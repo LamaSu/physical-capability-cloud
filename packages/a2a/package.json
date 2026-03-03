@@ -1,11 +1,14 @@
 {
-  "name": "@pcc/verifier",
+  "name": "@pcc/a2a",
   "version": "0.1.0",
   "private": true,
-  "description": "Hybrid verifier service — open market (Tier 0/1) + curated guild (Tier 2/3)",
+  "description": "Agent-to-Agent protocol — discovery, negotiation, and messaging between PCC agents",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
@@ -13,7 +16,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*"
+    "@pcc/spec": "workspace:*",
+    "nanoid": "^5.0.0"
   },
   "devDependencies": {
     "vitest": "^1.6.0"

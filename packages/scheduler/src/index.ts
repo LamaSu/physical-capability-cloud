@@ -1,2 +1,2 @@
 export { WorkflowCompiler } from "./compiler.js";
-export { CapabilityRouter } from "./router.js";
+export { CapabilityRouter, type KernelCapabilities, type RouteMatch } from "./router.js";

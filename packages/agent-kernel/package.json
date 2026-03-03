@@ -1,0 +1,20 @@
+{
+  "name": "@pcc/agent-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kernel Agent — represents a physical shop on the A2A network, accepts jobs, runs them, emits evidence",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }
+  },
+  "scripts": { "build": "tsc", "test": "vitest run --passWithNoTests", "typecheck": "tsc --noEmit", "clean": "rm -rf dist" },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*",
+    "@pcc/kernel": "workspace:*"
+  },
+  "devDependencies": { "vitest": "^1.6.0" }
+}
