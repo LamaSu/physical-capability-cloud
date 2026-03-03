@@ -1,0 +1,30 @@
+{
+  "name": "physical-capability-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A cloud control plane for physical capabilities — AWS for the physical world",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "e2e": "turbo e2e",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "clean": "turbo clean"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild": "^0.27.0"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.11.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
