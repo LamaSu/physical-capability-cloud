@@ -14,7 +14,7 @@
  */
 
 import { BaseAgent } from "@pcc/agent-runtime";
-import type { MessageBus, A2AMessage, Intent, QuoteResponseIntent, WorkflowAcceptedIntent, JobStatusResponseIntent, CapabilitiesResponseIntent } from "@pcc/a2a";
+import type { MessageBus, A2AMessage, Intent, QuoteResponseIntent, WorkflowAcceptedIntent, JobStatusResponseIntent, CapabilitiesResponseIntent, BuildOptionsResponseIntent, ContractBuiltResponseIntent } from "@pcc/a2a";
 import type { CWM, SHA256 } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 
@@ -22,7 +22,7 @@ import { ids } from "@pcc/spec";
 export type UserNotificationCallback = (notification: UserNotification) => void;
 
 export interface UserNotification {
-  type: "capabilities_found" | "quote_received" | "workflow_accepted" | "payment_needed" | "job_update" | "job_completed" | "message" | "error";
+  type: "capabilities_found" | "quote_received" | "workflow_accepted" | "payment_needed" | "job_update" | "job_completed" | "build_options" | "contract_built" | "message" | "error";
   data: unknown;
   conversationId: string;
   requiresAction: boolean;
@@ -142,6 +142,40 @@ export class UserAgent extends BaseAgent {
     return { conversationId };
   }
 
+  /** Explore configurable build options for a capability type */
+  async exploreBuildOptions(opts: {
+    capabilityType: string;
+    currentSelections?: Record<string, unknown>;
+    profileId?: string;
+  }): Promise<{ conversationId: string }> {
+    const broker = this.findBroker();
+    const { conversationId } = await this.startConversation(broker, {
+      type: "get_build_options",
+      capabilityType: opts.capabilityType,
+      currentSelections: opts.currentSelections,
+      profileId: opts.profileId,
+    });
+    return { conversationId };
+  }
+
+  /** Build a validated, priced contract from selections */
+  async buildContract(opts: {
+    capabilityType: string;
+    selections: Record<string, unknown>;
+    assuranceTier?: number;
+    profileId?: string;
+  }): Promise<{ conversationId: string }> {
+    const broker = this.findBroker();
+    const { conversationId } = await this.startConversation(broker, {
+      type: "build_contract",
+      capabilityType: opts.capabilityType,
+      selections: opts.selections,
+      assuranceTier: opts.assuranceTier ?? 1,
+      profileId: opts.profileId,
+    });
+    return { conversationId };
+  }
+
   // ── Intent Handlers (responses from other agents) ──────────────
 
   private setupIntentHandlers(): void {
@@ -172,6 +206,36 @@ export class UserAgent extends BaseAgent {
           `Tier ${intent.assuranceTier}, available ${new Date(intent.estimatedStart).toLocaleString()}. ` +
           `Bond: $${intent.operatorBond}. Valid until ${new Date(intent.validUntil).toLocaleString()}.` +
           (intent.options?.length ? ` ${intent.options.length} upgrade options available.` : ""),
+      });
+      return null;
+    });
+
+    this.onIntent("build_options_response", async (msg) => {
+      const intent = msg.intent as BuildOptionsResponseIntent;
+      const paramCount = intent.groups.reduce((s, g) => s + g.params.length, 0);
+      this.notify({
+        type: "build_options",
+        data: intent,
+        conversationId: msg.conversationId,
+        requiresAction: true,
+        summary: `Build options for ${intent.templateName}: ${paramCount} configurable parameters in ${intent.groups.length} groups. ` +
+          `Base price: $${intent.basePrice} ${intent.currency}.` +
+          (intent.machineInfo ? ` Machine: ${intent.machineInfo.machineName}.` : ""),
+      });
+      return null;
+    });
+
+    this.onIntent("contract_built_response", async (msg) => {
+      const intent = msg.intent as ContractBuiltResponseIntent;
+      this.notify({
+        type: "contract_built",
+        data: intent,
+        conversationId: msg.conversationId,
+        requiresAction: !intent.isValid,
+        summary: intent.isValid
+          ? `Contract built: $${intent.totalPrice} ${intent.currency} for ${intent.templateName}. ` +
+            `${intent.priceBreakdown.length} line items. Ready to submit.`
+          : `Contract has ${intent.validationErrors.length} errors: ${intent.validationErrors.map((e) => e.message).join("; ")}`,
       });
       return null;
     });
@@ -294,6 +358,34 @@ export class UserAgent extends BaseAgent {
       description: "Check the status of your current manufacturing job",
       parameters: {},
       execute: async () => this.checkStatus(),
+    });
+
+    this.registerTool({
+      name: "explore_build_options",
+      description: "Discover all configurable parameters for a manufacturing process (e.g., materials, infill, layer height, post-processing) with pricing",
+      parameters: {
+        capability_type: { type: "string", description: "Process type: fdm, sla, cnc-3axis, laser-cut" },
+        profile_id: { type: "string", description: "Specific machine profile ID", required: false },
+      },
+      execute: async (params) => this.exploreBuildOptions({
+        capabilityType: params.capability_type as string,
+        profileId: params.profile_id as string | undefined,
+      }),
+    });
+
+    this.registerTool({
+      name: "configure_and_build",
+      description: "Build a priced, validated contract from parameter selections",
+      parameters: {
+        capability_type: { type: "string", description: "Process type: fdm, sla, cnc-3axis, laser-cut" },
+        selections: { type: "string", description: "JSON string of parameter selections" },
+        assurance_tier: { type: "number", description: "Quality assurance level 0-3", required: false },
+      },
+      execute: async (params) => this.buildContract({
+        capabilityType: params.capability_type as string,
+        selections: JSON.parse(params.selections as string),
+        assuranceTier: params.assurance_tier as number | undefined,
+      }),
     });
 
     this.registerTool({

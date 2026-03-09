@@ -35,13 +35,38 @@ export type EvidenceEventType =
   | "custody_handoff_initiated"
   | "custody_handoff_confirmed"
   | "courier_pickup_confirmed"
-  | "courier_delivery_confirmed";
+  | "courier_delivery_confirmed"
+  // Sensor pipeline events
+  | "sensor_data_summary"
+  | "sensor_anomaly_detected"
+  | "process_log_summary"
+  // Batch tracking events
+  | "batch_session_started"
+  | "batch_session_completed"
+  | "batch_sample_result"
+  | "instrument_result"
+  // Encryption / ZK events
+  | "evidence_committed"
+  | "evidence_encrypted"
+  | "zk_proof_generated"
+  | "zk_proof_verified"
+  // Universal device events
+  | "device_birth"
+  | "device_death"
+  | "device_heartbeat"
+  | "calibration_record"
+  | "method_loaded"
+  | "sequence_started";
 
 /** Source device that produced an evidence event */
 export interface EvidenceSource {
   deviceId: Id;
   deviceType: "controller" | "camera" | "power_monitor" | "vibration_sensor" |
-              "acoustic_sensor" | "temperature_sensor" | "tee" | "courier_api" | "human";
+              "acoustic_sensor" | "temperature_sensor" | "tee" | "courier_api" | "human" |
+              "instrument" | "chromatograph" | "bioreactor" | "autosampler" |
+              "spectrometer" | "thermal_camera" | "force_sensor" | "flow_sensor" |
+              "ph_sensor" | "gas_analyzer" | "plc" | "robot_arm" |
+              "pcb_placer" | "gateway_bridge";
   kernelId: Id;
   firmwareVersion?: string;
 }

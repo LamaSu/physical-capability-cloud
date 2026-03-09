@@ -16,6 +16,7 @@
 import { BaseAgent, type BaseAgentConfig, type AgentTool } from "@pcc/agent-runtime";
 import { CapabilityRouter, WorkflowCompiler, type KernelCapabilities } from "@pcc/scheduler";
 import { VerifierMarket, EvidenceVerifier } from "@pcc/verifier";
+import { ContractBuilder } from "@pcc/contract-builder";
 import type {
   A2AMessage,
   Intent,
@@ -30,9 +31,13 @@ import type {
   RequestCourierIntent,
   CourierAssignedIntent,
   TextMessageIntent,
+  GetBuildOptionsIntent,
+  BuildOptionsResponseIntent,
+  BuildContractIntent,
+  ContractBuiltResponseIntent,
 } from "@pcc/a2a";
 import type { MessageBus } from "@pcc/a2a";
-import type { CWM, Capability } from "@pcc/spec";
+import type { CWM, Capability, MachineProfile } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 
 interface ActiveQuote {
@@ -60,6 +65,7 @@ export class BrokerAgent extends BaseAgent {
   private router: CapabilityRouter;
   private compiler: WorkflowCompiler;
   private verifierMarket: VerifierMarket;
+  private contractBuilder: ContractBuilder;
   private activeQuotes: Map<string, ActiveQuote> = new Map();
   private activePlans: Map<string, ActivePlan> = new Map();
 
@@ -75,6 +81,7 @@ export class BrokerAgent extends BaseAgent {
     this.router = new CapabilityRouter();
     this.compiler = new WorkflowCompiler(this.router);
     this.verifierMarket = new VerifierMarket();
+    this.contractBuilder = new ContractBuilder();
 
     this.setupIntentHandlers();
     this.setupTools();
@@ -83,6 +90,11 @@ export class BrokerAgent extends BaseAgent {
   /** Register a kernel's capabilities (called when kernel agents come online) */
   registerKernelCapabilities(kernelAgentId: string, kernel: KernelCapabilities): void {
     this.router.registerKernel(kernel);
+  }
+
+  /** Register a machine profile for the contract builder */
+  registerMachineProfile(profile: MachineProfile): void {
+    this.contractBuilder.registerProfile(profile);
   }
 
   private setupIntentHandlers(): void {
@@ -107,6 +119,17 @@ export class BrokerAgent extends BaseAgent {
     this.onIntent("negotiate", async (msg) => {
       const intent = msg.intent as any;
       return this.handleNegotiate(msg, intent);
+    });
+
+    // Contract builder
+    this.onIntent("get_build_options", async (msg) => {
+      const intent = msg.intent as GetBuildOptionsIntent;
+      return this.handleGetBuildOptions(intent);
+    });
+
+    this.onIntent("build_contract", async (msg) => {
+      const intent = msg.intent as BuildContractIntent;
+      return this.handleBuildContract(intent);
     });
 
     // Workflow submission
@@ -484,12 +507,108 @@ export class BrokerAgent extends BaseAgent {
     return null;
   }
 
+  private async handleGetBuildOptions(
+    intent: GetBuildOptionsIntent,
+  ): Promise<BuildOptionsResponseIntent> {
+    const options = this.contractBuilder.getBuildOptions(
+      intent.capabilityType as any,
+      intent.currentSelections ?? {},
+      intent.profileId,
+    );
+
+    return {
+      type: "build_options_response",
+      capabilityType: options.capabilityType,
+      templateName: options.templateName,
+      groups: options.groups.map((g) => ({
+        name: g.name,
+        params: g.params.map((rp) => ({
+          key: rp.def.key,
+          type: rp.def.type,
+          label: rp.def.label,
+          description: rp.def.description,
+          required: rp.def.required,
+          group: rp.def.group,
+          visible: rp.visible,
+          options: rp.def.type === "enum" ? (rp.def as any).options : undefined,
+          min: rp.def.type === "number" ? (rp.def as any).min : undefined,
+          max: rp.def.type === "number" ? (rp.def as any).max : undefined,
+          step: rp.def.type === "number" ? (rp.def as any).step : undefined,
+          unit: rp.def.type === "number" ? (rp.def as any).unit : undefined,
+          defaultValue: (rp.def as any).defaultValue,
+          multi: rp.def.type === "enum" ? (rp.def as any).multi : undefined,
+          pricingImpact: rp.def.pricingImpact ? {
+            mode: rp.def.pricingImpact.mode,
+            value: rp.def.pricingImpact.value,
+            label: rp.def.pricingImpact.label,
+          } : undefined,
+        })),
+      })),
+      basePrice: options.basePrice,
+      currency: options.currency,
+      machineInfo: options.machineInfo ? {
+        profileId: options.machineInfo.profileId,
+        machineName: options.machineInfo.machineName,
+        kernelId: options.machineInfo.kernelId,
+      } : undefined,
+    };
+  }
+
+  private async handleBuildContract(
+    intent: BuildContractIntent,
+  ): Promise<ContractBuiltResponseIntent> {
+    const contract = this.contractBuilder.buildContract(
+      intent.capabilityType as any,
+      intent.selections,
+      intent.assuranceTier,
+      intent.profileId,
+    );
+
+    return {
+      type: "contract_built_response",
+      isValid: contract.isValid,
+      totalPrice: contract.totalPrice,
+      currency: "USDC",
+      priceBreakdown: contract.priceBreakdown.map((b) => ({
+        paramKey: b.paramKey,
+        paramLabel: b.paramLabel,
+        selectedValue: b.selectedValue,
+        amount: b.amount,
+        impactLabel: b.impact.label,
+      })),
+      cwmStep: {
+        capability: contract.cwmStep.capability,
+        params: contract.cwmStep.params,
+        assuranceTier: contract.cwmStep.assuranceTier,
+      },
+      validationErrors: contract.validationErrors,
+      templateName: contract.templateName,
+      machineInfo: contract.machineInfo ? {
+        profileId: contract.machineInfo.profileId,
+        machineName: contract.machineInfo.machineName,
+        kernelId: contract.machineInfo.kernelId,
+      } : undefined,
+    };
+  }
+
   private async handleTextMessage(
     msg: A2AMessage,
     intent: TextMessageIntent,
   ): Promise<Intent> {
     // Parse natural language into structured intents
     const text = intent.text.toLowerCase();
+
+    if (text.includes("option") || text.includes("configure") || text.includes("build option")) {
+      // Route to contract builder
+      const capType = text.includes("cnc") ? "cnc-3axis"
+        : text.includes("sla") || text.includes("resin") ? "sla"
+        : text.includes("laser") ? "laser-cut"
+        : "fdm";
+      return this.handleGetBuildOptions({
+        type: "get_build_options",
+        capabilityType: capType,
+      });
+    }
 
     if (text.includes("print") || text.includes("3d") || text.includes("fdm")) {
       return this.handleDiscoverCapabilities({

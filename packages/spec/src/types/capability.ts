@@ -15,8 +15,8 @@ import type {
   TimeWindow,
 } from "./common.js";
 
-/** Types of manufacturing capabilities */
-export type CapabilityType =
+/** Built-in manufacturing capability types */
+export type BuiltinCapabilityType =
   | "cnc-3axis"
   | "cnc-5axis"
   | "fdm"
@@ -33,6 +33,9 @@ export type CapabilityType =
   | "inspection"
   | "assembly"
   | "custom";
+
+/** Open string union: autocompletes builtins but accepts any string for extensibility */
+export type CapabilityType = BuiltinCapabilityType | (string & {});
 
 /** Dimensional envelope a capability can handle */
 export interface WorkEnvelope {

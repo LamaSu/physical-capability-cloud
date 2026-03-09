@@ -1,0 +1,41 @@
+{
+  "name": "@pcc/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HTTP/SSE gateway bridging the dashboard to the PCC agent network",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/contract-builder": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*",
+    "@pcc/agent-user": "workspace:*",
+    "@pcc/agent-broker": "workspace:*",
+    "@pcc/agent-kernel": "workspace:*",
+    "@pcc/kernel": "workspace:*",
+    "@pcc/verifier": "workspace:*",
+    "@pcc/scheduler": "workspace:*",
+    "fastify": "^4.26.0",
+    "@fastify/cors": "^9.0.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^9.0.0",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

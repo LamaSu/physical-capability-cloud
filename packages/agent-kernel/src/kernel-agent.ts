@@ -22,6 +22,8 @@ import { MockFDMAdapter } from "@pcc/kernel";
 import { MockPowerMonitorAdapter } from "@pcc/kernel";
 import { MockCameraAdapter } from "@pcc/kernel";
 
+import type { MachineProfile } from "@pcc/spec";
+
 export interface KernelAgentConfig {
   kernelId: string;
   name: string;
@@ -29,6 +31,8 @@ export interface KernelAgentConfig {
   capabilities: Capability[];
   /** Print duration in ms for mock adapter */
   mockPrintDuration?: number;
+  /** Machine profiles for the contract builder */
+  machineProfiles?: MachineProfile[];
 }
 
 interface ActiveJob {
@@ -46,6 +50,7 @@ export class KernelAgent extends BaseAgent {
   readonly kernelId: string;
   readonly capabilities: Capability[];
   readonly location: { lat: number; lng: number };
+  readonly machineProfiles: MachineProfile[];
 
   private activeJobs: Map<string, ActiveJob> = new Map();
   private evidenceEmitter: EvidenceEmitter;
@@ -66,6 +71,7 @@ export class KernelAgent extends BaseAgent {
     this.kernelId = config.kernelId;
     this.capabilities = config.capabilities;
     this.location = config.location;
+    this.machineProfiles = config.machineProfiles ?? [];
 
     // Initialize mock devices
     this.fdm = new MockFDMAdapter(`dev_fdm_${config.kernelId}`, config.kernelId, config.mockPrintDuration ?? 3000);
@@ -85,6 +91,11 @@ export class KernelAgent extends BaseAgent {
   /** Get advertised capabilities (for broker registration) */
   getCapabilities(): Capability[] {
     return [...this.capabilities];
+  }
+
+  /** Get machine profiles for the contract builder */
+  getMachineProfiles(): MachineProfile[] {
+    return [...this.machineProfiles];
   }
 
   /** Get active jobs */
@@ -370,6 +381,22 @@ export class KernelAgent extends BaseAgent {
         startedAt: j.startedAt,
         completedAt: j.completedAt,
       })),
+    });
+
+    this.registerTool({
+      name: "get_build_options",
+      description: "Get available machine profiles and build options for this kernel",
+      parameters: {},
+      execute: async () => ({
+        kernelId: this.kernelId,
+        name: this.name,
+        profiles: this.machineProfiles.map((p) => ({
+          id: p.id,
+          machineName: p.machineName,
+          capabilityType: p.capabilityType,
+          overrideCount: p.paramOverrides.length,
+        })),
+      }),
     });
 
     this.registerTool({

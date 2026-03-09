@@ -94,6 +94,11 @@ export type Intent =
   | QuoteResponseIntent
   | NegotiateIntent
   | NegotiationResponseIntent
+  // Contract Builder
+  | GetBuildOptionsIntent
+  | BuildOptionsResponseIntent
+  | BuildContractIntent
+  | ContractBuiltResponseIntent
   // Job Lifecycle
   | SubmitWorkflowIntent
   | WorkflowAcceptedIntent
@@ -389,6 +394,89 @@ export interface VerificationResultIntent {
   confidence: number;
   attestationHash: string;
   findings: Array<{ check: string; passed: boolean; details: string }>;
+}
+
+// ── Contract Builder Intents ────────────────────────────────────
+
+export interface GetBuildOptionsIntent {
+  type: "get_build_options";
+  /** Which capability type to configure */
+  capabilityType: string;
+  /** Current user selections (for constraint resolution) */
+  currentSelections?: Record<string, unknown>;
+  /** Specific machine profile to use */
+  profileId?: string;
+}
+
+export interface BuildOptionsResponseIntent {
+  type: "build_options_response";
+  capabilityType: string;
+  templateName: string;
+  /** Parameter groups with full definitions */
+  groups: Array<{
+    name: string;
+    params: Array<{
+      key: string;
+      type: string;
+      label: string;
+      description?: string;
+      required: boolean;
+      group: string;
+      visible: boolean;
+      options?: Array<{
+        value: string;
+        label: string;
+        description?: string;
+        pricingImpact?: { mode: string; value: string; label?: string };
+      }>;
+      min?: number;
+      max?: number;
+      step?: number;
+      unit?: string;
+      defaultValue?: unknown;
+      multi?: boolean;
+      pricingImpact?: { mode: string; value: string; label?: string };
+    }>;
+  }>;
+  basePrice: string;
+  currency: string;
+  machineInfo?: { profileId: string; machineName: string; kernelId: string };
+}
+
+export interface BuildContractIntent {
+  type: "build_contract";
+  capabilityType: string;
+  /** User's parameter selections */
+  selections: Record<string, unknown>;
+  /** Desired assurance tier */
+  assuranceTier: number;
+  /** Specific machine profile */
+  profileId?: string;
+}
+
+export interface ContractBuiltResponseIntent {
+  type: "contract_built_response";
+  isValid: boolean;
+  totalPrice: string;
+  currency: string;
+  /** Itemized price breakdown */
+  priceBreakdown: Array<{
+    paramKey: string;
+    paramLabel: string;
+    selectedValue: string;
+    amount: string;
+    impactLabel?: string;
+  }>;
+  /** CWM step ready for workflow submission */
+  cwmStep: {
+    capability: string;
+    params: Record<string, unknown>;
+    assuranceTier: number;
+  };
+  /** Validation errors (empty if valid) */
+  validationErrors: Array<{ paramKey: string; message: string }>;
+  templateName: string;
+  machineInfo?: { profileId: string; machineName: string; kernelId: string };
 }
 
 // ── General Intents ─────────────────────────────────────────────

@@ -15,7 +15,8 @@
     "@pcc/a2a": "workspace:*",
     "@pcc/agent-runtime": "workspace:*",
     "@pcc/scheduler": "workspace:*",
-    "@pcc/verifier": "workspace:*"
+    "@pcc/verifier": "workspace:*",
+    "@pcc/contract-builder": "workspace:*"
   },
   "devDependencies": { "vitest": "^1.6.0" }
 }

@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+/* ── Solarpunk Ground Control Design Tokens ─────────────────────── */
+
+@theme {
+  /* Forest backgrounds */
+  --color-forest-900: #0A1A0F;
+  --color-forest-800: #0F2415;
+  --color-forest-700: #1A2E1F;
+  --color-forest-600: #253828;
+
+  /* Greens */
+  --color-green-700: #2D5016;
+  --color-green-600: #3A7A1F;
+  --color-green-500: #4CAF50;
+  --color-green-400: #7CB342;
+  --color-green-300: #AED581;
+
+  /* Golds */
+  --color-gold-500: #FF8F00;
+  --color-gold-400: #FFB300;
+  --color-gold-300: #FFC107;
+  --color-gold-200: #FFD54F;
+
+  /* Glass */
+  --color-glass-bg: rgba(255, 255, 255, 0.03);
+  --color-glass-border: rgba(255, 255, 255, 0.08);
+  --color-glass-hover: rgba(255, 255, 255, 0.06);
+
+  /* Status */
+  --color-status-online: #7CB342;
+  --color-status-executing: #FFB300;
+  --color-status-completed: #4CAF50;
+  --color-status-failed: #EF5350;
+  --color-status-offline: #616161;
+
+  /* Fonts */
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ── Base Styles ────────────────────────────────────────────────── */
+
+html {
+  background-color: var(--color-forest-900);
+  color: #E0E8E0;
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(124, 179, 66, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 179, 66, 0.5);
+}
+
+/* ── Utility Classes ────────────────────────────────────────────── */
+
+.glass-panel {
+  background: var(--color-glass-bg);
+  border: 1px solid var(--color-glass-border);
+  backdrop-filter: blur(20px);
+  border-radius: 12px;
+}
+
+.glass-panel-hover:hover {
+  background: var(--color-glass-hover);
+  border-color: rgba(124, 179, 66, 0.15);
+}
+
+.glow-green {
+  box-shadow: 0 0 20px rgba(124, 179, 66, 0.3);
+}
+
+.glow-gold {
+  box-shadow: 0 0 20px rgba(255, 179, 0, 0.3);
+}
+
+.glow-text-green {
+  text-shadow: 0 0 10px rgba(124, 179, 66, 0.5);
+}
+
+.glow-text-gold {
+  text-shadow: 0 0 10px rgba(255, 179, 0, 0.5);
+}
