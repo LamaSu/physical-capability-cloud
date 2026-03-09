@@ -1,0 +1,285 @@
+/**
+ * OPC-UA adapter for industrial machines (CNC, PLC, robots).
+ *
+ * OPC-UA is the standard protocol for industrial automation.
+ * This adapter connects to an OPC-UA server and maps nodes to
+ * PCC capabilities.
+ *
+ * Common OPC-UA servers:
+ * - Siemens S7 PLCs (via S7-1500 built-in OPC-UA)
+ * - FANUC CNC (via FOCAS-to-OPC-UA bridge)
+ * - Haas CNC (via HaasConnect or MTConnect-to-OPC-UA bridge)
+ * - ABB/KUKA robots (built-in OPC-UA)
+ * - Beckhoff TwinCAT (built-in OPC-UA)
+ *
+ * In production: use node-opcua npm package.
+ * In development: built-in mock mode.
+ */
+
+import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+
+export interface OPCUAConfig {
+  /** OPC-UA server endpoint (e.g., "opc.tcp://192.168.1.100:4840") */
+  endpoint: string;
+  /** Kernel ID */
+  kernelId: string;
+  /** Machine type */
+  machineType: "cnc-3axis" | "cnc-5axis" | "lathe" | "laser-cut";
+  /** Node map: maps OPC-UA node IDs to semantic names */
+  nodeMap: OPCUANodeDef[];
+  /** Poll interval in ms */
+  pollIntervalMs?: number;
+  /** Security mode */
+  securityMode?: "none" | "sign" | "signAndEncrypt";
+  /** Use mock mode */
+  mockMode?: boolean;
+}
+
+export interface OPCUANodeDef {
+  /** OPC-UA node ID (e.g., "ns=2;s=CNC.SpindleSpeed") */
+  nodeId: string;
+  /** Semantic name for PCC */
+  name: string;
+  /** Data type */
+  dataType: "number" | "boolean" | "string";
+  /** Unit */
+  unit?: string;
+  /** Is this a command node (write) or sensor node (read)? */
+  direction: "read" | "write" | "readwrite";
+}
+
+interface CNCState {
+  spindleSpeed: number;
+  feedRate: number;
+  position: { x: number; y: number; z: number };
+  toolNumber: number;
+  programName: string | null;
+  programProgress: number;
+  status: string;
+  alarmActive: boolean;
+}
+
+export class OPCUAAdapter implements MachineAdapter {
+  readonly id: string;
+  readonly type: "cnc-3axis" | "cnc-5axis" | "lathe" | "laser-cut";
+  readonly source: EvidenceSource;
+
+  private config: OPCUAConfig;
+  private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastState: CNCState | null = null;
+  private mockState: CNCState = {
+    spindleSpeed: 0,
+    feedRate: 0,
+    position: { x: 0, y: 0, z: 0 },
+    toolNumber: 1,
+    programName: null,
+    programProgress: 0,
+    status: "Idle",
+    alarmActive: false,
+  };
+
+  constructor(id: string, config: OPCUAConfig) {
+    this.id = id;
+    this.type = config.machineType;
+    this.config = config;
+    this.source = {
+      deviceId: id,
+      deviceType: "controller",
+      kernelId: config.kernelId,
+      firmwareVersion: "OPCUA-Adapter-1.0.0",
+    };
+  }
+
+  async getStatus(): Promise<MachineStatus> {
+    if (this.config.mockMode) {
+      return this.mockState.status === "Running" ? "busy"
+        : this.mockState.alarmActive ? "error"
+        : "idle";
+    }
+    // In production: read CNC status node
+    return "idle";
+  }
+
+  async getProgress(): Promise<number> {
+    if (this.config.mockMode) return this.mockState.programProgress;
+    // In production: read program progress node
+    return 0;
+  }
+
+  async execute(command: MachineCommand): Promise<MachineCommandResult> {
+    if (this.config.mockMode) return this.executeMock(command);
+
+    // In production: write to OPC-UA command nodes
+    switch (command.type) {
+      case "load_gcode": {
+        // Write program name to CNC controller
+        // await this.writeNode("CNC.ProgramName", command.payload?.filename);
+        this.emit({
+          type: "gcode_received",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { filename: command.payload?.filename },
+        });
+        return { success: true, message: "Program loaded" };
+      }
+
+      case "start": {
+        // Write CycleStart to command node
+        // await this.writeNode("CNC.CycleStart", true);
+        this.startPolling();
+        this.emit({
+          type: "execution_started",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: {},
+        });
+        return { success: true, message: "Cycle started" };
+      }
+
+      case "stop": {
+        // Write FeedHold or CycleStop
+        // await this.writeNode("CNC.CycleStop", true);
+        this.stopPolling();
+        return { success: true, message: "Cycle stopped" };
+      }
+
+      case "status": {
+        return {
+          success: true,
+          data: {
+            spindleSpeed: 0,
+            feedRate: 0,
+            position: { x: 0, y: 0, z: 0 },
+          },
+        };
+      }
+
+      default:
+        return { success: false, message: `Unknown command: ${command.type}` };
+    }
+  }
+
+  onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
+    this.listeners.push(callback);
+  }
+
+  async dispose(): Promise<void> {
+    this.stopPolling();
+    this.listeners = [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Polling
+  // ---------------------------------------------------------------------------
+
+  private startPolling(): void {
+    this.stopPolling();
+    const interval = this.config.pollIntervalMs ?? 1000;
+
+    this.pollTimer = setInterval(() => {
+      if (this.config.mockMode) {
+        this.updateMockState();
+      }
+      // In production: read all sensor nodes via OPC-UA subscription
+    }, interval);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mock mode
+  // ---------------------------------------------------------------------------
+
+  private executeMock(command: MachineCommand): MachineCommandResult {
+    switch (command.type) {
+      case "load_gcode":
+        this.mockState.programName = (command.payload?.filename as string) ?? "test.nc";
+        this.mockState.programProgress = 0;
+        this.emit({
+          type: "gcode_received",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { filename: this.mockState.programName, mock: true },
+        });
+        return { success: true, message: "Program loaded (mock)" };
+
+      case "start":
+        this.mockState.status = "Running";
+        this.mockState.spindleSpeed = 12000;
+        this.mockState.feedRate = 2000;
+        this.startPolling();
+        this.emit({
+          type: "execution_started",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { mock: true },
+        });
+        return { success: true, message: "Cycle started (mock)" };
+
+      case "stop":
+        this.mockState.status = "Idle";
+        this.mockState.spindleSpeed = 0;
+        this.mockState.programProgress = 0;
+        this.stopPolling();
+        return { success: true, message: "Stopped (mock)" };
+
+      case "status":
+        return { success: true, data: { ...this.mockState, mock: true } };
+
+      default:
+        return { success: true, message: `${command.type} (mock)` };
+    }
+  }
+
+  private updateMockState(): void {
+    if (this.mockState.status !== "Running") return;
+
+    this.mockState.programProgress = Math.min(100, this.mockState.programProgress + 2);
+    this.mockState.position.x += Math.random() * 10 - 5;
+    this.mockState.position.y += Math.random() * 10 - 5;
+    this.mockState.position.z = -Math.random() * 5;
+    this.mockState.spindleSpeed = 12000 + Math.random() * 500 - 250;
+
+    if (this.mockState.programProgress % 25 === 0 && this.mockState.programProgress < 100) {
+      this.emit({
+        type: "execution_progress",
+        timestamp: new Date().toISOString(),
+        source: this.source,
+        payload: {
+          progress: this.mockState.programProgress,
+          spindleSpeed: this.mockState.spindleSpeed,
+          feedRate: this.mockState.feedRate,
+          position: { ...this.mockState.position },
+        },
+      });
+    }
+
+    if (this.mockState.programProgress >= 100) {
+      this.mockState.status = "Idle";
+      this.mockState.spindleSpeed = 0;
+      this.stopPolling();
+      this.emit({
+        type: "execution_completed",
+        timestamp: new Date().toISOString(),
+        source: this.source,
+        payload: {
+          programName: this.mockState.programName,
+          mock: true,
+        },
+      });
+    }
+  }
+
+  private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+}
