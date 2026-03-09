@@ -18,6 +18,7 @@ import { logisticsRoutes } from "./routes/logistics.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
 import { x402Gate } from "./middleware/x402-gate.js";
+import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { getOrCreateSession } from "./session.js";
@@ -70,9 +71,29 @@ export async function createGateway(port = 3200) {
   await app.register(notificationSSE);
   await app.register(topicSSE);
 
+  // Agent bridge status endpoint
+  app.get("/api/agents/status", async () => getAgentStatus());
+  app.get("/api/agents/cards", async () => ({ cards: getAgentCards() }));
+  app.get("/api/agents/live/conversations", async () => ({
+    conversations: getConversations(),
+    source: isAgentBridgeReady() ? "live" : "mock",
+  }));
+  app.get("/api/agents/live/messages", async (req) => {
+    const limit = parseInt((req.query as Record<string, string>).limit ?? "50", 10);
+    return {
+      messages: getRecentMessages(limit),
+      source: isAgentBridgeReady() ? "live" : "mock",
+    };
+  });
+
   return {
     app,
     start: async () => {
+      // Initialize agent bridge in background (non-blocking)
+      initAgentBridge().catch((err) =>
+        console.warn("[gateway] Agent bridge init failed:", err),
+      );
+
       const address = await app.listen({ port, host: "0.0.0.0" });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
