@@ -256,6 +256,9 @@ importers:
       '@pcc/kernel':
         specifier: workspace:*
         version: link:../kernel
+      '@pcc/payments':
+        specifier: workspace:*
+        version: link:../payments
       '@pcc/scheduler':
         specifier: workspace:*
         version: link:../scheduler

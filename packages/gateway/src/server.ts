@@ -17,6 +17,7 @@ import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
+import { x402Gate } from "./middleware/x402-gate.js";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { getOrCreateSession } from "./session.js";
@@ -42,6 +43,9 @@ export async function createGateway(port = 3200) {
 
   // Auth routes (before other routes so session is available)
   await app.register(authRoutes);
+
+  // x402 payment gate (before REST routes — gates protected endpoints)
+  await app.register(x402Gate);
 
   // REST routes
   await app.register(capabilityRoutes);

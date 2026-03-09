@@ -30,6 +30,7 @@
     "@pcc/agent-user": "workspace:*",
     "@pcc/contract-builder": "workspace:*",
     "@pcc/contracts": "workspace:*",
+    "@pcc/payments": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",
