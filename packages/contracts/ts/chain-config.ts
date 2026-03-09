@@ -15,6 +15,10 @@ export interface ChainDeployment {
     mockUSDC?: Address;
     /** Real USDC on base-sepolia (Circle-deployed) */
     usdc?: Address;
+    /** ERC-8004 registries */
+    identityRegistry?: Address;
+    reputationRegistry?: Address;
+    validationRegistry?: Address;
   };
   blockExplorer?: string;
 }

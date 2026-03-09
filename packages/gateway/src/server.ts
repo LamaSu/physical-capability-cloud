@@ -16,6 +16,7 @@ import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
 import { authRoutes } from "./routes/auth.js";
+import { registryRoutes } from "./routes/registry.js";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { getOrCreateSession } from "./session.js";
@@ -59,6 +60,7 @@ export async function createGateway(port = 3200) {
   await app.register(evidenceEncryptedRoutes);
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
+  await app.register(registryRoutes);
 
   // SSE endpoints
   await app.register(notificationSSE);

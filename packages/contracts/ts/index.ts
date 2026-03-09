@@ -4,8 +4,15 @@ export {
   MilestoneStatus,
   milestoneStatusName,
   MockUSDCABI,
+  IdentityRegistryABI,
+  EntityType,
+  EntityStatus,
+  entityTypeName,
+  entityStatusName,
+  ReputationRegistryABI,
+  ValidationRegistryABI,
 } from "./abi/index.js";
-export type { MilestoneStatusName } from "./abi/index.js";
+export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
 // Chain config
 export {
