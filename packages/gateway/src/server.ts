@@ -15,6 +15,7 @@ import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
+import { authRoutes } from "./routes/auth.js";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { getOrCreateSession } from "./session.js";
@@ -37,6 +38,9 @@ export async function createGateway(port = 3200) {
     timestamp: new Date().toISOString(),
     version: "0.1.0",
   }));
+
+  // Auth routes (before other routes so session is available)
+  await app.register(authRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);

@@ -35,6 +35,8 @@ import { LogisticsHubPage } from "./pages/LogisticsHubPage.js";
 import { ShipmentDetailPage } from "./pages/ShipmentDetailPage.js";
 import { SpaceBookingsPage } from "./pages/SpaceBookingsPage.js";
 import { InstallationDetailPage } from "./pages/InstallationDetailPage.js";
+import { WalletProvider } from "./providers/WalletProvider.js";
+import { ConnectWallet } from "./components/ConnectWallet.js";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -67,7 +69,7 @@ function Shell() {
           <TopBar
             title={currentPageTitle}
             subtitle={currentPageSubtitle}
-            actions={<TourRestartButton />}
+            actions={<><ConnectWallet /><TourRestartButton /></>}
           />
         }
         statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
@@ -120,10 +122,12 @@ function Shell() {
 
 export function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Shell />
-      </BrowserRouter>
-    </QueryClientProvider>
+    <WalletProvider>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <Shell />
+        </BrowserRouter>
+      </QueryClientProvider>
+    </WalletProvider>
   );
 }
