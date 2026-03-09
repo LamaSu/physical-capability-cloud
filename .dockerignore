@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.github
+*.md
+.claude
+apps/dashboard/node_modules
+apps/dashboard/dist
+packages/*/node_modules
+packages/contracts/out
+packages/contracts/cache
+packages/contracts/lib
