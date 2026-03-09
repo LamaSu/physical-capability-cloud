@@ -29,6 +29,7 @@
     "@pcc/agent-runtime": "workspace:*",
     "@pcc/agent-user": "workspace:*",
     "@pcc/contract-builder": "workspace:*",
+    "@pcc/contracts": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",

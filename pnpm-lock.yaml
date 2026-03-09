@@ -214,6 +214,19 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)
 
+  packages/contracts:
+    dependencies:
+      viem:
+        specifier: ^2
+        version: 2.46.3(typescript@5.9.3)(zod@3.25.76)
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)
+
   packages/gateway:
     dependencies:
       '@fastify/cors':
@@ -237,6 +250,9 @@ importers:
       '@pcc/contract-builder':
         specifier: workspace:*
         version: link:../contract-builder
+      '@pcc/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@pcc/kernel':
         specifier: workspace:*
         version: link:../kernel
