@@ -9,6 +9,7 @@ import { NotificationToasts } from "./components/NotificationToasts.js";
 import { OnboardingTour, TourRestartButton } from "./components/OnboardingTour.js";
 import { WalletProvider } from "./providers/WalletProvider.js";
 import { ConnectWallet } from "./components/ConnectWallet.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
@@ -149,12 +150,14 @@ function Shell() {
 
 export function App() {
   return (
-    <WalletProvider>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <Shell />
-        </BrowserRouter>
-      </QueryClientProvider>
-    </WalletProvider>
+    <ErrorBoundary>
+      <WalletProvider>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <Shell />
+          </BrowserRouter>
+        </QueryClientProvider>
+      </WalletProvider>
+    </ErrorBoundary>
   );
 }

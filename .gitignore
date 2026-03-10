@@ -9,3 +9,6 @@ out/
 *.sqlite
 cache/
 lib/
+.DS_Store
+*.swp
+*.swo
