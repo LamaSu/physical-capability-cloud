@@ -45,6 +45,8 @@ const SpaceBookingsPage = lazy(() => import("./pages/SpaceBookingsPage.js").then
 const InstallationDetailPage = lazy(() => import("./pages/InstallationDetailPage.js").then(m => ({ default: m.InstallationDetailPage })));
 const DeviceBuilderPage = lazy(() => import("./pages/DeviceBuilderPage.js").then(m => ({ default: m.DeviceBuilderPage })));
 const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage.js").then(m => ({ default: m.SetupWizardPage })));
+const OrchestratorPage = lazy(() => import("./pages/OrchestratorPage.js").then(m => ({ default: m.OrchestratorPage })));
+const OrchestratorDetailPage = lazy(() => import("./pages/OrchestratorDetailPage.js").then(m => ({ default: m.OrchestratorDetailPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -137,6 +139,8 @@ function Shell() {
               <Route path="/logistics/bookings/:bookingId" element={<SpaceBookingsPage />} />
               <Route path="/logistics/installations" element={<InstallationDetailPage />} />
               <Route path="/logistics/installations/:installationId" element={<InstallationDetailPage />} />
+              <Route path="/orchestrator" element={<OrchestratorPage />} />
+              <Route path="/orchestrator/:kernelId" element={<OrchestratorDetailPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>

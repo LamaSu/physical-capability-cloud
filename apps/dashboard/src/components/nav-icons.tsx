@@ -29,3 +29,4 @@ export const ShipmentIcon = () => icon("M3 10h14l-2 6H5l-2-6zM6 10V6h8v4M10 6V3M
 export const InstallIcon = () => icon("M10 3v4M6 5l1.5 2.5M14 5l-1.5 2.5M4 10h12v7H4v-7zM7 13h6M10 10v7");
 export const SetupIcon = () => icon("M10 2v4M4 6l2 2M16 6l-2 2M10 18v-4M4 14l2-2M16 14l-2-2M6 10H2M18 10h-4");
 export const NewDeviceIcon = () => icon("M10 3v14M3 10h14M5 5l10 10M15 5L5 15");
+export const OrchestratorIcon = () => icon("M4 6a2 2 0 104 0 2 2 0 00-4 0M12 6a2 2 0 104 0 2 2 0 00-4 0M8 14a2 2 0 104 0 2 2 0 00-4 0M6 8l4 4M14 8l-4 4");

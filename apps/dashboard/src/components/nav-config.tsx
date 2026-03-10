@@ -21,6 +21,7 @@ import {
   LogisticsIcon,
   SetupIcon,
   NewDeviceIcon,
+  OrchestratorIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -62,6 +63,7 @@ export const navGroups: NavGroup[] = [
       { label: "Batches", path: "/batches", icon: <BatchIcon /> },
       { label: "Evidence", path: "/evidence", icon: <EvidenceIcon /> },
       { label: "Process Logs", path: "/logs", icon: <LogsIcon /> },
+      { label: "Orchestrator", path: "/orchestrator", icon: <OrchestratorIcon /> },
     ],
   },
   {

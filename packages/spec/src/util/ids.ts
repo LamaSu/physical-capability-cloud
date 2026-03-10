@@ -47,4 +47,11 @@ export const ids = {
   installStep: () => generateId("istep"),
   installNote: () => generateId("inote"),
   timelineEvent: () => generateId("tle"),
+  transferNode: () => generateId("tnode"),
+  transferEdge: () => generateId("tedge"),
+  transferGraph: () => generateId("tgraph"),
+  sampleMovement: () => generateId("smov"),
+  instrumentWorkflow: () => generateId("iwf"),
+  resourceClaim: () => generateId("rclaim"),
+  orchestratorEvent: () => generateId("oevt"),
 } as const;

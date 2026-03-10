@@ -33,6 +33,7 @@
     "@pcc/payments": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/scheduler": "workspace:*",
+    "@pcc/orchestrator": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "fastify": "^4.26.0",

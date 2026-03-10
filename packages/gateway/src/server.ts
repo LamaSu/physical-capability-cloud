@@ -15,6 +15,7 @@ import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
+import { orchestratorRoutes } from "./routes/orchestrator.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -65,6 +66,7 @@ export async function createGateway(port = 3200) {
   await app.register(evidenceEncryptedRoutes);
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
+  await app.register(orchestratorRoutes);
   await app.register(registryRoutes);
 
   // SSE endpoints
