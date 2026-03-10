@@ -19,6 +19,8 @@ import {
   EvidenceIcon,
   LogsIcon,
   LogisticsIcon,
+  SetupIcon,
+  NewDeviceIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -33,6 +35,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Discover", path: "/discover", icon: <DiscoverIcon /> },
       { label: "Build Contract", path: "/build", icon: <BuildIcon /> },
+      { label: "New Device", path: "/build/new-device", icon: <NewDeviceIcon /> },
       { label: "Workflows", path: "/workflow", icon: <WorkflowIcon /> },
       { label: "Jobs", path: "/jobs", icon: <JobsIcon /> },
     ],
@@ -77,6 +80,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "System",
     items: [
+      { label: "Setup Wizard", path: "/setup", icon: <SetupIcon /> },
       { label: "Settings", path: "/settings", icon: <SettingsIcon /> },
     ],
   },

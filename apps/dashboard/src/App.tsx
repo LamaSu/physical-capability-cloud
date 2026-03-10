@@ -42,6 +42,8 @@ const LogisticsHubPage = lazy(() => import("./pages/LogisticsHubPage.js").then(m
 const ShipmentDetailPage = lazy(() => import("./pages/ShipmentDetailPage.js").then(m => ({ default: m.ShipmentDetailPage })));
 const SpaceBookingsPage = lazy(() => import("./pages/SpaceBookingsPage.js").then(m => ({ default: m.SpaceBookingsPage })));
 const InstallationDetailPage = lazy(() => import("./pages/InstallationDetailPage.js").then(m => ({ default: m.InstallationDetailPage })));
+const DeviceBuilderPage = lazy(() => import("./pages/DeviceBuilderPage.js").then(m => ({ default: m.DeviceBuilderPage })));
+const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage.js").then(m => ({ default: m.SetupWizardPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -101,6 +103,7 @@ function Shell() {
               <Route path="/" element={<DashboardPage />} />
               <Route path="/discover" element={<DiscoverPage />} />
               <Route path="/build" element={<BuilderPage />} />
+              <Route path="/build/new-device" element={<DeviceBuilderPage />} />
               <Route path="/build/:type" element={<BuilderPage />} />
               <Route path="/workflow" element={<WorkflowPage />} />
               <Route path="/jobs" element={<JobsPage />} />
@@ -133,6 +136,7 @@ function Shell() {
               <Route path="/logistics/bookings/:bookingId" element={<SpaceBookingsPage />} />
               <Route path="/logistics/installations" element={<InstallationDetailPage />} />
               <Route path="/logistics/installations/:installationId" element={<InstallationDetailPage />} />
+              <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>
         </PageTransition>

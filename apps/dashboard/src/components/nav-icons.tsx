@@ -27,3 +27,5 @@ export const LogsIcon = () => icon("M4 5h12M4 8h10M4 11h12M4 14h8M4 17h10");
 export const LogisticsIcon = () => icon("M3 13h4l2-3h2l2 3h4M5 17h10M7 9V5h6v4M10 5V3");
 export const ShipmentIcon = () => icon("M3 10h14l-2 6H5l-2-6zM6 10V6h8v4M10 6V3M7 13h0M13 13h0");
 export const InstallIcon = () => icon("M10 3v4M6 5l1.5 2.5M14 5l-1.5 2.5M4 10h12v7H4v-7zM7 13h6M10 10v7");
+export const SetupIcon = () => icon("M10 2v4M4 6l2 2M16 6l-2 2M10 18v-4M4 14l2-2M16 14l-2-2M6 10H2M18 10h-4");
+export const NewDeviceIcon = () => icon("M10 3v14M3 10h14M5 5l10 10M15 5L5 15");
