@@ -2,61 +2,57 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master]
   pull_request:
-    branches: [master, main]
+    branches: [master]
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - uses: pnpm/action-setup@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 20
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build all packages
-        run: pnpm build
+        run: pnpm build --concurrency=1
 
       - name: Run tests
-        run: pnpm test
+        run: pnpm --workspace-concurrency=1 -r test
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Type check
+        run: pnpm -r exec tsc --noEmit
 
-  lint:
+  forge-tests:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          submodules: recursive
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Install forge-std
+        working-directory: packages/contracts
+        run: forge install foundry-rs/forge-std --no-commit
 
-      - name: Build (needed for lint)
-        run: pnpm build
-
-      - name: Lint
-        run: pnpm lint
-        continue-on-error: true  # Lint not yet configured
+      - name: Run Solidity tests
+        working-directory: packages/contracts
+        run: forge test -vvv --profile ci

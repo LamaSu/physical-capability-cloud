@@ -1,0 +1,53 @@
+name: Dashboard Build
+
+on:
+  pull_request:
+    paths:
+      - 'apps/dashboard/**'
+      - 'packages/ui/**'
+      - 'packages/spec/**'
+      - 'packages/gateway/**'
+
+jobs:
+  build-dashboard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm build --concurrency=1
+
+      - name: Report bundle size
+        run: |
+          echo "## Dashboard Bundle Size" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          du -sh apps/dashboard/dist/ >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "JS assets:" >> $GITHUB_STEP_SUMMARY
+          ls -lh apps/dashboard/dist/assets/*.js 2>/dev/null | awk '{print $5, $9}' >> $GITHUB_STEP_SUMMARY || echo "No JS assets found" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "CSS assets:" >> $GITHUB_STEP_SUMMARY
+          ls -lh apps/dashboard/dist/assets/*.css 2>/dev/null | awk '{print $5, $9}' >> $GITHUB_STEP_SUMMARY || echo "No CSS assets found" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: apps/dashboard/dist/
+          retention-days: 7
