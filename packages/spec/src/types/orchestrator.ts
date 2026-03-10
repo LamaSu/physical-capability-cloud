@@ -7,17 +7,23 @@
  */
 
 import type { Id, Timestamp, SHA256 } from "./common.js";
+import type { AutomationLevel } from "./protocol.js";
 
 // ── Physical topology ───────────────────────────────────────────
 
 /** Transfer mechanism between nodes */
 export type TransferMechanism =
   | "robot_arm"
+  | "robot_autonomous"          // Robot executing VLA policy autonomously
+  | "robot_teleoperated"        // Robot controlled by human teleop
+  | "robot_pilot"               // Robot executes, trained pilot supervises
   | "conveyor"
   | "pneumatic"
   | "manual"
   | "gravity"
   | "same_device"
+  | "deck_integrated"           // Mounted in another instrument's deck slot
+  | "liquid_handler_integrated" // Integrated liquid handling system
   | (string & {});
 
 /** Labware/sample container type */
@@ -56,6 +62,16 @@ export interface TransferEdge {
     labwareTypes?: LabwareType[];
     maxDimensionMm?: number;
   };
+  /** Transfer agent performing this edge (robot ID, operator ID, etc.) */
+  transferAgentId?: Id;
+  /** Current automation level for this edge */
+  automationLevel?: AutomationLevel;
+  /** Number of demonstration episodes recorded for this transfer */
+  episodeCount?: number;
+  /** VLA model ID trained for this transfer */
+  vlaModelId?: string;
+  /** VLA success rate (0-1) */
+  vlaSuccessRate?: number;
 }
 
 /** The physical topology of a kernel */

@@ -22,6 +22,9 @@ import {
   SetupIcon,
   NewDeviceIcon,
   OrchestratorIcon,
+  ProtocolLibraryIcon,
+  ProtocolBuilderIcon,
+  ProtocolRunIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -54,6 +57,14 @@ export const navGroups: NavGroup[] = [
     title: "Logistics",
     items: [
       { label: "Logistics Hub", path: "/logistics", icon: <LogisticsIcon /> },
+    ],
+  },
+  {
+    title: "Protocols",
+    items: [
+      { label: "Protocol Library", path: "/protocols", icon: <ProtocolLibraryIcon /> },
+      { label: "Protocol Builder", path: "/protocols/new", icon: <ProtocolBuilderIcon /> },
+      { label: "Active Runs", path: "/protocol-runs", icon: <ProtocolRunIcon /> },
     ],
   },
   {

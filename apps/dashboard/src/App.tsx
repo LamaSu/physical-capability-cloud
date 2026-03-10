@@ -47,6 +47,10 @@ const DeviceBuilderPage = lazy(() => import("./pages/DeviceBuilderPage.js").then
 const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage.js").then(m => ({ default: m.SetupWizardPage })));
 const OrchestratorPage = lazy(() => import("./pages/OrchestratorPage.js").then(m => ({ default: m.OrchestratorPage })));
 const OrchestratorDetailPage = lazy(() => import("./pages/OrchestratorDetailPage.js").then(m => ({ default: m.OrchestratorDetailPage })));
+const ProtocolLibraryPage = lazy(() => import("./pages/ProtocolLibraryPage.js").then(m => ({ default: m.ProtocolLibraryPage })));
+const ProtocolDetailPage = lazy(() => import("./pages/ProtocolDetailPage.js").then(m => ({ default: m.ProtocolDetailPage })));
+const ProtocolBuilderPage = lazy(() => import("./pages/ProtocolBuilderPage.js").then(m => ({ default: m.ProtocolBuilderPage })));
+const ProtocolRunPage = lazy(() => import("./pages/ProtocolRunPage.js").then(m => ({ default: m.ProtocolRunPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -141,6 +145,12 @@ function Shell() {
               <Route path="/logistics/installations/:installationId" element={<InstallationDetailPage />} />
               <Route path="/orchestrator" element={<OrchestratorPage />} />
               <Route path="/orchestrator/:kernelId" element={<OrchestratorDetailPage />} />
+              <Route path="/protocols" element={<ProtocolLibraryPage />} />
+              <Route path="/protocols/new" element={<ProtocolBuilderPage />} />
+              <Route path="/protocols/:templateId" element={<ProtocolDetailPage />} />
+              <Route path="/protocols/:templateId/edit" element={<ProtocolBuilderPage />} />
+              <Route path="/protocol-runs" element={<ProtocolRunPage />} />
+              <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>
