@@ -12,3 +12,4 @@ lib/
 .DS_Store
 *.swp
 *.swo
+packages/gateway/data/

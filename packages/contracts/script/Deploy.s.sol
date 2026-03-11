@@ -7,21 +7,31 @@ import "../src/MockUSDC.sol";
 
 /**
  * @title Deploy
- * @notice Deploys MockUSDC + a sample MilestoneEscrow instance.
+ * @notice Deploys MockUSDC + a sample MilestoneEscrow to a live network (Base Sepolia).
+ *
+ * Required env vars:
+ *   DEPLOYER_PRIVATE_KEY  — deployer wallet private key
+ *
+ * Optional env vars:
+ *   ARBITER_ADDRESS       — arbiter address (defaults to deployer)
  *
  * Usage:
- *   # Local (anvil must be running on 8545):
- *   forge script script/Deploy.s.sol --broadcast --rpc-url http://127.0.0.1:8545
+ *   # Base Sepolia (via deploy.sh wrapper):
+ *   ./script/deploy.sh
  *
- *   # Base Sepolia:
- *   forge script script/Deploy.s.sol --broadcast --rpc-url https://sepolia.base.org \
- *     --private-key $DEPLOYER_PRIVATE_KEY --verify --etherscan-api-key $BASESCAN_API_KEY
+ *   # Or directly:
+ *   forge script script/Deploy.s.sol:DeployScript \
+ *     --rpc-url https://sepolia.base.org \
+ *     --broadcast --verify -vvvv
  */
-contract Deploy is Script {
+contract DeployScript is Script {
     function run() external {
-        uint256 deployerKey = vm.envOr("DEPLOYER_PRIVATE_KEY", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80)); // anvil default
+        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
         address arbiter = vm.envOr("ARBITER_ADDRESS", deployer);
+
+        console.log("Deployer:", deployer);
+        console.log("Arbiter:", arbiter);
 
         vm.startBroadcast(deployerKey);
 

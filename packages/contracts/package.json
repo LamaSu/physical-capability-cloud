@@ -24,7 +24,9 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "forge:build": "forge build",
-    "forge:test": "forge test -vvv"
+    "forge:test": "forge test -vvv",
+    "forge:deploy:local": "forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://127.0.0.1:8545 --broadcast -vvvv",
+    "forge:deploy:base-sepolia": "bash script/deploy.sh"
   },
   "dependencies": {
     "viem": "^2"

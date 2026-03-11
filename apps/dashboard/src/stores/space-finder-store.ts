@@ -6,7 +6,7 @@ interface SpaceFinderState {
   minArea: number;
   maxPrice: number;
   accessFilter: "all" | "24/7" | "business-hours" | "scheduled";
-  sortBy: "price" | "rating" | "match" | "slots";
+  sortBy: "sqft" | "rating" | "match" | "slots";
   selectedSpaceId: string | null;
 
   setSearch: (q: string) => void;
@@ -14,7 +14,7 @@ interface SpaceFinderState {
   setMinArea: (v: number) => void;
   setMaxPrice: (v: number) => void;
   setAccessFilter: (f: "all" | "24/7" | "business-hours" | "scheduled") => void;
-  setSortBy: (s: "price" | "rating" | "match" | "slots") => void;
+  setSortBy: (s: "sqft" | "rating" | "match" | "slots") => void;
   setSelectedSpace: (id: string | null) => void;
 }
 
@@ -22,7 +22,7 @@ export const useSpaceFinderStore = create<SpaceFinderState>((set) => ({
   searchQuery: "",
   minPower: 0,
   minArea: 0,
-  maxPrice: 5000,
+  maxPrice: 0,
   accessFilter: "all",
   sortBy: "match",
   selectedSpaceId: null,

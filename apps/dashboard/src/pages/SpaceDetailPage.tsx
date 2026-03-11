@@ -39,8 +39,11 @@ export function SpaceDetailPage() {
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <GlassPanel padding="md" className="text-center">
-          <div className="text-[10px] text-white/20">Monthly Price</div>
-          <div className="text-lg font-mono text-green-400 mt-1">${space.monthlyPrice}</div>
+          <div className="text-[10px] text-white/20">Pricing</div>
+          <div className="text-lg font-mono text-green-400 mt-1">
+            {space.pricingPhase === "free" ? "Free" : `$${space.monthlyPrice}/mo`}
+          </div>
+          {space.sqft && <div className="text-[10px] text-white/20 mt-0.5">{space.sqft} sqft</div>}
         </GlassPanel>
         <GlassPanel padding="md" className="text-center">
           <div className="text-[10px] text-white/20">Available Slots</div>

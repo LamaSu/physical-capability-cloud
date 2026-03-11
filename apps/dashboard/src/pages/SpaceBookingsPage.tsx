@@ -12,8 +12,9 @@ const mockBookings = [
     machine: "Prusa MK4 + MMU3 + Enclosure",
     status: "equipment_arriving" as const,
     period: { start: "2026-03-10", end: "2027-03-10" },
-    monthlyRate: "$1,200",
-    deposit: "$2,400",
+    pricingPhase: "free" as const,
+    monthlyRate: "Free",
+    sqft: 120,
     requirements: { power: "1 circuit, 120V", air: false, network: "1 port", floor: "Standard" },
     shipmentId: "shp-001",
     installationId: "inst-001",
@@ -34,8 +35,9 @@ const mockBookings = [
     machine: "Haas VF-2 CNC Vertical Mill",
     status: "confirmed" as const,
     period: { start: "2026-03-16", end: "2027-03-16" },
-    monthlyRate: "$1,800",
-    deposit: "$3,600",
+    pricingPhase: "free" as const,
+    monthlyRate: "Free",
+    sqft: 200,
     requirements: { power: "3 circuits, 480V 3-phase", air: true, network: "2 ports", floor: "Concrete pad required" },
     shipmentId: "shp-002",
     installationId: "inst-002",
@@ -100,12 +102,14 @@ export function SpaceBookingsPage() {
                 <span className="text-white/50">{selectedBooking.period.start} → {selectedBooking.period.end}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-white/20">Monthly Rate</span>
-                <span className="text-green-400/70">{selectedBooking.monthlyRate}</span>
+                <span className="text-white/20">Pricing</span>
+                <span className={selectedBooking.pricingPhase === "free" ? "text-green-400/70" : "text-white/50"}>
+                  {selectedBooking.pricingPhase === "free" ? "Free (initial period)" : selectedBooking.monthlyRate + "/mo"}
+                </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-white/20">Deposit</span>
-                <span className="text-white/50">{selectedBooking.deposit}</span>
+                <span className="text-white/20">Space</span>
+                <span className="text-white/50">{selectedBooking.sqft} sqft</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-white/20">Move-in Date</span>
@@ -217,7 +221,8 @@ export function SpaceBookingsPage() {
                 <div className="text-[10px] text-white/15">{b.period.start} → {b.period.end}</div>
               </div>
               <div className="text-right">
-                <div className="text-xs text-green-400/60">{b.monthlyRate}/mo</div>
+                <div className="text-xs text-green-400/60">{b.pricingPhase === "free" ? "Free" : b.monthlyRate + "/mo"}</div>
+                <div className="text-[10px] text-white/15">{b.sqft} sqft</div>
                 <div className="text-[10px] text-white/15">Move-in: {b.moveInDate}</div>
               </div>
             </div>

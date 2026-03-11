@@ -1,0 +1,26 @@
+{
+  "name": "@pcc/store",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "db:push": "drizzle-kit push",
+    "db:generate": "drizzle-kit generate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "better-sqlite3": "^11.8.1",
+    "drizzle-orm": "^0.39.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "drizzle-kit": "^0.30.5",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.1"
+  }
+}

@@ -51,7 +51,7 @@ export function SpaceCard({
       <div className="grid grid-cols-4 gap-2 text-center">
         <div>
           <div className="text-[10px] text-white/20">Price/mo</div>
-          <div className="text-xs font-mono text-green-400">${monthlyPrice}</div>
+          <div className="text-xs font-mono text-green-400">{monthlyPrice === "Free" || monthlyPrice === "0" ? "Free" : `$${monthlyPrice}`}</div>
         </div>
         <div>
           <div className="text-[10px] text-white/20">Slots</div>

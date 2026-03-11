@@ -1,12 +1,10 @@
 node_modules
-dist
+**/node_modules
+**/dist
 .git
 .github
-*.md
 .claude
-apps/dashboard/node_modules
-apps/dashboard/dist
-packages/*/node_modules
+*.md
 packages/contracts/out
 packages/contracts/cache
 packages/contracts/lib

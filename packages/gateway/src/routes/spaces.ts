@@ -14,7 +14,9 @@ const mockSpaces: HostingSpace[] = [
     environmentalSystems: ["HVAC", "Dust extraction", "Fume hood"],
     safetyFeatures: ["Fire suppression", "Eye wash", "First aid"],
     access: { schedule: "24/7", loadingDock: true, forklift: true },
-    monthlyPrice: "1200.00",
+    pricingPhase: "free",
+    monthlyPrice: "0",
+    sqft: 1200,
     currency: "USDC",
     availableSlots: 3,
     totalSlots: 8,
@@ -32,7 +34,9 @@ const mockSpaces: HostingSpace[] = [
     environmentalSystems: ["HVAC", "Cleanroom zone", "Compressed air"],
     safetyFeatures: ["Fire suppression", "Gas detection"],
     access: { schedule: "business-hours", loadingDock: true, forklift: false },
-    monthlyPrice: "2800.00",
+    pricingPhase: "free",
+    monthlyPrice: "0",
+    sqft: 875,
     currency: "USDC",
     availableSlots: 1,
     totalSlots: 6,
@@ -46,8 +50,9 @@ export async function spaceRoutes(app: FastifyInstance) {
     const query = req.query as Record<string, string>;
     let spaces = [...mockSpaces];
 
-    if (query.maxPrice) {
-      spaces = spaces.filter((s) => parseFloat(s.monthlyPrice) <= parseFloat(query.maxPrice));
+    if (query.maxSqft) {
+      const max = parseFloat(query.maxSqft);
+      spaces = spaces.filter((s) => !s.sqft || s.sqft <= max);
     }
     if (query.access && query.access !== "all") {
       spaces = spaces.filter((s) => s.access.schedule === query.access);

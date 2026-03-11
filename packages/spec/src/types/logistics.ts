@@ -179,7 +179,14 @@ export interface SpaceBooking {
 
   status: BookingStatus;
   period: TimeWindow;            // Start/end of booking
+  /** Pricing phase: "free" during initial period, "assessed" after sqft evaluation */
+  pricingPhase: "free" | "assessed";
+  /** Monthly rate — "0" when free, computed from sqft when assessed */
   monthlyRate: Amount;
+  /** Price per sqft/month — only set when assessed */
+  pricePerSqftMonth?: Amount;
+  /** Occupied sqft for this booking */
+  sqft?: number;
   currency: Currency;
   depositAmount?: Amount;
 

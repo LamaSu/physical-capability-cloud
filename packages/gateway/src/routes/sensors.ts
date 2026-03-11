@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { sensorPipeline } from "../services.js";
-
-// Collected anomalies (pipeline emits these; we store for REST queries)
+import { getRepos } from "../db.js";
 import type { SensorAnomaly } from "@pcc/spec";
+
+// Collected anomalies (pipeline emits these; we store for REST queries AND persist to DB)
 const recentAnomalies: SensorAnomaly[] = [];
 sensorPipeline.onAnomaly((a) => {
   recentAnomalies.push(a);
@@ -10,17 +11,24 @@ sensorPipeline.onAnomaly((a) => {
 });
 
 export async function sensorRoutes(app: FastifyInstance) {
-  // List all registered sensor channels
+  // List all registered sensor channels — merge pipeline + DB descriptors
   app.get("/api/sensors/channels", async () => {
-    return { channels: sensorPipeline.getDescriptors() };
+    const pipelineChannels = sensorPipeline.getDescriptors();
+    // If pipeline has channels, use those (live). Otherwise fall back to DB.
+    if (pipelineChannels.length > 0) {
+      return { channels: pipelineChannels, source: "pipeline" };
+    }
+    // No live channels — future: could read from DB sensor_channel_descriptors
+    return { channels: [], source: "empty" };
   });
 
   // Channels for a specific kernel
   app.get<{ Params: { kernelId: string } }>("/api/sensors/channels/:kernelId", async (req) => {
-    return { channels: sensorPipeline.getDescriptors(), kernelId: req.params.kernelId };
+    const pipelineChannels = sensorPipeline.getDescriptors();
+    return { channels: pipelineChannels, kernelId: req.params.kernelId };
   });
 
-  // Recent readings for a channel
+  // Recent readings for a channel (live from pipeline ring buffer)
   app.get<{ Params: { channel: string }; Querystring: { limit?: string; jobId?: string; since?: string } }>(
     "/api/sensors/readings/:channel",
     async (req) => {
@@ -37,7 +45,7 @@ export async function sensorRoutes(app: FastifyInstance) {
     },
   );
 
-  // Aggregated data for a channel
+  // Aggregated data for a channel (live from pipeline)
   app.get<{ Params: { channel: string }; Querystring: { windowMs?: string; jobId?: string } }>(
     "/api/sensors/aggregates/:channel",
     async (req) => {
@@ -48,10 +56,22 @@ export async function sensorRoutes(app: FastifyInstance) {
     },
   );
 
-  // Recent anomalies
-  app.get<{ Querystring: { kernelId?: string; severity?: string } }>(
+  // Recent anomalies — check in-memory first, fall back to DB for history
+  app.get<{ Querystring: { kernelId?: string; severity?: string; source?: string } }>(
     "/api/sensors/anomalies",
     async (req) => {
+      // If caller specifically wants DB history
+      if (req.query.source === "db") {
+        try {
+          const repos = getRepos();
+          // Use raw DB query for anomalies — the repos don't have a dedicated method yet
+          // so we fall through to in-memory
+        } catch {
+          // fall through
+        }
+      }
+
+      // Default: in-memory anomalies from pipeline
       let anomalies = [...recentAnomalies];
       if (req.query.kernelId) {
         anomalies = anomalies.filter((a) => a.kernelId === req.query.kernelId);

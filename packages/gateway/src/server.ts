@@ -1,5 +1,8 @@
 import Fastify from "fastify";
+import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
+import { initStore, closeStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
@@ -19,16 +22,33 @@ import { orchestratorRoutes } from "./routes/orchestrator.js";
 import { protocolRoutes } from "./routes/protocols.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
+import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
+import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
 
 export async function createGateway(port = 3200) {
+  // Initialize SQLite store (creates tables + seeds if empty)
+  initStore({ seed: true });
+
   const app = Fastify({ logger: true });
 
-  await app.register(cors, { origin: true });
+  // Close the DB when the server shuts down
+  app.addHook("onClose", async () => {
+    closeStore();
+  });
+
+  await app.register(cors, { origin: true, credentials: true });
+  await app.register(cookie);
+
+  // Decorate request with userId (set by requireAuth / optionalAuth hooks)
+  app.decorateRequest("userId", null);
+
+  // SIWE auth routes (nonce, verify, me, logout, sessions)
+  await app.register(siweAuthPlugin);
 
   // Session middleware
   app.decorateRequest("pccSession", null);
@@ -75,6 +95,19 @@ export async function createGateway(port = 3200) {
   await app.register(notificationSSE);
   await app.register(topicSSE);
 
+  // Mock SSE producers (enabled by default; set ENABLE_MOCK_STREAMING=false to disable)
+  const enableMockStreaming = process.env.ENABLE_MOCK_STREAMING !== "false";
+  let producerManager: ProducerManager | null = null;
+  if (enableMockStreaming) {
+    producerManager = new ProducerManager();
+  }
+
+  // Producer status endpoint
+  app.get("/api/producers/status", async () => ({
+    enabled: enableMockStreaming,
+    producers: producerManager?.getStatus() ?? [],
+  }));
+
   // Agent bridge status endpoint
   app.get("/api/agents/status", async () => getAgentStatus());
   app.get("/api/agents/cards", async () => ({ cards: getAgentCards() }));
@@ -90,6 +123,34 @@ export async function createGateway(port = 3200) {
     };
   });
 
+  // Clean up producers on shutdown
+  app.addHook("onClose", async () => {
+    producerManager?.stopAll();
+  });
+
+  // Serve dashboard static files in production
+  if (process.env.SERVE_DASHBOARD === "true") {
+    const { resolve } = await import("node:path");
+    const dashboardPath = resolve(process.env.DASHBOARD_PATH ?? "./apps/dashboard/dist");
+
+    await app.register(fastifyStatic, {
+      root: dashboardPath,
+      prefix: "/",
+      decorateReply: false,
+      wildcard: false,
+    });
+
+    // SPA fallback — serve index.html for all non-API/SSE routes
+    app.setNotFoundHandler(async (req, reply) => {
+      if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
+        return reply.status(404).send({ error: "not_found" });
+      }
+      return reply.sendFile("index.html", dashboardPath);
+    });
+
+    console.log(`[gateway] Serving dashboard from ${dashboardPath}`);
+  }
+
   return {
     app,
     start: async () => {
@@ -97,6 +158,9 @@ export async function createGateway(port = 3200) {
       initAgentBridge().catch((err) =>
         console.warn("[gateway] Agent bridge init failed:", err),
       );
+
+      // Start mock streaming producers
+      producerManager?.startAll();
 
       const address = await app.listen({ port, host: "0.0.0.0" });
       console.log(`PCC Gateway listening on ${address}`);
@@ -108,5 +172,6 @@ export async function createGateway(port = 3200) {
 // Auto-start when run directly
 const isMain = import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, "/")}`;
 if (isMain) {
-  createGateway().then(({ start }) => start());
+  const port = parseInt(process.env.PORT ?? "3200", 10);
+  createGateway(port).then(({ start }) => start());
 }

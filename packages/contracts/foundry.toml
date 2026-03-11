@@ -10,3 +10,12 @@ tab_width = 4
 
 [profile.ci]
 fuzz = { runs = 1000 }
+
+# ── Deployment ───────────────────────────────────────────────────────────────
+
+[rpc_endpoints]
+base_sepolia = "https://sepolia.base.org"
+localhost = "http://127.0.0.1:8545"
+
+[etherscan]
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api", chain = 84532 }

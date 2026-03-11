@@ -4,11 +4,39 @@ import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
 
 /**
+ * Build an EIP-4361 SIWE message string.
+ * No `siwe` package needed — we construct it manually.
+ */
+function buildSiweMessage(params: {
+  domain: string;
+  address: string;
+  statement: string;
+  uri: string;
+  version: string;
+  chainId: number;
+  nonce: string;
+  issuedAt: string;
+}): string {
+  return [
+    `${params.domain} wants you to sign in with your Ethereum account:`,
+    params.address,
+    "",
+    params.statement,
+    "",
+    `URI: ${params.uri}`,
+    `Version: ${params.version}`,
+    `Chain ID: ${params.chainId}`,
+    `Nonce: ${params.nonce}`,
+    `Issued At: ${params.issuedAt}`,
+  ].join("\n");
+}
+
+/**
  * Wallet connect button + SIWE auth flow.
- * Shows in TopBar — connects wallet, signs SIWE message, establishes session.
+ * Shows in TopBar -- connects wallet, signs SIWE message, establishes session.
  */
 export function ConnectWallet() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { connectors, connect } = useConnect();
   const { disconnect } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
@@ -35,63 +63,74 @@ export function ConnectWallet() {
     }
   }, [isConnected, address, setAddress, setSession]);
 
+  // Check for existing session on mount
+  React.useEffect(() => {
+    fetch("/api/auth/me", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.address) {
+          setSession("cookie"); // cookie-based session, token managed server-side
+        }
+      })
+      .catch(() => {});
+  }, [setSession]);
+
   // SIWE sign-in after wallet connects
   const handleSIWE = React.useCallback(async () => {
-    if (!address) return;
+    if (!address || !chainId) return;
     setVerifying(true);
     setError(null);
 
     try {
       // 1. Get nonce from gateway
-      const nonceRes = await fetch("/api/auth/nonce", { method: "POST" });
+      const nonceRes = await fetch("/api/auth/nonce", {
+        credentials: "include",
+      });
+      if (!nonceRes.ok) throw new Error("Failed to get nonce");
       const { nonce } = await nonceRes.json();
 
-      // 2. Build SIWE message
-      const domain = window.location.host;
-      const origin = window.location.origin;
-      const issuedAt = new Date().toISOString();
-      const message = [
-        `${domain} wants you to sign in with your Ethereum account:`,
+      // 2. Build SIWE message (no siwe package needed)
+      const message = buildSiweMessage({
+        domain: window.location.host,
         address,
-        "",
-        "Sign in to PCC Ground Control",
-        "",
-        `URI: ${origin}`,
-        `Version: 1`,
-        `Chain ID: 84532`,
-        `Nonce: ${nonce}`,
-        `Issued At: ${issuedAt}`,
-      ].join("\n");
+        statement: "Sign in to PCC Ground Control",
+        uri: window.location.origin,
+        version: "1",
+        chainId,
+        nonce,
+        issuedAt: new Date().toISOString(),
+      });
 
-      // 3. Sign
+      // 3. Sign with wallet
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
       const verifyRes = await fetch("/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, signature, address }),
+        credentials: "include",
+        body: JSON.stringify({ message, signature }),
       });
 
       if (!verifyRes.ok) {
-        throw new Error("Verification failed");
+        const err = await verifyRes.json().catch(() => ({}));
+        throw new Error(err.error ?? "Verification failed");
       }
 
-      const { token } = await verifyRes.json();
-      setSession(token);
+      const data = await verifyRes.json();
+      // Session cookie is set automatically; also store the bearer token
+      setSession(data.token ?? "cookie");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
     }
-  }, [address, signMessageAsync, setVerifying, setError, setSession]);
+  }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 
   const handleDisconnect = () => {
-    // Logout from gateway
-    if (sessionToken) {
-      fetch("/api/auth/logout", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${sessionToken}` },
-      }).catch(() => {});
-    }
+    // Logout from gateway (clears cookie)
+    fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {});
     disconnect();
     authLogout();
     setShowModal(false);
@@ -144,7 +183,7 @@ export function ConnectWallet() {
     );
   }
 
-  // Not connected — show connect button + modal
+  // Not connected -- show connect button + modal
   return (
     <div className="relative">
       <button
@@ -167,9 +206,9 @@ export function ConnectWallet() {
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] hover:bg-white/[0.05] hover:border-green-500/15 transition-colors text-left"
               >
                 <div className="w-8 h-8 rounded-lg bg-white/[0.04] flex items-center justify-center text-white/30 text-sm">
-                  {connector.name === "MetaMask" ? "🦊" :
-                   connector.name === "Coinbase Wallet" ? "🔵" :
-                   connector.name === "WalletConnect" ? "🔗" : "💼"}
+                  {connector.name === "MetaMask" ? "M" :
+                   connector.name === "Coinbase Wallet" ? "C" :
+                   connector.name === "WalletConnect" ? "W" : "?"}
                 </div>
                 <div>
                   <div className="text-xs text-white/60">{connector.name}</div>

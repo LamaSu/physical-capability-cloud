@@ -3,7 +3,7 @@ import type { SampleSlot } from "@pcc/spec";
 import { batchTracker } from "../services.js";
 
 export async function batchRoutes(app: FastifyInstance) {
-  // List batch manifests
+  // List batch manifests — from in-memory BatchTracker (live lifecycle state)
   app.get<{ Querystring: { kernelId?: string; status?: string } }>(
     "/api/batches",
     async (req) => {

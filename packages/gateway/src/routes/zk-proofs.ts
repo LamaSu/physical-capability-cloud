@@ -1,11 +1,11 @@
 import type { FastifyInstance } from "fastify";
-import type { EvidenceCommitment, SHA256 } from "@pcc/spec";
+import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
 
 // In-memory stores (production: database / on-chain)
 const commitments = new Map<string, EvidenceCommitment>();
 const trees = new Map<string, Awaited<ReturnType<typeof commitmentService.buildTree>>>();
-const proofs = new Map<string, Awaited<ReturnType<typeof zkProofService.generateProof>>>();
+const proofs = new Map<string, ZKProof>();
 
 export async function zkProofRoutes(app: FastifyInstance) {
   // Create commitment for a bundle

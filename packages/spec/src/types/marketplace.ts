@@ -80,7 +80,14 @@ export interface HostingSpace {
   environmentalSystems: string[];
   safetyFeatures: string[];
   access: { schedule: "24/7" | "business-hours" | "scheduled"; loadingDock: boolean; forklift: boolean };
+  /** Pricing phase: "free" during initial onboarding, "assessed" after sqft evaluation */
+  pricingPhase: "free" | "assessed";
+  /** Price per sqft/month — only set when pricingPhase is "assessed" */
+  pricePerSqftMonth?: Amount;
+  /** Total monthly price — computed from sqft when assessed, "0" when free */
   monthlyPrice: Amount;
+  /** Total sqft occupied by equipment + clearance */
+  sqft?: number;
   currency: Currency;
   availableSlots: number;
   totalSlots: number;

@@ -321,9 +321,9 @@ describe("Gateway Routes", () => {
     });
   });
 
-  describe("POST /api/auth/logout", () => {
+  describe("POST /api/auth/logout/bearer", () => {
     it("returns ok even without a session", async () => {
-      const res = await app.inject({ method: "POST", url: "/api/auth/logout" });
+      const res = await app.inject({ method: "POST", url: "/api/auth/logout/bearer" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.ok).toBe(true);

@@ -16,6 +16,8 @@
     "@pcc/spec": "workspace:*"
   },
   "devDependencies": {
+    "@noir-lang/backend_barretenberg": "^0.36.0",
+    "@noir-lang/noir_js": "1.0.0-beta.19",
     "vitest": "^1.6.0"
   }
 }

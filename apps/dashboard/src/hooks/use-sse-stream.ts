@@ -31,11 +31,22 @@ export function useSSEStream({ url, onEvent, enabled = true }: UseSSEStreamOptio
       } catch { /* ignore parse errors */ }
     };
 
-    // Listen for typed events (sensor_reading, sensor_anomaly, etc.)
+    // Listen for typed events — covers sensor, batch, protocol, and log producers
     const eventTypes = [
-      "sensor_reading", "sensor_anomaly", "process_log",
-      "batch_created", "batch_sealed", "batch_started", "batch_completed",
-      "sample_added", "sample_completed", "sample_failed",
+      // Sensor
+      "sensor_reading", "sensor_anomaly",
+      // Process logs
+      "process_log",
+      // Batch lifecycle
+      "batch_created", "batch_sealed", "batch_started", "batch_completed", "batch_failed",
+      "sample_added", "sample_injection_start", "sample_acquisition_start",
+      "sample_acquisition_end", "sample_result_available", "sample_completed", "sample_failed",
+      // Protocol run lifecycle
+      "protocol_run_started", "protocol_run_completed", "protocol_run_failed",
+      "protocol_run_paused", "protocol_run_cancelled",
+      "protocol_step_started", "protocol_step_completed", "protocol_step_failed",
+      "protocol_transfer_started", "protocol_transfer_completed", "protocol_transfer_failed",
+      "protocol_episode_recorded",
     ];
     for (const type of eventTypes) {
       eventSource.addEventListener(type, (e: MessageEvent) => {

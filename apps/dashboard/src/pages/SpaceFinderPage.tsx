@@ -19,13 +19,13 @@ export function SpaceFinderPage() {
 
   let spaces = mockHostingSpaces.filter((s) => {
     if (searchQuery && !s.name.toLowerCase().includes(searchQuery.toLowerCase()) && !s.address.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-    if (parseFloat(s.monthlyPrice) > maxPrice) return false;
     if (accessFilter !== "all" && s.access.schedule !== accessFilter) return false;
+    if (maxPrice > 0 && s.sqft && s.sqft > maxPrice) return false;
     return true;
   });
 
   spaces = [...spaces].sort((a, b) => {
-    if (sortBy === "price") return parseFloat(a.monthlyPrice) - parseFloat(b.monthlyPrice);
+    if (sortBy === "sqft") return (a.sqft ?? 0) - (b.sqft ?? 0);
     if (sortBy === "rating") return b.rating - a.rating;
     if (sortBy === "slots") return b.availableSlots - a.availableSlots;
     return b.rating - a.rating; // default "match"
@@ -45,11 +45,12 @@ export function SpaceFinderPage() {
           />
         </div>
         <div className="w-32">
-          <label className="text-[10px] text-white/20 mb-1 block">Max Price</label>
+          <label className="text-[10px] text-white/20 mb-1 block">Max Sqft</label>
           <input
             className={baseInput}
             type="number"
-            value={maxPrice}
+            placeholder="Any size"
+            value={maxPrice || ""}
             onChange={(e) => setMaxPrice(+e.target.value)}
           />
         </div>
@@ -72,7 +73,7 @@ export function SpaceFinderPage() {
         <div>
           <label className="text-[10px] text-white/20 mb-1 block">Sort</label>
           <div className="flex gap-1">
-            {(["match", "price", "rating", "slots"] as const).map((s) => (
+            {(["match", "sqft", "rating", "slots"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => setSortBy(s)}
@@ -94,8 +95,8 @@ export function SpaceFinderPage() {
             key={s.id}
             name={s.name}
             address={s.address}
-            monthlyPrice={s.monthlyPrice}
-            currency={s.currency}
+            monthlyPrice={s.pricingPhase === "free" ? "Free" : s.monthlyPrice}
+            currency={s.pricingPhase === "free" ? "" : s.currency}
             availableSlots={s.availableSlots}
             totalSlots={s.totalSlots}
             amenities={s.amenities}

@@ -7,7 +7,7 @@
  */
 
 import { SensorPipeline, BatchTracker, EncryptionService } from "@pcc/kernel";
-import { CommitmentService, ZKProofService } from "@pcc/verifier";
+import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
 
@@ -172,4 +172,4 @@ export const encryptionService = new EncryptionService();
 // ── ZK Services ─────────────────────────────────────────────────────
 
 export const commitmentService = new CommitmentService();
-export const zkProofService = new ZKProofService();
+export const zkProofService = new NoirProofService();
