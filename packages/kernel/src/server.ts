@@ -206,7 +206,7 @@ async function buildServer() {
 }
 
 // ---- Start (only when run directly) ----
-const isMain = process.argv[1]?.includes("server");
+const isMain = import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, "/")}`;
 if (isMain) {
   buildServer().then((app) => {
     app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
