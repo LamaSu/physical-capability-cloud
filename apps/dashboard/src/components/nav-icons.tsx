@@ -33,3 +33,5 @@ export const OrchestratorIcon = () => icon("M4 6a2 2 0 104 0 2 2 0 00-4 0M12 6a2
 export const ProtocolLibraryIcon = () => icon("M4 3h9v14H4zM7 3v14M13 5h3v10h-3M7 7h4M7 10h4M7 13h3");
 export const ProtocolBuilderIcon = () => icon("M6 3l-2 4h4l-2-4zM14 3l-2 4h4l-2-4zM10 11l-2 4h4l-2-4zM6 7v2l4 2M14 7v2l-4 2M4 17h12");
 export const ProtocolRunIcon = () => icon("M7 4l8 6-8 6V4zM3 10h1M16 10h1M10 3v1M10 16v1");
+export const SubnetIcon = () => icon("M10 3a7 7 0 100 14 7 7 0 000-14zM3 10h14M10 3c-2 2-3 4.5-3 7s1 5 3 7M10 3c2 2 3 4.5 3 7s-1 5-3 7");
+export const DePINIcon = () => icon("M10 2a8 8 0 100 16 8 8 0 000-16zM10 5v5l3 3M7 10h6");

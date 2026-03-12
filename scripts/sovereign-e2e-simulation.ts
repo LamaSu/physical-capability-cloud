@@ -23,8 +23,9 @@ import {
   verifyCredential,
 } from "@pcc/spec/identity";
 import { EvidenceEmitter, MockFDMAdapter, MockPowerMonitorAdapter, MockCameraAdapter, JobRunner, EncryptionService } from "@pcc/kernel";
-import { CommitmentService, ZKProofService, EvidenceVerifier } from "@pcc/verifier";
+import { CommitmentService, ZKProofService, EvidenceVerifier, BittensorSubnetBridge } from "@pcc/verifier";
 import { SolanaAgentWallet, SpendingTracker, createBrokerAgentPolicy } from "@pcc/agent-runtime";
+import { CapabilityCertificateService, RewardEngine } from "@pcc/contracts";
 import type { CWM, Capability, Verifier, SHA256 } from "@pcc/spec";
 import { ids, sha256 } from "@pcc/spec";
 
@@ -329,9 +330,137 @@ async function main() {
   log("DEPIN", `  Total score:     ${score.toFixed(4)}`);
   log("DEPIN", `  Epoch reward:    ${(score * 100).toFixed(2)} PCC tokens`);
 
+  console.log();
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Phase 8: Bittensor Subnet Verification
+  // ══════════════════════════════════════════════════════════════════════
+
+  console.log("▸ PHASE 8: Bittensor Subnet Verification\n" + SUB_DIVIDER);
+
+  const bridge = new BittensorSubnetBridge();
+  log("SUBNET", `Available:       ${bridge.isAvailable() ? "✓ ONLINE" : "✗ OFFLINE"}`);
+
+  const preMetrics = bridge.getMetrics();
+  log("SUBNET", `Active miners:   ${preMetrics.activeMinerCount}`);
+  log("SUBNET", "Submitting evidence bundle for decentralized verification...");
+
+  const subnetResult = await bridge.submitForVerification(
+    bundle.bundleHash,
+    JSON.stringify(bundle),
+    2, // requiredTier
+  );
+
+  log("SUBNET", `Consensus score: ${subnetResult.consensusScore}`);
+  log("SUBNET", `Tier compliant:  ${subnetResult.tierCompliant ? "✓" : "✗"}`);
+  log("SUBNET", `Miners queried:  ${subnetResult.minerCount}`);
+  log("SUBNET", `Defects found:   ${subnetResult.defects.length > 0 ? subnetResult.defects.join(", ") : "none"}`);
+  log("SUBNET", `Verification:    ${subnetResult.passed ? "✓ PASSED" : "✗ FAILED"}`);
+  log("SUBNET", `Round time:      ${subnetResult.totalTimeMs}ms`);
+
+  // Show miner leaderboard
+  const leaderboard = bridge.getMinerLeaderboard();
+  log("SUBNET", "\nMiner Leaderboard:");
+  for (const miner of leaderboard.slice(0, 5)) {
+    log("SUBNET", `  UID ${miner.uid}  stake=${miner.stake}  trust=${miner.trust.toFixed(3)}  incentive=${miner.incentive.toFixed(3)}  ${miner.hotkey.slice(0, 12)}...`);
+  }
+
+  const postMetrics = bridge.getMetrics();
+  log("SUBNET", `\nTotal verifications: ${postMetrics.totalVerifications}`);
+  log("SUBNET", `Average score:       ${postMetrics.averageScore.toFixed(3)}`);
+
+  console.log();
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Phase 9: DePIN Rewards
+  // ══════════════════════════════════════════════════════════════════════
+
+  console.log("▸ PHASE 9: DePIN Rewards (Certificates + Epoch Rewards)\n" + SUB_DIVIDER);
+
+  // Mint a capability certificate for the kernel
+  const certService = new CapabilityCertificateService();
+  log("CERT", "Minting soulbound capability certificate...");
+  const cert = certService.mintCapabilityCertificate({
+    kernelDid: kernelPccDid,
+    capabilityType: "fdm",
+    assuranceTier: 2,
+    metadata: {
+      materials: ["PLA", "PETG", "ABS"],
+      maxBuildVolume: "250x210x210 mm",
+      calibrationDate: "2026-03-10T00:00:00Z",
+      calibrationProofCid: "bafybeig_calibration_proof_cid",
+    },
+  });
+  log("CERT", `Certificate ID:   ${cert.id}`);
+  log("CERT", `Capability:       ${cert.capabilityType}`);
+  log("CERT", `Assurance Tier:   ${cert.assuranceTier}`);
+  log("CERT", `Soulbound:        ${cert.soulbound ? "✓" : "✗"}`);
+  log("CERT", `Status:           ${cert.status}`);
+  log("CERT", `Merkle Tree:      ${cert.merkleTree}`);
+  log("CERT", `Leaf Index:       ${cert.leafIndex}`);
+
+  // Verify the certificate
+  const certCheck = certService.verifyCapabilityCertificate(cert.id);
+  log("CERT", `Cert valid:       ${certCheck.valid ? "✓" : "✗"}`);
+
+  // Attempt transfer (should fail — soulbound)
+  const transferResult = certService.transferCertificate(cert.id, "did:pcc:kernel:other");
+  log("CERT", `Transfer blocked: ${!transferResult.transferred ? "✓ " + transferResult.reason : "✗ transferred"}`);
+
+  console.log();
+
+  // Create a reward epoch
+  const rewardEngine = new RewardEngine();
+  log("REWARD", "Creating reward epoch #1...");
+  const epoch = rewardEngine.createEpoch(
+    1,
+    "2026-03-01T00:00:00Z",
+    "2026-03-07T23:59:59Z",
+    "1000.000000",
+  );
+  log("REWARD", `Epoch ID:         ${epoch.id}`);
+  log("REWARD", `Total pool:       ${epoch.totalRewards} PCC tokens`);
+
+  // Complete the epoch with kernel scores
+  log("REWARD", "Computing epoch scores...");
+  const completedEpoch = rewardEngine.completeEpoch(epoch.id, [
+    {
+      kernelId: KERNEL_ID,
+      kernelDid: kernelPccDid,
+      jobsCompleted: 1,
+      qualityScore: verifyPassed ? 1.0 : 0.5,
+      uptimePercent: 99.5,
+      capabilityDiversity: 1,
+      scarcityBonus: 0.8,
+    },
+  ]);
+
+  const kernelScore = completedEpoch.kernelScores[0];
+  log("REWARD", `Kernel score:     ${kernelScore.totalScore.toFixed(4)}`);
+  log("REWARD", `Reward amount:    ${kernelScore.rewardAmount} PCC tokens`);
+  log("REWARD", `Epoch status:     ${completedEpoch.status}`);
+
+  // Submit and settle a reward claim
+  log("REWARD", "Submitting reward claim...");
+  const claim = rewardEngine.submitClaim(
+    KERNEL_ID,
+    epoch.id,
+    kernelScore.rewardAmount,
+    "solana",
+  );
+  log("REWARD", `Claim ID:         ${claim.id}`);
+  log("REWARD", `Claim status:     ${claim.status}`);
+
+  // Settle the claim (mock on-chain)
+  const mockTxHash = `${Date.now().toString(36)}${Math.random().toString(36).substring(2, 10)}`;
+  const settledClaim = rewardEngine.settleClaim(claim.id, mockTxHash);
+  log("REWARD", `Settlement TX:    ${settledClaim.txHash}`);
+  log("REWARD", `Final status:     ${settledClaim.status}`);
+  log("REWARD", `Claimed at:       ${settledClaim.claimedAt}`);
+
   console.log("\n" + DIVIDER);
   console.log("  ✓ Sovereign E2E Simulation Complete");
-  console.log("  ✓ DID → VC → Job → Encrypt → IPFS → Merkle → ZK → Verify → Settle");
+  console.log("  ✓ DID → VC → Job → Encrypt → IPFS → Merkle → ZK → Verify → Settle → Subnet → Rewards");
   console.log(DIVIDER + "\n");
 }
 

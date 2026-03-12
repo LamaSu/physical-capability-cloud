@@ -51,6 +51,8 @@ const ProtocolLibraryPage = lazy(() => import("./pages/ProtocolLibraryPage.js").
 const ProtocolDetailPage = lazy(() => import("./pages/ProtocolDetailPage.js").then(m => ({ default: m.ProtocolDetailPage })));
 const ProtocolBuilderPage = lazy(() => import("./pages/ProtocolBuilderPage.js").then(m => ({ default: m.ProtocolBuilderPage })));
 const ProtocolRunPage = lazy(() => import("./pages/ProtocolRunPage.js").then(m => ({ default: m.ProtocolRunPage })));
+const SubnetStatusPage = lazy(() => import("./pages/SubnetStatusPage.js").then(m => ({ default: m.SubnetStatusPage })));
+const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").then(m => ({ default: m.DePINDashboardPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -151,6 +153,8 @@ function Shell() {
               <Route path="/protocols/:templateId/edit" element={<ProtocolBuilderPage />} />
               <Route path="/protocol-runs" element={<ProtocolRunPage />} />
               <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
+              <Route path="/subnet" element={<SubnetStatusPage />} />
+              <Route path="/depin" element={<DePINDashboardPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>
