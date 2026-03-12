@@ -174,5 +174,21 @@ import { fileURLToPath } from "node:url";
 const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   const port = parseInt(process.env.PORT ?? "3200", 10);
-  createGateway(port).then(({ start }) => start());
+  console.log(`[gateway] Starting PCC Gateway on port ${port} (pid=${process.pid})...`);
+  createGateway(port)
+    .then(({ start }) => start())
+    .catch((err) => {
+      console.error("[gateway] FATAL: Failed to start gateway:", err);
+      process.exit(1);
+    });
 }
+
+// Catch unhandled rejections and uncaught exceptions so the process
+// never exits silently. Railway needs log output to diagnose failures.
+process.on("unhandledRejection", (reason) => {
+  console.error("[gateway] Unhandled rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[gateway] Uncaught exception:", err);
+  process.exit(1);
+});

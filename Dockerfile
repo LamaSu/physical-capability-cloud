@@ -1,4 +1,4 @@
-# Single-stage build — pnpm symlinks preserved, simpler for demo deploy
+# Single-stage build -- pnpm symlinks preserved, simpler for demo deploy
 FROM node:22-slim
 
 RUN corepack enable && corepack prepare pnpm@9 --activate
@@ -33,6 +33,10 @@ RUN pnpm install --frozen-lockfile
 # Copy all source and build
 COPY . .
 RUN pnpm build --concurrency=1
+
+# Verify the build output exists and better-sqlite3 native module loads
+RUN node -e "require('better-sqlite3'); console.log('[docker] better-sqlite3 native module OK')"
+RUN ls -la packages/gateway/dist/server.js && echo "[docker] gateway build output OK"
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data
