@@ -116,6 +116,10 @@ export type Intent =
   // Verification
   | RequestVerificationIntent
   | VerificationResultIntent
+  // Funding
+  | RequestFundingIntent
+  | DelegateBudgetIntent
+  | ClaimRewardsIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -477,6 +481,57 @@ export interface ContractBuiltResponseIntent {
   validationErrors: Array<{ paramKey: string; message: string }>;
   templateName: string;
   machineInfo?: { profileId: string; machineName: string; kernelId: string };
+}
+
+// ── Funding Intents ──────────────────────────────────────────
+
+/** Agent requests funds from treasury or parent agent */
+export interface RequestFundingIntent {
+  type: "request_funding";
+  /** Amount requested (human-readable, e.g., "10.00") */
+  amount: string;
+  /** Currency of the request */
+  currency: string;
+  /** Why the funds are needed */
+  reason: "operational" | "escrow_funding" | "gas_topup" | "service_payment";
+  /** Which chain to fund on */
+  chain: string;
+  /** Recipient wallet address (Solana base58 or EVM hex) */
+  recipientAddress: string;
+}
+
+/** Agent delegates a spending budget to a sub-agent */
+export interface DelegateBudgetIntent {
+  type: "delegate_budget";
+  /** Delegatee agent ID */
+  delegateeId: string;
+  /** Max amount the delegatee can spend */
+  maxAmount: string;
+  /** Currency */
+  currency: string;
+  /** Which chain the budget applies to */
+  chain: string;
+  /** Duration in seconds this delegation is valid */
+  validForSeconds: number;
+  /** Which intent types the delegatee can spend on */
+  allowedIntents: string[];
+}
+
+/** Kernel agent claims DePIN rewards for completed work */
+export interface ClaimRewardsIntent {
+  type: "claim_rewards";
+  /** Job IDs that generated these rewards */
+  jobIds: string[];
+  /** Total reward amount */
+  totalReward: string;
+  /** Currency */
+  currency: string;
+  /** Chain to claim on */
+  chain: string;
+  /** Evidence bundle hashes proving the work */
+  evidenceHashes: string[];
+  /** Recipient address for the rewards */
+  recipientAddress: string;
 }
 
 // ── General Intents ─────────────────────────────────────────────

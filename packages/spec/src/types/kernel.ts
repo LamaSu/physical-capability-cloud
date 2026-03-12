@@ -15,6 +15,7 @@ import type {
   AssuranceTier,
 } from "./common.js";
 import type { Capability } from "./capability.js";
+import type { DIDString, DIDDocument, CapabilityCredential } from "../identity/types.js";
 
 /** Shop Kernel identity and metadata */
 export interface ShopKernel {
@@ -45,6 +46,10 @@ export interface ShopKernel {
   lastHeartbeat: Timestamp;
   /** Software version */
   version: string;
+  /** W3C Decentralized Identifier */
+  did?: DIDString;
+  /** Resolved DID Document */
+  didDocument?: DIDDocument;
 }
 
 /** A device registered within a kernel */
@@ -63,6 +68,10 @@ export interface KernelDevice {
   contributesToCapabilities: Id[];
   /** Last status update */
   lastUpdated: Timestamp;
+  /** W3C Decentralized Identifier */
+  did?: DIDString;
+  /** Verifiable Credentials for device capabilities */
+  credentials?: CapabilityCredential[];
 }
 
 /** A job as seen by the kernel */

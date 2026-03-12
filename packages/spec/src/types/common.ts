@@ -18,7 +18,10 @@ export type Id = string;
 export type Amount = string;
 
 /** Supported currencies for settlement */
-export type Currency = "USDC" | "ETH" | "DAI";
+export type Currency = "USDC" | "ETH" | "DAI" | "SOL";
+
+/** Supported settlement chains */
+export type Chain = "base-sepolia" | "base" | "solana-devnet" | "solana";
 
 /** Assurance tiers — the SLA levels of the physical cloud */
 export type AssuranceTier = 0 | 1 | 2 | 3;
