@@ -11,3 +11,6 @@ export { ProgressArc, type ProgressArcProps } from "./ProgressArc.js";
 export { Skeleton, type SkeletonProps } from "./Skeleton.js";
 export { FileUploadButton, type FileUploadButtonProps } from "./FileUploadButton.js";
 export { ConfidenceIndicator, type ConfidenceIndicatorProps } from "./ConfidenceIndicator.js";
+export { DIDBadge, type DIDBadgeProps } from "./DIDBadge.js";
+export { IPFSLink, type IPFSLinkProps } from "./IPFSLink.js";
+export { ChainTxLink, type ChainTxLinkProps } from "./ChainTxLink.js";
