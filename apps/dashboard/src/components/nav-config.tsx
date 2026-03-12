@@ -25,6 +25,8 @@ import {
   ProtocolLibraryIcon,
   ProtocolBuilderIcon,
   ProtocolRunIcon,
+  SubnetIcon,
+  DePINIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -88,6 +90,13 @@ export const navGroups: NavGroup[] = [
     title: "Network",
     items: [
       { label: "Agent Log", path: "/agents", icon: <AgentsIcon /> },
+    ],
+  },
+  {
+    title: "Sovereign",
+    items: [
+      { label: "Subnet", path: "/subnet", icon: <SubnetIcon /> },
+      { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
     ],
   },
   {
