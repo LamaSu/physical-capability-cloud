@@ -6,7 +6,7 @@
  * here they start with demo seed data.
  */
 
-import { SensorPipeline, BatchTracker, EncryptionService } from "@pcc/kernel";
+import { SensorPipeline, BatchTracker, EncryptionService, LitEncryptionService } from "@pcc/kernel";
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
@@ -168,6 +168,19 @@ batchTracker.updateSlotStatus(demoBatch.id, secondSlot.id, "acquiring");
 // ── Encryption Service ──────────────────────────────────────────────
 
 export const encryptionService = new EncryptionService();
+
+// ── Lit Encryption Service ──────────────────────────────────────────
+
+export const litEncryptionService = new LitEncryptionService({
+  network: "datil-test",
+  chain: "baseSepolia",
+  mock: true,
+});
+
+// Connect Lit service (non-blocking — will be ready by first request)
+litEncryptionService.connect().catch((err) => {
+  console.error("Failed to connect LitEncryptionService:", err);
+});
 
 // ── ZK Services ─────────────────────────────────────────────────────
 

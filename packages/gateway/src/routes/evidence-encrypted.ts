@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { EncryptedEvidenceBundle, AccessGrant, Address } from "@pcc/spec";
-import { encryptionService } from "../services.js";
+import { encryptionService, litEncryptionService } from "../services.js";
+import type { LitAuthSig } from "@pcc/kernel";
 
 // In-memory stores (production: database)
 const encryptedBundles = new Map<string, EncryptedEvidenceBundle>();
@@ -99,4 +100,59 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       filecoinDealId: bundle.filecoinDealId ?? null,
     };
   });
+
+  // ── Lit Protocol endpoints ──────────────────────────────────────
+
+  // Get Lit access conditions for a bundle
+  app.get<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/lit-conditions", async (req, reply) => {
+    const bundle = encryptedBundles.get(req.params.bundleId);
+    if (!bundle) return reply.code(404).send({ error: "not_found" });
+
+    const conditions = litEncryptionService.getAccessConditions(bundle);
+    if (!conditions) {
+      return reply.code(404).send({
+        error: "not_lit_encrypted",
+        message: "Bundle was not encrypted with Lit Protocol",
+      });
+    }
+
+    return {
+      bundleId: req.params.bundleId,
+      accessConditions: conditions,
+      network: bundle.litNetwork ?? null,
+      dataToEncryptHash: bundle.litDataToEncryptHash ?? null,
+    };
+  });
+
+  // Decrypt a Lit-encrypted bundle using an auth signature
+  app.post<{ Params: { bundleId: string }; Body: { authSig: LitAuthSig } }>(
+    "/api/evidence/:bundleId/lit-decrypt",
+    async (req, reply) => {
+      const bundle = encryptedBundles.get(req.params.bundleId);
+      if (!bundle) return reply.code(404).send({ error: "not_found" });
+
+      if (!bundle.litCiphertext || !bundle.litDataToEncryptHash) {
+        return reply.code(400).send({
+          error: "not_lit_encrypted",
+          message: "Bundle was not encrypted with Lit Protocol",
+        });
+      }
+
+      const body = req.body as { authSig?: LitAuthSig };
+      if (!body.authSig) {
+        return reply.code(400).send({
+          error: "auth_sig_required",
+          message: "Request body must include authSig with sig, derivedVia, signedMessage, and address",
+        });
+      }
+
+      try {
+        const decrypted = await litEncryptionService.decryptBundle(bundle, body.authSig);
+        return { bundle: decrypted };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Decryption failed";
+        return reply.code(403).send({ error: "decryption_failed", message });
+      }
+    },
+  );
 }
