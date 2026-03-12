@@ -170,7 +170,8 @@ export async function createGateway(port = 3200) {
 }
 
 // Auto-start when run directly
-const isMain = import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, "/")}`;
+import { fileURLToPath } from "node:url";
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   const port = parseInt(process.env.PORT ?? "3200", 10);
   createGateway(port).then(({ start }) => start());
