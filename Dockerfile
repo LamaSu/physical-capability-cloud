@@ -28,7 +28,12 @@ COPY packages/ui/package.json packages/ui/
 COPY packages/db/package.json packages/db/
 COPY apps/dashboard/package.json apps/dashboard/
 
+# Cache-bust: change this value to force pnpm install to re-run
+ARG CACHE_BUST=2
 RUN pnpm install --frozen-lockfile
+
+# Verify correct @fastify/static version installed (must be 8.x for Fastify 4)
+RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.json').version; console.log('@fastify/static version:', v); if (v.startsWith('9.')) { console.error('ERROR: @fastify/static v9 requires Fastify 5!'); process.exit(1); }"
 
 # Copy all source and build
 COPY . .
