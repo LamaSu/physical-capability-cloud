@@ -36,9 +36,20 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **ERC-8004**: Identity Registry + Reputation Registry + Validation Registry for machines/agents
 - **x402**: HTTP 402 Payment Required protocol (Coinbase) for per-request micropayments
 
+### Sovereign Infrastructure
+- **packages/spec/src/identity/**: W3C DIDs (did:key + did:pcc) + Verifiable Credentials
+- **packages/kernel/src/evidence-storage.ts**: IPFS evidence storage via Helia (ESM-only — import from dist path)
+- **packages/kernel/src/lit-encryption-service.ts**: Lit Protocol encryption (mock with real AES-256-GCM)
+- **packages/agent-runtime/src/solana-wallet.ts**: Solana agent wallets + SPL token transfers
+- **packages/agent-runtime/src/spending-policy.ts**: Budget-aware spending policies
+- **packages/verifier/src/bittensor/**: Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
+- **packages/contracts/ts/capability-certificates.ts**: Soulbound capability cNFTs (mock Bubblegum)
+- **packages/contracts/ts/reward-engine.ts**: DePIN reward epoch scoring + distribution
+
 ## Dev Commands
 - `pnpm install` — install all deps
-- `pnpm test` — run all tests (36 tests across spec + scheduler)
-- `pnpm build` — build all 10 packages
+- `pnpm build --concurrency=1` — build all 17 packages (sequential to avoid OOM on Windows)
+- `pnpm --workspace-concurrency=1 -r test` — run all tests (603 passing across 36 test files)
 - `npx tsx scripts/e2e-simulation.ts` — run kernel-level e2e simulation
 - `npx tsx scripts/agent-e2e-simulation.ts` — run agent-to-agent e2e simulation
+- `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases)
