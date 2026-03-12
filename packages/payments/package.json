@@ -13,7 +13,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*"
+    "@pcc/spec": "workspace:*",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "1",
+    "x402-solana": "^2.0.4"
   },
   "devDependencies": {
     "vitest": "^1.6.0"

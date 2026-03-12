@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
 import { hashEvent, hashBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
+import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
 
 /** In-memory store for evidence events per job step */
 interface StepEvidence {
@@ -33,6 +34,10 @@ export class EvidenceEmitter {
   private bundleListeners: Array<(bundle: EvidenceBundle) => void> = [];
   /** Mock signing function — in production, use HSM/TEE */
   private signFn: (data: string) => Signature;
+  /** Optional IPFS storage service — when set, bundles are archived after finalization */
+  private storageService: EvidenceStorageService | null = null;
+  /** Result from the most recent IPFS archive operation */
+  private lastIpfsResult: ArchiveResult | undefined = undefined;
 
   constructor(
     kernelId: string,
@@ -44,6 +49,21 @@ export class EvidenceEmitter {
       algorithm: "secp256k1" as const,
       value: `mock_sig_${data.slice(0, 16)}`,
     }));
+  }
+
+  /** Attach an IPFS storage service for automatic archiving */
+  setStorageService(service: EvidenceStorageService): void {
+    this.storageService = service;
+  }
+
+  /** Get the attached storage service (if any) */
+  getStorageService(): EvidenceStorageService | null {
+    return this.storageService;
+  }
+
+  /** Get the IPFS archive result from the most recent finalizeBundle call */
+  getLastIpfsResult(): ArchiveResult | undefined {
+    return this.lastIpfsResult;
   }
 
   /** Register a job step to collect evidence for */
@@ -107,6 +127,17 @@ export class EvidenceEmitter {
       kernelSignature: signature,
       createdAt: new Date().toISOString(),
     };
+
+    // Archive to IPFS if storage service is available (best-effort)
+    if (this.storageService?.isReady()) {
+      try {
+        const ipfsResult = await this.storageService.archiveBundle(bundle);
+        this.lastIpfsResult = ipfsResult;
+      } catch {
+        // IPFS archival is best-effort — do not block bundle finalization
+        this.lastIpfsResult = undefined;
+      }
+    }
 
     // Notify listeners
     for (const listener of this.bundleListeners) {

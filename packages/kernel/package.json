@@ -14,15 +14,18 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*",
-    "fastify": "^4.28.0",
     "@fastify/cors": "^9.0.0",
+    "@helia/unixfs": "^7.0.4",
+    "@pcc/spec": "workspace:*",
     "better-sqlite3": "^11.0.0",
+    "fastify": "^4.28.0",
+    "helia": "^6.0.21",
+    "multiformats": "^13.4.2",
     "nanoid": "^5.0.0"
   },
   "devDependencies": {
-    "vitest": "^1.6.0",
+    "@types/better-sqlite3": "^7.6.0",
     "tsx": "^4.11.0",
-    "@types/better-sqlite3": "^7.6.0"
+    "vitest": "^1.6.0"
   }
 }

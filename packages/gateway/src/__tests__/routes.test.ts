@@ -6,7 +6,9 @@ import { jobRoutes } from "../routes/jobs.js";
 import { escrowRoutes } from "../routes/escrow.js";
 import { agentRoutes } from "../routes/agents.js";
 import { registryRoutes } from "../routes/registry.js";
-import { authRoutes } from "../routes/auth.js";
+import { siweAuthPlugin } from "../auth/siwe-auth.js";
+import { initStore, closeStore } from "../db.js";
+import cookie from "@fastify/cookie";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -14,11 +16,17 @@ import { authRoutes } from "../routes/auth.js";
 
 /**
  * Build a minimal Fastify instance with the given route plugins.
- * We avoid loading the full createGateway() to skip the agent bridge,
- * services module (SensorPipeline, BatchTracker), and x402 gate.
+ * Uses an in-memory SQLite DB so DB-dependent routes work.
  */
 async function buildApp(): Promise<FastifyInstance> {
+  // Initialize in-memory DB with seed data for route tests
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: true });
+
   const app = Fastify({ logger: false });
+
+  // Cookie support (needed by siweAuthPlugin for session cookies)
+  await app.register(cookie);
 
   // Health check (copied from server.ts — no deps)
   app.get("/api/health", async () => ({
@@ -27,14 +35,14 @@ async function buildApp(): Promise<FastifyInstance> {
     version: "0.1.0",
   }));
 
-  // Register route plugins that use self-contained mock data
+  // Register route plugins
   await app.register(capabilityRoutes);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(escrowRoutes);
   await app.register(agentRoutes);
   await app.register(registryRoutes);
-  await app.register(authRoutes);
+  await app.register(siweAuthPlugin);
 
   await app.ready();
   return app;
@@ -53,6 +61,7 @@ describe("Gateway Routes", () => {
 
   afterAll(async () => {
     await app.close();
+    closeStore();
   });
 
   // ── Health ──────────────────────────────────────────────────────
@@ -207,7 +216,7 @@ describe("Gateway Routes", () => {
       const body = res.json();
       expect(body.escrow).toBeDefined();
       expect(body.escrow.id).toBe("esc-001");
-      expect(body.source).toBe("mock");
+      expect(["mock", "db"]).toContain(body.source);
     });
 
     it("returns 404 for unknown escrow id", async () => {
@@ -292,9 +301,9 @@ describe("Gateway Routes", () => {
 
   // ── Auth ───────────────────────────────────────────────────────
 
-  describe("POST /api/auth/nonce", () => {
+  describe("GET /api/auth/nonce", () => {
     it("returns a hex nonce", async () => {
-      const res = await app.inject({ method: "POST", url: "/api/auth/nonce" });
+      const res = await app.inject({ method: "GET", url: "/api/auth/nonce" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.nonce).toBeDefined();
@@ -321,9 +330,9 @@ describe("Gateway Routes", () => {
     });
   });
 
-  describe("POST /api/auth/logout/bearer", () => {
+  describe("POST /api/auth/logout", () => {
     it("returns ok even without a session", async () => {
-      const res = await app.inject({ method: "POST", url: "/api/auth/logout/bearer" });
+      const res = await app.inject({ method: "POST", url: "/api/auth/logout" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.ok).toBe(true);

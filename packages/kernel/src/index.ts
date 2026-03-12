@@ -6,4 +6,6 @@ export { SensorPipeline, RingBuffer, lttbDownsample } from "./sensor-pipeline.js
 export type { PipelineConfig } from "./sensor-pipeline.js";
 export { BatchTracker } from "./batch-tracker.js";
 export { EncryptionService } from "./encryption-service.js";
+export { EvidenceStorageService } from "./evidence-storage.js";
+export type { ArchiveResult } from "./evidence-storage.js";
 export * from "./adapters/index.js";

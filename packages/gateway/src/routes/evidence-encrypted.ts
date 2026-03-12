@@ -82,4 +82,21 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
     const filtered = grants.filter((g) => g.grantedTo === req.params.address);
     return { grants: filtered };
   });
+
+  // Get IPFS CIDs for a bundle
+  app.get<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/ipfs", async (req, reply) => {
+    const bundle = encryptedBundles.get(req.params.bundleId);
+    if (!bundle) return reply.code(404).send({ error: "not_found" });
+
+    if (!bundle.ipfsCid) {
+      return reply.code(404).send({ error: "not_archived", message: "Bundle has not been archived to IPFS" });
+    }
+
+    return {
+      bundleId: req.params.bundleId,
+      cid: bundle.ipfsCid,
+      metadataCid: bundle.ipfsMetadataCid ?? null,
+      filecoinDealId: bundle.filecoinDealId ?? null,
+    };
+  });
 }

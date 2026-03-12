@@ -24,6 +24,22 @@ export interface EncryptedEvidenceBundle {
   encryptedAt: Timestamp;
   /** Per-recipient encrypted AES keys */
   capsules: KeyCapsule[];
+  /** IPFS content identifier for the encrypted bundle */
+  ipfsCid?: string;
+  /** IPFS CID for public metadata (no secrets) */
+  ipfsMetadataCid?: string;
+  /** Future: Filecoin storage deal ID */
+  filecoinDealId?: string;
+
+  // ── Lit Protocol fields ──────────────────────────────────────────
+  /** Base64-encoded Lit Protocol ciphertext (when using Lit encryption) */
+  litCiphertext?: string;
+  /** Hash of the data that was encrypted (Lit integrity check) */
+  litDataToEncryptHash?: string;
+  /** Lit Protocol Unified Access Control Conditions */
+  litAccessConditions?: object[];
+  /** Lit network used for encryption (e.g. "datil-test", "datil") */
+  litNetwork?: string;
 }
 
 /** Per-recipient encrypted AES key (ECIES envelope) */
