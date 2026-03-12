@@ -163,7 +163,7 @@ describe("SensorPipeline", () => {
   });
 
   it("detects threshold anomaly", () => {
-    const pipeline = new SensorPipeline();
+    const pipeline = new SensorPipeline({ maxRateOfChange: Infinity });
     pipeline.registerChannel(tempDescriptor);
     const anomalies: unknown[] = [];
     pipeline.onAnomaly((a) => anomalies.push(a));
@@ -172,7 +172,7 @@ describe("SensorPipeline", () => {
     pipeline.ingest(makeReading({ channel: "nozzle_temp", value: 200 }));
     expect(anomalies).toHaveLength(0);
 
-    // Value exceeds max — anomaly
+    // Value exceeds max — anomaly (only threshold, not rate_of_change)
     pipeline.ingest(makeReading({ channel: "nozzle_temp", value: 300 }));
     expect(anomalies).toHaveLength(1);
     expect((anomalies[0] as any).type).toBe("threshold_exceeded");

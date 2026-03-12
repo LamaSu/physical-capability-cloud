@@ -64,4 +64,8 @@ export const ids = {
   protocolEvent: () => generateId("pevt"),
   transferAgent: () => generateId("tagent"),
   automationStatus: () => generateId("astat"),
+  capabilityCertificate: () => generateId("cnft"),
+  epoch: () => generateId("epoch"),
+  rewardClaim: () => generateId("claim"),
+  fundingProposal: () => generateId("fund"),
 } as const;

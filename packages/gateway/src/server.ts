@@ -20,6 +20,7 @@ import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
 import { orchestratorRoutes } from "./routes/orchestrator.js";
 import { protocolRoutes } from "./routes/protocols.js";
+import { rewardRoutes } from "./routes/rewards.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
@@ -89,6 +90,7 @@ export async function createGateway(port = 3200) {
   await app.register(logisticsRoutes);
   await app.register(orchestratorRoutes);
   await app.register(protocolRoutes);
+  await app.register(rewardRoutes);
   await app.register(registryRoutes);
 
   // SSE endpoints

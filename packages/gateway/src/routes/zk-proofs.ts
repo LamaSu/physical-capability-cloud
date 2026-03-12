@@ -1,6 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
+import { BittensorSubnetBridge } from "@pcc/verifier";
+
+// Singleton Bittensor subnet bridge
+const subnetBridge = new BittensorSubnetBridge({
+  numMinersToQuery: 5,
+  minScoreThreshold: 0.6,
+});
 
 // In-memory stores (production: database / on-chain)
 const commitments = new Map<string, EvidenceCommitment>();
@@ -82,5 +89,51 @@ export async function zkProofRoutes(app: FastifyInstance) {
     const commitment = commitments.get(req.params.bundleId);
     if (!commitment) return { error: "not_found" };
     return { commitment };
+  });
+
+  // ── Bittensor Verification Subnet Routes ────────────────────────────
+
+  // Get subnet status and metrics
+  app.get("/api/verification/subnet-status", async () => {
+    const available = subnetBridge.isAvailable();
+    const metrics = subnetBridge.getMetrics();
+    const minerCount = subnetBridge.getMinerLeaderboard().length;
+
+    return {
+      available,
+      metrics,
+      minerCount,
+      subnetId: 42,
+      network: "mock-local",
+    };
+  });
+
+  // Submit evidence for subnet verification
+  app.post<{ Body: { bundleHash: string; bundleData: string; requiredTier: number } }>(
+    "/api/verification/subnet-submit",
+    async (req) => {
+      const { bundleHash, bundleData, requiredTier } = req.body as {
+        bundleHash: string;
+        bundleData: string;
+        requiredTier: number;
+      };
+
+      if (!subnetBridge.isAvailable()) {
+        return { error: "subnet_unavailable", message: "Bittensor verification subnet is not available" };
+      }
+
+      try {
+        const result = await subnetBridge.submitForVerification(bundleHash, bundleData, requiredTier);
+        return { result };
+      } catch (err) {
+        return { error: "verification_failed", message: (err as Error).message };
+      }
+    },
+  );
+
+  // Get miner leaderboard
+  app.get("/api/verification/miners", async () => {
+    const miners = subnetBridge.getMinerLeaderboard();
+    return { miners, count: miners.length };
   });
 }

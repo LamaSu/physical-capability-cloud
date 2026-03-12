@@ -29,6 +29,7 @@
     "forge:deploy:base-sepolia": "bash script/deploy.sh"
   },
   "dependencies": {
+    "@pcc/spec": "workspace:*",
     "viem": "^2"
   },
   "devDependencies": {
