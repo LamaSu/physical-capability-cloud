@@ -34,9 +34,10 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build --concurrency=1
 
-# Verify the build output exists and better-sqlite3 native module loads
-RUN node -e "require('better-sqlite3'); console.log('[docker] better-sqlite3 native module OK')"
+# Verify the build artifacts exist and the full import chain works
 RUN ls -la packages/gateway/dist/server.js && echo "[docker] gateway build output OK"
+# Test that better-sqlite3 native module loads from within the @pcc/store context
+RUN cd packages/db && node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close(); console.log('[docker] better-sqlite3 native module OK')"
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data

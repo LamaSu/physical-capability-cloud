@@ -589,7 +589,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
       booking_contact TEXT NOT NULL,
       status TEXT NOT NULL,
       period TEXT NOT NULL,  -- JSON
+      pricing_phase TEXT NOT NULL DEFAULT 'free',
       monthly_rate TEXT NOT NULL,
+      price_per_sqft_month TEXT,
+      sqft INTEGER,
       currency TEXT NOT NULL,
       deposit_amount TEXT,
       requirements TEXT NOT NULL,  -- JSON
