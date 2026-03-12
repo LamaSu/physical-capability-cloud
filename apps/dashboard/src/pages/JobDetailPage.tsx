@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   GlassPanel, StatusChip, AmountDisplay, TierBadge, ProgressArc,
   DataCell, HashDisplay, AddressDisplay, EvidenceTimeline, TierRequirementsList,
-  MilestoneTimeline,
+  MilestoneTimeline, IPFSLink, DIDBadge, ChainTxLink,
 } from "@pcc/ui";
 import type { EvidenceEvent, AssuranceTier } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
@@ -96,6 +96,29 @@ export function JobDetailPage() {
           <GlassPanel padding="lg">
             <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">Evidence Timeline</h3>
             <EvidenceTimeline events={mockEvidence} />
+          </GlassPanel>
+
+          {/* Sovereign Infrastructure */}
+          <GlassPanel padding="md">
+            <h3 className="text-[10px] text-white/30 uppercase tracking-wider mb-3">Sovereign Infrastructure</h3>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="space-y-2">
+                <div className="text-white/40">Kernel Identity</div>
+                <DIDBadge did="did:pcc:kernel:kernel-nyc" />
+              </div>
+              <div className="space-y-2">
+                <div className="text-white/40">Evidence Archive (IPFS)</div>
+                <IPFSLink cid="bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi" />
+              </div>
+              <div className="space-y-2">
+                <div className="text-white/40">On-Chain Commitment</div>
+                <ChainTxLink txHash="0x7f3c2a8d9e4b1f6c5a3d8e7f2b1c4a9d8e7f6c5a3b2d1e4f7a8c9d0b3e6f1a2" chain="base-sepolia" />
+              </div>
+              <div className="space-y-2">
+                <div className="text-white/40">Settlement</div>
+                <ChainTxLink txHash="5UfVcNs5rMb8T4kM3F7JzXW9PkBH2hCf9nKvR8YwLpD7" chain="solana-devnet" />
+              </div>
+            </div>
           </GlassPanel>
         </div>
 

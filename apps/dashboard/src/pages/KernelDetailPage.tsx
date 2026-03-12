@@ -2,7 +2,7 @@ import React from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   GlassPanel, StatusChip, CapabilityCard, DeviceStatusGrid,
-  DataCell, AddressDisplay, AmountDisplay, TierBadge,
+  DataCell, AddressDisplay, AmountDisplay, TierBadge, DIDBadge,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { mockKernels, mockDevices, mockJobs, jobMeta } from "../api/mock-data.js";
@@ -53,6 +53,9 @@ export function KernelDetailPage() {
           </button>
           <h2 className="text-xl font-semibold text-white/90">{kernel.name}</h2>
           <div className="text-xs text-white/30 font-mono mt-1">{kernel.id}</div>
+          <div className="mt-1.5">
+            <DIDBadge did={`did:pcc:kernel:${kernel.id}`} />
+          </div>
         </div>
         <StatusChip status={statusMap[kernel.status]} />
       </div>

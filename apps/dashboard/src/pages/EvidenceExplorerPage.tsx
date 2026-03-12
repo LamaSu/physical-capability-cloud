@@ -1,7 +1,7 @@
 import React from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { GlassPanel, GlowBadge } from "@pcc/ui";
+import { GlassPanel, GlowBadge, IPFSLink, DIDBadge, ChainTxLink } from "@pcc/ui";
 import type { EncryptedEvidenceBundle, EvidenceCommitment, ZKProof } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEvidenceExplorerStore } from "../stores/evidence-explorer-store.js";
@@ -34,6 +34,16 @@ export function EvidenceExplorerPage() {
         capsules: [
           { id: "cap_001", recipientAddress: "0x1234567890abcdef1234567890abcdef12345678", encryptedKey: "key1", ephemeralPublicKey: "epk1", accessLevel: "full" },
         ],
+        ipfsCid: "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        ipfsMetadataCid: "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenosa7777",
+        litCiphertext: "lit_enc_mock_001",
+        litDataToEncryptHash: "0xabc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+        litAccessConditions: [
+          { conditionType: "evmBasic", chain: "baseSepolia", method: "escrowBuyerOf", parameters: [":jobId"], returnValueTest: { comparator: "=", value: ":userAddress" } },
+          { operator: "or" },
+          { conditionType: "evmBasic", chain: "baseSepolia", method: "reputationOf", parameters: [":userAddress"], returnValueTest: { comparator: ">=", value: "100" } },
+        ],
+        litNetwork: "datil-test",
       },
       {
         id: "enc_002",
@@ -46,6 +56,8 @@ export function EvidenceExplorerPage() {
         capsules: [
           { id: "cap_002", recipientAddress: "0xabcdef1234567890abcdef1234567890abcdef12", encryptedKey: "key2", ephemeralPublicKey: "epk2", accessLevel: "selective" },
         ],
+        ipfsCid: "bafybeihkoviema7g3gxyt6la7vd5ho32b4b3tg4tsfzqw7qxt57axi7imu",
+        litNetwork: "datil-test",
       },
     ];
     setBundles(mockBundles);
@@ -162,7 +174,51 @@ export function EvidenceExplorerPage() {
                     <span>Recipients</span>
                     <span className="text-white/60">{selected.capsules.length}</span>
                   </div>
+                  {selected.ipfsCid && (
+                    <div className="flex justify-between items-center text-white/40">
+                      <span>IPFS Bundle</span>
+                      <IPFSLink cid={selected.ipfsCid} />
+                    </div>
+                  )}
+                  {selected.ipfsMetadataCid && (
+                    <div className="flex justify-between items-center text-white/40">
+                      <span>IPFS Metadata</span>
+                      <IPFSLink cid={selected.ipfsMetadataCid} label="metadata" />
+                    </div>
+                  )}
+                  {selected.litNetwork && (
+                    <div className="flex justify-between items-center text-white/40">
+                      <span>Lit Network</span>
+                      <GlowBadge color="gold">{selected.litNetwork}</GlowBadge>
+                    </div>
+                  )}
                 </div>
+
+                {/* Lit Access Conditions */}
+                {selected.litAccessConditions && selected.litAccessConditions.length > 0 && (
+                  <div className="mt-4">
+                    <div className="text-xs text-white/40 mb-2">Lit Protocol Access Conditions</div>
+                    <div className="space-y-1">
+                      {selected.litAccessConditions.map((cond: any, i: number) => (
+                        <div key={i} className="px-2 py-1.5 bg-white/[0.03] rounded text-xs">
+                          {cond.operator ? (
+                            <span className="text-gold-300 font-medium uppercase">{cond.operator}</span>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <GlowBadge color="gray">{cond.conditionType}</GlowBadge>
+                              <span className="font-mono text-white/50">{cond.method}</span>
+                              {cond.returnValueTest && (
+                                <span className="text-white/30">
+                                  {cond.returnValueTest.comparator} {cond.returnValueTest.value}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Key capsules */}
                 <div className="mt-4">
