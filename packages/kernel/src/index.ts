@@ -7,6 +7,7 @@ export type { PipelineConfig } from "./sensor-pipeline.js";
 export { BatchTracker } from "./batch-tracker.js";
 export { EncryptionService } from "./encryption-service.js";
 export { LitEncryptionService } from "./lit-encryption-service.js";
+export { RealLitEncryptionService } from "./lit-encryption-real.js";
 export type {
   LitEncryptionServiceOptions,
   LitEncryptionResult,
@@ -16,7 +17,7 @@ export type {
   AccessControlConditionOperator,
   AccessControlConditionChain,
 } from "./lit-encryption-service.js";
-// EvidenceStorageService uses Helia (ESM-only) — import directly from
-// "@pcc/kernel/dist/evidence-storage.js" when needed to avoid CJS issues.
+// EvidenceStorageService uses Helia (ESM-only) — import from the subpath
+// "@pcc/kernel/evidence-storage" when needed to avoid CJS barrel issues.
 export type { ArchiveResult } from "./evidence-storage.js";
 export * from "./adapters/index.js";

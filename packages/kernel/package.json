@@ -6,6 +6,18 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./evidence-storage": {
+      "types": "./dist/evidence-storage.d.ts",
+      "import": "./dist/evidence-storage.js",
+      "default": "./dist/evidence-storage.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
@@ -16,6 +28,9 @@
   "dependencies": {
     "@fastify/cors": "^9.0.0",
     "@helia/unixfs": "^7.0.4",
+    "@lit-protocol/constants": "^6",
+    "@lit-protocol/lit-node-client": "^6",
+    "@lit-protocol/types": "^6",
     "@pcc/spec": "workspace:*",
     "better-sqlite3": "^11.0.0",
     "fastify": "^4.28.0",

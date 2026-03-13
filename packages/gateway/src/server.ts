@@ -37,9 +37,11 @@ export async function createGateway(port = 3200) {
 
   const app = Fastify({ logger: true });
 
-  // Close the DB when the server shuts down
+  // Close the DB and IPFS node when the server shuts down
   app.addHook("onClose", async () => {
     closeStore();
+    const { stopEvidenceStorage } = await import("./services.js");
+    await stopEvidenceStorage();
   });
 
   await app.register(cors, { origin: true, credentials: true });
