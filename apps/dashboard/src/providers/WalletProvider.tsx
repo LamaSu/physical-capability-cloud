@@ -4,8 +4,8 @@ import { baseSepolia, base } from "wagmi/chains";
 import { injected, coinbaseWallet, walletConnect } from "@wagmi/connectors";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-// WalletConnect project ID — replace with real one for production
-const WALLETCONNECT_PROJECT_ID = "pcc-dev-placeholder";
+// WalletConnect project ID — reads from env or falls back to demo ID
+const WALLETCONNECT_PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || "pcc-dev-placeholder";
 
 const config = createConfig({
   chains: [baseSepolia, base],
