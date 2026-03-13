@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { EncryptedEvidenceBundle, AccessGrant, Address } from "@pcc/spec";
-import { encryptionService, litEncryptionService } from "../services.js";
+import { encryptionService, litEncryptionService, getEvidenceStorage } from "../services.js";
 import type { LitAuthSig } from "@pcc/kernel";
 
 // In-memory stores (production: database)
@@ -82,6 +82,56 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   app.get<{ Params: { address: string } }>("/api/evidence/grants/:address", async (req) => {
     const filtered = grants.filter((g) => g.grantedTo === req.params.address);
     return { grants: filtered };
+  });
+
+  // Archive an evidence bundle to IPFS
+  app.post<{ Body: { bundle: any } }>("/api/evidence/archive", async (req, reply) => {
+    try {
+      const { bundle } = req.body as { bundle: any };
+      if (!bundle) {
+        return reply.code(400).send({ error: "bundle_required", message: "Request body must include a bundle object" });
+      }
+      const storage = await getEvidenceStorage();
+      const result = await storage.archiveBundle(bundle);
+      return { archived: true, cid: result.cid, metadataCid: result.metadataCid };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Archive failed";
+      return reply.code(500).send({ error: "archive_failed", message });
+    }
+  });
+
+  // Archive an encrypted evidence bundle to IPFS and store CIDs
+  app.post<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/archive", async (req, reply) => {
+    const bundle = encryptedBundles.get(req.params.bundleId);
+    if (!bundle) return reply.code(404).send({ error: "not_found" });
+
+    if (bundle.ipfsCid) {
+      return { archived: true, cid: bundle.ipfsCid, metadataCid: bundle.ipfsMetadataCid ?? null, alreadyArchived: true };
+    }
+
+    try {
+      const storage = await getEvidenceStorage();
+      const result = await storage.archiveEncryptedBundle(bundle);
+      // Store CIDs on the bundle
+      bundle.ipfsCid = result.cid;
+      bundle.ipfsMetadataCid = result.metadataCid;
+      return { archived: true, cid: result.cid, metadataCid: result.metadataCid };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Archive failed";
+      return reply.code(500).send({ error: "archive_failed", message });
+    }
+  });
+
+  // Retrieve data from IPFS by CID
+  app.get<{ Params: { cid: string } }>("/api/evidence/ipfs/:cid", async (req, reply) => {
+    try {
+      const storage = await getEvidenceStorage();
+      const data = await storage.retrieveBundle(req.params.cid);
+      return { data };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Retrieval failed";
+      return reply.code(404).send({ error: "not_found", message });
+    }
   });
 
   // Get IPFS CIDs for a bundle

@@ -6,7 +6,7 @@
  * here they start with demo seed data.
  */
 
-import { SensorPipeline, BatchTracker, EncryptionService, LitEncryptionService } from "@pcc/kernel";
+import { SensorPipeline, BatchTracker, EncryptionService, LitEncryptionService, RealLitEncryptionService } from "@pcc/kernel";
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
@@ -171,16 +171,51 @@ export const encryptionService = new EncryptionService();
 
 // ── Lit Encryption Service ──────────────────────────────────────────
 
-export const litEncryptionService = new LitEncryptionService({
-  network: "datil-test",
-  chain: "baseSepolia",
-  mock: true,
-});
+// Set LIT_PROTOCOL_REAL=true to use the real Lit Protocol network (datil-test).
+// Default: mock mode (local AES-256-GCM with in-process key storage).
+const USE_REAL_LIT = process.env.LIT_PROTOCOL_REAL === "true";
+
+export const litEncryptionService = USE_REAL_LIT
+  ? new RealLitEncryptionService({
+      network: "datil-test",
+      chain: "baseSepolia",
+    })
+  : new LitEncryptionService({
+      network: "datil-test",
+      chain: "baseSepolia",
+      mock: true,
+    });
 
 // Connect Lit service (non-blocking — will be ready by first request)
 litEncryptionService.connect().catch((err) => {
-  console.error("Failed to connect LitEncryptionService:", err);
+  console.error(
+    `Failed to connect LitEncryptionService (${USE_REAL_LIT ? "real" : "mock"}):`,
+    err,
+  );
 });
+
+// ── IPFS Evidence Storage (ESM-only Helia — lazy init) ──────────────
+
+let _evidenceStorage: any = null;
+
+export async function getEvidenceStorage() {
+  if (!_evidenceStorage) {
+    // Dynamic import to handle ESM-only Helia dependency
+    const { EvidenceStorageService } = await import("@pcc/kernel/evidence-storage");
+    _evidenceStorage = new EvidenceStorageService();
+    await _evidenceStorage.init();
+    console.log("[services] IPFS evidence storage initialized");
+  }
+  return _evidenceStorage;
+}
+
+export async function stopEvidenceStorage() {
+  if (_evidenceStorage) {
+    await _evidenceStorage.stop();
+    _evidenceStorage = null;
+    console.log("[services] IPFS evidence storage stopped");
+  }
+}
 
 // ── ZK Services ─────────────────────────────────────────────────────
 

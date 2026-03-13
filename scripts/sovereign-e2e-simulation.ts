@@ -228,6 +228,39 @@ async function main() {
   console.log();
 
   // ══════════════════════════════════════════════════════════════════════
+  // Phase 4b: IPFS Evidence Archive (Helia)
+  // ══════════════════════════════════════════════════════════════════════
+
+  console.log("▸ PHASE 4b: IPFS Evidence Archive (Helia)\n" + SUB_DIVIDER);
+
+  // Dynamic import for ESM-only Helia (relative path for tsx compatibility)
+  const { EvidenceStorageService } = await import("../packages/kernel/src/evidence-storage.js");
+  const ipfsStorage = new EvidenceStorageService();
+  await ipfsStorage.init();
+  log("IPFS", "Helia node started");
+
+  // Archive the plain evidence bundle
+  const archiveResult = await ipfsStorage.archiveBundle(bundle);
+  log("IPFS", `Bundle CID:      ${archiveResult.cid}`);
+  log("IPFS", `Metadata CID:    ${archiveResult.metadataCid}`);
+
+  // Archive the encrypted bundle
+  const encArchiveResult = await ipfsStorage.archiveEncryptedBundle(encrypted);
+  log("IPFS", `Encrypted CID:   ${encArchiveResult.cid}`);
+  log("IPFS", `Enc Meta CID:    ${encArchiveResult.metadataCid}`);
+
+  // Verify retrieval round-trip
+  const retrieved = await ipfsStorage.retrieveBundle(archiveResult.cid) as any;
+  const retrievalMatch = retrieved.bundleHash === bundle.bundleHash;
+  log("IPFS", `Retrieval:       ${retrievalMatch ? "✓ round-trip verified" : "✗ mismatch"}`);
+  log("IPFS", `Events intact:   ${retrieved.events?.length === bundle.events.length ? "✓" : "✗"} (${retrieved.events?.length ?? 0} events)`);
+
+  await ipfsStorage.stop();
+  log("IPFS", "Helia node stopped");
+
+  console.log();
+
+  // ══════════════════════════════════════════════════════════════════════
   // Phase 5: On-Chain Commitments + ZK Proofs
   // ══════════════════════════════════════════════════════════════════════
 
@@ -460,7 +493,7 @@ async function main() {
 
   console.log("\n" + DIVIDER);
   console.log("  ✓ Sovereign E2E Simulation Complete");
-  console.log("  ✓ DID → VC → Job → Encrypt → IPFS → Merkle → ZK → Verify → Settle → Subnet → Rewards");
+  console.log("  ✓ DID → VC → Job → Encrypt → IPFS (Helia) → Merkle → ZK → Verify → Settle → Subnet → Rewards");
   console.log(DIVIDER + "\n");
 }
 

@@ -40,6 +40,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/spec/src/identity/**: W3C DIDs (did:key + did:pcc) + Verifiable Credentials
 - **packages/kernel/src/evidence-storage.ts**: IPFS evidence storage via Helia (ESM-only — import from dist path)
 - **packages/kernel/src/lit-encryption-service.ts**: Lit Protocol encryption (mock with real AES-256-GCM)
+- **packages/kernel/src/lit-encryption-real.ts**: Real Lit Protocol via @lit-protocol/lit-node-client v6 (datil-test)
 - **packages/agent-runtime/src/solana-wallet.ts**: Solana agent wallets + SPL token transfers
 - **packages/agent-runtime/src/spending-policy.ts**: Budget-aware spending policies
 - **packages/verifier/src/bittensor/**: Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
@@ -49,7 +50,13 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 ## Dev Commands
 - `pnpm install` — install all deps
 - `pnpm build --concurrency=1` — build all 17 packages (sequential to avoid OOM on Windows)
-- `pnpm --workspace-concurrency=1 -r test` — run all tests (603 passing across 36 test files)
+- `pnpm --workspace-concurrency=1 -r test` — run all tests (623 passing across 37 test files)
 - `npx tsx scripts/e2e-simulation.ts` — run kernel-level e2e simulation
 - `npx tsx scripts/agent-e2e-simulation.ts` — run agent-to-agent e2e simulation
-- `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases)
+- `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases + IPFS)
+- `npx tsx scripts/generate-wallet.ts` — generate a deployer wallet for Base Sepolia
+- `DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-base-sepolia.ts` — deploy contracts to Base Sepolia
+
+## Environment Variables
+- `LIT_PROTOCOL_REAL=true` — use real Lit Protocol network (datil-test) instead of mock
+- `DEPLOYER_PRIVATE_KEY=0x...` — private key for contract deployment
