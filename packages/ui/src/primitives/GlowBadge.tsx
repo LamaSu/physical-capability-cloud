@@ -2,7 +2,7 @@ import React from "react";
 import { cn } from "../utils.js";
 
 export interface GlowBadgeProps {
-  color?: "green" | "gold" | "red" | "gray";
+  color?: "green" | "gold" | "red" | "gray" | "teal" | "cyan";
   children: React.ReactNode;
   className?: string;
 }
@@ -12,6 +12,8 @@ const colorStyles = {
   gold: "bg-gold-400/15 text-gold-300 border-gold-400/30",
   red: "bg-red-500/15 text-red-400 border-red-500/30",
   gray: "bg-white/5 text-white/60 border-white/10",
+  teal: "bg-teal-500/20 text-teal-300 border-teal-500/30",
+  cyan: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
 };
 
 export function GlowBadge({ color = "green", children, className }: GlowBadgeProps) {

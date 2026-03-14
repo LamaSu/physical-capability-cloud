@@ -37,7 +37,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
         {!collapsed && (
           <div className="flex flex-col overflow-hidden">
             <span className="text-sm font-semibold text-white/90 leading-tight">PCC</span>
-            <span className="text-[10px] text-green-400/70 font-mono uppercase tracking-wider">Ground Control</span>
+            <span className="text-[10px] text-green-400/70 font-mono uppercase tracking-wider">Biotech & Neurotech</span>
           </div>
         )}
         {onToggle && (

@@ -31,13 +31,13 @@ import {
 
 export const navGroups: NavGroup[] = [
   {
-    title: "Ground Control",
+    title: "Command Center",
     items: [
       { label: "Dashboard", path: "/", icon: <DashboardIcon /> },
     ],
   },
   {
-    title: "Manufacturing",
+    title: "Workflows",
     items: [
       { label: "Discover", path: "/discover", icon: <DiscoverIcon /> },
       { label: "Build Contract", path: "/build", icon: <BuildIcon /> },

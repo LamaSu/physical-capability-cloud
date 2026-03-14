@@ -9,24 +9,24 @@ interface TourStep {
 }
 
 const tourSteps: TourStep[] = [
-  { id: "welcome", title: "Welcome to PCC Ground Control", content: "This is your command center for physical manufacturing capabilities. Use the sidebar to navigate between sections." },
+  { id: "welcome", title: "Welcome to PCC Command Center", content: "This is your command center for biotech and neurotech capabilities. Use the sidebar to navigate between sections." },
   { id: "kpi-row", title: "Key Performance Indicators", content: "Monitor active jobs, online kernels, total value locked in escrow, and evidence events at a glance." },
-  { id: "discover", title: "Discover Capabilities", content: "Search and browse available manufacturing capabilities across all registered kernels. Filter by type, material, or capability." },
-  { id: "compare", title: "Compare Capabilities", content: "Each capability card shows pricing, queue depth, supported tiers, and available materials for easy comparison." },
-  { id: "process-select", title: "Build a Contract", content: "Select a capability type — CNC milling, laser cutting, 3D printing, assembly, inspection, or any other registered process — to configure your job parameters." },
-  { id: "configure", title: "Configure Parameters", content: "Every process type has its own configurable parameters — materials, tolerances, finishing options, and more. Parameters are grouped and cross-parameter constraints resolve automatically." },
+  { id: "discover", title: "Discover Capabilities", content: "Search and browse available biotech capabilities across all registered kernels. Filter by type, substrate, or instrument." },
+  { id: "compare", title: "Compare Capabilities", content: "Each capability card shows pricing, queue depth, supported tiers, and available substrates for easy comparison." },
+  { id: "process-select", title: "Build a Contract", content: "Select a capability type — HPLC, PCR, microscopy, sequencing, mass spectrometry, or any other registered process — to configure your job parameters." },
+  { id: "configure", title: "Configure Parameters", content: "Every process type has its own configurable parameters — substrates, protocols, detection limits, and more. Parameters are grouped and cross-parameter constraints resolve automatically." },
   { id: "watch-price", title: "Live Pricing", content: "Watch the price update in real-time as you change parameters. The breakdown shows exactly how each option affects the total." },
   { id: "review", title: "Review Contract", content: "The contract summary shows your validated selections, total price, CWM step output, and any validation errors." },
   { id: "workflow", title: "Workflow Builder", content: "Build multi-step workflows by adding steps from the palette and connecting them with dependency edges. Each step is a DAG node." },
   { id: "connect", title: "Connect Steps", content: "Drag between step handles to create dependency edges. Steps execute in topological order based on these connections." },
-  { id: "evidence", title: "Evidence & Proof", content: "Every job produces cryptographic evidence events — input file hashes, power profiles, camera snapshots, sensor data, TEE attestations. Each assurance tier requires specific combinations of evidence." },
+  { id: "evidence", title: "Evidence & Proof", content: "Every job produces cryptographic evidence events — chromatograms, gel images, sensor readings, instrument logs, TEE attestations. Each assurance tier requires specific combinations of evidence." },
   { id: "settlement", title: "Settlement & Escrow", content: "Funds are locked in milestone escrow. After evidence is submitted, a challenge window opens. If unchallenged, funds release to the operator." },
-  { id: "add-machine", title: "Add a Machine", content: "Use the guided wizard to register any machine — from desktop 3D printers to industrial bio-reactors and microfluidic devices. Our AI assistant helps every step of the way." },
-  { id: "ai-setup", title: "AI-Powered Setup", content: "Upload manufacturer datasheets and documentation. The AI extracts capabilities, materials, tolerances, and parameters automatically — just review and accept." },
-  { id: "marketplace", title: "Machine Marketplace", content: "Explore demand heatmaps, supply gaps across the network, price trends, and ROI projections. Find the most profitable equipment to bring online." },
-  { id: "find-space", title: "Find a Space", content: "Browse hosting locations that match your machine's power, environmental, and safety requirements. Filter by price, access schedule, and amenities." },
-  { id: "operator-dash", title: "Operator Dashboard", content: "Monitor machine health, track earnings over time, manage certifications, and schedule maintenance — all in one place." },
-  { id: "grow-network", title: "Growing the Network", content: "Every machine you onboard expands the Physical Capability Cloud. Earn from every job your machine completes on the network." },
+  { id: "add-machine", title: "Add an Instrument", content: "Use the guided wizard to register any instrument — from HPLC systems to confocal microscopes and electrophysiology rigs. Our AI assistant helps every step of the way." },
+  { id: "ai-setup", title: "AI-Powered Setup", content: "Upload manufacturer datasheets and documentation. The AI extracts capabilities, substrates, detection limits, and parameters automatically — just review and accept." },
+  { id: "marketplace", title: "Instrument Marketplace", content: "Explore demand heatmaps, supply gaps across the network, price trends, and ROI projections. Find the most profitable instruments to bring online." },
+  { id: "find-space", title: "Find a Space", content: "Browse hosting locations that match your instrument's power, environmental, and safety requirements. Filter by price, access schedule, and amenities." },
+  { id: "operator-dash", title: "Operator Dashboard", content: "Monitor instrument health, track earnings over time, manage certifications, and schedule maintenance — all in one place." },
+  { id: "grow-network", title: "Growing the Network", content: "Every instrument you onboard expands the Physical Capability Cloud. Earn from every job your instrument completes on the network." },
 ];
 
 export function OnboardingTour() {

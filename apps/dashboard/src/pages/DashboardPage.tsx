@@ -18,7 +18,7 @@ const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "f
 export function DashboardPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  React.useEffect(() => { setPageMeta("Ground Control", "System overview and active operations"); }, [setPageMeta]);
+  React.useEffect(() => { setPageMeta("Command Center", "System overview and active operations"); }, [setPageMeta]);
 
   const onlineKernels = mockKernels.filter((k) => k.status === "online").length;
   const activeJobs = mockJobs.filter((j) => j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled").length;
@@ -39,7 +39,7 @@ export function DashboardPage() {
           <DataCell label="Total Value Locked" value={<AmountDisplay amount={totalLocked.toFixed(2)} size="md" />} sub={`across ${mockEscrows.length} escrows`} />
         </GlassPanel>
         <GlassPanel glow="green" padding="lg">
-          <DataCell label="Evidence Events" value="47" sub="last 24 hours" mono />
+          <DataCell label="Evidence Events" value="127" sub="last 24 hours" mono />
         </GlassPanel>
       </div>
 
@@ -79,12 +79,12 @@ export function DashboardPage() {
           <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">Recent Activity</h2>
           <div className="space-y-2.5 text-sm">
             {[
-              { time: "14:32", text: "Evidence bundle submitted for job-001 step-1", color: "text-green-400/70" },
-              { time: "14:28", text: "Milestone funded: $245.00 USDC for CNC bracket", color: "text-gold-300/70" },
-              { time: "14:15", text: "Kernel NYC MakerSpace heartbeat received", color: "text-green-400/50" },
-              { time: "14:02", text: "Workflow cwm-003 compiled and dispatched", color: "text-green-400/70" },
-              { time: "13:48", text: "Quote response: $18.50 from NYC MakerSpace", color: "text-white/40" },
-              { time: "13:30", text: "New kernel SF Precision Workshop registered", color: "text-green-400/50" },
+              { time: "14:32", text: "Evidence submitted: HPLC chromatogram bundle for NVX-7", color: "text-green-400/70" },
+              { time: "14:28", text: "Milestone funded: PCR analysis ($45 USDC locked)", color: "text-gold-300/70" },
+              { time: "14:15", text: "Kernel heartbeat: NeuroLab SOMA", color: "text-green-400/50" },
+              { time: "14:02", text: "Workflow compiled: Compound purity pipeline", color: "text-green-400/70" },
+              { time: "13:48", text: "Quote received: BioAnalytica \u2014 $65/HPLC run", color: "text-white/40" },
+              { time: "13:30", text: "New kernel registered: Frontier Tower 4F Lab", color: "text-green-400/50" },
             ].map((item, i) => (
               <div key={i} className="flex items-start gap-3">
                 <span className={`font-mono text-xs ${item.color} w-10 flex-shrink-0`}>{item.time}</span>
