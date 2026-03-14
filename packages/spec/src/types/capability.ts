@@ -32,7 +32,26 @@ export type BuiltinCapabilityType =
   | "courier-delivery"
   | "inspection"
   | "assembly"
-  | "custom";
+  | "custom"
+  // Biotech / neurotech capability types
+  | "hplc"
+  | "mass-spec"
+  | "pcr"
+  | "sequencing"
+  | "cell-culture"
+  | "microscopy"
+  | "2d-print"
+  | "spectroscopy"
+  | "centrifuge"
+  | "lyophilizer"
+  | "bioreactor"
+  | "flow-cytometry"
+  | "electrophysiology"
+  | "imaging"
+  | "sample-prep"
+  | "compound-synthesis"
+  | "assay"
+  | "chromatography";
 
 /** Open string union: autocompletes builtins but accepts any string for extensibility */
 export type CapabilityType = BuiltinCapabilityType | (string & {});
