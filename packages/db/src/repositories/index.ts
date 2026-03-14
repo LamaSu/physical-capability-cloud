@@ -7,6 +7,10 @@ import { EscrowRepository } from "./settlement.js";
 import { ProtocolTemplateRepository, ProtocolRunRepository, AutomationStatusRepository } from "./protocols.js";
 import { OrchestratorRepository } from "./orchestrator.js";
 import { LogisticsRepository } from "./logistics.js";
+import { SessionRepository } from "./sessions.js";
+import { EncryptionRepository } from "./encryption.js";
+import { SensorRepository } from "./sensors.js";
+import { BatchRepository } from "./batches.js";
 
 export {
   KernelRepository,
@@ -19,6 +23,10 @@ export {
   AutomationStatusRepository,
   OrchestratorRepository,
   LogisticsRepository,
+  SessionRepository,
+  EncryptionRepository,
+  SensorRepository,
+  BatchRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -33,6 +41,10 @@ export function buildRepositories(db: StoreDB) {
     automationStatuses: new AutomationStatusRepository(db),
     orchestrator: new OrchestratorRepository(db),
     logistics: new LogisticsRepository(db),
+    sessions: new SessionRepository(db),
+    encryption: new EncryptionRepository(db),
+    sensors: new SensorRepository(db),
+    batches: new BatchRepository(db),
   };
 }
 

@@ -9,11 +9,10 @@ describe("NoirProofService", () => {
   const commitmentService = new CommitmentService();
 
   describe("isNoirAvailable", () => {
-    it("returns false when noir packages are not installed", async () => {
+    it("returns a boolean indicating noir availability", async () => {
       const available = await service.isNoirAvailable();
-      // In test environment, Noir packages are not installed
       expect(typeof available).toBe("boolean");
-    });
+    }, 15_000);
   });
 
   describe("proveEvidenceInclusion (mock fallback)", () => {

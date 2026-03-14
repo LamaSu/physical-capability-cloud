@@ -10,6 +10,15 @@ export const encryptedEvidenceBundles = sqliteTable("encrypted_evidence_bundles"
   iv: text("iv").notNull(),
   authTag: text("auth_tag").notNull(),
   encryptedAt: text("encrypted_at").notNull(),
+  // IPFS archival fields
+  ipfsCid: text("ipfs_cid"),
+  ipfsMetadataCid: text("ipfs_metadata_cid"),
+  filecoinDealId: text("filecoin_deal_id"),
+  // Lit Protocol fields
+  litCiphertext: text("lit_ciphertext"),
+  litDataToEncryptHash: text("lit_data_to_encrypt_hash"),
+  litAccessConditions: text("lit_access_conditions", { mode: "json" }).$type<object[]>(),
+  litNetwork: text("lit_network"),
 });
 
 /** Per-recipient encrypted AES key (ECIES envelope) */

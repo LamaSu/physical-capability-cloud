@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
 import { BittensorSubnetBridge } from "@pcc/verifier";
+import { getRepos } from "../db.js";
 
 // Singleton Bittensor subnet bridge
 const subnetBridge = new BittensorSubnetBridge({
@@ -9,17 +10,17 @@ const subnetBridge = new BittensorSubnetBridge({
   minScoreThreshold: 0.6,
 });
 
-// In-memory stores (production: database / on-chain)
-const commitments = new Map<string, EvidenceCommitment>();
-const trees = new Map<string, Awaited<ReturnType<typeof commitmentService.buildTree>>>();
-const proofs = new Map<string, ZKProof>();
-
 export async function zkProofRoutes(app: FastifyInstance) {
   // Create commitment for a bundle
   app.post<{ Body: { bundleHash: string } }>("/api/zk/commit", async (req) => {
     const { bundleHash } = req.body as { bundleHash: string };
     const commitment = await commitmentService.createCommitment(bundleHash as SHA256);
-    commitments.set(bundleHash, commitment);
+    getRepos().encryption.insertCommitment({
+      id: commitment.id,
+      bundleHash: commitment.bundleHash,
+      commitmentHash: commitment.commitmentHash,
+      commitmentTimestamp: commitment.commitmentTimestamp,
+    });
     return { commitment };
   });
 
@@ -27,13 +28,20 @@ export async function zkProofRoutes(app: FastifyInstance) {
   app.post<{ Body: { bundleHashes: string[] } }>("/api/zk/tree", async (req) => {
     const { bundleHashes } = req.body as { bundleHashes: string[] };
     const cmts = bundleHashes
-      .map((h) => commitments.get(h))
-      .filter((c): c is EvidenceCommitment => c !== undefined);
+      .map((h) => getRepos().encryption.findCommitmentByBundleHash(h))
+      .filter((c): c is NonNullable<typeof c> => c !== undefined) as unknown as EvidenceCommitment[];
 
     if (cmts.length === 0) return { error: "no_commitments_found" };
 
     const tree = await commitmentService.buildTree(cmts);
-    trees.set(tree.id, tree);
+    getRepos().encryption.insertTree({
+      id: tree.id,
+      root: tree.root,
+      depth: tree.depth,
+      leafCount: tree.leafCount,
+      leaves: tree.leaves,
+      createdAt: tree.createdAt,
+    });
     return { tree };
   });
 
@@ -42,11 +50,30 @@ export async function zkProofRoutes(app: FastifyInstance) {
     "/api/zk/prove/inclusion",
     async (req) => {
       const { treeId, leafIndex, bundleHash } = req.body as { treeId: string; leafIndex: number; bundleHash: string };
-      const tree = trees.get(treeId);
-      if (!tree) return { error: "tree_not_found" };
+      const dbTree = getRepos().encryption.findTreeById(treeId);
+      if (!dbTree) return { error: "tree_not_found" };
+
+      // Cast DB row to CommitmentTree shape expected by zkProofService
+      const tree = {
+        id: dbTree.id,
+        root: dbTree.root as SHA256,
+        depth: dbTree.depth,
+        leafCount: dbTree.leafCount,
+        leaves: dbTree.leaves as SHA256[],
+        createdAt: dbTree.createdAt,
+      };
 
       const proof = await zkProofService.proveEvidenceInclusion(tree, leafIndex, bundleHash as SHA256);
-      proofs.set(proof.id, proof);
+      getRepos().encryption.insertProof({
+        id: proof.id,
+        proofType: proof.proofType,
+        commitmentId: proof.commitmentId,
+        publicInputs: proof.publicInputs,
+        proof: proof.proof,
+        verificationKey: proof.verificationKey,
+        verified: proof.verified,
+        generatedAt: proof.generatedAt,
+      });
       return { proof };
     },
   );
@@ -56,20 +83,34 @@ export async function zkProofRoutes(app: FastifyInstance) {
     "/api/zk/prove/tier",
     async (req) => {
       const { bundleHash, requiredTier } = req.body as { bundleHash: string; requiredTier: number };
-      const commitment = commitments.get(bundleHash);
+      let commitment = getRepos().encryption.findCommitmentByBundleHash(bundleHash);
 
       if (!commitment) {
         // Auto-create commitment
         const c = await commitmentService.createCommitment(bundleHash as SHA256);
-        commitments.set(bundleHash, c);
+        commitment = getRepos().encryption.insertCommitment({
+          id: c.id,
+          bundleHash: c.bundleHash,
+          commitmentHash: c.commitmentHash,
+          commitmentTimestamp: c.commitmentTimestamp,
+        });
       }
 
-      const cmt = commitments.get(bundleHash)!;
+      const cmt = commitment as unknown as EvidenceCommitment;
       const proof = await zkProofService.generateProof("tier_compliance", cmt, {
         requiredTier,
         bundleHash,
       });
-      proofs.set(proof.id, proof);
+      getRepos().encryption.insertProof({
+        id: proof.id,
+        proofType: proof.proofType,
+        commitmentId: proof.commitmentId,
+        publicInputs: proof.publicInputs,
+        proof: proof.proof,
+        verificationKey: proof.verificationKey,
+        verified: proof.verified,
+        generatedAt: proof.generatedAt,
+      });
       return { proof };
     },
   );
@@ -77,16 +118,30 @@ export async function zkProofRoutes(app: FastifyInstance) {
   // Verify a proof
   app.post<{ Body: { proofId: string } }>("/api/zk/verify", async (req) => {
     const { proofId } = req.body as { proofId: string };
-    const proof = proofs.get(proofId);
-    if (!proof) return { error: "proof_not_found" };
+    const dbProof = getRepos().encryption.findProofById(proofId);
+    if (!dbProof) return { error: "proof_not_found" };
+
+    // Cast DB row to ZKProof shape for the service
+    const proof: ZKProof = {
+      id: dbProof.id,
+      proofType: dbProof.proofType as ZKProof["proofType"],
+      commitmentId: dbProof.commitmentId,
+      publicInputs: dbProof.publicInputs,
+      proof: dbProof.proof,
+      verificationKey: dbProof.verificationKey,
+      verified: dbProof.verified,
+      generatedAt: dbProof.generatedAt,
+    };
 
     const verified = await zkProofService.verifyProof(proof);
+    // Save verification result back to DB
+    getRepos().encryption.updateProofVerified(proofId, proof.verified);
     return { verified, proof };
   });
 
   // Get commitment for a bundle
   app.get<{ Params: { bundleId: string } }>("/api/zk/commitments/:bundleId", async (req) => {
-    const commitment = commitments.get(req.params.bundleId);
+    const commitment = getRepos().encryption.findCommitmentByBundleHash(req.params.bundleId);
     if (!commitment) return { error: "not_found" };
     return { commitment };
   });
