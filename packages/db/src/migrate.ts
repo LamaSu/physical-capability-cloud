@@ -465,7 +465,14 @@ export function migrateDatabase(sqlite: Database.Database): void {
       ciphertext TEXT NOT NULL,
       iv TEXT NOT NULL,
       auth_tag TEXT NOT NULL,
-      encrypted_at TEXT NOT NULL
+      encrypted_at TEXT NOT NULL,
+      ipfs_cid TEXT,
+      ipfs_metadata_cid TEXT,
+      filecoin_deal_id TEXT,
+      lit_ciphertext TEXT,
+      lit_data_to_encrypt_hash TEXT,
+      lit_access_conditions TEXT,
+      lit_network TEXT
     );
 
     CREATE TABLE IF NOT EXISTS key_capsules (

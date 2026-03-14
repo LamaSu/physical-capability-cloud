@@ -7,7 +7,8 @@
  *   3. GET  /api/auth/me      -> returns current session (cookie or bearer)
  *   4. POST /api/auth/logout  -> destroys session
  *
- * Sessions are stored in-memory (swap for Redis/DB in production).
+ * Sessions are stored in SQLite via @pcc/store SessionRepository.
+ * Nonces remain in-memory (short-lived, 5min TTL).
  * Supports both HTTP-only cookie and Authorization Bearer token auth.
  * Uses viem for signature verification — no `siwe` package needed.
  */
@@ -15,37 +16,26 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
+import { getRepos } from "../db.js";
 
 // ---------------------------------------------------------------------------
-// Types
+// In-memory nonce store (ephemeral, no DB persistence needed)
 // ---------------------------------------------------------------------------
 
-interface SiweSession {
-  address: `0x${string}`;
-  token: string;
-  createdAt: number;
-  expiresAt: number;
-}
-
-// ---------------------------------------------------------------------------
-// In-memory stores
-// ---------------------------------------------------------------------------
-
-const sessions = new Map<string, SiweSession>();
 const nonces = new Map<string, number>(); // nonce -> expiry timestamp
 
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-/** Remove expired sessions and nonces */
+/** Remove expired sessions (DB) and nonces (in-memory) */
 function cleanExpired() {
+  // Clean expired nonces from memory
   const now = Date.now();
-  for (const [key, session] of sessions) {
-    if (session.expiresAt < now) sessions.delete(key);
-  }
   for (const [nonce, expiry] of nonces) {
     if (expiry < now) nonces.delete(nonce);
   }
+  // Clean expired sessions from DB
+  getRepos().sessions.deleteExpired(new Date().toISOString());
 }
 
 // ---------------------------------------------------------------------------
@@ -166,25 +156,27 @@ function parseSiweMessage(message: string): ParsedSiweMessage | null {
 export function resolveSession(
   req: FastifyRequest,
 ): { address: `0x${string}`; token: string } | null {
+  const repo = getRepos().sessions;
+
   // 1. Try cookie
   const cookieToken = req.cookies?.pcc_session;
   if (cookieToken) {
-    const session = sessions.get(cookieToken);
-    if (session && session.expiresAt > Date.now()) {
-      return { address: session.address, token: cookieToken };
+    const session = repo.findByToken(cookieToken);
+    if (session && new Date(session.expiresAt).getTime() > Date.now()) {
+      return { address: session.walletAddress as `0x${string}`, token: cookieToken };
     }
-    if (session) sessions.delete(cookieToken);
+    if (session) repo.deleteByToken(cookieToken);
   }
 
   // 2. Try Bearer token
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) {
     const bearerToken = authHeader.slice(7);
-    const session = sessions.get(bearerToken);
-    if (session && session.expiresAt > Date.now()) {
-      return { address: session.address, token: bearerToken };
+    const session = repo.findByToken(bearerToken);
+    if (session && new Date(session.expiresAt).getTime() > Date.now()) {
+      return { address: session.walletAddress as `0x${string}`, token: bearerToken };
     }
-    if (session) sessions.delete(bearerToken);
+    if (session) repo.deleteByToken(bearerToken);
   }
 
   return null;
@@ -195,7 +187,7 @@ export function resolveSession(
  */
 export function getSessionCount(): number {
   cleanExpired();
-  return sessions.size;
+  return getRepos().sessions.countActive();
 }
 
 /**
@@ -207,10 +199,11 @@ export function listSessions(): Array<{
   expiresAt: string;
 }> {
   cleanExpired();
-  return [...sessions.values()].map((s) => ({
-    address: s.address,
-    createdAt: new Date(s.createdAt).toISOString(),
-    expiresAt: new Date(s.expiresAt).toISOString(),
+  const rows = getRepos().sessions.listActive(new Date().toISOString());
+  return rows.map((s) => ({
+    address: s.walletAddress,
+    createdAt: s.createdAt,
+    expiresAt: s.expiresAt,
   }));
 }
 
@@ -285,13 +278,16 @@ export async function siweAuthPlugin(app: FastifyInstance) {
     // Create session
     const token = randomUUID();
     const now = Date.now();
-    const session: SiweSession = {
-      address: parsed.address as `0x${string}`,
+    const createdAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + SESSION_TTL_MS).toISOString();
+    getRepos().sessions.insert({
+      id: randomUUID(),
+      walletAddress: parsed.address,
       token,
-      createdAt: now,
-      expiresAt: now + SESSION_TTL_MS,
-    };
-    sessions.set(token, session);
+      createdAt,
+      expiresAt,
+      lastActiveAt: createdAt,
+    });
 
     // Set HTTP-only cookie AND return token in body (client chooses which to use)
     return reply
@@ -304,8 +300,8 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       })
       .send({
         token,
-        address: session.address,
-        expiresAt: new Date(session.expiresAt).toISOString(),
+        address: parsed.address,
+        expiresAt,
       });
   });
 
@@ -320,16 +316,18 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // ----- POST /api/auth/logout -----
   app.post("/api/auth/logout", async (req, reply) => {
+    const repo = getRepos().sessions;
+
     // Clear cookie-based session
     const cookieToken = req.cookies?.pcc_session;
     if (cookieToken) {
-      sessions.delete(cookieToken);
+      repo.deleteByToken(cookieToken);
     }
 
     // Clear bearer-based session
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith("Bearer ")) {
-      sessions.delete(authHeader.slice(7));
+      repo.deleteByToken(authHeader.slice(7));
     }
 
     return reply.clearCookie("pcc_session", { path: "/" }).send({ ok: true });

@@ -7,6 +7,9 @@ import { seedEscrow } from "./escrow.js";
 import { seedOrchestrator } from "./orchestrator.js";
 import { seedProtocols } from "./protocols.js";
 import { seedLogistics } from "./logistics.js";
+import { seedEncryption } from "./encryption.js";
+import { seedSensors } from "./sensors.js";
+import { seedBatches } from "./batches.js";
 
 /**
  * Seeds all mock data in dependency order.
@@ -29,7 +32,20 @@ export function seedAll(db: StoreDB): void {
   seedOrchestrator(db);
   seedProtocols(db);
   seedLogistics(db);
+  seedEncryption(db);
+  seedSensors(db);
+  seedBatches(db);
   console.log("[seed] Mock data seeded successfully");
 }
 
-export { seedKernels, seedJobs, seedEscrow, seedOrchestrator, seedProtocols, seedLogistics };
+export {
+  seedKernels,
+  seedJobs,
+  seedEscrow,
+  seedOrchestrator,
+  seedProtocols,
+  seedLogistics,
+  seedEncryption,
+  seedSensors,
+  seedBatches,
+};

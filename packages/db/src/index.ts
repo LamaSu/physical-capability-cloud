@@ -57,4 +57,8 @@ export {
   AutomationStatusRepository,
   OrchestratorRepository,
   LogisticsRepository,
+  SessionRepository,
+  EncryptionRepository,
+  SensorRepository,
+  BatchRepository,
 } from "./repositories/index.js";

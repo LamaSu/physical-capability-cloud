@@ -1,43 +1,26 @@
 import type { FastifyInstance } from "fastify";
-import type { EncryptedEvidenceBundle, AccessGrant, Address } from "@pcc/spec";
+import type { Address } from "@pcc/spec";
 import { encryptionService, litEncryptionService, getEvidenceStorage } from "../services.js";
 import type { LitAuthSig } from "@pcc/kernel";
+import { getRepos } from "../db.js";
 
-// In-memory stores (production: database)
-const encryptedBundles = new Map<string, EncryptedEvidenceBundle>();
-const grants: AccessGrant[] = [];
+/**
+ * Helper: fetch an encrypted bundle row from DB and attach its capsules,
+ * returning the composite shape that matches EncryptedEvidenceBundle.
+ */
+function fetchBundleWithCapsules(bundleId: string) {
+  const repos = getRepos();
+  const encBundle = repos.encryption.findEncryptedByBundleId(bundleId);
+  if (!encBundle) return undefined;
 
-// Seed demo data
-encryptedBundles.set("bun_001", {
-  id: "enc_001",
-  bundleId: "bun_001",
-  bundleHash: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" as any,
-  ciphertext: "bW9ja19lbmNyeXB0ZWRfZXZpZGVuY2VfYnVuZGxlX2RhdGE=",
-  iv: "bW9ja19pdl8xMjM=",
-  authTag: "bW9ja19hdXRoX3RhZw==",
-  encryptedAt: new Date(Date.now() - 600_000).toISOString(),
-  capsules: [
-    { id: "cap_001", recipientAddress: "0x1234567890abcdef1234567890abcdef12345678" as Address, encryptedKey: "bW9ja19lbmNyeXB0ZWRfa2V5XzE=", ephemeralPublicKey: "bW9ja19lcGhlbWVyYWxfMQ==", accessLevel: "full" },
-    { id: "cap_002", recipientAddress: "0xabcdef1234567890abcdef1234567890abcdef12" as Address, encryptedKey: "bW9ja19lbmNyeXB0ZWRfa2V5XzI=", ephemeralPublicKey: "bW9ja19lcGhlbWVyYWxfMg==", accessLevel: "selective" },
-  ],
-});
-encryptedBundles.set("bun_002", {
-  id: "enc_002",
-  bundleId: "bun_002",
-  bundleHash: "sha256:f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5" as any,
-  ciphertext: "bW9ja19lbmNyeXB0ZWRfYnVuZGxlXzI=",
-  iv: "bW9ja19pdl80NTY=",
-  authTag: "bW9ja19hdXRoX3RhZ18y",
-  encryptedAt: new Date(Date.now() - 1_200_000).toISOString(),
-  capsules: [
-    { id: "cap_003", recipientAddress: "0x9876543210fedcba9876543210fedcba98765432" as Address, encryptedKey: "bW9ja19lbmNyeXB0ZWRfa2V5XzM=", ephemeralPublicKey: "bW9ja19lcGhlbWVyYWxfMw==", accessLevel: "full" },
-  ],
-});
+  const capsules = repos.encryption.findCapsulesForBundle(encBundle.id);
+  return { ...encBundle, capsules };
+}
 
 export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   // Get encrypted evidence bundle
   app.get<{ Params: { bundleId: string } }>("/api/evidence/encrypted/:bundleId", async (req) => {
-    const bundle = encryptedBundles.get(req.params.bundleId);
+    const bundle = fetchBundleWithCapsules(req.params.bundleId);
     if (!bundle) return { error: "not_found" };
     return { bundle };
   });
@@ -46,7 +29,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   app.get<{ Params: { bundleId: string }; Querystring: { address?: string } }>(
     "/api/evidence/encrypted/:bundleId/capsule",
     async (req) => {
-      const bundle = encryptedBundles.get(req.params.bundleId);
+      const bundle = fetchBundleWithCapsules(req.params.bundleId);
       if (!bundle) return { error: "not_found" };
 
       const address = req.query.address as Address | undefined;
@@ -63,8 +46,9 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   app.post<{ Params: { bundleId: string }; Body: { recipientAddress: string; accessLevel?: string } }>(
     "/api/evidence/encrypted/:bundleId/grant",
     async (req, reply) => {
-      const bundle = encryptedBundles.get(req.params.bundleId);
-      if (!bundle) return reply.code(404).send({ error: "not_found" });
+      const repos = getRepos();
+      const encBundle = repos.encryption.findEncryptedByBundleId(req.params.bundleId);
+      if (!encBundle) return reply.code(404).send({ error: "not_found" });
 
       const body = req.body as { recipientAddress: Address; accessLevel?: "full" | "selective" | "summary_only" };
       const grant = await encryptionService.grantAccess(
@@ -73,14 +57,27 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
         body.recipientAddress,
         body.accessLevel ?? "full",
       );
-      grants.push(grant);
+
+      // Persist the grant to the database
+      repos.encryption.insertGrant({
+        id: grant.id,
+        bundleId: grant.bundleId,
+        grantedBy: grant.grantedBy,
+        grantedTo: grant.grantedTo,
+        capsuleId: grant.capsuleId,
+        grantedAt: grant.grantedAt,
+        expiresAt: grant.expiresAt ?? null,
+        revoked: grant.revoked,
+      });
+
       return { grant };
     },
   );
 
   // List all grants for an address
   app.get<{ Params: { address: string } }>("/api/evidence/grants/:address", async (req) => {
-    const filtered = grants.filter((g) => g.grantedTo === req.params.address);
+    const repos = getRepos();
+    const filtered = repos.encryption.findGrantsByAddress(req.params.address);
     return { grants: filtered };
   });
 
@@ -102,19 +99,24 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
 
   // Archive an encrypted evidence bundle to IPFS and store CIDs
   app.post<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/archive", async (req, reply) => {
-    const bundle = encryptedBundles.get(req.params.bundleId);
-    if (!bundle) return reply.code(404).send({ error: "not_found" });
+    const repos = getRepos();
+    const encBundle = repos.encryption.findEncryptedByBundleId(req.params.bundleId);
+    if (!encBundle) return reply.code(404).send({ error: "not_found" });
 
-    if (bundle.ipfsCid) {
-      return { archived: true, cid: bundle.ipfsCid, metadataCid: bundle.ipfsMetadataCid ?? null, alreadyArchived: true };
+    if (encBundle.ipfsCid) {
+      return { archived: true, cid: encBundle.ipfsCid, metadataCid: encBundle.ipfsMetadataCid ?? null, alreadyArchived: true };
     }
 
     try {
+      const capsules = repos.encryption.findCapsulesForBundle(encBundle.id);
+      const bundle = { ...encBundle, capsules };
       const storage = await getEvidenceStorage();
       const result = await storage.archiveEncryptedBundle(bundle);
-      // Store CIDs on the bundle
-      bundle.ipfsCid = result.cid;
-      bundle.ipfsMetadataCid = result.metadataCid;
+      // Persist CIDs back to the database
+      repos.encryption.updateEncryptedBundle(encBundle.id, {
+        ipfsCid: result.cid,
+        ipfsMetadataCid: result.metadataCid,
+      });
       return { archived: true, cid: result.cid, metadataCid: result.metadataCid };
     } catch (err) {
       const message = err instanceof Error ? err.message : "Archive failed";
@@ -136,18 +138,19 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
 
   // Get IPFS CIDs for a bundle
   app.get<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/ipfs", async (req, reply) => {
-    const bundle = encryptedBundles.get(req.params.bundleId);
-    if (!bundle) return reply.code(404).send({ error: "not_found" });
+    const repos = getRepos();
+    const encBundle = repos.encryption.findEncryptedByBundleId(req.params.bundleId);
+    if (!encBundle) return reply.code(404).send({ error: "not_found" });
 
-    if (!bundle.ipfsCid) {
+    if (!encBundle.ipfsCid) {
       return reply.code(404).send({ error: "not_archived", message: "Bundle has not been archived to IPFS" });
     }
 
     return {
       bundleId: req.params.bundleId,
-      cid: bundle.ipfsCid,
-      metadataCid: bundle.ipfsMetadataCid ?? null,
-      filecoinDealId: bundle.filecoinDealId ?? null,
+      cid: encBundle.ipfsCid,
+      metadataCid: encBundle.ipfsMetadataCid ?? null,
+      filecoinDealId: encBundle.filecoinDealId ?? null,
     };
   });
 
@@ -155,10 +158,10 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
 
   // Get Lit access conditions for a bundle
   app.get<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/lit-conditions", async (req, reply) => {
-    const bundle = encryptedBundles.get(req.params.bundleId);
+    const bundle = fetchBundleWithCapsules(req.params.bundleId);
     if (!bundle) return reply.code(404).send({ error: "not_found" });
 
-    const conditions = litEncryptionService.getAccessConditions(bundle);
+    const conditions = litEncryptionService.getAccessConditions(bundle as any);
     if (!conditions) {
       return reply.code(404).send({
         error: "not_lit_encrypted",
@@ -178,7 +181,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
   app.post<{ Params: { bundleId: string }; Body: { authSig: LitAuthSig } }>(
     "/api/evidence/:bundleId/lit-decrypt",
     async (req, reply) => {
-      const bundle = encryptedBundles.get(req.params.bundleId);
+      const bundle = fetchBundleWithCapsules(req.params.bundleId);
       if (!bundle) return reply.code(404).send({ error: "not_found" });
 
       if (!bundle.litCiphertext || !bundle.litDataToEncryptHash) {
@@ -197,7 +200,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       }
 
       try {
-        const decrypted = await litEncryptionService.decryptBundle(bundle, body.authSig);
+        const decrypted = await litEncryptionService.decryptBundle(bundle as any, body.authSig);
         return { bundle: decrypted };
       } catch (err) {
         const message = err instanceof Error ? err.message : "Decryption failed";
