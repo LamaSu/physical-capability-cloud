@@ -14,3 +14,5 @@ export { ConfidenceIndicator, type ConfidenceIndicatorProps } from "./Confidence
 export { DIDBadge, type DIDBadgeProps } from "./DIDBadge.js";
 export { IPFSLink, type IPFSLinkProps } from "./IPFSLink.js";
 export { ChainTxLink, type ChainTxLinkProps } from "./ChainTxLink.js";
+export { BorderBeam, type BorderBeamProps } from "./BorderBeam.js";
+export { AnimatedNumber, type AnimatedNumberProps } from "./AnimatedNumber.js";

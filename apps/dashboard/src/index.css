@@ -1,3 +1,4 @@
+@import "tw-animate-css";
 @import "tailwindcss";
 
 /* ── Solarpunk Ground Control Design Tokens ─────────────────────── */
@@ -16,6 +17,16 @@
   --color-green-400: #7CB342;
   --color-green-300: #AED581;
 
+  /* Bioluminescent accents — Teal */
+  --color-teal-500: #00BFA5;
+  --color-teal-400: #26D9B5;
+  --color-teal-300: #64FFDA;
+
+  /* Bioluminescent accents — Cyan */
+  --color-cyan-500: #00ACC1;
+  --color-cyan-400: #00BCD4;
+  --color-cyan-300: #4DD0E1;
+
   /* Golds */
   --color-gold-500: #FF8F00;
   --color-gold-400: #FFB300;
@@ -33,6 +44,10 @@
   --color-status-completed: #4CAF50;
   --color-status-failed: #EF5350;
   --color-status-offline: #616161;
+
+  /* Gradients */
+  --gradient-hero: linear-gradient(135deg, #7CB342 0%, #00BFA5 50%, #00ACC1 100%);
+  --gradient-beam: linear-gradient(90deg, transparent, #00BFA5, transparent);
 
   /* Fonts */
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
@@ -105,4 +120,25 @@ body {
 
 .glow-text-gold {
   text-shadow: 0 0 10px rgba(255, 179, 0, 0.5);
+}
+
+.glow-teal {
+  box-shadow: 0 0 20px rgba(0, 191, 165, 0.3), 0 0 60px rgba(0, 191, 165, 0.1);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(0, 188, 212, 0.3), 0 0 60px rgba(0, 188, 212, 0.1);
+}
+
+/* ── BorderBeam Animation ─────────────────────────────────────── */
+
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes border-beam-spin {
+  from { --angle: 0deg; }
+  to { --angle: 360deg; }
 }

@@ -4,14 +4,14 @@ import type { CapabilityType } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { allCapabilities, mockKernels } from "../api/mock-data.js";
 
-const capabilityTypes: CapabilityType[] = ["fdm", "sla", "cnc-3axis", "laser-cut"];
+const capabilityTypes: CapabilityType[] = ["hplc", "pcr", "microscopy", "mass-spec", "sequencing", "cell-culture"];
 
 export function DiscoverPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [search, setSearch] = React.useState("");
   const [typeFilter, setTypeFilter] = React.useState<CapabilityType | "all">("all");
 
-  React.useEffect(() => { setPageMeta("Discover Capabilities", "Search and browse available manufacturing capabilities"); }, [setPageMeta]);
+  React.useEffect(() => { setPageMeta("Discover Capabilities", "Search and browse available biotech and neurotech capabilities"); }, [setPageMeta]);
 
   const filtered = allCapabilities.filter((cap) => {
     if (typeFilter !== "all" && cap.type !== typeFilter) return false;
@@ -36,7 +36,7 @@ export function DiscoverPage() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search capabilities... (e.g., PLA, aluminum, FDM)"
+            placeholder="Search capabilities... (e.g., HPLC, PCR, neural tissue, sequencing)"
             className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-lg px-4 py-2.5 text-sm text-white/80 placeholder-white/25 outline-none focus:border-green-500/30 transition-colors"
           />
         </div>

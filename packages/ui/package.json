@@ -27,6 +27,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@number-flow/react": "^0.6.0",
     "@pcc/spec": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

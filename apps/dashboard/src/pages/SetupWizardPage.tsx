@@ -59,7 +59,7 @@ function StepWelcome() {
   return (
     <WizardStepContent
       title="Welcome to Physical Capability Cloud"
-      subtitle="AWS for the physical world"
+      subtitle="Biotech & Neurotech Platform"
       onNext={nextStep}
       nextLabel="Get Started"
     >
@@ -68,9 +68,9 @@ function StepWelcome() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <GlassPanel hover padding="md">
             <div className="text-green-400/80 text-lg mb-2">&#9881;</div>
-            <div className="text-sm font-semibold text-white/80 mb-1">Manufacturing as a Service</div>
+            <div className="text-sm font-semibold text-white/80 mb-1">Lab Capabilities as a Service</div>
             <div className="text-xs text-white/30">
-              Connect physical machines to the cloud. Expose capabilities, not devices.
+              Connect lab instruments to the cloud. Expose capabilities like HPLC, PCR, and microscopy.
             </div>
           </GlassPanel>
           <GlassPanel hover padding="md">
@@ -84,7 +84,7 @@ function StepWelcome() {
             <div className="text-green-400/80 text-lg mb-2">&#128203;</div>
             <div className="text-sm font-semibold text-white/80 mb-1">Evidence-Based QA</div>
             <div className="text-xs text-white/30">
-              Cryptographic proof of manufacturing quality at every assurance tier.
+              Cryptographic proof of assay and analysis quality at every assurance tier.
             </div>
           </GlassPanel>
         </div>
@@ -277,17 +277,17 @@ const roles = [
   {
     id: "operator" as const,
     label: "Operator",
-    description: "I have machines and want to offer capabilities",
+    description: "I have lab instruments and want to offer capabilities",
   },
   {
     id: "customer" as const,
     label: "Customer",
-    description: "I need manufacturing done",
+    description: "I need biotech analysis or neurotech services done",
   },
   {
     id: "both" as const,
     label: "Both",
-    description: "I operate machines and use others' capabilities",
+    description: "I operate lab instruments and use others' capabilities",
   },
 ];
 
@@ -324,7 +324,7 @@ function StepIdentity() {
           <label className="text-xs text-white/40 mb-1 block">Display Name *</label>
           <input
             className={baseInput}
-            placeholder="e.g., Alice's Workshop"
+            placeholder="e.g., NeuroLab SOMA"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
           />
@@ -334,7 +334,7 @@ function StepIdentity() {
           <label className="text-xs text-white/40 mb-1 block">Organization</label>
           <input
             className={baseInput}
-            placeholder="Optional — e.g., Acme Manufacturing Co."
+            placeholder="Optional — e.g., BioAnalytica Inc."
             value={organization}
             onChange={(e) => setOrganization(e.target.value)}
           />
