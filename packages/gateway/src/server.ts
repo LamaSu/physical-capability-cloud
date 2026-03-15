@@ -23,6 +23,7 @@ import { protocolRoutes } from "./routes/protocols.js";
 import { rewardRoutes } from "./routes/rewards.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
+import { agentChatRoutes } from "./routes/agent-chat.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
@@ -94,6 +95,7 @@ export async function createGateway(port = 3200) {
   await app.register(protocolRoutes);
   await app.register(rewardRoutes);
   await app.register(registryRoutes);
+  await app.register(agentChatRoutes);
 
   // SSE endpoints
   await app.register(notificationSSE);
