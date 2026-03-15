@@ -1,0 +1,165 @@
+{
+  "schema": "unbrowse-skill-manifest/1.0",
+  "domain": "pcc-gateway-production.up.railway.app",
+  "name": "Physical Capability Cloud",
+  "description": "Verifiable on-chain skill wrapper for any physical capability. Discover, price, and orchestrate manufacturing capabilities — 3D printing, CNC machining, HPLC analysis, and more.",
+  "categories": ["manufacturing", "defi", "ai-agents", "physical-ai", "depin"],
+  "endpoints": [
+    {
+      "id": "list-capability-types",
+      "method": "GET",
+      "path": "/api/capabilities/types",
+      "description": "List all physical capability types on the PCC network (FDM printing, SLA printing, CNC machining, laser cutting, HPLC analysis, mass spectrometry, PCB assembly, injection molding)",
+      "params": {},
+      "tags": ["discovery", "capabilities", "manufacturing"]
+    },
+    {
+      "id": "search-capabilities",
+      "method": "GET",
+      "path": "/api/capabilities/templates",
+      "description": "Search for capability templates — find machines that can do what you need, with pricing and assurance tier info",
+      "params": { "query": { "type": "string", "description": "What capability you need, e.g. 'HPLC purity analysis' or '3D print in PLA'" } },
+      "tags": ["discovery", "search", "capabilities"]
+    },
+    {
+      "id": "get-build-options",
+      "method": "POST",
+      "path": "/api/build/options",
+      "description": "Get configuration options for a capability — materials, dimensions, tolerances, and other parameters",
+      "params": { "type": { "type": "string", "required": true }, "selections": { "type": "object" } },
+      "tags": ["build", "configure", "parameters"]
+    },
+    {
+      "id": "calculate-price",
+      "method": "POST",
+      "path": "/api/build/price",
+      "description": "Calculate real-time price for a capability configuration using Meteora DLMM pools",
+      "params": { "type": { "type": "string", "required": true }, "selections": { "type": "object", "required": true } },
+      "tags": ["pricing", "defi", "meteora"]
+    },
+    {
+      "id": "build-contract",
+      "method": "POST",
+      "path": "/api/build/contract",
+      "description": "Build and submit a manufacturing contract with milestone escrow on Base Sepolia",
+      "params": { "type": { "type": "string", "required": true }, "selections": { "type": "object", "required": true }, "assuranceTier": { "type": "number", "required": true } },
+      "tags": ["contract", "escrow", "settlement"]
+    },
+    {
+      "id": "list-kernels",
+      "method": "GET",
+      "path": "/api/kernels",
+      "description": "List all Shop Kernels — physical manufacturing sites with equipment, status, and capabilities",
+      "params": {},
+      "tags": ["kernels", "sites", "infrastructure"]
+    },
+    {
+      "id": "get-kernel",
+      "method": "GET",
+      "path": "/api/kernels/:kernelId",
+      "description": "Get detailed Shop Kernel info — devices, queue depth, capability certificates",
+      "params": { "kernelId": { "type": "string", "required": true } },
+      "tags": ["kernels", "detail"]
+    },
+    {
+      "id": "list-jobs",
+      "method": "GET",
+      "path": "/api/jobs",
+      "description": "List all active and completed manufacturing jobs with status and progress",
+      "params": {},
+      "tags": ["jobs", "monitoring", "status"]
+    },
+    {
+      "id": "get-job",
+      "method": "GET",
+      "path": "/api/jobs/:jobId",
+      "description": "Get job details — progress, evidence timeline, escrow status, sensor data",
+      "params": { "jobId": { "type": "string", "required": true } },
+      "tags": ["jobs", "detail", "evidence"]
+    },
+    {
+      "id": "list-escrows",
+      "method": "GET",
+      "path": "/api/escrow",
+      "description": "List all milestone escrow contracts — amounts locked, challenge windows, bond status",
+      "params": {},
+      "tags": ["escrow", "settlement", "bonds"]
+    },
+    {
+      "id": "get-escrow",
+      "method": "GET",
+      "path": "/api/escrow/:escrowId",
+      "description": "Get escrow details — milestones, bonds, challenge windows, dispute status",
+      "params": { "escrowId": { "type": "string", "required": true } },
+      "tags": ["escrow", "detail", "disputes"]
+    },
+    {
+      "id": "list-evidence",
+      "method": "GET",
+      "path": "/api/evidence",
+      "description": "List encrypted evidence bundles — Lit Protocol encrypted, IPFS stored, Bittensor verified",
+      "params": {},
+      "tags": ["evidence", "verification", "ipfs"]
+    },
+    {
+      "id": "list-protocols",
+      "method": "GET",
+      "path": "/api/protocols",
+      "description": "Browse protocol templates — reusable multi-step manufacturing workflows as DAGs",
+      "params": {},
+      "tags": ["protocols", "workflows", "dag"]
+    },
+    {
+      "id": "get-marketplace",
+      "method": "GET",
+      "path": "/api/marketplace",
+      "description": "Equipment marketplace — demand/supply charts, equipment classes, ROI data",
+      "params": {},
+      "tags": ["marketplace", "demand", "supply"]
+    },
+    {
+      "id": "get-operator",
+      "method": "GET",
+      "path": "/api/operator",
+      "description": "Operator dashboard — machines, earnings, capability certificates, maintenance schedules",
+      "params": {},
+      "tags": ["operator", "earnings", "machines"]
+    },
+    {
+      "id": "get-depin-stats",
+      "method": "GET",
+      "path": "/api/rewards",
+      "description": "DePIN reward statistics — treasury balance, soulbound certificates, epoch rewards, claim status",
+      "params": {},
+      "tags": ["depin", "rewards", "treasury"]
+    },
+    {
+      "id": "get-subnet-status",
+      "method": "GET",
+      "path": "/api/agents/status",
+      "description": "Bittensor verification subnet status — miner health, leaderboard, consensus scores",
+      "params": {},
+      "tags": ["bittensor", "subnet", "verification"]
+    },
+    {
+      "id": "get-logistics",
+      "method": "GET",
+      "path": "/api/logistics",
+      "description": "Logistics hub — shipments, installations, space bookings for physical equipment",
+      "params": {},
+      "tags": ["logistics", "shipping", "installation"]
+    }
+  ],
+  "auth": {
+    "type": "siwe",
+    "description": "SIWE (Sign-In with Ethereum) — connect wallet, sign EIP-4361 message, get session cookie",
+    "endpoints": {
+      "nonce": "GET /api/auth/nonce",
+      "verify": "POST /api/auth/verify",
+      "session": "GET /api/auth/me"
+    }
+  },
+  "agent_package": "/agent-package.json",
+  "docs": "/docs/",
+  "repo": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud"
+}
