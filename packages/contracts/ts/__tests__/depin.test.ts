@@ -7,18 +7,18 @@ import {
 import type { KernelEpochInput } from "../index.js";
 
 // ─────────────────────────────────────────────────────────────────
-// Capability Certificate Tests
+// Capability Certificate Tests (mpl-core, mock mode)
 // ─────────────────────────────────────────────────────────────────
 
 describe("CapabilityCertificateService", () => {
   let service: CapabilityCertificateService;
 
   beforeEach(() => {
-    service = new CapabilityCertificateService();
+    service = new CapabilityCertificateService({ mock: true });
   });
 
-  it("mints a certificate with correct metadata", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("mints a certificate with correct metadata", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 2,
@@ -42,28 +42,28 @@ describe("CapabilityCertificateService", () => {
     expect(cert.metadata.maxBuildVolume).toBe("250x210x210 mm");
   });
 
-  it("assigns Solana-specific fields (merkleTree, leafIndex, assetId)", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("assigns Solana-specific fields (collection, leafIndex, assetId)", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "cnc-3axis",
       assuranceTier: 3,
       metadata: {},
     });
 
-    expect(cert.merkleTree).toBeTruthy();
+    expect(cert.merkleTree).toBeTruthy(); // collection address in mpl-core
     expect(typeof cert.leafIndex).toBe("number");
     expect(cert.leafIndex).toBe(0); // first mint
     expect(cert.assetId).toBeTruthy();
   });
 
-  it("increments leafIndex for each mint", () => {
-    const c1 = service.mintCapabilityCertificate({
+  it("increments leafIndex for each mint", async () => {
+    const c1 = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 1,
       metadata: {},
     });
-    const c2 = service.mintCapabilityCertificate({
+    const c2 = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "cnc-3axis",
       assuranceTier: 2,
@@ -73,8 +73,8 @@ describe("CapabilityCertificateService", () => {
     expect(c2.leafIndex).toBe(c1.leafIndex! + 1);
   });
 
-  it("verifies an active certificate", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("verifies an active certificate", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 1,
@@ -92,15 +92,15 @@ describe("CapabilityCertificateService", () => {
     expect(result.reason).toContain("not found");
   });
 
-  it("revokes a certificate", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("revokes a certificate (burns mpl-core asset in production)", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 1,
       metadata: {},
     });
 
-    const revokeResult = service.revokeCapabilityCertificate(cert.id);
+    const revokeResult = await service.revokeCapabilityCertificate(cert.id);
     expect(revokeResult.revoked).toBe(true);
 
     const verifyResult = service.verifyCapabilityCertificate(cert.id);
@@ -108,22 +108,22 @@ describe("CapabilityCertificateService", () => {
     expect(verifyResult.reason).toContain("revoked");
   });
 
-  it("cannot revoke an already revoked certificate", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("cannot revoke an already revoked certificate", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 1,
       metadata: {},
     });
 
-    service.revokeCapabilityCertificate(cert.id);
-    const secondRevoke = service.revokeCapabilityCertificate(cert.id);
+    await service.revokeCapabilityCertificate(cert.id);
+    const secondRevoke = await service.revokeCapabilityCertificate(cert.id);
     expect(secondRevoke.revoked).toBe(false);
     expect(secondRevoke.reason).toContain("already revoked");
   });
 
-  it("enforces soulbound — transfer always fails", () => {
-    const cert = service.mintCapabilityCertificate({
+  it("enforces soulbound via PermanentFreezeDelegate — transfer always fails", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test-01",
       capabilityType: "fdm",
       assuranceTier: 1,
@@ -133,23 +133,23 @@ describe("CapabilityCertificateService", () => {
     const result = service.transferCertificate(cert.id, "did:pcc:kernel:other");
     expect(result.transferred).toBe(false);
     expect(result.reason).toContain("soulbound");
-    expect(result.reason).toContain("non-transferable");
+    expect(result.reason).toContain("PermanentFreezeDelegate");
   });
 
-  it("getCertificatesForKernel returns only matching kernel certs", () => {
-    service.mintCapabilityCertificate({
+  it("getCertificatesForKernel returns only matching kernel certs", async () => {
+    await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:a",
       capabilityType: "fdm",
       assuranceTier: 1,
       metadata: {},
     });
-    service.mintCapabilityCertificate({
+    await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:b",
       capabilityType: "cnc-3axis",
       assuranceTier: 2,
       metadata: {},
     });
-    service.mintCapabilityCertificate({
+    await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:a",
       capabilityType: "sla",
       assuranceTier: 1,
@@ -161,58 +161,65 @@ describe("CapabilityCertificateService", () => {
     expect(kernelACerts.every((c) => c.kernelDid === "did:pcc:kernel:a")).toBe(true);
   });
 
-  it("throws on invalid assurance tier", () => {
-    expect(() =>
+  it("throws on invalid assurance tier", async () => {
+    await expect(
       service.mintCapabilityCertificate({
         kernelDid: "did:pcc:kernel:test",
         capabilityType: "fdm",
         assuranceTier: 5,
         metadata: {},
       }),
-    ).toThrow("assuranceTier must be 0-3");
+    ).rejects.toThrow("assuranceTier must be 0-3");
   });
 
-  it("throws on missing kernelDid", () => {
-    expect(() =>
+  it("throws on missing kernelDid", async () => {
+    await expect(
       service.mintCapabilityCertificate({
         kernelDid: "",
         capabilityType: "fdm",
         assuranceTier: 1,
         metadata: {},
       }),
-    ).toThrow("kernelDid is required");
+    ).rejects.toThrow("kernelDid is required");
   });
 
-  it("listCertificates returns all and supports status filter", () => {
-    service.mintCapabilityCertificate({
+  it("listCertificates returns all and supports status filter", async () => {
+    await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:a",
       capabilityType: "fdm",
       assuranceTier: 1,
       metadata: {},
     });
-    const cert2 = service.mintCapabilityCertificate({
+    const cert2 = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:b",
       capabilityType: "cnc-3axis",
       assuranceTier: 2,
       metadata: {},
     });
-    service.revokeCapabilityCertificate(cert2.id);
+    await service.revokeCapabilityCertificate(cert2.id);
 
     expect(service.listCertificates()).toHaveLength(2);
     expect(service.listCertificates({ status: "active" })).toHaveLength(1);
     expect(service.listCertificates({ status: "revoked" })).toHaveLength(1);
   });
 
-  it("uses custom merkle tree address when provided", () => {
-    const customTree = "CustomTreeAddress12345678901234567890abc";
-    const svc = new CapabilityCertificateService(customTree);
-    const cert = svc.mintCapabilityCertificate({
+  it("creates a collection for certificates", async () => {
+    const collectionAddr = await service.createCollection();
+    expect(collectionAddr).toBeTruthy();
+    expect(collectionAddr).toContain("PCCCollection");
+  });
+
+  it("fetchOnChainAsset returns cert by assetId (mock)", async () => {
+    const cert = await service.mintCapabilityCertificate({
       kernelDid: "did:pcc:kernel:test",
       capabilityType: "fdm",
       assuranceTier: 0,
       metadata: {},
     });
-    expect(cert.merkleTree).toBe(customTree);
+
+    const asset = await service.fetchOnChainAsset(cert.assetId!);
+    expect(asset).not.toBeNull();
+    expect((asset as Record<string, unknown>).capabilityType).toBe("fdm");
   });
 });
 
@@ -286,9 +293,6 @@ describe("RewardEngine", () => {
 
     const scores = engine.calculateEpochScores(inputs);
     expect(scores).toHaveLength(2);
-
-    // k1 has more jobs (normalized to 1.0 for jobs)
-    // k2 has half the jobs (normalized to 0.5 for jobs)
     expect(scores[0].totalScore).toBeGreaterThan(0);
     expect(scores[1].totalScore).toBeGreaterThan(0);
   });
@@ -325,13 +329,9 @@ describe("RewardEngine", () => {
     const scores = engine.calculateEpochScores(inputs);
     const distributed = engine.distributeRewards(scores, "10000");
 
-    // k1 has all same scores as k2 except jobs (100 vs 50),
-    // so k1 gets more of the pool
     const r1 = parseFloat(distributed[0].rewardAmount);
     const r2 = parseFloat(distributed[1].rewardAmount);
     expect(r1).toBeGreaterThan(r2);
-
-    // Total distributed should equal pool
     expect(r1 + r2).toBeCloseTo(10000, 2);
   });
 
@@ -354,13 +354,7 @@ describe("RewardEngine", () => {
   // ── Epoch Lifecycle ───────────────────────────────────────────
 
   it("creates an epoch with active status", () => {
-    const epoch = engine.createEpoch(
-      1,
-      "2026-03-01T00:00:00Z",
-      "2026-03-31T23:59:59Z",
-      "10000",
-    );
-
+    const epoch = engine.createEpoch(1, "2026-03-01T00:00:00Z", "2026-03-31T23:59:59Z", "10000");
     expect(epoch.id).toMatch(/^epoch_/);
     expect(epoch.epochNumber).toBe(1);
     expect(epoch.status).toBe("active");
@@ -369,13 +363,7 @@ describe("RewardEngine", () => {
   });
 
   it("completes an epoch with scores and distribution", () => {
-    const epoch = engine.createEpoch(
-      1,
-      "2026-03-01T00:00:00Z",
-      "2026-03-31T23:59:59Z",
-      "5000",
-    );
-
+    const epoch = engine.createEpoch(1, "2026-03-01T00:00:00Z", "2026-03-31T23:59:59Z", "5000");
     const completed = engine.completeEpoch(epoch.id, [
       {
         kernelId: "k1",
