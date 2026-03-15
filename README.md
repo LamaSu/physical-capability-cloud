@@ -1,42 +1,45 @@
-# Physical Capability Cloud (PCC)
+# PCCP — Physical Capability Cloud Protocol
 
-AWS for the physical world -- a cloud control plane for physical manufacturing capabilities.
+**AWS for the physical world.** Any physical capability — lab instruments, printers, couriers, robot arms — becomes a composable, verifiable, settleable service. AI agents discover, negotiate, and orchestrate. Evidence proves every step. Settlement is automatic. No middleman.
 
-Targeting **Funding the Commons SF** (Mar 14-15, 2026) and **PL_Genesis** ($150K).
+**Live**: [pcc-gateway-production.up.railway.app](https://pcc-gateway-production.up.railway.app)
 
-## Overview
+**Hackathon**: Intelligence at the Frontier — Funding the Commons SF, March 14-15, 2026
 
-PCC turns physical manufacturing equipment into composable, billable cloud services. Shop Kernels wrap real machines (CNC mills, 3D printers, laser cutters, chromatographs) and expose what they can *do* as schedulable capabilities with SLA-backed assurance tiers. Jobs settle through milestone escrow on Base with bonds, slashing, and dispute windows. Evidence is content-addressed, encrypted, and verifiable through ZK proofs. Sovereign infrastructure layers -- W3C DIDs, IPFS storage, Lit Protocol encryption, Solana wallets, Bittensor verification, and DePIN economics -- make the whole stack decentralized and self-sustaining.
+## How It Works
 
-## Quick Start
+1. **Post a workflow** — "Analyze this compound's purity, print the report, deliver it back"
+2. **Agents bid** — Operators set maximum prices. AI agents compete by bidding under. Cheapest valid path wins.
+3. **Escrow locks** — Funds lock in milestone escrow before work starts. Each step has a bond.
+4. **Execute with evidence** — Every step produces cryptographic evidence: sensor data, QC photos, chain of custody, instrument calibration records.
+5. **Verify** — Bittensor subnet miners verify evidence quality through decentralized consensus. ZK proofs anchor to chain.
+6. **Settle** — Funds release automatically to each operator. Soulbound cNFTs prove competence. DePIN rewards grow the network.
 
-```bash
-git clone git@github.com:global-mysterysnailrevolution/physical-capability-cloud.git
-cd physical-capability-cloud
-pnpm install
-pnpm build --concurrency=1    # Sequential builds (avoids OOM on Windows)
-pnpm dev                       # Dashboard at localhost:5173, Gateway at localhost:3200
-```
-
-Run tests and simulations:
+## Demo
 
 ```bash
-pnpm --workspace-concurrency=1 -r test                # 623 tests across 37 test files
-npx tsx scripts/e2e-simulation.ts                      # Kernel-level e2e
-npx tsx scripts/agent-e2e-simulation.ts                # Agent-to-agent e2e
-npx tsx scripts/sovereign-e2e-simulation.ts            # Sovereign infrastructure e2e (9 phases)
-npx tsx scripts/contract-builder-demo.ts               # Contract builder demo
+# Fast version (2.5 seconds, full pipeline)
+npx tsx scripts/hackathon-demo.ts
+
+# Live version (pauses at each phase for dashboard click-through)
+npx tsx scripts/demo-live.ts
+
+# Agent-to-agent negotiation
+npx tsx scripts/agent-e2e-simulation.ts
+
+# Sovereign infrastructure (DIDs, IPFS, Lit, ZK, Bittensor, DePIN)
+npx tsx scripts/sovereign-e2e-simulation.ts
 ```
 
 ## Architecture
 
 ```
 +--------------------------------------------------+
-|  Dashboard (React 19 + Vite)                     |
-|  44+ routes, Solarpunk theme, live builders      |
+|  Dashboard (React 19 + Vite + Tailwind v4)       |
+|  44+ routes, Bioluminescent Solarpunk theme       |
 +--------------------------------------------------+
-|  Gateway (Fastify)           Agent Swarm (A2A)   |
-|  REST + SSE + x402           User<>Broker<>Kernel |
+|  Gateway (Fastify)           Agent Swarm (A2A)    |
+|  REST + SSE + SIWE           User<>Broker<>Kernel |
 +--------------------------------------------------+
 |  Core Services                                    |
 |  Scheduler . Verifier . Payments . ContractBuilder|
@@ -45,118 +48,88 @@ npx tsx scripts/contract-builder-demo.ts               # Contract builder demo
 |  Adapters . Evidence . Sensors . Protocols        |
 +--------------------------------------------------+
 |  Sovereign Infrastructure                         |
-|  DIDs . IPFS . Lit . Solana . Bittensor . DePIN  |
+|  DIDs . IPFS . Lit . Solana . Bittensor . DePIN   |
 +--------------------------------------------------+
-|  Smart Contracts (Solidity / Base Sepolia)        |
-|  MilestoneEscrow . ERC-8004 . MockUSDC . cNFTs   |
+|  Settlement (Base Sepolia + Solana)               |
+|  MilestoneEscrow . MockUSDC . cNFTs . x402       |
 +--------------------------------------------------+
 ```
 
-## Packages (17 packages + 1 app)
+## Packages (17 + 1 app)
 
-### Core Layer
+| Layer | Package | What It Does |
+|-------|---------|-------------|
+| **Core** | `@pcc/spec` | Types, Zod schemas, hashing, W3C DIDs, Verifiable Credentials |
+| | `@pcc/kernel` | Shop Kernel: device adapters, evidence emitter, sensor pipeline, IPFS (Helia), Lit encryption |
+| | `@pcc/contracts` | Solidity: MilestoneEscrow. TS: soulbound cNFTs, DePIN reward engine |
+| | `@pcc/scheduler` | Workflow compiler (DAG), capability router (auction pricing) |
+| | `@pcc/verifier` | Merkle commitments, ZK proofs, Bittensor subnet bridge |
+| | `@pcc/payments` | x402 middleware + client |
+| | `@pcc/contract-builder` | Schema-driven config: templates, profiles, pricing, validation |
+| | `@pcc/orchestrator` | TransferGraph, ResourcePool, ProtocolEngine, ProtocolRunner |
+| | `@pcc/store` | SQLite persistence (Drizzle ORM + better-sqlite3) |
+| **Agents** | `@pcc/a2a` | 27+ typed intents, MessageBus, conversation tracking |
+| | `@pcc/agent-runtime` | Base agent: viem wallets, Solana wallets, spending policies |
+| | `@pcc/agent-user` | Discover, quote, negotiate, submit workflows |
+| | `@pcc/agent-broker` | Route capabilities, compile workflows, manage escrow, NLP |
+| | `@pcc/agent-kernel` | Wrap kernel, accept jobs, emit evidence |
+| **Frontend** | `@pcc/ui` | 64+ Solarpunk components (GlassPanel, BorderBeam, AnimatedNumber, GlowBadge) |
+| | `@pcc/gateway` | Fastify REST/SSE, SIWE auth, 20+ route files, StreamHub |
+| | `@pcc/dashboard` | Vite SPA: 44+ routes, React Flow builders, 18-step tour |
 
-| Package | Description |
-|---------|-------------|
-| `@pcc/spec` | Canonical types, Zod schemas, content-addressed hashing, W3C DIDs, Verifiable Credentials |
-| `@pcc/kernel` | Shop Kernel runtime: device adapters, evidence emitter, sensor pipeline, batch tracker, IPFS storage (Helia), Lit encryption |
-| `@pcc/contracts` | Solidity: MilestoneEscrow with bonds/slashing/disputes, MockUSDC. TS: soulbound capability cNFTs, DePIN reward engine |
-| `@pcc/scheduler` | Workflow compiler (DAG/topo-sort) and capability router (price/queue/reputation scoring) |
-| `@pcc/verifier` | Verifier market, evidence verification, Merkle commitments, ZK proofs, Bittensor subnet bridge |
-| `@pcc/payments` | x402 server middleware (HTTP 402) and client (auto-pay with EIP-3009) |
-| `@pcc/contract-builder` | Schema-driven contract builder: templates, machine profiles, pricing engine, validator |
-| `@pcc/orchestrator` | TransferGraph, ResourcePool, SampleTracker, ProtocolEngine, ProtocolRunner |
-| `@pcc/store` | Persistence layer |
+## Capabilities
 
-### Agent Layer
+PCCP supports any physical capability. Built-in types include:
 
-| Package | Description |
-|---------|-------------|
-| `@pcc/a2a` | Agent-to-agent protocol: 27+ typed intents, message bus, conversation tracking |
-| `@pcc/agent-runtime` | Base agent framework: viem wallets, Solana wallets, spending policies, intent handlers |
-| `@pcc/agent-user` | User agent: discover, quote, negotiate, submit workflows, build contracts |
-| `@pcc/agent-broker` | Broker agent: route capabilities, compile workflows, manage escrow, NLP, funding handler |
-| `@pcc/agent-kernel` | Kernel agent: wraps kernel runtime, accepts jobs, runs them, emits evidence |
+**Biotech/Neurotech**: `hplc` · `mass-spec` · `pcr` · `sequencing` · `cell-culture` · `microscopy` · `spectroscopy` · `flow-cytometry` · `electrophysiology` · `bioreactor` · `assay` · `sample-prep`
 
-### Frontend Layer
+**Manufacturing**: `fdm` · `sla` · `sls` · `cnc-3axis` · `cnc-5axis` · `lathe` · `laser-cut` · `waterjet` · `injection-mold`
 
-| Package | Description |
-|---------|-------------|
-| `@pcc/ui` | Solarpunk component library: 64+ components including DIDBadge, IPFSLink, ChainTxLink |
-| `@pcc/gateway` | Fastify HTTP/SSE bridge: 20+ route files, StreamHub, SIWE auth, x402 gate |
-| `@pcc/dashboard` | Vite SPA: 44+ routes, React Flow builders, contract builder, onboarding wizard, protocol runner |
+**Services**: `assembly` · `inspection` · `courier-pickup` · `courier-delivery` · `2d-print` · `imaging`
+
+## Pricing Model
+
+Operators set **maximum prices**. Agents bid competitively under the ceiling:
+- `mode: "auction"` (default) — agents compete, discounting based on queue depth + reputation
+- `mode: "fixed"` — take-it-or-leave-it pricing
+- `minimum` — floor price, bids cannot go below
 
 ## Sovereign Infrastructure
 
-Six layers of decentralized infrastructure, all tested end-to-end:
+| Layer | Technology | Status |
+|-------|-----------|--------|
+| **Identity** | W3C DIDs (`did:key` + `did:pcc`), Verifiable Credentials | Implemented + tested |
+| **Storage** | IPFS via Helia, content-addressed CIDs | Implemented + tested |
+| **Encryption** | Lit Protocol (AES-256-GCM + access conditions) | Mock + real (`LIT_PROTOCOL_REAL=true`) |
+| **Agent Wallets** | Solana (`@solana/web3.js`), Base (viem) | Implemented + tested |
+| **Verification** | Bittensor subnet (MockMiner, MockValidator, Yuma Consensus) | Mock, testnet-ready |
+| **Settlement** | MilestoneEscrow (Solidity), x402 micropayments | Implemented, Base Sepolia |
+| **DePIN** | Soulbound cNFTs, reward epochs, weighted scoring | Implemented + tested |
+| **ZK Proofs** | Merkle commitments, inclusion proofs, tier compliance | Mock + Noir integration |
 
-**W3C Decentralized Identity** -- `did:key` (Ed25519) and `did:pcc` method, plus Verifiable Credential issuance and verification. Agents, kernels, and machines all get DIDs.
+## Quick Start
 
-**IPFS Evidence Storage** -- Helia-based content-addressed storage. Evidence bundles get real CIDs with round-trip store/retrieve verified. ESM-only module.
+```bash
+pnpm install
+pnpm build --concurrency=1
+pnpm dev                        # Dashboard :5173, Gateway :3200
+pnpm --workspace-concurrency=1 -r test   # 623+ tests
+```
 
-**Lit Protocol Encryption** -- AES-256-GCM encryption with access-controlled key capsules. Mock implementation for testing; real `@lit-protocol/lit-node-client` v6 integration against the datil-test network (enable with `LIT_PROTOCOL_REAL=true`).
+## Networks
 
-**Solana Agent Wallets** -- `@solana/web3.js` v1 keypair wallets with SPL token transfers and budget-aware spending policies. Three funding intents (request-funding, approve-funding, transfer-funds).
-
-**Bittensor Verification Subnet** -- MockMiner with quality tiers, MockValidator with Yuma Consensus scoring, BittensorSubnetBridge for routing verification tasks to the subnet and aggregating results.
-
-**DePIN Economics** -- Soulbound capability certificates (cNFTs via mock Bubblegum), reward epoch scoring with weighted metrics (utilization, quality, uptime), FundingHandler with demand detection for automated capital allocation.
-
-## Key Features
-
-- Schema-driven contract builder with 4 templates (FDM, SLA, CNC, laser-cut) and live pricing
-- 7-step AI-assisted machine onboarding wizard
-- React Flow workflow and protocol DAG editors
-- Milestone escrow with bonds, slashing, and challenge windows
-- Universal sensor pipeline with RingBuffer, LTTB downsampling, anomaly detection
-- Encrypted evidence with per-user key capsules (AES-256-GCM + Lit Protocol)
-- ZK proof infrastructure (Merkle commitment trees) for dispute settlement
-- Batch instrument tracking for autosamplers and chromatographs
-- x402 micropayment protocol for per-request billing
-- Physical logistics: shipping, space booking, 10-step installation checklists
-- Protocol library with fork/run and live execution DAG views
-- Equipment marketplace with ROI calculator
-
-## Scripts
-
-| Command | Description |
-|---------|-------------|
-| `pnpm install` | Install all dependencies |
-| `pnpm build --concurrency=1` | Build all 17 packages + 1 app (sequential, avoids OOM) |
-| `pnpm --workspace-concurrency=1 -r test` | Run all 623 tests across 37 test files |
-| `pnpm dev` | Start Vite dev server (port 5173) + gateway (port 3200) |
-| `pnpm lint` | Lint all packages |
-| `pnpm typecheck` | Type-check all packages |
-| `pnpm clean` | Remove all build artifacts |
-| `npx tsx scripts/e2e-simulation.ts` | Kernel-level end-to-end simulation |
-| `npx tsx scripts/agent-e2e-simulation.ts` | Agent-to-agent end-to-end simulation |
-| `npx tsx scripts/sovereign-e2e-simulation.ts` | Sovereign infrastructure e2e (9 phases) |
-| `npx tsx scripts/contract-builder-demo.ts` | Contract builder demo |
-| `npx tsx scripts/generate-wallet.ts` | Generate a deployer wallet for Base Sepolia |
-| `DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-base-sepolia.ts` | Deploy contracts to Base Sepolia |
+| Network | Chain | Use |
+|---------|-------|-----|
+| Base Sepolia | EVM L2 | Escrow settlement, USDC, contract deploy |
+| Solana Devnet | Solana | Agent wallets, DePIN rewards, soulbound cNFTs |
+| Bittensor Testnet | Bittensor | Evidence verification subnet |
+| IPFS (Helia) | IPFS | Content-addressed evidence storage |
+| Lit Protocol (datil-test) | Lit | Threshold encryption for evidence |
 
 ## Tech Stack
 
-Node.js 20+, TypeScript (ES2022, strict), pnpm 9, Turborepo, Vite, React 19, React Router v7, TanStack Query v5, Zustand v5, Tailwind CSS v4, React Flow, Motion, Recharts, Fastify, viem, Zod, Foundry, vitest, @solana/web3.js, Helia (IPFS), Lit Protocol.
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KERNEL_ID` | `kernel_dev_001` | Identifier for the local shop kernel |
-| `PORT` | `3100` | Kernel server port |
-| `PCC_RPC_URL` | `https://sepolia.base.org` | Base Sepolia JSON-RPC endpoint |
-| `PCC_TREASURY_ADDRESS` | `0x0000...0001` | Treasury address for escrow settlement |
-| `PCC_X402_ENABLED` | `false` | Enable x402 payment gating on gateway routes |
-| `PCC_X402_FACILITATOR_URL` | `http://localhost:4020` | x402 facilitator service URL |
-| `LIT_PROTOCOL_REAL` | `false` | Use real Lit Protocol network (datil-test) instead of mock |
-| `DEPLOYER_PRIVATE_KEY` | -- | Private key for contract deployment to Base Sepolia |
-
-## Documentation
-
-- [TUTORIAL.md](./TUTORIAL.md) -- Comprehensive getting-started guide
-- [CLAUDE.md](./CLAUDE.md) -- Developer instructions and project conventions
+TypeScript · React 19 · Vite · Tailwind v4 · React Flow · Motion · Recharts · Fastify · viem · Zod · Solidity · Foundry · vitest · pnpm · Turborepo · @solana/web3.js · Helia · Lit Protocol · @number-flow/react · tw-animate-css · better-sqlite3 · Drizzle ORM
 
 ## License
 
-MIT -- see [LICENSE](./LICENSE).
+MIT
