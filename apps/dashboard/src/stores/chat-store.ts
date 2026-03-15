@@ -6,18 +6,10 @@ function makeId() {
   return `msg-${Date.now()}-${nextId++}`;
 }
 
-export interface AgentConnection {
-  endpoint: string;
-  apiKey: string;
-  provider: "claude" | "openai" | "custom";
-  connected: boolean;
-}
-
 interface ChatStoreState {
   messages: AgentMessage[];
   chatState: ChatState;
   streamingText: string;
-  agentConnection: AgentConnection | null;
 
   addMessage: (msg: Omit<AgentMessage, "id" | "timestamp">) => string;
   updateMessage: (id: string, patch: Partial<AgentMessage>) => void;
@@ -25,28 +17,26 @@ interface ChatStoreState {
   clearStreamingText: () => void;
   setChatState: (state: ChatState) => void;
   clearChat: () => void;
-  setAgentConnection: (conn: AgentConnection | null) => void;
 }
 
 const WELCOME_MESSAGE: AgentMessage = {
   id: "welcome",
   role: "assistant",
-  content: `**Welcome to the Physical Capability Cloud**
+  content: `**Physical Capability Cloud**
 
-PCC is a **verifiable on-chain skill wrapper for any physical capability**. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.
+A verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.
 
-**Connect your AI agent** to interact with the network. PCC provides **28 tools** your agent can use — capability discovery, contract building, job monitoring, escrow management, and more.
+**Your agent connects directly to PCC.** No API keys, no middleware — just fetch the agent package and your agent has 28 tools to interact with the network.
 
-Your agent needs:
-1. An API endpoint (Claude, GPT, or any LLM)
-2. An API key for your provider
-3. PCC's tool definitions (auto-loaded when you connect)
+\`\`\`
+GET /agent-package.json
+\`\`\`
 
-Once connected, your agent can discover capabilities, build contracts, submit workflows, and monitor jobs — all through natural conversation.`,
+That single file gives your agent everything: system prompt, tool definitions, and API endpoint mappings. Any LLM, any framework, any language.`,
   suggestedActions: [
-    { label: "Connect my agent", message: "/connect" },
-    { label: "View tool spec", message: "/tools" },
-    { label: "How it works", message: "/how" },
+    { label: "What is PCC?", message: "/how" },
+    { label: "See the tools", message: "/tools" },
+    { label: "Get the agent package", message: "/package" },
     { label: "Explore the dashboard", message: "/dashboard" },
   ],
   timestamp: Date.now(),
@@ -56,7 +46,6 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   messages: [WELCOME_MESSAGE],
   chatState: "idle",
   streamingText: "",
-  agentConnection: null,
 
   addMessage: (msg) => {
     const id = makeId();
@@ -80,6 +69,4 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   setChatState: (state) => set({ chatState: state }),
 
   clearChat: () => set({ messages: [WELCOME_MESSAGE], chatState: "idle", streamingText: "" }),
-
-  setAgentConnection: (conn) => set({ agentConnection: conn }),
 }));
