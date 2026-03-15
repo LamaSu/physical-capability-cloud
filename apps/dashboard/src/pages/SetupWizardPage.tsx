@@ -151,7 +151,7 @@ function StepNetwork() {
   return (
     <WizardStepContent
       title="Network Configuration"
-      subtitle="Select which chain PCC should connect to."
+      subtitle="Select which chain PCCP should connect to."
       onNext={nextStep}
       onBack={prevStep}
       nextDisabled={!isStepValid(1)}
@@ -313,7 +313,7 @@ function StepIdentity() {
   return (
     <WizardStepContent
       title="Platform Identity"
-      subtitle="Register your identity on the PCC network."
+      subtitle="Register your identity on the PCCP network."
       onNext={handleNext}
       onBack={prevStep}
       nextLabel="Complete Setup"
@@ -371,7 +371,7 @@ function StepIdentity() {
         </div>
 
         <p className="text-[10px] text-white/15 italic">
-          This registers your identity on the PCC network via ERC-8004.
+          This registers your identity on the PCCP network via ERC-8004.
         </p>
       </div>
     </WizardStepContent>
@@ -397,7 +397,7 @@ function StepComplete() {
   return (
     <WizardStepContent
       title="Setup Complete"
-      subtitle="Your PCC instance is configured and ready to go."
+      subtitle="Your PCCP instance is configured and ready to go."
       onNext={() => navigate("/")}
       nextLabel="Go to Dashboard"
     >

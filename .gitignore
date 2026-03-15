@@ -13,3 +13,5 @@ lib/
 *.swp
 *.swo
 packages/gateway/data/
+.playwright-cli/
+ai/
