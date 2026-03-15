@@ -1,5 +1,7 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DocumentAnalysisResult, MachineRegistration } from "@pcc/spec";
+
+const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
 // Mock storage
 const registrations: MachineRegistration[] = [];
@@ -84,5 +86,130 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reg = registrations.find((r) => r.id === req.params.id);
     if (!reg) return { error: "not_found" };
     return { registration: reg };
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // Agent Onboarding — one invite code provisions everything
+  // Uses Gatecraft as identity/wallet/credential layer
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * POST /api/onboard/redeem — One-click agent onboarding
+   *
+   * 1. Redeems Gatecraft invite code → account + wallet + shared keys
+   * 2. Returns unified config: PCC tools + LLM proxy + wallet + identity
+   *
+   * Result: agent has wallet, identity, LLM access, and PCC tools.
+   * No manual key management, no provider selection, no wallet setup.
+   */
+  app.post("/api/onboard/redeem", async (req, reply) => {
+    const body = req.body as {
+      inviteCode: string;
+      email: string;
+      password: string;
+      name?: string;
+    };
+
+    if (!body.inviteCode || !body.email || !body.password) {
+      return reply.status(400).send({
+        error: "inviteCode, email, and password are required",
+      });
+    }
+
+    try {
+      const gcRes = await fetch(`${GATECRAFT_URL}/v1/hackathon/redeem`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!gcRes.ok) {
+        const err = await gcRes.json().catch(() => ({ error: "Identity service error" }));
+        return reply.status(gcRes.status).send(err);
+      }
+
+      const gc = await gcRes.json() as {
+        token: string;
+        userId: string;
+        walletBalance: number;
+        providers: string[];
+        message: string;
+      };
+
+      const baseUrl = `${req.protocol}://${req.hostname}`;
+
+      return reply.send({
+        success: true,
+        message: "Your agent is provisioned. Everything is ready.",
+
+        // Identity
+        token: gc.token,
+        user_id: gc.userId,
+
+        // Wallet (microdollars)
+        wallet_balance_usd: gc.walletBalance / 1_000_000,
+
+        // Agent configuration — feed this entire object to your agent
+        agent_config: {
+          pcc_tools: `${baseUrl}/agent-package.json`,
+          pcc_api: `${baseUrl}/api`,
+          llm_proxy: `${GATECRAFT_URL}/api/v2/proxy/call`,
+          llm_auth: `Bearer ${gc.token}`,
+          providers: gc.providers,
+          unbrowse_skills: `${baseUrl}/unbrowse-skills.json`,
+          wallet: `${GATECRAFT_URL}/api/v2/proxy/wallet`,
+        },
+      });
+    } catch (err) {
+      app.log.error(err, "Onboard redeem failed");
+      return reply.status(502).send({ error: "Identity service unreachable" });
+    }
+  });
+
+  /** GET /api/onboard/check/:code — Validate invite code before redeeming */
+  app.get<{ Params: { code: string } }>("/api/onboard/check/:code", async (req, reply) => {
+    try {
+      const res = await fetch(`${GATECRAFT_URL}/v1/hackathon/invite/${req.params.code}`);
+      if (!res.ok) return reply.status(404).send({ valid: false });
+      const data = await res.json();
+      return reply.send({
+        valid: true,
+        event: data,
+        includes: [
+          "Wallet with credits for LLM calls",
+          "Access to Claude, GPT-4o, Groq — no API keys needed",
+          "28 PCC tools for physical capability discovery and orchestration",
+          "Agent identity with trust scoring",
+        ],
+      });
+    } catch {
+      return reply.status(502).send({ valid: false, error: "Service unreachable" });
+    }
+  });
+
+  /** GET /api/onboard/status — Check what the agent has provisioned */
+  app.get("/api/onboard/status", async (req, reply) => {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ")) {
+      return reply.status(401).send({ error: "Bearer token required (from /api/onboard/redeem)" });
+    }
+
+    try {
+      const [meRes, walletRes, credsRes] = await Promise.all([
+        fetch(`${GATECRAFT_URL}/v1/auth/me`, { headers: { Authorization: auth } }),
+        fetch(`${GATECRAFT_URL}/api/v2/proxy/wallet`, { headers: { Authorization: auth } }),
+        fetch(`${GATECRAFT_URL}/api/v2/proxy/credentials`, { headers: { Authorization: auth } }),
+      ]);
+
+      return reply.send({
+        user: meRes.ok ? await meRes.json() : null,
+        wallet: walletRes.ok ? await walletRes.json() : null,
+        credentials: credsRes.ok ? await credsRes.json() : null,
+        pcc_tools: `${req.protocol}://${req.hostname}/agent-package.json`,
+        ready: meRes.ok,
+      });
+    } catch {
+      return reply.status(502).send({ error: "Identity service unreachable" });
+    }
   });
 }
