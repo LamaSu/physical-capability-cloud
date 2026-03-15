@@ -143,17 +143,29 @@ export async function createGateway(port = 3200) {
       root: dashboardPath,
       prefix: "/",
       decorateReply: false,
-      wildcard: false,
+      wildcard: true,
     });
 
     // SPA fallback — serve index.html for all non-API/SSE routes
-    const { readFileSync } = await import("node:fs");
+    // Only if the requested path isn't a real file in dist/
+    const { readFileSync, existsSync } = await import("node:fs");
     const { join } = await import("node:path");
     const indexHtml = readFileSync(join(dashboardPath, "index.html"), "utf-8");
 
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
+      }
+      // Check if a real static file exists (strip query string)
+      const cleanPath = req.url.split("?")[0];
+      const filePath = join(dashboardPath, cleanPath);
+      if (existsSync(filePath) && !filePath.endsWith("/")) {
+        return reply.sendFile(cleanPath);
+      }
+      // Check for index.html in subdirectories (e.g. /docs/ → /docs/index.html)
+      const indexPath = join(dashboardPath, cleanPath, "index.html");
+      if (existsSync(indexPath)) {
+        return reply.type("text/html").send(readFileSync(indexPath, "utf-8"));
       }
       return reply.type("text/html").send(indexHtml);
     });
