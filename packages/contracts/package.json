@@ -29,6 +29,9 @@
     "forge:deploy:base-sepolia": "bash script/deploy.sh"
   },
   "dependencies": {
+    "@metaplex-foundation/mpl-core": "^1.8.0",
+    "@metaplex-foundation/umi": "^1.5.1",
+    "@metaplex-foundation/umi-bundle-defaults": "^1.5.1",
     "@pcc/spec": "workspace:*",
     "viem": "^2"
   },

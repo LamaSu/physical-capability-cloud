@@ -1,17 +1,30 @@
 /**
- * Capability Certificate Service — mock implementation of Metaplex
- * Bubblegum v2 soulbound compressed NFTs (cNFTs) on Solana.
+ * Capability Certificate Service — Metaplex Core (mpl-core) soulbound NFTs.
  *
- * In production this would interact with the Solana Bubblegum program.
- * Here we simulate the full interface with in-memory state so that
- * the rest of the PCC stack (gateway, dashboard, agents) can develop
- * against a realistic API surface.
+ * Uses mpl-core's single-account NFT standard with PermanentFreezeDelegate
+ * plugin to create non-transferable capability certificates on Solana.
+ *
+ * Each certificate proves a machine's manufacturing capability at a specific
+ * assurance tier. Soulbound = PermanentFreezeDelegate frozen at mint time.
+ *
+ * In production: real Solana RPC + funded keypair.
+ * In mock mode (default): simulates mpl-core with in-memory state.
  */
 
+import type {
+  Umi,
+  PublicKey as UmiPublicKey,
+  Signer,
+  TransactionBuilder,
+} from "@metaplex-foundation/umi";
 import type {
   CapabilityCertificate,
   CertificateMetadata,
 } from "@pcc/spec";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export interface MintCertificateParams {
   kernelDid: string;
@@ -20,31 +33,113 @@ export interface MintCertificateParams {
   metadata: CertificateMetadata;
 }
 
+export interface MplCoreConfig {
+  /** Solana RPC URL (default: devnet) */
+  rpcUrl?: string;
+  /** Use mock mode — no real Solana calls (default: true) */
+  mock?: boolean;
+  /** Collection address for PCC certificates (created on first mint if absent) */
+  collectionAddress?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
 export class CapabilityCertificateService {
-  /** In-memory store keyed by certificate ID */
+  private mock: boolean;
+  private rpcUrl: string;
+  private collectionAddress: string | null;
+
+  /** In-memory store (mock mode) keyed by certificate ID */
   private certificates = new Map<string, CapabilityCertificate>();
+  /** Running asset index counter (mock) */
+  private nextIndex = 0;
 
-  /** Mock Merkle tree address */
-  private readonly merkleTree: string;
+  /** Lazy-initialized Umi instance (production mode) */
+  private umi: Umi | null = null;
 
-  /** Running leaf index counter */
-  private nextLeafIndex = 0;
-
-  constructor(merkleTree?: string) {
-    // Use a deterministic-looking but fake Solana pubkey
-    this.merkleTree =
-      merkleTree ?? "TreeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  constructor(config: MplCoreConfig = {}) {
+    this.mock = config.mock ?? true;
+    this.rpcUrl = config.rpcUrl ?? "https://api.devnet.solana.com";
+    this.collectionAddress = config.collectionAddress ?? null;
   }
 
-  // ── Public API ─────────────────────────────────────────────────
+  // ── Umi setup (production only) ──────────────────────────────────
 
   /**
-   * Mint a new soulbound capability certificate.
-   * Returns the full certificate object (analogous to the on-chain asset).
+   * Initialize Umi with mpl-core plugin. Call once before production mints.
+   * In mock mode this is a no-op.
    */
-  mintCapabilityCertificate(
+  async initUmi(signerKeypair?: Uint8Array): Promise<void> {
+    if (this.mock) return;
+
+    // Dynamic imports — mpl-core + umi are ESM
+    const { createUmi } = await import("@metaplex-foundation/umi-bundle-defaults");
+    const { mplCore } = await import("@metaplex-foundation/mpl-core");
+    const { keypairIdentity } = await import("@metaplex-foundation/umi");
+
+    const umi = createUmi(this.rpcUrl).use(mplCore());
+
+    if (signerKeypair) {
+      const kp = umi.eddsa.createKeypairFromSecretKey(signerKeypair);
+      umi.use(keypairIdentity(kp));
+    }
+
+    this.umi = umi;
+  }
+
+  // ── Core API ─────────────────────────────────────────────────────
+
+  /**
+   * Create the PCC Capability Certificate collection (once per deployment).
+   * In production: calls mpl-core createCollection with PermanentFreezeDelegate.
+   */
+  async createCollection(): Promise<string> {
+    if (this.mock) {
+      this.collectionAddress = `PCCCollection${Date.now().toString(36)}`;
+      return this.collectionAddress;
+    }
+
+    if (!this.umi) throw new Error("Call initUmi() first");
+
+    const { createCollection, ruleSet } = await import("@metaplex-foundation/mpl-core");
+    const { generateSigner } = await import("@metaplex-foundation/umi");
+
+    const collectionSigner = generateSigner(this.umi);
+
+    await createCollection(this.umi, {
+      collection: collectionSigner,
+      name: "PCC Capability Certificates",
+      uri: "https://pcc.network/metadata/collection.json",
+      plugins: [
+        {
+          type: "PermanentFreezeDelegate",
+          frozen: true,
+          authority: { type: "UpdateAuthority" },
+        },
+        {
+          type: "Royalties",
+          basisPoints: 0,
+          creators: [{ address: this.umi.identity.publicKey, percentage: 100 }],
+          ruleSet: ruleSet("None"),
+        },
+      ],
+    }).sendAndConfirm(this.umi);
+
+    this.collectionAddress = collectionSigner.publicKey.toString();
+    return this.collectionAddress;
+  }
+
+  /**
+   * Mint a soulbound capability certificate as an mpl-core Asset.
+   *
+   * The asset is created with PermanentFreezeDelegate(frozen: true),
+   * making it non-transferable from the moment it's minted.
+   */
+  async mintCapabilityCertificate(
     params: MintCertificateParams,
-  ): CapabilityCertificate {
+  ): Promise<CapabilityCertificate> {
     const { kernelDid, capabilityType, assuranceTier, metadata } = params;
 
     if (!kernelDid) throw new Error("kernelDid is required");
@@ -53,10 +148,96 @@ export class CapabilityCertificateService {
       throw new Error("assuranceTier must be 0-3");
     }
 
-    const leafIndex = this.nextLeafIndex++;
-    const id = `cnft_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 8)}`;
-    const assetId = `Asset${id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 32)}`;
+    // ── Mock mode ────────────────────────────────────────────────
+    if (this.mock) {
+      const index = this.nextIndex++;
+      const id = `cnft_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 8)}`;
+      const assetId = `Asset${id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 32)}`;
 
+      const cert: CapabilityCertificate = {
+        id,
+        kernelDid,
+        capabilityType,
+        assuranceTier,
+        metadata,
+        mintedAt: new Date().toISOString(),
+        soulbound: true,
+        status: "active",
+        merkleTree: this.collectionAddress ?? "PCCCollection",
+        leafIndex: index,
+        assetId,
+      };
+
+      this.certificates.set(id, cert);
+      return cert;
+    }
+
+    // ── Production mode (mpl-core) ───────────────────────────────
+    if (!this.umi) throw new Error("Call initUmi() first");
+
+    const { create, fetchCollection } = await import("@metaplex-foundation/mpl-core");
+    const { generateSigner } = await import("@metaplex-foundation/umi");
+
+    const assetSigner = generateSigner(this.umi);
+
+    // Build on-chain metadata URI (in production, upload to Arweave/IPFS)
+    const onChainMetadata = {
+      name: `PCC ${capabilityType} Tier ${assuranceTier}`,
+      description: `Capability certificate for ${capabilityType} at assurance tier ${assuranceTier}`,
+      image: "https://pcc.network/assets/cert-badge.png",
+      attributes: [
+        { trait_type: "Capability Type", value: capabilityType },
+        { trait_type: "Assurance Tier", value: String(assuranceTier) },
+        { trait_type: "Kernel DID", value: kernelDid },
+        ...(metadata.materials ?? []).map((m) => ({ trait_type: "Material", value: m })),
+        ...(metadata.maxBuildVolume ? [{ trait_type: "Build Volume", value: metadata.maxBuildVolume }] : []),
+        ...(metadata.calibrationDate ? [{ trait_type: "Calibration Date", value: metadata.calibrationDate }] : []),
+        ...(metadata.calibrationProofCid ? [{ trait_type: "Calibration Proof CID", value: metadata.calibrationProofCid }] : []),
+        ...Object.entries(metadata.toleranceSpecs ?? {}).map(([k, v]) => ({ trait_type: `Tolerance: ${k}`, value: v })),
+      ],
+      properties: {
+        category: "capability_certificate",
+        soulbound: true,
+      },
+    };
+
+    // TODO: Upload metadata JSON to Arweave/IPFS and get URI
+    const metadataUri = `https://pcc.network/metadata/cert/${assetSigner.publicKey.toString()}.json`;
+
+    // Fetch collection if we have one
+    const { publicKey } = await import("@metaplex-foundation/umi");
+
+    let collectionArg: Record<string, unknown> | undefined;
+    if (this.collectionAddress) {
+      const collection = await fetchCollection(this.umi, publicKey(this.collectionAddress));
+      collectionArg = { collection };
+    }
+
+    // Mint with PermanentFreezeDelegate → soulbound from creation
+    await create(this.umi, {
+      asset: assetSigner,
+      name: `PCC ${capabilityType} T${assuranceTier}`,
+      uri: metadataUri,
+      ...collectionArg,
+      plugins: [
+        {
+          type: "PermanentFreezeDelegate",
+          frozen: true,
+          authority: { type: "UpdateAuthority" },
+        },
+        {
+          type: "Attributes",
+          attributeList: [
+            { key: "capabilityType", value: capabilityType },
+            { key: "assuranceTier", value: String(assuranceTier) },
+            { key: "kernelDid", value: kernelDid },
+            { key: "soulbound", value: "true" },
+          ],
+        },
+      ],
+    }).sendAndConfirm(this.umi);
+
+    const id = `cnft_${assetSigner.publicKey.toString().slice(0, 16)}`;
     const cert: CapabilityCertificate = {
       id,
       kernelDid,
@@ -66,9 +247,9 @@ export class CapabilityCertificateService {
       mintedAt: new Date().toISOString(),
       soulbound: true,
       status: "active",
-      merkleTree: this.merkleTree,
-      leafIndex,
-      assetId,
+      merkleTree: this.collectionAddress ?? undefined,
+      leafIndex: this.nextIndex++,
+      assetId: assetSigner.publicKey.toString(),
     };
 
     this.certificates.set(id, cert);
@@ -95,11 +276,11 @@ export class CapabilityCertificateService {
   }
 
   /**
-   * Revoke a certificate. In production this would burn/freeze the cNFT.
+   * Revoke a certificate. In production: burns the mpl-core asset.
    */
-  revokeCapabilityCertificate(
+  async revokeCapabilityCertificate(
     certificateId: string,
-  ): { revoked: boolean; reason?: string } {
+  ): Promise<{ revoked: boolean; reason?: string }> {
     const cert = this.certificates.get(certificateId);
     if (!cert) {
       return { revoked: false, reason: "Certificate not found" };
@@ -107,8 +288,36 @@ export class CapabilityCertificateService {
     if (cert.status === "revoked") {
       return { revoked: false, reason: "Certificate already revoked" };
     }
+
+    // Production: burn the on-chain asset
+    if (!this.mock && this.umi && cert.assetId) {
+      const { fetchAsset, burn } = await import("@metaplex-foundation/mpl-core");
+      const { publicKey } = await import("@metaplex-foundation/umi");
+      const asset = await fetchAsset(this.umi, publicKey(cert.assetId));
+      await burn(this.umi, { asset }).sendAndConfirm(this.umi);
+    }
+
     cert.status = "revoked";
     return { revoked: true };
+  }
+
+  /**
+   * Fetch a certificate from on-chain (production) or memory (mock).
+   */
+  async fetchOnChainAsset(assetId: string): Promise<Record<string, unknown> | null> {
+    if (this.mock) {
+      for (const cert of this.certificates.values()) {
+        if (cert.assetId === assetId) return cert as unknown as Record<string, unknown>;
+      }
+      return null;
+    }
+
+    if (!this.umi) throw new Error("Call initUmi() first");
+
+    const { fetchAsset } = await import("@metaplex-foundation/mpl-core");
+    const { publicKey } = await import("@metaplex-foundation/umi");
+    const asset = await fetchAsset(this.umi, publicKey(assetId));
+    return asset as unknown as Record<string, unknown>;
   }
 
   /**
@@ -142,7 +351,8 @@ export class CapabilityCertificateService {
 
   /**
    * Attempting to transfer a soulbound certificate always fails.
-   * This method exists to explicitly enforce the soulbound invariant.
+   * PermanentFreezeDelegate enforces this on-chain; this method
+   * exists to explicitly enforce the invariant in application code.
    */
   transferCertificate(
     _certificateId: string,
@@ -150,7 +360,7 @@ export class CapabilityCertificateService {
   ): { transferred: false; reason: string } {
     return {
       transferred: false,
-      reason: "Capability certificates are soulbound and non-transferable",
+      reason: "Capability certificates are soulbound (PermanentFreezeDelegate) and non-transferable",
     };
   }
 }

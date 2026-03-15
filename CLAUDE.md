@@ -44,7 +44,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/agent-runtime/src/solana-wallet.ts**: Solana agent wallets + SPL token transfers
 - **packages/agent-runtime/src/spending-policy.ts**: Budget-aware spending policies
 - **packages/verifier/src/bittensor/**: Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
-- **packages/contracts/ts/capability-certificates.ts**: Soulbound capability cNFTs (mock Bubblegum)
+- **packages/contracts/ts/capability-certificates.ts**: Soulbound capability NFTs via Metaplex Core (mpl-core) + PermanentFreezeDelegate
 - **packages/contracts/ts/reward-engine.ts**: DePIN reward epoch scoring + distribution
 - **packages/payments/src/meteora/**: Meteora DLMM pools for dynamic capability pricing (mock + production path)
 
