@@ -36,8 +36,8 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
         </div>
         {!collapsed && (
           <div className="flex flex-col overflow-hidden">
-            <span className="text-sm font-semibold text-white/90 leading-tight">PCC</span>
-            <span className="text-[10px] text-green-400/70 font-mono uppercase tracking-wider">Biotech & Neurotech</span>
+            <span className="text-sm font-semibold text-white/90 leading-tight">PCCP</span>
+            <span className="text-[10px] text-green-400/70 font-mono uppercase tracking-wider">Physical Capability Cloud Protocol</span>
           </div>
         )}
         {onToggle && (
@@ -97,7 +97,7 @@ export function Sidebar({ groups, currentPath, onNavigate, collapsed = false, on
       {/* Version */}
       {!collapsed && (
         <div className="px-4 py-3 border-t border-white/[0.06]">
-          <span className="text-[10px] font-mono text-white/20">PCC v0.1.0</span>
+          <span className="text-[10px] font-mono text-white/20">PCCP v0.1.0</span>
         </div>
       )}
     </aside>

@@ -71,19 +71,21 @@ export interface ToleranceSpec {
   positional?: string; // e.g., "±0.1mm"
 }
 
-/** Pricing model for a capability */
+/** Pricing model for a capability — values are MAXIMUMS, agents bid under */
 export interface PricingModel {
   currency: Currency;
-  /** Base cost per job */
+  /** Maximum base cost per job — agents may bid lower */
   baseCost: Amount;
-  /** Cost per unit time (minutes) */
+  /** Maximum cost per unit time (minutes) */
   perMinute?: Amount;
-  /** Cost per unit weight (grams) */
+  /** Maximum cost per unit weight (grams) */
   perGram?: Amount;
-  /** Cost per unit volume (cm³) */
+  /** Maximum cost per unit volume (cm³) */
   perCm3?: Amount;
-  /** Minimum charge */
+  /** Minimum charge (floor — bids cannot go below this) */
   minimum: Amount;
+  /** Pricing mode: "fixed" = take-it-or-leave-it, "auction" = agents bid under max */
+  mode?: "fixed" | "auction";
 }
 
 /** A weekly availability schedule */

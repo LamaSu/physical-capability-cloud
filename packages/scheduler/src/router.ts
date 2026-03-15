@@ -57,13 +57,23 @@ export class CapabilityRouter {
         const material = step.params.material as string | undefined;
         if (material && !cap.materials.includes(material)) continue;
 
-        // 4. Calculate price
+        // 4. Calculate max price ceiling
         const estimatedMinutes = step.estimatedDuration ?? 60;
         const baseCost = parseFloat(cap.pricing.baseCost);
         const perMin = parseFloat(cap.pricing.perMinute ?? "0");
-        const price = Math.max(
+        const maxPrice = Math.max(
           parseFloat(cap.pricing.minimum),
           baseCost + perMin * estimatedMinutes,
+        );
+
+        // 5. Agent bids under the max — discount based on queue depth + reputation
+        const isAuction = (cap.pricing as any).mode !== "fixed";
+        const queueDiscount = isAuction ? Math.min(0.15, cap.queueDepth * 0.03) : 0;
+        const repBonus = isAuction ? Math.max(0, (kernel.reputation - 900) / 1000) * 0.05 : 0;
+        const bidDiscount = queueDiscount + repBonus;
+        const price = Math.max(
+          parseFloat(cap.pricing.minimum),
+          maxPrice * (1 - bidDiscount),
         );
 
         // 5. Check max price constraint
@@ -109,7 +119,13 @@ export class CapabilityRouter {
         const estimatedMinutes = step.estimatedDuration ?? 60;
         const baseCost = parseFloat(cap.pricing.baseCost);
         const perMin = parseFloat(cap.pricing.perMinute ?? "0");
-        const price = Math.max(parseFloat(cap.pricing.minimum), baseCost + perMin * estimatedMinutes);
+        const maxPrice = Math.max(parseFloat(cap.pricing.minimum), baseCost + perMin * estimatedMinutes);
+
+        // Agents bid under max — competitive pricing
+        const isAuction = (cap.pricing as any).mode !== "fixed";
+        const queueDiscount = isAuction ? Math.min(0.15, cap.queueDepth * 0.03) : 0;
+        const repBonus = isAuction ? Math.max(0, (kernel.reputation - 900) / 1000) * 0.05 : 0;
+        const price = Math.max(parseFloat(cap.pricing.minimum), maxPrice * (1 - queueDiscount - repBonus));
 
         matches.push({
           kernelId: kernel.kernelId,

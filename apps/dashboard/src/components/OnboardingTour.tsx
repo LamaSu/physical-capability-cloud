@@ -9,7 +9,7 @@ interface TourStep {
 }
 
 const tourSteps: TourStep[] = [
-  { id: "welcome", title: "Welcome to PCC Command Center", content: "This is your command center for biotech and neurotech capabilities. Use the sidebar to navigate between sections." },
+  { id: "welcome", title: "Welcome to PCCPP Command Center", content: "This is your command center for biotech and neurotech capabilities. Use the sidebar to navigate between sections." },
   { id: "kpi-row", title: "Key Performance Indicators", content: "Monitor active jobs, online kernels, total value locked in escrow, and evidence events at a glance." },
   { id: "discover", title: "Discover Capabilities", content: "Search and browse available biotech capabilities across all registered kernels. Filter by type, substrate, or instrument." },
   { id: "compare", title: "Compare Capabilities", content: "Each capability card shows pricing, queue depth, supported tiers, and available substrates for easy comparison." },
