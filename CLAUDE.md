@@ -15,7 +15,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/contracts**: Solidity contracts — MilestoneEscrow with bonds/slashing
 - **packages/scheduler**: Workflow compiler + capability router
 - **packages/verifier**: Hybrid verifier market + evidence verification
-- **packages/payments**: x402 middleware (server) + x402 client (auto-pay)
+- **packages/payments**: x402 middleware (server) + x402 client (auto-pay) + Meteora DLMM (capability pricing pools)
 
 ### Agent Layer (A2A)
 - **packages/a2a**: Agent-to-Agent protocol — typed intents, message bus, conversations
@@ -46,6 +46,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/verifier/src/bittensor/**: Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
 - **packages/contracts/ts/capability-certificates.ts**: Soulbound capability cNFTs (mock Bubblegum)
 - **packages/contracts/ts/reward-engine.ts**: DePIN reward epoch scoring + distribution
+- **packages/payments/src/meteora/**: Meteora DLMM pools for dynamic capability pricing (mock + production path)
 
 ## Dev Commands
 - `pnpm install` — install all deps

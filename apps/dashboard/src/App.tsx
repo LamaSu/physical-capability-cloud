@@ -10,11 +10,13 @@ import { OnboardingTour, TourRestartButton } from "./components/OnboardingTour.j
 import { WalletProvider } from "./providers/WalletProvider.js";
 import { ConnectWallet } from "./components/ConnectWallet.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
+import { ModeToggle } from "./components/ModeToggle.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
 // ---------------------------------------------------------------------------
 
+const AgentChatPage = lazy(() => import("./pages/AgentChatPage.js").then(m => ({ default: m.AgentChatPage })));
 const DashboardPage = lazy(() => import("./pages/DashboardPage.js").then(m => ({ default: m.DashboardPage })));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage.js").then(m => ({ default: m.DiscoverPage })));
 const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ default: m.BuilderPage })));
@@ -79,7 +81,44 @@ const queryClient = new QueryClient({
   },
 });
 
-function Shell() {
+// ---------------------------------------------------------------------------
+// Agent Chat Shell — full-height chat, no sidebar
+// ---------------------------------------------------------------------------
+
+function AgentShell() {
+  const { currentPageTitle, currentPageSubtitle } = useUIStore();
+
+  return (
+    <div className="flex flex-col h-screen bg-black/90 relative">
+      <ParticleBackground />
+      <div className="relative z-10 flex flex-col h-full">
+        {/* Minimal top bar */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-white/[0.06] bg-black/40 backdrop-blur-sm">
+          <div className="flex items-center gap-3">
+            <div className="text-sm font-medium text-white/70">{currentPageTitle}</div>
+            {currentPageSubtitle && (
+              <div className="text-xs text-white/30">{currentPageSubtitle}</div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <ModeToggle />
+            <ConnectWallet />
+          </div>
+        </div>
+        {/* Chat content */}
+        <Suspense fallback={<PageLoader />}>
+          <AgentChatPage />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard Shell — full 45-page shell with sidebar
+// ---------------------------------------------------------------------------
+
+function DashboardShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const { sidebarCollapsed, toggleSidebar, currentPageTitle, currentPageSubtitle } = useUIStore();
@@ -101,7 +140,7 @@ function Shell() {
           <TopBar
             title={currentPageTitle}
             subtitle={currentPageSubtitle}
-            actions={<><ConnectWallet /><TourRestartButton /></>}
+            actions={<><ModeToggle /><ConnectWallet /><TourRestartButton /></>}
           />
         }
         statusBar={<StatusBar kernelsOnline={2} activeJobs={3} networkStatus="connected" />}
@@ -110,6 +149,7 @@ function Shell() {
           <Suspense fallback={<PageLoader />}>
             <Routes>
               <Route path="/" element={<DashboardPage />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/discover" element={<DiscoverPage />} />
               <Route path="/build" element={<BuilderPage />} />
               <Route path="/build/new-device" element={<DeviceBuilderPage />} />
@@ -164,6 +204,20 @@ function Shell() {
       <OnboardingTour />
     </>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Shell router — picks agent or dashboard shell based on mode
+// ---------------------------------------------------------------------------
+
+function Shell() {
+  const interfaceMode = useUIStore((s) => s.interfaceMode);
+
+  if (interfaceMode === "agent") {
+    return <AgentShell />;
+  }
+
+  return <DashboardShell />;
 }
 
 export function App() {

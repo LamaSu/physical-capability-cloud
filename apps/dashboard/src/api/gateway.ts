@@ -66,4 +66,21 @@ export const api = {
   // Agents
   getConversations: () => fetchAPI<{ conversations: unknown[] }>("/agents/conversations"),
   getConversation: (convId: string) => fetchAPI<{ conversation: unknown }>(`/agents/conversations/${convId}`),
+
+  // Agent Chat (streaming — returns raw Response for SSE consumption)
+  agentChat: (body: {
+    system: string;
+    messages: unknown[];
+    tools?: unknown[];
+    max_tokens?: number;
+    stream?: boolean;
+  }): Promise<Response> =>
+    fetch(`${BASE_URL}/agent/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(sessionId ? { "x-pcc-session": sessionId } : {}),
+      },
+      body: JSON.stringify(body),
+    }),
 };
