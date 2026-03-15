@@ -252,7 +252,7 @@ export const mockAISuggestions: AISuggestedCapability[] = [
 
 export const mockCertifications: OperatorCertification[] = [
   { id: "cert-1", name: "OSHA 10-Hour General Industry", issuer: "OSHA", issuedAt: "2025-06-15T00:00:00Z", expiresAt: "2028-06-15T00:00:00Z", status: "valid" },
-  { id: "cert-2", name: "3D Printing Safety Training", issuer: "PCC Network", issuedAt: "2025-09-01T00:00:00Z", expiresAt: "2026-09-01T00:00:00Z", status: "valid" },
+  { id: "cert-2", name: "3D Printing Safety Training", issuer: "PCCP Network", issuedAt: "2025-09-01T00:00:00Z", expiresAt: "2026-09-01T00:00:00Z", status: "valid" },
   { id: "cert-3", name: "CNC Operator Level 2", issuer: "NIMS", issuedAt: "2024-01-10T00:00:00Z", expiresAt: "2026-04-10T00:00:00Z", status: "expiring" },
 ];
 

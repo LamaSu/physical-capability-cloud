@@ -23,16 +23,16 @@ const wizardSteps: WizardStep[] = [
   { id: "welcome", label: "Welcome", description: "Platform overview" },
   { id: "network", label: "Network", description: "Chain configuration" },
   { id: "wallet", label: "Wallet", description: "Connect EVM wallet" },
-  { id: "identity", label: "Identity", description: "Register on PCC" },
+  { id: "identity", label: "Identity", description: "Register on PCCP" },
   { id: "complete", label: "Complete", description: "Setup summary" },
 ];
 
 const aiMessages: Record<number, { id: string; content: string; timestamp: string }> = {
-  0: { id: "ai-0", content: "I'll help you set up your PCC instance. This takes about 2 minutes.", timestamp: "now" },
-  1: { id: "ai-1", content: "PCC needs a gateway server for API access. If you ran `pnpm dev`, it's already running on port 3200.", timestamp: "now" },
+  0: { id: "ai-0", content: "I'll help you set up your PCCP instance. This takes about 2 minutes.", timestamp: "now" },
+  1: { id: "ai-1", content: "PCCP needs a gateway server for API access. If you ran `pnpm dev`, it's already running on port 3200.", timestamp: "now" },
   2: { id: "ai-2", content: "Base Sepolia is recommended for testing. You can get free test USDC from the Coinbase faucet.", timestamp: "now" },
   3: { id: "ai-3", content: "Connect any EVM wallet. MetaMask and Coinbase Wallet are most popular.", timestamp: "now" },
-  4: { id: "ai-4", content: "Your identity is registered on-chain via ERC-8004. This links your wallet to your PCC profile.", timestamp: "now" },
+  4: { id: "ai-4", content: "Your identity is registered on-chain via ERC-8004. This links your wallet to your PCCP profile.", timestamp: "now" },
 };
 
 const baseInput =
@@ -58,8 +58,8 @@ function StepWelcome() {
 
   return (
     <WizardStepContent
-      title="Welcome to Physical Capability Cloud"
-      subtitle="Biotech & Neurotech Platform"
+      title="Welcome to PCCP"
+      subtitle="Physical Capability Cloud Protocol"
       onNext={nextStep}
       nextLabel="Get Started"
     >
@@ -133,13 +133,19 @@ const networks = [
   {
     id: "base-sepolia" as const,
     label: "Base Sepolia",
-    description: "Testnet, free test tokens",
+    description: "Testnet — MilestoneEscrow + MockUSDC deployed",
     badge: "RECOMMENDED" as const,
   },
   {
     id: "base" as const,
     label: "Base",
-    description: "Production mainnet, real USDC",
+    description: "Production L2, real USDC settlement",
+    badge: null,
+  },
+  {
+    id: "solana-devnet" as const,
+    label: "Solana Devnet",
+    description: "Agent wallets, DePIN rewards, soulbound cNFTs",
     badge: null,
   },
 ];

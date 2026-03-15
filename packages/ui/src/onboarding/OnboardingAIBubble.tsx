@@ -21,7 +21,7 @@ export function OnboardingAIBubble({ content, suggestions, actions, timestamp, c
         <div className="w-5 h-5 rounded-full bg-green-500/20 border border-green-500/30 flex items-center justify-center">
           <span className="text-[8px] text-green-400 font-bold">AI</span>
         </div>
-        <span className="text-[10px] text-green-400/40 font-mono">PCC Assistant</span>
+        <span className="text-[10px] text-green-400/40 font-mono">PCCP Assistant</span>
         {timestamp && <span className="text-[10px] text-white/10 font-mono">{timestamp}</span>}
       </div>
 

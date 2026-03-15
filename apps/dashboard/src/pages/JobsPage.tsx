@@ -20,7 +20,7 @@ export function JobsPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [filter, setFilter] = React.useState<"all" | "active" | "completed">("all");
 
-  React.useEffect(() => { setPageMeta("Jobs", "Track active and completed manufacturing jobs"); }, [setPageMeta]);
+  React.useEffect(() => { setPageMeta("Jobs", "Track active and completed lab and manufacturing jobs"); }, [setPageMeta]);
 
   const filtered = mockJobs.filter((j) => {
     if (filter === "active") return j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";

@@ -32,7 +32,7 @@ export function OnboardLandingPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
   React.useEffect(() => {
-    setPageMeta("Add Machine", "Onboard any machine to the PCC network");
+    setPageMeta("Add Machine", "Onboard any machine to the PCCP network");
   }, [setPageMeta]);
 
   return (

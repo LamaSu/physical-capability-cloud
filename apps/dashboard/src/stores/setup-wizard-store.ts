@@ -7,7 +7,7 @@ interface SetupWizardState {
   gatewayStatus: "checking" | "online" | "offline";
 
   // Step 2: Network
-  selectedNetwork: "localhost" | "base-sepolia" | "base";
+  selectedNetwork: "localhost" | "base-sepolia" | "base" | "solana-devnet";
   rpcUrl: string;
 
   // Step 3: Wallet
@@ -26,7 +26,7 @@ interface SetupWizardState {
   nextStep: () => void;
   prevStep: () => void;
   setGatewayStatus: (status: "checking" | "online" | "offline") => void;
-  setNetwork: (network: "localhost" | "base-sepolia" | "base") => void;
+  setNetwork: (network: "localhost" | "base-sepolia" | "base" | "solana-devnet") => void;
   setRpcUrl: (url: string) => void;
   setWalletConnected: (connected: boolean) => void;
   setDisplayName: (name: string) => void;
