@@ -15,3 +15,10 @@ export {
   type AddLiquidityParams,
   type RemoveLiquidityParams,
 } from "./meteora/index.js";
+export {
+  AlkahestEscrowBridge,
+  type AlkahestObligation,
+  type AlkahestBridgeConfig,
+  type PCCEvidenceDemand,
+  type PCCEvidenceResult,
+} from "./alkahest/index.js";
