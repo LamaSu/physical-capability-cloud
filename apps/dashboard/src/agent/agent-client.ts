@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
-// Streaming LLM client — sends messages + tools to POST /api/agent/chat
+// Agent client — relays messages to user's connected agent via gateway
 // ---------------------------------------------------------------------------
 
 import type { AgentMessage, ToolCall } from "./agent-types.js";
 import { agentTools, toolEndpoints } from "./agent-tools.js";
-import { SYSTEM_PROMPT } from "./system-prompt.js";
+import { useChatStore } from "../stores/chat-store.js";
 
 const MAX_CONTEXT_MESSAGES = 20;
 
@@ -68,7 +68,6 @@ function buildClaudeMessages(messages: AgentMessage[]): ClaudeMessage[] {
         result.push({ role: "assistant", content: blocks });
       }
     }
-    // Tool results are sent as user messages with tool_result content blocks
     if (msg.toolResults && msg.toolResults.length > 0) {
       const blocks: ClaudeContentBlock[] = msg.toolResults.map((tr) => ({
         type: "tool_result" as const,
@@ -87,6 +86,12 @@ export async function sendAgentMessage(
   messages: AgentMessage[],
   callbacks: AgentStreamCallbacks,
 ): Promise<void> {
+  const conn = useChatStore.getState().agentConnection;
+  if (!conn?.connected) {
+    callbacks.onError("No agent connected. Use /connect to link your agent.");
+    return;
+  }
+
   const claudeMessages = buildClaudeMessages(messages);
 
   try {
@@ -94,9 +99,11 @@ export async function sendAgentMessage(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        system: SYSTEM_PROMPT,
+        agent_endpoint: conn.endpoint,
+        agent_api_key: conn.apiKey,
+        provider: conn.provider,
         messages: claudeMessages,
-        tools: agentTools,
+        include_tools: true,
         max_tokens: 4096,
         stream: true,
       }),
@@ -190,7 +197,6 @@ export async function executeToolCall(
     return { error: `Unknown tool: ${toolCall.name}` };
   }
 
-  // Client-side-only tools
   if (endpoint.clientOnly) {
     if (toolCall.name === "navigate_to_page") {
       const path = toolCall.input.path as string;
@@ -203,7 +209,6 @@ export async function executeToolCall(
     return { error: "Unknown client-only tool" };
   }
 
-  // API call
   const path = typeof endpoint.path === "function" ? endpoint.path(toolCall.input) : endpoint.path;
   const options: RequestInit = { method: endpoint.method };
 
