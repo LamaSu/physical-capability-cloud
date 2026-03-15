@@ -145,11 +145,15 @@ export async function createGateway(port = 3200) {
     });
 
     // SPA fallback — serve index.html for all non-API/SSE routes
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const indexHtml = readFileSync(join(dashboardPath, "index.html"), "utf-8");
+
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
       }
-      return reply.sendFile("index.html", dashboardPath);
+      return reply.type("text/html").send(indexHtml);
     });
 
     console.log(`[gateway] Serving dashboard from ${dashboardPath}`);
