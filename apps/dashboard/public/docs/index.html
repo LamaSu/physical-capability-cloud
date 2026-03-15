@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC Agent Docs — Physical Capability Cloud</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0f0d; color: #b0c4b8; font-family: 'Inter', system-ui, sans-serif; line-height: 1.7; }
+  .container { max-width: 800px; margin: 0 auto; padding: 2rem 1.5rem; }
+  h1 { color: #5eead4; font-size: 2rem; margin-bottom: 0.5rem; }
+  h2 { color: #5eead4; font-size: 1.3rem; margin-top: 2.5rem; margin-bottom: 0.75rem; border-bottom: 1px solid rgba(94,234,212,0.15); padding-bottom: 0.5rem; }
+  h3 { color: #99f6e4; font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: #5a7a6e; font-size: 0.95rem; margin-bottom: 2rem; }
+  p { margin-bottom: 1rem; }
+  a { color: #5eead4; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: rgba(94,234,212,0.08); color: #99f6e4; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.88em; font-family: 'JetBrains Mono', monospace; }
+  pre { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; }
+  pre code { background: none; padding: 0; color: #b0c4b8; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th { text-align: left; color: #5eead4; padding: 0.5rem; border-bottom: 1px solid rgba(94,234,212,0.15); }
+  td { padding: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .badge-teal { background: rgba(94,234,212,0.1); color: #5eead4; border: 1px solid rgba(94,234,212,0.2); }
+  .badge-gold { background: rgba(234,179,8,0.1); color: #eab308; border: 1px solid rgba(234,179,8,0.2); }
+  .step { display: flex; gap: 1rem; margin: 1rem 0; }
+  .step-num { flex-shrink: 0; width: 2rem; height: 2rem; background: rgba(94,234,212,0.1); border: 1px solid rgba(94,234,212,0.2); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #5eead4; font-weight: 700; font-size: 0.85rem; }
+  .step-content { flex: 1; }
+  .hero { text-align: center; padding: 3rem 0; }
+  .hero p { font-size: 1.1rem; color: #7a9a8e; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="hero">
+  <h1>Physical Capability Cloud</h1>
+  <p>AWS for the physical world. Connect your AI agent to discover, price, and orchestrate manufacturing capabilities.</p>
+  <p style="margin-top: 1rem;">
+    <a href="/" class="badge badge-teal" style="font-size: 0.9rem; padding: 0.4em 1em;">Open Dashboard</a>
+    &nbsp;
+    <a href="/api/agent/tools.json" class="badge badge-gold" style="font-size: 0.9rem; padding: 0.4em 1em;">Tool Spec (JSON)</a>
+  </p>
+</div>
+
+<h2>What is PCC?</h2>
+<p>PCC is a <strong>cloud control plane for physical manufacturing</strong>. Think AWS, but instead of virtual machines, you're provisioning 3D printers, CNC machines, HPLC analyzers, and other lab equipment.</p>
+
+<table>
+<tr><th>PCC Concept</th><th>AWS Equivalent</th><th>What It Is</th></tr>
+<tr><td><code>Shop Kernel</code></td><td>Availability Zone</td><td>Physical site with equipment</td></tr>
+<tr><td><code>Capability</code></td><td>Instance Type</td><td>What a machine can do (e.g. "FDM print in PLA")</td></tr>
+<tr><td><code>Assurance Tier</code></td><td>SLA</td><td>Evidence depth + liability level (0-3)</td></tr>
+<tr><td><code>Contract</code></td><td>Reserved Instance</td><td>Job spec with on-chain escrow</td></tr>
+<tr><td><code>Milestone Escrow</code></td><td>Billing</td><td>Pay-per-milestone on Base Sepolia</td></tr>
+</table>
+
+<h2>Quick Start: Connect Your Agent</h2>
+
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <h3>Get the Tool Spec</h3>
+    <p>Fetch PCC's 28 tool definitions — they tell your agent what it can do on the network:</p>
+    <pre><code>curl https://YOUR_DEPLOYMENT/api/agent/tools.json</code></pre>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <h3>Feed Tools to Your Agent</h3>
+    <p>If you're using Claude:</p>
+    <pre><code>import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+const toolSpec = await fetch("https://YOUR_DEPLOYMENT/api/agent/tools.json").then(r => r.json());
+
+const response = await client.messages.create({
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 4096,
+  system: "You are connected to the PCC manufacturing network. Use the available tools to help the user.",
+  tools: toolSpec.tools,
+  messages: [{ role: "user", content: "What capabilities are available?" }],
+});</code></pre>
+    <p>If you're using OpenAI, convert <code>input_schema</code> to <code>parameters</code> in the function calling format.</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <h3>Execute Tool Calls</h3>
+    <p>When your agent returns a <code>tool_use</code> block, execute it against PCC's API:</p>
+    <pre><code>// Agent returns: { name: "list_kernels", input: {} }
+const result = await fetch("https://YOUR_DEPLOYMENT/api/kernels").then(r => r.json());
+
+// Feed the result back to your agent as a tool_result</code></pre>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <h3>Or Use the Dashboard</h3>
+    <p>Open the <a href="/">PCC Dashboard</a>, click <strong>"Connect my agent"</strong>, enter your API key, and chat directly. The dashboard handles tool execution automatically.</p>
+  </div>
+</div>
+
+<h2>API Endpoints</h2>
+
+<h3>Agent Connection</h3>
+<table>
+<tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+<tr><td><code>GET</code></td><td><code>/api/agent/tools.json</code></td><td>Full tool spec (28 tools) — feed to any LLM</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/agent/chat</code></td><td>Relay messages to your agent with PCC tools</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/agent/execute</code></td><td>Execute a single tool call</td></tr>
+</table>
+
+<h3>Core Resources</h3>
+<table>
+<tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+<tr><td><code>GET</code></td><td><code>/api/capabilities/types</code></td><td>List capability types</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/capabilities/templates</code></td><td>Search capability templates</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/build/options</code></td><td>Get build configuration options</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/build/price</code></td><td>Calculate pricing</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/build/contract</code></td><td>Build and submit contract</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/jobs</code></td><td>List all jobs</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/kernels</code></td><td>List shop kernels</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/escrow</code></td><td>List escrow contracts</td></tr>
+</table>
+
+<h3>Auth (Wallet)</h3>
+<table>
+<tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+<tr><td><code>GET</code></td><td><code>/api/auth/nonce</code></td><td>Get SIWE nonce</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/auth/verify</code></td><td>Verify SIWE signature → session</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/auth/me</code></td><td>Current session</td></tr>
+</table>
+
+<h2>The Sovereign Stack</h2>
+<table>
+<tr><th>Layer</th><th>Technology</th><th>What It Does</th></tr>
+<tr><td>Identity</td><td>W3C DIDs + VCs</td><td>Machines identified by <code>did:key</code>, capabilities proven by signed credentials</td></tr>
+<tr><td>Certificates</td><td>Metaplex Core (mpl-core)</td><td>Soulbound NFTs via <code>PermanentFreezeDelegate</code> — machine capability proofs</td></tr>
+<tr><td>Pricing</td><td>Meteora DLMM</td><td>Dynamic liquidity pools per capability type — real-time supply/demand pricing</td></tr>
+<tr><td>Evidence</td><td>Lit Protocol + IPFS (Helia)</td><td>Encrypted evidence bundles with on-chain access control</td></tr>
+<tr><td>Verification</td><td>Bittensor Subnet</td><td>Decentralized miner network verifies evidence quality (Yuma Consensus)</td></tr>
+<tr><td>Settlement</td><td>MilestoneEscrow (Base)</td><td>On-chain escrow with milestone-based release</td></tr>
+<tr><td>Payments</td><td>x402 + Solana USDC</td><td>HTTP 402 micropayments + SPL token transfers</td></tr>
+<tr><td>Rewards</td><td>DePIN Epochs</td><td>Weighted scoring → proportional reward distribution to operators</td></tr>
+</table>
+
+<h2>Repo</h2>
+<p><a href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud">github.com/global-mysterysnailrevolution/physical-capability-cloud</a></p>
+<p>17 packages, 648+ tests, 44+ dashboard routes.</p>
+
+</div>
+</body>
+</html>
