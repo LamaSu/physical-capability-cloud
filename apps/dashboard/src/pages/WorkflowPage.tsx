@@ -60,7 +60,7 @@ const stepOptions: { type: CapabilityType; label: string; icon: string }[] = [
 export function WorkflowPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   React.useEffect(() => {
-    setPageMeta("Workflow Builder", "Design multi-step manufacturing workflows");
+    setPageMeta("Workflow Builder", "Design multi-step capability workflows");
   }, [setPageMeta]);
 
   const { steps, selectedStepId, workflowName, addStep, removeStep, updateStep, addDependency, selectStep, setWorkflowName, reset } = useWorkflowStore();

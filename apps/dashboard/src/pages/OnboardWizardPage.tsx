@@ -22,7 +22,7 @@ const wizardSteps: WizardStep[] = [
 ];
 
 const aiMessages = [
-  { id: "1", content: "Welcome! I'll help you register your machine on the PCC network. Start by entering your machine details.", timestamp: "now" },
+  { id: "1", content: "Welcome! I'll help you register your machine on the PCCP network. Start by entering your machine details.", timestamp: "now" },
   { id: "2", content: "Tip: Upload manufacturer datasheets in step 2 and I'll automatically extract capabilities, tolerances, and materials.", suggestions: ["Upload a PDF datasheet", "Skip to manual entry"], timestamp: "now" },
 ];
 

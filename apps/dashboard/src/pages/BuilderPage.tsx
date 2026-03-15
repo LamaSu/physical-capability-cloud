@@ -9,6 +9,13 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useBuilderStore } from "../stores/builder-store.js";
 
 const processIcons: Record<string, string> = {
+  hplc: "🧪",
+  pcr: "🧬",
+  microscopy: "🔬",
+  "mass-spec": "⚗️",
+  sequencing: "🧬",
+  "2d-print": "🖨️",
+  assembly: "🔧",
   fdm: "🏭",
   sla: "💧",
   "cnc-3axis": "⚙️",
@@ -16,6 +23,13 @@ const processIcons: Record<string, string> = {
 };
 
 const processDescriptions: Record<string, string> = {
+  hplc: "High-Performance Liquid Chromatography — compound purity and separation analysis",
+  pcr: "Polymerase Chain Reaction — DNA/RNA amplification and detection",
+  microscopy: "Optical/Confocal Microscopy — high-resolution cellular and tissue imaging",
+  "mass-spec": "Mass Spectrometry — molecular weight and structure identification",
+  sequencing: "DNA/RNA Sequencing — genome and transcriptome analysis",
+  "2d-print": "Large Format Printing — posters, reports, and documentation",
+  assembly: "Assembly/Framing — manual or robot-assisted assembly tasks",
   fdm: "Fused Deposition Modeling — layer-by-layer thermoplastic extrusion",
   sla: "Stereolithography — UV-cured resin for fine details",
   "cnc-3axis": "3-axis CNC milling — subtractive machining for metal and plastic",
@@ -31,7 +45,7 @@ export function BuilderPage() {
   } = useBuilderStore();
 
   React.useEffect(() => {
-    setPageMeta("Build Contract", "Configure manufacturing parameters and pricing");
+    setPageMeta("Build Contract", "Configure capability parameters and pricing");
   }, [setPageMeta]);
 
   React.useEffect(() => {

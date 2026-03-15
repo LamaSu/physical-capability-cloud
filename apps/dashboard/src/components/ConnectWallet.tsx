@@ -93,7 +93,7 @@ export function ConnectWallet() {
       const message = buildSiweMessage({
         domain: window.location.host,
         address,
-        statement: "Sign in to PCCPP Command Center",
+        statement: "Sign in to PCCP Command Center",
         uri: window.location.origin,
         version: "1",
         chainId,
