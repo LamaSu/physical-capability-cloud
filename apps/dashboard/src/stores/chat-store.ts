@@ -33,7 +33,7 @@ const WELCOME_MESSAGE: AgentMessage = {
   role: "assistant",
   content: `**Welcome to the Physical Capability Cloud**
 
-PCC is **AWS for the physical world** — a cloud control plane for manufacturing capabilities. Shop Kernels are physical sites with equipment. Capabilities are what machines can do. Contracts define jobs with on-chain escrow.
+PCC is a **verifiable on-chain skill wrapper for any physical capability**. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.
 
 **Connect your AI agent** to interact with the network. PCC provides **28 tools** your agent can use — capability discovery, contract building, job monitoring, escrow management, and more.
 
