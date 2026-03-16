@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DocumentAnalysisResult, MachineRegistration } from "@pcc/spec";
+import { UnifiedKeychain } from "@pcc/agent-runtime";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -138,6 +139,10 @@ export async function onboardRoutes(app: FastifyInstance) {
 
       const baseUrl = `${req.protocol}://${req.hostname}`;
 
+      // Generate unified keychain — one mnemonic derives all chain keys
+      const kc = new UnifiedKeychain();
+      const keys = kc.generate();
+
       return reply.send({
         success: true,
         message: "Your agent is provisioned. Everything is ready.",
@@ -148,6 +153,24 @@ export async function onboardRoutes(app: FastifyInstance) {
 
         // Wallet (microdollars)
         wallet_balance_usd: gc.walletBalance / 1_000_000,
+
+        // Unified keys (generated client-side in production — here for demo)
+        keys: {
+          mnemonic: keys.mnemonic, // SENSITIVE — user must back this up
+          evm: {
+            address: keys.evm.address,
+            // privateKey NOT exposed in API — only mnemonic
+          },
+          solana: {
+            publicKey: keys.solana.publicKey,
+          },
+          did: keys.did,
+          bittensor: {
+            publicKeyHex: keys.bittensor.publicKeyHex,
+          },
+        },
+        warning:
+          "Back up your mnemonic. It derives all your keys. PCC never stores it.",
 
         // Agent configuration — feed this entire object to your agent
         agent_config: {
