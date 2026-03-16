@@ -6,6 +6,7 @@ export {
   SOLANA_DEVNET_USDC_MINT,
   SOLANA_MAINNET_USDC_MINT,
 } from "./solana-wallet.js";
+export { UnifiedKeychain, type UnifiedKeys } from "./unified-keychain.js";
 export {
   SpendingTracker,
   type SpendingPolicy,
