@@ -1,0 +1,24 @@
+{
+  "name": "@pcc/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pcc-mcp": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "@pcc/spec": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}
