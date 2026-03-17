@@ -8,7 +8,8 @@ const techBadges = [
   "Metaplex Core",
   "Meteora DLMM",
   "Lit Protocol",
-  "Bittensor",
+  "Bittensor / POA Subnet",
+  "Arkhai / Alkahest",
   "Helia/IPFS",
   "Base Sepolia",
   "Solana",
@@ -79,6 +80,35 @@ export function AgentChatPage() {
           </div>
         </section>
 
+        {/* Demo Videos */}
+        <section className="space-y-6">
+          <h2 className="text-2xl font-bold text-white text-center">Demo</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.06]">
+              <iframe
+                width="100%"
+                height="100%"
+                src="https://www.youtube.com/embed/MxWOh0DJhGE"
+                title="PCCP Demo"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                className="w-full h-full"
+              />
+            </div>
+            <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.06]">
+              <iframe
+                width="100%"
+                height="100%"
+                src="https://www.youtube.com/embed/7Dxt_UkZZto"
+                title="PCCP Technical Walkthrough"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                className="w-full h-full"
+              />
+            </div>
+          </div>
+        </section>
+
         {/* How It Works */}
         <section className="space-y-6">
           <h2 className="text-2xl font-bold text-white text-center">How It Works</h2>
@@ -122,7 +152,7 @@ export function AgentChatPage() {
                   Real-time pricing via Meteora DLMM pools — operators deposit liquidity, requesters swap at market rate
                 </li>
                 <li>
-                  MilestoneEscrow on Base Sepolia — funds locked per milestone, released on evidence, slashed on dispute
+                  Arkhai/Alkahest escrow on Base Sepolia — demand attestation locks funds, arbiter validates evidence, releases on proof
                 </li>
                 <li>
                   Payments: Solana USDC (SPL tokens) + EVM USDC (Base) + x402 micropayments
@@ -144,10 +174,10 @@ export function AgentChatPage() {
                   Stored on IPFS via Helia — content-addressed, immutable
                 </li>
                 <li>
-                  Bittensor subnet miners verify evidence quality independently
+                  Bittensor POA subnet miners verify evidence quality via 6-check gate + 5-dimension scoring
                 </li>
                 <li>
-                  Yuma Consensus aggregates miner scores into a single trust signal
+                  Yuma Consensus aggregates miner scores into Assurance Score (0-1.0)
                 </li>
                 <li>
                   ZK proofs (Noir circuits) for dispute resolution without revealing raw data
