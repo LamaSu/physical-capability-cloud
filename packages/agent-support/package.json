@@ -1,0 +1,19 @@
+{
+  "name": "@pcc/agent-support",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PCC Support Agent — network-resident bot with full platform knowledge. Troubleshoots onboarding, adapter issues, evidence collection, settlement, and connectivity. Relays escalations to the operator.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }
+  },
+  "scripts": { "build": "tsc", "test": "vitest run --passWithNoTests", "typecheck": "tsc --noEmit", "clean": "rm -rf dist" },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*"
+  },
+  "devDependencies": { "vitest": "^1.6.0" }
+}
