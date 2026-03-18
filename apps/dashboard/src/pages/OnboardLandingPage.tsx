@@ -12,6 +12,13 @@ const pathways = [
     glow: "green" as const,
   },
   {
+    title: "Onboard Kit",
+    description: "SDK package for AI agents. Hand this to your team's agent — it wraps your device API and connects to the network autonomously. 44 capability types, 6 adapter templates.",
+    path: "/onboard/kit",
+    icon: "M10 2a1 1 0 011 0h2a1 1 0 011 0v2h2a1 1 0 011 1v2a1 1 0 01-1 1h-2v6h2a1 1 0 011 1v2a1 1 0 01-1 1h-2v2a1 1 0 01-1 0h-2a1 1 0 01-1 0v-2H8a1 1 0 01-1-1v-2a1 1 0 011-1h2V8H8a1 1 0 01-1-1V5a1 1 0 011-1h2V2z",
+    glow: "green" as const,
+  },
+  {
     title: "Equipment Marketplace",
     description: "Explore demand heatmaps, supply gaps, price trends, and ROI projections. Find the most profitable equipment to bring online.",
     path: "/marketplace",
@@ -44,7 +51,7 @@ export function OnboardLandingPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {pathways.map((p) => (
           <GlassPanel
             key={p.path}

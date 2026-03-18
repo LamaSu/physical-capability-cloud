@@ -67,6 +67,22 @@ export const api = {
   getConversations: () => fetchAPI<{ conversations: unknown[] }>("/agents/conversations"),
   getConversation: (convId: string) => fetchAPI<{ conversation: unknown }>(`/agents/conversations/${convId}`),
 
+  // Settlement (ERC-4337 batch)
+  getSettlementStatus: () => fetchAPI<{
+    batchEnabled: boolean;
+    pending: number;
+    totalValue: string;
+    smartAccountAddress: string | null;
+  }>("/settlement/status"),
+
+  getSettlementEpochs: () => fetchAPI<{ epochs: unknown[] }>("/settlement/epochs"),
+
+  flushSettlement: () => fetchAPI<{
+    epoch: number;
+    totalIntents: number;
+    batches: number;
+  }>("/settlement/flush", { method: "POST" }),
+
   // Agent Chat (streaming — returns raw Response for SSE consumption)
   agentChat: (body: {
     system: string;

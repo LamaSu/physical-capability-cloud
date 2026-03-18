@@ -15,7 +15,7 @@ export function KernelDetailPage() {
   const kernel = mockKernels.find((k) => k.id === kernelId);
   const devices = mockDevices.filter((d) => d.kernelId === kernelId);
   const jobs = mockJobs.filter((j) => {
-    const cap = kernel?.capabilities.find((c) => c.id === j.capabilityId);
+    const cap = (kernel?.capabilities ?? []).find((c: any) => c.id === j.capabilityId);
     return !!cap;
   });
 
@@ -80,7 +80,7 @@ export function KernelDetailPage() {
         {/* Capabilities */}
         <div className="space-y-4">
           <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Capabilities</h3>
-          {kernel.capabilities.map((cap) => (
+          {(kernel.capabilities ?? []).map((cap: any) => (
             <CapabilityCard key={cap.id} capability={cap} />
           ))}
         </div>

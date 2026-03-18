@@ -78,7 +78,7 @@ export function SpaceDetailPage() {
         <GlassPanel padding="md" className="space-y-2">
           <span className="text-xs font-medium text-white/50">Amenities</span>
           <div className="flex flex-wrap gap-1">
-            {space.amenities.map((a) => (
+            {(space.amenities ?? []).map((a: any) => (
               <GlowBadge key={a} color="green">{a}</GlowBadge>
             ))}
           </div>
@@ -87,7 +87,7 @@ export function SpaceDetailPage() {
         <GlassPanel padding="md" className="space-y-2">
           <span className="text-xs font-medium text-white/50">Environmental Systems</span>
           <div className="flex flex-wrap gap-1">
-            {space.environmentalSystems.map((e) => (
+            {(space.environmentalSystems ?? []).map((e: any) => (
               <GlowBadge key={e} color="gold">{e}</GlowBadge>
             ))}
           </div>
@@ -96,7 +96,7 @@ export function SpaceDetailPage() {
         <GlassPanel padding="md" className="space-y-2">
           <span className="text-xs font-medium text-white/50">Safety Features</span>
           <div className="flex flex-wrap gap-1">
-            {space.safetyFeatures.map((s) => (
+            {(space.safetyFeatures ?? []).map((s: any) => (
               <GlowBadge key={s} color="gray">{s}</GlowBadge>
             ))}
           </div>

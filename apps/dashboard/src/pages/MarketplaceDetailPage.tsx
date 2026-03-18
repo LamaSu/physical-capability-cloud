@@ -71,7 +71,7 @@ export function MarketplaceDetailPage() {
         <GlassPanel padding="md" className="space-y-2">
           <span className="text-xs font-medium text-white/50">Common Materials</span>
           <div className="flex flex-wrap gap-1">
-            {ec.commonMaterials.map((m) => (
+            {(ec.commonMaterials ?? []).map((m: any) => (
               <span key={m} className="text-[10px] px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.06] text-white/30">
                 {m}
               </span>
@@ -81,7 +81,7 @@ export function MarketplaceDetailPage() {
         <GlassPanel padding="md" className="space-y-2">
           <span className="text-xs font-medium text-white/50">Typical Tolerances</span>
           <div className="space-y-1">
-            {ec.typicalTolerances.map((t) => (
+            {(ec.typicalTolerances ?? []).map((t: any) => (
               <div key={t} className="text-xs text-white/40 font-mono">{t}</div>
             ))}
           </div>

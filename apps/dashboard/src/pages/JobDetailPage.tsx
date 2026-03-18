@@ -37,7 +37,7 @@ export function JobDetailPage() {
 
   const job = mockJobs.find((j) => j.id === jobId);
   const meta = jobId ? jobMeta[jobId] : undefined;
-  const escrow = mockEscrows.find((e) => e.milestones.some((m) => m.stepId === job?.stepId));
+  const escrow = mockEscrows.find((e: any) => (e.milestones ?? []).some((m: any) => m.stepId === job?.stepId));
 
   React.useEffect(() => {
     setPageMeta(meta?.name ?? `Job ${jobId}`, "Job progress, evidence, and escrow details");
