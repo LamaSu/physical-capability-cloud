@@ -27,6 +27,7 @@ import { registryRoutes } from "./routes/registry.js";
 import { agentChatRoutes } from "./routes/agent-chat.js";
 import { settlementRoutes } from "./routes/settlement.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
+import { feedbackRoutes } from "./routes/feedback.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -72,6 +73,8 @@ export async function createGateway(port = 3200) {
 
   // ERC-8004 domain verification (public, before auth)
   await app.register(wellKnownRoutes);
+  // Bug reports / feedback (public, before auth)
+  await app.register(feedbackRoutes);
 
   // Health check
   app.get("/api/health", async () => ({

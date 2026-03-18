@@ -35,9 +35,101 @@ for (const tool of response.tool_calls) {
   // Feed result back to your agent...
 }`;
 
+function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [type, setType] = useState<"bug" | "comment" | "difficulty" | "suggestion">("bug");
+  const [message, setMessage] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+
+  if (!open) return null;
+
+  const handleSubmit = async () => {
+    if (!message.trim()) return;
+    setStatus("sending");
+    try {
+      const res = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, message, page: window.location.pathname }),
+      });
+      if (res.ok) {
+        setStatus("sent");
+        setMessage("");
+        setTimeout(() => { setStatus("idle"); onClose(); }, 1500);
+      } else {
+        setStatus("error");
+      }
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-lg mx-4 rounded-xl border border-white/[0.08] bg-gray-900/95 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-white">Report a Bug or Leave Feedback</h2>
+          <p className="text-xs text-white/40">Found something weird? Having trouble? Let us know. All reports go directly to the dev team.</p>
+
+          <div className="flex gap-2">
+            {(["bug", "difficulty", "suggestion", "comment"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setType(t)}
+                className={`px-3 py-1.5 text-xs rounded-lg border capitalize transition-all ${
+                  type === t
+                    ? "bg-teal-500/20 border-teal-500/40 text-teal-300"
+                    : "border-white/[0.08] text-white/40 hover:text-white/60"
+                }`}
+              >
+                {t === "bug" ? "Bug Report" : t === "difficulty" ? "Having Trouble" : t === "suggestion" ? "Suggestion" : "Comment"}
+              </button>
+            ))}
+          </div>
+
+          <textarea
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder={
+              type === "bug" ? "Describe the bug: what happened, what you expected, and steps to reproduce..."
+                : type === "difficulty" ? "What are you having trouble with? What were you trying to do?"
+                : type === "suggestion" ? "What would you like to see improved or added?"
+                : "Any comments or thoughts..."
+            }
+            rows={5}
+            maxLength={5000}
+            className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white/80 placeholder-white/25 outline-none focus:border-teal-500/40 transition-colors resize-none"
+          />
+
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-white/20">{message.length}/5000</span>
+            <div className="flex gap-3">
+              <button onClick={onClose} className="px-4 py-2 text-xs text-white/40 hover:text-white/60 transition-colors">Cancel</button>
+              <button
+                onClick={handleSubmit}
+                disabled={!message.trim() || status === "sending"}
+                className={cn(
+                  "px-6 py-2 rounded-lg text-sm font-medium transition-all",
+                  status === "sent"
+                    ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                    : status === "error"
+                    ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                    : "bg-teal-500 hover:bg-teal-400 text-white disabled:opacity-40 disabled:cursor-not-allowed",
+                )}
+              >
+                {status === "sending" ? "Sending..." : status === "sent" ? "Submitted!" : status === "error" ? "Failed — retry?" : "Submit"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AgentChatPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [copied, setCopied] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   React.useEffect(() => {
     setPageMeta("PCC Network", "Verifiable on-chain skill wrapper for physical capabilities");
@@ -78,7 +170,21 @@ export function AgentChatPage() {
               Feed this to your agent. 28 tools. Any LLM. No setup.
             </p>
           </div>
+
+          {/* Bug Report / Feedback Button */}
+          <button
+            onClick={() => setFeedbackOpen(true)}
+            className={cn(
+              "px-6 py-3 rounded-lg text-sm font-medium transition-all duration-200",
+              "border-2 border-dashed border-white/20 text-white/50",
+              "hover:border-teal-400/40 hover:text-teal-300 hover:bg-teal-500/5",
+            )}
+          >
+            Report Bugs / Leave Feedback
+          </button>
         </section>
+
+        <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
 
         {/* Demo Videos */}
         <section className="space-y-6">
