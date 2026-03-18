@@ -83,6 +83,14 @@ export const api = {
     batches: number;
   }>("/settlement/flush", { method: "POST" }),
 
+  // Feedback
+  submitFeedback: (body: { type: string; message: string; page?: string }) =>
+    fetchAPI<{ id: string; submitted: boolean }>("/feedback", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getFeedback: () => fetchAPI<{ count: number; entries: unknown[] }>("/feedback"),
+
   // Agent Chat (streaming — returns raw Response for SSE consumption)
   agentChat: (body: {
     system: string;
