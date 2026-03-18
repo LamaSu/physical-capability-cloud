@@ -37,6 +37,7 @@ const SpaceFinderPage = lazy(() => import("./pages/SpaceFinderPage.js").then(m =
 const SpaceDetailPage = lazy(() => import("./pages/SpaceDetailPage.js").then(m => ({ default: m.SpaceDetailPage })));
 const OperatorDashboardPage = lazy(() => import("./pages/OperatorDashboardPage.js").then(m => ({ default: m.OperatorDashboardPage })));
 const OperatorMachineDetailPage = lazy(() => import("./pages/OperatorMachineDetailPage.js").then(m => ({ default: m.OperatorMachineDetailPage })));
+const RevenueDashboardPage = lazy(() => import("./pages/RevenueDashboardPage.js").then(m => ({ default: m.RevenueDashboardPage })));
 const SensorDashboardPage = lazy(() => import("./pages/SensorDashboardPage.js").then(m => ({ default: m.SensorDashboardPage })));
 const BatchTrackingPage = lazy(() => import("./pages/BatchTrackingPage.js").then(m => ({ default: m.BatchTrackingPage })));
 const EvidenceExplorerPage = lazy(() => import("./pages/EvidenceExplorerPage.js").then(m => ({ default: m.EvidenceExplorerPage })));
@@ -55,6 +56,8 @@ const ProtocolBuilderPage = lazy(() => import("./pages/ProtocolBuilderPage.js").
 const ProtocolRunPage = lazy(() => import("./pages/ProtocolRunPage.js").then(m => ({ default: m.ProtocolRunPage })));
 const SubnetStatusPage = lazy(() => import("./pages/SubnetStatusPage.js").then(m => ({ default: m.SubnetStatusPage })));
 const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").then(m => ({ default: m.DePINDashboardPage })));
+const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => ({ default: m.SettlementPage })));
+const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -160,9 +163,11 @@ function DashboardShell() {
               <Route path="/kernels" element={<KernelsPage />} />
               <Route path="/kernels/:kernelId" element={<KernelDetailPage />} />
               <Route path="/escrow" element={<EscrowPage />} />
+              <Route path="/settlement" element={<SettlementPage />} />
               <Route path="/agents" element={<AgentLogPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/onboard" element={<OnboardLandingPage />} />
+              <Route path="/onboard/kit" element={<OnboardKitPage />} />
               <Route path="/onboard/wizard" element={<OnboardWizardPage />} />
               <Route path="/onboard/wizard/:step" element={<OnboardWizardPage />} />
               <Route path="/marketplace" element={<MarketplacePage />} />
@@ -171,6 +176,7 @@ function DashboardShell() {
               <Route path="/spaces" element={<SpaceFinderPage />} />
               <Route path="/spaces/:spaceId" element={<SpaceDetailPage />} />
               <Route path="/operator" element={<OperatorDashboardPage />} />
+              <Route path="/operator/revenue" element={<RevenueDashboardPage />} />
               <Route path="/operator/:machineId" element={<OperatorMachineDetailPage />} />
               <Route path="/sensors" element={<SensorDashboardPage />} />
               <Route path="/sensors/:kernelId" element={<SensorDashboardPage />} />

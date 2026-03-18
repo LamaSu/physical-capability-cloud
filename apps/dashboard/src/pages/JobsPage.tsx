@@ -1,86 +1,83 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import { GlassPanel, StatusChip, ProgressArc, AmountDisplay, TierBadge, GlowBadge } from "@pcc/ui";
+import { GlassPanel, DataCell, AmountDisplay, StatusChip, ProgressArc, EmptyState, LoadingShell } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { mockJobs, jobMeta } from "../api/mock-data.js";
+import { useJobs } from "../api/hooks/use-pcc-data.js";
 
 const jobStatusToPulse: Record<string, "online" | "executing" | "completed" | "failed" | "offline"> = {
-  queued: "online",
-  preparing: "executing",
-  executing: "executing",
-  collecting_evidence: "executing",
-  awaiting_pickup: "executing",
-  completed: "completed",
-  failed: "failed",
-  cancelled: "offline",
+  queued: "online", preparing: "executing", executing: "executing",
+  collecting_evidence: "executing", awaiting_pickup: "executing",
+  completed: "completed", failed: "failed", cancelled: "offline",
 };
 
 export function JobsPage() {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
+  React.useEffect(() => { setPageMeta("Jobs", "Active and completed jobs"); }, [setPageMeta]);
+
+  const { data: jobs = [], isLoading } = useJobs();
   const [filter, setFilter] = React.useState<"all" | "active" | "completed">("all");
 
-  React.useEffect(() => { setPageMeta("Jobs", "Track active and completed lab and manufacturing jobs"); }, [setPageMeta]);
+  if (isLoading) return <LoadingShell rows={5} />;
 
-  const filtered = mockJobs.filter((j) => {
-    if (filter === "active") return j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";
-    if (filter === "completed") return j.status === "completed";
-    return true;
-  });
+  const filtered = filter === "all" ? jobs
+    : filter === "active" ? jobs.filter((j: any) => !["completed", "failed", "cancelled"].includes(j.status))
+    : jobs.filter((j: any) => j.status === "completed");
+
+  const activeCount = jobs.filter((j: any) => !["completed", "failed", "cancelled"].includes(j.status)).length;
+  const completedCount = jobs.filter((j: any) => j.status === "completed").length;
 
   return (
-    <div className="space-y-4">
-      {/* Filters */}
-      <div className="flex gap-2">
-        {(["all", "active", "completed"] as const).map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`px-3 py-1 rounded-lg text-xs border transition-all ${
-              filter === f
-                ? "bg-green-500/15 border-green-500/30 text-green-400"
-                : "bg-white/[0.03] border-white/[0.06] text-white/40 hover:border-white/[0.12]"
-            }`}
-          >
-            {f.charAt(0).toUpperCase() + f.slice(1)}
-          </button>
-        ))}
-        <span className="ml-auto text-xs text-white/30">{filtered.length} jobs</span>
+    <div className="space-y-6">
+      <div className="grid grid-cols-3 gap-4">
+        <GlassPanel padding="md"><DataCell label="Total Jobs" value={jobs.length} mono /></GlassPanel>
+        <GlassPanel padding="md" glow={activeCount > 0 ? "green" : undefined}><DataCell label="Active" value={activeCount} mono /></GlassPanel>
+        <GlassPanel padding="md"><DataCell label="Completed" value={completedCount} mono /></GlassPanel>
       </div>
 
-      {/* Job list */}
-      {filtered.map((job) => {
-        const meta = jobMeta[job.id];
-        return (
-          <GlassPanel
-            key={job.id}
-            hover
-            padding="md"
-            onClick={() => navigate(`/jobs/${job.id}`)}
-          >
-            <div className="flex items-center gap-4">
-              <ProgressArc progress={job.progress} />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-white/80">{meta?.name ?? job.id}</div>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-white/30 font-mono">{job.id}</span>
-                  <span className="text-xs text-white/20">·</span>
-                  <span className="text-xs text-white/30">{meta?.kernelName ?? job.capabilityId}</span>
-                </div>
-              </div>
-              {meta && <TierBadge tier={meta.tier} />}
-              <AmountDisplay amount={meta?.amount ?? "0"} size="sm" />
-              <StatusChip status={jobStatusToPulse[job.status] ?? "offline"} label={job.status.replace(/_/g, " ")} />
-            </div>
-          </GlassPanel>
-        );
-      })}
-
-      {filtered.length === 0 && (
-        <div className="text-center py-12 text-white/30 text-sm">
-          No jobs match the current filter
+      <GlassPanel padding="lg">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex gap-2">
+            {(["all", "active", "completed"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-3 py-1 text-xs rounded-md capitalize transition-all ${
+                  filter === f ? "bg-teal-400/20 text-teal-400 border border-teal-400/30" : "text-white/30 hover:text-white/50"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
         </div>
-      )}
+
+        {filtered.length === 0 ? (
+          <EmptyState
+            title={jobs.length === 0 ? "No jobs yet" : `No ${filter} jobs`}
+            description={jobs.length === 0 ? "Jobs will appear here when you submit a workflow or capability request." : undefined}
+            action={jobs.length === 0 ? { label: "Discover Capabilities", onClick: () => navigate("/discover") } : undefined}
+          />
+        ) : (
+          <div className="space-y-2">
+            {filtered.map((job: any) => (
+              <div
+                key={job.id}
+                onClick={() => navigate(`/jobs/${job.id}`)}
+                className="flex items-center gap-4 p-3 rounded-lg bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.04] cursor-pointer transition-colors"
+              >
+                <ProgressArc progress={job.progress ?? 0} size={40} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-white/80 truncate">{job.name ?? job.id}</div>
+                  <div className="text-xs text-white/30 font-mono">{job.capabilityId ?? ""}</div>
+                </div>
+                <AmountDisplay amount={job.amount ?? "0"} size="sm" />
+                <StatusChip status={jobStatusToPulse[job.status] ?? "offline"} label={job.status?.replace("_", " ") ?? ""} />
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassPanel>
     </div>
   );
 }

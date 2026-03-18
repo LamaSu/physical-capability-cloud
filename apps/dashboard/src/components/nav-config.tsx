@@ -50,6 +50,7 @@ export const navGroups: NavGroup[] = [
     title: "Onboarding",
     items: [
       { label: "Add Machine", path: "/onboard", icon: <OnboardIcon /> },
+      { label: "Onboard Kit", path: "/onboard/kit", icon: <OnboardIcon /> },
       { label: "Marketplace", path: "/marketplace", icon: <MarketplaceIcon /> },
       { label: "Find Space", path: "/spaces", icon: <SpaceFinderIcon /> },
       { label: "Operator", path: "/operator", icon: <OperatorIcon /> },
@@ -84,6 +85,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Kernels", path: "/kernels", icon: <KernelsIcon /> },
       { label: "Escrow", path: "/escrow", icon: <EscrowIcon /> },
+      { label: "Settlement", path: "/settlement", icon: <EscrowIcon /> },
     ],
   },
   {

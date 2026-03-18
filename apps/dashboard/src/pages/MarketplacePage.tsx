@@ -93,7 +93,7 @@ export function MarketplacePage() {
               >
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-white/70">{ec.name}</span>
-                  {snap && <GlowBadge color={demandColors[snap.demandLevel]}>{snap.demandLevel}</GlowBadge>}
+                  {snap && <GlowBadge color={(demandColors as any)[snap.demandLevel] ?? "gray"}>{snap.demandLevel}</GlowBadge>}
                 </div>
                 <p className="text-xs text-white/30">{ec.description}</p>
                 {snap && (
