@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import websocket from "@fastify/websocket";
 import { initStore, closeStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { buildRoutes } from "./routes/build.js";
@@ -24,29 +25,37 @@ import { rewardRoutes } from "./routes/rewards.js";
 import { authRoutes } from "./routes/auth.js";
 import { registryRoutes } from "./routes/registry.js";
 import { agentChatRoutes } from "./routes/agent-chat.js";
+import { settlementRoutes } from "./routes/settlement.js";
+import { wellKnownRoutes } from "./routes/well-known.js";
+import { telemetryRoutes } from "./routes/telemetry.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
+import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
 
 export async function createGateway(port = 3200) {
-  // Initialize SQLite store (creates tables + seeds if empty)
-  initStore({ seed: true });
+  // Initialize SQLite store — only seed demo data in dev (not production)
+  const shouldSeed = process.env.PCC_SEED_DATA === "true" || process.env.NODE_ENV !== "production";
+  initStore({ seed: shouldSeed });
 
   const app = Fastify({ logger: true });
 
-  // Close the DB and IPFS node when the server shuts down
+  // Close the DB, IPFS node, and batch settlement when the server shuts down
   app.addHook("onClose", async () => {
     closeStore();
     const { stopEvidenceStorage } = await import("./services.js");
     await stopEvidenceStorage();
+    const { stopBatchSettlement } = await import("./contracts/batch-settlement.js");
+    stopBatchSettlement();
   });
 
   await app.register(cors, { origin: true, credentials: true });
   await app.register(cookie);
+  await app.register(websocket);
 
   // Decorate request with userId (set by requireAuth / optionalAuth hooks)
   app.decorateRequest("userId", null);
@@ -60,6 +69,9 @@ export async function createGateway(port = 3200) {
     const sessionId = req.headers["x-pcc-session"] as string | undefined;
     (req as unknown as { pccSession: unknown }).pccSession = getOrCreateSession(sessionId);
   });
+
+  // ERC-8004 domain verification (public, before auth)
+  await app.register(wellKnownRoutes);
 
   // Health check
   app.get("/api/health", async () => ({
@@ -96,6 +108,11 @@ export async function createGateway(port = 3200) {
   await app.register(rewardRoutes);
   await app.register(registryRoutes);
   await app.register(agentChatRoutes);
+  await app.register(settlementRoutes);
+  await app.register(telemetryRoutes);
+
+  // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
+  await app.register(a2aRelayRoutes);
 
   // SSE endpoints
   await app.register(notificationSSE);
@@ -180,6 +197,13 @@ export async function createGateway(port = 3200) {
       initAgentBridge().catch((err) =>
         console.warn("[gateway] Agent bridge init failed:", err),
       );
+
+      // Initialize ERC-4337 batch settlement in background (non-blocking)
+      import("./contracts/batch-settlement.js")
+        .then(({ initBatchSettlement }) => initBatchSettlement())
+        .catch((err) =>
+          console.warn("[gateway] Batch settlement init failed:", err),
+        );
 
       // Start mock streaming producers
       producerManager?.startAll();
