@@ -1,0 +1,162 @@
+{
+  "kernel": {
+    "kernelId": "kernel_acme_cnc_sf",
+    "name": "ACME CNC Shop — San Francisco",
+    "location": { "lat": 37.7749, "lng": -122.4194 },
+    "walletPrivateKeyEnvVar": "KERNEL_PRIVATE_KEY",
+    "gatewayUrl": "http://localhost:3200",
+    "httpPort": 3100
+  },
+  "adapters": [
+    {
+      "adapterId": "dev-haas-vf2",
+      "className": "HaasVF2Adapter",
+      "adapterType": "machine",
+      "protocol": "http",
+      "connectionString": "http://192.168.1.100:8080",
+      "deviceType": "controller",
+      "firmwareVersion": "HaasVF2-Adapter-1.0.0",
+      "pollIntervalMs": 2000,
+      "generateMockMode": true,
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/api/machine/status",
+          "purpose": "status",
+          "description": "Get current machine status",
+          "responseShape": { "state": "string", "mode": "string", "alarm": "boolean" }
+        },
+        {
+          "method": "GET",
+          "path": "/api/job/progress",
+          "purpose": "progress",
+          "description": "Get current job progress percentage",
+          "responseShape": { "percentComplete": "number", "timeRemaining": "number" }
+        },
+        {
+          "method": "POST",
+          "path": "/api/programs/upload",
+          "purpose": "load_program",
+          "description": "Upload a G-code file to the machine",
+          "requestBody": { "filename": "string", "gcodeHash": "string" }
+        },
+        {
+          "method": "POST",
+          "path": "/api/job/start",
+          "purpose": "start",
+          "description": "Start the loaded program"
+        },
+        {
+          "method": "POST",
+          "path": "/api/job/stop",
+          "purpose": "stop",
+          "description": "Stop the current job"
+        },
+        {
+          "method": "POST",
+          "path": "/api/job/pause",
+          "purpose": "pause",
+          "description": "Pause the current job"
+        },
+        {
+          "method": "POST",
+          "path": "/api/job/resume",
+          "purpose": "resume",
+          "description": "Resume a paused job"
+        }
+      ]
+    },
+    {
+      "adapterId": "dev-power-meter",
+      "className": "ShopPowerMeter",
+      "adapterType": "sensor",
+      "protocol": "modbus",
+      "connectionString": "http://192.168.1.101:502",
+      "deviceType": "sensor",
+      "firmwareVersion": "Schneider-PM5xxx-1.0.0",
+      "pollIntervalMs": 1000,
+      "generateMockMode": true,
+      "registerMap": [
+        { "channel": "voltage_l1", "label": "Voltage L1", "address": 0, "registerType": "holding", "dataType": "float32", "unit": "V" },
+        { "channel": "current_l1", "label": "Current L1", "address": 6, "registerType": "holding", "dataType": "float32", "unit": "A" },
+        { "channel": "active_power", "label": "Active Power", "address": 12, "registerType": "holding", "dataType": "float32", "unit": "W" }
+      ]
+    },
+    {
+      "adapterId": "dev-qc-camera",
+      "className": "QCCamera",
+      "adapterType": "camera",
+      "protocol": "http",
+      "connectionString": "http://192.168.1.102:8000",
+      "deviceType": "camera",
+      "firmwareVersion": "QCCamera-1.0.0",
+      "generateMockMode": true,
+      "endpoints": [
+        {
+          "method": "POST",
+          "path": "/api/capture",
+          "purpose": "capture_image",
+          "description": "Capture a snapshot from the QC camera"
+        },
+        {
+          "method": "POST",
+          "path": "/api/inspect",
+          "purpose": "inspect",
+          "description": "Run CV inspection on a captured image"
+        }
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "cnc-3axis",
+      "name": "Haas VF-2 3-Axis CNC Mill",
+      "description": "Vertical machining center, 30x16x20 inch travel, 8100 RPM spindle",
+      "materials": ["aluminum-6061", "aluminum-7075", "steel-1018", "steel-4140", "stainless-304", "brass", "delrin"],
+      "tolerances": {
+        "linear": "±0.001 inch",
+        "surface": "Ra 32 μin",
+        "positional": "±0.0005 inch"
+      },
+      "workEnvelope": { "x": 762, "y": 406, "z": 508, "unit": "mm" },
+      "assuranceTiers": [0, 1, 2],
+      "pricing": {
+        "currency": "USDC",
+        "baseCost": "25.00",
+        "perMinute": "1.50",
+        "minimum": "50.00"
+      },
+      "adapterId": "dev-haas-vf2"
+    }
+  ],
+  "profiles": [
+    {
+      "profileId": "profile-haas-vf2",
+      "profileName": "Haas VF-2 CNC Mill",
+      "capabilityType": "cnc-3axis",
+      "adapterId": "dev-haas-vf2",
+      "paramOverrides": {
+        "material": {
+          "key": "material",
+          "label": "Material",
+          "type": "enum",
+          "options": [
+            { "value": "aluminum-6061", "label": "Aluminum 6061" },
+            { "value": "aluminum-7075", "label": "Aluminum 7075" },
+            { "value": "steel-1018", "label": "Steel 1018" },
+            { "value": "stainless-304", "label": "Stainless 304" },
+            { "value": "brass", "label": "Brass" },
+            { "value": "delrin", "label": "Delrin" }
+          ],
+          "defaultValue": "aluminum-6061",
+          "required": true
+        }
+      },
+      "pricingOverrides": {
+        "baseCost": "30.00",
+        "perMinute": "1.75",
+        "minimum": "60.00"
+      }
+    }
+  ]
+}

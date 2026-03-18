@@ -1,0 +1,36 @@
+{
+  "name": "@pcc/onboard-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Complete onboarding SDK for teams to wrap their device APIs and host capabilities on the Physical Capability Cloud Platform. Hand this package to your AI agent.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pcc-onboard": "dist/cli.js"
+  },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" },
+    "./templates/*": { "types": "./dist/templates/*.d.ts", "import": "./dist/templates/*.js" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "scaffold": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*",
+    "@pcc/agent-kernel": "workspace:*",
+    "@pcc/kernel": "workspace:*",
+    "@pcc/contract-builder": "workspace:*",
+    "@pcc/agent-user": "workspace:*",
+    "@pcc/agent-broker": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
