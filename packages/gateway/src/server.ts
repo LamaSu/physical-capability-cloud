@@ -27,11 +27,13 @@ import { registryRoutes } from "./routes/registry.js";
 import { agentChatRoutes } from "./routes/agent-chat.js";
 import { settlementRoutes } from "./routes/settlement.js";
 import { bountyRoutes } from "./routes/bounty.js";
+import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
+import { aegisGate } from "./middleware/aegis-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -87,6 +89,12 @@ export async function createGateway(port = 3200) {
   // Auth routes (before other routes so session is available)
   await app.register(authRoutes);
 
+  // AEGIS content scanning gate (before payment + REST routes — scans request bodies)
+  const aegisEnabled = process.env.PCC_AEGIS_ENABLED !== "false";
+  if (aegisEnabled) {
+    await app.register(aegisGate);
+  }
+
   // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
 
@@ -114,6 +122,7 @@ export async function createGateway(port = 3200) {
   await app.register(agentChatRoutes);
   await app.register(settlementRoutes);
   await app.register(bountyRoutes);
+  await app.register(poolRoutes);
   await app.register(telemetryRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging

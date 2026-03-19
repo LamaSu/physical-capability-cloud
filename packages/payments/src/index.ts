@@ -40,3 +40,12 @@ export {
   type BountyHunter,
   type BountyRequirements,
 } from "./bounty/index.js";
+export {
+  PoolService,
+  type InvestmentPool,
+  type PoolStake,
+  type PoolDistribution,
+  type PoolConfig,
+  type PoolStatus,
+  type StakerEarnings,
+} from "./pool/index.js";

@@ -17,6 +17,8 @@ import type {
   Conversation,
 } from "@pcc/a2a";
 import { MessageBus } from "@pcc/a2a";
+import type { ContentScanner } from "@pcc/a2a";
+import type { ContentScanResult } from "@pcc/spec";
 import { AgentWallet, type WalletConfig } from "./wallet.js";
 import type { Address } from "@pcc/spec";
 import { ids } from "@pcc/spec";
@@ -41,6 +43,10 @@ export interface BaseAgentConfig {
   description: string;
   wallet?: WalletConfig;
   bus: MessageBus;
+  /** Optional content scanner for intent verification before handling */
+  contentScanner?: ContentScanner;
+  /** Minimum confidence to accept an intent (0-1, default: 0.5) */
+  minScanConfidence?: number;
 }
 
 export abstract class BaseAgent {
@@ -55,6 +61,8 @@ export abstract class BaseAgent {
   protected tools: Map<string, AgentTool> = new Map();
   protected intentHandlers: Map<string, IntentHandler> = new Map();
   private running = false;
+  private contentScanner?: ContentScanner;
+  private minScanConfidence: number;
 
   constructor(config: BaseAgentConfig) {
     this.id = ids.job(); // reusing id generator, prefix doesn't matter for agents
@@ -63,6 +71,8 @@ export abstract class BaseAgent {
     this.description = config.description;
     this.wallet = new AgentWallet(config.wallet);
     this.bus = config.bus;
+    this.contentScanner = config.contentScanner;
+    this.minScanConfidence = config.minScanConfidence ?? 0.5;
 
     this.card = {
       id: this.id,
@@ -197,6 +207,20 @@ export abstract class BaseAgent {
   // ── Internal ────────────────────────────────────────────────────
 
   private async handleMessage(message: A2AMessage): Promise<void> {
+    // Verify intent content if scanner is configured
+    if (this.contentScanner) {
+      const scanResult = await this.verifyIntent(message);
+      if (scanResult && scanResult.decision === "BLOCK") {
+        await this.reply(message, {
+          type: "error",
+          code: "intent_blocked",
+          message: `Intent blocked by content scanner: ${scanResult.zone} (${scanResult.triggeredLayers.join(", ")})`,
+          retryable: false,
+        });
+        return;
+      }
+    }
+
     const handler = this.intentHandlers.get(message.intent.type);
     if (handler) {
       const response = await handler(message, this);
@@ -212,6 +236,21 @@ export abstract class BaseAgent {
         retryable: false,
       });
     }
+  }
+
+  /**
+   * Verify intent content using the configured scanner.
+   * Returns the scan result, or null if no scanner is configured.
+   */
+  private async verifyIntent(message: A2AMessage): Promise<ContentScanResult | null> {
+    if (!this.contentScanner) return null;
+
+    const content = JSON.stringify(message.intent);
+    return this.contentScanner.scan(content, {
+      sourceAgentId: message.from,
+      intentType: message.intent.type,
+      conversationId: message.conversationId,
+    });
   }
 
   /** Called when agent starts — override in subclasses */

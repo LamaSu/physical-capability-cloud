@@ -1,6 +1,6 @@
 # PCCP — Physical Capability Cloud Protocol
 
-![Tests](https://img.shields.io/badge/tests-623%20passing-brightgreen) ![Packages](https://img.shields.io/badge/packages-17%20%2B%201%20app-blue) ![Routes](https://img.shields.io/badge/dashboard%20routes-44%2B-blueviolet) ![Track](https://img.shields.io/badge/PL%20Genesis-Existing%20Code-orange)
+![Tests](https://img.shields.io/badge/tests-1174%20passing-brightgreen) ![Packages](https://img.shields.io/badge/packages-18%20%2B%201%20app-blue) ![Routes](https://img.shields.io/badge/dashboard%20routes-45%2B-blueviolet) ![Track](https://img.shields.io/badge/PL%20Genesis-Existing%20Code-orange)
 
 **AWS for the physical world.** Any physical capability — lab instruments, printers, couriers, robot arms — becomes a composable, verifiable, settleable service. AI agents discover, negotiate, and orchestrate. Evidence proves every step. Settlement is automatic. No middleman.
 
@@ -159,7 +159,7 @@ Operators set **maximum prices**. Agents bid competitively under the ceiling:
 pnpm install
 pnpm build --concurrency=1
 pnpm dev                        # Dashboard :5173, Gateway :3200
-pnpm --workspace-concurrency=1 -r test   # 623+ tests
+pnpm --workspace-concurrency=1 -r test   # 1174 tests
 ```
 
 ---
