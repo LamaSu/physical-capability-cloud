@@ -33,3 +33,10 @@ export {
   type ObligationStatus,
   type Attestation,
 } from "./native-escrow/index.js";
+export {
+  BountyService,
+  type DemandSignal,
+  type CapabilityBounty,
+  type BountyHunter,
+  type BountyRequirements,
+} from "./bounty/index.js";
