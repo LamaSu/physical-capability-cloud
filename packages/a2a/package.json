@@ -7,7 +7,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc",
@@ -20,6 +24,10 @@
     "nanoid": "^5.0.0"
   },
   "devDependencies": {
-    "vitest": "^1.6.0"
+    "@fastify/websocket": "^10.0.1",
+    "@types/ws": "^8.18.1",
+    "fastify": "^4.26.0",
+    "vitest": "^1.6.0",
+    "ws": "^8.19.0"
   }
 }

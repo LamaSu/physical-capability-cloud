@@ -354,6 +354,132 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// 15. pcc_get_agent_identity
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_agent_identity",
+  "Get the ERC-8004 agent identity for a PCC kernel or agent, including registration file, reputation summary, and validation status.",
+  {
+    agentId: z.string().describe("Kernel ID or agent DID to look up"),
+  },
+  async ({ agentId }) => {
+    const data = await pccFetch(`/api/registry/entities/${encodeURIComponent(agentId)}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 16. pcc_get_reputation
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_reputation",
+  "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness.",
+  {
+    agentId: z.string().describe("Agent ID or kernel ID"),
+    tag: z.string().optional().describe("Filter by reputation tag (e.g. 'quality', 'uptime', 'assurance')"),
+  },
+  async ({ agentId, tag }) => {
+    const data = await pccFetch(`/api/registry/entities/${encodeURIComponent(agentId)}/reputation`, {
+      query: { tag },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 17. pcc_list_sensors
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_list_sensors",
+  "List available sensor channels for a kernel — temperature, pressure, pH, flow rate, etc.",
+  {
+    kernelId: z.string().describe("Kernel ID to list sensors for"),
+  },
+  async ({ kernelId }) => {
+    const data = await pccFetch(`/api/sensors/${encodeURIComponent(kernelId)}/channels`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 18. pcc_get_sensor_data
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_sensor_data",
+  "Get recent sensor readings for a specific channel on a kernel.",
+  {
+    kernelId: z.string().describe("Kernel ID"),
+    channel: z.string().describe("Sensor channel name (e.g. 'temperature', 'pressure')"),
+    limit: z.number().optional().describe("Number of recent readings to return (default 50)"),
+  },
+  async ({ kernelId, channel, limit }) => {
+    const data = await pccFetch(
+      `/api/sensors/${encodeURIComponent(kernelId)}/data/${encodeURIComponent(channel)}`,
+      { query: { limit: limit?.toString() } },
+    );
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 19. pcc_get_evidence
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_evidence",
+  "Get a specific evidence bundle by ID — includes encrypted data reference, IPFS CID, ZK proof status, Bittensor verification scores, and evaluator attestations.",
+  {
+    bundleId: z.string().describe("Evidence bundle ID"),
+  },
+  async ({ bundleId }) => {
+    const data = await pccFetch(`/api/evidence/${encodeURIComponent(bundleId)}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 20. pcc_compile_workflow
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_compile_workflow",
+  "Compile a multi-step manufacturing workflow into an execution DAG. Provide capability requirements and dependencies — returns topologically sorted execution waves.",
+  {
+    steps: z.array(z.object({
+      id: z.string().describe("Step identifier"),
+      capabilityType: z.string().describe("Required capability type"),
+      dependsOn: z.array(z.string()).optional().describe("Step IDs this step depends on"),
+      parameters: z.record(z.unknown()).optional().describe("Capability parameters"),
+    })).describe("Workflow steps with dependencies"),
+  },
+  async ({ steps }) => {
+    const data = await pccFetch("/api/workflows/compile", {
+      method: "POST",
+      body: { steps },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 21. pcc_agent_registration
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_agent_registration",
+  "Get the ERC-8004 Agent Registration File for the PCC gateway. This is the machine-readable identity document that enables agent discovery.",
+  {},
+  async () => {
+    const data = await pccFetch("/.well-known/agent-registration.json");
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

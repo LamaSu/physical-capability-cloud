@@ -27,6 +27,7 @@ import {
   ProtocolRunIcon,
   SubnetIcon,
   DePINIcon,
+  TelemetryIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -73,6 +74,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "Monitoring",
     items: [
+      { label: "Telemetry", path: "/telemetry", icon: <TelemetryIcon /> },
       { label: "Sensors", path: "/sensors", icon: <SensorIcon /> },
       { label: "Batches", path: "/batches", icon: <BatchIcon /> },
       { label: "Evidence", path: "/evidence", icon: <EvidenceIcon /> },

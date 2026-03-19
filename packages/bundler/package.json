@@ -1,0 +1,31 @@
+{
+  "name": "@pcc/bundler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ERC-4337 account abstraction — smart accounts, UserOp batching, paymaster, epoch settlement",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/contracts": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "permissionless": "^0.2.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

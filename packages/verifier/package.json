@@ -13,7 +13,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*"
+    "@pcc/spec": "workspace:*",
+    "starknet": "^9.4.2"
   },
   "devDependencies": {
     "@noir-lang/backend_barretenberg": "^0.36.0",

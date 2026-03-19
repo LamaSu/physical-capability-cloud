@@ -4,3 +4,5 @@ export { canonicalize, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEv
 export { ids, generateId } from "./util/ids.js";
 // Identity types and browser-safe functions (no node:crypto)
 export * from "./identity/types.js";
+// ERC-8004 types (browser-safe)
+export * from "./identity/erc8004.js";

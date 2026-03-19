@@ -35,3 +35,4 @@ export const ProtocolBuilderIcon = () => icon("M6 3l-2 4h4l-2-4zM14 3l-2 4h4l-2-
 export const ProtocolRunIcon = () => icon("M7 4l8 6-8 6V4zM3 10h1M16 10h1M10 3v1M10 16v1");
 export const SubnetIcon = () => icon("M10 3a7 7 0 100 14 7 7 0 000-14zM3 10h14M10 3c-2 2-3 4.5-3 7s1 5 3 7M10 3c2 2 3 4.5 3 7s-1 5-3 7");
 export const DePINIcon = () => icon("M10 2a8 8 0 100 16 8 8 0 000-16zM10 5v5l3 3M7 10h6");
+export const TelemetryIcon = () => icon("M3 15l4-8 3 5 2-3 3 6M3 5h14M17 3v4");

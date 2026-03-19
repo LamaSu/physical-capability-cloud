@@ -3,33 +3,65 @@
  *
  * Reads escrow state, token balances, and event logs.
  * Write operations go through agent wallets — the gateway only reads.
+ *
+ * Network selection:
+ *   PCC_NETWORK=sepolia       → Ethereum Sepolia (deployed contracts)
+ *   PCC_NETWORK=base-sepolia  → Base Sepolia (default, legacy)
+ *   PCC_RPC_URL               → Override RPC URL for any network
  */
 import { createPublicClient, http, type Address, formatUnits } from "viem";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
 import {
   MilestoneEscrowABI,
   MockUSDCABI,
   MilestoneStatus,
   milestoneStatusName,
+  getDeployment,
 } from "@pcc/contracts";
+
+// ---------------------------------------------------------------------------
+// Network-aware configuration
+// ---------------------------------------------------------------------------
+
+const PCC_NETWORK = process.env.PCC_NETWORK ?? "base-sepolia";
+
+function resolveChainConfig() {
+  try {
+    const deployment = getDeployment(PCC_NETWORK);
+    return {
+      chain: deployment.chain,
+      rpcUrl: process.env.PCC_RPC_URL ?? deployment.rpcUrl ?? "https://sepolia.base.org",
+    };
+  } catch {
+    // Fallback to base-sepolia if network not found
+    return {
+      chain: baseSepolia,
+      rpcUrl: process.env.PCC_RPC_URL ?? "https://sepolia.base.org",
+    };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Client singleton
 // ---------------------------------------------------------------------------
-
-const PCC_RPC_URL = process.env.PCC_RPC_URL ?? "https://sepolia.base.org";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _client: any;
 
 export function getPublicClient() {
   if (!_client) {
+    const { chain, rpcUrl } = resolveChainConfig();
     _client = createPublicClient({
-      chain: baseSepolia,
-      transport: http(PCC_RPC_URL),
+      chain,
+      transport: http(rpcUrl),
     });
   }
   return _client as ReturnType<typeof createPublicClient>;
+}
+
+/** Get the active network name */
+export function getActiveNetwork(): string {
+  return PCC_NETWORK;
 }
 
 // ---------------------------------------------------------------------------

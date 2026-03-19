@@ -20,4 +20,11 @@ export type {
 // EvidenceStorageService uses Helia (ESM-only) — import from the subpath
 // "@pcc/kernel/evidence-storage" when needed to avoid CJS barrel issues.
 export type { ArchiveResult } from "./evidence-storage.js";
+// Storacha (w3up) alternative backend — import from subpath to keep ESM-clean
+export { StorachaStorageService } from "./storacha-storage.js";
+export type { StorachaStorageOptions } from "./storacha-storage.js";
+export { createEvidenceStorage } from "./evidence-storage-factory.js";
+export type { IEvidenceStorageService } from "./evidence-storage-factory.js";
+export { createLitEncryptionService, isRealLitEnabled } from "./lit-encryption-factory.js";
+export type { AnyLitEncryptionService } from "./lit-encryption-factory.js";
 export * from "./adapters/index.js";

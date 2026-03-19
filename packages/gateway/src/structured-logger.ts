@@ -33,11 +33,29 @@ export class StructuredLogger {
 
   getRecent(limit = 100): LogEntry[] { return this.getEntries(limit); }
   getSources(): string[] { return [...new Set(this.entries.map(e => e.source))]; }
-  query(opts: { level?: string; source?: string; since?: string; limit?: number } = {}): LogEntry[] {
+  query(opts: {
+    level?: string;
+    source?: string;
+    since?: string;
+    limit?: number;
+    jobId?: string;
+    kernelId?: string;
+    search?: string;
+    after?: string;
+    before?: string;
+  } = {}): LogEntry[] {
     let filtered = [...this.entries];
     if (opts.level) filtered = filtered.filter(e => e.level === opts.level);
     if (opts.source) filtered = filtered.filter(e => e.source === opts.source);
-    if (opts.since) filtered = filtered.filter(e => e.timestamp >= opts.since);
+    if (opts.since != null) filtered = filtered.filter(e => e.timestamp >= opts.since!);
+    if (opts.after != null) filtered = filtered.filter(e => e.timestamp > opts.after!);
+    if (opts.before != null) filtered = filtered.filter(e => e.timestamp < opts.before!);
+    if (opts.jobId) filtered = filtered.filter(e => (e as Record<string, unknown>).jobId === opts.jobId);
+    if (opts.kernelId) filtered = filtered.filter(e => (e as Record<string, unknown>).kernelId === opts.kernelId);
+    if (opts.search) {
+      const s = opts.search.toLowerCase();
+      filtered = filtered.filter(e => e.message.toLowerCase().includes(s));
+    }
     return filtered.slice(-(opts.limit ?? 100));
   }
   getEntries(limit = 100): LogEntry[] {

@@ -9,11 +9,15 @@
  * has connected their wallet via SIWE.  In production, writes should go
  * through agent wallets; this client is for admin / operator tooling.
  *
+ * Network selection:
+ *   PCC_NETWORK=sepolia       → Ethereum Sepolia (deployed contracts)
+ *   PCC_NETWORK=base-sepolia  → Base Sepolia (default, legacy)
+ *
  * Env vars:
  *   ESCROW_CONTRACT_ADDRESS — default escrow contract (optional, per-request override)
- *   PCC_RPC_URL             — Base Sepolia RPC (defaults to https://sepolia.base.org)
+ *   PCC_RPC_URL             — Override RPC URL (defaults per network from chain-config)
  *   PCC_GATEWAY_PRIVATE_KEY — private key for write ops (optional; writes fail gracefully without it)
- *   MOCK_USDC_ADDRESS       — MockUSDC token address (optional)
+ *   MOCK_USDC_ADDRESS       — MockUSDC token address (optional; auto-resolved from chain-config)
  */
 
 import {
@@ -24,6 +28,7 @@ import {
   type PublicClient,
   type WalletClient,
   type Account,
+  type Chain,
   formatUnits,
   parseUnits,
 } from "viem";
@@ -34,16 +39,45 @@ import {
   MockUSDCABI,
   MilestoneStatus,
   milestoneStatusName,
+  getDeployment,
+  getContractAddress,
 } from "@pcc/contracts";
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Network-aware configuration
 // ---------------------------------------------------------------------------
 
-const PCC_RPC_URL = process.env.PCC_RPC_URL ?? "https://sepolia.base.org";
+const PCC_NETWORK = process.env.PCC_NETWORK ?? "base-sepolia";
+
+function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
+  try {
+    const deployment = getDeployment(PCC_NETWORK);
+    return {
+      chain: deployment.chain,
+      rpcUrl: process.env.PCC_RPC_URL ?? deployment.rpcUrl ?? "https://sepolia.base.org",
+    };
+  } catch {
+    return {
+      chain: baseSepolia,
+      rpcUrl: process.env.PCC_RPC_URL ?? "https://sepolia.base.org",
+    };
+  }
+}
+
 const DEFAULT_ESCROW_ADDRESS = process.env.ESCROW_CONTRACT_ADDRESS as Address | undefined;
 const GATEWAY_PRIVATE_KEY = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
-const MOCK_USDC_ADDRESS = process.env.MOCK_USDC_ADDRESS as Address | undefined;
+
+/** Resolve MockUSDC address: env var > chain-config > undefined */
+function resolveMockUSDCAddress(): Address | undefined {
+  if (process.env.MOCK_USDC_ADDRESS) {
+    return process.env.MOCK_USDC_ADDRESS as Address;
+  }
+  try {
+    return getContractAddress(PCC_NETWORK, "mockUSDC");
+  } catch {
+    return undefined;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Client singletons
@@ -55,9 +89,10 @@ let _account: Account | undefined;
 
 function getPublicClient(): PublicClient {
   if (!_publicClient) {
+    const { chain, rpcUrl } = resolveChainConfig();
     _publicClient = createPublicClient({
-      chain: baseSepolia,
-      transport: http(PCC_RPC_URL),
+      chain,
+      transport: http(rpcUrl),
     }) as PublicClient;
   }
   return _publicClient;
@@ -71,11 +106,12 @@ function getWalletClient(): WalletClient {
         "Set this env var to enable escrow funding, milestone release, and dispute filing.",
       );
     }
+    const { chain, rpcUrl } = resolveChainConfig();
     _account = privateKeyToAccount(GATEWAY_PRIVATE_KEY);
     _walletClient = createWalletClient({
       account: _account,
-      chain: baseSepolia,
-      transport: http(PCC_RPC_URL),
+      chain,
+      transport: http(rpcUrl),
     });
   }
   return _walletClient;
@@ -301,7 +337,7 @@ export async function fundEscrow(contractAddress?: Address): Promise<WriteResult
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
@@ -321,14 +357,14 @@ export async function approveToken(
   amount: string,
   tokenAddress?: Address,
 ): Promise<WriteResult> {
-  const token = tokenAddress ?? MOCK_USDC_ADDRESS;
+  const token = tokenAddress ?? resolveMockUSDCAddress();
   if (!token) {
-    throw new Error("No token address provided and MOCK_USDC_ADDRESS env var is not set.");
+    throw new Error("No token address provided and MOCK_USDC_ADDRESS env var is not set and no mockUSDC in chain-config.");
   }
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address: token,
     abi: MockUSDCABI,
@@ -351,7 +387,7 @@ export async function releaseMilestone(
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
@@ -379,7 +415,7 @@ export async function fileDispute(
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
@@ -407,7 +443,7 @@ export async function depositBond(
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
@@ -431,7 +467,7 @@ export async function submitEvidence(
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
@@ -455,7 +491,7 @@ export async function submitAttestation(
   const wallet = getWalletClient();
 
   const hash = await wallet.writeContract({
-    chain: baseSepolia,
+    chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,

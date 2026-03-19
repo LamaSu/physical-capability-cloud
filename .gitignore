@@ -15,3 +15,10 @@ lib/
 packages/gateway/data/
 .playwright-cli/
 ai/
+docs/TECHNOECONOMIC_PLAN.md
+docs/VENDOR_STACK_AUDIT.md
+docs/BLIND_SPOTS_AND_RISKS.md
+docs/LAUNCH_PLAYBOOK.md
+docs/PROTOCOL_ECONOMICS.md
+docs/reports/
+.claude/worktrees/

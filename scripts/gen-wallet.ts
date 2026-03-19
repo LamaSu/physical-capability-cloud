@@ -1,0 +1,33 @@
+import { UnifiedKeychain } from "../packages/agent-runtime/src/unified-keychain.js";
+
+const kc = new UnifiedKeychain();
+const keys = kc.generate();
+
+console.log("═══════════════════════════════════════════════════");
+console.log("  PCCP Wallet Addresses — Generated from BIP-39");
+console.log("═══════════════════════════════════════════════════");
+console.log("");
+console.log("MNEMONIC (WRITE THIS DOWN — controls all your keys):");
+console.log(keys.mnemonic);
+console.log("");
+console.log("─── EVM (Base Sepolia) ───");
+console.log("Address:", keys.evm.address);
+console.log("Private Key:", keys.evm.privateKey);
+console.log("");
+console.log("─── Solana (Devnet) ───");
+console.log("Address:", keys.solana.publicKey);
+console.log("");
+console.log("─── DID ───");
+console.log(keys.did);
+console.log("");
+console.log("═══════════════════════════════════════════════════");
+console.log("");
+console.log("NEXT STEPS:");
+console.log("1. Copy the EVM address above");
+console.log("2. Go to: https://www.alchemy.com/faucets/base-sepolia");
+console.log("   Paste EVM address → Get 0.1 Base Sepolia ETH");
+console.log("3. Go to: https://faucet.circle.com/");
+console.log("   Select 'Base Sepolia' + 'USDC' → Paste same EVM address");
+console.log("4. Go to: https://faucet.solana.com/");
+console.log("   Paste Solana address → Get 2 SOL devnet");
+console.log("═══════════════════════════════════════════════════");

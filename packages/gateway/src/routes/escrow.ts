@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { type Address, isAddress } from "viem";
-import { readEscrow, getEscrowEvents, readTokenBalance, readTokenAllowance } from "../chain-client.js";
+import { readEscrow, getEscrowEvents, readTokenBalance, readTokenAllowance, getActiveNetwork } from "../chain-client.js";
 import { getRepos } from "../db.js";
 import {
   getEscrowState,
@@ -205,6 +205,7 @@ export async function escrowRoutes(app: FastifyInstance) {
     return {
       writeEnabled: isWriteEnabled(),
       signerAddress: getSignerAddress() ?? null,
+      network: getActiveNetwork(),
     };
   });
 

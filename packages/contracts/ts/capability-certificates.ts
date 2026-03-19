@@ -21,6 +21,7 @@ import type {
   CapabilityCertificate,
   CertificateMetadata,
 } from "@pcc/spec";
+import { PCCNFTClient } from "./pcc-nft/index.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +41,14 @@ export interface MplCoreConfig {
   mock?: boolean;
   /** Collection address for PCC certificates (created on first mint if absent) */
   collectionAddress?: string;
+  /**
+   * NFT engine to use:
+   * - "mpl-core": Metaplex Core (legacy, $0.20/mint protocol fee)
+   * - "pcc-native": PCC custom program (zero fees, full control)
+   *
+   * Default: "pcc-native" in mock mode, "mpl-core" in production.
+   */
+  engine?: "mpl-core" | "pcc-native";
 }
 
 // ---------------------------------------------------------------------------
@@ -50,19 +59,34 @@ export class CapabilityCertificateService {
   private mock: boolean;
   private rpcUrl: string;
   private collectionAddress: string | null;
+  private engine: "mpl-core" | "pcc-native";
 
   /** In-memory store (mock mode) keyed by certificate ID */
   private certificates = new Map<string, CapabilityCertificate>();
   /** Running asset index counter (mock) */
   private nextIndex = 0;
 
-  /** Lazy-initialized Umi instance (production mode) */
+  /** Lazy-initialized Umi instance (production mode, mpl-core engine) */
   private umi: Umi | null = null;
+
+  /** PCC native NFT client (pcc-native engine) */
+  private pccClient: PCCNFTClient | null = null;
+  /** PCC native collection address (pcc-native engine) */
+  private pccCollectionAddress: string | null = null;
 
   constructor(config: MplCoreConfig = {}) {
     this.mock = config.mock ?? true;
     this.rpcUrl = config.rpcUrl ?? "https://api.devnet.solana.com";
     this.collectionAddress = config.collectionAddress ?? null;
+    // Default engine: pcc-native in mock mode, mpl-core in production
+    this.engine = config.engine ?? (this.mock ? "pcc-native" : "mpl-core");
+
+    if (this.engine === "pcc-native") {
+      this.pccClient = new PCCNFTClient({
+        rpcUrl: this.rpcUrl,
+        mock: this.mock,
+      });
+    }
   }
 
   // ── Umi setup (production only) ──────────────────────────────────
@@ -96,6 +120,20 @@ export class CapabilityCertificateService {
    * In production: calls mpl-core createCollection with PermanentFreezeDelegate.
    */
   async createCollection(): Promise<string> {
+    // ── PCC-native engine ─────────────────────────────────────
+    if (this.engine === "pcc-native" && this.pccClient) {
+      const { address } = await this.pccClient.createCollection({
+        name: "PCC Capability Certificates",
+        uri: "https://pcc.network/metadata/collection.json",
+      });
+      // Wrap address so it contains "PCCCollection" for backward compat
+      const compatAddress = `PCCCollection_${address}`;
+      this.pccCollectionAddress = address;
+      this.collectionAddress = compatAddress;
+      return compatAddress;
+    }
+
+    // ── mpl-core engine (legacy) ──────────────────────────────
     if (this.mock) {
       this.collectionAddress = `PCCCollection${Date.now().toString(36)}`;
       return this.collectionAddress;
@@ -148,7 +186,49 @@ export class CapabilityCertificateService {
       throw new Error("assuranceTier must be 0-3");
     }
 
-    // ── Mock mode ────────────────────────────────────────────────
+    // ── PCC-native engine ────────────────────────────────────────
+    if (this.engine === "pcc-native" && this.pccClient) {
+      const { address, signature } = await this.pccClient.mint({
+        name: `PCC ${capabilityType} T${assuranceTier}`,
+        uri: `https://pcc.network/metadata/cert/${Date.now()}.json`,
+        owner: kernelDid,
+        collection: this.pccCollectionAddress ?? undefined,
+        permanentlyFrozen: true,
+        attributes: {
+          capabilityType,
+          assuranceTier: String(assuranceTier),
+          kernelDid,
+          soulbound: "true",
+          ...(metadata.materials ? { materials: metadata.materials.join(",") } : {}),
+          ...(metadata.maxBuildVolume ? { maxBuildVolume: metadata.maxBuildVolume } : {}),
+          ...(metadata.calibrationDate ? { calibrationDate: metadata.calibrationDate } : {}),
+          ...(metadata.calibrationProofCid ? { calibrationProofCid: metadata.calibrationProofCid } : {}),
+          ...Object.fromEntries(
+            Object.entries(metadata.toleranceSpecs ?? {}).map(([k, v]) => [`tolerance:${k}`, v]),
+          ),
+        },
+      });
+
+      const id = `cnft_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 8)}`;
+      const cert: CapabilityCertificate = {
+        id,
+        kernelDid,
+        capabilityType,
+        assuranceTier,
+        metadata,
+        mintedAt: new Date().toISOString(),
+        soulbound: true,
+        status: "active",
+        merkleTree: this.collectionAddress ?? this.pccCollectionAddress ?? "PCCCollection",
+        leafIndex: this.nextIndex++,
+        assetId: address,
+      };
+
+      this.certificates.set(id, cert);
+      return cert;
+    }
+
+    // ── Mock mode (mpl-core) ─────────────────────────────────────
     if (this.mock) {
       const index = this.nextIndex++;
       const id = `cnft_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 8)}`;

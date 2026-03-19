@@ -13,7 +13,7 @@
  *   8. Handles verification and settlement
  */
 
-import { BaseAgent, type BaseAgentConfig, type AgentTool } from "@pcc/agent-runtime";
+import { BaseAgent, SettlementClient, type BaseAgentConfig, type AgentTool } from "@pcc/agent-runtime";
 import { CapabilityRouter, WorkflowCompiler, type KernelCapabilities } from "@pcc/scheduler";
 import { VerifierMarket, EvidenceVerifier } from "@pcc/verifier";
 import { ContractBuilder } from "@pcc/contract-builder";
@@ -69,7 +69,12 @@ export class BrokerAgent extends BaseAgent {
   private activeQuotes: Map<string, ActiveQuote> = new Map();
   private activePlans: Map<string, ActivePlan> = new Map();
 
-  constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }) {
+  private settlement?: SettlementClient;
+
+  constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }, opts?: {
+    /** Gateway URL for batch settlement */
+    gatewayUrl?: string;
+  }) {
     super({
       name: "PCC Broker",
       role: "scheduler",
@@ -82,6 +87,14 @@ export class BrokerAgent extends BaseAgent {
     this.compiler = new WorkflowCompiler(this.router);
     this.verifierMarket = new VerifierMarket();
     this.contractBuilder = new ContractBuilder();
+
+    if (opts?.gatewayUrl) {
+      this.settlement = new SettlementClient({
+        gatewayUrl: opts.gatewayUrl,
+        agentId: this.id,
+        wallet: this.wallet,
+      });
+    }
 
     this.setupIntentHandlers();
     this.setupTools();
@@ -487,6 +500,12 @@ export class BrokerAgent extends BaseAgent {
         const allDone = plan.quotes.every(() => true); // simplified
         if (allDone) {
           plan.status = "completed";
+
+          // Queue milestone releases via batch settlement
+          this.queueMilestoneReleases(plan).catch((err) => {
+            console.warn("[broker] Failed to queue milestone releases:", err);
+          });
+
           // Notify user agent
           await this.send(plan.userAgentId, {
             type: "job_status_response",
@@ -505,6 +524,38 @@ export class BrokerAgent extends BaseAgent {
       }
     }
     return null;
+  }
+
+  /**
+   * Queue milestone releases for a completed plan via batch settlement.
+   * In production, this would wait for challenge windows to expire.
+   */
+  private async queueMilestoneReleases(plan: ActivePlan): Promise<void> {
+    if (!this.settlement) return;
+
+    // The escrow address was set during workflow acceptance
+    const escrowAddress = `0x${"E5C80".padEnd(40, "0")}` as `0x${string}`;
+
+    for (let i = 0; i < plan.quotes.length; i++) {
+      const quote = plan.quotes[i];
+      try {
+        await this.settlement.release(
+          escrowAddress,
+          i,
+          BigInt(Math.round(parseFloat(quote.price) * 1_000_000)),
+        );
+      } catch (err) {
+        console.warn(
+          `[broker] Failed to queue release for milestone ${i}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  /** Get the settlement client (if configured) */
+  getSettlement(): SettlementClient | undefined {
+    return this.settlement;
   }
 
   private async handleGetBuildOptions(

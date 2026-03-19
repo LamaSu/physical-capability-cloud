@@ -30,7 +30,14 @@
     "tweetnacl": "^1.0.3",
     "viem": "^2.21.0"
   },
+  "peerDependencies": {
+    "@pcc/bundler": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@pcc/bundler": { "optional": true }
+  },
   "devDependencies": {
+    "@pcc/bundler": "workspace:*",
     "vitest": "^1.6.0"
   }
 }

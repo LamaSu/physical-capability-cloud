@@ -8,6 +8,7 @@
  */
 
 import type { A2AMessage, AgentCard, Conversation, Intent } from "./types.js";
+import type { SecurityMiddleware } from "./security-middleware.js";
 
 type MessageHandler = (message: A2AMessage) => void | Promise<void>;
 
@@ -15,6 +16,12 @@ export class MessageBus {
   private agents: Map<string, AgentCard> = new Map();
   private handlers: Map<string, MessageHandler[]> = new Map();
   private conversations: Map<string, Conversation> = new Map();
+  private security?: SecurityMiddleware;
+
+  /** Set security middleware — if set, all messages are scanned before delivery */
+  setSecurityMiddleware(mw: SecurityMiddleware): void {
+    this.security = mw;
+  }
 
   /** Register an agent on the bus */
   register(card: AgentCard): void {
@@ -39,6 +46,11 @@ export class MessageBus {
 
   /** Send a message from one agent to another */
   async send(message: A2AMessage): Promise<void> {
+    // Security scan — throws SecurityError if blocked
+    if (this.security) {
+      await this.security.scanMessage(message);
+    }
+
     // Track in conversation
     let convo = this.conversations.get(message.conversationId);
     if (!convo) {
@@ -71,13 +83,51 @@ export class MessageBus {
 
   /** Broadcast to all agents with a specific role */
   async broadcast(message: A2AMessage, role?: string): Promise<void> {
+    // Security scan — throws SecurityError if blocked
+    if (this.security) {
+      await this.security.scanMessage(message);
+    }
+
     const targets = role
       ? [...this.agents.values()].filter((a) => a.role === role)
       : [...this.agents.values()];
 
     for (const agent of targets) {
       if (agent.id === message.from) continue;
-      await this.send({ ...message, to: agent.id });
+      // Use internal delivery (already scanned above)
+      await this._deliverTo({ ...message, to: agent.id });
+    }
+  }
+
+  /** Internal delivery without re-scanning (used by broadcast after scan) */
+  private async _deliverTo(message: A2AMessage): Promise<void> {
+    // Track in conversation
+    let convo = this.conversations.get(message.conversationId);
+    if (!convo) {
+      convo = {
+        id: message.conversationId,
+        participants: [message.from, message.to],
+        messages: [],
+        status: "active",
+        topic: message.intent.type,
+        createdAt: message.timestamp,
+        updatedAt: message.timestamp,
+      };
+      this.conversations.set(message.conversationId, convo);
+    }
+    convo.messages.push(message);
+    convo.updatedAt = message.timestamp;
+    if (!convo.participants.includes(message.from)) convo.participants.push(message.from);
+    if (!convo.participants.includes(message.to)) convo.participants.push(message.to);
+
+    // Deliver to recipient's handlers
+    const handlers = this.handlers.get(message.to) ?? [];
+    for (const handler of handlers) {
+      try {
+        await handler(message);
+      } catch (err) {
+        console.error(`Handler error for agent ${message.to}:`, err);
+      }
     }
   }
 

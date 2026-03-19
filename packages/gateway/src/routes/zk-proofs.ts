@@ -1,13 +1,21 @@
 import type { FastifyInstance } from "fastify";
 import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
-import { BittensorSubnetBridge } from "@pcc/verifier";
+import { BittensorSubnetBridge, StarknetProofAnchoringService } from "@pcc/verifier";
 import { getRepos } from "../db.js";
 
 // Singleton Bittensor subnet bridge
 const subnetBridge = new BittensorSubnetBridge({
   numMinersToQuery: 5,
   minScoreThreshold: 0.6,
+});
+
+// Singleton Starknet proof anchoring service (mock mode unless env vars are set)
+const starknetService = new StarknetProofAnchoringService({
+  mock: process.env.STARKNET_ACCOUNT_ADDRESS === undefined,
+  nodeUrl: process.env.STARKNET_NODE_URL,
+  accountAddress: process.env.STARKNET_ACCOUNT_ADDRESS,
+  privateKey: process.env.STARKNET_PRIVATE_KEY,
 });
 
 export async function zkProofRoutes(app: FastifyInstance) {
@@ -191,4 +199,72 @@ export async function zkProofRoutes(app: FastifyInstance) {
     const miners = subnetBridge.getMinerLeaderboard();
     return { miners, count: miners.length };
   });
+
+  // ── Starknet Proof Anchoring Routes ─────────────────────────────────
+
+  // Anchor a proof on Starknet
+  app.post<{ Body: { proofId?: string; merkleRoot?: string; treeDepth?: number } }>(
+    "/api/zk/anchor-starknet",
+    async (req) => {
+      const body = req.body as { proofId?: string; merkleRoot?: string; treeDepth?: number };
+
+      // Anchor a Merkle root directly
+      if (body.merkleRoot) {
+        const depth = body.treeDepth ?? 0;
+        try {
+          const anchor = await starknetService.anchorMerkleRoot(body.merkleRoot, depth);
+          return { anchor, mode: starknetService.isMock() ? "mock" : "real" };
+        } catch (err) {
+          return { error: "anchor_failed", message: (err as Error).message };
+        }
+      }
+
+      // Anchor an existing proof by ID
+      if (!body.proofId) {
+        return { error: "missing_params", message: "Provide proofId or merkleRoot" };
+      }
+
+      const dbProof = getRepos().encryption.findProofById(body.proofId);
+      if (!dbProof) return { error: "proof_not_found" };
+
+      const proof: ZKProof = {
+        id: dbProof.id,
+        proofType: dbProof.proofType as ZKProof["proofType"],
+        commitmentId: dbProof.commitmentId,
+        publicInputs: dbProof.publicInputs,
+        proof: dbProof.proof,
+        verificationKey: dbProof.verificationKey,
+        verified: dbProof.verified,
+        generatedAt: dbProof.generatedAt,
+      };
+
+      try {
+        const anchor = await starknetService.anchorProof(proof);
+        return { anchor, mode: starknetService.isMock() ? "mock" : "real" };
+      } catch (err) {
+        return { error: "anchor_failed", message: (err as Error).message };
+      }
+    },
+  );
+
+  // Get anchor status by tx hash
+  app.get<{ Params: { txHash: string } }>(
+    "/api/zk/anchor-starknet/:txHash",
+    async (req) => {
+      const { txHash } = req.params;
+
+      try {
+        const status = await starknetService.getAnchorStatus(txHash);
+        const storedAnchor = starknetService.getStoredAnchor(txHash);
+        return {
+          txHash,
+          status,
+          anchor: storedAnchor ?? null,
+          mode: starknetService.isMock() ? "mock" : "real",
+        };
+      } catch (err) {
+        return { error: "status_fetch_failed", message: (err as Error).message };
+      }
+    },
+  );
 }

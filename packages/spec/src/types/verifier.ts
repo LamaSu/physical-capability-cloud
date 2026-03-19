@@ -81,6 +81,17 @@ export interface VerificationAttestation {
   /** Verifier's signature */
   signature: Signature;
   createdAt: Timestamp;
+  /** POAW-style audit receipt proving verification work was performed */
+  auditReceipt?: {
+    /** SHA-256 hash of the verification computation */
+    scanHash: SHA256;
+    /** Position in audit chain */
+    chainPosition: number;
+    /** Number of checks performed */
+    checksPerformed: number;
+    /** Timestamp */
+    timestamp: Timestamp;
+  };
 }
 
 /** A specific finding from verification */
