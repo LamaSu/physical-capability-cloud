@@ -54,7 +54,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 ## Dev Commands
 - `pnpm install` — install all deps
 - `pnpm build --concurrency=1` — build all 17 packages (sequential to avoid OOM on Windows)
-- `pnpm --workspace-concurrency=1 -r test` — run all tests (858+ passing across 40+ test files)
+- `pnpm --workspace-concurrency=1 -r test` — run all tests (1174 passing across 69 test files)
 - `npx tsx scripts/e2e-simulation.ts` — run kernel-level e2e simulation
 - `npx tsx scripts/agent-e2e-simulation.ts` — run agent-to-agent e2e simulation
 - `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases + IPFS)
