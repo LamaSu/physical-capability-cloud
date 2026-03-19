@@ -4,6 +4,12 @@ export { CommitmentService } from "./commitment-service.js";
 export { ZKProofService } from "./zk-proof-service.js";
 export { NoirProofService } from "./noir-proof-service.js";
 export {
+  StarknetProofAnchoringService,
+  type StarknetAnchor,
+  type AnchorStatus,
+  type StarknetProofServiceConfig,
+} from "./starknet-proof-service.js";
+export {
   BittensorSubnetBridge,
   MockValidator,
   MockMiner,
@@ -16,3 +22,36 @@ export {
   type MinerQuality,
   DEFAULT_VALIDATOR_CONFIG,
 } from "./bittensor/index.js";
+export {
+  VerificationNetwork,
+  VerifierNode,
+  ConsensusEngine,
+  type VerifierNodeInfo,
+  type VerificationRequest,
+  type VerificationResponse,
+  type ConsensusResult,
+  type NetworkConfig,
+  type NetworkStatus,
+  type NodeStatus,
+  type VerifierQuality,
+  type VerifierNodeConfig,
+  DEFAULT_NETWORK_CONFIG,
+} from "./network/index.js";
+export {
+  POABridge,
+  type CreateCPCParams,
+  type SubmitEvidenceParams,
+  type CPCTask,
+  type CPCTaskType,
+  type CPCWorkflowStep,
+  type CPCTaskConstraints,
+  type POAEvidenceBundle,
+  type TraceEntry,
+  type ExecutionTimestamps,
+  type AssuranceScore,
+  type ScoreDimension,
+  type POABridgeConfig,
+  type POAVerificationResult,
+  DEFAULT_POA_BRIDGE_CONFIG,
+  DEFAULT_SCORING_WEIGHTS,
+} from "./poa/index.js";

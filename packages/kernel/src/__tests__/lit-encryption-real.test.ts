@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { RealLitEncryptionService } from "../lit-encryption-real.js";
+import { LitEncryptionService } from "../lit-encryption-service.js";
+import {
+  createLitEncryptionService,
+  isRealLitEnabled,
+} from "../lit-encryption-factory.js";
 import type {
   UnifiedAccessControlCondition,
   AccessControlConditionOperator,
@@ -271,5 +276,103 @@ describe("RealLitEncryptionService", () => {
       expect(typeof service.getAccessConditions).toBe("function");
       expect(typeof service.validateAccessConditions).toBe("function");
     });
+  });
+});
+
+// ── createLitEncryptionService factory ────────────────────────────────────
+
+describe("createLitEncryptionService (factory)", () => {
+  const origEnv = process.env.LIT_PROTOCOL_REAL;
+
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env.LIT_PROTOCOL_REAL;
+    } else {
+      process.env.LIT_PROTOCOL_REAL = origEnv;
+    }
+  });
+
+  it("returns LitEncryptionService (mock) by default when env is unset", () => {
+    delete process.env.LIT_PROTOCOL_REAL;
+    const svc = createLitEncryptionService();
+    expect(svc).toBeInstanceOf(LitEncryptionService);
+  });
+
+  it("returns LitEncryptionService when LIT_PROTOCOL_REAL is 'false'", () => {
+    process.env.LIT_PROTOCOL_REAL = "false";
+    const svc = createLitEncryptionService();
+    expect(svc).toBeInstanceOf(LitEncryptionService);
+  });
+
+  it("returns RealLitEncryptionService when LIT_PROTOCOL_REAL=true", () => {
+    process.env.LIT_PROTOCOL_REAL = "true";
+    const svc = createLitEncryptionService();
+    expect(svc).toBeInstanceOf(RealLitEncryptionService);
+  });
+
+  it("returns RealLitEncryptionService when options.mock=false, env unset", () => {
+    delete process.env.LIT_PROTOCOL_REAL;
+    const svc = createLitEncryptionService({ mock: false });
+    expect(svc).toBeInstanceOf(RealLitEncryptionService);
+  });
+
+  it("returns LitEncryptionService when options.mock=true even if env says real", () => {
+    process.env.LIT_PROTOCOL_REAL = "true";
+    const svc = createLitEncryptionService({ mock: true });
+    // options.mock=true forces mock regardless of env
+    expect(svc).toBeInstanceOf(LitEncryptionService);
+  });
+
+  it("forwards options to the constructed service (real path)", () => {
+    process.env.LIT_PROTOCOL_REAL = "true";
+    const svc = createLitEncryptionService({ network: "datil-test", chain: "baseSepolia" });
+    expect(svc).toBeInstanceOf(RealLitEncryptionService);
+    // Service starts disconnected — options accepted without error
+    expect(svc.isConnected()).toBe(false);
+  });
+
+  it("forwards options to the constructed service (mock path)", () => {
+    delete process.env.LIT_PROTOCOL_REAL;
+    const svc = createLitEncryptionService({ network: "datil-test", chain: "ethereum" });
+    expect(svc).toBeInstanceOf(LitEncryptionService);
+    // Mock service also starts disconnected
+    expect(svc.isConnected()).toBe(false);
+  });
+
+  it("returned mock service can connect and encrypt synchronously", async () => {
+    delete process.env.LIT_PROTOCOL_REAL;
+    const svc = createLitEncryptionService() as LitEncryptionService;
+    await svc.connect();
+    expect(svc.isConnected()).toBe(true);
+    await svc.disconnect();
+  });
+});
+
+// ── isRealLitEnabled helper ───────────────────────────────────────────────
+
+describe("isRealLitEnabled", () => {
+  const origEnv = process.env.LIT_PROTOCOL_REAL;
+
+  afterEach(() => {
+    if (origEnv === undefined) {
+      delete process.env.LIT_PROTOCOL_REAL;
+    } else {
+      process.env.LIT_PROTOCOL_REAL = origEnv;
+    }
+  });
+
+  it("returns false when env var is not set", () => {
+    delete process.env.LIT_PROTOCOL_REAL;
+    expect(isRealLitEnabled()).toBe(false);
+  });
+
+  it("returns false when env var is 'false'", () => {
+    process.env.LIT_PROTOCOL_REAL = "false";
+    expect(isRealLitEnabled()).toBe(false);
+  });
+
+  it("returns true when env var is 'true'", () => {
+    process.env.LIT_PROTOCOL_REAL = "true";
+    expect(isRealLitEnabled()).toBe(true);
   });
 });

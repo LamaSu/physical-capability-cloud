@@ -16,6 +16,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/scheduler**: Workflow compiler + capability router
 - **packages/verifier**: Hybrid verifier market + evidence verification
 - **packages/payments**: x402 middleware (server) + x402 client (auto-pay) + Meteora DLMM (capability pricing pools)
+- **packages/identity-8004**: ERC-8004 Trustless Agents — Identity/Reputation/Validation registry clients (viem), Agent Registration File generator, contract ABIs
 
 ### Agent Layer (A2A)
 - **packages/a2a**: Agent-to-Agent protocol — typed intents, message bus, conversations
@@ -23,6 +24,8 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **packages/agent-user**: User Agent — holds wallet, discovers, negotiates, submits workflows
 - **packages/agent-broker**: Broker Agent — routes capabilities, quotes, compiles workflows
 - **packages/agent-kernel**: Kernel Agent — wraps shop kernel, accepts jobs, emits evidence
+- **packages/agent-evaluator**: Evaluator Agent — third-party quality assessment, attestation VCs, ACP↔A2A bridge, reputation bridge
+- **packages/agent-runtime** also includes: SmartAccountManager (ERC-4337 session keys mapped to SpendingPolicy)
 
 ## Invariants
 1. All schemas live in `packages/spec` — no other package defines wire types
@@ -51,13 +54,21 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 ## Dev Commands
 - `pnpm install` — install all deps
 - `pnpm build --concurrency=1` — build all 17 packages (sequential to avoid OOM on Windows)
-- `pnpm --workspace-concurrency=1 -r test` — run all tests (623 passing across 37 test files)
+- `pnpm --workspace-concurrency=1 -r test` — run all tests (858+ passing across 40+ test files)
 - `npx tsx scripts/e2e-simulation.ts` — run kernel-level e2e simulation
 - `npx tsx scripts/agent-e2e-simulation.ts` — run agent-to-agent e2e simulation
 - `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases + IPFS)
+- `npx tsx scripts/openclaw-print-deliver-e2e.ts` — OpenClaw print-and-deliver e2e (3 variations: default, --variation 2, --variation 3)
+- `npx tsx scripts/lit-protocol-demo.ts` — Lit Protocol mock/real encryption demo
 - `npx tsx scripts/generate-wallet.ts` — generate a deployer wallet for Base Sepolia
 - `DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-base-sepolia.ts` — deploy contracts to Base Sepolia
 
 ## Environment Variables
 - `LIT_PROTOCOL_REAL=true` — use real Lit Protocol network (datil-test) instead of mock
+- `EVIDENCE_STORAGE=storacha` — use Storacha w3up instead of Helia for evidence storage
+- `STORACHA_PROOF=...` — Storacha delegation proof (base64, required when EVIDENCE_STORAGE=storacha)
+- `STORACHA_SPACE_DID=did:key:...` — Storacha space DID
+- `STARKNET_ACCOUNT=...` — Starknet account address for ZK proof anchoring
+- `STARKNET_PRIVATE_KEY=0x...` — Starknet account private key
+- `STARKNET_NETWORK=goerli|mainnet` — Starknet network (default: goerli)
 - `DEPLOYER_PRIVATE_KEY=0x...` — private key for contract deployment

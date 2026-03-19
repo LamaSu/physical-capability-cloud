@@ -40,3 +40,6 @@ export {
   signCredential,
   verifyCredential,
 } from "./credentials.js";
+
+// ERC-8004 types (browser-safe)
+export * from "./erc8004.js";

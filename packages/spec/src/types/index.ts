@@ -16,3 +16,4 @@ export * from "./logistics.js";
 export * from "./orchestrator.js";
 export * from "./protocol.js";
 export * from "./depin.js";
+export * from "./security.js";

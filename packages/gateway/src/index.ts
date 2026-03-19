@@ -22,3 +22,13 @@ export type { OnChainEscrowState, OnChainDispute, EscrowEvent, WriteResult } fro
 export { initAgentBridge, shutdownAgentBridge, isAgentBridgeReady, getAgentStatus } from "./agent-bridge.js";
 export { resolveSession } from "./auth/siwe-auth.js";
 export { requireAuth, optionalAuth } from "./auth/require-auth.js";
+export {
+  initBatchSettlement,
+  isBatchEnabled,
+  getSmartAccountAddress,
+  submitSettlement,
+  flushSettlements,
+  getQueueStatus,
+  getEpochHistory,
+  stopBatchSettlement,
+} from "./contracts/batch-settlement.js";

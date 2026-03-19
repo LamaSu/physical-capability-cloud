@@ -5,7 +5,7 @@
  * On base-sepolia/base: fill in after deployment.
  */
 import type { Address, Chain } from "viem";
-import { baseSepolia, base, localhost } from "viem/chains";
+import { baseSepolia, base, localhost, sepolia } from "viem/chains";
 
 export interface ChainDeployment {
   chain: Chain;
@@ -33,13 +33,22 @@ export const deployments: Record<string, ChainDeployment> = {
       mockUSDC: undefined,
     },
   },
+  sepolia: {
+    chain: sepolia,
+    rpcUrl: "https://ethereum-sepolia-rpc.publicnode.com",
+    contracts: {
+      milestoneEscrowFactory: "0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454",
+      mockUSDC: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
+    },
+    blockExplorer: "https://sepolia.etherscan.io",
+  },
   "base-sepolia": {
     chain: baseSepolia,
     rpcUrl: "https://sepolia.base.org",
     contracts: {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-      // Deployed contract addresses — fill after deployment
+      // Deployed contract addresses — fill after Base Sepolia deployment
       milestoneEscrowFactory: undefined,
       mockUSDC: undefined,
     },

@@ -16,6 +16,7 @@ import {
   type Chain,
   type Transport,
   type Address,
+  type Hex,
   parseEther,
   parseUnits,
   formatUnits,
@@ -31,6 +32,19 @@ export interface WalletConfig {
   chain?: "base" | "base-sepolia" | "localhost";
   /** RPC URL override */
   rpcUrl?: string;
+}
+
+export interface SmartAccountHandle {
+  /** Smart account address (counterfactual) */
+  address: Address;
+  /** EOA signer address */
+  signerAddress: Address;
+  /** Send a UserOp through the bundler */
+  sendUserOp: (callData: Hex) => Promise<Hex>;
+  /** Encode a single call for the smart account */
+  encodeExecute: (target: Address, value: bigint, data: Hex) => Hex;
+  /** Encode multiple calls as a batch */
+  encodeBatch: (calls: Array<{ target: Address; value: bigint; data: Hex }>) => Hex;
 }
 
 const CHAINS: Record<string, Chain> = {
@@ -194,5 +208,53 @@ export class AgentWallet {
 
   getChain(): Chain {
     return this.chain;
+  }
+
+  /** Get the private key for smart account derivation */
+  getPrivateKey(): Hex {
+    // The account was derived from the private key in the constructor.
+    // We expose this so SmartAccountClient can use the same signer.
+    return (this.account as { source: string }).source === "privateKey"
+      ? (this.account as unknown as { _key: Hex })._key
+      : ("0x" as Hex);
+  }
+
+  /**
+   * Upgrade this EOA wallet to a smart account via ERC-4337.
+   *
+   * Returns a SmartAccountHandle that routes transactions through a bundler
+   * instead of directly to the mempool. This enables:
+   * - Batched transactions (N calls in 1 UserOp)
+   * - Gas sponsorship via paymaster
+   * - Session keys for autonomous operation
+   *
+   * The EOA remains the signer/owner — the smart account is a proxy.
+   *
+   * @param bundlerUrl - Bundler RPC URL (Pimlico, Alchemy, etc.)
+   * @param paymasterUrl - Optional paymaster URL for gas sponsorship
+   */
+  async toSmartAccount(bundlerUrl: string, paymasterUrl?: string): Promise<SmartAccountHandle> {
+    // Dynamic import to avoid requiring @pcc/bundler when not using AA
+    const { SmartAccountClient } = await import("@pcc/bundler");
+
+    const client = new SmartAccountClient({
+      privateKey: this.getPrivateKey(),
+      bundler: {
+        bundlerUrl,
+        paymasterUrl,
+        chain: this.chain,
+        rpcUrl: undefined, // use default for chain
+      },
+    });
+
+    return {
+      address: client.smartAccountAddress,
+      signerAddress: client.signerAddress,
+      sendUserOp: (callData: Hex) => client.sendUserOp(callData),
+      encodeExecute: (target: Address, value: bigint, data: Hex) =>
+        client.encodeExecute(target, value, data),
+      encodeBatch: (calls: Array<{ target: Address; value: bigint; data: Hex }>) =>
+        client.encodeBatch(calls),
+    };
   }
 }

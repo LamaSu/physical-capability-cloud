@@ -12,7 +12,7 @@
  * Each KernelAgent wraps one Shop Kernel instance (one physical site).
  */
 
-import { BaseAgent } from "@pcc/agent-runtime";
+import { BaseAgent, SettlementClient } from "@pcc/agent-runtime";
 import type { MessageBus, A2AMessage, Intent, RequestQuoteIntent, JobCompletedIntent } from "@pcc/a2a";
 import type { Capability, AssuranceTier, EvidenceBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
@@ -33,6 +33,10 @@ export interface KernelAgentConfig {
   mockPrintDuration?: number;
   /** Machine profiles for the contract builder */
   machineProfiles?: MachineProfile[];
+  /** Gateway URL for batch settlement (e.g., "http://localhost:3200") */
+  gatewayUrl?: string;
+  /** Escrow address → milestone index mapping (set externally when jobs are dispatched) */
+  escrowMappings?: Map<string, { escrowAddress: `0x${string}`; milestoneIndex: number }>;
 }
 
 interface ActiveJob {
@@ -59,6 +63,8 @@ export class KernelAgent extends BaseAgent {
   private camera: MockCameraAdapter;
   private jobQueue: string[] = [];
   private isProcessing = false;
+  private settlement?: SettlementClient;
+  private escrowMappings: Map<string, { escrowAddress: `0x${string}`; milestoneIndex: number }> = new Map();
 
   constructor(bus: MessageBus, config: KernelAgentConfig) {
     super({
@@ -83,6 +89,18 @@ export class KernelAgent extends BaseAgent {
     this.evidenceEmitter.onBundle((bundle) => {
       this.handleBundleComplete(bundle);
     });
+
+    // Initialize batch settlement client if gateway URL provided
+    if (config.gatewayUrl) {
+      this.settlement = new SettlementClient({
+        gatewayUrl: config.gatewayUrl,
+        agentId: this.id,
+        wallet: this.wallet,
+      });
+    }
+    if (config.escrowMappings) {
+      this.escrowMappings = config.escrowMappings;
+    }
 
     this.setupIntentHandlers();
     this.setupTools();
@@ -312,6 +330,11 @@ export class KernelAgent extends BaseAgent {
           job.status = "completed";
           job.completedAt = new Date().toISOString();
 
+          // Auto-submit evidence to escrow via batch settlement
+          if (result.bundleHash) {
+            this.autoSubmitEvidence(job.jobId, result.bundleHash).catch(() => {});
+          }
+
           // Notify requester (broker) that job is complete
           await this.send(job.requesterId, {
             type: "job_completed",
@@ -351,6 +374,43 @@ export class KernelAgent extends BaseAgent {
         job.evidenceBundle = bundle;
         break;
       }
+    }
+  }
+
+  /**
+   * Register an escrow mapping so the kernel knows which escrow contract
+   * and milestone index to submit evidence to after job completion.
+   */
+  registerEscrowMapping(jobId: string, escrowAddress: `0x${string}`, milestoneIndex: number): void {
+    this.escrowMappings.set(jobId, { escrowAddress, milestoneIndex });
+  }
+
+  /** Get the settlement client (if configured) */
+  getSettlement(): SettlementClient | undefined {
+    return this.settlement;
+  }
+
+  /**
+   * Auto-submit evidence to the escrow contract after job completion.
+   * Routes through batch settlement for throughput.
+   */
+  private async autoSubmitEvidence(jobId: string, evidenceBundleHash: string): Promise<void> {
+    if (!this.settlement) return;
+
+    const mapping = this.escrowMappings.get(jobId);
+    if (!mapping) return;
+
+    try {
+      await this.settlement.submitEvidence(
+        mapping.escrowAddress,
+        mapping.milestoneIndex,
+        evidenceBundleHash as `0x${string}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[kernel-agent] Auto-submit evidence failed for job ${jobId}:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 

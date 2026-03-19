@@ -125,6 +125,16 @@ export class EvidenceVerifier {
       criticalFailures: criticalFailures.length,
     };
     const attestationHash = await sha256(canonicalize(attestationData));
+    const now = new Date().toISOString();
+
+    // Generate POAW-style audit receipt
+    const auditReceiptData = {
+      attestationHash,
+      verifierId: this.verifierId,
+      checksPerformed: findings.length,
+      timestamp: now,
+    };
+    const scanHash = await sha256(canonicalize(auditReceiptData));
 
     return {
       id: ids.attestation(),
@@ -140,7 +150,13 @@ export class EvidenceVerifier {
         algorithm: "secp256k1",
         value: `mock_sig_${attestationHash.slice(7, 23)}`,
       },
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      auditReceipt: {
+        scanHash,
+        chainPosition: 0,
+        checksPerformed: findings.length,
+        timestamp: now,
+      },
     };
   }
 }

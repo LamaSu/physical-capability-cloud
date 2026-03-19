@@ -13,7 +13,7 @@
  * would use as its "manufacturing toolkit."
  */
 
-import { BaseAgent } from "@pcc/agent-runtime";
+import { BaseAgent, SettlementClient, type SettlementResult } from "@pcc/agent-runtime";
 import type { MessageBus, A2AMessage, Intent, QuoteResponseIntent, WorkflowAcceptedIntent, JobStatusResponseIntent, CapabilitiesResponseIntent, BuildOptionsResponseIntent, ContractBuiltResponseIntent } from "@pcc/a2a";
 import type { CWM, SHA256 } from "@pcc/spec";
 import { ids } from "@pcc/spec";
@@ -36,8 +36,12 @@ export class UserAgent extends BaseAgent {
   private pendingQuotes: Map<string, QuoteResponseIntent> = new Map();
   private activePlanId?: string;
   private brokerAgentId?: string;
+  private settlement?: SettlementClient;
 
-  constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }) {
+  constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }, opts?: {
+    /** Gateway URL for batch settlement (e.g., "http://localhost:3200") */
+    gatewayUrl?: string;
+  }) {
     super({
       name: "User Agent",
       role: "user",
@@ -45,6 +49,14 @@ export class UserAgent extends BaseAgent {
       wallet: walletConfig,
       bus,
     });
+
+    if (opts?.gatewayUrl) {
+      this.settlement = new SettlementClient({
+        gatewayUrl: opts.gatewayUrl,
+        agentId: this.id,
+        wallet: this.wallet,
+      });
+    }
 
     this.setupIntentHandlers();
     this.setupTools();
@@ -174,6 +186,30 @@ export class UserAgent extends BaseAgent {
       profileId: opts.profileId,
     });
     return { conversationId };
+  }
+
+  // ── Escrow / Settlement ────────────────────────────────────────
+
+  /**
+   * Fund an escrow contract. Routes through the batch settlement service
+   * when available, falling back to direct wallet calls.
+   */
+  async fundEscrow(escrowAddress: `0x${string}`, tokenAddress?: `0x${string}`, amount?: string): Promise<SettlementResult | { transactionHash: string }> {
+    if (this.settlement) {
+      return this.settlement.fund(escrowAddress);
+    }
+
+    // Direct fallback: approve + fund
+    if (tokenAddress && amount) {
+      await this.wallet.approveToken(tokenAddress, escrowAddress, amount);
+    }
+    const txHash = await this.wallet.fundEscrow(escrowAddress);
+    return { transactionHash: txHash };
+  }
+
+  /** Get the settlement client (if configured) */
+  getSettlement(): SettlementClient | undefined {
+    return this.settlement;
   }
 
   // ── Intent Handlers (responses from other agents) ──────────────
@@ -395,6 +431,21 @@ export class UserAgent extends BaseAgent {
         message: { type: "string", description: "What you want to tell/ask the broker" },
       },
       execute: async (params) => this.chat(params.message as string),
+    });
+
+    this.registerTool({
+      name: "fund_escrow",
+      description: "Fund an escrow contract (approve USDC + call fund). Routes through batch settlement for higher throughput.",
+      parameters: {
+        escrow_address: { type: "string", description: "Escrow contract address" },
+        token_address: { type: "string", description: "USDC token address (for direct fallback)", required: false },
+        amount: { type: "string", description: "Amount to approve (for direct fallback)", required: false },
+      },
+      execute: async (params) => this.fundEscrow(
+        params.escrow_address as `0x${string}`,
+        params.token_address as `0x${string}` | undefined,
+        params.amount as string | undefined,
+      ),
     });
   }
 

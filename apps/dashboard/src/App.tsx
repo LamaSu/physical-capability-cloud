@@ -58,6 +58,7 @@ const SubnetStatusPage = lazy(() => import("./pages/SubnetStatusPage.js").then(m
 const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").then(m => ({ default: m.DePINDashboardPage })));
 const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => ({ default: m.SettlementPage })));
 const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
+const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({ default: m.TelemetryPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -201,6 +202,7 @@ function DashboardShell() {
               <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
               <Route path="/subnet" element={<SubnetStatusPage />} />
               <Route path="/depin" element={<DePINDashboardPage />} />
+              <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>

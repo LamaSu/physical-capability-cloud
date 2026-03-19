@@ -116,6 +116,9 @@ export type Intent =
   // Verification
   | RequestVerificationIntent
   | VerificationResultIntent
+  // Evaluation (third-party quality assessment — Virtuals ACP pattern)
+  | RequestEvaluationIntent
+  | EvaluationResultIntent
   // Funding
   | RequestFundingIntent
   | DelegateBudgetIntent
@@ -398,6 +401,59 @@ export interface VerificationResultIntent {
   confidence: number;
   attestationHash: string;
   findings: Array<{ check: string; passed: boolean; details: string }>;
+}
+
+// ── Evaluation Intents (third-party quality assessment) ─────────
+// Inspired by Virtuals ACP evaluator pattern — specialized agents
+// assess whether deliverables meet requirements before escrow release.
+
+export interface RequestEvaluationIntent {
+  type: "request_evaluation";
+  jobId: string;
+  milestoneId: string;
+  /** Hash of the evidence bundle to evaluate */
+  evidenceBundleHash: string;
+  /** Capability type being evaluated */
+  capabilityType: string;
+  /** Assurance tier determines evaluation rigor */
+  assuranceTier: number;
+  /** Specific requirements the evaluator should check */
+  requirements: Array<{
+    name: string;
+    expectedValue?: string;
+    tolerance?: string;
+    unit?: string;
+  }>;
+  /** Fee offered for evaluation (USDC atomic units) */
+  evaluationFee: string;
+}
+
+export interface EvaluationResultIntent {
+  type: "evaluation_result";
+  jobId: string;
+  milestoneId: string;
+  /** Overall verdict */
+  verdict: "pass" | "fail" | "conditional";
+  /** Quality score 0-100 */
+  score: number;
+  /** Confidence in the evaluation 0-1 */
+  confidence: number;
+  /** Detailed findings */
+  findings: Array<{
+    category: "dimensional" | "material" | "process" | "documentation" | "safety";
+    severity: "critical" | "major" | "minor" | "observation";
+    description: string;
+    /** Reference into evidence bundle */
+    evidenceRef?: string;
+    expectedValue?: string;
+    actualValue?: string;
+  }>;
+  /** Recommendations for the operator */
+  recommendations: string[];
+  /** Hash of signed attestation VC */
+  attestationHash: string;
+  /** IPFS CID of full evaluation report */
+  reportCid?: string;
 }
 
 // ── Contract Builder Intents ────────────────────────────────────

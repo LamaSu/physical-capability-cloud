@@ -17,7 +17,7 @@
 
 import { createWalletClient, createPublicClient, http, formatEther, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -41,16 +41,18 @@ async function main() {
   }
 
   const rpcUrl = process.env.RPC_URL ?? "https://sepolia.base.org";
+  const useSepoliaL1 = rpcUrl.includes("sepolia") && !rpcUrl.includes("base");
+  const chain = useSepoliaL1 ? sepolia : baseSepolia;
 
   // ── Setup clients ─────────────────────────────────────────────────
   const account = privateKeyToAccount(privateKey as `0x${string}`);
   const walletClient = createWalletClient({
     account,
-    chain: baseSepolia,
+    chain,
     transport: http(rpcUrl),
   });
   const publicClient = createPublicClient({
-    chain: baseSepolia,
+    chain,
     transport: http(rpcUrl),
   });
 
@@ -67,7 +69,7 @@ async function main() {
   }
 
   // ── Load compiled artifacts ───────────────────────────────────────
-  const contractsDir = resolve(import.meta.dirname ?? ".", "../packages/contracts");
+  const contractsDir = resolve(process.cwd(), "packages/contracts");
   const mockUsdcArtifact = JSON.parse(
     readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"),
   );

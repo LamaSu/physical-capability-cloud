@@ -22,3 +22,14 @@ export {
   type PCCEvidenceDemand,
   type PCCEvidenceResult,
 } from "./alkahest/index.js";
+export {
+  NativeEscrowService,
+  AttestationService,
+  type EscrowObligation,
+  type EscrowDispute,
+  type DemandSpec,
+  type FulfillmentProof,
+  type EscrowConfig,
+  type ObligationStatus,
+  type Attestation,
+} from "./native-escrow/index.js";

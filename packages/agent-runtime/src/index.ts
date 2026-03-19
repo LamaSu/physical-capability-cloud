@@ -1,5 +1,5 @@
 export { BaseAgent, type AgentTool, type IntentHandler, type BaseAgentConfig } from "./base-agent.js";
-export { AgentWallet, type WalletConfig } from "./wallet.js";
+export { AgentWallet, type WalletConfig, type SmartAccountHandle } from "./wallet.js";
 export {
   SolanaAgentWallet,
   type SolanaWalletConfig,
@@ -16,3 +16,16 @@ export {
   createBrokerAgentPolicy,
   createKernelAgentPolicy,
 } from "./spending-policy.js";
+export {
+  SettlementClient,
+  type SettlementClientConfig,
+  type SettlementResult,
+} from "./settlement-client.js";
+export {
+  SmartAccountManager,
+  type SmartAccountConfig,
+  type SessionKeyConfig,
+  type SessionKey,
+  type PccSessionModule,
+  type PccKernelOperation,
+} from "./smart-account.js";

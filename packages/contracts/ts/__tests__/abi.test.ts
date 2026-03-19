@@ -90,18 +90,32 @@ describe("MilestoneStatus", () => {
 });
 
 describe("chain-config", () => {
-  it("has 3 network deployments", () => {
-    expect(Object.keys(deployments)).toEqual(["localhost", "base-sepolia", "base"]);
+  it("has 4 network deployments", () => {
+    expect(Object.keys(deployments)).toEqual(["localhost", "sepolia", "base-sepolia", "base"]);
   });
 
-  it("getDeployment returns valid config", () => {
+  it("getDeployment returns valid config for base-sepolia", () => {
     const bsep = getDeployment("base-sepolia");
     expect(bsep.chain.id).toBe(84532);
     expect(bsep.contracts.usdc).toBe("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
   });
 
+  it("getDeployment returns valid config for sepolia with deployed contracts", () => {
+    const sep = getDeployment("sepolia");
+    expect(sep.chain.id).toBe(11155111);
+    expect(sep.rpcUrl).toBe("https://ethereum-sepolia-rpc.publicnode.com");
+    expect(sep.contracts.milestoneEscrowFactory).toBe("0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454");
+    expect(sep.contracts.mockUSDC).toBe("0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb");
+    expect(sep.blockExplorer).toBe("https://sepolia.etherscan.io");
+  });
+
   it("getDeployment throws for unknown network", () => {
     expect(() => getDeployment("polygon")).toThrow("Unknown network");
+  });
+
+  it("getContractAddress returns deployed address for sepolia", () => {
+    const addr = getContractAddress("sepolia", "milestoneEscrowFactory");
+    expect(addr).toBe("0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454");
   });
 
   it("getContractAddress throws for undeployed contract", () => {
