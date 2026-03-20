@@ -29,7 +29,7 @@ COPY packages/db/package.json packages/db/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # Cache-bust: change this value to force pnpm install to re-run
-ARG CACHE_BUST=2
+ARG CACHE_BUST=3
 RUN pnpm install --frozen-lockfile
 
 # Verify correct @fastify/static version installed (must be 8.x for Fastify 4)
