@@ -26,10 +26,16 @@ COPY packages/agent-kernel/package.json packages/agent-kernel/
 COPY packages/gateway/package.json packages/gateway/
 COPY packages/ui/package.json packages/ui/
 COPY packages/db/package.json packages/db/
+COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/agent-evaluator/package.json packages/agent-evaluator/
+COPY packages/agent-support/package.json packages/agent-support/
+COPY packages/onboard-kit/package.json packages/onboard-kit/
+COPY packages/identity-8004/package.json packages/identity-8004/
+COPY packages/bundler/package.json packages/bundler/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # Cache-bust: change this value to force pnpm install to re-run
-ARG CACHE_BUST=3
+ARG CACHE_BUST=4
 RUN pnpm install --frozen-lockfile
 
 # Verify correct @fastify/static version installed (must be 8.x for Fastify 4)
