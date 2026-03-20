@@ -480,6 +480,337 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// 22. pcc_setup_detect
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_detect",
+  "Auto-detect the current PCC configuration state. Returns which environment variables are set, database status (kernels/devices/jobs), chain connectivity, adapter health, and evidence storage status. Use this as the FIRST step when helping someone set up PCC.",
+  {},
+  async () => {
+    const data = await pccFetch("/api/setup/detect");
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 23. pcc_setup_generate_config
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_generate_config",
+  "Generate a KERNEL_CONFIG JSON from device descriptions. Tell it what devices the operator has (type, adapter protocol, connection details) and it produces the config JSON, an env var line, and a JSON file.",
+  {
+    devices: z
+      .array(
+        z.object({
+          name: z.string().describe("Human-readable device name"),
+          type: z.enum(["machine", "sensor", "camera"]),
+          adapterType: z.enum(["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"]),
+          url: z.string().optional().describe("Device API URL (OctoPrint, SiLA, generic-http)"),
+          apiKey: z.string().optional().describe("API key (OctoPrint)"),
+          host: z.string().optional().describe("Host IP (Modbus, OPC-UA)"),
+          port: z.number().optional().describe("Port (Modbus, OPC-UA)"),
+        }),
+      )
+      .describe("Devices to include in the kernel config"),
+    kernelId: z
+      .string()
+      .optional()
+      .describe("Unique kernel ID (e.g. 'kernel_my_shop'). Auto-generated if omitted."),
+    mockMode: z.boolean().optional().describe("Force all adapters to mock mode (for testing)"),
+  },
+  async ({
+    devices,
+    kernelId,
+    mockMode,
+  }: {
+    devices: Array<{
+      name: string;
+      type: "machine" | "sensor" | "camera";
+      adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "mock";
+      url?: string;
+      apiKey?: string;
+      host?: string;
+      port?: number;
+    }>;
+    kernelId?: string;
+    mockMode?: boolean;
+  }) => {
+    const data = await pccFetch("/api/setup/generate-config", {
+      method: "POST",
+      body: { devices, kernelId, mockMode },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 24. pcc_setup_validate_config
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_validate_config",
+  "Validate a kernel configuration. Checks adapter connectivity, capability definitions, and configuration completeness. If no config is provided, validates the currently loaded config.",
+  {
+    config: z
+      .string()
+      .optional()
+      .describe("KERNEL_CONFIG JSON string to validate. Omit to validate current config."),
+  },
+  async ({ config }: { config?: string }) => {
+    const data = await pccFetch("/api/setup/validate", {
+      method: "POST",
+      body: { config },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 25. pcc_setup_register_device
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_register_device",
+  "Register a physical device onto the PCC network. Creates a DB record and optionally runs a health check.",
+  {
+    kernelId: z.string().describe("Kernel this device belongs to"),
+    deviceId: z.string().describe("Unique device ID"),
+    type: z.enum(["machine", "sensor", "camera"]).describe("Device type"),
+    model: z.string().optional().describe("Device model name (e.g. 'Prusa MK4')"),
+    adapterType: z
+      .enum(["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"])
+      .describe("Adapter protocol"),
+    adapterConfig: z
+      .string()
+      .optional()
+      .describe("JSON string of adapter-specific config (url, apiKey, host, port, etc.)"),
+    capabilities: z
+      .array(z.string())
+      .optional()
+      .describe("Capability type IDs this device provides"),
+  },
+  async ({
+    kernelId,
+    deviceId,
+    type,
+    model,
+    adapterType,
+    adapterConfig,
+    capabilities,
+  }: {
+    kernelId: string;
+    deviceId: string;
+    type: "machine" | "sensor" | "camera";
+    model?: string;
+    adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "mock";
+    adapterConfig?: string;
+    capabilities?: string[];
+  }) => {
+    const data = await pccFetch("/api/setup/register-device", {
+      method: "POST",
+      body: {
+        kernelId,
+        deviceId,
+        type,
+        model,
+        adapterType,
+        adapterConfig: adapterConfig ? JSON.parse(adapterConfig) : undefined,
+        capabilities,
+      },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 26. pcc_setup_health_check
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_health_check",
+  "Run health checks on all configured devices or a specific device. Returns connectivity status, response time, and any errors.",
+  {
+    deviceId: z
+      .string()
+      .optional()
+      .describe("Check a specific device by ID. Omit to check all devices via setup status."),
+  },
+  async ({ deviceId }: { deviceId?: string }) => {
+    let data: unknown;
+    if (deviceId) {
+      data = await pccFetch(`/api/devices/${encodeURIComponent(deviceId)}/health`, {
+        method: "POST",
+        body: {},
+      });
+    } else {
+      data = await pccFetch("/api/setup/status");
+    }
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 27. pcc_setup_test_job
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_test_job",
+  "Submit a test job to verify the full PCC pipeline works end-to-end: job submission → adapter execution → evidence collection → (optional) settlement. Returns job result with evidence bundle ID.",
+  {
+    kernelId: z.string().optional().describe("Target kernel. Uses default if omitted."),
+    deviceId: z.string().optional().describe("Target device. Auto-selects if omitted."),
+    assuranceTier: z
+      .number()
+      .min(0)
+      .max(3)
+      .optional()
+      .describe("Assurance tier 0-3. Default 0 (no challenge window, auto-settle)."),
+  },
+  async ({
+    kernelId,
+    deviceId,
+    assuranceTier,
+  }: {
+    kernelId?: string;
+    deviceId?: string;
+    assuranceTier?: number;
+  }) => {
+    const data = await pccFetch("/api/setup/test-job", {
+      method: "POST",
+      body: { kernelId, deviceId, assuranceTier },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 28. pcc_setup_generate_env
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_generate_env",
+  "Generate a .env file from configuration answers. Produces all required environment variables for a specific deployment profile (dev, testnet, mainnet). This tool runs locally without a gateway call.",
+  {
+    profile: z
+      .enum(["dev", "testnet", "mainnet"])
+      .describe("Deployment profile. 'dev' = all mocked, 'testnet' = Base Sepolia, 'mainnet' = Base Mainnet."),
+    chainNetwork: z
+      .string()
+      .optional()
+      .describe("Chain network override (base-sepolia, sepolia, localhost). Defaults per profile."),
+    gatewayPrivateKey: z
+      .string()
+      .optional()
+      .describe("Private key (0x...) for on-chain writes. Required for testnet/mainnet."),
+    escrowAddress: z.string().optional().describe("Deployed MilestoneEscrow contract address (0x...)."),
+    evidenceStorage: z
+      .enum(["helia", "storacha"])
+      .optional()
+      .describe("Evidence storage backend. Default: helia (local IPFS via Helia)."),
+    litProtocolReal: z
+      .boolean()
+      .optional()
+      .describe("Use real Lit Protocol network (datil-test) instead of mock AES encryption."),
+  },
+  async ({
+    profile,
+    chainNetwork,
+    gatewayPrivateKey,
+    escrowAddress,
+    evidenceStorage,
+    litProtocolReal,
+  }: {
+    profile: "dev" | "testnet" | "mainnet";
+    chainNetwork?: string;
+    gatewayPrivateKey?: string;
+    escrowAddress?: string;
+    evidenceStorage?: "helia" | "storacha";
+    litProtocolReal?: boolean;
+  }) => {
+    const lines: string[] = [
+      `# PCC Environment — profile: ${profile}`,
+      `# Generated by pcc_setup_generate_env on ${new Date().toISOString()}`,
+      "",
+      `NODE_ENV=${profile === "dev" ? "development" : "production"}`,
+      "PORT=3200",
+      "",
+    ];
+
+    if (profile === "testnet" || profile === "mainnet") {
+      const network =
+        chainNetwork ?? (profile === "mainnet" ? "base" : "base-sepolia");
+      lines.push("# Chain / Network");
+      lines.push(`PCC_NETWORK=${network}`);
+      if (gatewayPrivateKey) {
+        lines.push(`PCC_GATEWAY_PRIVATE_KEY=${gatewayPrivateKey}`);
+      } else {
+        lines.push("# PCC_GATEWAY_PRIVATE_KEY=0x... (required for on-chain writes)");
+      }
+      if (escrowAddress) {
+        lines.push(`ESCROW_CONTRACT_ADDRESS=${escrowAddress}`);
+      } else {
+        lines.push("# ESCROW_CONTRACT_ADDRESS=0x... (deploy with: npx tsx scripts/deploy-base-sepolia.ts)");
+      }
+      lines.push("");
+    } else {
+      // dev profile — add comment guidance
+      lines.push("# Chain / Network (commented out — using mock mode)");
+      lines.push("# PCC_NETWORK=localhost");
+      lines.push("# PCC_GATEWAY_PRIVATE_KEY=0x...");
+      lines.push("# ESCROW_CONTRACT_ADDRESS=0x...");
+      lines.push("");
+    }
+
+    // Evidence storage
+    const storage = evidenceStorage ?? "helia";
+    lines.push("# Evidence Storage");
+    lines.push(`EVIDENCE_STORAGE=${storage}`);
+    if (storage === "storacha") {
+      lines.push("# STORACHA_PROOF=<base64_ucan>  (get from: npx w3 delegation create)");
+      lines.push("# STORACHA_SPACE_DID=did:key:z6Mk...");
+    }
+    lines.push("");
+
+    // Lit Protocol
+    lines.push("# Lit Protocol Encryption");
+    if (litProtocolReal) {
+      lines.push("LIT_PROTOCOL_REAL=true");
+    } else {
+      lines.push("# LIT_PROTOCOL_REAL=true  (uncomment to use real Lit Protocol datil-test network)");
+    }
+    lines.push("");
+
+    // Kernel config placeholder
+    if (profile === "dev") {
+      lines.push("# Kernel Runtime (optional — mock mode used if not set)");
+      lines.push("# KERNEL_CONFIG='{\"kernelId\":\"my-shop\",\"devices\":[...]}'");
+      lines.push("# KERNEL_CONFIG_FILE=./kernel-config.json");
+    }
+
+    const envContent = lines.join("\n");
+    const filename = `.env.${profile}`;
+
+    return toolResult({ envContent, filename, profile, linesGenerated: lines.length });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 29. pcc_setup_status
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_setup_status",
+  "Get comprehensive setup status. Shows what's configured, what's missing, and what needs attention across all categories: gateway, database, adapters, chain, storage, identity.",
+  {},
+  async () => {
+    const data = await pccFetch("/api/setup/status");
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

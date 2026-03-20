@@ -1,3 +1,7 @@
+import { initSentry, Sentry } from "./sentry.js";
+// Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
+initSentry();
+
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -34,6 +38,7 @@ import { telemetryRoutes } from "./routes/telemetry.js";
 import { jobSubmitRoutes } from "./routes/job-submit.js";
 import { pgtrRelayRoutes } from "./routes/pgtr-relay.js";
 import { tmpTaskRoutes } from "./routes/tmp-tasks.js";
+import { setupRoutes } from "./routes/setup.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
@@ -55,6 +60,14 @@ export async function createGateway(port = 3200) {
 
   const app = Fastify({ logger: true });
 
+  // Sentry error handler — captures Fastify errors and attaches request context
+  // Must be registered before other error handlers
+  try {
+    Sentry.setupFastifyErrorHandler(app);
+  } catch {
+    // Sentry not initialised (no DSN) — safe to ignore
+  }
+
   // Close the DB, IPFS node, and batch settlement when the server shuts down
   app.addHook("onClose", async () => {
     closeStore();
@@ -62,6 +75,12 @@ export async function createGateway(port = 3200) {
     await stopEvidenceStorage();
     const { stopBatchSettlement } = await import("./contracts/batch-settlement.js");
     stopBatchSettlement();
+    // Flush any remaining Sentry events before the process exits
+    try {
+      await Sentry.close(2000);
+    } catch {
+      // Non-fatal
+    }
   });
 
   await app.register(cors, { origin: true, credentials: true });
@@ -134,6 +153,7 @@ export async function createGateway(port = 3200) {
   await app.register(jobSubmitRoutes);
   await app.register(pgtrRelayRoutes);
   await app.register(tmpTaskRoutes);
+  await app.register(setupRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
