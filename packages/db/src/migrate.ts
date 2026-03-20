@@ -31,7 +31,12 @@ export function migrateDatabase(sqlite: Database.Database): void {
       firmware TEXT NOT NULL,
       status TEXT NOT NULL,
       contributes_to_capabilities TEXT NOT NULL,  -- JSON string[]
-      last_updated TEXT NOT NULL
+      last_updated TEXT NOT NULL,
+      adapter_type TEXT,                          -- "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | NULL
+      adapter_config TEXT,                        -- JSON adapter-specific config
+      capabilities TEXT,                          -- JSON string[] of capability IDs
+      health_status TEXT NOT NULL DEFAULT 'unknown',  -- "healthy" | "degraded" | "offline" | "unknown"
+      last_health_check INTEGER                   -- unix timestamp
     );
 
     -- ── Capabilities ─────────────────────────────────────────────────

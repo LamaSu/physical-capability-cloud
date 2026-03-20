@@ -27,4 +27,16 @@ export const kernelDevices = sqliteTable("kernel_devices", {
   status: text("status").notNull(), // "idle" | "busy" | "error" | "offline" | "maintenance"
   contributesToCapabilities: text("contributes_to_capabilities", { mode: "json" }).notNull().$type<string[]>(),
   lastUpdated: text("last_updated").notNull(),
+  // ── Adapter config ─────────────────────────────────────────────────
+  /** Adapter type: one of "octoprint" | "modbus" | "opcua" | "sila" | "generic-http", or null for sensors/cameras */
+  adapterType: text("adapter_type"),
+  /** JSON string containing adapter-specific config (url, apiKey, host, port, etc.) */
+  adapterConfig: text("adapter_config"),
+  /** JSON string array of capability IDs this device provides */
+  capabilities: text("capabilities", { mode: "json" }).$type<string[]>(),
+  // ── Health tracking ────────────────────────────────────────────────
+  /** Health status of the device */
+  healthStatus: text("health_status").notNull().default("unknown"), // "healthy" | "degraded" | "offline" | "unknown"
+  /** Unix timestamp of last health check */
+  lastHealthCheck: integer("last_health_check"),
 });

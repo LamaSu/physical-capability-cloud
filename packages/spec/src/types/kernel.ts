@@ -6,6 +6,36 @@
  * capability endpoints + produces signed evidence bundles.
  */
 
+// ── Device Adapter Types ────────────────────────────────────────────────────
+
+/** Supported device adapter protocols */
+export type AdapterType = "octoprint" | "modbus" | "opcua" | "sila" | "generic-http";
+
+/**
+ * Adapter configuration for a device.
+ * The shape of the config depends on the adapter type.
+ */
+export interface AdapterConfig {
+  type: AdapterType;
+  /** Base URL — used by OctoPrint, generic-http, and SiLA adapters */
+  url?: string;
+  /** API key — used by OctoPrint and some generic-http adapters */
+  apiKey?: string;
+  /** Hostname or IP — used by Modbus and OPC-UA adapters */
+  host?: string;
+  /** TCP port — used by Modbus and OPC-UA adapters */
+  port?: number;
+  /** Modbus unit (slave) ID */
+  unitId?: number;
+  /** OPC-UA endpoint URL (e.g. opc.tcp://host:4840) */
+  endpointUrl?: string;
+  /** When true the adapter runs in simulation mode without touching real hardware */
+  mockMode?: boolean;
+}
+
+/** Health state of a registered device */
+export type DeviceHealthStatus = "healthy" | "degraded" | "offline" | "unknown";
+
 import type {
   Id,
   Address,
@@ -72,6 +102,18 @@ export interface KernelDevice {
   did?: DIDString;
   /** Verifiable Credentials for device capabilities */
   credentials?: CapabilityCredential[];
+  // ── Adapter config ─────────────────────────────────────────────────
+  /** Adapter protocol type; null for sensors/cameras with no control adapter */
+  adapterType?: AdapterType | null;
+  /** Adapter-specific configuration (URL, API key, host, port, etc.) */
+  adapterConfig?: AdapterConfig | null;
+  /** Capability IDs this device directly provides */
+  capabilities?: Id[];
+  // ── Health tracking ────────────────────────────────────────────────
+  /** Last known health state */
+  healthStatus?: DeviceHealthStatus;
+  /** Unix timestamp of the last health check */
+  lastHealthCheck?: number | null;
 }
 
 /** A job as seen by the kernel */

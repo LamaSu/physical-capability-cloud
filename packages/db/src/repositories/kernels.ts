@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { shopKernels, kernelDevices } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 
@@ -41,5 +41,33 @@ export class KernelRepository {
 
   updateDevice(id: string, data: Partial<typeof kernelDevices.$inferInsert>) {
     return this.db.update(kernelDevices).set(data).where(eq(kernelDevices.id, id)).returning().get();
+  }
+
+  /** Find all devices that use a specific adapter type */
+  findDevicesByAdapter(adapterType: string) {
+    return this.db
+      .select()
+      .from(kernelDevices)
+      .where(eq(kernelDevices.adapterType, adapterType))
+      .all();
+  }
+
+  /** Update the health status and last health check timestamp for a device */
+  updateHealth(deviceId: string, healthStatus: string, lastHealthCheck: number) {
+    return this.db
+      .update(kernelDevices)
+      .set({ healthStatus, lastHealthCheck })
+      .where(eq(kernelDevices.id, deviceId))
+      .returning()
+      .get();
+  }
+
+  /** Find all devices with "healthy" health status for a given kernel */
+  findHealthyDevices(kernelId: string) {
+    return this.db
+      .select()
+      .from(kernelDevices)
+      .where(and(eq(kernelDevices.kernelId, kernelId), eq(kernelDevices.healthStatus, "healthy")))
+      .all();
   }
 }
