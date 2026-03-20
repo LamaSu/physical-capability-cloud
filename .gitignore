@@ -14,7 +14,8 @@ lib/
 *.swo
 packages/gateway/data/
 .playwright-cli/
-ai/
+ai/*
+!ai/research/
 docs/TECHNOECONOMIC_PLAN.md
 docs/VENDOR_STACK_AUDIT.md
 docs/BLIND_SPOTS_AND_RISKS.md
