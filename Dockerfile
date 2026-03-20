@@ -45,7 +45,10 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 COPY . .
 ARG BUILD_BUST=1
 ENV NODE_OPTIONS="--max-old-space-size=4096"
-RUN pnpm build --concurrency=1
+# Build all packages except dashboard (tsc only)
+RUN pnpm --filter '!@pcc/dashboard' build --concurrency=1
+# Build dashboard with vite only (skip tsc -b which OOMs on large workspace)
+RUN cd apps/dashboard && npx vite build
 
 # Verify the build artifacts exist and the full import chain works
 RUN ls -la packages/gateway/dist/server.js && echo "[docker] gateway build output OK"
