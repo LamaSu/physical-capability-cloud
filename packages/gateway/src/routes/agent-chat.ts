@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 /**
  * Agent API routes — agents connect to PCC directly, no proxy.
  *
- * GET  /api/agent/tools    — Tool definitions (28 tools)
+ * GET  /api/agent/tools    — Tool definitions (73 tools)
  * POST /api/agent/execute  — Execute a tool call on behalf of an agent
  *
  * Agents fetch the agent-package.json (static file), get tools + system prompt,

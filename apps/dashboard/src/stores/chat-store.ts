@@ -26,7 +26,7 @@ const WELCOME_MESSAGE: AgentMessage = {
 
 A verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.
 
-**Your agent connects directly to PCC.** No API keys, no middleware — just fetch the agent package and your agent has 28 tools to interact with the network.
+**Your agent connects directly to PCC.** No API keys, no middleware — just fetch the agent package and your agent has 73 tools to interact with the network.
 
 \`\`\`
 GET /agent-package.json
