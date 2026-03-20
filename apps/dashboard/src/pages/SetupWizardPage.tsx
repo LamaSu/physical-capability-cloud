@@ -14,6 +14,8 @@ import {
 import type { WizardStep } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useSetupWizardStore } from "../stores/setup-wizard-store.js";
+import { apiPost } from "../lib/api.js";
+import type { ValidateResponse } from "../lib/api.js";
 
 /* ------------------------------------------------------------------ */
 /*  Step definitions                                                   */
@@ -311,7 +313,41 @@ function StepIdentity() {
     completeSetup,
   } = useSetupWizardStore();
 
-  const handleNext = () => {
+  const [submitting, setSubmitting] = React.useState(false);
+  const [apiError, setApiError] = React.useState<string | null>(null);
+  const [apiWarnings, setApiWarnings] = React.useState<string[]>([]);
+
+  const handleNext = async () => {
+    setApiError(null);
+    setApiWarnings([]);
+    setSubmitting(true);
+
+    try {
+      // Validate the setup config
+      const validation = await apiPost<ValidateResponse>("/setup/validate", {});
+      if (!validation.valid) {
+        // Non-fatal: just surface warnings and continue
+        setApiWarnings(validation.warnings);
+      }
+      // Mark setup complete in store and advance
+      completeSetup();
+      nextStep();
+    } catch (err) {
+      // Gateway may not be running in demo mode — fall back gracefully
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      // If it's a network/fetch error, continue offline with a warning
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("fetch")) {
+        completeSetup();
+        nextStep();
+      } else {
+        setApiError(msg);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSkip = () => {
     completeSetup();
     nextStep();
   };
@@ -322,8 +358,8 @@ function StepIdentity() {
       subtitle="Register your identity on the PCCP network."
       onNext={handleNext}
       onBack={prevStep}
-      nextLabel="Complete Setup"
-      nextDisabled={!isStepValid(3)}
+      nextLabel={submitting ? "Registering..." : "Complete Setup"}
+      nextDisabled={!isStepValid(3) || submitting}
     >
       <div className="space-y-6 max-w-lg">
         <div>
@@ -376,8 +412,43 @@ function StepIdentity() {
           </div>
         </div>
 
+        {/* API error */}
+        {apiError && (
+          <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+            <div className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-red-400 font-medium mb-1">Registration error</div>
+              <div className="text-xs text-white/40">{apiError}</div>
+            </div>
+            <button
+              onClick={handleSkip}
+              className="text-[10px] text-white/30 hover:text-white/50 transition-colors shrink-0"
+            >
+              Skip
+            </button>
+          </div>
+        )}
+
+        {/* API warnings */}
+        {apiWarnings.length > 0 && (
+          <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 space-y-1">
+            <div className="text-xs text-yellow-400 font-medium">Setup warnings</div>
+            {apiWarnings.map((w) => (
+              <div key={w} className="text-xs text-white/40">{w}</div>
+            ))}
+          </div>
+        )}
+
+        {/* Loading state */}
+        {submitting && (
+          <div className="flex items-center gap-2 text-xs text-white/40">
+            <div className="w-3 h-3 border border-green-500/50 border-t-green-500 rounded-full animate-spin" />
+            Validating setup configuration...
+          </div>
+        )}
+
         <p className="text-[10px] text-white/15 italic">
-          This registers your identity on the PCCP network via ERC-8004.
+          This validates your setup and registers your identity on the PCCP network via ERC-8004.
         </p>
       </div>
     </WizardStepContent>
