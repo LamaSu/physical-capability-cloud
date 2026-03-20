@@ -1,3 +1,12 @@
+## MANDATORY: DGX Spark Offload
+
+**ALWAYS check Spark availability (`spark-check`) at session start and offload ALL builds, tests, and heavy work to the DGX Spark (192.168.108.72, 119GB RAM).** The local machine has only 16GB RAM and WILL OOM on builds, parallel tests, and multi-agent workloads. Use `spark-run` for everything. No exceptions.
+
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm build --concurrency=1"` — build
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm --workspace-concurrency=1 -r test"` — test
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm install"` — install
+- If Spark is down, use `--concurrency=1` locally and warn the user about OOM risk.
+
 # Physical Capability Cloud (PCC)
 
 ## What This Is
@@ -54,7 +63,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 ## Dev Commands
 - `pnpm install` — install all deps
 - `pnpm build --concurrency=1` — build all 17 packages (sequential to avoid OOM on Windows)
-- `pnpm --workspace-concurrency=1 -r test` — run all tests (1174 passing across 69 test files)
+- `pnpm --workspace-concurrency=1 -r test` — run all tests (1514 passing across 83 test files)
 - `npx tsx scripts/e2e-simulation.ts` — run kernel-level e2e simulation
 - `npx tsx scripts/agent-e2e-simulation.ts` — run agent-to-agent e2e simulation
 - `npx tsx scripts/sovereign-e2e-simulation.ts` — run sovereign infrastructure e2e (9 phases + IPFS)
