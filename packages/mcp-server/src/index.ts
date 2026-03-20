@@ -128,7 +128,7 @@ server.tool(
       .optional()
       .describe("Filter by kernel status (e.g. 'online', 'offline', 'maintenance')"),
   },
-  async ({ status }) => {
+  async ({ status }: { status?: string }) => {
     const data = await pccFetch("/api/kernels", { query: { status } });
     return toolResult(data);
   },
@@ -144,7 +144,7 @@ server.tool(
   {
     kernelId: z.string().describe("The kernel ID (e.g. 'kernel-biolab-01')"),
   },
-  async ({ kernelId }) => {
+  async ({ kernelId }: { kernelId: string }) => {
     const data = await pccFetch(`/api/kernels/${encodeURIComponent(kernelId)}`);
     return toolResult(data);
   },
@@ -164,7 +164,7 @@ server.tool(
       .optional()
       .describe("Filter by job status (e.g. 'queued', 'running', 'completed', 'failed')"),
   },
-  async ({ kernelId, status }) => {
+  async ({ kernelId, status }: { kernelId?: string; status?: string }) => {
     const data = await pccFetch("/api/jobs", { query: { kernelId, status } });
     return toolResult(data);
   },
@@ -180,7 +180,7 @@ server.tool(
   {
     jobId: z.string().describe("The job ID"),
   },
-  async ({ jobId }) => {
+  async ({ jobId }: { jobId: string }) => {
     const data = await pccFetch(`/api/jobs/${encodeURIComponent(jobId)}`);
     return toolResult(data);
   },
@@ -201,7 +201,7 @@ server.tool(
       .describe("Partial parameter selections made so far"),
     profileId: z.string().optional().describe("Optional builder profile ID for presets"),
   },
-  async ({ type, selections, profileId }) => {
+  async ({ type, selections, profileId }: { type: string; selections?: Record<string, unknown>; profileId?: string }) => {
     const data = await pccFetch("/api/build/options", {
       method: "POST",
       body: { type, selections: selections ?? {}, profileId },
@@ -222,7 +222,7 @@ server.tool(
     selections: z.record(z.unknown()).describe("Complete parameter selections"),
     profileId: z.string().optional().describe("Optional builder profile ID"),
   },
-  async ({ type, selections, profileId }) => {
+  async ({ type, selections, profileId }: { type: string; selections: Record<string, unknown>; profileId?: string }) => {
     const data = await pccFetch("/api/build/price", {
       method: "POST",
       body: { type, selections, profileId },
@@ -248,7 +248,7 @@ server.tool(
       .describe("Assurance tier (0-3): 0=none, 1=basic, 2=standard, 3=full"),
     profileId: z.string().optional().describe("Optional builder profile ID"),
   },
-  async ({ type, selections, assuranceTier, profileId }) => {
+  async ({ type, selections, assuranceTier, profileId }: { type: string; selections: Record<string, unknown>; assuranceTier: number; profileId?: string }) => {
     const data = await pccFetch("/api/build/contract", {
       method: "POST",
       body: { type, selections, assuranceTier, profileId },
@@ -270,7 +270,7 @@ server.tool(
       .optional()
       .describe("Filter by escrow status (e.g. 'funded', 'active', 'completed', 'disputed')"),
   },
-  async ({ status }) => {
+  async ({ status }: { status?: string }) => {
     const data = await pccFetch("/api/escrow", { query: { status } });
     return toolResult(data);
   },
@@ -312,7 +312,7 @@ server.tool(
       .optional()
       .describe("Filter by template status ('draft' or 'published')"),
   },
-  async ({ tags, capabilities, search, status }) => {
+  async ({ tags, capabilities, search, status }: { tags?: string; capabilities?: string; search?: string; status?: string }) => {
     const data = await pccFetch("/api/protocols", {
       query: { tags, capabilities, search, status },
     });
@@ -363,7 +363,7 @@ server.tool(
   {
     agentId: z.string().describe("Kernel ID or agent DID to look up"),
   },
-  async ({ agentId }) => {
+  async ({ agentId }: { agentId: string }) => {
     const data = await pccFetch(`/api/registry/entities/${encodeURIComponent(agentId)}`);
     return toolResult(data);
   },
@@ -380,7 +380,7 @@ server.tool(
     agentId: z.string().describe("Agent ID or kernel ID"),
     tag: z.string().optional().describe("Filter by reputation tag (e.g. 'quality', 'uptime', 'assurance')"),
   },
-  async ({ agentId, tag }) => {
+  async ({ agentId, tag }: { agentId: string; tag?: string }) => {
     const data = await pccFetch(`/api/registry/entities/${encodeURIComponent(agentId)}/reputation`, {
       query: { tag },
     });
@@ -398,7 +398,7 @@ server.tool(
   {
     kernelId: z.string().describe("Kernel ID to list sensors for"),
   },
-  async ({ kernelId }) => {
+  async ({ kernelId }: { kernelId: string }) => {
     const data = await pccFetch(`/api/sensors/${encodeURIComponent(kernelId)}/channels`);
     return toolResult(data);
   },
@@ -416,7 +416,7 @@ server.tool(
     channel: z.string().describe("Sensor channel name (e.g. 'temperature', 'pressure')"),
     limit: z.number().optional().describe("Number of recent readings to return (default 50)"),
   },
-  async ({ kernelId, channel, limit }) => {
+  async ({ kernelId, channel, limit }: { kernelId: string; channel: string; limit?: number }) => {
     const data = await pccFetch(
       `/api/sensors/${encodeURIComponent(kernelId)}/data/${encodeURIComponent(channel)}`,
       { query: { limit: limit?.toString() } },
@@ -435,7 +435,7 @@ server.tool(
   {
     bundleId: z.string().describe("Evidence bundle ID"),
   },
-  async ({ bundleId }) => {
+  async ({ bundleId }: { bundleId: string }) => {
     const data = await pccFetch(`/api/evidence/${encodeURIComponent(bundleId)}`);
     return toolResult(data);
   },
@@ -456,7 +456,7 @@ server.tool(
       parameters: z.record(z.unknown()).optional().describe("Capability parameters"),
     })).describe("Workflow steps with dependencies"),
   },
-  async ({ steps }) => {
+  async ({ steps }: { steps: Array<{ id: string; capabilityType: string; dependsOn?: string[]; parameters?: Record<string, unknown> }> }) => {
     const data = await pccFetch("/api/workflows/compile", {
       method: "POST",
       body: { steps },
