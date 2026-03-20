@@ -43,6 +43,7 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
+ARG BUILD_BUST=1
 RUN pnpm build --concurrency=1
 
 # Verify the build artifacts exist and the full import chain works
