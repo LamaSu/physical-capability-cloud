@@ -1,4 +1,13 @@
 export { EvidenceEmitter } from "./evidence-emitter.js";
+export { loadKernelConfig } from "./kernel-config.js";
+export type { KernelConfig, DeviceConfig, DeviceRole, AdapterType } from "./kernel-config.js";
+export {
+  createMachineAdapter,
+  createSensorAdapter,
+  createCameraAdapter,
+  createAdaptersFromConfig,
+} from "./adapter-factory.js";
+export type { AdapterSet } from "./adapter-factory.js";
 export { JobRunner } from "./job-runner.js";
 export type { JobConfig, JobResult } from "./job-runner.js";
 export { buildServer } from "./server.js";

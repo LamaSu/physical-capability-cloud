@@ -31,6 +31,9 @@ import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
+import { jobSubmitRoutes } from "./routes/job-submit.js";
+import { pgtrRelayRoutes } from "./routes/pgtr-relay.js";
+import { tmpTaskRoutes } from "./routes/tmp-tasks.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
@@ -45,6 +48,10 @@ export async function createGateway(port = 3200) {
   // Initialize SQLite store — only seed demo data in dev (not production)
   const shouldSeed = process.env.PCC_SEED_DATA === "true" || process.env.NODE_ENV !== "production";
   initStore({ seed: shouldSeed });
+
+  // Initialize KernelService (mock mode by default)
+  const { initKernelService } = await import("./services/kernel-service.js");
+  initKernelService();
 
   const app = Fastify({ logger: true });
 
@@ -124,6 +131,9 @@ export async function createGateway(port = 3200) {
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
   await app.register(telemetryRoutes);
+  await app.register(jobSubmitRoutes);
+  await app.register(pgtrRelayRoutes);
+  await app.register(tmpTaskRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);

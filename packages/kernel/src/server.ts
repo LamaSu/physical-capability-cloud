@@ -18,24 +18,37 @@ import type { Capability, CapabilitySlot, KernelJob, CustodyEvent, EvidenceBundl
 import { ids } from "@pcc/spec";
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { JobRunner } from "./job-runner.js";
-import { MockFDMAdapter } from "./adapters/mock-fdm.js";
-import { MockPowerMonitorAdapter } from "./adapters/mock-power-monitor.js";
-import { MockCameraAdapter } from "./adapters/mock-camera.js";
+import { loadKernelConfig } from "./kernel-config.js";
+import { createAdaptersFromConfig } from "./adapter-factory.js";
 
-const KERNEL_ID = process.env.KERNEL_ID ?? "kernel_dev_001";
 const PORT = parseInt(process.env.PORT ?? "3100", 10);
+
+// ---- Load kernel configuration (env → file → mock defaults) ----
+const kernelConfig = loadKernelConfig();
+const KERNEL_ID = kernelConfig.kernelId;
+
+// ---- Instantiate adapters from config ----
+const { machines, sensors, cameras } = createAdaptersFromConfig(kernelConfig);
+
+// Pick primary machine, sensors and camera (first of each type for now)
+const fdm = machines[0];
+const powerMonitor = sensors[0];
+const camera = cameras[0] ?? null;
+const evidenceEmitter = new EvidenceEmitter(KERNEL_ID);
+
+// Log what was instantiated
+console.log(
+  `[kernel] ${KERNEL_ID} — adapters: ` +
+  `machines=[${machines.map((m) => `${m.id}(${m.constructor.name})`).join(", ")}] ` +
+  `sensors=[${sensors.map((s) => `${s.id}(${s.constructor.name})`).join(", ")}] ` +
+  `cameras=[${cameras.map((c) => `${c.id}(${c.constructor.name})`).join(", ")}]`,
+);
 
 // ---- State (in-memory for v1; swap to SQLite/Postgres later) ----
 const capabilities: Capability[] = [];
 const jobs: Map<string, KernelJob> = new Map();
 const bundles: Map<string, EvidenceBundle> = new Map();
 const custodyEvents: Map<string, CustodyEvent[]> = new Map();
-
-// ---- Initialize mock devices ----
-const fdm = new MockFDMAdapter("dev_fdm_001", KERNEL_ID, 5_000);
-const powerMonitor = new MockPowerMonitorAdapter("dev_power_001", KERNEL_ID);
-const camera = new MockCameraAdapter("dev_cam_001", KERNEL_ID);
-const evidenceEmitter = new EvidenceEmitter(KERNEL_ID);
 
 // Register a mock capability
 capabilities.push({
@@ -128,19 +141,32 @@ async function buildServer() {
     async (request) => {
       const { capabilityId, jobId, stepId, cwmId, gcodeHash, assuranceTier } = request.body;
 
+      if (!fdm) return { error: "No machine adapter available" };
+
+      const assignedDevices = [
+        fdm.id,
+        ...(powerMonitor ? [powerMonitor.id] : []),
+        ...(camera ? [camera.id] : []),
+      ];
+
       const job: KernelJob = {
         id: jobId,
         stepId,
         cwmId,
         capabilityId,
         status: "preparing",
-        assignedDevices: [fdm.id, powerMonitor.id, camera.id],
+        assignedDevices,
         progress: 0,
       };
       jobs.set(jobId, job);
 
       // Run job asynchronously
-      const runner = new JobRunner(fdm, [powerMonitor], camera, evidenceEmitter);
+      const runner = new JobRunner(
+        fdm,
+        powerMonitor ? [powerMonitor] : [],
+        camera,
+        evidenceEmitter,
+      );
       job.status = "executing";
       job.startedAt = new Date().toISOString();
 
