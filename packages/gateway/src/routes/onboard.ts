@@ -201,7 +201,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         includes: [
           "Wallet with credits for LLM calls",
           "Access to Claude, GPT-4o, Groq — no API keys needed",
-          "28 PCC tools for physical capability discovery and orchestration",
+          "73 PCC tools for physical capability discovery and orchestration",
           "Agent identity with trust scoring",
         ],
       });
