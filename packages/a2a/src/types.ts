@@ -123,6 +123,18 @@ export type Intent =
   | RequestFundingIntent
   | DelegateBudgetIntent
   | ClaimRewardsIntent
+  // Unbrowse (external data/action layer)
+  | UnbrowseQueryIntent
+  | UnbrowseResultIntent
+  | UnbrowseShareSkillIntent
+  | UnbrowseSkillSharedIntent
+  // Setup
+  | SetupDetectIntent
+  | SetupDetectResultIntent
+  | SetupConfigureIntent
+  | SetupConfigureResultIntent
+  | SetupValidateIntent
+  | SetupValidateResultIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -589,6 +601,138 @@ export interface ClaimRewardsIntent {
   /** Recipient address for the rewards */
   recipientAddress: string;
 }
+
+// ── Unbrowse Intents (external data/action layer) ───────────────
+// Unbrowse gives agents direct API access to any website, 100x faster
+// than browser automation. Agents discover, share, and reuse API skills.
+
+/** Agent requests external data via Unbrowse (resolve intent against a URL) */
+export interface UnbrowseQueryIntent {
+  type: "unbrowse_query";
+  /** Natural language description of what data/action is needed */
+  query: string;
+  /** Target URL to query (e.g., supplier site, marketplace) */
+  targetUrl?: string;
+  /** Limit results */
+  maxResults?: number;
+  /** Whether this is a read-only query (default: true) */
+  dryRun?: boolean;
+}
+
+/** Response containing Unbrowse results */
+export interface UnbrowseResultIntent {
+  type: "unbrowse_result";
+  /** The query that produced these results */
+  query: string;
+  /** Results from the Unbrowse marketplace or live capture */
+  results: Array<{
+    /** Unbrowse skill ID */
+    skillId: string;
+    /** Domain the skill targets */
+    domain: string;
+    /** What the skill does */
+    intent: string;
+    /** Confidence score (0-1) */
+    confidence: number;
+    /** Data returned by the skill (if executed) */
+    data?: unknown;
+    /** How the data was obtained */
+    source?: "marketplace" | "capture" | "dom_fallback";
+  }>;
+  /** Total results found */
+  totalResults: number;
+  /** Resolution time in ms */
+  durationMs: number;
+}
+
+/** Agent shares a discovered Unbrowse skill with the network */
+export interface UnbrowseShareSkillIntent {
+  type: "unbrowse_share_skill";
+  /** Unbrowse skill ID to share */
+  skillId: string;
+  /** Domain the skill targets */
+  domain: string;
+  /** What the skill does */
+  intent: string;
+  /** Who discovered this skill */
+  discoveredBy: string;
+  /** When it was discovered */
+  discoveredAt: string;
+}
+
+/** Acknowledgement that a shared skill was received */
+export interface UnbrowseSkillSharedIntent {
+  type: "unbrowse_skill_shared";
+  /** The skill that was shared */
+  skillId: string;
+  /** How many agents now know about this skill */
+  networkReach: number;
+}
+
+// ── Setup Intents ────────────────────────────────────────────────
+// These allow agents to orchestrate kernel/device setup flows programmatically.
+
+/** Request: detect current config state — no params needed, agent figures out what to check */
+export interface SetupDetectIntent {
+  type: "setup_detect";
+}
+
+/** Response: detected config state */
+export interface SetupDetectResultIntent {
+  type: "setup_detect_result";
+  gateway: { running: boolean; url: string; version?: string };
+  database: { initialized: boolean; kernels: number; devices: number; jobs: number };
+  chain: { connected: boolean; network?: string; walletAddress?: string; balance?: string };
+  adapters: Array<{ id: string; type: string; adapterType: string; healthy: boolean }>;
+  storage: { type: string; connected: boolean };
+  identity: { registered: boolean; agentId?: string; did?: string };
+  overall: "ready" | "partial" | "unconfigured";
+  /** Human-readable list of what is not configured */
+  missing: string[];
+}
+
+/** Request: configure a subsystem (adapter, chain, storage, identity, or full) */
+export interface SetupConfigureIntent {
+  type: "setup_configure";
+  subsystem: "adapter" | "chain" | "storage" | "identity" | "full";
+  config: Record<string, unknown>;
+}
+
+/** Response: configuration result */
+export interface SetupConfigureResultIntent {
+  type: "setup_configure_result";
+  subsystem: string;
+  success: boolean;
+  config?: Record<string, unknown>;
+  error?: string;
+}
+
+/** Request: validate full setup — pass a JSON config string or omit to validate current env */
+export interface SetupValidateIntent {
+  type: "setup_validate";
+  /** JSON string of config to validate. Omit to validate the currently loaded config. */
+  config?: string;
+}
+
+/** Response: validation results with per-check pass/warn/fail status */
+export interface SetupValidateResultIntent {
+  type: "setup_validate_result";
+  valid: boolean;
+  checks: Array<{ name: string; status: "pass" | "warn" | "fail"; message: string }>;
+  errors: string[];
+  warnings: string[];
+}
+
+// ── Setup Payload Types (re-exported aliases for consumers) ───────
+// These mirror the intent shapes but without the `type` discriminant,
+// matching the task-spec naming convention for payload interfaces.
+
+export type SetupDetectPayload = Omit<SetupDetectIntent, "type">;
+export type SetupDetectResultPayload = Omit<SetupDetectResultIntent, "type">;
+export type SetupConfigurePayload = Omit<SetupConfigureIntent, "type">;
+export type SetupConfigureResultPayload = Omit<SetupConfigureResultIntent, "type">;
+export type SetupValidatePayload = Omit<SetupValidateIntent, "type">;
+export type SetupValidateResultPayload = Omit<SetupValidateResultIntent, "type">;
 
 // ── General Intents ─────────────────────────────────────────────
 
