@@ -5,7 +5,7 @@
  * checks (hash integrity, tier compliance, missing fields) combined with
  * quality-tier scoring. This is the production replacement for MockMiner,
  * reusing its proven defect-detection logic but with:
- *   - Ed25519 signing (HMAC-based for portability)
+ *   - Ed25519 signing (real nacl.sign.detached via tweetnacl)
  *   - Deterministic scoring (no random noise)
  *   - Structured node identity (id, publicKey, stake, reputation)
  */
@@ -18,7 +18,8 @@ import type {
   VerificationResponse,
   NodeStatus,
 } from "./types.js";
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import nacl from "tweetnacl";
 
 /** Quality tier of the verifier node — determines verification thoroughness */
 export type VerifierQuality = "excellent" | "good" | "acceptable";
@@ -32,7 +33,7 @@ const QUALITY_THRESHOLDS: Record<VerifierQuality, { baseAccuracy: number; minSco
 export interface VerifierNodeConfig {
   /** Unique node identifier */
   id: string;
-  /** HMAC secret key (hex). If omitted, a random key is generated. */
+  /** Ed25519 seed (32-byte hex). If omitted, a random seed is generated. */
   privateKey?: string;
   /** Quality tier of this node */
   quality?: VerifierQuality;
@@ -47,6 +48,7 @@ export class VerifierNode {
   readonly quality: VerifierQuality;
 
   private privateKey: string;
+  private _secretKey: string;
   private publicKey: string;
   private stake: number;
   private reputation: number;
@@ -62,12 +64,14 @@ export class VerifierNode {
     this.status = "online";
     this.endpoint = config.endpoint ?? `http://localhost:0/verify/${config.id}`;
 
-    // Key pair: use HMAC-SHA256 as a portable signing mechanism
+    // Ed25519 key pair: treat privateKey as a 32-byte seed
     this.privateKey = config.privateKey ?? randomBytes(32).toString("hex");
-    // Public key is a hash of the private key (deterministic derivation)
-    this.publicKey = createHmac("sha256", "pcc-verifier-pk")
-      .update(this.privateKey)
-      .digest("hex");
+    const seed = Buffer.from(this.privateKey.slice(0, 64).padEnd(64, "0"), "hex");
+    const keyPair = nacl.sign.keyPair.fromSeed(seed);
+    // Store the full 64-byte secret key (seed + public key) as hex
+    this._secretKey = Buffer.from(keyPair.secretKey).toString("hex");
+    // Derive public key from Ed25519 key pair
+    this.publicKey = Buffer.from(keyPair.publicKey).toString("hex");
   }
 
   /**
@@ -173,11 +177,31 @@ export class VerifierNode {
   }
 
   /**
-   * Sign data using HMAC-SHA256 with this node's private key.
-   * In production, this would use Ed25519 via libsodium or noble-ed25519.
+   * Sign data using Ed25519 with this node's secret key.
+   * Returns a 64-byte signature as a 128-char hex string.
    */
   sign(data: string): string {
-    return createHmac("sha256", this.privateKey).update(data).digest("hex");
+    const secretKey = new Uint8Array(Buffer.from(this._secretKey, "hex"));
+    const messageBytes = Buffer.from(data);
+    const sig = nacl.sign.detached(messageBytes, secretKey);
+    return Buffer.from(sig).toString("hex");
+  }
+
+  /**
+   * Verify an Ed25519 signature against a public key.
+   * @param data - The original signed data string
+   * @param signature - 128-char hex signature
+   * @param publicKey - 64-char hex public key
+   */
+  static verify(data: string, signature: string, publicKey: string): boolean {
+    try {
+      const pubKeyBytes = new Uint8Array(Buffer.from(publicKey, "hex"));
+      const sigBytes = new Uint8Array(Buffer.from(signature, "hex"));
+      const messageBytes = Buffer.from(data);
+      return nacl.sign.detached.verify(messageBytes, sigBytes, pubKeyBytes);
+    } catch {
+      return false;
+    }
   }
 
   /** Get node info for network registration */

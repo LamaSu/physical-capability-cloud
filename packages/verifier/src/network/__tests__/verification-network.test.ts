@@ -245,7 +245,7 @@ describe("VerifierNode", () => {
     const sig2 = node.sign("data_two");
 
     expect(sig1).not.toBe(sig2);
-    expect(sig1.length).toBe(64); // HMAC-SHA256 hex
+    expect(sig1.length).toBe(128); // Ed25519 signature: 64 bytes = 128 hex chars
   });
 
   it("produces consistent signatures for the same data", () => {

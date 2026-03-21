@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@pcc/spec": "workspace:*",
-    "starknet": "^9.4.2"
+    "starknet": "^9.4.2",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@noir-lang/backend_barretenberg": "^0.36.0",
