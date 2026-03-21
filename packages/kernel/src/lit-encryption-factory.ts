@@ -6,8 +6,12 @@
  *   await svc.connect();
  *   const encrypted = await svc.encryptBundle(bundle, escrowAddress, jobId);
  *
- * Set LIT_PROTOCOL_REAL=true to activate the real Lit Protocol path (datil-test network).
+ * Set LIT_PROTOCOL_REAL=true to activate the real Lit Protocol path (datil-dev network by default).
  * Default: mock mode (local AES-256-GCM, no network required).
+ * Network options (via LitEncryptionServiceOptions.network):
+ *   - "datil-dev" (default when real) -- active dev/test network
+ *   - "datil" -- production Lit network
+ * NOTE: "datil-test" was decommissioned Feb 25, 2026. Do not use it.
  */
 
 import { LitEncryptionService } from "./lit-encryption-service.js";

@@ -1,20 +1,25 @@
 /**
  * RealLitEncryptionService -- Lit Protocol-based decentralized encryption for evidence bundles.
  *
- * Uses the real @lit-protocol/lit-node-client SDK on the "datil-test" network.
- * Encrypts data with Lit's threshold cryptography, where decryption key shares
- * are held by the Lit node network and released only when on-chain access
- * control conditions are met.
+ * Uses the real @lit-protocol/lit-node-client SDK v7 on the Datil network generation
+ * (Lit Protocol's "Chipotle v3" era). Encrypts data with Lit's threshold cryptography,
+ * where decryption key shares are held by the Lit node network and released only when
+ * on-chain access control conditions are met.
  *
  * Key differences from mock:
  * - No local key storage: encryption keys are threshold-split across Lit nodes
  * - Access conditions enforced cryptographically by the Lit network, not in-process
  * - Requires SessionSigs (SIWE-based) for decryption, not simple auth signatures
- * - Connects to a real decentralized network (datil-test for testing, datil for production)
+ * - Connects to a real decentralized network:
+ *   - "datil-dev" (LIT_NETWORK.DatilDev) -- active dev/test network (default)
+ *   - "datil" (LIT_NETWORK.Datil) -- production network
+ *
+ * NOTE: "datil-test" (LIT_NETWORK.DatilTest) was decommissioned on Feb 25, 2026.
+ * Use datil-dev for testing or datil for production.
  */
 
 import { LitNodeClient } from "@lit-protocol/lit-node-client";
-import { LitNetwork } from "@lit-protocol/constants";
+import { LIT_NETWORK } from "@lit-protocol/constants";
 import type {
   AuthSig,
   SessionSigsMap,
@@ -22,6 +27,7 @@ import type {
   DecryptRequest,
   EncryptResponse,
   DecryptResponse,
+  LIT_NETWORKS_KEYS,
 } from "@lit-protocol/types";
 import type {
   EvidenceBundle,
@@ -72,12 +78,12 @@ export class RealLitEncryptionService {
   private readonly debug: boolean;
 
   constructor(options: LitEncryptionServiceOptions = {}) {
-    this.network = options.network ?? LitNetwork.DatilTest;
+    this.network = options.network ?? LIT_NETWORK.DatilDev;
     this.chain = options.chain ?? "baseSepolia";
     this.debug = false;
 
     this.client = new LitNodeClient({
-      litNetwork: this.network as LitNetwork,
+      litNetwork: this.network as LIT_NETWORKS_KEYS,
       debug: this.debug,
     });
   }
