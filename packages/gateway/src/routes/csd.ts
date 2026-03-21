@@ -11,6 +11,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { loadBuiltinCsds, CsdRegistry, CsdSchema } from "@pcc/spec";
+import { getRepos } from "../db.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -83,7 +84,15 @@ export async function csdRoutes(app: FastifyInstance) {
 
   // ── POST /api/csd ───────────────────────────────────────────────
   // Register a new CSD; validates against schema first.
-  app.post("/api/csd", async (req, reply) => {
+  // After successful registration, auto-registers as Story Protocol IP Asset (best-effort).
+  app.post<{
+    Body: {
+      designerAddress?: string;
+      designerName?: string;
+      commercialRevShare?: number;
+      [key: string]: unknown;
+    };
+  }>("/api/csd", async (req, reply) => {
     const parsed = CsdSchema.safeParse(req.body);
     if (!parsed.success) {
       const errors = parsed.error.errors.map(
@@ -95,11 +104,62 @@ export async function csdRoutes(app: FastifyInstance) {
     const registry = getCsdRegistry();
     try {
       registry.register(parsed.data);
-      return { registered: true, url: parsed.data.url };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return reply.status(400).send({ error: message });
     }
+
+    // ── Best-effort: Auto-register as Story Protocol IP Asset ──────
+    let storyIpId: string | undefined;
+    try {
+      const { getStoryIPService } = await import("@pcc/contracts");
+      const storyIPService = getStoryIPService();
+
+      const designerAddress = req.body.designerAddress ?? "0x0000000000000000000000000000000000000000";
+      const designerName = req.body.designerName ?? "Unknown Designer";
+      const commercialRevShare = typeof req.body.commercialRevShare === "number" ? req.body.commercialRevShare : 5;
+
+      const csd = parsed.data;
+      const capabilityId = csd.url;
+
+      const registration = await storyIPService.registerCapabilityAsIP(
+        {
+          id: capabilityId,
+          name: csd.name,
+          type: csd.kind,
+          kernelId: "unknown",
+          description: csd.description,
+        },
+        {
+          designerAddress,
+          designerName,
+          commercialRevShare,
+        },
+      );
+
+      storyIpId = registration.ipId;
+
+      // Persist to DB (best-effort — DB may not be initialized in all contexts)
+      try {
+        const repos = getRepos();
+        repos.story.insertIpRegistration({
+          ipId: registration.ipId,
+          nftTokenId: registration.nftTokenId,
+          licenseTermsId: registration.licenseTermsId,
+          txHash: registration.txHash,
+          capabilityId,
+          csdUrl: registration.csdUrl,
+          chain: registration.chain,
+          registeredAt: registration.registeredAt,
+        });
+      } catch (dbErr) {
+        console.warn("[csd] Story IP DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+      }
+    } catch (storyErr) {
+      console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+    }
+
+    return { registered: true, url: parsed.data.url, storyIpId };
   });
 
   // ── GET /api/csd/:url ───────────────────────────────────────────
