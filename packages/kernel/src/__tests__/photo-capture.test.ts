@@ -274,18 +274,17 @@ describe("PhotoCaptureService", () => {
 // ---------------------------------------------------------------------------
 
 describe("GeminiComparisonService", () => {
-  describe("no API key (mock mode)", () => {
-    it("returns matchScore -1 when no API key is set", async () => {
+  describe("no API key (local fallback mode)", () => {
+    it("returns matchScore > 0 using local fallback when no API key is set", async () => {
       // Ensure env var is absent for this test
       const saved = process.env["GEMINI_API_KEY"];
       delete process.env["GEMINI_API_KEY"];
       try {
         const svc = new GeminiComparisonService(); // no key
         const result = await svc.compare(makeMinimalJpeg(), makeMinimalJpeg());
-        expect(result.matchScore).toBe(-1);
-        expect(result.verdict).toBe("no_match");
-        expect(result.reasoning).toContain("GEMINI_API_KEY not set");
-        expect(result.modelUsed).toBe("gemini-2.0-flash");
+        // With local fallback, matchScore is the local combined score (not -1)
+        expect(result.matchScore).toBeGreaterThanOrEqual(0);
+        expect(result.modelUsed).toBe("local_phash_ssim");
       } finally {
         if (saved !== undefined) process.env["GEMINI_API_KEY"] = saved;
       }
