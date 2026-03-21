@@ -10,11 +10,11 @@
 import { type CSD, CsdSchema } from "./schema.js";
 
 // JSON imports resolved at build time via TypeScript's resolveJsonModule
-import fdmCsd from "../csds/fdm.csd.json" assert { type: "json" };
-import slaCsd from "../csds/sla.csd.json" assert { type: "json" };
-import cnc3axisCsd from "../csds/cnc-3axis.csd.json" assert { type: "json" };
-import laserCutCsd from "../csds/laser-cut.csd.json" assert { type: "json" };
-import print2dCsd from "../csds/2d-print.csd.json" assert { type: "json" };
+import fdmCsd from "../csds/fdm.csd.json" with { type: "json" };
+import slaCsd from "../csds/sla.csd.json" with { type: "json" };
+import cnc3axisCsd from "../csds/cnc-3axis.csd.json" with { type: "json" };
+import laserCutCsd from "../csds/laser-cut.csd.json" with { type: "json" };
+import print2dCsd from "../csds/2d-print.csd.json" with { type: "json" };
 
 export class CsdRegistry {
   private csds: Map<string, CSD> = new Map();

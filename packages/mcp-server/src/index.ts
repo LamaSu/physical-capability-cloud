@@ -811,6 +811,126 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// 30. pcc_csd_list
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_csd_list",
+  "List all registered CSD (Capability StructureDefinition) documents. Optionally filter by structural kind or lifecycle status.",
+  {
+    kind: z
+      .enum(["base", "profile", "extension", "workflow"])
+      .optional()
+      .describe("Filter by CSD kind"),
+    status: z
+      .enum(["active", "draft", "retired"])
+      .optional()
+      .describe("Filter by lifecycle status"),
+  },
+  async ({ kind, status }: { kind?: string; status?: string }) => {
+    const data = await pccFetch("/api/csd", {
+      query: { kind, status },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 31. pcc_csd_get
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_csd_get",
+  "Get a specific CSD (Capability StructureDefinition) by its canonical URI.",
+  {
+    url: z
+      .string()
+      .describe("CSD canonical URI (e.g. 'pcc://capabilities/fdm/v2')"),
+  },
+  async ({ url }: { url: string }) => {
+    const data = await pccFetch(`/api/csd/${encodeURIComponent(url)}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 32. pcc_csd_register
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_csd_register",
+  "Register a new CSD (Capability StructureDefinition) in the PCC registry. Validates the document against the CSD schema before storing.",
+  {
+    csd: z
+      .record(z.unknown())
+      .describe("CSD document as a JSON object conforming to the CSD schema"),
+  },
+  async ({ csd }: { csd: Record<string, unknown> }) => {
+    const data = await pccFetch("/api/csd", {
+      method: "POST",
+      body: csd,
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 33. pcc_discover_scan
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_discover_scan",
+  "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode.",
+  {
+    protocols: z
+      .array(z.string())
+      .optional()
+      .describe("Protocols to scan (default: ['ipp'])"),
+    timeoutMs: z
+      .number()
+      .optional()
+      .describe("Discovery timeout in milliseconds (default: 3000)"),
+  },
+  async ({ protocols, timeoutMs }: { protocols?: string[]; timeoutMs?: number }) => {
+    const data = await pccFetch("/api/discover/scan", {
+      method: "POST",
+      body: { protocols, timeoutMs },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 34. pcc_discover_onboard
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_discover_onboard",
+  "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation.",
+  {
+    deviceUri: z
+      .string()
+      .optional()
+      .describe("Specific device URI to onboard (e.g. 'ipp://192.168.1.50/ipp/print'). Auto-selects the first found device if omitted."),
+    protocol: z
+      .string()
+      .optional()
+      .describe("Discovery protocol to use (default: 'ipp')"),
+    timeoutMs: z
+      .number()
+      .optional()
+      .describe("Discovery timeout in milliseconds (default: 3000)"),
+  },
+  async ({ deviceUri, protocol, timeoutMs }: { deviceUri?: string; protocol?: string; timeoutMs?: number }) => {
+    const data = await pccFetch("/api/discover/onboard", {
+      method: "POST",
+      body: { deviceUri, protocol, timeoutMs },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

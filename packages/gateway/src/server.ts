@@ -35,10 +35,14 @@ import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
+import { traceRoutes } from "./routes/traces.js";
 import { jobSubmitRoutes } from "./routes/job-submit.js";
 import { pgtrRelayRoutes } from "./routes/pgtr-relay.js";
 import { tmpTaskRoutes } from "./routes/tmp-tasks.js";
 import { setupRoutes } from "./routes/setup.js";
+import { unbrowseRoutes } from "./routes/unbrowse.js";
+import { csdRoutes } from "./routes/csd.js";
+import { discoverRoutes } from "./routes/discover.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
@@ -150,10 +154,14 @@ export async function createGateway(port = 3200) {
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
   await app.register(telemetryRoutes);
+  await app.register(traceRoutes);
   await app.register(jobSubmitRoutes);
   await app.register(pgtrRelayRoutes);
   await app.register(tmpTaskRoutes);
   await app.register(setupRoutes);
+  await app.register(unbrowseRoutes);
+  await app.register(csdRoutes);
+  await app.register(discoverRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
