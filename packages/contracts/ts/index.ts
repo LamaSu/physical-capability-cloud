@@ -58,3 +58,17 @@ export type {
   RegisterCapabilityOptions,
   RegisterJobEvidenceParams,
 } from "./story-ip-service.js";
+
+// Story Protocol — default revenue split profiles
+export {
+  SPLIT_PROFILES,
+  buildSplitsForJob,
+  calculateDistribution,
+  validateSplitTotal,
+} from "./story-defaults.js";
+export type {
+  RevenueSplitProfile,
+  SplitEntry,
+  ResolvedSplit,
+  DistributionEntry,
+} from "./story-defaults.js";
