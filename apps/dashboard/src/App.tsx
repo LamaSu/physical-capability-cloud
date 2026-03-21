@@ -11,12 +11,16 @@ import { WalletProvider } from "./providers/WalletProvider.js";
 import { ConnectWallet } from "./components/ConnectWallet.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { ModeToggle } from "./components/ModeToggle.js";
+import { Sentry } from "./lib/telemetry.js";
+import { usePageTracking } from "./hooks/use-page-tracking.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
 // ---------------------------------------------------------------------------
 
 const AgentChatPage = lazy(() => import("./pages/AgentChatPage.js").then(m => ({ default: m.AgentChatPage })));
+const LandingPage = lazy(() => import("./pages/LandingPage.js").then(m => ({ default: m.LandingPage })));
+const StartPage = lazy(() => import("./pages/StartPage.js").then(m => ({ default: m.StartPage })));
 const DashboardPage = lazy(() => import("./pages/DashboardPage.js").then(m => ({ default: m.DashboardPage })));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage.js").then(m => ({ default: m.DiscoverPage })));
 const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ default: m.BuilderPage })));
@@ -59,6 +63,7 @@ const DePINDashboardPage = lazy(() => import("./pages/DePINDashboardPage.js").th
 const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => ({ default: m.SettlementPage })));
 const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({ default: m.TelemetryPage })));
+const TracesPage = lazy(() => import("./pages/TracesPage.js").then(m => ({ default: m.TracesPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -91,6 +96,7 @@ const queryClient = new QueryClient({
 
 function AgentShell() {
   const { currentPageTitle, currentPageSubtitle } = useUIStore();
+  usePageTracking();
 
   return (
     <div className="flex flex-col h-screen bg-black/90 relative">
@@ -126,6 +132,7 @@ function DashboardShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const { sidebarCollapsed, toggleSidebar, currentPageTitle, currentPageSubtitle } = useUIStore();
+  usePageTracking();
 
   return (
     <>
@@ -152,7 +159,6 @@ function DashboardShell() {
         <PageTransition>
           <Suspense fallback={<PageLoader />}>
             <Routes>
-              <Route path="/" element={<DashboardPage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/discover" element={<DiscoverPage />} />
               <Route path="/build" element={<BuilderPage />} />
@@ -203,6 +209,7 @@ function DashboardShell() {
               <Route path="/subnet" element={<SubnetStatusPage />} />
               <Route path="/depin" element={<DePINDashboardPage />} />
               <Route path="/telemetry" element={<TelemetryPage />} />
+              <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
             </Routes>
           </Suspense>
@@ -220,6 +227,24 @@ function DashboardShell() {
 
 function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
+  const location = useLocation();
+
+  // Landing page and Start page render outside the shell (no sidebar, no top bar)
+  if (location.pathname === "/") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <LandingPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === "/start") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <StartPage />
+      </Suspense>
+    );
+  }
 
   if (interfaceMode === "agent") {
     return <AgentShell />;
@@ -230,14 +255,19 @@ function Shell() {
 
 export function App() {
   return (
-    <ErrorBoundary>
-      <WalletProvider>
-        <QueryClientProvider client={queryClient}>
-          <BrowserRouter>
-            <Shell />
-          </BrowserRouter>
-        </QueryClientProvider>
-      </WalletProvider>
-    </ErrorBoundary>
+    // Sentry.ErrorBoundary captures errors to Sentry before falling through
+    // to the local ErrorBoundary for display. When VITE_SENTRY_DSN is not set,
+    // Sentry.init() was never called so this boundary is a transparent passthrough.
+    <Sentry.ErrorBoundary showDialog={false}>
+      <ErrorBoundary>
+        <WalletProvider>
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter>
+              <Shell />
+            </BrowserRouter>
+          </QueryClientProvider>
+        </WalletProvider>
+      </ErrorBoundary>
+    </Sentry.ErrorBoundary>
   );
 }
