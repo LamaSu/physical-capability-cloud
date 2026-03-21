@@ -11,6 +11,7 @@ import { SessionRepository } from "./sessions.js";
 import { EncryptionRepository } from "./encryption.js";
 import { SensorRepository } from "./sensors.js";
 import { BatchRepository } from "./batches.js";
+import { StoryRepository } from "./story.js";
 
 export {
   KernelRepository,
@@ -27,6 +28,7 @@ export {
   EncryptionRepository,
   SensorRepository,
   BatchRepository,
+  StoryRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -45,6 +47,7 @@ export function buildRepositories(db: StoreDB) {
     encryption: new EncryptionRepository(db),
     sensors: new SensorRepository(db),
     batches: new BatchRepository(db),
+    story: new StoryRepository(db),
   };
 }
 
