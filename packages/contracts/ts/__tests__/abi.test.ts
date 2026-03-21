@@ -90,8 +90,15 @@ describe("MilestoneStatus", () => {
 });
 
 describe("chain-config", () => {
-  it("has 4 network deployments", () => {
-    expect(Object.keys(deployments)).toEqual(["localhost", "sepolia", "base-sepolia", "base"]);
+  it("has at least 4 network deployments (including Story Protocol chains)", () => {
+    const networks = Object.keys(deployments);
+    expect(networks).toContain("localhost");
+    expect(networks).toContain("sepolia");
+    expect(networks).toContain("base-sepolia");
+    expect(networks).toContain("base");
+    // Story Protocol chains added in Phase 1
+    expect(networks).toContain("story");
+    expect(networks).toContain("story-aeneid");
   });
 
   it("getDeployment returns valid config for base-sepolia", () => {
@@ -119,7 +126,8 @@ describe("chain-config", () => {
   });
 
   it("getContractAddress throws for undeployed contract", () => {
-    expect(() => getContractAddress("base-sepolia", "milestoneEscrowFactory")).toThrow("not deployed");
+    // localhost has no milestoneEscrowFactory deployed (undefined in config)
+    expect(() => getContractAddress("localhost", "milestoneEscrowFactory")).toThrow("not deployed");
   });
 
   it("getContractAddress returns address for deployed contract", () => {

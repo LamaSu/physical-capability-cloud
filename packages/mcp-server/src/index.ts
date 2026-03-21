@@ -931,6 +931,174 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// 35. pcc_ip_register_capability
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_ip_register_capability",
+  "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability.",
+  {
+    capabilityId: z.string().describe("PCC capability ID (e.g. 'cap_cnc_001')"),
+    capabilityName: z.string().describe("Human-readable capability name"),
+    capabilityType: z.string().describe("Capability type (e.g. 'cnc-3axis', 'fdm-printer')"),
+    kernelId: z.string().describe("Shop Kernel ID that hosts this capability"),
+    designerAddress: z.string().describe("Wallet address of the CSD designer (0x...)"),
+    designerName: z.string().describe("Human-readable name of the designer"),
+    commercialRevShare: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("Percentage of derivative revenue that flows back to this IP (default: 5)"),
+    ipfsCid: z
+      .string()
+      .optional()
+      .describe("IPFS CID of the CSD metadata document (from Storacha/Helia upload)"),
+    description: z.string().optional().describe("Capability description"),
+  },
+  async ({
+    capabilityId,
+    capabilityName,
+    capabilityType,
+    kernelId,
+    designerAddress,
+    designerName,
+    commercialRevShare,
+    ipfsCid,
+    description,
+  }: {
+    capabilityId: string;
+    capabilityName: string;
+    capabilityType: string;
+    kernelId: string;
+    designerAddress: string;
+    designerName: string;
+    commercialRevShare?: number;
+    ipfsCid?: string;
+    description?: string;
+  }) => {
+    const data = await pccFetch("/api/ip/register-capability", {
+      method: "POST",
+      body: {
+        capability: {
+          id: capabilityId,
+          name: capabilityName,
+          type: capabilityType,
+          kernelId,
+          description,
+        },
+        designerAddress,
+        designerName,
+        commercialRevShare,
+        ipfsCid,
+      },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 36. pcc_ip_revenue_snapshot
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_ip_revenue_snapshot",
+  "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated.",
+  {
+    ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
+  },
+  async ({ ipId }: { ipId: string }) => {
+    const data = await pccFetch(`/api/ip/${encodeURIComponent(ipId)}/revenue`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 37. pcc_ip_claim
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_ip_claim",
+  "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all.",
+  {
+    ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
+    tokenIds: z
+      .array(z.string())
+      .optional()
+      .describe("Specific Royalty Token IDs to claim. Omit to claim all available revenue."),
+  },
+  async ({ ipId, tokenIds }: { ipId: string; tokenIds?: string[] }) => {
+    const data = await pccFetch(`/api/ip/${encodeURIComponent(ipId)}/claim`, {
+      method: "POST",
+      body: { tokenIds },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 38. pcc_ip_lineage
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_ip_lineage",
+  "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work.",
+  {
+    ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
+  },
+  async ({ ipId }: { ipId: string }) => {
+    const data = await pccFetch(`/api/ip/${encodeURIComponent(ipId)}/lineage`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 39. pcc_ip_set_splits
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_ip_set_splits",
+  "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset. Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP. Default recommended: designer 10%, operator 70%, verifier 10%, network 10%.",
+  {
+    ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
+    splits: z
+      .array(
+        z.object({
+          address: z.string().describe("Recipient wallet address (0x...)"),
+          role: z
+            .enum(["designer", "operator", "verifier", "assembler", "curator"])
+            .describe("Collaborator role"),
+          percentage: z
+            .number()
+            .min(1)
+            .max(100)
+            .describe("Integer percentage (1-100). All splits must sum to 100."),
+          label: z.string().describe("Human-readable label (e.g. 'CSD Author', 'Machine Operator')"),
+        }),
+      )
+      .describe("Revenue splits — must sum to 100"),
+  },
+  async ({
+    ipId,
+    splits,
+  }: {
+    ipId: string;
+    splits: Array<{
+      address: string;
+      role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+      percentage: number;
+      label: string;
+    }>;
+  }) => {
+    const data = await pccFetch("/api/ip/distribute-royalties", {
+      method: "POST",
+      body: { ipId, splits },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

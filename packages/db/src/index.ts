@@ -61,4 +61,5 @@ export {
   EncryptionRepository,
   SensorRepository,
   BatchRepository,
+  StoryRepository,
 } from "./repositories/index.js";

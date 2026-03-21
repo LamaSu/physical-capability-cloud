@@ -756,5 +756,52 @@ export function migrateDatabase(sqlite: Database.Database): void {
       user_agent TEXT,
       ip_address TEXT
     );
+
+    -- ── Story Protocol ────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS story_ip_registrations (
+      ip_id TEXT PRIMARY KEY,
+      nft_token_id TEXT NOT NULL,
+      license_terms_id TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      capability_id TEXT,
+      csd_url TEXT,
+      chain TEXT NOT NULL DEFAULT 'story-aeneid',
+      registered_at TEXT NOT NULL,
+      FOREIGN KEY (capability_id) REFERENCES capabilities(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS story_derivative_links (
+      id TEXT PRIMARY KEY,
+      parent_ip_id TEXT NOT NULL,
+      child_ip_id TEXT NOT NULL,
+      license_token_id TEXT NOT NULL,
+      job_id TEXT,
+      evidence_bundle_hash TEXT,
+      tx_hash TEXT NOT NULL,
+      linked_at TEXT NOT NULL,
+      FOREIGN KEY (parent_ip_id) REFERENCES story_ip_registrations(ip_id),
+      FOREIGN KEY (job_id) REFERENCES jobs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS story_royalty_splits (
+      id TEXT PRIMARY KEY,
+      ip_id TEXT NOT NULL,
+      address TEXT NOT NULL,
+      role TEXT NOT NULL,
+      percentage INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      FOREIGN KEY (ip_id) REFERENCES story_ip_registrations(ip_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS story_revenue_claims (
+      id TEXT PRIMARY KEY,
+      ip_id TEXT NOT NULL,
+      claimer_address TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      claimed_at TEXT NOT NULL,
+      FOREIGN KEY (ip_id) REFERENCES story_ip_registrations(ip_id)
+    );
   `);
 }
