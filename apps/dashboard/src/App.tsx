@@ -65,6 +65,8 @@ const SettlementPage = lazy(() => import("./pages/SettlementPage.js").then(m => 
 const OnboardKitPage = lazy(() => import("./pages/OnboardKitPage.js").then(m => ({ default: m.OnboardKitPage })));
 const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({ default: m.TelemetryPage })));
 const TracesPage = lazy(() => import("./pages/TracesPage.js").then(m => ({ default: m.TracesPage })));
+const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m => ({ default: m.NegotiationPage })));
+const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -213,6 +215,7 @@ function DashboardShell() {
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
               <Route path="/setup/agent" element={<SetupAgentPage />} />
+              <Route path="/negotiate" element={<NegotiationPage />} />
             </Routes>
           </Suspense>
         </PageTransition>
@@ -244,6 +247,14 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <StartPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === "/operator/mobile") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <OperatorMobilePage />
       </Suspense>
     );
   }

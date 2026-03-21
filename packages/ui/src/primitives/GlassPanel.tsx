@@ -20,18 +20,54 @@ export function GlassPanel({
   padding = "md",
   className,
   children,
+  style,
   ...props
 }: GlassPanelProps) {
+  const glowStyle =
+    glow === "green"
+      ? { boxShadow: "0 0 24px rgba(0, 255, 136, 0.12), 0 0 60px rgba(0, 255, 136, 0.04)" }
+      : glow === "gold"
+        ? { boxShadow: "0 0 24px rgba(255, 170, 0, 0.12), 0 0 60px rgba(255, 170, 0, 0.04)" }
+        : {};
+
   return (
     <div
       className={cn(
-        "rounded-xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl",
-        hover && "transition-all duration-200 hover:bg-white/[0.06] hover:border-green-400/20 cursor-pointer",
-        glow === "green" && "shadow-[0_0_20px_rgba(124,179,66,0.15)]",
-        glow === "gold" && "shadow-[0_0_20px_rgba(255,179,0,0.15)]",
+        "rounded-xl backdrop-blur-2xl transition-all duration-200",
+        hover && "cursor-pointer",
         paddingMap[padding],
         className,
       )}
+      style={{
+        background: "rgba(255, 255, 255, 0.04)",
+        border: "1px solid rgba(255, 255, 255, 0.12)",
+        ...glowStyle,
+        ...style,
+      }}
+      onMouseEnter={
+        hover
+          ? (e) => {
+              const el = e.currentTarget as HTMLDivElement;
+              el.style.background = "rgba(255, 255, 255, 0.07)";
+              el.style.borderColor = "rgba(0, 255, 136, 0.25)";
+              el.style.boxShadow = "0 0 20px rgba(0, 255, 136, 0.1), inset 0 1px 0 rgba(255,255,255,0.06)";
+            }
+          : undefined
+      }
+      onMouseLeave={
+        hover
+          ? (e) => {
+              const el = e.currentTarget as HTMLDivElement;
+              el.style.background = "rgba(255, 255, 255, 0.04)";
+              el.style.borderColor = "rgba(255, 255, 255, 0.12)";
+              el.style.boxShadow = glow === "green"
+                ? "0 0 24px rgba(0, 255, 136, 0.12), 0 0 60px rgba(0, 255, 136, 0.04)"
+                : glow === "gold"
+                  ? "0 0 24px rgba(255, 170, 0, 0.12), 0 0 60px rgba(255, 170, 0, 0.04)"
+                  : "none";
+            }
+          : undefined
+      }
       {...props}
     >
       {children}

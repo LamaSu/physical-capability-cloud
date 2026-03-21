@@ -23,6 +23,29 @@ const pulseColors = {
   offline: "bg-white/10",
 };
 
+// Neon glow styles for active states — applied inline for vivid color accuracy
+const neonDotStyles: Record<string, React.CSSProperties> = {
+  online: {
+    backgroundColor: "#00ff88",
+    boxShadow: "0 0 6px rgba(0, 255, 136, 0.9), 0 0 12px rgba(0, 255, 136, 0.5)",
+  },
+  executing: {
+    backgroundColor: "#ffaa00",
+    boxShadow: "0 0 6px rgba(255, 170, 0, 0.9), 0 0 12px rgba(255, 170, 0, 0.5)",
+  },
+  completed: {
+    backgroundColor: "#10b981",
+    boxShadow: "0 0 4px rgba(16, 185, 129, 0.6)",
+  },
+  failed: {
+    backgroundColor: "#ff4444",
+    boxShadow: "0 0 6px rgba(255, 68, 68, 0.8)",
+  },
+  offline: {
+    backgroundColor: "rgba(255,255,255,0.25)",
+  },
+};
+
 const sizeMap = { sm: "h-2 w-2", md: "h-3 w-3", lg: "h-4 w-4" };
 const pulseSizeMap = { sm: "h-2 w-2", md: "h-3 w-3", lg: "h-4 w-4" };
 
@@ -39,7 +62,10 @@ export function PulseIndicator({ status, size = "md", className }: PulseIndicato
           )}
         />
       )}
-      <span className={cn("relative inline-flex rounded-full", sizeMap[size], statusColors[status])} />
+      <span
+        className={cn("relative inline-flex rounded-full", sizeMap[size])}
+        style={neonDotStyles[status]}
+      />
     </span>
   );
 }
