@@ -1,0 +1,241 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/fdm/v2",
+  "version": "2.0.0",
+  "status": "active",
+  "name": "FDM 3D Printing",
+  "description": "Fused Deposition Modeling — layer-by-layer thermoplastic extrusion",
+  "kind": "base",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["octoprint", "http", "manual"],
+    "detect": {
+      "octoprint": {
+        "endpoints": ["/api/printer", "/api/printerprofiles"],
+        "attributes": ["volume", "heatedBed", "extruder"]
+      },
+      "mdns": {
+        "serviceType": "_octoprint._tcp"
+      }
+    }
+  },
+  "adapter": {
+    "type": "octoprint",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "baseUrl": { "type": "string", "description": "OctoPrint base URL (e.g., http://192.168.1.10)" },
+        "apiKey": { "type": "string", "description": "OctoPrint API key" }
+      },
+      "required": ["baseUrl", "apiKey"]
+    },
+    "commands": {
+      "print": { "description": "Upload and start a print job", "input": "gcodeFile", "output": "jobId" },
+      "status": { "description": "Get printer status", "output": "printerState" },
+      "cancel": { "description": "Cancel current print job", "input": "jobId" },
+      "home": { "description": "Home all axes" }
+    }
+  },
+  "parameters": [
+    {
+      "type": "enum",
+      "key": "material",
+      "label": "Material",
+      "description": "Filament material for the print",
+      "required": true,
+      "order": 1,
+      "group": "Material",
+      "options": [
+        { "value": "pla", "label": "PLA", "description": "Easy to print, biodegradable, low strength" },
+        { "value": "petg", "label": "PETG", "description": "Good strength, chemical resistance, slight stringing" },
+        { "value": "abs", "label": "ABS", "description": "Strong, heat-resistant, requires enclosure", "pricingImpact": { "mode": "percent", "value": "10", "label": "+10% for ABS (enclosure required)" } },
+        { "value": "tpu", "label": "TPU", "description": "Flexible, rubber-like, slow printing", "pricingImpact": { "mode": "percent", "value": "20", "label": "+20% for TPU (slow print)" } },
+        { "value": "nylon", "label": "Nylon", "description": "Very strong, flexible, hygroscopic", "pricingImpact": { "mode": "percent", "value": "25", "label": "+25% for Nylon" } },
+        { "value": "pc", "label": "Polycarbonate", "description": "Extremely strong, heat-resistant", "pricingImpact": { "mode": "percent", "value": "30", "label": "+30% for PC" } },
+        { "value": "asa", "label": "ASA", "description": "UV-resistant ABS alternative, outdoor use", "pricingImpact": { "mode": "percent", "value": "15", "label": "+15% for ASA" } },
+        { "value": "cf-nylon", "label": "Carbon Fiber Nylon", "description": "Stiff, lightweight, abrasive on nozzles", "pricingImpact": { "mode": "percent", "value": "40", "label": "+40% for CF-Nylon" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "color",
+      "label": "Color",
+      "description": "Filament color",
+      "required": false,
+      "order": 2,
+      "group": "Material",
+      "defaultValue": "black",
+      "options": [
+        { "value": "black", "label": "Black" },
+        { "value": "white", "label": "White" },
+        { "value": "gray", "label": "Gray" },
+        { "value": "red", "label": "Red" },
+        { "value": "blue", "label": "Blue" },
+        { "value": "green", "label": "Green" },
+        { "value": "orange", "label": "Orange" },
+        { "value": "natural", "label": "Natural/Translucent" }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "infill",
+      "label": "Infill Density",
+      "description": "Internal fill percentage — higher = stronger but heavier and slower",
+      "required": true,
+      "order": 3,
+      "group": "Print Settings",
+      "min": 5,
+      "max": 100,
+      "step": 5,
+      "unit": "%",
+      "defaultValue": 20,
+      "pricingImpact": { "mode": "per_unit", "value": "0.01", "label": "+$0.01 per 1% infill" }
+    },
+    {
+      "type": "enum",
+      "key": "layerHeight",
+      "label": "Layer Height",
+      "description": "Vertical resolution — lower = smoother surface but slower print",
+      "required": true,
+      "order": 4,
+      "group": "Print Settings",
+      "defaultValue": "0.20",
+      "options": [
+        { "value": "0.10", "label": "0.10mm (Ultra Fine)", "pricingImpact": { "mode": "multiplier", "value": "1.8", "label": "1.8x (ultra fine layers)" } },
+        { "value": "0.15", "label": "0.15mm (Fine)", "pricingImpact": { "mode": "multiplier", "value": "1.4", "label": "1.4x (fine layers)" } },
+        { "value": "0.20", "label": "0.20mm (Standard)", "pricingImpact": { "mode": "multiplier", "value": "1.0", "label": "1.0x (standard)" } },
+        { "value": "0.30", "label": "0.30mm (Draft)", "pricingImpact": { "mode": "multiplier", "value": "0.7", "label": "0.7x (fast draft)" } }
+      ]
+    },
+    {
+      "type": "boolean",
+      "key": "supports",
+      "label": "Support Structures",
+      "description": "Enable support structures for overhangs",
+      "required": false,
+      "order": 5,
+      "group": "Print Settings",
+      "defaultValue": false,
+      "pricingImpact": { "mode": "percent", "value": "15", "label": "+15% for supports" }
+    },
+    {
+      "type": "enum",
+      "key": "supportType",
+      "label": "Support Type",
+      "description": "Type of support structure",
+      "required": false,
+      "order": 6,
+      "group": "Print Settings",
+      "defaultValue": "normal",
+      "visibleWhen": { "param": "supports", "equals": true },
+      "options": [
+        { "value": "normal", "label": "Normal", "description": "Standard grid supports" },
+        { "value": "tree", "label": "Tree Supports", "description": "Branch-like, less scarring", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 tree supports" } },
+        { "value": "organic", "label": "Organic Supports", "description": "Smooth organic shapes, best surface quality" }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "wallCount",
+      "label": "Wall Count",
+      "description": "Number of perimeter walls — more walls = stronger shell",
+      "required": false,
+      "order": 7,
+      "group": "Print Settings",
+      "min": 1,
+      "max": 8,
+      "step": 1,
+      "defaultValue": 3
+    },
+    {
+      "type": "enum",
+      "key": "postProcessing",
+      "label": "Post-Processing",
+      "description": "Optional finishing steps after printing",
+      "required": false,
+      "order": 8,
+      "group": "Post-Processing",
+      "multi": true,
+      "defaultValue": "none",
+      "options": [
+        { "value": "none", "label": "None" },
+        { "value": "sanding", "label": "Sanding", "description": "Sand smooth to remove layer lines", "pricingImpact": { "mode": "flat", "value": "10.00", "label": "+$10 sanding" } },
+        { "value": "vapor-smoothing", "label": "Vapor Smoothing", "description": "Chemical vapor bath for glossy finish (ABS/ASA only)", "pricingImpact": { "mode": "flat", "value": "15.00", "label": "+$15 vapor smoothing" } },
+        { "value": "painting", "label": "Painting", "description": "Prime and paint to desired color", "pricingImpact": { "mode": "flat", "value": "25.00", "label": "+$25 painting" } },
+        { "value": "heat-inserts", "label": "Heat-Set Inserts", "description": "Install threaded brass inserts", "pricingImpact": { "mode": "flat", "value": "5.00", "label": "+$5 heat-set inserts" } }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "quantity",
+      "label": "Quantity",
+      "description": "Number of units to print",
+      "required": true,
+      "order": 9,
+      "group": "Order",
+      "min": 1,
+      "max": 1000,
+      "step": 1,
+      "defaultValue": 1
+    }
+  ],
+  "constraints": [
+    {
+      "key": "fdm-1",
+      "human": "PLA cannot be vapor smoothed",
+      "severity": "error",
+      "when": [
+        { "param": "material", "operator": "equals", "value": "pla" },
+        { "param": "postProcessing", "operator": "in", "value": ["vapor-smoothing"] }
+      ],
+      "then": [{ "action": "exclude", "param": "postProcessing", "values": ["vapor-smoothing"] }]
+    },
+    {
+      "key": "fdm-2",
+      "human": "PETG cannot be vapor smoothed",
+      "severity": "error",
+      "when": [
+        { "param": "material", "operator": "equals", "value": "petg" },
+        { "param": "postProcessing", "operator": "in", "value": ["vapor-smoothing"] }
+      ],
+      "then": [{ "action": "exclude", "param": "postProcessing", "values": ["vapor-smoothing"] }]
+    },
+    {
+      "key": "fdm-3",
+      "human": "TPU is restricted to normal support type only",
+      "severity": "error",
+      "when": [
+        { "param": "material", "operator": "equals", "value": "tpu" }
+      ],
+      "then": [{ "action": "restrictTo", "param": "supportType", "values": ["normal"] }]
+    },
+    {
+      "key": "fdm-4",
+      "human": "High infill (>80%) requires standard or draft layer height",
+      "severity": "warning",
+      "when": [
+        { "param": "infill", "operator": "gt", "value": 80 }
+      ],
+      "then": [{ "action": "restrictTo", "param": "layerHeight", "values": ["0.20", "0.30"] }]
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Print completion receipt",
+      "required": ["jobId", "timestamp", "material", "printDurationSeconds"]
+    },
+    "tier1": {
+      "description": "Print completion + OctoPrint job data",
+      "required": ["jobId", "timestamp", "material", "printDurationSeconds", "octoprintJobState", "filamentUsedMm"]
+    },
+    "tier2": {
+      "description": "Print completion + photo of finished part",
+      "required": ["jobId", "timestamp", "material", "printDurationSeconds", "octoprintJobState", "filamentUsedMm", "outputPhotoCid"]
+    }
+  },
+  "pricing": {
+    "basePrice": "15.00",
+    "currency": "USDC",
+    "unit": "per part"
+  }
+}

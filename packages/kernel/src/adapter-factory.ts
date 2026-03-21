@@ -19,6 +19,7 @@ import { OctoPrintAdapter } from "./adapters/octoprint-adapter.js";
 import { ModbusSensorAdapter } from "./adapters/modbus-sensor-adapter.js";
 import { OPCUAAdapter } from "./adapters/opcua-adapter.js";
 import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
+import { IppAdapter } from "./adapters/ipp-adapter.js";
 
 // ---------------------------------------------------------------------------
 // Machine adapters
@@ -58,6 +59,16 @@ export function createMachineAdapter(
         pollIntervalMs: cfg.pollIntervalMs as number | undefined,
         securityMode: cfg.securityMode as "none" | "sign" | "signAndEncrypt" | undefined,
         mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+      });
+    }
+
+    case "ipp": {
+      return new IppAdapter(device.id, {
+        uri: (cfg.uri as string | undefined) ?? "ipp://localhost:631/ipp/print",
+        name: cfg.name as string | undefined,
+        kernelId,
+        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+        mockMode: (cfg.mockMode as boolean | undefined) ?? true,
       });
     }
 

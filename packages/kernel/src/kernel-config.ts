@@ -21,6 +21,7 @@ export type AdapterType =
   | "modbus"
   | "opcua"
   | "sila"
+  | "ipp"
   | "generic-http"
   | "mock";
 
