@@ -10,10 +10,12 @@
  *   - Trust normalization across all participating nodes
  */
 
+import { createHash } from "node:crypto";
 import type {
   VerificationResponse,
   ConsensusResult,
   NetworkConfig,
+  HumanVerificationResponse,
 } from "./types.js";
 import { DEFAULT_NETWORK_CONFIG } from "./types.js";
 import type { VerifierNode } from "./verifier-node.js";
@@ -175,6 +177,101 @@ export class ConsensusEngine {
         Math.max(0, currentRep + REPUTATION.NON_RESPONSE_PENALTY),
       );
     }
+  }
+
+  /**
+   * Run human consensus over a set of HumanVerificationResponse objects.
+   *
+   * Algorithm:
+   *   1. Count votes per verdict category (match / no_match / inconclusive).
+   *   2. If any category has >= threshold * total responses → consensus reached.
+   *   3. Compute an attestation hash for on-chain submission:
+   *      sha256(requestId + verdict + sorted response hashes).
+   *   4. Identify dissenters (verifiers whose verdict differs from consensus).
+   *
+   * @param responses  All human responses collected for a request.
+   * @param threshold  Fraction of votes required for consensus (default 0.6 = 3/5).
+   */
+  async runHumanConsensus(
+    responses: HumanVerificationResponse[],
+    threshold: number = 0.6,
+  ): Promise<{
+    reached: boolean;
+    verdict: "match" | "no_match" | "inconclusive";
+    agreementRatio: number;
+    attestationHash?: string;
+    dissenters: string[];
+  }> {
+    if (responses.length === 0) {
+      return {
+        reached: false,
+        verdict: "inconclusive",
+        agreementRatio: 0,
+        dissenters: [],
+      };
+    }
+
+    const total = responses.length;
+
+    // 1. Count votes per verdict
+    const tally = new Map<"match" | "no_match" | "inconclusive", number>([
+      ["match", 0],
+      ["no_match", 0],
+      ["inconclusive", 0],
+    ]);
+
+    for (const r of responses) {
+      const v = r.humanVerdict;
+      tally.set(v, (tally.get(v) ?? 0) + 1);
+    }
+
+    // 2. Find winning verdict (highest vote count that meets threshold)
+    let winningVerdict: "match" | "no_match" | "inconclusive" = "inconclusive";
+    let winningCount = 0;
+    let reached = false;
+
+    for (const [verdict, count] of tally) {
+      if (count > winningCount) {
+        winningCount = count;
+        winningVerdict = verdict;
+      }
+    }
+
+    const agreementRatio = total > 0 ? winningCount / total : 0;
+    reached = agreementRatio >= threshold;
+
+    // 3. Identify dissenters
+    const dissenters: string[] = [];
+    for (const r of responses) {
+      if (r.humanVerdict !== winningVerdict) {
+        dissenters.push(r.nodeId);
+      }
+    }
+
+    // 4. Compute attestation hash (only when consensus is reached)
+    let attestationHash: string | undefined;
+    if (reached) {
+      const requestId = responses[0].requestId;
+
+      // Sort response signatures so the hash is deterministic regardless of response order
+      const sortedSignatures = responses.map((r) => r.signature).sort();
+
+      const payload = JSON.stringify({
+        requestId,
+        verdict: winningVerdict,
+        responses: sortedSignatures,
+      });
+
+      attestationHash = createHash("sha256").update(payload).digest("hex");
+    }
+
+    return {
+      reached,
+      verdict: winningVerdict,
+      agreementRatio,
+      attestationHash,
+      dissenters,
+    };
   }
 
   /** Get the current reputation map */

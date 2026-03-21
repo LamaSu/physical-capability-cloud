@@ -45,6 +45,7 @@ import { csdRoutes } from "./routes/csd.js";
 import { discoverRoutes } from "./routes/discover.js";
 import { ipRoutes } from "./routes/ip.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
+import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
@@ -166,6 +167,7 @@ export async function createGateway(port = 3200) {
   await app.register(discoverRoutes);
   await app.register(ipRoutes);
   await app.register(photoVerificationRoutes);
+  await app.register(humanVerificationRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
