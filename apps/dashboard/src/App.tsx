@@ -52,6 +52,7 @@ const SpaceBookingsPage = lazy(() => import("./pages/SpaceBookingsPage.js").then
 const InstallationDetailPage = lazy(() => import("./pages/InstallationDetailPage.js").then(m => ({ default: m.InstallationDetailPage })));
 const DeviceBuilderPage = lazy(() => import("./pages/DeviceBuilderPage.js").then(m => ({ default: m.DeviceBuilderPage })));
 const SetupWizardPage = lazy(() => import("./pages/SetupWizardPage.js").then(m => ({ default: m.SetupWizardPage })));
+const SetupAgentPage = lazy(() => import("./pages/SetupAgentPage.js").then(m => ({ default: m.SetupAgentPage })));
 const OrchestratorPage = lazy(() => import("./pages/OrchestratorPage.js").then(m => ({ default: m.OrchestratorPage })));
 const OrchestratorDetailPage = lazy(() => import("./pages/OrchestratorDetailPage.js").then(m => ({ default: m.OrchestratorDetailPage })));
 const ProtocolLibraryPage = lazy(() => import("./pages/ProtocolLibraryPage.js").then(m => ({ default: m.ProtocolLibraryPage })));
@@ -211,6 +212,7 @@ function DashboardShell() {
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />
+              <Route path="/setup/agent" element={<SetupAgentPage />} />
             </Routes>
           </Suspense>
         </PageTransition>

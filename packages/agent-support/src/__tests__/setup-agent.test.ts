@@ -62,6 +62,19 @@ function makeFetchMock(overrides?: Record<string, unknown>) {
   return vi.fn((url: string | URL) => {
     const urlStr = String(url);
 
+    // Must check detect-connection before /api/setup/detect (prefix match avoidance)
+    if (urlStr.includes("/api/setup/detect-connection")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(overrides?.detectConnection ?? {
+          adapterType: "octoprint",
+          url: "http://192.168.1.50:5000",
+          apiVersion: "0.1.0",
+          capabilities: ["print", "preheat"],
+        }),
+      });
+    }
     if (urlStr.includes("/api/setup/detect")) {
       return Promise.resolve({
         ok: true,
@@ -102,6 +115,30 @@ function makeFetchMock(overrides?: Record<string, unknown>) {
         ok: true,
         status: 200,
         json: () => Promise.resolve({ registered: true, device: { id: "dev_001" } }),
+      });
+    }
+    if (urlStr.includes("/api/ai/identify-machine")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(overrides?.identifyMachine ?? {
+          make: "Prusa",
+          model: "MK4",
+          type: "FDM 3D Printer",
+          suggestedAdapterType: "octoprint",
+          confidence: 0.92,
+        }),
+      });
+    }
+    if (urlStr.includes("/api/setup/scan-network")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(overrides?.scanNetwork ?? {
+          devices: [
+            { address: "192.168.1.50", hostname: "octopi.local", service: "OctoPrint" },
+          ],
+        }),
       });
     }
     return Promise.resolve({ ok: false, status: 404, statusText: "Not Found", text: () => Promise.resolve("Not Found") });
@@ -151,8 +188,8 @@ describe("SetupAgent", () => {
       expect(a.id).toBe("agent_setup_001");
     });
 
-    it("registers 6 tools on construction", () => {
-      expect(agent.getTools()).toHaveLength(6);
+    it("registers 11 tools on construction", () => {
+      expect(agent.getTools()).toHaveLength(11);
     });
   });
 
@@ -305,8 +342,8 @@ describe("SetupAgent", () => {
   // ── LLM tool definitions ────────────────────────────────────────
 
   describe("getTools()", () => {
-    it("returns exactly 6 tools", () => {
-      expect(agent.getTools()).toHaveLength(6);
+    it("returns exactly 11 tools", () => {
+      expect(agent.getTools()).toHaveLength(11);
     });
 
     it("includes all expected tool names", () => {
@@ -317,6 +354,11 @@ describe("SetupAgent", () => {
       expect(names).toContain("validate_setup");
       expect(names).toContain("run_test_job");
       expect(names).toContain("get_setup_status");
+      expect(names).toContain("identify_machine_from_photo");
+      expect(names).toContain("scan_network_for_devices");
+      expect(names).toContain("auto_detect_connection");
+      expect(names).toContain("generate_kernel_config");
+      expect(names).toContain("register_and_test");
     });
 
     it("each tool has a name, description, parameters, and execute function", () => {
@@ -332,7 +374,7 @@ describe("SetupAgent", () => {
   describe("getToolDefinitions()", () => {
     it("returns definitions in Anthropic/OpenAI function-calling format", () => {
       const defs = agent.getToolDefinitions();
-      expect(defs).toHaveLength(6);
+      expect(defs).toHaveLength(11);
       for (const def of defs) {
         expect(def.type).toBe("function");
         expect(def.function.name).toBeTruthy();
@@ -403,6 +445,53 @@ describe("SetupAgent", () => {
       expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/register-device");
     });
 
+    it('executes "identify_machine_from_photo" and calls gateway', async () => {
+      const result = await agent.executeTool("identify_machine_from_photo", {
+        imageBase64: "data:image/jpeg;base64,/9j/4AAQ==",
+      }) as any;
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/ai/identify-machine");
+      expect(result.make).toBe("Prusa");
+      expect(result.suggestedAdapterType).toBe("octoprint");
+    });
+
+    it('executes "scan_network_for_devices" and returns devices', async () => {
+      const result = await agent.executeTool("scan_network_for_devices", {}) as any;
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/scan-network");
+      expect(result.count).toBe(1);
+      expect(result.devices[0].address).toBe("192.168.1.50");
+    });
+
+    it('executes "auto_detect_connection" and probes target', async () => {
+      const result = await agent.executeTool("auto_detect_connection", { target: "192.168.1.50" }) as any;
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/detect-connection");
+      expect(result.adapterType).toBe("octoprint");
+      expect(result.url).toBe("http://192.168.1.50:5000");
+    });
+
+    it('executes "generate_kernel_config" and calls generate-config', async () => {
+      const result = await agent.executeTool("generate_kernel_config", {
+        deviceName: "My Printer",
+        deviceType: "machine",
+        adapterType: "octoprint",
+        url: "http://192.168.1.50:5000",
+      }) as any;
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/generate-config");
+      expect(result.config.kernelId).toBe("kernel_test");
+    });
+
+    it('executes "register_and_test" and calls register-device then test-job', async () => {
+      const result = await agent.executeTool("register_and_test", {
+        kernelId: "k1",
+        deviceId: "d1",
+        type: "machine",
+        adapterType: "octoprint",
+      }) as any;
+      expect(result.registered).toBe(true);
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+      expect(urls.some((u) => u.includes("/api/setup/register-device"))).toBe(true);
+      expect(urls.some((u) => u.includes("/api/setup/test-job"))).toBe(true);
+    });
+
     it("throws for unknown tool name", async () => {
       await expect(agent.executeTool("unknown_tool", {})).rejects.toThrow("Unknown tool: unknown_tool");
     });
@@ -440,6 +529,97 @@ describe("SetupAgent", () => {
       const { intent, response } = await agent.routeTextMessage("what is the meaning of life");
       expect(intent).toBe("unknown");
       expect(response).toContain("detect config");
+    });
+  });
+
+  // ── Conversation state machine ──────────────────────────────────
+
+  describe("conversation state", () => {
+    it("initializes state with 'greeting' phase for a new conversation", () => {
+      const state = agent.getConversationState("conv_new_001");
+      expect(state.phase).toBe("greeting");
+      expect(state.detectedMachine).toBeUndefined();
+    });
+
+    it("updates state and reflects changes on next get", () => {
+      agent.updateConversationState("conv_upd_001", {
+        phase: "identify",
+        detectedMachine: { make: "Prusa", model: "MK4", type: "FDM Printer" },
+      });
+      const state = agent.getConversationState("conv_upd_001");
+      expect(state.phase).toBe("identify");
+      expect(state.detectedMachine?.make).toBe("Prusa");
+    });
+
+    it("clears conversation state", () => {
+      agent.updateConversationState("conv_clr_001", { phase: "complete", registered: true });
+      agent.clearConversationState("conv_clr_001");
+      const state = agent.getConversationState("conv_clr_001");
+      expect(state.phase).toBe("greeting");
+      expect(state.registered).toBeUndefined();
+    });
+
+    it("tracks multiple conversations independently", () => {
+      agent.updateConversationState("conv_a", { phase: "connect" });
+      agent.updateConversationState("conv_b", { phase: "test" });
+      expect(agent.getConversationState("conv_a").phase).toBe("connect");
+      expect(agent.getConversationState("conv_b").phase).toBe("test");
+    });
+  });
+
+  // ── identifyMachineFromPhoto ────────────────────────────────────
+
+  describe("identifyMachineFromPhoto()", () => {
+    it("returns machine identification from gateway proxy", async () => {
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/ai/identify-machine");
+      expect(result.make).toBe("Prusa");
+      expect(result.model).toBe("MK4");
+      expect(result.suggestedAdapterType).toBe("octoprint");
+      expect(result.confidence).toBeGreaterThan(0);
+    });
+
+    it("falls back to mock result when gateway is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+      const result = await agent.identifyMachineFromPhoto("/9j/4AAQ==");
+      expect(result.make).toBe("Unknown");
+      expect(result.confidence).toBeLessThanOrEqual(0.5);
+    });
+  });
+
+  // ── scanNetworkForDevices ───────────────────────────────────────
+
+  describe("scanNetworkForDevices()", () => {
+    it("returns discovered devices from gateway", async () => {
+      const devices = await agent.scanNetworkForDevices();
+      expect(devices).toHaveLength(1);
+      expect(devices[0].address).toBe("192.168.1.50");
+      expect(devices[0].service).toBe("OctoPrint");
+    });
+
+    it("returns empty array when gateway is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+      const devices = await agent.scanNetworkForDevices();
+      expect(devices).toEqual([]);
+    });
+  });
+
+  // ── autoDetectConnection ────────────────────────────────────────
+
+  describe("autoDetectConnection()", () => {
+    it("returns connection detection result from gateway", async () => {
+      const result = await agent.autoDetectConnection("192.168.1.50");
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/setup/detect-connection");
+      expect(result.adapterType).toBe("octoprint");
+      expect(result.url).toBe("http://192.168.1.50:5000");
+    });
+
+    it("falls back to octoprint guess when gateway is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))));
+      const result = await agent.autoDetectConnection("192.168.1.50");
+      expect(result.adapterType).toBe("octoprint");
+      expect(result.url).toContain("192.168.1.50");
     });
   });
 });

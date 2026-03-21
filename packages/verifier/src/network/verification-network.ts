@@ -15,6 +15,9 @@ import type {
   ConsensusResult,
   NetworkConfig,
   NetworkStatus,
+  HumanVerificationResponse,
+  VerifierReward,
+  VerifierSlash,
 } from "./types.js";
 import { DEFAULT_NETWORK_CONFIG } from "./types.js";
 import { VerifierNode } from "./verifier-node.js";
@@ -165,6 +168,59 @@ export class VerificationNetwork {
   /** Get count of registered nodes */
   getNodeCount(): number {
     return this.nodes.size;
+  }
+
+  /**
+   * Process a human verification result and compute rewards / pending slashes.
+   *
+   * Reward policy:
+   *   - Verifiers whose verdict aligned with consensus receive a reward.
+   *   - Dissenters are NOT immediately slashed — they may file a dispute.
+   *   - Slashing only occurs after dispute resolution (losing side gets slashed).
+   *     This method therefore returns an empty slashes array; the caller is
+   *     responsible for applying slashes once a dispute resolves.
+   *
+   * Reward amount is scaled by the agreement ratio (stronger consensus → larger reward).
+   *
+   * @param requestId        The ID of the verification request.
+   * @param consensusResult  Output of ConsensusEngine.runHumanConsensus().
+   * @param responses        All HumanVerificationResponse objects for this request.
+   */
+  async processVerificationResult(
+    requestId: string,
+    consensusResult: {
+      verdict: string;
+      agreementRatio: number;
+      dissenters: string[];
+    },
+    responses: HumanVerificationResponse[],
+  ): Promise<{ rewards: VerifierReward[]; slashes: VerifierSlash[] }> {
+    const now = new Date().toISOString();
+    const dissenterSet = new Set(consensusResult.dissenters);
+
+    // Base reward: 100 tokens, scaled by agreement ratio (60-100% → 60-100 tokens)
+    const baseReward = 100;
+    const rewardAmount = Math.round(baseReward * consensusResult.agreementRatio);
+
+    const rewards: VerifierReward[] = [];
+
+    for (const response of responses) {
+      const verifierId = response.nodeId;
+      if (!dissenterSet.has(verifierId)) {
+        // Aligned with consensus — earns a reward
+        rewards.push({
+          verifierId,
+          requestId,
+          amount: rewardAmount.toString(),
+          reason: "correct_verification",
+          timestamp: now,
+        });
+      }
+      // Dissenters: no reward, but also no slash until dispute is resolved
+    }
+
+    // Slashes are empty — applied only after dispute resolution
+    return { rewards, slashes: [] };
   }
 
   /**

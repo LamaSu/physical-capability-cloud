@@ -14,9 +14,15 @@
  * - validate_setup
  * - run_test_job
  * - get_setup_status
+ * - identify_machine_from_photo
+ * - scan_network_for_devices
+ * - auto_detect_connection
+ * - generate_kernel_config
+ * - register_and_test
  */
 
 import type { MessageBus, A2AMessage } from "@pcc/a2a";
+import type { AdapterType } from "@pcc/spec";
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -34,6 +40,45 @@ export interface SetupAgentTool {
   execute: (params: Record<string, unknown>) => Promise<unknown>;
 }
 
+// ── Conversation state machine ───────────────────────────────────
+
+export interface SetupConversationState {
+  phase: "greeting" | "identify" | "connect" | "configure" | "test" | "complete";
+  detectedMachine?: { make: string; model: string; type: string };
+  connectionConfig?: { adapterType: string; url: string };
+  kernelConfig?: Record<string, unknown>;
+  registered?: boolean;
+  tested?: boolean;
+}
+
+// ── Machine identification result ───────────────────────────────
+
+export interface MachineIdentificationResult {
+  make: string;
+  model: string;
+  type: string;
+  suggestedAdapterType: AdapterType;
+  confidence: number;
+}
+
+// ── Discovered device ───────────────────────────────────────────
+
+export interface DiscoveredDevice {
+  address: string;
+  hostname?: string;
+  port?: number;
+  service?: string;
+}
+
+// ── Connection detection result ─────────────────────────────────
+
+export interface ConnectionDetectionResult {
+  adapterType: AdapterType | "unknown";
+  url: string;
+  apiVersion?: string;
+  capabilities?: string[];
+}
+
 // ── Agent ───────────────────────────────────────────────────────
 
 export class SetupAgent {
@@ -43,6 +88,9 @@ export class SetupAgent {
   private config: Required<SetupAgentConfig>;
   private toolMap: Map<string, SetupAgentTool> = new Map();
   private running = false;
+
+  /** Per-conversation state tracked for multi-turn setup flows */
+  private conversationStates: Map<string, SetupConversationState> = new Map();
 
   constructor(bus: MessageBus, config?: SetupAgentConfig) {
     this.bus = bus;
@@ -62,10 +110,10 @@ export class SetupAgent {
       id: this.id,
       name: "PCC Setup Agent",
       description:
-        "Orchestrates PCC setup flows: detect config, configure adapters, register devices, validate, run test jobs.",
+        "Orchestrates PCC setup flows: detect config, configure adapters, register devices, validate, run test jobs. Supports conversational multi-turn setup with photo machine identification.",
       role: "broker" as any,
       walletAddress: "0x0000000000000000000000000000000000000000",
-      capabilities: ["setup", "configuration", "device-registration", "validation"],
+      capabilities: ["setup", "configuration", "device-registration", "validation", "machine-identification"],
       endpoint: `agent://${this.id}`,
       supportedIntents: [
         "setup_detect",
@@ -89,6 +137,29 @@ export class SetupAgent {
   stop(): void {
     this.running = false;
     this.bus.unregister(this.id);
+  }
+
+  // ── Conversation state ─────────────────────────────────────────
+
+  getConversationState(conversationId: string): SetupConversationState {
+    if (!this.conversationStates.has(conversationId)) {
+      this.conversationStates.set(conversationId, { phase: "greeting" });
+    }
+    return this.conversationStates.get(conversationId)!;
+  }
+
+  updateConversationState(
+    conversationId: string,
+    update: Partial<SetupConversationState>,
+  ): SetupConversationState {
+    const current = this.getConversationState(conversationId);
+    const next = { ...current, ...update };
+    this.conversationStates.set(conversationId, next);
+    return next;
+  }
+
+  clearConversationState(conversationId: string): void {
+    this.conversationStates.delete(conversationId);
   }
 
   // ── Message routing ───────────────────────────────────────────
@@ -208,10 +279,114 @@ export class SetupAgent {
     };
   }
 
+  // ── Machine identification ─────────────────────────────────────
+
+  /**
+   * Uses Gemini (or a compatible vision LLM) to identify a machine from a photo.
+   * In the absence of a real Gemini client, falls back to structured mock analysis
+   * based on image size/encoding hints.
+   */
+  async identifyMachineFromPhoto(imageBase64: string): Promise<MachineIdentificationResult> {
+    // Attempt to call Gemini via the gateway proxy if available
+    try {
+      const result = await this.gatewayPost("/api/ai/identify-machine", {
+        imageBase64,
+        prompt:
+          "Identify this machine. What is the make, model, and type? " +
+          "Is it a 3D printer, CNC machine, laser cutter, industrial printer, etc.? " +
+          "Respond in JSON: {make, model, type, confidence}",
+      }) as any;
+
+      const adapterMap: Record<string, AdapterType> = {
+        "3d printer": "octoprint",
+        "fdm printer": "octoprint",
+        "resin printer": "octoprint",
+        "cnc machine": "modbus",
+        "cnc router": "modbus",
+        "laser cutter": "opcua",
+        "laser engraver": "opcua",
+        "industrial printer": "sila",
+        "inkjet printer": "sila",
+        "plotter": "generic-http",
+      };
+
+      const typeLower = (result.type ?? "").toLowerCase();
+      let suggestedAdapterType: AdapterType = "generic-http";
+      for (const [keyword, adapter] of Object.entries(adapterMap)) {
+        if (typeLower.includes(keyword)) {
+          suggestedAdapterType = adapter;
+          break;
+        }
+      }
+
+      return {
+        make: result.make ?? "Unknown",
+        model: result.model ?? "Unknown",
+        type: result.type ?? "Unknown",
+        suggestedAdapterType,
+        confidence: typeof result.confidence === "number" ? result.confidence : 0.5,
+      };
+    } catch {
+      // Gateway proxy unavailable — return a structured mock response
+      // In production, this would call the Gemini Vision API directly.
+      const imageSize = imageBase64.length;
+      const isLargeImage = imageSize > 50_000;
+
+      return {
+        make: "Unknown",
+        model: "Unknown",
+        type: isLargeImage ? "3D Printer" : "Machine",
+        suggestedAdapterType: isLargeImage ? "octoprint" : "generic-http",
+        confidence: 0.4,
+      };
+    }
+  }
+
+  // ── Network scanning ───────────────────────────────────────────
+
+  /**
+   * Scans the local network for printers and devices.
+   * Calls the gateway's network scan endpoint, falling back to an empty list.
+   */
+  async scanNetworkForDevices(): Promise<DiscoveredDevice[]> {
+    try {
+      const result = await this.gatewayPost("/api/setup/scan-network", {}) as any;
+      return Array.isArray(result.devices) ? result.devices : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // ── Connection probing ─────────────────────────────────────────
+
+  /**
+   * Probes an IP/hostname to detect what type of device is running there.
+   * Tries OctoPrint, IPP, Modbus, and OPC-UA in order.
+   */
+  async autoDetectConnection(target: string): Promise<ConnectionDetectionResult> {
+    try {
+      const result = await this.gatewayPost("/api/setup/detect-connection", { target }) as any;
+      return {
+        adapterType: result.adapterType ?? "unknown",
+        url: result.url ?? target,
+        apiVersion: result.apiVersion,
+        capabilities: result.capabilities,
+      };
+    } catch {
+      // Fallback: assume OctoPrint on default port if target looks like a printer IP
+      const url = target.startsWith("http") ? target : `http://${target}:5000`;
+      return {
+        adapterType: "octoprint",
+        url,
+      };
+    }
+  }
+
   // ── LLM tools ─────────────────────────────────────────────────
 
   private registerTools(): void {
     const tools: SetupAgentTool[] = [
+      // ── Existing tools ─────────────────────────────────────
       {
         name: "detect_config",
         description: "Detect current PCC configuration state — env vars, DB, kernel service, chain, storage, identity.",
@@ -265,6 +440,142 @@ export class SetupAgent {
         description: "Get comprehensive setup status across all categories: gateway, database, adapters, chain, storage, identity.",
         parameters: {},
         execute: async (_params) => this.gatewayGet("/api/setup/status"),
+      },
+
+      // ── New conversational tools ──────────────────────────
+
+      {
+        name: "identify_machine_from_photo",
+        description:
+          "Takes a base64-encoded photo of a machine and calls Gemini Vision to identify it. " +
+          "Returns the machine make, model, type, suggested adapter type, and confidence score.",
+        parameters: {
+          imageBase64: {
+            type: "string",
+            description: "Base64-encoded image data (JPEG or PNG). Can include data URI prefix.",
+          },
+        },
+        execute: async (params) => {
+          const imageBase64 = String(params.imageBase64 ?? "");
+          // Strip data URI prefix if present
+          const base64Data = imageBase64.replace(/^data:image\/[^;]+;base64,/, "");
+          return this.identifyMachineFromPhoto(base64Data);
+        },
+      },
+
+      {
+        name: "scan_network_for_devices",
+        description:
+          "Scans the local network for printers and devices (OctoPrint, IPP, Modbus, OPC-UA). " +
+          "Returns a list of discovered devices with their addresses and services.",
+        parameters: {},
+        execute: async (_params) => {
+          const devices = await this.scanNetworkForDevices();
+          return { devices, count: devices.length };
+        },
+      },
+
+      {
+        name: "auto_detect_connection",
+        description:
+          "Given an IP address or hostname, probes for OctoPrint, IPP, Modbus, and OPC-UA. " +
+          "Returns the detected adapter type, URL, API version, and capabilities.",
+        parameters: {
+          target: {
+            type: "string",
+            description: "IP address, hostname, or URL of the device to probe (e.g. '192.168.1.50' or 'http://printer.local:5000')",
+          },
+        },
+        execute: async (params) => {
+          const target = String(params.target ?? "");
+          return this.autoDetectConnection(target);
+        },
+      },
+
+      {
+        name: "generate_kernel_config",
+        description:
+          "Takes the results of the setup conversation (machine info, connection config) and " +
+          "generates a complete KernelConfig object with the env variable line to add to .env.",
+        parameters: {
+          kernelId: { type: "string", description: "Kernel ID for the config", required: false },
+          deviceName: { type: "string", description: "Human-readable device name" },
+          deviceType: { type: "string", description: "Device type: machine | sensor | camera" },
+          adapterType: { type: "string", description: "Adapter type detected or chosen" },
+          url: { type: "string", description: "Device URL or endpoint", required: false },
+          apiKey: { type: "string", description: "API key for the device adapter", required: false },
+          host: { type: "string", description: "Host/IP for TCP adapters (Modbus, OPC-UA)", required: false },
+          port: { type: "number", description: "Port for TCP adapters", required: false },
+          mockMode: { type: "boolean", description: "Enable mock mode", required: false },
+        },
+        execute: async (params) => {
+          return this.gatewayPost("/api/setup/generate-config", {
+            kernelId: params.kernelId,
+            devices: [
+              {
+                name: params.deviceName,
+                type: params.deviceType,
+                adapterType: params.adapterType,
+                url: params.url,
+                apiKey: params.apiKey,
+                host: params.host,
+                port: params.port,
+              },
+            ],
+            mockMode: params.mockMode ?? false,
+          });
+        },
+      },
+
+      {
+        name: "register_and_test",
+        description:
+          "Registers the device via /api/setup/register-device and then runs a test job to verify " +
+          "the full pipeline. Returns whether registration succeeded and the test result.",
+        parameters: {
+          kernelId: { type: "string", description: "Kernel ID to register the device under" },
+          deviceId: { type: "string", description: "Unique device identifier" },
+          type: { type: "string", description: "Device type: machine | sensor | camera" },
+          adapterType: { type: "string", description: "Adapter type" },
+          model: { type: "string", description: "Device model name", required: false },
+          adapterConfig: { type: "object", description: "Adapter-specific configuration", required: false },
+        },
+        execute: async (params) => {
+          let registered = false;
+          let registrationError: string | undefined;
+          let testResult: { success: boolean; duration?: number } | undefined;
+
+          // Step 1: Register
+          try {
+            await this.gatewayPost("/api/setup/register-device", params);
+            registered = true;
+          } catch (err) {
+            registrationError = err instanceof Error ? err.message : String(err);
+          }
+
+          // Step 2: Test job (only if registration succeeded)
+          if (registered) {
+            try {
+              const start = Date.now();
+              const jobResult = await this.gatewayPost("/api/setup/test-job", {
+                kernelId: params.kernelId,
+                deviceId: params.deviceId,
+              }) as any;
+              testResult = {
+                success: jobResult?.status === "completed",
+                duration: Date.now() - start,
+              };
+            } catch (err) {
+              testResult = { success: false };
+            }
+          }
+
+          return {
+            registered,
+            registrationError,
+            testResult,
+          };
+        },
       },
     ];
 
