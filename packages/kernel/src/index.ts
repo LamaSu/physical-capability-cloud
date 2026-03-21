@@ -41,6 +41,14 @@ export { PhotoCaptureService } from "./photo-capture-service.js";
 export type { PhotoCaptureResult } from "./photo-capture-service.js";
 export { GeminiComparisonService } from "./gemini-comparison-service.js";
 export type { ComparisonResult } from "./gemini-comparison-service.js";
+export {
+  LocalComparisonService,
+  computePHash,
+  pHashDistance,
+  pHashSimilarity,
+  computeSSIM,
+} from "./local-comparison-service.js";
+export type { ImageData, LocalComparisonResult } from "./local-comparison-service.js";
 export * from "./adapters/index.js";
 export { KernelKeychain } from "./kernel-keychain.js";
 export { LogCaptureService } from "./log-capture-service.js";
