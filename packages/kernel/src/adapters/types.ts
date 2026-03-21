@@ -27,7 +27,7 @@ export interface MachineCommandResult {
 /** Interface every machine adapter must implement */
 export interface MachineAdapter {
   readonly id: string;
-  readonly type: "fdm" | "cnc-3axis" | "cnc-5axis" | "sla" | "lathe" | "laser-cut";
+  readonly type: "fdm" | "cnc-3axis" | "cnc-5axis" | "sla" | "lathe" | "laser-cut" | "ipp-2d";
   readonly source: EvidenceSource;
 
   /** Get current status */

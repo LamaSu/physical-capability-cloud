@@ -1,0 +1,221 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/2d-print/v1",
+  "version": "1.0.0",
+  "status": "active",
+  "name": "2D Print",
+  "description": "Standard 2D document and image printing via inkjet or laser",
+  "kind": "base",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["ipp", "usb", "mdns", "manual"],
+    "detect": {
+      "ipp": {
+        "attributes": ["printer-make-and-model", "media-supported", "print-color-mode-supported"]
+      },
+      "mdns": {
+        "serviceType": "_ipp._tcp"
+      }
+    }
+  },
+  "adapter": {
+    "type": "ipp",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "uri": { "type": "string", "description": "IPP printer URI (e.g., ipp://192.168.1.50/ipp/print)" },
+        "name": { "type": "string", "description": "Human-readable printer name" }
+      },
+      "required": ["uri"]
+    },
+    "commands": {
+      "print": { "description": "Send a document to the printer", "input": "file", "output": "jobId" },
+      "status": { "description": "Get printer status", "output": "printerState" },
+      "cancel": { "description": "Cancel a print job", "input": "jobId" }
+    }
+  },
+  "parameters": [
+    {
+      "key": "mediaSize",
+      "type": "enum",
+      "label": "Paper Size",
+      "required": true,
+      "order": 1,
+      "group": "media",
+      "options": [
+        { "value": "na_letter_8.5x11in", "label": "Letter (8.5×11\")" },
+        { "value": "iso_a4_210x297mm", "label": "A4 (210×297mm)" },
+        { "value": "iso_a3_297x420mm", "label": "A3 (297×420mm)" },
+        { "value": "na_legal_8.5x14in", "label": "Legal (8.5×14\")" },
+        { "value": "na_number-10_4.125x9.5in", "label": "Envelope #10" },
+        { "value": "custom", "label": "Custom Size" }
+      ],
+      "pricingImpact": null
+    },
+    {
+      "key": "mediaType",
+      "type": "enum",
+      "label": "Paper Type",
+      "required": true,
+      "order": 2,
+      "group": "media",
+      "options": [
+        { "value": "stationery", "label": "Plain Paper" },
+        { "value": "photographic-high-gloss", "label": "Photo Paper (Glossy)" },
+        { "value": "photographic-matte", "label": "Photo Paper (Matte)" },
+        { "value": "cardstock", "label": "Cardstock" },
+        { "value": "transparency", "label": "Transparency" },
+        { "value": "labels", "label": "Labels" },
+        { "value": "envelope", "label": "Envelope" }
+      ],
+      "pricingImpact": null
+    },
+    {
+      "key": "colorMode",
+      "type": "enum",
+      "label": "Color Mode",
+      "required": true,
+      "order": 3,
+      "group": "quality",
+      "options": [
+        { "value": "color", "label": "Full Color" },
+        { "value": "monochrome", "label": "Black & White" },
+        { "value": "auto", "label": "Auto-detect" }
+      ],
+      "pricingImpact": { "mode": "multiplier", "perOption": { "color": 2.0, "monochrome": 1.0, "auto": 1.5 } }
+    },
+    {
+      "key": "resolution",
+      "type": "enum",
+      "label": "Print Resolution",
+      "required": false,
+      "order": 4,
+      "group": "quality",
+      "options": [
+        { "value": "300", "label": "300 DPI (Draft)" },
+        { "value": "600", "label": "600 DPI (Normal)" },
+        { "value": "1200", "label": "1200 DPI (High)" },
+        { "value": "2400", "label": "2400 DPI (Photo)" },
+        { "value": "4800", "label": "4800 DPI (Ultra)" }
+      ],
+      "pricingImpact": { "mode": "multiplier", "perOption": { "300": 0.5, "600": 1.0, "1200": 1.5, "2400": 2.5, "4800": 4.0 } }
+    },
+    {
+      "key": "duplex",
+      "type": "enum",
+      "label": "Sides",
+      "required": false,
+      "order": 5,
+      "group": "layout",
+      "options": [
+        { "value": "one-sided", "label": "Single-sided" },
+        { "value": "two-sided-long-edge", "label": "Double-sided (Long Edge)" },
+        { "value": "two-sided-short-edge", "label": "Double-sided (Short Edge)" }
+      ],
+      "pricingImpact": { "mode": "percent", "perOption": { "two-sided-long-edge": 40, "two-sided-short-edge": 40 } }
+    },
+    {
+      "key": "copies",
+      "type": "number",
+      "label": "Number of Copies",
+      "required": true,
+      "order": 6,
+      "group": "job",
+      "min": 1,
+      "max": 9999,
+      "step": 1,
+      "defaultValue": 1,
+      "pricingImpact": { "mode": "per_unit", "value": 1.0 }
+    },
+    {
+      "key": "borderless",
+      "type": "boolean",
+      "label": "Borderless Printing",
+      "required": false,
+      "order": 7,
+      "group": "layout",
+      "defaultValue": false,
+      "pricingImpact": { "mode": "percent", "value": 15 }
+    },
+    {
+      "key": "staple",
+      "type": "boolean",
+      "label": "Staple Output",
+      "required": false,
+      "order": 8,
+      "group": "finishing",
+      "defaultValue": false,
+      "pricingImpact": { "mode": "flat", "value": 0.50 }
+    }
+  ],
+  "constraints": [
+    {
+      "key": "2d-print-1",
+      "human": "Borderless printing only available on photo paper",
+      "severity": "error",
+      "when": [
+        { "param": "borderless", "operator": "equals", "value": true },
+        { "param": "mediaType", "operator": "notIn", "value": ["photographic-high-gloss", "photographic-matte"] }
+      ],
+      "then": [{ "action": "reject", "message": "Borderless printing requires photo paper" }]
+    },
+    {
+      "key": "2d-print-2",
+      "human": "Envelopes cannot be printed double-sided",
+      "severity": "error",
+      "when": [
+        { "param": "mediaType", "operator": "in", "value": ["envelope"] },
+        { "param": "duplex", "operator": "notEquals", "value": "one-sided" }
+      ],
+      "then": [{ "action": "restrictTo", "param": "duplex", "values": ["one-sided"] }]
+    },
+    {
+      "key": "2d-print-3",
+      "human": "Ultra-high resolution only available for photo paper",
+      "severity": "warning",
+      "when": [
+        { "param": "resolution", "operator": "in", "value": ["2400", "4800"] },
+        { "param": "mediaType", "operator": "notIn", "value": ["photographic-high-gloss", "photographic-matte"] }
+      ],
+      "then": [{ "action": "warn", "message": "2400+ DPI is optimized for photo paper. Results on plain paper may not show improvement." }]
+    },
+    {
+      "key": "2d-print-4",
+      "human": "Stapling requires multiple pages or copies",
+      "severity": "error",
+      "when": [
+        { "param": "staple", "operator": "equals", "value": true },
+        { "param": "copies", "operator": "lt", "value": 1 }
+      ],
+      "then": [{ "action": "warn", "message": "Stapling requires a multi-page document" }]
+    }
+  ],
+  "invariants": [
+    {
+      "key": "2d-print-inv-1",
+      "human": "Custom paper size requires A3-capable printer",
+      "severity": "error",
+      "expression": "mediaSize != 'custom' or device.capabilities.includes('iso_a3_297x420mm')"
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Job completion receipt",
+      "required": ["jobId", "timestamp", "pageCount", "printerModel"]
+    },
+    "tier1": {
+      "description": "Job completion + print queue confirmation",
+      "required": ["jobId", "timestamp", "pageCount", "printerModel", "ippJobState", "ippJobId"]
+    },
+    "tier2": {
+      "description": "Job completion + scanned output sample",
+      "required": ["jobId", "timestamp", "pageCount", "printerModel", "ippJobState", "ippJobId", "outputScanCid"]
+    }
+  },
+  "pricing": {
+    "basePrice": "0.10",
+    "currency": "USDC",
+    "unit": "per page",
+    "minimumCharge": "1.00"
+  }
+}

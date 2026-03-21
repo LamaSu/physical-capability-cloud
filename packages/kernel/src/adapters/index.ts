@@ -30,6 +30,10 @@ export type {
   ComplianceStandard,
 } from "./sila/index.js";
 
+// IPP (Internet Printing Protocol) adapter for standard 2D printers
+export { IppAdapter, type IppAdapterConfig, type IppCapabilities } from "./ipp-adapter.js";
+export { discoverIppPrinters, generatePrinterCsd, type DiscoveredPrinter } from "./ipp-discovery.js";
+
 // Interfaces
 export type { MachineAdapter, SensorAdapter, CameraAdapter, MachineCommand, MachineCommandResult } from "./types.js";
 export type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
