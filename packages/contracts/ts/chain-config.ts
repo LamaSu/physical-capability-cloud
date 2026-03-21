@@ -48,9 +48,8 @@ export const deployments: Record<string, ChainDeployment> = {
     contracts: {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-      // Deployed contract addresses — fill after Base Sepolia deployment
-      milestoneEscrowFactory: undefined,
-      mockUSDC: undefined,
+      milestoneEscrowFactory: "0x10059efeeab1ddf013489e9597a3aec4480d95e1",
+      mockUSDC: "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9",
     },
     blockExplorer: "https://sepolia.basescan.org",
   },
