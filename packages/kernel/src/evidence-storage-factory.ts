@@ -40,7 +40,7 @@ export async function createEvidenceStorage(
 
   if (backend === "storacha") {
     const { StorachaStorageService } = await import("./storacha-storage.js");
-    return new StorachaStorageService({ mock: true });
+    return new StorachaStorageService({ mock: !process.env["STORACHA_PROOF"] });
   }
 
   // Default: Helia in-process node

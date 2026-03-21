@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Address } from "@pcc/spec";
 import { encryptionService, litEncryptionService, getEvidenceStorage } from "../services.js";
 import type { LitAuthSig } from "@pcc/kernel";
+import { kernelKeyStore } from "@pcc/kernel";
 import { getRepos } from "../db.js";
 
 /**
@@ -50,12 +51,17 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       const encBundle = repos.encryption.findEncryptedByBundleId(req.params.bundleId);
       if (!encBundle) return reply.code(404).send({ error: "not_found" });
 
-      const body = req.body as { recipientAddress: Address; accessLevel?: "full" | "selective" | "summary_only" };
+      const body = req.body as { recipientAddress: Address; accessLevel?: "full" | "selective" | "summary_only"; recipientPublicKey?: string };
+
+      // Retrieve the real AES key from key store; fall back to zero bytes if not present
+      const storedKey = kernelKeyStore.retrieve(req.params.bundleId) ?? new Uint8Array(32);
+
       const grant = await encryptionService.grantAccess(
         req.params.bundleId,
-        new Uint8Array(32), // mock key — in production, retrieve from secure store
+        storedKey,
         body.recipientAddress,
         body.accessLevel ?? "full",
+        body.recipientPublicKey,
       );
 
       // Persist the grant to the database

@@ -6,7 +6,7 @@
  * here they start with demo seed data.
  */
 
-import { SensorPipeline, BatchTracker, EncryptionService, LitEncryptionService, RealLitEncryptionService } from "@pcc/kernel";
+import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionService } from "@pcc/kernel";
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
@@ -171,40 +171,33 @@ export const encryptionService = new EncryptionService();
 
 // ── Lit Encryption Service ──────────────────────────────────────────
 
-// Set LIT_PROTOCOL_REAL=true to use the real Lit Protocol network (datil-test).
-// Default: mock mode (local AES-256-GCM with in-process key storage).
-const USE_REAL_LIT = process.env.LIT_PROTOCOL_REAL === "true";
-
-export const litEncryptionService = USE_REAL_LIT
-  ? new RealLitEncryptionService({
-      network: "datil-test",
-      chain: "baseSepolia",
-    })
-  : new LitEncryptionService({
-      network: "datil-test",
-      chain: "baseSepolia",
-      mock: true,
-    });
+// Use createLitEncryptionService() factory — resolves real vs mock via LIT_PROTOCOL_REAL env var.
+// Network: "datil-dev" (active dev/test) or "datil" (production).
+// NOTE: "datil-test" was decommissioned Feb 25, 2026.
+export const litEncryptionService = createLitEncryptionService({
+  network: "datil-dev",
+  chain: "baseSepolia",
+});
 
 // Connect Lit service (non-blocking — will be ready by first request)
 litEncryptionService.connect().catch((err) => {
   console.error(
-    `Failed to connect LitEncryptionService (${USE_REAL_LIT ? "real" : "mock"}):`,
+    `Failed to connect LitEncryptionService:`,
     err,
   );
 });
 
-// ── IPFS Evidence Storage (ESM-only Helia — lazy init) ──────────────
+// ── IPFS Evidence Storage (factory — picks backend from EVIDENCE_STORAGE env) ──
 
 let _evidenceStorage: any = null;
 
 export async function getEvidenceStorage() {
   if (!_evidenceStorage) {
-    // Dynamic import to handle ESM-only Helia dependency
-    const { EvidenceStorageService } = await import("@pcc/kernel/evidence-storage");
-    _evidenceStorage = new EvidenceStorageService();
+    // Dynamic import to handle ESM-only Helia/Storacha dependency
+    const { createEvidenceStorage } = await import("@pcc/kernel/evidence-storage-factory");
+    _evidenceStorage = await createEvidenceStorage();
     await _evidenceStorage.init();
-    console.log("[services] IPFS evidence storage initialized");
+    console.log(`[services] Evidence storage initialized (backend: ${process.env["EVIDENCE_STORAGE"] ?? "helia"})`);
   }
   return _evidenceStorage;
 }

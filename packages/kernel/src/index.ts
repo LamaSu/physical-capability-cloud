@@ -15,6 +15,7 @@ export { SensorPipeline, RingBuffer, lttbDownsample } from "./sensor-pipeline.js
 export type { PipelineConfig } from "./sensor-pipeline.js";
 export { BatchTracker } from "./batch-tracker.js";
 export { EncryptionService } from "./encryption-service.js";
+export { KernelKeyStore, kernelKeyStore } from "./key-store.js";
 export { LitEncryptionService } from "./lit-encryption-service.js";
 export { RealLitEncryptionService } from "./lit-encryption-real.js";
 export type {
@@ -36,4 +37,11 @@ export type { StorachaStorageOptions } from "./storacha-storage.js";
 export type { IEvidenceStorageService } from "./evidence-storage-factory.js";
 export { createLitEncryptionService, isRealLitEnabled } from "./lit-encryption-factory.js";
 export type { AnyLitEncryptionService } from "./lit-encryption-factory.js";
+export { PhotoCaptureService } from "./photo-capture-service.js";
+export type { PhotoCaptureResult } from "./photo-capture-service.js";
+export { GeminiComparisonService } from "./gemini-comparison-service.js";
+export type { ComparisonResult } from "./gemini-comparison-service.js";
 export * from "./adapters/index.js";
+export { KernelKeychain } from "./kernel-keychain.js";
+export { LogCaptureService } from "./log-capture-service.js";
+export type { LogEntry, LogChainVerification } from "./log-capture-service.js";
