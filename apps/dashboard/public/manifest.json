@@ -1,0 +1,12 @@
+{
+  "name": "PCC Operator",
+  "short_name": "PCC",
+  "description": "Physical Capability Cloud — Operator Tools",
+  "start_url": "/operator",
+  "display": "standalone",
+  "background_color": "#0A1A0F",
+  "theme_color": "#10B981",
+  "icons": [
+    { "src": "/pcc-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

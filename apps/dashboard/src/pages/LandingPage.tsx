@@ -202,7 +202,15 @@ export function LandingPage() {
           </motion.p>
 
           {/* CTAs */}
-          <motion.div variants={fadeUp} className="flex items-center justify-center gap-4 pt-4">
+          <motion.div variants={fadeUp} className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
+            <button
+              onClick={() => navigate("/setup/agent")}
+              className="relative px-8 py-3.5 rounded-xl font-bold text-sm text-white bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 transition-all duration-300 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 hover:-translate-y-0.5 ring-2 ring-emerald-400/30 hover:ring-emerald-400/60"
+            >
+              <span className="flex items-center gap-2">
+                Get Started
+              </span>
+            </button>
             <button
               onClick={() => navigate("/setup")}
               className="px-8 py-3 rounded-xl font-semibold text-sm text-forest-900 bg-gradient-to-r from-green-400 to-teal-400 hover:from-green-300 hover:to-teal-300 transition-all duration-300 shadow-lg shadow-green-500/20 hover:shadow-green-500/30 hover:-translate-y-0.5"
