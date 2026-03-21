@@ -275,17 +275,18 @@ export function LandingPage() {
             </div>
 
             {/* With PCC */}
-            <div className="p-6 rounded-2xl bg-white/[0.02] border border-green-500/10 space-y-4 relative overflow-hidden">
+            <div className="p-6 rounded-2xl bg-white/[0.02] border border-green-500/10 relative overflow-hidden flex flex-col justify-center min-h-[280px]">
               <div className="absolute inset-0 bg-gradient-to-br from-green-500/[0.03] to-transparent pointer-events-none" />
-              <div className="relative z-10 space-y-4">
-                <div className="text-xs tracking-[0.2em] uppercase text-green-400/60 font-mono mb-2">With PCC</div>
-                <MoneyBar label="You keep" amount={100} total={100} color="#7CB342" delay={0.2} />
-                <div className="pt-2 border-t border-white/[0.06]">
-                  <p className="text-xs text-white/30 leading-relaxed">
-                    The platform fee, the agency markup, the dispatcher, the project manager,
-                    the invoice department — that $55 stays in your pocket.
-                  </p>
-                </div>
+              <div className="relative z-10 space-y-5 text-center px-4">
+                <div className="text-xs tracking-[0.2em] uppercase text-green-400/60 font-mono">With PCC</div>
+                <p className="text-xl sm:text-2xl font-bold text-white/90 leading-snug">
+                  You generate $100 of value.<br />
+                  <span className="bg-gradient-to-r from-green-400 to-teal-400 bg-clip-text text-transparent">You keep the money they would have taken.</span>
+                </p>
+                <p className="text-sm text-white/30 leading-relaxed">
+                  Your agent replaces the platform. Proof of work replaces the middlemen.
+                  Escrow replaces the invoice department.
+                </p>
               </div>
             </div>
           </motion.div>
