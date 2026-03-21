@@ -8,7 +8,7 @@ out/
 *.db
 *.sqlite
 cache/
-lib/
+packages/contracts/lib/
 .DS_Store
 *.swp
 *.swo
