@@ -135,6 +135,17 @@ export type Intent =
   | SetupConfigureResultIntent
   | SetupValidateIntent
   | SetupValidateResultIntent
+  // UI render (dynamic UI protocol for conversational setup flows)
+  | UIRenderRequestIntent
+  // IP / Story Protocol
+  | IPRegisterIntent
+  | IPRegisterResultIntent
+  | IPRevenueQueryIntent
+  | IPRevenueResultIntent
+  | IPClaimRevenueIntent
+  | IPClaimResultIntent
+  | IPProposeSplitIntent
+  | IPSplitResponseIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -733,6 +744,133 @@ export type SetupConfigurePayload = Omit<SetupConfigureIntent, "type">;
 export type SetupConfigureResultPayload = Omit<SetupConfigureResultIntent, "type">;
 export type SetupValidatePayload = Omit<SetupValidateIntent, "type">;
 export type SetupValidateResultPayload = Omit<SetupValidateResultIntent, "type">;
+
+// ── UI Render Request Intent ─────────────────────────────────────
+// Allows the setup agent to request the dashboard to render dynamic UI
+// components during a conversational setup flow.
+
+/** Component types the setup agent can request the dashboard to render */
+export type UIRenderComponent =
+  | "photo_capture"
+  | "network_scan_results"
+  | "machine_config_preview"
+  | "test_results"
+  | "setup_complete"
+  | "text_input"
+  | "selection";
+
+/** Request from the setup agent to the dashboard to render a UI component */
+export interface UIRenderRequestIntent {
+  type: "ui_render_request";
+  /** Which component to render */
+  component: UIRenderComponent;
+  /** Component-specific props (e.g., options for selection, config for preview) */
+  props: Record<string, unknown>;
+}
+
+// ── IP / Story Protocol Intents ──────────────────────────────────
+// Agents can manage IP registration, revenue queries, claims, and
+// revenue-split negotiation via these typed intents.
+
+/** Request to register a CSD capability as a Story Protocol IP Asset */
+export interface IPRegisterIntent {
+  type: "ip_register";
+  /** PCC capability ID to register as IP */
+  capabilityId: string;
+  /** Wallet address of the CSD designer (receives royalty tokens) */
+  designerAddress: string;
+  /** Human-readable designer name */
+  designerName: string;
+  /** Percentage of all derivative revenue that flows to this IP (default 5) */
+  commercialRevShare?: number;
+}
+
+/** Response containing the Story Protocol IP Asset registration details */
+export interface IPRegisterResultIntent {
+  type: "ip_register_result";
+  /** Story Protocol IP Account address (0x...) */
+  ipId: string;
+  /** Registration transaction hash */
+  txHash: string;
+  /** PIL license terms ID assigned to this IP */
+  licenseTermsId: string;
+  /** Whether registration succeeded */
+  success: boolean;
+  /** Error message if success=false */
+  error?: string;
+}
+
+/** Request to query revenue accumulated in a Story IP Royalty Vault */
+export interface IPRevenueQueryIntent {
+  type: "ip_revenue_query";
+  /** Story Protocol IP Account address */
+  ipId: string;
+}
+
+/** Response with revenue snapshot for a Story IP Royalty Vault */
+export interface IPRevenueResultIntent {
+  type: "ip_revenue_result";
+  /** Story Protocol IP Account address */
+  ipId: string;
+  /** Total accumulated revenue (WIP/USDC token units) */
+  totalRevenue: string;
+  /** Revenue available to claim */
+  unclaimedRevenue: string;
+  /** Royalty Token holders with claimable amounts */
+  tokenHolders: Array<{
+    address: string;
+    tokensHeld: number;
+    claimable: string;
+  }>;
+}
+
+/** Request to claim accumulated revenue from a Story IP Royalty Vault */
+export interface IPClaimRevenueIntent {
+  type: "ip_claim_revenue";
+  /** Story Protocol IP Account address */
+  ipId: string;
+  /** Specific Royalty Token IDs to claim (omit to claim all) */
+  tokenIds?: string[];
+}
+
+/** Response for a revenue claim transaction */
+export interface IPClaimResultIntent {
+  type: "ip_claim_result";
+  /** Claim transaction hash */
+  txHash: string;
+  /** Amount claimed (token units) */
+  claimed: string;
+  /** Whether claim succeeded */
+  success: boolean;
+}
+
+/** Revenue split entry in a proposed split scheme */
+export interface IPRevenueSplitEntry {
+  address: string;
+  role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+  percentage: number;
+  label: string;
+}
+
+/** Propose a revenue split scheme for an IP Asset (used in contract negotiation) */
+export interface IPProposeSplitIntent {
+  type: "ip_propose_split";
+  /** Story Protocol IP Account address */
+  ipId: string;
+  /** Proposed split allocations (must sum to 100) */
+  splits: IPRevenueSplitEntry[];
+}
+
+/** Accept or counter-propose a revenue split scheme */
+export interface IPSplitResponseIntent {
+  type: "ip_split_response";
+  /** Whether the proposed split was accepted */
+  accepted: boolean;
+  /** The accepted or counter-proposed split (present when accepted=true or counterProposal=true) */
+  splits?: IPRevenueSplitEntry[];
+  /** Whether this is a counter-proposal (accepted=false but splits contains a counter-offer) */
+  counterProposal?: boolean;
+}
 
 // ── General Intents ─────────────────────────────────────────────
 
