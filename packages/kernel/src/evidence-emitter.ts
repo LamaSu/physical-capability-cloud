@@ -14,11 +14,13 @@ import type {
   SHA256,
   Signature,
   TierEvidenceRequirements,
+  Address,
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
 import { hashEvent, hashBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
+import * as Sentry from "@sentry/node";
 
 /** In-memory store for evidence events per job step */
 interface StepEvidence {
@@ -32,8 +34,8 @@ export class EvidenceEmitter {
   private kernelId: string;
   private stepEvidence: Map<string, StepEvidence> = new Map();
   private bundleListeners: Array<(bundle: EvidenceBundle) => void> = [];
-  /** Mock signing function — in production, use HSM/TEE */
-  private signFn: (data: string) => Signature;
+  /** Signing function — async to support HSM/TEE/wallet signers in production */
+  private signFn: (data: string) => Promise<Signature>;
   /** Optional IPFS storage service — when set, bundles are archived after finalization */
   private storageService: EvidenceStorageService | null = null;
   /** Result from the most recent IPFS archive operation */
@@ -41,13 +43,14 @@ export class EvidenceEmitter {
 
   constructor(
     kernelId: string,
-    signFn?: (data: string) => Signature,
+    signFn?: (data: string) => Promise<Signature>,
   ) {
     this.kernelId = kernelId;
-    this.signFn = signFn ?? ((data: string) => ({
-      signer: "0x0000000000000000000000000000000000000000" as const,
+    // TEST-ONLY default — replace with a real wallet signFn in production
+    this.signFn = signFn ?? (async (data: string) => ({
+      signer: "0x0000000000000000000000000000000000000000" as Address,
       algorithm: "secp256k1" as const,
-      value: `mock_sig_${data.slice(0, 16)}`,
+      value: `test_sig_${data.slice(0, 16)}`,
     }));
   }
 
@@ -114,7 +117,7 @@ export class EvidenceEmitter {
     }
 
     const bundleHashValue = await hashBundle(stepEv.events);
-    const signature = this.signFn(bundleHashValue);
+    const signature = await this.signFn(bundleHashValue);
 
     const bundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -131,7 +134,18 @@ export class EvidenceEmitter {
     // Archive to IPFS if storage service is available (best-effort)
     if (this.storageService?.isReady()) {
       try {
-        const ipfsResult = await this.storageService.archiveBundle(bundle);
+        const ipfsResult = await Sentry.startSpan(
+          {
+            name: "evidence.ipfs_archive",
+            op: "storage",
+            attributes: {
+              "bundle.id": bundle.id,
+              "job.id": bundle.jobId,
+              "kernel.id": this.kernelId,
+            },
+          },
+          async () => this.storageService!.archiveBundle(bundle),
+        );
         this.lastIpfsResult = ipfsResult;
       } catch {
         // IPFS archival is best-effort — do not block bundle finalization

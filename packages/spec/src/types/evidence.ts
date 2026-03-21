@@ -56,12 +56,21 @@ export type EvidenceEventType =
   | "device_heartbeat"
   | "calibration_record"
   | "method_loaded"
-  | "sequence_started";
+  | "sequence_started"
+  // Photo verification events (WS2)
+  | "photo_captured"
+  | "photo_reference_set"
+  | "photo_comparison_result"
+  | "photo_anti_spoof_check"
+  // Machine log events (WS3)
+  | "printer_log_captured"
+  | "printer_job_verified"
+  | "log_hash_chain_entry";
 
 /** Source device that produced an evidence event */
 export interface EvidenceSource {
   deviceId: Id;
-  deviceType: "controller" | "camera" | "power_monitor" | "vibration_sensor" |
+  deviceType: "controller" | "camera" | "photo-camera" | "power_monitor" | "vibration_sensor" |
               "acoustic_sensor" | "temperature_sensor" | "tee" | "courier_api" | "human" |
               "instrument" | "chromatograph" | "bioreactor" | "autosampler" |
               "spectrometer" | "thermal_camera" | "force_sensor" | "flow_sensor" |

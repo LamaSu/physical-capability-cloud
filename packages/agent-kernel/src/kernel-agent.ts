@@ -12,7 +12,7 @@
  * Each KernelAgent wraps one Shop Kernel instance (one physical site).
  */
 
-import { BaseAgent, SettlementClient } from "@pcc/agent-runtime";
+import { BaseAgent, SettlementClient, UnbrowseClient } from "@pcc/agent-runtime";
 import type { MessageBus, A2AMessage, Intent, RequestQuoteIntent, JobCompletedIntent } from "@pcc/a2a";
 import type { Capability, AssuranceTier, EvidenceBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
@@ -37,6 +37,10 @@ export interface KernelAgentConfig {
   gatewayUrl?: string;
   /** Escrow address → milestone index mapping (set externally when jobs are dispatched) */
   escrowMappings?: Map<string, { escrowAddress: `0x${string}`; milestoneIndex: number }>;
+  /** Unbrowse server URL for supply chain monitoring */
+  unbrowseUrl?: string;
+  /** Supplier URLs to monitor for stock/pricing changes */
+  supplierUrls?: string[];
 }
 
 interface ActiveJob {
@@ -65,6 +69,8 @@ export class KernelAgent extends BaseAgent {
   private isProcessing = false;
   private settlement?: SettlementClient;
   private escrowMappings: Map<string, { escrowAddress: `0x${string}`; milestoneIndex: number }> = new Map();
+  private unbrowse?: UnbrowseClient;
+  private supplierUrls: string[];
 
   constructor(bus: MessageBus, config: KernelAgentConfig) {
     super({
@@ -83,7 +89,10 @@ export class KernelAgent extends BaseAgent {
     this.fdm = new MockFDMAdapter(`dev_fdm_${config.kernelId}`, config.kernelId, config.mockPrintDuration ?? 3000);
     this.powerMonitor = new MockPowerMonitorAdapter(`dev_power_${config.kernelId}`, config.kernelId);
     this.camera = new MockCameraAdapter(`dev_cam_${config.kernelId}`, config.kernelId);
-    this.evidenceEmitter = new EvidenceEmitter(config.kernelId);
+    this.evidenceEmitter = new EvidenceEmitter(config.kernelId, async (data: string) => {
+      const sig = await this.wallet.signMessage(data);
+      return { signer: this.wallet.address, algorithm: "secp256k1" as const, value: sig };
+    });
 
     // Listen for completed evidence bundles
     this.evidenceEmitter.onBundle((bundle) => {
@@ -100,6 +109,11 @@ export class KernelAgent extends BaseAgent {
     }
     if (config.escrowMappings) {
       this.escrowMappings = config.escrowMappings;
+    }
+
+    this.supplierUrls = config.supplierUrls ?? [];
+    if (config.unbrowseUrl || process.env.UNBROWSE_URL) {
+      this.unbrowse = new UnbrowseClient({ serverUrl: config.unbrowseUrl });
     }
 
     this.setupIntentHandlers();
@@ -468,6 +482,58 @@ export class KernelAgent extends BaseAgent {
         activeJobs: [...this.activeJobs.values()].filter((j) => j.status === "executing").length,
         completedJobs: [...this.activeJobs.values()].filter((j) => j.status === "completed").length,
       }),
+    });
+
+    // Unbrowse: supply chain monitoring tools
+    this.registerTool({
+      name: "check_supplier",
+      description: "Check a supplier website for material stock, pricing, and lead times via Unbrowse",
+      parameters: {
+        url: { type: "string", description: "Supplier URL (e.g., McMaster-Carr, Xometry)" },
+        query: { type: "string", description: "What to check (e.g., 'PLA filament 1.75mm stock and price')" },
+      },
+      execute: async (params) => {
+        if (!this.unbrowse) return { error: "Unbrowse not configured. Set UNBROWSE_URL or pass unbrowseUrl." };
+        return this.unbrowse.resolveSupplierQuery(params.url as string, params.query as string);
+      },
+    });
+
+    this.registerTool({
+      name: "monitor_suppliers",
+      description: "Check all configured supplier URLs for stock/pricing changes",
+      parameters: {
+        material: { type: "string", description: "Material to check across all suppliers" },
+      },
+      execute: async (params) => {
+        if (!this.unbrowse) return { error: "Unbrowse not configured" };
+        if (this.supplierUrls.length === 0) return { error: "No supplier URLs configured" };
+
+        const results = [];
+        for (const url of this.supplierUrls) {
+          try {
+            const data = await this.unbrowse.resolveSupplierQuery(
+              url,
+              `${params.material as string} stock price availability`,
+            );
+            results.push({ url, ...data });
+          } catch (err) {
+            results.push({ url, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return results;
+      },
+    });
+
+    this.registerTool({
+      name: "search_materials",
+      description: "Search Unbrowse marketplace for material suppliers (finds vendors automatically)",
+      parameters: {
+        query: { type: "string", description: "Material need (e.g., 'aluminum 6061 sheet 1mm', 'PLA filament bulk')" },
+      },
+      execute: async (params) => {
+        if (!this.unbrowse) return { error: "Unbrowse not configured" };
+        return this.unbrowse.searchExternalCapabilities(params.query as string);
+      },
     });
   }
 }

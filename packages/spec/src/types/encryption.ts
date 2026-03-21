@@ -46,9 +46,14 @@ export interface EncryptedEvidenceBundle {
 export interface KeyCapsule {
   id: Id;
   recipientAddress: Address;
+  /**
+   * Recipient's secp256k1 compressed public key (hex, 33 bytes = 66 chars).
+   * Required for real ECIES key wrapping; optional for legacy mock mode.
+   */
+  recipientPublicKey?: string;
   /** Base64 ECIES-encrypted AES key */
   encryptedKey: string;
-  /** ECIES ephemeral key */
+  /** ECIES ephemeral public key (hex, 33 bytes) for real ECIES; Base64 for mock */
   ephemeralPublicKey: string;
   accessLevel: "full" | "selective" | "summary_only";
 }

@@ -36,19 +36,25 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.0",
     "@fastify/cors": "^9.0.0",
     "@helia/unixfs": "^7.0.4",
     "@lit-protocol/constants": "^7",
     "@lit-protocol/lit-node-client": "^7",
     "@lit-protocol/types": "^7",
     "@pcc/spec": "workspace:*",
+    "@scure/bip32": "^2.0.0",
+    "@scure/bip39": "^2.0.0",
     "@sentry/node": "^10.45.0",
     "@storacha/client": "^2.1.2",
     "better-sqlite3": "^11.0.0",
     "fastify": "^4.28.0",
     "helia": "^6.0.21",
     "multiformats": "^13.4.2",
-    "nanoid": "^5.0.0"
+    "nanoid": "^5.0.0",
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
