@@ -3,11 +3,11 @@ import { CsdSchema, type CSD } from "../csd/schema.js";
 import { CsdRegistry, loadBuiltinCsds } from "../csd/registry.js";
 
 // ── Import JSON files directly ──────────────────────────────────────
-import fdmRaw from "../csds/fdm.csd.json" assert { type: "json" };
-import slaRaw from "../csds/sla.csd.json" assert { type: "json" };
-import cnc3axisRaw from "../csds/cnc-3axis.csd.json" assert { type: "json" };
-import laserCutRaw from "../csds/laser-cut.csd.json" assert { type: "json" };
-import print2dRaw from "../csds/2d-print.csd.json" assert { type: "json" };
+import fdmRaw from "../csds/fdm.csd.json" with { type: "json" };
+import slaRaw from "../csds/sla.csd.json" with { type: "json" };
+import cnc3axisRaw from "../csds/cnc-3axis.csd.json" with { type: "json" };
+import laserCutRaw from "../csds/laser-cut.csd.json" with { type: "json" };
+import print2dRaw from "../csds/2d-print.csd.json" with { type: "json" };
 
 // ── CSD JSON validation ─────────────────────────────────────────────
 

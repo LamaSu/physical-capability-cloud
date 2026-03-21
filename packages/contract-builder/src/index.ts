@@ -6,6 +6,17 @@ export type { PricingResult } from "./pricing.js";
 export { ContractValidator } from "./validator.js";
 export type { ValidationResult } from "./validator.js";
 
+// CSD constraint engine
+export { CsdConstraintEvaluator } from "./csd-evaluator.js";
+export type { EvaluationResult, EvaluationError, ParamRestriction } from "./csd-evaluator.js";
+
+// CSD invariant evaluator
+export { CsdInvariantEvaluator } from "./csd-invariant-evaluator.js";
+
+// CSD-aware resolver
+export { CsdResolver } from "./csd-resolver.js";
+export type { ResolvedCsd, ResolvedCsdParameter, CsdPricingResult, CsdValidationResult } from "./csd-resolver.js";
+
 // Template registry
 export {
   registerTemplate,
