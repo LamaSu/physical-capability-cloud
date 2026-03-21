@@ -16,6 +16,8 @@ import type {
   VerificationAttestation,
   VerificationFinding,
   AssuranceTier,
+  Signature,
+  Address,
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS, verifyBundleHash, verifyEventHash, ids } from "@pcc/spec";
 import { canonicalize, sha256 } from "@pcc/spec";
@@ -23,10 +25,21 @@ import { canonicalize, sha256 } from "@pcc/spec";
 export class EvidenceVerifier {
   private verifierId: string;
   private verifierAddress: string;
+  private signFn: (data: string) => Promise<Signature>;
 
-  constructor(verifierId: string, verifierAddress: string) {
+  constructor(
+    verifierId: string,
+    verifierAddress: string,
+    signFn?: (data: string) => Promise<Signature>,
+  ) {
     this.verifierId = verifierId;
     this.verifierAddress = verifierAddress;
+    // TEST-ONLY default — replace with a real wallet signFn in production
+    this.signFn = signFn ?? (async (data: string) => ({
+      signer: verifierAddress as Address,
+      algorithm: "secp256k1" as const,
+      value: `test_sig_${data.slice(0, 16)}`,
+    }));
   }
 
   /**
@@ -136,6 +149,8 @@ export class EvidenceVerifier {
     };
     const scanHash = await sha256(canonicalize(auditReceiptData));
 
+    const signature = await this.signFn(attestationHash);
+
     return {
       id: ids.attestation(),
       requestId: "", // filled in by caller
@@ -145,11 +160,7 @@ export class EvidenceVerifier {
       confidence: Math.round(confidence * 100) / 100,
       findings,
       attestationHash,
-      signature: {
-        signer: this.verifierAddress as any,
-        algorithm: "secp256k1",
-        value: `mock_sig_${attestationHash.slice(7, 23)}`,
-      },
+      signature,
       createdAt: now,
       auditReceipt: {
         scanHash,

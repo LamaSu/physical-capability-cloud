@@ -4,6 +4,7 @@ export {
   MilestoneStatus,
   milestoneStatusName,
   MockUSDCABI,
+  PCCForwarderABI,
   IdentityRegistryABI,
   EntityType,
   EntityStatus,
@@ -11,6 +12,7 @@ export {
   entityStatusName,
   ReputationRegistryABI,
   ValidationRegistryABI,
+  VerifierRegistryABI,
 } from "./abi/index.js";
 export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
@@ -45,3 +47,14 @@ export type {
   CreateCollectionParams,
   PCCNFTClientConfig,
 } from "./pcc-nft/index.js";
+
+// Story Protocol IP Service
+export {
+  StoryIPService,
+  getStoryIPService,
+  resetStoryIPService,
+} from "./story-ip-service.js";
+export type {
+  RegisterCapabilityOptions,
+  RegisterJobEvidenceParams,
+} from "./story-ip-service.js";

@@ -97,6 +97,63 @@ export const DEFAULT_NETWORK_CONFIG: NetworkConfig = {
   reputationDecayRate: 0.01,
 };
 
+// ── Human Verification Types ─────────────────────────────────────────────────
+
+/** A request that requires human verifiers to compare a photo against a reference */
+export interface HumanVerificationRequest extends VerificationRequest {
+  /** CID of captured photo */
+  photoRef: string;
+  /** CID of reference document */
+  referenceRef: string;
+  /** AI pre-score from Gemini (0.0 - 1.0) */
+  comparisonScore?: number;
+  /** How many humans to assign (default: 5) */
+  verifierCount: number;
+}
+
+/** Response from a single human verifier */
+export interface HumanVerificationResponse extends VerificationResponse {
+  /** Human verdict on photo-vs-reference match */
+  humanVerdict: "match" | "no_match" | "inconclusive";
+  /** Optional notes from the human verifier */
+  humanNotes?: string;
+  /** How long the human took to respond (ms) */
+  responseTimeMs: number;
+}
+
+/** A dispute raised against a verification result */
+export interface DisputeRecord {
+  disputeId: string;
+  requestId: string;
+  disputerId: string;
+  reason: string;
+  /** CID of counter-evidence */
+  evidence: string;
+  status: "pending" | "resolved_for" | "resolved_against";
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+/** Reward paid to a verifier for correct behavior */
+export interface VerifierReward {
+  verifierId: string;
+  requestId: string;
+  /** Token amount (as string to handle large numbers safely) */
+  amount: string;
+  reason: "correct_verification" | "dispute_won";
+  timestamp: string;
+}
+
+/** Slash applied to a verifier for bad behavior */
+export interface VerifierSlash {
+  verifierId: string;
+  requestId: string;
+  /** Token amount (as string to handle large numbers safely) */
+  amount: string;
+  reason: "incorrect_verification" | "dispute_lost" | "timeout";
+  timestamp: string;
+}
+
 /** Network status summary */
 export interface NetworkStatus {
   /** Total registered nodes */

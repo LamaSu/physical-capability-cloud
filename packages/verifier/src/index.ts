@@ -26,6 +26,7 @@ export {
   VerificationNetwork,
   VerifierNode,
   ConsensusEngine,
+  VerifierSelector,
   type VerifierNodeInfo,
   type VerificationRequest,
   type VerificationResponse,
@@ -35,8 +36,19 @@ export {
   type NodeStatus,
   type VerifierQuality,
   type VerifierNodeConfig,
+  type HumanVerificationRequest,
+  type HumanVerificationResponse,
+  type DisputeRecord,
+  type VerifierReward,
+  type VerifierSlash,
   DEFAULT_NETWORK_CONFIG,
 } from "./network/index.js";
+export {
+  TMPValidatorBridge,
+  type BenchmarkProofEnvelope,
+  type ValidationResult as TMPValidationResult,
+  type TMPAcceptanceCallback,
+} from "./tmp-validator-bridge.js";
 export {
   POABridge,
   type CreateCPCParams,

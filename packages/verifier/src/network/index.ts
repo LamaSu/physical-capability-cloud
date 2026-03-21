@@ -14,6 +14,11 @@ export type {
   NetworkConfig,
   NetworkStatus,
   NodeStatus,
+  HumanVerificationRequest,
+  HumanVerificationResponse,
+  DisputeRecord,
+  VerifierReward,
+  VerifierSlash,
 } from "./types.js";
 export { DEFAULT_NETWORK_CONFIG } from "./types.js";
 
@@ -21,3 +26,4 @@ export { DEFAULT_NETWORK_CONFIG } from "./types.js";
 export { VerifierNode, type VerifierQuality, type VerifierNodeConfig } from "./verifier-node.js";
 export { ConsensusEngine } from "./consensus-engine.js";
 export { VerificationNetwork } from "./verification-network.js";
+export { VerifierSelector } from "./verifier-selector.js";
