@@ -353,8 +353,9 @@ export interface SWFEquityPortfolio {
 }
 
 /**
- * Equity tier → revenue share schedule.
- * Higher risk (seed) = higher equity stake for the fund.
+ * Default equity tier → revenue share schedule.
+ * Used as a starting point — actual terms are negotiated per deal
+ * based on the operator's cost model via SWFTermSheet.
  */
 export const SWF_EQUITY_SCHEDULE = {
   /** Unserved capability — fund takes largest stake */
@@ -364,6 +365,168 @@ export const SWF_EQUITY_SCHEDULE = {
   /** Capacity expansion — smallest stake */
   expansion: { revenueShareBps: 300, maturityMultiplier: 5 },
 } as const;
+
+// ── Term Sheet Negotiation ────────────────────────────────────────
+
+/** Operator's cost model — what it actually costs to run this capability */
+export interface SWFOperatorCostModel {
+  /** One-time equipment / setup cost */
+  capex: number;
+  /** Monthly operating cost (power, materials, labor, rent, maintenance) */
+  monthlyOpex: number;
+  /** Expected average job price */
+  avgJobPrice: number;
+  /** Expected jobs per month at full utilization */
+  maxJobsPerMonth: number;
+  /** Realistic utilization estimate 0-100 */
+  expectedUtilizationPercent: number;
+  /** How many months until the operator expects to break even (without fund) */
+  breakEvenMonths?: number;
+}
+
+/** Term sheet status lifecycle */
+export type SWFTermSheetStatus =
+  | "proposed"    // Fund proposes initial terms
+  | "countered"   // Operator counters with different terms
+  | "accepted"    // Both parties agree
+  | "rejected"    // One party walks away
+  | "expired";    // Negotiation timed out
+
+/** A negotiated term sheet between the fund and an operator */
+export interface SWFTermSheet {
+  /** Prefixed ID: swf_terms_xxx */
+  id: string;
+  /** Capability type being funded */
+  capabilityType: string;
+  /** Operator receiving the funding */
+  operatorId: string;
+  /** Equity tier (seed/growth/expansion) */
+  equityTier: SWFEquityTier;
+  /** The operator's declared cost model */
+  costModel: SWFOperatorCostModel;
+
+  // ── Computed terms (from the cost model) ──
+  /** Fund's seed amount (string to avoid fp) */
+  seedAmount: string;
+  /** Fund's revenue share in basis points — computed, not flat */
+  proposedRevenueShareBps: number;
+  /** Maturity multiplier — how many x ROI before the fund exits */
+  proposedMaturityMultiplier: number;
+  /** Estimated months to maturity based on the cost model */
+  estimatedMonthsToMaturity: number;
+  /** Operator's net margin AFTER the fund's revenue share (%) */
+  operatorNetMarginPercent: number;
+
+  // ── Negotiation ──
+  /** Current status */
+  status: SWFTermSheetStatus;
+  /** Counter-proposed revenue share (if operator countered) */
+  counterRevenueShareBps?: number;
+  /** Counter-proposed maturity multiplier */
+  counterMaturityMultiplier?: number;
+  /** Reason for counter or rejection */
+  counterReason?: string;
+  /** Final agreed terms (set on acceptance) */
+  agreedRevenueShareBps?: number;
+  agreedMaturityMultiplier?: number;
+
+  /** ISO 8601 timestamps */
+  proposedAt: string;
+  expiresAt: string;
+  resolvedAt?: string;
+}
+
+/**
+ * Compute fair revenue share from an operator's cost model.
+ *
+ * The formula ensures the operator remains profitable after the fund's cut:
+ *
+ *   monthlyRevenue = avgJobPrice × maxJobs × (utilization / 100)
+ *   monthlyProfit  = monthlyRevenue - monthlyOpex
+ *   profitMargin   = monthlyProfit / monthlyRevenue
+ *
+ *   maxShareBps = profitMargin × 10000 × 0.25
+ *     (fund never takes more than 25% of the operator's margin)
+ *
+ *   seedRatio = seedAmount / capex
+ *     (how much of the operator's capex the fund is covering)
+ *
+ *   revenueShareBps = maxShareBps × seedRatio
+ *     (fund's share scales linearly with how much it funded)
+ *
+ *   maturityMultiplier = max(3, 10 × (1 - seedRatio))
+ *     (if fund covers 100% of capex, it exits at 3x; if 10%, exits at 9x)
+ *
+ * Constraints:
+ *   - Revenue share: floor 100 bps (1%), cap 1500 bps (15%)
+ *   - Maturity: floor 3x, cap 15x
+ *   - Operator net margin must stay above 10% after fund's cut — if not, reduce share
+ */
+export function computeFairTerms(params: {
+  costModel: SWFOperatorCostModel;
+  seedAmount: number;
+  equityTier: SWFEquityTier;
+}): {
+  revenueShareBps: number;
+  maturityMultiplier: number;
+  estimatedMonthsToMaturity: number;
+  operatorNetMarginPercent: number;
+} {
+  const { costModel, seedAmount } = params;
+
+  const monthlyRevenue =
+    costModel.avgJobPrice *
+    costModel.maxJobsPerMonth *
+    (costModel.expectedUtilizationPercent / 100);
+
+  const monthlyProfit = monthlyRevenue - costModel.monthlyOpex;
+  const profitMargin = monthlyRevenue > 0 ? monthlyProfit / monthlyRevenue : 0;
+
+  // Fund never takes more than 25% of the operator's profit margin
+  const maxShareBps = Math.max(0, profitMargin * 10_000 * 0.25);
+
+  // Scale by how much capex the fund is covering
+  const seedRatio = costModel.capex > 0 ? Math.min(seedAmount / costModel.capex, 1) : 0.5;
+
+  let revenueShareBps = Math.round(maxShareBps * seedRatio);
+
+  // Clamp to [100, 1500] bps (1% to 15%)
+  revenueShareBps = Math.max(100, Math.min(1500, revenueShareBps));
+
+  // Maturity: high seed ratio = lower multiplier (fund exits sooner)
+  let maturityMultiplier = Math.max(3, Math.round(10 * (1 - seedRatio)));
+  maturityMultiplier = Math.min(15, maturityMultiplier);
+
+  // Check operator remains viable — net margin after fund's cut must be ≥ 10%
+  const fundMonthlyTake = (monthlyRevenue * revenueShareBps) / 10_000;
+  const operatorNetProfit = monthlyProfit - fundMonthlyTake;
+  const operatorNetMarginPercent =
+    monthlyRevenue > 0 ? (operatorNetProfit / monthlyRevenue) * 100 : 0;
+
+  // If operator margin drops below 10%, reduce fund's share until it doesn't
+  if (operatorNetMarginPercent < 10 && profitMargin > 0.10) {
+    // Back-solve: operator needs 10% margin → fundTake = profit - (0.10 × revenue)
+    const maxFundTake = monthlyProfit - 0.10 * monthlyRevenue;
+    if (maxFundTake > 0) {
+      revenueShareBps = Math.max(100, Math.round((maxFundTake / monthlyRevenue) * 10_000));
+    } else {
+      revenueShareBps = 100; // minimum — deal barely works
+    }
+  }
+
+  // Estimated months to maturity
+  const monthlyFundRevenue = (monthlyRevenue * revenueShareBps) / 10_000;
+  const targetReturn = seedAmount * maturityMultiplier;
+  const estimatedMonthsToMaturity =
+    monthlyFundRevenue > 0 ? Math.ceil(targetReturn / monthlyFundRevenue) : 999;
+
+  return {
+    revenueShareBps,
+    maturityMultiplier,
+    estimatedMonthsToMaturity,
+    operatorNetMarginPercent: Math.round(operatorNetMarginPercent * 10) / 10,
+  };
+}
 
 // ── Participant Dashboard ─────────────────────────────────────────
 

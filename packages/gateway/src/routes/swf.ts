@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { SWFService } from "@pcc/payments";
-import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast } from "@pcc/spec";
+import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast, SWFOperatorCostModel, SWFEquityTier } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
@@ -434,4 +434,127 @@ export async function swfRoutes(app: FastifyInstance) {
       return reply.code(409).send({ error: "conflict", message });
     }
   });
+
+  // ── Term Sheet Negotiation ──────────────────────────────────────
+
+  app.post("/api/swf/terms/propose", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      capabilityType?: string;
+      operatorId?: string;
+      equityTier?: string;
+      seedAmount?: number;
+      costModel?: SWFOperatorCostModel;
+    };
+
+    if (!body.capabilityType || !body.operatorId || !body.equityTier || !body.seedAmount || !body.costModel) {
+      return reply.code(400).send({
+        error: "bad_request",
+        message: "capabilityType, operatorId, equityTier, seedAmount, and costModel are required",
+      });
+    }
+
+    try {
+      const termSheet = swfService.proposeTermSheet({
+        capabilityType: body.capabilityType,
+        operatorId: body.operatorId,
+        equityTier: body.equityTier as SWFEquityTier,
+        seedAmount: body.seedAmount,
+        costModel: body.costModel,
+      });
+      return reply.code(201).send({ termSheet });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(409).send({ error: "conflict", message });
+    }
+  });
+
+  app.post<{ Params: { termSheetId: string } }>(
+    "/api/swf/terms/:termSheetId/counter",
+    async (req, reply) => {
+      const body = (req.body ?? {}) as {
+        counterRevenueShareBps?: number;
+        counterMaturityMultiplier?: number;
+        reason?: string;
+      };
+
+      if (!body.counterRevenueShareBps || !body.counterMaturityMultiplier || !body.reason) {
+        return reply.code(400).send({
+          error: "bad_request",
+          message: "counterRevenueShareBps, counterMaturityMultiplier, and reason are required",
+        });
+      }
+
+      try {
+        const termSheet = swfService.counterTermSheet({
+          termSheetId: req.params.termSheetId,
+          counterRevenueShareBps: body.counterRevenueShareBps,
+          counterMaturityMultiplier: body.counterMaturityMultiplier,
+          reason: body.reason,
+        });
+        return { termSheet };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(409).send({ error: "conflict", message });
+      }
+    },
+  );
+
+  app.post<{ Params: { termSheetId: string } }>(
+    "/api/swf/terms/:termSheetId/accept",
+    async (req, reply) => {
+      const body = (req.body ?? {}) as { epochId?: string };
+      const epochId = body.epochId ?? swfService.getActiveEpoch()?.id;
+      if (!epochId) {
+        return reply.code(400).send({ error: "bad_request", message: "No active epoch" });
+      }
+
+      try {
+        const result = swfService.acceptTermSheet(req.params.termSheetId, epochId);
+        return { termSheet: result.termSheet, equityPosition: result.equityPosition };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(409).send({ error: "conflict", message });
+      }
+    },
+  );
+
+  app.post<{ Params: { termSheetId: string } }>(
+    "/api/swf/terms/:termSheetId/reject",
+    async (req, reply) => {
+      const body = (req.body ?? {}) as { reason?: string };
+      try {
+        const termSheet = swfService.rejectTermSheet(req.params.termSheetId, body.reason);
+        return { termSheet };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(409).send({ error: "conflict", message });
+      }
+    },
+  );
+
+  app.get<{ Querystring: { status?: string; operatorId?: string; capabilityType?: string } }>(
+    "/api/swf/terms",
+    async (req) => {
+      const terms = swfService.listTermSheets({
+        status: req.query.status as any,
+        operatorId: req.query.operatorId,
+        capabilityType: req.query.capabilityType,
+      });
+      return { termSheets: terms, total: terms.length };
+    },
+  );
+
+  app.get<{ Params: { termSheetId: string } }>(
+    "/api/swf/terms/:termSheetId",
+    async (req, reply) => {
+      const sheet = swfService.getTermSheet(req.params.termSheetId);
+      if (!sheet) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: `Term sheet ${req.params.termSheetId} not found`,
+        });
+      }
+      return { termSheet: sheet };
+    },
+  );
 }
