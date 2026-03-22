@@ -18,7 +18,12 @@ import type {
   SWFDemandForecast,
   SWFInfraAllocation,
   SWFForecastAllocationResult,
+  SWFEquityPosition,
+  SWFEquityTier,
+  SWFEquityRevenue,
+  SWFEquityPortfolio,
 } from "@pcc/spec";
+import { SWF_EQUITY_SCHEDULE } from "@pcc/spec";
 
 import {
   type SWFConfig,
@@ -38,6 +43,8 @@ let nextClaimId = 1;
 let nextProposalId = 1;
 let nextVoteId = 1;
 let nextScoreId = 1;
+let nextEquityId = 1;
+let nextEqRevId = 1;
 
 function genPartId(): string {
   return `swf_part_${String(nextPartId++).padStart(4, "0")}`;
@@ -60,6 +67,12 @@ function genVoteId(): string {
 function genScoreId(): string {
   return `swf_score_${String(nextScoreId++).padStart(4, "0")}`;
 }
+function genEquityId(): string {
+  return `swf_equity_${String(nextEquityId++).padStart(4, "0")}`;
+}
+function genEqRevId(): string {
+  return `swf_eqrev_${String(nextEqRevId++).padStart(4, "0")}`;
+}
 
 // ---------------------------------------------------------------------------
 // SWFService
@@ -72,6 +85,8 @@ export class SWFService {
   private claims = new Map<string, SWFDividendClaim>();
   private proposals = new Map<string, SWFProposal>();
   private votes = new Map<string, SWFVote>();
+  private equityPositions = new Map<string, SWFEquityPosition>();
+  private equityRevenues = new Map<string, SWFEquityRevenue>();
 
   private config: SWFConfig;
   private currentStrategy: SWFAllocationStrategy;
@@ -680,6 +695,27 @@ export class SWFService {
           `${forecastROI.toFixed(1)}x ROI.`;
       }
 
+      // Determine equity tier based on capability status
+      const equityTier: SWFEquityTier = !demand.alreadyServed
+        ? "seed"
+        : demand.utilizationPercent != null && demand.utilizationPercent > 80
+          ? "growth"
+          : "expansion";
+
+      // Mint equity NFT — the fund now owns a revenue share in this capability
+      const equityPosition = this.mintEquityPosition({
+        capabilityType: demand.capabilityType,
+        seedAmount,
+        equityTier,
+        epochId,
+      });
+
+      const schedule = SWF_EQUITY_SCHEDULE[equityTier];
+      rationale +=
+        ` Fund takes ${schedule.revenueShareBps / 100}% equity ` +
+        `(${equityTier} tier, matures at ${schedule.maturityMultiplier}x). ` +
+        `NFT: ${equityPosition.nftId}`;
+
       allocations.push({
         capabilityType: demand.capabilityType,
         amount: String(seedAmount),
@@ -698,6 +734,148 @@ export class SWFService {
       unallocated: String(Math.max(0, remaining)),
       computedAt: new Date().toISOString(),
     };
+  }
+
+  // ── Equity Positions ─────────────────────────────────────────────
+
+  /**
+   * Mint an equity position when the fund seeds a capability.
+   * The fund gets a soulbound NFT with revenue share rights.
+   *
+   * Equity tiers:
+   *   seed (unserved capability):  8% revenue share, matures at 10x ROI
+   *   growth (high utilization):   5% revenue share, matures at 7x ROI
+   *   expansion (capacity):        3% revenue share, matures at 5x ROI
+   */
+  mintEquityPosition(params: {
+    capabilityType: string;
+    seedAmount: number;
+    equityTier: SWFEquityTier;
+    epochId: string;
+  }): SWFEquityPosition {
+    const schedule = SWF_EQUITY_SCHEDULE[params.equityTier];
+
+    const position: SWFEquityPosition = {
+      id: genEquityId(),
+      capabilityType: params.capabilityType,
+      nftId: `swf_nft_${params.capabilityType}_${Date.now().toString(36)}`,
+      seedAmount: String(params.seedAmount),
+      revenueShareBps: schedule.revenueShareBps,
+      equityTier: params.equityTier,
+      totalRevenue: "0",
+      realizedROI: 0,
+      capabilityActive: false,
+      originEpochId: params.epochId,
+      mintedAt: new Date().toISOString(),
+      status: "active",
+    };
+
+    this.equityPositions.set(position.id, position);
+    return position;
+  }
+
+  /**
+   * Record revenue flowing back to the fund from an equity position.
+   * Called when a job completes for a capability the fund has equity in.
+   *
+   * Automatically checks maturity: if totalRevenue >= seedAmount × maturityMultiplier,
+   * the position matures and stops earning (the fund got its return).
+   */
+  recordEquityRevenue(params: {
+    equityPositionId: string;
+    jobId: string;
+    protocolFee: number;
+  }): SWFEquityRevenue | null {
+    const position = this.equityPositions.get(params.equityPositionId);
+    if (!position) throw new Error(`Equity position ${params.equityPositionId} not found`);
+    if (position.status !== "active") return null; // matured or written off
+
+    const fundShare = (params.protocolFee * position.revenueShareBps) / 10_000;
+
+    const revenue: SWFEquityRevenue = {
+      id: genEqRevId(),
+      equityPositionId: params.equityPositionId,
+      jobId: params.jobId,
+      protocolFee: String(params.protocolFee),
+      fundShare: String(fundShare),
+      earnedAt: new Date().toISOString(),
+    };
+
+    this.equityRevenues.set(revenue.id, revenue);
+
+    // Update position totals
+    position.totalRevenue = String(Number(position.totalRevenue) + fundShare);
+    position.realizedROI =
+      Number(position.seedAmount) > 0
+        ? Number(position.totalRevenue) / Number(position.seedAmount)
+        : 0;
+
+    // Check maturity
+    const schedule = SWF_EQUITY_SCHEDULE[position.equityTier];
+    if (position.realizedROI >= schedule.maturityMultiplier) {
+      position.status = "matured";
+      position.maturedAt = new Date().toISOString();
+    }
+
+    return revenue;
+  }
+
+  /**
+   * Mark a capability as active — the fund's equity position starts earning.
+   */
+  activateEquityPosition(positionId: string): SWFEquityPosition {
+    const position = this.equityPositions.get(positionId);
+    if (!position) throw new Error(`Equity position ${positionId} not found`);
+    position.capabilityActive = true;
+    return position;
+  }
+
+  /**
+   * Write off a position — the capability never materialized.
+   */
+  writeOffEquityPosition(positionId: string): SWFEquityPosition {
+    const position = this.equityPositions.get(positionId);
+    if (!position) throw new Error(`Equity position ${positionId} not found`);
+    position.status = "written_off";
+    return position;
+  }
+
+  /**
+   * Find equity positions for a capability type.
+   */
+  findEquityByCapability(capabilityType: string): SWFEquityPosition | null {
+    for (const p of this.equityPositions.values()) {
+      if (p.capabilityType === capabilityType && p.status === "active") return p;
+    }
+    return null;
+  }
+
+  /**
+   * Get the fund's equity portfolio summary.
+   */
+  getEquityPortfolio(): SWFEquityPortfolio {
+    const positions = [...this.equityPositions.values()];
+    const active = positions.filter((p) => p.status === "active");
+    const totalDeployed = positions.reduce((s, p) => s + Number(p.seedAmount), 0);
+    const totalRevenue = positions.reduce((s, p) => s + Number(p.totalRevenue), 0);
+
+    return {
+      totalPositions: positions.length,
+      activePositions: active.length,
+      totalDeployed: String(totalDeployed),
+      totalRevenueEarned: String(totalRevenue),
+      portfolioROI: totalDeployed > 0 ? totalRevenue / totalDeployed : 0,
+      positions,
+    };
+  }
+
+  /**
+   * Get revenue history for an equity position.
+   */
+  getEquityRevenues(positionId: string): SWFEquityRevenue[] {
+    return [...this.equityRevenues.values()].filter(
+      (r) => r.equityPositionId === positionId,
+    );
   }
 
   // ── Accessors ───────────────────────────────────────────────────

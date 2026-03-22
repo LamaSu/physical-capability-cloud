@@ -369,4 +369,69 @@ export async function swfRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  // ── Equity Portfolio ──────────────────────────────────────────
+
+  app.get("/api/swf/equity/portfolio", async () => {
+    return { portfolio: swfService.getEquityPortfolio() };
+  });
+
+  app.get<{ Params: { positionId: string } }>(
+    "/api/swf/equity/:positionId",
+    async (req, reply) => {
+      const positions = swfService.getEquityPortfolio().positions;
+      const position = positions.find((p) => p.id === req.params.positionId);
+      if (!position) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: `Equity position ${req.params.positionId} not found`,
+        });
+      }
+      const revenues = swfService.getEquityRevenues(req.params.positionId);
+      return { position, revenues, revenueCount: revenues.length };
+    },
+  );
+
+  app.post<{ Params: { positionId: string } }>(
+    "/api/swf/equity/:positionId/activate",
+    async (req, reply) => {
+      try {
+        const position = swfService.activateEquityPosition(req.params.positionId);
+        return { position };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(409).send({ error: "conflict", message });
+      }
+    },
+  );
+
+  app.post("/api/swf/equity/record-revenue", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      equityPositionId?: string;
+      jobId?: string;
+      protocolFee?: number;
+    };
+
+    if (!body.equityPositionId || !body.jobId || body.protocolFee === undefined) {
+      return reply.code(400).send({
+        error: "bad_request",
+        message: "equityPositionId, jobId, and protocolFee are required",
+      });
+    }
+
+    try {
+      const revenue = swfService.recordEquityRevenue({
+        equityPositionId: body.equityPositionId,
+        jobId: body.jobId,
+        protocolFee: body.protocolFee,
+      });
+      const position = swfService.getEquityPortfolio().positions.find(
+        (p) => p.id === body.equityPositionId,
+      );
+      return { revenue, position };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(409).send({ error: "conflict", message });
+    }
+  });
 }
