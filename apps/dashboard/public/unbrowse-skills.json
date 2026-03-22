@@ -159,6 +159,19 @@
       "session": "GET /api/auth/me"
     }
   },
+  "unbrowse_proxy": {
+    "description": "Gateway proxy for Unbrowse API — any agent can use Unbrowse through the PCC gateway without running a local instance",
+    "base_url": "/api/unbrowse",
+    "endpoints": {
+      "health": "GET /api/unbrowse/health",
+      "search": "POST /api/unbrowse/search",
+      "resolve": "POST /api/unbrowse/resolve",
+      "execute": "POST /api/unbrowse/execute/:skillId",
+      "feedback": "POST /api/unbrowse/feedback",
+      "shared_skills": "GET /api/unbrowse/skills",
+      "share_skill": "POST /api/unbrowse/skills/share"
+    }
+  },
   "agent_package": "/agent-package.json",
   "docs": "/docs/",
   "repo": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud"

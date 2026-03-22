@@ -180,6 +180,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           llm_auth: `Bearer ${gc.token}`,
           providers: gc.providers,
           unbrowse_skills: `${baseUrl}/unbrowse-skills.json`,
+          unbrowse_api: `${baseUrl}/api/unbrowse`,
           wallet: `${GATECRAFT_URL}/api/v2/proxy/wallet`,
         },
       });

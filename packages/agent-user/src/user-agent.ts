@@ -13,8 +13,8 @@
  * would use as its "manufacturing toolkit."
  */
 
-import { BaseAgent, SettlementClient, type SettlementResult } from "@pcc/agent-runtime";
-import type { MessageBus, A2AMessage, Intent, QuoteResponseIntent, WorkflowAcceptedIntent, JobStatusResponseIntent, CapabilitiesResponseIntent, BuildOptionsResponseIntent, ContractBuiltResponseIntent } from "@pcc/a2a";
+import { BaseAgent, SettlementClient, UnbrowseClient, type SettlementResult } from "@pcc/agent-runtime";
+import type { MessageBus, A2AMessage, Intent, QuoteResponseIntent, WorkflowAcceptedIntent, JobStatusResponseIntent, CapabilitiesResponseIntent, BuildOptionsResponseIntent, ContractBuiltResponseIntent, UnbrowseResultIntent, UnbrowseSkillSharedIntent } from "@pcc/a2a";
 import type { CWM, SHA256 } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 
@@ -22,7 +22,7 @@ import { ids } from "@pcc/spec";
 export type UserNotificationCallback = (notification: UserNotification) => void;
 
 export interface UserNotification {
-  type: "capabilities_found" | "quote_received" | "workflow_accepted" | "payment_needed" | "job_update" | "job_completed" | "build_options" | "contract_built" | "message" | "error";
+  type: "capabilities_found" | "quote_received" | "workflow_accepted" | "payment_needed" | "job_update" | "job_completed" | "build_options" | "contract_built" | "unbrowse_results" | "unbrowse_skill_shared" | "message" | "error";
   data: unknown;
   conversationId: string;
   requiresAction: boolean;
@@ -37,10 +37,13 @@ export class UserAgent extends BaseAgent {
   private activePlanId?: string;
   private brokerAgentId?: string;
   private settlement?: SettlementClient;
+  private unbrowse?: UnbrowseClient;
 
   constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }, opts?: {
     /** Gateway URL for batch settlement (e.g., "http://localhost:3200") */
     gatewayUrl?: string;
+    /** Unbrowse server URL (default: http://localhost:6969) */
+    unbrowseUrl?: string;
   }) {
     super({
       name: "User Agent",
@@ -56,6 +59,10 @@ export class UserAgent extends BaseAgent {
         agentId: this.id,
         wallet: this.wallet,
       });
+    }
+
+    if (opts?.unbrowseUrl || process.env.UNBROWSE_URL) {
+      this.unbrowse = new UnbrowseClient({ serverUrl: opts?.unbrowseUrl });
     }
 
     this.setupIntentHandlers();
@@ -186,6 +193,48 @@ export class UserAgent extends BaseAgent {
       profileId: opts.profileId,
     });
     return { conversationId };
+  }
+
+  // ── Unbrowse (capability discovery beyond PCC) ─────────────────
+
+  /** Search for capabilities outside the PCC network via Unbrowse */
+  async searchExternal(query: string, opts?: {
+    targetUrl?: string;
+    maxResults?: number;
+  }): Promise<{ conversationId: string }> {
+    const broker = this.findBroker();
+    const { conversationId } = await this.startConversation(broker, {
+      type: "unbrowse_query",
+      query,
+      targetUrl: opts?.targetUrl,
+      maxResults: opts?.maxResults ?? 10,
+      dryRun: true,
+    });
+    return { conversationId };
+  }
+
+  /** Share a discovered Unbrowse skill with the network */
+  async shareSkill(skillId: string, domain: string, intent: string): Promise<void> {
+    const broker = this.findBroker();
+    await this.send(broker, {
+      type: "unbrowse_share_skill",
+      skillId,
+      domain,
+      intent,
+      discoveredBy: this.id,
+      discoveredAt: new Date().toISOString(),
+    });
+  }
+
+  /** Direct Unbrowse search (bypasses broker, uses local Unbrowse instance) */
+  async searchUnbrowseDirect(query: string): Promise<Array<{
+    skillId: string;
+    domain: string;
+    intent: string;
+    confidence: number;
+  }>> {
+    if (!this.unbrowse) return [];
+    return this.unbrowse.searchExternalCapabilities(query);
   }
 
   // ── Escrow / Settlement ────────────────────────────────────────
@@ -356,6 +405,35 @@ export class UserAgent extends BaseAgent {
       });
       return null;
     });
+
+    // Unbrowse results (from broker after unbrowse_query)
+    this.onIntent("unbrowse_result", async (msg) => {
+      const intent = msg.intent as UnbrowseResultIntent;
+      this.notify({
+        type: "unbrowse_results",
+        data: intent,
+        conversationId: msg.conversationId,
+        requiresAction: false,
+        summary: `Unbrowse: ${intent.totalResults} external results for "${intent.query}" (${intent.durationMs}ms). ` +
+          (intent.results.length > 0
+            ? `Top: ${intent.results[0].domain} (${(intent.results[0].confidence * 100).toFixed(0)}% confidence)`
+            : "No results."),
+      });
+      return null;
+    });
+
+    // Skill shared notification (broadcast from broker)
+    this.onIntent("unbrowse_skill_shared", async (msg) => {
+      const intent = msg.intent as UnbrowseSkillSharedIntent;
+      this.notify({
+        type: "unbrowse_skill_shared",
+        data: intent,
+        conversationId: msg.conversationId,
+        requiresAction: false,
+        summary: `New Unbrowse skill shared: ${intent.skillId} (${intent.networkReach} agents reached)`,
+      });
+      return null;
+    });
   }
 
   private setupTools(): void {
@@ -431,6 +509,33 @@ export class UserAgent extends BaseAgent {
         message: { type: "string", description: "What you want to tell/ask the broker" },
       },
       execute: async (params) => this.chat(params.message as string),
+    });
+
+    this.registerTool({
+      name: "search_external",
+      description: "Search for manufacturing capabilities OUTSIDE the PCC network via Unbrowse (e.g., Xometry, Hubs, McMaster-Carr, Protolabs). Discovers real vendor APIs automatically.",
+      parameters: {
+        query: { type: "string", description: "What you need (e.g., 'CNC machining in titanium', 'injection molding quotes')" },
+        url: { type: "string", description: "Specific vendor URL to query", required: false },
+      },
+      execute: async (params) => this.searchExternal(params.query as string, {
+        targetUrl: params.url as string | undefined,
+      }),
+    });
+
+    this.registerTool({
+      name: "share_skill",
+      description: "Share a discovered Unbrowse skill with all agents on the network. Other agents can reuse it instantly.",
+      parameters: {
+        skill_id: { type: "string", description: "Unbrowse skill ID to share" },
+        domain: { type: "string", description: "Domain the skill targets" },
+        intent: { type: "string", description: "What the skill does" },
+      },
+      execute: async (params) => this.shareSkill(
+        params.skill_id as string,
+        params.domain as string,
+        params.intent as string,
+      ),
     });
 
     this.registerTool({

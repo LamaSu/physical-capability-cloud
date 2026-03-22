@@ -13,7 +13,7 @@
  *   8. Handles verification and settlement
  */
 
-import { BaseAgent, SettlementClient, type BaseAgentConfig, type AgentTool } from "@pcc/agent-runtime";
+import { BaseAgent, SettlementClient, UnbrowseClient, type BaseAgentConfig, type AgentTool } from "@pcc/agent-runtime";
 import { CapabilityRouter, WorkflowCompiler, type KernelCapabilities } from "@pcc/scheduler";
 import { VerifierMarket, EvidenceVerifier } from "@pcc/verifier";
 import { ContractBuilder } from "@pcc/contract-builder";
@@ -35,6 +35,10 @@ import type {
   BuildOptionsResponseIntent,
   BuildContractIntent,
   ContractBuiltResponseIntent,
+  UnbrowseQueryIntent,
+  UnbrowseResultIntent,
+  UnbrowseShareSkillIntent,
+  UnbrowseSkillSharedIntent,
 } from "@pcc/a2a";
 import type { MessageBus } from "@pcc/a2a";
 import type { CWM, Capability, MachineProfile } from "@pcc/spec";
@@ -70,10 +74,15 @@ export class BrokerAgent extends BaseAgent {
   private activePlans: Map<string, ActivePlan> = new Map();
 
   private settlement?: SettlementClient;
+  private unbrowse?: UnbrowseClient;
+  /** Shared skill registry — skills discovered by any agent on this broker's network */
+  private sharedSkills: Map<string, { skillId: string; domain: string; intent: string; discoveredBy: string; discoveredAt: string }> = new Map();
 
   constructor(bus: MessageBus, walletConfig?: { privateKey?: `0x${string}` }, opts?: {
     /** Gateway URL for batch settlement */
     gatewayUrl?: string;
+    /** Unbrowse server URL (default: http://localhost:6969) */
+    unbrowseUrl?: string;
   }) {
     super({
       name: "PCC Broker",
@@ -94,6 +103,10 @@ export class BrokerAgent extends BaseAgent {
         agentId: this.id,
         wallet: this.wallet,
       });
+    }
+
+    if (opts?.unbrowseUrl || process.env.UNBROWSE_URL) {
+      this.unbrowse = new UnbrowseClient({ serverUrl: opts?.unbrowseUrl });
     }
 
     this.setupIntentHandlers();
@@ -168,6 +181,18 @@ export class BrokerAgent extends BaseAgent {
     // When a kernel agent reports job completion
     this.onIntent("job_completed", async (msg) => {
       return this.handleJobCompleted(msg);
+    });
+
+    // Unbrowse: query external data sources for market-aware routing
+    this.onIntent("unbrowse_query", async (msg) => {
+      const intent = msg.intent as UnbrowseQueryIntent;
+      return this.handleUnbrowseQuery(intent);
+    });
+
+    // Unbrowse: agent shares a discovered skill with the network
+    this.onIntent("unbrowse_share_skill", async (msg) => {
+      const intent = msg.intent as UnbrowseShareSkillIntent;
+      return this.handleUnbrowseShareSkill(msg, intent);
     });
   }
 
@@ -244,6 +269,40 @@ export class BrokerAgent extends BaseAgent {
           totalQuoted: p.quotes.reduce((s, q) => s + parseFloat(q.price), 0).toFixed(2),
         }));
       },
+    });
+
+    // Unbrowse tools — market-aware routing via external data
+    this.registerTool({
+      name: "search_unbrowse",
+      description: "Search Unbrowse marketplace for external capabilities, suppliers, and pricing data. Returns skills that can fetch data from any website.",
+      parameters: {
+        query: { type: "string", description: "Natural language query (e.g., 'CNC machining quotes', 'supplier pricing for aluminum 6061')" },
+        max_results: { type: "number", description: "Max results to return", required: false },
+      },
+      execute: async (params) => {
+        if (!this.unbrowse) return { error: "Unbrowse not configured. Set UNBROWSE_URL or pass unbrowseUrl option." };
+        return this.unbrowse.search(params.query as string, { k: params.max_results as number ?? 10 });
+      },
+    });
+
+    this.registerTool({
+      name: "resolve_supplier",
+      description: "Fetch real-time data from an external supplier/vendor website via Unbrowse. Returns pricing, availability, specs.",
+      parameters: {
+        url: { type: "string", description: "Supplier website URL" },
+        query: { type: "string", description: "What data to extract (e.g., 'list 3D printing services with prices')" },
+      },
+      execute: async (params) => {
+        if (!this.unbrowse) return { error: "Unbrowse not configured" };
+        return this.unbrowse.resolveSupplierQuery(params.url as string, params.query as string);
+      },
+    });
+
+    this.registerTool({
+      name: "list_shared_skills",
+      description: "List all Unbrowse skills that agents on this network have discovered and shared",
+      parameters: {},
+      execute: async () => [...this.sharedSkills.values()],
     });
   }
 
@@ -640,6 +699,108 @@ export class BrokerAgent extends BaseAgent {
         kernelId: contract.machineInfo.kernelId,
       } : undefined,
     };
+  }
+
+  // ── Unbrowse Handlers ─────────────────────────────────────────
+
+  private async handleUnbrowseQuery(intent: UnbrowseQueryIntent): Promise<UnbrowseResultIntent> {
+    if (!this.unbrowse) {
+      return {
+        type: "unbrowse_result",
+        query: intent.query,
+        results: [],
+        totalResults: 0,
+        durationMs: 0,
+      };
+    }
+
+    const start = Date.now();
+
+    // If a target URL is provided, resolve directly against it
+    if (intent.targetUrl) {
+      try {
+        const resolved = await this.unbrowse.resolve(intent.query, intent.targetUrl, {
+          dryRun: intent.dryRun ?? true,
+        });
+        return {
+          type: "unbrowse_result",
+          query: intent.query,
+          results: [{
+            skillId: resolved.skill_id ?? "direct",
+            domain: new URL(intent.targetUrl).hostname,
+            intent: intent.query,
+            confidence: 1.0,
+            data: resolved.data,
+            source: resolved.source,
+          }],
+          totalResults: 1,
+          durationMs: Date.now() - start,
+        };
+      } catch {
+        // Fall through to search
+      }
+    }
+
+    // Search the marketplace
+    const searchResult = await this.unbrowse.search(intent.query, {
+      k: intent.maxResults ?? 10,
+    });
+
+    return {
+      type: "unbrowse_result",
+      query: intent.query,
+      results: searchResult.results.map((r) => ({
+        skillId: r.id,
+        domain: r.metadata?.domain ?? r.domain,
+        intent: r.intent,
+        confidence: r.confidence,
+      })),
+      totalResults: searchResult.total,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  private async handleUnbrowseShareSkill(
+    msg: A2AMessage,
+    intent: UnbrowseShareSkillIntent,
+  ): Promise<UnbrowseSkillSharedIntent> {
+    // Add to shared registry
+    this.sharedSkills.set(intent.skillId, {
+      skillId: intent.skillId,
+      domain: intent.domain,
+      intent: intent.intent,
+      discoveredBy: intent.discoveredBy,
+      discoveredAt: intent.discoveredAt,
+    });
+
+    // Broadcast to all agents on the network
+    const agents = this.bus.findAgents("user")
+      .concat(this.bus.findAgents("kernel"))
+      .filter((a) => a.id !== msg.from);
+
+    for (const agent of agents) {
+      this.send(agent.id, {
+        type: "unbrowse_skill_shared",
+        skillId: intent.skillId,
+        networkReach: this.sharedSkills.size,
+      }).catch(() => {});  // fire-and-forget broadcast
+    }
+
+    return {
+      type: "unbrowse_skill_shared",
+      skillId: intent.skillId,
+      networkReach: agents.length + 1,
+    };
+  }
+
+  /** Get the Unbrowse client (if configured) */
+  getUnbrowse(): UnbrowseClient | undefined {
+    return this.unbrowse;
+  }
+
+  /** Get all shared Unbrowse skills */
+  getSharedSkills(): Array<{ skillId: string; domain: string; intent: string; discoveredBy: string }> {
+    return [...this.sharedSkills.values()];
   }
 
   private async handleTextMessage(
