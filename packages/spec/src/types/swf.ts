@@ -239,6 +239,50 @@ export interface SWFSummary {
   chainBalances: Array<{ chain: string; currency: string; amount: string }>;
 }
 
+// ── Forecast-Driven Allocation ─────────────────────────────────────
+
+/** A demand signal used for forecast-driven infrastructure allocation */
+export interface SWFDemandForecast {
+  /** Capability type (e.g. "fdm", "cnc-3axis") */
+  capabilityType: string;
+  /** Number of unique requesters */
+  requesterCount: number;
+  /** Estimated annual value in USD */
+  annualValue: number;
+  /** Whether this capability already exists on the network */
+  alreadyServed: boolean;
+  /** Existing supply utilization 0-100 (null if not served) */
+  utilizationPercent?: number;
+}
+
+/** A single allocation decision within the infrastructure budget */
+export interface SWFInfraAllocation {
+  /** Capability type receiving funding */
+  capabilityType: string;
+  /** Amount allocated from the infrastructure budget (string to avoid fp) */
+  amount: string;
+  /** Why this was selected — human-readable rationale */
+  rationale: string;
+  /** Forecast ROI: estimated annual revenue / allocation amount */
+  forecastROI: number;
+  /** Score used for ranking (higher = funded first) */
+  priorityScore: number;
+}
+
+/** Result of a forecast-driven allocation run */
+export interface SWFForecastAllocationResult {
+  /** Epoch this allocation was computed for */
+  epochId: string;
+  /** Total infrastructure budget for this epoch (string to avoid fp) */
+  totalBudget: string;
+  /** Individual allocations, ranked by priority */
+  allocations: SWFInfraAllocation[];
+  /** Amount remaining unallocated (goes to reserve) */
+  unallocated: string;
+  /** ISO 8601 timestamp */
+  computedAt: string;
+}
+
 // ── Participant Dashboard ─────────────────────────────────────────
 
 /** Per-participant dashboard data */

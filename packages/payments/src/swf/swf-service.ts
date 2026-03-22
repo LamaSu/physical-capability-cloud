@@ -15,6 +15,9 @@ import type {
   SWFAllocationStrategy,
   SWFSummary,
   SWFParticipantDashboard,
+  SWFDemandForecast,
+  SWFInfraAllocation,
+  SWFForecastAllocationResult,
 } from "@pcc/spec";
 
 import {
@@ -583,6 +586,117 @@ export class SWFService {
       epochCount,
       claims,
       votingHistory,
+    };
+  }
+
+  // ── Forecast-Driven Allocation ────────────────────────────────
+
+  /**
+   * Compute infrastructure allocations for an epoch based on demand forecasts.
+   *
+   * Takes demand signals (from BountyService.getTopDemand() or similar) and
+   * allocates the epoch's infrastructure budget to the highest-ROI capability
+   * gaps. Unserved capabilities with high demand get funded first. Already-served
+   * capabilities with high utilization get funded for capacity expansion.
+   *
+   * Priority score formula:
+   *   base = annualValue × requesterCount
+   *   if unserved: ×3 multiplier (new capability > expansion)
+   *   if utilization > 80%: ×1.5 (capacity constrained)
+   *   forecastROI = annualValue / allocation
+   */
+  computeForecastAllocation(
+    epochId: string,
+    demands: SWFDemandForecast[],
+  ): SWFForecastAllocationResult {
+    const epoch = this.epochs.get(epochId);
+    if (!epoch) throw new Error(`Epoch ${epochId} not found`);
+
+    const totalAccrued = Number(epoch.totalAccrued);
+    const infraBudget =
+      (totalAccrued * epoch.allocationStrategy.infrastructurePercent) / 100;
+
+    if (infraBudget <= 0 || demands.length === 0) {
+      return {
+        epochId,
+        totalBudget: String(infraBudget),
+        allocations: [],
+        unallocated: String(infraBudget),
+        computedAt: new Date().toISOString(),
+      };
+    }
+
+    // Score and rank demands
+    const scored = demands.map((d) => {
+      let priorityScore = d.annualValue * d.requesterCount;
+
+      // Unserved capabilities get 3x — filling a gap is higher ROI than expansion
+      if (!d.alreadyServed) {
+        priorityScore *= 3;
+      }
+      // High-utilization capabilities need capacity expansion
+      else if (d.utilizationPercent != null && d.utilizationPercent > 80) {
+        priorityScore *= 1.5;
+      }
+
+      return { ...d, priorityScore };
+    });
+
+    // Sort by priority score descending
+    scored.sort((a, b) => b.priorityScore - a.priorityScore);
+
+    // Allocate budget top-down
+    let remaining = infraBudget;
+    const allocations: SWFInfraAllocation[] = [];
+
+    for (const demand of scored) {
+      if (remaining <= 0) break;
+
+      // Allocation = min(10% of annual value as seed capital, remaining budget)
+      // Seed capital = enough to incentivize a pool or bounty
+      const seedAmount = Math.min(demand.annualValue * 0.10, remaining);
+      if (seedAmount <= 0) continue;
+
+      const forecastROI = seedAmount > 0 ? demand.annualValue / seedAmount : 0;
+
+      let rationale: string;
+      if (!demand.alreadyServed) {
+        rationale =
+          `Unserved capability with ${demand.requesterCount} requesters ` +
+          `and $${demand.annualValue.toLocaleString()}/yr demand. ` +
+          `Forecast ${forecastROI.toFixed(1)}x ROI.`;
+      } else if (
+        demand.utilizationPercent != null &&
+        demand.utilizationPercent > 80
+      ) {
+        rationale =
+          `Capacity-constrained (${demand.utilizationPercent}% utilization) ` +
+          `with $${demand.annualValue.toLocaleString()}/yr demand. ` +
+          `Expansion funding for ${forecastROI.toFixed(1)}x ROI.`;
+      } else {
+        rationale =
+          `Growth opportunity: ${demand.requesterCount} requesters, ` +
+          `$${demand.annualValue.toLocaleString()}/yr. ` +
+          `${forecastROI.toFixed(1)}x ROI.`;
+      }
+
+      allocations.push({
+        capabilityType: demand.capabilityType,
+        amount: String(seedAmount),
+        rationale,
+        forecastROI,
+        priorityScore: demand.priorityScore,
+      });
+
+      remaining -= seedAmount;
+    }
+
+    return {
+      epochId,
+      totalBudget: String(infraBudget),
+      allocations,
+      unallocated: String(Math.max(0, remaining)),
+      computedAt: new Date().toISOString(),
     };
   }
 
