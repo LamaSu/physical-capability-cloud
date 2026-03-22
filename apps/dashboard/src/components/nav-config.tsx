@@ -27,7 +27,10 @@ import {
   ProtocolRunIcon,
   SubnetIcon,
   DePINIcon,
+  SWFIcon,
   TelemetryIcon,
+  TracesIcon,
+  NegotiationIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -42,6 +45,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Discover", path: "/discover", icon: <DiscoverIcon /> },
       { label: "Build Contract", path: "/build", icon: <BuildIcon /> },
+      { label: "Negotiations", path: "/negotiate", icon: <NegotiationIcon /> },
       { label: "New Device", path: "/build/new-device", icon: <NewDeviceIcon /> },
       { label: "Workflows", path: "/workflow", icon: <WorkflowIcon /> },
       { label: "Jobs", path: "/jobs", icon: <JobsIcon /> },
@@ -75,6 +79,7 @@ export const navGroups: NavGroup[] = [
     title: "Monitoring",
     items: [
       { label: "Telemetry", path: "/telemetry", icon: <TelemetryIcon /> },
+      { label: "Traces", path: "/traces", icon: <TracesIcon /> },
       { label: "Sensors", path: "/sensors", icon: <SensorIcon /> },
       { label: "Batches", path: "/batches", icon: <BatchIcon /> },
       { label: "Evidence", path: "/evidence", icon: <EvidenceIcon /> },
@@ -101,6 +106,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Subnet", path: "/subnet", icon: <SubnetIcon /> },
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
+      { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
     ],
   },
   {

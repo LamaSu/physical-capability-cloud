@@ -12,6 +12,7 @@ import { EncryptionRepository } from "./encryption.js";
 import { SensorRepository } from "./sensors.js";
 import { BatchRepository } from "./batches.js";
 import { StoryRepository } from "./story.js";
+import { SWFRepository } from "./swf.js";
 
 export {
   KernelRepository,
@@ -29,6 +30,7 @@ export {
   SensorRepository,
   BatchRepository,
   StoryRepository,
+  SWFRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -48,6 +50,7 @@ export function buildRepositories(db: StoreDB) {
     sensors: new SensorRepository(db),
     batches: new BatchRepository(db),
     story: new StoryRepository(db),
+    swf: new SWFRepository(db),
   };
 }
 

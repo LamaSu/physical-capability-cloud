@@ -803,5 +803,98 @@ export function migrateDatabase(sqlite: Database.Database): void {
       claimed_at TEXT NOT NULL,
       FOREIGN KEY (ip_id) REFERENCES story_ip_registrations(ip_id)
     );
+
+    -- ── Sovereign Wealth Fund ─────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS swf_participants (
+      id TEXT PRIMARY KEY,
+      did TEXT NOT NULL,
+      wallet_address TEXT NOT NULL,
+      role TEXT NOT NULL,
+      registered_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_epochs (
+      id TEXT PRIMARY KEY,
+      epoch_number INTEGER NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      total_accrued TEXT NOT NULL DEFAULT '0',
+      total_distributed TEXT NOT NULL DEFAULT '0',
+      allocation_strategy TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      participant_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_accruals (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      gross_amount TEXT NOT NULL,
+      accrual_bps INTEGER NOT NULL,
+      accrual_amount TEXT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USDC',
+      chain TEXT NOT NULL,
+      accrued_at TEXT NOT NULL,
+      epoch_id TEXT NOT NULL,
+      FOREIGN KEY (epoch_id) REFERENCES swf_epochs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_contribution_scores (
+      id TEXT PRIMARY KEY,
+      participant_id TEXT NOT NULL,
+      epoch_id TEXT NOT NULL,
+      job_volume REAL NOT NULL DEFAULT 0,
+      reputation_score REAL NOT NULL DEFAULT 0,
+      uptime_or_activity REAL NOT NULL DEFAULT 0,
+      tenure_factor REAL NOT NULL DEFAULT 0,
+      governance_participation REAL NOT NULL DEFAULT 0,
+      total_score REAL NOT NULL DEFAULT 0,
+      share_of_epoch REAL NOT NULL DEFAULT 0,
+      FOREIGN KEY (participant_id) REFERENCES swf_participants(id),
+      FOREIGN KEY (epoch_id) REFERENCES swf_epochs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_dividend_claims (
+      id TEXT PRIMARY KEY,
+      participant_id TEXT NOT NULL,
+      epoch_id TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      chain TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      tx_hash TEXT,
+      claimed_at TEXT,
+      FOREIGN KEY (participant_id) REFERENCES swf_participants(id),
+      FOREIGN KEY (epoch_id) REFERENCES swf_epochs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_proposals (
+      id TEXT PRIMARY KEY,
+      proposer TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      proposed_strategy TEXT NOT NULL,
+      voting_start TEXT NOT NULL,
+      voting_end TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      yes_votes REAL NOT NULL DEFAULT 0,
+      no_votes REAL NOT NULL DEFAULT 0,
+      total_voters INTEGER NOT NULL DEFAULT 0,
+      quorum_required REAL NOT NULL DEFAULT 0.3,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (proposer) REFERENCES swf_participants(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS swf_votes (
+      id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL,
+      participant_id TEXT NOT NULL,
+      vote TEXT NOT NULL,
+      weight REAL NOT NULL DEFAULT 0,
+      voted_at TEXT NOT NULL,
+      FOREIGN KEY (proposal_id) REFERENCES swf_proposals(id),
+      FOREIGN KEY (participant_id) REFERENCES swf_participants(id)
+    );
   `);
 }
