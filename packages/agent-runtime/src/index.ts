@@ -29,3 +29,12 @@ export {
   type PccSessionModule,
   type PccKernelOperation,
 } from "./smart-account.js";
+export {
+  UnbrowseClient,
+  UnbrowseError,
+  type UnbrowseClientConfig,
+  type UnbrowseResolveResult,
+  type UnbrowseSkill,
+  type UnbrowseSearchResult,
+  type UnbrowseFeedback,
+} from "./unbrowse-client.js";
