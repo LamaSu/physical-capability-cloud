@@ -283,6 +283,88 @@ export interface SWFForecastAllocationResult {
   computedAt: string;
 }
 
+// ── Equity Positions ──────────────────────────────────────────────
+
+/** Equity tier — higher risk funding = higher equity stake */
+export type SWFEquityTier = "seed" | "growth" | "expansion";
+
+/** An equity position the fund holds in a capability it funded */
+export interface SWFEquityPosition {
+  /** Prefixed ID: swf_equity_xxx */
+  id: string;
+  /** Capability type the fund invested in */
+  capabilityType: string;
+  /** NFT ID — soulbound to the fund (Metaplex cNFT or on-chain token) */
+  nftId: string;
+  /** Merkle tree address for the cNFT (Solana) */
+  merkleTree?: string;
+  /** Original seed amount invested (string to avoid fp) */
+  seedAmount: string;
+  /** Revenue share in basis points the fund receives from this capability */
+  revenueShareBps: number;
+  /** Risk tier at time of investment */
+  equityTier: SWFEquityTier;
+  /** Total revenue earned back from this position (string to avoid fp) */
+  totalRevenue: string;
+  /** ROI = totalRevenue / seedAmount */
+  realizedROI: number;
+  /** Whether the capability is now active on the network */
+  capabilityActive: boolean;
+  /** Epoch the position was created in */
+  originEpochId: string;
+  /** ISO 8601 mint timestamp */
+  mintedAt: string;
+  /** Lifecycle status */
+  status: "active" | "matured" | "written_off";
+  /** ISO 8601 maturity date (if matured — e.g., after 10x ROI) */
+  maturedAt?: string;
+}
+
+/** Revenue event flowing back to the fund from an equity position */
+export interface SWFEquityRevenue {
+  /** Prefixed ID: swf_eqrev_xxx */
+  id: string;
+  /** Equity position this revenue belongs to */
+  equityPositionId: string;
+  /** Job that generated the revenue */
+  jobId: string;
+  /** Total protocol fee from the job (string to avoid fp) */
+  protocolFee: string;
+  /** Fund's share of the fee (string to avoid fp) */
+  fundShare: string;
+  /** ISO 8601 timestamp */
+  earnedAt: string;
+}
+
+/** Summary of the fund's equity portfolio */
+export interface SWFEquityPortfolio {
+  /** Total equity positions held */
+  totalPositions: number;
+  /** Active positions (capability is live, earning revenue) */
+  activePositions: number;
+  /** Total seed capital deployed (string to avoid fp) */
+  totalDeployed: string;
+  /** Total revenue earned back across all positions (string to avoid fp) */
+  totalRevenueEarned: string;
+  /** Portfolio ROI = totalRevenue / totalDeployed */
+  portfolioROI: number;
+  /** Individual positions */
+  positions: SWFEquityPosition[];
+}
+
+/**
+ * Equity tier → revenue share schedule.
+ * Higher risk (seed) = higher equity stake for the fund.
+ */
+export const SWF_EQUITY_SCHEDULE = {
+  /** Unserved capability — fund takes largest stake */
+  seed: { revenueShareBps: 800, maturityMultiplier: 10 },
+  /** Underserved / high utilization — moderate stake */
+  growth: { revenueShareBps: 500, maturityMultiplier: 7 },
+  /** Capacity expansion — smallest stake */
+  expansion: { revenueShareBps: 300, maturityMultiplier: 5 },
+} as const;
+
 // ── Participant Dashboard ─────────────────────────────────────────
 
 /** Per-participant dashboard data */
