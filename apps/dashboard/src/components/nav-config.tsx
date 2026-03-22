@@ -31,6 +31,7 @@ import {
   TelemetryIcon,
   TracesIcon,
   NegotiationIcon,
+  IPRevenueIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -107,6 +108,7 @@ export const navGroups: NavGroup[] = [
       { label: "Subnet", path: "/subnet", icon: <SubnetIcon /> },
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
       { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
+      { label: "IP Revenue", path: "/ip", icon: <IPRevenueIcon /> },
     ],
   },
   {

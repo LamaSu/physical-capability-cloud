@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
-import type { UIRenderComponent } from "@pcc/a2a";
+
+type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -342,7 +343,7 @@ async function agentStep(
         timestamp: ts(),
         uiRequest: {
           component: "test_results",
-          props: testResults,
+          props: testResults as unknown as Record<string, unknown>,
         },
       });
     } catch {
@@ -360,7 +361,7 @@ async function agentStep(
         timestamp: ts(),
         uiRequest: {
           component: "test_results",
-          props: mockResults,
+          props: mockResults as unknown as Record<string, unknown>,
         },
       });
     }

@@ -69,6 +69,7 @@ const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m =
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
 const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
+const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -220,6 +221,7 @@ function DashboardShell() {
               <Route path="/setup" element={<SetupWizardPage />} />
               <Route path="/setup/agent" element={<SetupAgentPage />} />
               <Route path="/negotiate" element={<NegotiationPage />} />
+              <Route path="/ip" element={<IPRevenuePage />} />
             </Routes>
           </Suspense>
         </PageTransition>
