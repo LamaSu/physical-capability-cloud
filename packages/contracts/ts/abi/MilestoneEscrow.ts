@@ -112,6 +112,33 @@ export const MilestoneEscrowABI = [
     ],
   },
 
+  // ── PGTR Forwarder views ─────────────────────────────────────────
+
+  {
+    name: "trustedForwarders",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+
+  // ── PGTR Forwarder management ───────────────────────────────────
+
+  {
+    name: "addForwarder",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "forwarder", type: "address" }],
+    outputs: [],
+  },
+  {
+    name: "removeForwarder",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "forwarder", type: "address" }],
+    outputs: [],
+  },
+
   // ── State-changing ─────────────────────────────────────────────────
 
   {
@@ -192,6 +219,25 @@ export const MilestoneEscrowABI = [
   },
 
   // ── Events ─────────────────────────────────────────────────────────
+
+  // ── PGTR Forwarder events ─────────────────────────────────────────
+
+  {
+    name: "ForwarderAdded",
+    type: "event",
+    inputs: [
+      { name: "forwarder", type: "address", indexed: true },
+    ],
+  },
+  {
+    name: "ForwarderRemoved",
+    type: "event",
+    inputs: [
+      { name: "forwarder", type: "address", indexed: true },
+    ],
+  },
+
+  // ── Original events ─────────────────────────────────────────────
 
   {
     name: "EscrowFunded",

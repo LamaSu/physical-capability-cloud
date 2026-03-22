@@ -181,3 +181,116 @@ export interface CourierPayment {
   /** Whether this is escrowed or direct */
   paymentMethod: "escrowed" | "direct";
 }
+
+// ============================================================
+// MPP (Machine-Payable Protocol) Types — mppx integration
+// ============================================================
+
+/** MPP server configuration for Mppx.create() */
+export interface MppConfig {
+  /** HMAC secret key for challenge IDs (env: MPP_SECRET_KEY) */
+  secretKey: string;
+  /** Server realm, e.g. hostname (env: MPP_REALM) */
+  realm?: string;
+  /** Tempo recipient address (env: TEMPO_RECIPIENT) */
+  recipient: Address;
+  /** ERC-20 token contract address for payment currency */
+  currency: Address;
+  /** Whether to use testnet mode */
+  testnet?: boolean;
+}
+
+/** MPP route configuration — mirrors X402RouteConfig for feature-flag switching */
+export interface MppRouteConfig {
+  /** Price in atomic token units (e.g. "10000" for $0.01 USDC) */
+  amount: string;
+  /** Human-readable description */
+  description: string;
+  /** Optional external ID for correlation */
+  externalId?: string;
+}
+
+/** Route pattern -> MPP payment config */
+export type MppRouteMap = Record<string, MppRouteConfig>;
+
+/** MPP session configuration */
+export interface MppSessionConfig {
+  /** Initial deposit in human-readable units (e.g. "10" for 10 USDC) */
+  deposit: string;
+  /** Maximum deposit cap in human-readable units */
+  maxDeposit?: string;
+  /** Token decimals (default: 6 for USDC) */
+  decimals?: number;
+  /** Escrow contract address */
+  escrowContract?: Address;
+  /** Session timeout in milliseconds */
+  timeoutMs?: number;
+}
+
+/** MPP payment method — which mppx method was used */
+export type MppPaymentMethod = "tempo/charge" | "tempo/session";
+
+/** MPP payment stats for monitoring */
+export interface MppPaymentStats {
+  totalRequests: number;
+  paidRequests: number;
+  challengedRequests: number;
+  totalRevenue: string;
+  activeSessions: number;
+  recentPayments: Array<{
+    path: string;
+    method: MppPaymentMethod;
+    amount: string;
+    timestamp: string;
+  }>;
+}
+
+// ============================================================
+// PGTR (ERC-8194) Payment-Gated Transaction Relay Types
+// ============================================================
+
+/** Request to relay a payment-gated transaction through the PCCForwarder */
+export interface PGTRRelayRequest {
+  /** The address authorizing the USDC payment (EIP-3009 `from`) */
+  payer: Address;
+  /** USDC amount in atomic units (6 decimals) */
+  amount: string;
+  /** EIP-3009 nonce (32 bytes hex) */
+  nonce: string;
+  /** Unix timestamp after which this relay request expires */
+  expiry: number;
+  /** Target contract address to call */
+  target: Address;
+  /** 4-byte function selector (hex) */
+  selector: string;
+  /** ABI-encoded call data for the target function */
+  callData: string;
+  /** EIP-3009 signature v component */
+  v: number;
+  /** EIP-3009 signature r component (32 bytes hex) */
+  r: string;
+  /** EIP-3009 signature s component (32 bytes hex) */
+  s: string;
+}
+
+/** Result of a successful PGTR relay */
+export interface PGTRRelayResult {
+  /** Transaction hash of the on-chain relay call */
+  txHash: string;
+  /** The payer whose payment was processed */
+  payer: Address;
+  /** The target contract that was called */
+  target: Address;
+  /** USDC amount transferred (atomic units) */
+  amount: string;
+}
+
+/** Configuration for the PGTR relay system */
+export interface PGTRConfig {
+  /** Address of the deployed PCCForwarder contract */
+  forwarderAddress: Address;
+  /** Private key of the authorized relayer (hex, optional -- server-side only) */
+  relayerKey?: string;
+  /** Whether PGTR relay is enabled */
+  enabled: boolean;
+}

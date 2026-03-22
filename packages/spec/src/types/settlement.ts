@@ -16,6 +16,7 @@ import type {
   EscrowStatus,
   AssuranceTier,
 } from "./common.js";
+import type { TMPMode } from "./procurement.js";
 
 /** A milestone in the escrow — corresponds to one CWM step */
 export interface EscrowMilestone {
@@ -34,6 +35,12 @@ export interface EscrowMilestone {
   challengeWindowEnd?: Timestamp;
   /** Operator bond amount for this milestone */
   bondAmount: Amount;
+  /** Optional TMP procurement linkage for this milestone */
+  procurement?: {
+    mode: TMPMode;
+    tmpTaskId?: string;
+    tmpContractAddress?: Address;
+  };
 }
 
 /** An escrow contract instance for a workflow */

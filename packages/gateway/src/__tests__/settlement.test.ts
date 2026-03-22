@@ -91,7 +91,7 @@ function makeBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
     stepId: "step-4",
     kernelId: "kernel-nyc",
     assuranceTier: 0,
-    bundleHash: "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+    bundleHash: "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1" as `sha256:${string}`,
     kernelSignature: {
       signer: "0x0000000000000000000000000000000000000000" as const,
       algorithm: "secp256k1" as const,
@@ -101,15 +101,15 @@ function makeBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
     events: [
       {
         id: "ev-001",
-        type: "job_started",
+        type: "execution_started",
         timestamp: new Date().toISOString(),
         source: {
           deviceId: "dev-fdm-prusa-mk4",
-          deviceType: "machine",
+          deviceType: "controller",
           kernelId: "kernel-nyc",
         },
         payload: { message: "Job started" },
-        hash: "hash_ev001",
+        hash: "sha256:hash_ev001" as `sha256:${string}`,
       },
     ],
     ...overrides,
@@ -189,7 +189,7 @@ describe("SettlementService", () => {
       const repos = getRepos();
       const events = repos.evidence.findEventsByBundle("bundle-test-001");
       expect(events.length).toBe(1);
-      expect(events[0].type).toBe("job_started");
+      expect(events[0].type).toBe("execution_started");
     });
 
     it("skips on-chain submission when write is not enabled (graceful degradation)", async () => {
@@ -215,7 +215,7 @@ describe("SettlementService", () => {
 
       const service = getSettlementService();
       const bundle = makeBundle({
-        bundleHash: "0xdeadbeef00000000000000000000000000000000000000000000000000000001",
+        bundleHash: "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as `sha256:${string}`,
       });
 
       const result = await service.processEvidence(bundle, bundle.jobId, {

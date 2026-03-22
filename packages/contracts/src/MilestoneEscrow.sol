@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
+import {IPGTRForwarder} from "./interfaces/IPGTRForwarder.sol";
 
 /**
  * @title MilestoneEscrow
@@ -66,7 +67,15 @@ contract MilestoneEscrow {
     bool public funded;
     uint256 public totalAmount;
 
+    // ── PGTR Trusted Forwarders ─────────────────────────────────────────
+
+    /// @notice Trusted PGTR forwarder contracts that can relay calls on behalf of users.
+    mapping(address => bool) public trustedForwarders;
+
     // ── Events ───────────────────────────────────────────────────────────
+
+    event ForwarderAdded(address indexed forwarder);
+    event ForwarderRemoved(address indexed forwarder);
 
     event EscrowFunded(bytes32 indexed cwmId, uint256 totalAmount);
     event MilestoneLocked(uint256 indexed milestoneIndex, bytes32 stepId);
@@ -107,6 +116,42 @@ contract MilestoneEscrow {
         arbiter = _arbiter;
         token = IERC20(_token);
         cwmId = _cwmId;
+    }
+
+    // ── PGTR Forwarder Management ──────────────────────────────────────
+
+    /**
+     * @notice Add a trusted PGTR forwarder. Only the payer (contract owner) can add.
+     * @param forwarder Address of the PCCForwarder contract to trust.
+     */
+    function addForwarder(address forwarder) external onlyPayer {
+        require(forwarder != address(0), "Zero address");
+        trustedForwarders[forwarder] = true;
+        emit ForwarderAdded(forwarder);
+    }
+
+    /**
+     * @notice Remove a trusted PGTR forwarder. Only the payer (contract owner) can remove.
+     * @param forwarder Address of the forwarder to remove.
+     */
+    function removeForwarder(address forwarder) external onlyPayer {
+        trustedForwarders[forwarder] = false;
+        emit ForwarderRemoved(forwarder);
+    }
+
+    /**
+     * @notice Resolve the effective sender. If called via a trusted PGTR forwarder,
+     *         returns the original payer from the forwarder. Otherwise returns msg.sender.
+     * @dev This maintains backward compatibility: direct calls still work as before.
+     */
+    function _effectiveSender() internal view returns (address) {
+        if (trustedForwarders[msg.sender]) {
+            // msg.sender is a trusted forwarder — get the original caller
+            address sender = IPGTRForwarder(msg.sender).pgtrSender();
+            require(sender != address(0), "PGTR: no sender set");
+            return sender;
+        }
+        return msg.sender;
     }
 
     // ── Setup ────────────────────────────────────────────────────────────
@@ -158,11 +203,12 @@ contract MilestoneEscrow {
      */
     function depositBond(uint256 milestoneIndex) external milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
-        require(msg.sender == m.operator, "Only operator");
+        address sender = _effectiveSender();
+        require(sender == m.operator, "Only operator");
         require(m.status == MilestoneStatus.Funded, "Not funded");
         require(m.operatorBond > 0, "No bond required");
 
-        require(token.transferFrom(msg.sender, address(this), m.operatorBond), "Bond transfer failed");
+        require(token.transferFrom(sender, address(this), m.operatorBond), "Bond transfer failed");
         m.status = MilestoneStatus.Locked;
         emit MilestoneLocked(milestoneIndex, m.stepId);
     }
@@ -177,7 +223,7 @@ contract MilestoneEscrow {
         milestoneExists(milestoneIndex)
     {
         Milestone storage m = milestones[milestoneIndex];
-        require(msg.sender == m.operator, "Only operator");
+        require(_effectiveSender() == m.operator, "Only operator");
         require(
             m.status == MilestoneStatus.Locked ||
             (m.status == MilestoneStatus.Funded && m.operatorBond == 0),
@@ -232,14 +278,15 @@ contract MilestoneEscrow {
         string calldata _reason
     ) external milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
+        address sender = _effectiveSender();
         require(m.status == MilestoneStatus.Attested, "Cannot dispute");
         require(block.timestamp < m.challengeWindowEnd, "Challenge window closed");
         require(_challengerBond > 0, "Bond required");
 
-        require(token.transferFrom(msg.sender, address(this), _challengerBond), "Bond transfer failed");
+        require(token.transferFrom(sender, address(this), _challengerBond), "Bond transfer failed");
 
         disputes[milestoneIndex] = Dispute({
-            challenger: msg.sender,
+            challenger: sender,
             challengerBond: _challengerBond,
             challengerEvidenceHash: _challengerEvidenceHash,
             reason: _reason,
@@ -248,7 +295,7 @@ contract MilestoneEscrow {
         });
 
         m.status = MilestoneStatus.Disputed;
-        emit DisputeFiled(milestoneIndex, msg.sender, _challengerBond);
+        emit DisputeFiled(milestoneIndex, sender, _challengerBond);
     }
 
     /**
