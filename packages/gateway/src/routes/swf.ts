@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { SWFService } from "@pcc/payments";
-import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy } from "@pcc/spec";
+import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
@@ -334,6 +334,35 @@ export async function swfRoutes(app: FastifyInstance) {
           return { proposal: executed, action: "executed" };
         }
         return { proposal: tallied, action: "rejected" };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(409).send({ error: "conflict", message });
+      }
+    },
+  );
+
+  // ── Forecast-Driven Allocation ──────────────────────────────────
+
+  app.post<{ Params: { epochId: string } }>(
+    "/api/swf/epochs/:epochId/forecast-allocate",
+    async (req, reply) => {
+      const body = (req.body ?? {}) as {
+        demands?: SWFDemandForecast[];
+      };
+
+      if (!body.demands || !Array.isArray(body.demands) || body.demands.length === 0) {
+        return reply.code(400).send({
+          error: "bad_request",
+          message: "demands array is required (from BountyService.getTopDemand or manual input)",
+        });
+      }
+
+      try {
+        const result = swfService.computeForecastAllocation(
+          req.params.epochId,
+          body.demands,
+        );
+        return { forecastAllocation: result };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         return reply.code(409).send({ error: "conflict", message });

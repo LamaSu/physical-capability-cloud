@@ -10,7 +10,7 @@ import type { ParticipantEpochInput } from "../swf/types.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeService(overrides?: Parameters<typeof SWFService>[0]) {
+function makeService(overrides?: Partial<import("../swf/types.js").SWFConfig>) {
   return new SWFService(overrides);
 }
 
