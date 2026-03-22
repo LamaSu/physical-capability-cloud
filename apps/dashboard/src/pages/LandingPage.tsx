@@ -133,6 +133,52 @@ function ComparisonRow({ label, old: oldVal, pcc, index }: { label: string; old:
 }
 
 // ---------------------------------------------------------------------------
+// Copy-link CTA button
+// ---------------------------------------------------------------------------
+function CopyLinkButton() {
+  const [copied, setCopied] = React.useState(false);
+  const link = "https://capability.network/setup/agent";
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Fallback
+      const input = document.createElement("input");
+      input.value = link;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      document.body.removeChild(input);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-3 w-full max-w-md">
+      <button
+        onClick={handleCopy}
+        className="w-full relative px-8 py-4 rounded-2xl font-bold text-base text-white bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 transition-all duration-300 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 hover:-translate-y-0.5 ring-2 ring-emerald-400/30 hover:ring-emerald-400/60"
+      >
+        {copied ? "Copied!" : "Copy link for your agent"}
+      </button>
+      <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.03] border border-white/[0.06] w-full">
+        <span className="text-xs font-mono text-white/30 truncate flex-1">{link}</span>
+        <button
+          onClick={handleCopy}
+          className="text-xs text-emerald-400/60 hover:text-emerald-400 transition-colors shrink-0"
+        >
+          {copied ? "done" : "copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Landing Page
 // ---------------------------------------------------------------------------
 export function LandingPage() {
@@ -201,28 +247,28 @@ export function LandingPage() {
             <span className="text-white/60 font-medium">No platform cut. No invoicing. No waiting.</span>
           </motion.p>
 
-          {/* CTAs */}
-          <motion.div variants={fadeUp} className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
-            <button
-              onClick={() => navigate("/setup/agent")}
-              className="relative px-8 py-3.5 rounded-xl font-bold text-sm text-white bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 transition-all duration-300 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 hover:-translate-y-0.5 ring-2 ring-emerald-400/30 hover:ring-emerald-400/60"
-            >
-              <span className="flex items-center gap-2">
-                Get Started
-              </span>
-            </button>
-            <button
-              onClick={() => navigate("/setup")}
-              className="px-8 py-3 rounded-xl font-semibold text-sm text-forest-900 bg-gradient-to-r from-green-400 to-teal-400 hover:from-green-300 hover:to-teal-300 transition-all duration-300 shadow-lg shadow-green-500/20 hover:shadow-green-500/30 hover:-translate-y-0.5"
-            >
-              Get Your Agent
-            </button>
-            <button
-              onClick={() => navigate("/discover")}
-              className="px-8 py-3 rounded-xl font-semibold text-sm text-white/70 bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] hover:text-white/90 transition-all duration-300 hover:-translate-y-0.5"
-            >
-              Find Someone
-            </button>
+          {/* Primary CTA — copy link for your agent */}
+          <motion.div variants={fadeUp} className="flex flex-col items-center gap-6 pt-4">
+            <CopyLinkButton />
+
+            {/* Secondary links */}
+            <div className="flex items-center gap-6">
+              <a
+                href="/whitepaper.pdf"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-white/40 hover:text-white/70 transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
+              >
+                Read the whitepaper
+              </a>
+              <span className="text-white/10">|</span>
+              <button
+                onClick={() => navigate("/feedback")}
+                className="text-sm text-white/40 hover:text-white/70 transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
+              >
+                Bug report / Feedback
+              </button>
+            </div>
           </motion.div>
         </motion.div>
 
