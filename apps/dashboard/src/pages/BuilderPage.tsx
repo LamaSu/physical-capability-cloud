@@ -7,6 +7,33 @@ import {
 import type { CapabilityType, AssuranceTier } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useBuilderStore } from "../stores/builder-store.js";
+import { SplitEditor } from "../components/SplitEditor.js";
+import type { SplitEntry } from "../components/SplitEditor.js";
+import { NegotiationPanel } from "../components/builder/NegotiationPanel.js";
+
+const DEFAULT_SPLITS: SplitEntry[] = [
+  { role: "designer",  percentage: 10, label: "CSD Author" },
+  { role: "operator",  percentage: 70, label: "Machine Operator" },
+  { role: "verifier",  percentage: 10, label: "Evidence Verifier" },
+  { role: "network",   percentage: 10, label: "Protocol Treasury" },
+];
+
+const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
+  "Single-Step": DEFAULT_SPLITS,
+  "Multi-Step": [
+    { role: "designer",  percentage: 5,  label: "Workflow Designer" },
+    { role: "operator",  percentage: 75, label: "Step Operators" },
+    { role: "verifier",  percentage: 10, label: "Evidence Verifiers" },
+    { role: "network",   percentage: 10, label: "Protocol Treasury" },
+  ],
+  "Community": [
+    { role: "designer",  percentage: 20, label: "CSD Author" },
+    { role: "operator",  percentage: 60, label: "Machine Operator" },
+    { role: "curator",   percentage:  5, label: "Community Curator" },
+    { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
+    { role: "network",   percentage: 10, label: "Protocol Treasury" },
+  ],
+};
 
 const processIcons: Record<string, string> = {
   hplc: "🧪",
@@ -43,6 +70,8 @@ export function BuilderPage() {
     selectedType, availableTypes, resolvedOptions, selections, contract,
     assuranceTier, selectType, updateSelection, setAssuranceTier, buildContract, reset,
   } = useBuilderStore();
+
+  const [splits, setSplits] = React.useState<SplitEntry[]>(DEFAULT_SPLITS.map((s) => ({ ...s })));
 
   React.useEffect(() => {
     setPageMeta("Build Contract", "Configure capability parameters and pricing");
@@ -141,6 +170,27 @@ export function BuilderPage() {
           </div>
         </GlassPanel>
 
+        {/* Revenue Split */}
+        <GlassPanel padding="lg">
+          <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-3">Revenue Split</h3>
+          <SplitEditor
+            splits={splits}
+            onChange={setSplits}
+            presets={SPLIT_PRESETS}
+            totalPrice={livePrice ? Number(livePrice.totalPrice) : undefined}
+          />
+        </GlassPanel>
+
+        {/* Negotiation Panel */}
+        <GlassPanel padding="lg">
+          <NegotiationPanel
+            basePrice={livePrice ? Number(livePrice.totalPrice) : Number(resolvedOptions?.basePrice ?? 0)}
+            splits={splits}
+            onSplitsChange={setSplits}
+            editable={true}
+          />
+        </GlassPanel>
+
         {/* Build button */}
         <button
           onClick={buildContract}
@@ -175,6 +225,23 @@ export function BuilderPage() {
             </div>
           )}
         </GlassPanel>
+
+        {/* Split earnings preview */}
+        {livePrice && splits.length > 0 && (
+          <GlassPanel padding="md">
+            <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">Per-Job Earnings</div>
+            <div className="space-y-1">
+              {splits.map((s, i) => (
+                <div key={i} className="flex items-center justify-between text-xs">
+                  <span className="text-white/50">{s.label}</span>
+                  <span className="font-mono text-white/60">
+                    ${((Number(livePrice.totalPrice) * s.percentage) / 100).toFixed(2)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </GlassPanel>
+        )}
 
         {/* Machine info */}
         {resolvedOptions?.machineInfo && (

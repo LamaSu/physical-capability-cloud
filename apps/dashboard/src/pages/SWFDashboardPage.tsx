@@ -169,24 +169,16 @@ export function SWFDashboardPage() {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <GlassPanel>
-          <DataCell label="Fund Balance">
-            <AmountDisplay amount={MOCK_SUMMARY.totalBalance} currency="USDC" />
-          </DataCell>
+          <DataCell label="Fund Balance" value={<AmountDisplay amount={MOCK_SUMMARY.totalBalance} currency="USDC" />} />
         </GlassPanel>
         <GlassPanel>
-          <DataCell label="Total Distributed">
-            <AmountDisplay amount={MOCK_SUMMARY.totalDistributedAllTime} currency="USDC" />
-          </DataCell>
+          <DataCell label="Total Distributed" value={<AmountDisplay amount={MOCK_SUMMARY.totalDistributedAllTime} currency="USDC" />} />
         </GlassPanel>
         <GlassPanel>
-          <DataCell label="Participants">
-            <span className="text-xl font-semibold text-white">{MOCK_SUMMARY.participantCount}</span>
-          </DataCell>
+          <DataCell label="Participants" value={MOCK_SUMMARY.participantCount} mono />
         </GlassPanel>
         <GlassPanel>
-          <DataCell label="Active Proposals">
-            <span className="text-xl font-semibold text-amber-400">{MOCK_SUMMARY.activeProposals}</span>
-          </DataCell>
+          <DataCell label="Active Proposals" value={MOCK_SUMMARY.activeProposals} mono />
         </GlassPanel>
       </div>
 
@@ -251,10 +243,9 @@ export function SWFDashboardPage() {
                       <AmountDisplay amount={e.totalDistributed} currency="USDC" />
                     </td>
                     <td className="py-2">
-                      <GlowBadge
-                        label={e.status}
-                        color={e.status === "active" ? "emerald" : e.status === "completed" ? "blue" : "amber"}
-                      />
+                      <GlowBadge color={e.status === "active" ? "green" : e.status === "completed" ? "cyan" : "gold"}>
+                        {e.status}
+                      </GlowBadge>
                     </td>
                   </tr>
                 ))}
@@ -292,7 +283,7 @@ export function SWFDashboardPage() {
               {MOCK_ACCRUALS.map((a) => (
                 <tr key={a.id} className="border-t border-zinc-800">
                   <td className="py-2">
-                    <GlowBadge label={sourceLabel(a.sourceType)} color="cyan" />
+                    <GlowBadge color="cyan">{sourceLabel(a.sourceType)}</GlowBadge>
                   </td>
                   <td className="py-2">
                     <AmountDisplay amount={a.grossAmount} currency={a.currency} />
@@ -328,10 +319,9 @@ export function SWFDashboardPage() {
                     <AmountDisplay amount={c.amount} currency="USDC" />
                   </td>
                   <td className="py-2">
-                    <GlowBadge
-                      label={c.status}
-                      color={c.status === "claimed" ? "emerald" : c.status === "pending" ? "amber" : "red"}
-                    />
+                    <GlowBadge color={c.status === "claimed" ? "green" : c.status === "pending" ? "gold" : "red"}>
+                      {c.status}
+                    </GlowBadge>
                   </td>
                   <td className="py-2 text-zinc-400">{c.claimedAt ? fmtDate(c.claimedAt) : "—"}</td>
                 </tr>
@@ -351,7 +341,7 @@ export function SWFDashboardPage() {
                   <h4 className="text-white font-medium">{p.title}</h4>
                   <p className="text-zinc-500 text-xs mt-1">{p.description}</p>
                 </div>
-                <GlowBadge label={p.status} color="amber" />
+                <GlowBadge color="gold">{p.status}</GlowBadge>
               </div>
               <div className="flex gap-4 mt-3">
                 <div className="text-sm">

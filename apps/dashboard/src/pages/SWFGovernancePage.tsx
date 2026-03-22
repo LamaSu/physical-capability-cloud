@@ -69,7 +69,7 @@ export function SWFGovernancePage() {
     <div className="space-y-6 p-4">
       <div className="flex items-center gap-3">
         <a href="/swf" className="text-zinc-500 hover:text-zinc-300 text-sm">&larr; Back to Fund</a>
-        <GlowBadge label={proposal.status} color={proposal.status === "active" ? "amber" : proposal.status === "passed" ? "emerald" : "red"} />
+        <GlowBadge color={proposal.status === "active" ? "gold" : proposal.status === "passed" ? "green" : "red"}>{proposal.status}</GlowBadge>
       </div>
 
       <h1 className="text-2xl font-bold text-emerald-300">{proposal.title}</h1>
@@ -151,10 +151,9 @@ export function SWFGovernancePage() {
               <tr key={v.id} className="border-t border-zinc-800">
                 <td className="py-2 text-zinc-300 font-mono text-xs">{v.participantId}</td>
                 <td className="py-2">
-                  <GlowBadge
-                    label={v.vote}
-                    color={v.vote === "yes" ? "emerald" : v.vote === "no" ? "red" : "zinc"}
-                  />
+                  <GlowBadge color={v.vote === "yes" ? "green" : v.vote === "no" ? "red" : "gray"}>
+                    {v.vote}
+                  </GlowBadge>
                 </td>
                 <td className="py-2 text-white">{v.weight.toFixed(1)}</td>
                 <td className="py-2 text-zinc-400 text-xs">{fmtDate(v.votedAt)}</td>
