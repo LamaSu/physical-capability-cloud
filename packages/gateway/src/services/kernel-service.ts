@@ -14,6 +14,8 @@ import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
+import { Sentry } from "../sentry.js";
+import { startTrace, endTrace } from "../tracing.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,6 +120,16 @@ export class KernelService {
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
 
+    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
+    const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
+      "job.lifecycle",
+      "kernel",
+      { "job.id": jobId, "job.type": stepId, "job.assurance_tier": assuranceTier },
+    );
+    // Store traceId on the running job so we can reference it in callbacks
+    (this.runningJobs.get(jobId) as unknown as { traceId: string }).traceId = traceId;
+    (this.runningJobs.get(jobId) as unknown as { lifecycleLocalSpanId: string }).lifecycleLocalSpanId = lifecycleLocalSpanId;
+
     // Update DB status to "executing"
     try {
       const repos = getRepos();
@@ -126,59 +138,139 @@ export class KernelService {
       // DB may not have this job yet — that's okay, the route layer inserts first
     }
 
-    // Fire-and-forget execution
-    runner
-      .run({
-        jobId,
-        stepId,
-        gcodeHash: (gcodeHash ?? `hash_${jobId}`) as `0x${string}`,
-        assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
-      })
-      .then(async (result) => {
-        this.runningJobs.delete(jobId);
-        try {
-          const repos = getRepos();
-          if (result.success) {
-            repos.jobs.update(jobId, {
-              status: "completed",
-              progress: 100,
-              completedAt: new Date().toISOString(),
-              evidenceBundleId: result.bundleId,
-            });
-          } else {
-            repos.jobs.updateStatus(jobId, "failed");
-          }
-        } catch {
-          // DB update failure is non-fatal
-        }
+    // Fire-and-forget execution — wrapped in a Sentry lifecycle span so the
+    // async chain is visible as a waterfall in the Sentry trace view.
+    try {
+      Sentry.startSpanManual(
+        {
+          name: "job.lifecycle",
+          op: "job.lifecycle",
+          attributes: {
+            "job.id": jobId,
+            "job.type": stepId,
+            "job.assurance_tier": assuranceTier,
+          },
+        },
+        (lifecycleSpan) => {
+          runner
+            .run({
+              jobId,
+              stepId,
+              gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
+              assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+            })
+            .then(async (result) => {
+              this.runningJobs.delete(jobId);
+              try {
+                const repos = getRepos();
+                if (result.success) {
+                  repos.jobs.update(jobId, {
+                    status: "completed",
+                    progress: 100,
+                    completedAt: new Date().toISOString(),
+                    evidenceBundleId: result.bundleId,
+                  });
+                } else {
+                  repos.jobs.updateStatus(jobId, "failed");
+                }
+              } catch {
+                // DB update failure is non-fatal
+              }
 
-        // ── Evidence-to-settlement pipeline ──────────────────────────
-        if (result.success) {
-          const bundle = this.completedBundles.get(jobId);
-          if (bundle) {
-            try {
-              const settlementService = getSettlementService();
-              await settlementService.processEvidence(bundle, jobId, {
-                // For tier 0 jobs, auto-release immediately (no challenge window)
-                autoRelease: assuranceTier === 0,
+              // ── Evidence-to-settlement pipeline ──────────────────────────
+              if (result.success) {
+                const bundle = this.completedBundles.get(jobId);
+                if (bundle) {
+                  try {
+                    const settlementService = getSettlementService();
+                    await settlementService.processEvidence(bundle, jobId, {
+                      // For tier 0 jobs, auto-release immediately (no challenge window)
+                      autoRelease: assuranceTier === 0,
+                    });
+                  } catch (err) {
+                    // Settlement pipeline is non-fatal — the job itself succeeded
+                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                  }
+                  this.completedBundles.delete(jobId);
+                }
+              }
+
+              lifecycleSpan.setStatus({ code: result.success ? 1 : 2, message: result.error ?? "ok" });
+              lifecycleSpan.end();
+              // End local trace span
+              endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
+            })
+            .catch((err: unknown) => {
+              this.runningJobs.delete(jobId);
+              try {
+                const repos = getRepos();
+                repos.jobs.updateStatus(jobId, "failed");
+              } catch {
+                // DB update failure is non-fatal
+              }
+              lifecycleSpan.setStatus({ code: 2, message: String(err) });
+              lifecycleSpan.end();
+              // End local trace span
+              endTrace(traceId, lifecycleLocalSpanId, "error");
+            });
+        },
+      );
+    } catch {
+      // Sentry not initialised — fall back to plain fire-and-forget
+      runner
+        .run({
+          jobId,
+          stepId,
+          gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
+          assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+        })
+        .then(async (result) => {
+          this.runningJobs.delete(jobId);
+          try {
+            const repos = getRepos();
+            if (result.success) {
+              repos.jobs.update(jobId, {
+                status: "completed",
+                progress: 100,
+                completedAt: new Date().toISOString(),
+                evidenceBundleId: result.bundleId,
               });
-            } catch (err) {
-              // Settlement pipeline is non-fatal — the job itself succeeded
-              console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+            } else {
+              repos.jobs.updateStatus(jobId, "failed");
             }
-            this.completedBundles.delete(jobId);
+          } catch {
+            // DB update failure is non-fatal
           }
-        }
-      })
-      .catch(() => {
-        this.runningJobs.delete(jobId);
-        try {
-          const repos = getRepos();
-          repos.jobs.updateStatus(jobId, "failed");
-        } catch {
-          // DB update failure is non-fatal
-        }
-      });
+
+          if (result.success) {
+            const bundle = this.completedBundles.get(jobId);
+            if (bundle) {
+              try {
+                const settlementService = getSettlementService();
+                await settlementService.processEvidence(bundle, jobId, {
+                  autoRelease: assuranceTier === 0,
+                });
+              } catch (err) {
+                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+              }
+              this.completedBundles.delete(jobId);
+            }
+          }
+          // End local trace span (fallback path)
+          endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
+        })
+        .catch(() => {
+          this.runningJobs.delete(jobId);
+          try {
+            const repos = getRepos();
+            repos.jobs.updateStatus(jobId, "failed");
+          } catch {
+            // DB update failure is non-fatal
+          }
+          // End local trace span on error (fallback path)
+          endTrace(traceId, lifecycleLocalSpanId, "error");
+        });
+    }
 
     return { jobId, deviceId, status: "accepted" };
   }
