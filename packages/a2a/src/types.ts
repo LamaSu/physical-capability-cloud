@@ -146,6 +146,13 @@ export type Intent =
   | IPClaimResultIntent
   | IPProposeSplitIntent
   | IPSplitResponseIntent
+  // Sovereign Wealth Fund
+  | SWFRegisterParticipantIntent
+  | SWFRegisterParticipantResultIntent
+  | SWFQueryDividendsIntent
+  | SWFDividendsResultIntent
+  | SWFClaimDividendsIntent
+  | SWFClaimResultIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -877,6 +884,47 @@ export interface IPSplitResponseIntent {
 export interface TextMessageIntent {
   type: "text_message";
   text: string;
+}
+
+// ── Sovereign Wealth Fund Intents ─────────────────────────────────
+
+export interface SWFRegisterParticipantIntent {
+  type: "swf_register_participant";
+  did: string;
+  walletAddress: string;
+  role: string;
+}
+
+export interface SWFRegisterParticipantResultIntent {
+  type: "swf_register_participant_result";
+  participantId: string;
+  status: "active" | "already_registered";
+}
+
+export interface SWFQueryDividendsIntent {
+  type: "swf_query_dividends";
+  participantId: string;
+}
+
+export interface SWFDividendsResultIntent {
+  type: "swf_dividends_result";
+  participantId: string;
+  totalEarned: string;
+  pendingDividends: string;
+  epochCount: number;
+}
+
+export interface SWFClaimDividendsIntent {
+  type: "swf_claim_dividends";
+  claimId: string;
+  chain?: string;
+}
+
+export interface SWFClaimResultIntent {
+  type: "swf_claim_result";
+  claimId: string;
+  status: "pending" | "claimed" | "failed";
+  txHash?: string;
 }
 
 export interface ErrorIntent {

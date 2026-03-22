@@ -1,5 +1,10 @@
+// x402 (DEPRECATED -- kept for fallback; use MPP for new integrations)
 export { X402Middleware, type X402Config, type RoutePaymentMap } from "./x402-middleware.js";
 export { X402Client, type X402ClientConfig } from "./x402-client.js";
+// MPP (Machine-Payable Protocol via mppx)
+export { MppMiddleware, type MppMiddlewareConfig, type MppChargeResult } from "./mpp-middleware.js";
+export { MppClient, type MppClientConfig } from "./mpp-client.js";
+export { MppSessionManager, type MppSessionManagerConfig } from "./mpp-session.js";
 export {
   DLMMClient,
   type DLMMClientConfig,
@@ -49,3 +54,14 @@ export {
   type PoolStatus,
   type StakerEarnings,
 } from "./pool/index.js";
+// PGTR (ERC-8194 Payment-Gated Transaction Relay)
+export { PGTRClient, type PGTRClientConfig } from "./pgtr-client.js";
+// Sovereign Wealth Fund
+export {
+  SWFService,
+  SWF_SCORE_WEIGHTS,
+  DEFAULT_ALLOCATION,
+  DEFAULT_SWF_CONFIG,
+  type SWFConfig,
+  type ParticipantEpochInput,
+} from "./swf/index.js";

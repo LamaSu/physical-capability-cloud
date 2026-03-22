@@ -62,4 +62,5 @@ export {
   SensorRepository,
   BatchRepository,
   StoryRepository,
+  SWFRepository,
 } from "./repositories/index.js";

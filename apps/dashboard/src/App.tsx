@@ -67,6 +67,8 @@ const TelemetryPage = lazy(() => import("./pages/TelemetryPage.js").then(m => ({
 const TracesPage = lazy(() => import("./pages/TracesPage.js").then(m => ({ default: m.TracesPage })));
 const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m => ({ default: m.NegotiationPage })));
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
+const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
+const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -211,6 +213,8 @@ function DashboardShell() {
               <Route path="/protocol-runs/:runId" element={<ProtocolRunPage />} />
               <Route path="/subnet" element={<SubnetStatusPage />} />
               <Route path="/depin" element={<DePINDashboardPage />} />
+              <Route path="/swf" element={<SWFDashboardPage />} />
+              <Route path="/swf/governance/:proposalId" element={<SWFGovernancePage />} />
               <Route path="/telemetry" element={<TelemetryPage />} />
               <Route path="/traces" element={<TracesPage />} />
               <Route path="/setup" element={<SetupWizardPage />} />

@@ -143,6 +143,10 @@ const ALL_EXPECTED_TOOL_NAMES = [
   "pcc_agent_registration",
   // New setup tools (8)
   ...EXPECTED_SETUP_TOOL_NAMES,
+  // SWF tools (3)
+  "pcc_swf_summary",
+  "pcc_swf_participant_dashboard",
+  "pcc_swf_list_proposals",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -283,8 +287,8 @@ describe("MCP server tool names", () => {
     expect(EXPECTED_SETUP_TOOL_NAMES).toHaveLength(8);
   });
 
-  it("total expected tool count is 29 (21 original + 8 setup)", () => {
-    expect(ALL_EXPECTED_TOOL_NAMES).toHaveLength(29);
+  it("total expected tool count is 32 (21 original + 8 setup + 3 SWF)", () => {
+    expect(ALL_EXPECTED_TOOL_NAMES).toHaveLength(32);
   });
 
   it("all setup tool names follow pcc_setup_* naming convention", () => {

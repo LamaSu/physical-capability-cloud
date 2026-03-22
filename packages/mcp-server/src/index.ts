@@ -1099,6 +1099,60 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// 30. pcc_swf_summary
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_swf_summary",
+  "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals.",
+  {},
+  async () => {
+    const data = await pccFetch("/api/swf/summary");
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 31. pcc_swf_participant_dashboard
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_swf_participant_dashboard",
+  "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history.",
+  {
+    participantId: {
+      type: "string" as const,
+      description: "SWF participant ID (swf_part_XXXX)",
+    },
+  },
+  async ({ participantId }: { participantId: string }) => {
+    const data = await pccFetch(`/api/swf/participants/${participantId}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 32. pcc_swf_list_proposals
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_swf_list_proposals",
+  "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed).",
+  {
+    status: {
+      type: "string" as const,
+      description: "Filter by proposal status: active, passed, rejected, executed",
+      optional: true,
+    },
+  },
+  async ({ status }: { status?: string }) => {
+    const query = status ? `?status=${status}` : "";
+    const data = await pccFetch(`/api/swf/proposals${query}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

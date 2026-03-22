@@ -14,6 +14,7 @@ import type { FastifyInstance } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import { swfAccrue } from "./swf.js";
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -147,6 +148,11 @@ export async function settlementRoutes(app: FastifyInstance) {
           message: result.error,
           jobId: result.jobId,
         });
+      }
+
+      // SWF accrual: 2% of released milestone value flows into the fund
+      if (result.status === "released") {
+        swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
       }
 
       return {

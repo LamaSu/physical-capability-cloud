@@ -44,6 +44,7 @@ import { unbrowseRoutes } from "./routes/unbrowse.js";
 import { csdRoutes } from "./routes/csd.js";
 import { discoverRoutes } from "./routes/discover.js";
 import { ipRoutes } from "./routes/ip.js";
+import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
@@ -170,6 +171,7 @@ export async function createGateway(port = 3200) {
   await app.register(docRoutes);
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);
+  await app.register(swfRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
