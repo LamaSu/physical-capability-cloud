@@ -22,8 +22,10 @@ import type {
   SWFEquityTier,
   SWFEquityRevenue,
   SWFEquityPortfolio,
+  SWFTermSheet,
+  SWFOperatorCostModel,
 } from "@pcc/spec";
-import { SWF_EQUITY_SCHEDULE } from "@pcc/spec";
+import { SWF_EQUITY_SCHEDULE, computeFairTerms } from "@pcc/spec";
 
 import {
   type SWFConfig,
@@ -45,6 +47,7 @@ let nextVoteId = 1;
 let nextScoreId = 1;
 let nextEquityId = 1;
 let nextEqRevId = 1;
+let nextTermsId = 1;
 
 function genPartId(): string {
   return `swf_part_${String(nextPartId++).padStart(4, "0")}`;
@@ -73,6 +76,9 @@ function genEquityId(): string {
 function genEqRevId(): string {
   return `swf_eqrev_${String(nextEqRevId++).padStart(4, "0")}`;
 }
+function genTermsId(): string {
+  return `swf_terms_${String(nextTermsId++).padStart(4, "0")}`;
+}
 
 // ---------------------------------------------------------------------------
 // SWFService
@@ -87,6 +93,7 @@ export class SWFService {
   private votes = new Map<string, SWFVote>();
   private equityPositions = new Map<string, SWFEquityPosition>();
   private equityRevenues = new Map<string, SWFEquityRevenue>();
+  private termSheets = new Map<string, SWFTermSheet>();
 
   private config: SWFConfig;
   private currentStrategy: SWFAllocationStrategy;
@@ -876,6 +883,140 @@ export class SWFService {
     return [...this.equityRevenues.values()].filter(
       (r) => r.equityPositionId === positionId,
     );
+  }
+
+  // ── Term Sheet Negotiation ────────────────────────────────────
+
+  /**
+   * Propose a term sheet to an operator based on their cost model.
+   * The fund computes fair terms using computeFairTerms() — the revenue share
+   * scales with how much capex the fund covers, and the operator's margin
+   * is protected (never drops below 10%).
+   */
+  proposeTermSheet(params: {
+    capabilityType: string;
+    operatorId: string;
+    equityTier: SWFEquityTier;
+    seedAmount: number;
+    costModel: SWFOperatorCostModel;
+    expiresInDays?: number;
+  }): SWFTermSheet {
+    const computed = computeFairTerms({
+      costModel: params.costModel,
+      seedAmount: params.seedAmount,
+      equityTier: params.equityTier,
+    });
+
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + (params.expiresInDays ?? 14) * 86_400_000,
+    );
+
+    const sheet: SWFTermSheet = {
+      id: genTermsId(),
+      capabilityType: params.capabilityType,
+      operatorId: params.operatorId,
+      equityTier: params.equityTier,
+      costModel: params.costModel,
+      seedAmount: String(params.seedAmount),
+      proposedRevenueShareBps: computed.revenueShareBps,
+      proposedMaturityMultiplier: computed.maturityMultiplier,
+      estimatedMonthsToMaturity: computed.estimatedMonthsToMaturity,
+      operatorNetMarginPercent: computed.operatorNetMarginPercent,
+      status: "proposed",
+      proposedAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    };
+
+    this.termSheets.set(sheet.id, sheet);
+    return sheet;
+  }
+
+  /**
+   * Operator counters with different terms.
+   */
+  counterTermSheet(params: {
+    termSheetId: string;
+    counterRevenueShareBps: number;
+    counterMaturityMultiplier: number;
+    reason: string;
+  }): SWFTermSheet {
+    const sheet = this.termSheets.get(params.termSheetId);
+    if (!sheet) throw new Error(`Term sheet ${params.termSheetId} not found`);
+    if (sheet.status !== "proposed") {
+      throw new Error(`Term sheet ${params.termSheetId} is not in proposed status (${sheet.status})`);
+    }
+
+    sheet.status = "countered";
+    sheet.counterRevenueShareBps = params.counterRevenueShareBps;
+    sheet.counterMaturityMultiplier = params.counterMaturityMultiplier;
+    sheet.counterReason = params.reason;
+    return sheet;
+  }
+
+  /**
+   * Accept a term sheet — uses the counter terms if countered, otherwise the proposed terms.
+   * Mints the equity position with the agreed terms.
+   */
+  acceptTermSheet(termSheetId: string, epochId: string): {
+    termSheet: SWFTermSheet;
+    equityPosition: SWFEquityPosition;
+  } {
+    const sheet = this.termSheets.get(termSheetId);
+    if (!sheet) throw new Error(`Term sheet ${termSheetId} not found`);
+    if (sheet.status !== "proposed" && sheet.status !== "countered") {
+      throw new Error(`Term sheet ${termSheetId} cannot be accepted (status: ${sheet.status})`);
+    }
+
+    // Use counter terms if available, otherwise proposed
+    sheet.agreedRevenueShareBps =
+      sheet.counterRevenueShareBps ?? sheet.proposedRevenueShareBps;
+    sheet.agreedMaturityMultiplier =
+      sheet.counterMaturityMultiplier ?? sheet.proposedMaturityMultiplier;
+    sheet.status = "accepted";
+    sheet.resolvedAt = new Date().toISOString();
+
+    // Mint equity position with the negotiated terms (not the flat schedule)
+    const position = this.mintEquityPosition({
+      capabilityType: sheet.capabilityType,
+      seedAmount: Number(sheet.seedAmount),
+      equityTier: sheet.equityTier,
+      epochId,
+    });
+
+    // Override the flat-schedule terms with the negotiated ones
+    position.revenueShareBps = sheet.agreedRevenueShareBps;
+
+    return { termSheet: sheet, equityPosition: position };
+  }
+
+  /**
+   * Reject a term sheet.
+   */
+  rejectTermSheet(termSheetId: string, reason?: string): SWFTermSheet {
+    const sheet = this.termSheets.get(termSheetId);
+    if (!sheet) throw new Error(`Term sheet ${termSheetId} not found`);
+
+    sheet.status = "rejected";
+    sheet.counterReason = reason ?? sheet.counterReason;
+    sheet.resolvedAt = new Date().toISOString();
+    return sheet;
+  }
+
+  getTermSheet(id: string): SWFTermSheet | null {
+    return this.termSheets.get(id) ?? null;
+  }
+
+  listTermSheets(filter?: {
+    status?: SWFTermSheet["status"];
+    operatorId?: string;
+    capabilityType?: string;
+  }): SWFTermSheet[] {
+    let result = [...this.termSheets.values()];
+    if (filter?.status) result = result.filter((t) => t.status === filter.status);
+    if (filter?.operatorId) result = result.filter((t) => t.operatorId === filter.operatorId);
+    if (filter?.capabilityType) result = result.filter((t) => t.capabilityType === filter.capabilityType);
+    return result;
   }
 
   // ── Accessors ───────────────────────────────────────────────────
