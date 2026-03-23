@@ -21,6 +21,7 @@ import { usePageTracking } from "./hooks/use-page-tracking.js";
 const AgentChatPage = lazy(() => import("./pages/AgentChatPage.js").then(m => ({ default: m.AgentChatPage })));
 const LandingPage = lazy(() => import("./pages/LandingPage.js").then(m => ({ default: m.LandingPage })));
 const StartPage = lazy(() => import("./pages/StartPage.js").then(m => ({ default: m.StartPage })));
+const AgentLinkPage = lazy(() => import("./pages/AgentLinkPage.js").then(m => ({ default: m.AgentLinkPage })));
 const DashboardPage = lazy(() => import("./pages/DashboardPage.js").then(m => ({ default: m.DashboardPage })));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage.js").then(m => ({ default: m.DiscoverPage })));
 const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ default: m.BuilderPage })));
@@ -70,6 +71,7 @@ const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").th
 const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m => ({ default: m.SWFDashboardPage })));
 const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
 const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
+const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -177,6 +179,7 @@ function DashboardShell() {
               <Route path="/kernels/:kernelId" element={<KernelDetailPage />} />
               <Route path="/escrow" element={<EscrowPage />} />
               <Route path="/settlement" element={<SettlementPage />} />
+              <Route path="/wallet" element={<WalletPage />} />
               <Route path="/agents" element={<AgentLogPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/onboard" element={<OnboardLandingPage />} />
@@ -253,6 +256,14 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <StartPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === "/go") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <AgentLinkPage />
       </Suspense>
     );
   }
