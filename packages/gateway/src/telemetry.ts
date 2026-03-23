@@ -9,6 +9,7 @@
 
 import { randomBytes } from "node:crypto";
 import { streamHub } from "./sse/stream-hub.js";
+import { Sentry } from "./sentry.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -166,6 +167,22 @@ export class PipelineTelemetryService {
         payload: event,
       },
     );
+
+    // Add a Sentry breadcrumb for every telemetry event so the trace waterfall
+    // in Sentry shows the pipeline phase progression alongside spans.
+    Sentry.addBreadcrumb({
+      category: "pcc.pipeline",
+      message: `[${jobId}] ${phase} → ${status}`,
+      level: event.level === "error" ? "error" : event.level === "warn" ? "warning" : "info",
+      data: {
+        jobId,
+        phase,
+        status,
+        duration_ms: event.duration_ms,
+        source: event.source,
+      },
+      timestamp: new Date(event.timestamp).getTime() / 1000,
+    });
 
     return event;
   }

@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@pcc/spec": "workspace:*",
+    "@sentry/node": "^10.45.0",
     "nanoid": "^5.0.0"
   },
   "devDependencies": {

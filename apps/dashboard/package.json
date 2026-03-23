@@ -17,6 +17,7 @@
     "@pcc/contract-builder": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/ui": "workspace:*",
+    "@sentry/react": "^8.55.0",
     "@tanstack/react-query": "^5.60.0",
     "@tsparticles/react": "^3.0.0",
     "@tsparticles/slim": "^3.7.0",
@@ -25,6 +26,7 @@
     "@xyflow/react": "^12.10.1",
     "clsx": "^2.1.0",
     "framer-motion": "^12.0.0",
+    "posthog-js": "^1.363.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.0.0",
@@ -35,6 +37,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@sentry/vite-plugin": "^3.6.1",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

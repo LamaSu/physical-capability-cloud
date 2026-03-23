@@ -9,6 +9,7 @@
 
 import type { A2AMessage, AgentCard, Conversation, Intent } from "./types.js";
 import type { SecurityMiddleware } from "./security-middleware.js";
+import * as Sentry from "@sentry/node";
 
 type MessageHandler = (message: A2AMessage) => void | Promise<void>;
 
@@ -70,11 +71,23 @@ export class MessageBus {
     if (!convo.participants.includes(message.from)) convo.participants.push(message.from);
     if (!convo.participants.includes(message.to)) convo.participants.push(message.to);
 
-    // Deliver to recipient's handlers
+    // Deliver to recipient's handlers — each handler invocation is a Sentry span
     const handlers = this.handlers.get(message.to) ?? [];
     for (const handler of handlers) {
       try {
-        await handler(message);
+        await Sentry.startSpan(
+          {
+            name: `a2a.handler.${message.intent.type}`,
+            op: "a2a.message",
+            attributes: {
+              "a2a.intent": message.intent.type,
+              "a2a.from": message.from,
+              "a2a.to": message.to,
+              "a2a.conversation_id": message.conversationId,
+            },
+          },
+          async () => handler(message),
+        );
       } catch (err) {
         console.error(`Handler error for agent ${message.to}:`, err);
       }
@@ -120,11 +133,23 @@ export class MessageBus {
     if (!convo.participants.includes(message.from)) convo.participants.push(message.from);
     if (!convo.participants.includes(message.to)) convo.participants.push(message.to);
 
-    // Deliver to recipient's handlers
+    // Deliver to recipient's handlers — each handler invocation is a Sentry span
     const handlers = this.handlers.get(message.to) ?? [];
     for (const handler of handlers) {
       try {
-        await handler(message);
+        await Sentry.startSpan(
+          {
+            name: `a2a.handler.${message.intent.type}`,
+            op: "a2a.message",
+            attributes: {
+              "a2a.intent": message.intent.type,
+              "a2a.from": message.from,
+              "a2a.to": message.to,
+              "a2a.conversation_id": message.conversationId,
+            },
+          },
+          async () => handler(message),
+        );
       } catch (err) {
         console.error(`Handler error for agent ${message.to}:`, err);
       }
