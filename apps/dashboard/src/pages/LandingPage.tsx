@@ -133,27 +133,41 @@ function ComparisonRow({ label, old: oldVal, pcc, index }: { label: string; old:
 }
 
 // ---------------------------------------------------------------------------
-// Copy-link CTA button
+// Copy Agent File CTA button
 // ---------------------------------------------------------------------------
-function CopyLinkButton() {
+function CopyAgentFileButton() {
   const [copied, setCopied] = React.useState(false);
-  const link = "https://capability.network/setup/agent";
+  const [loading, setLoading] = React.useState(false);
 
   const handleCopy = async () => {
+    setLoading(true);
     try {
-      await navigator.clipboard.writeText(link);
+      const res = await fetch("/agent-package.json");
+      const text = await res.text();
+      await navigator.clipboard.writeText(text);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
+      setTimeout(() => setCopied(false), 3000);
     } catch {
-      // Fallback
-      const input = document.createElement("input");
-      input.value = link;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand("copy");
-      document.body.removeChild(input);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
+      // Fallback: try with a textarea
+      try {
+        const res = await fetch("/agent-package.json");
+        const text = await res.text();
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 3000);
+      } catch {
+        // Last resort: open in new tab
+        window.open("/agent-package.json", "_blank");
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -161,12 +175,13 @@ function CopyLinkButton() {
     <div className="flex flex-col items-center gap-3 w-full max-w-md">
       <button
         onClick={handleCopy}
-        className="w-full relative px-8 py-4 rounded-2xl font-bold text-base text-white bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 transition-all duration-300 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 hover:-translate-y-0.5 ring-2 ring-emerald-400/30 hover:ring-emerald-400/60"
+        disabled={loading}
+        className="w-full relative px-8 py-4 rounded-2xl font-bold text-base text-white bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 transition-all duration-300 shadow-lg shadow-emerald-500/30 hover:shadow-emerald-500/50 hover:-translate-y-0.5 ring-2 ring-emerald-400/30 hover:ring-emerald-400/60 disabled:opacity-60"
       >
-        {copied ? "Copied!" : "Copy link for your agent"}
+        {loading ? "Loading..." : copied ? "Copied to clipboard!" : "Copy Agent File"}
       </button>
       <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.03] border border-white/[0.06] w-full">
-        <span className="text-xs font-mono text-white/30 truncate flex-1">{link}</span>
+        <span className="text-xs font-mono text-white/30 truncate flex-1">agent-package.json — 73 tools, ready to paste</span>
         <button
           onClick={handleCopy}
           className="text-xs text-emerald-400/60 hover:text-emerald-400 transition-colors shrink-0"
@@ -175,6 +190,103 @@ function CopyLinkButton() {
         </button>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inline Feedback Form
+// ---------------------------------------------------------------------------
+function FeedbackSection() {
+  const [type, setType] = React.useState<"bug" | "suggestion" | "comment">("comment");
+  const [message, setMessage] = React.useState("");
+  const [submitted, setSubmitted] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!message.trim()) return;
+    setSubmitting(true);
+    try {
+      const base = (window as any).__PCC_API_BASE__ || "";
+      await fetch(`${base}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, message, page: "landing" }),
+      });
+    } catch {
+      // Silently succeed — feedback is best-effort
+    }
+    setSubmitted(true);
+    setSubmitting(false);
+    setTimeout(() => {
+      setSubmitted(false);
+      setMessage("");
+    }, 4000);
+  };
+
+  return (
+    <motion.div
+      initial="hidden"
+      whileInView="show"
+      viewport={{ once: true, margin: "-50px" }}
+      variants={stagger}
+      className="max-w-xl mx-auto"
+    >
+      <motion.div variants={fadeUp} className="text-center mb-8">
+        <span className="text-xs tracking-[0.3em] uppercase text-amber-400/60 font-mono">Talk to us</span>
+        <h2 className="text-2xl font-bold text-white/90 mt-3">Found a bug? Have an idea?</h2>
+      </motion.div>
+
+      {submitted ? (
+        <motion.div variants={fadeUp} className="text-center p-6 rounded-2xl bg-green-500/[0.05] border border-green-500/20">
+          <p className="text-green-400 font-medium">Thanks! We got it.</p>
+        </motion.div>
+      ) : (
+        <motion.form variants={fadeUp} onSubmit={handleSubmit} className="space-y-4">
+          <div className="flex gap-2">
+            {(["bug", "suggestion", "comment"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setType(t)}
+                className={`px-4 py-2 rounded-lg text-xs font-medium transition-all duration-200 ${
+                  type === t
+                    ? "bg-white/10 text-white/90 border border-white/20"
+                    : "bg-white/[0.03] text-white/40 border border-white/[0.06] hover:bg-white/[0.06]"
+                }`}
+              >
+                {t === "bug" ? "Bug Report" : t === "suggestion" ? "Suggestion" : "Comment"}
+              </button>
+            ))}
+          </div>
+          <textarea
+            placeholder={type === "bug" ? "What went wrong? Steps to reproduce..." : type === "suggestion" ? "What would make PCC better?" : "Tell us what you think..."}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            required
+            rows={4}
+            className="w-full px-4 py-3 rounded-xl bg-white/[0.04] border border-white/[0.08] text-white/90 text-sm placeholder:text-white/25 focus:outline-none focus:border-amber-400/30 transition-colors resize-none"
+          />
+          <div className="flex items-center justify-between">
+            <a
+              href="https://github.com/wingdingspenpal/poop/issues"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-white/20 hover:text-white/40 transition-colors underline underline-offset-2"
+            >
+              Or open a GitHub issue
+            </a>
+            <button
+              type="submit"
+              disabled={submitting || !message.trim()}
+              className="px-6 py-2.5 rounded-xl font-semibold text-sm text-forest-900 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-300 hover:to-orange-300 transition-all duration-300 shadow-lg shadow-amber-500/20 disabled:opacity-40"
+            >
+              {submitting ? "Sending..." : "Send Feedback"}
+            </button>
+          </div>
+        </motion.form>
+      )}
+    </motion.div>
   );
 }
 
@@ -247,28 +359,30 @@ export function LandingPage() {
             <span className="text-white/60 font-medium">No platform cut. No invoicing. No waiting.</span>
           </motion.p>
 
-          {/* Primary CTA — copy link for your agent */}
+          {/* Primary CTAs — agent file + whitepaper */}
           <motion.div variants={fadeUp} className="flex flex-col items-center gap-6 pt-4">
-            <CopyLinkButton />
-
-            {/* Secondary links */}
-            <div className="flex items-center gap-6">
-              <a
-                href="/whitepaper.pdf"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-white/40 hover:text-white/70 transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
-              >
-                Read the whitepaper
-              </a>
-              <span className="text-white/10">|</span>
-              <button
-                onClick={() => navigate("/feedback")}
-                className="text-sm text-white/40 hover:text-white/70 transition-colors underline underline-offset-4 decoration-white/10 hover:decoration-white/30"
-              >
-                Bug report / Feedback
-              </button>
+            <div className="flex flex-col sm:flex-row items-center gap-4 w-full max-w-lg">
+              <CopyAgentFileButton />
             </div>
+            <a
+              href="/whitepaper.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-sm text-white/70 bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] hover:text-white/90 transition-all duration-300 hover:-translate-y-0.5"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-white/50">
+                <path d="M4 2h5.5L13 5.5V14H4V2Z" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M9 2v4h4" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+              Read the White Paper
+            </a>
+            <a
+              href="#feedback"
+              className="text-xs text-white/30 hover:text-white/50 transition-colors underline underline-offset-4 decoration-white/10"
+            >
+              Report a bug or give feedback
+            </a>
           </motion.div>
         </motion.div>
 
@@ -665,7 +779,14 @@ export function LandingPage() {
       </section>
 
       {/* ═══════════════════════════════════════════════════════════════ */}
-      {/* FEEDBACK & FOOTER                                              */}
+      {/* FEEDBACK                                                       */}
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      <section id="feedback" className="relative z-10 py-24 px-6">
+        <FeedbackSection />
+      </section>
+
+      {/* ═══════════════════════════════════════════════════════════════ */}
+      {/* FOOTER                                                         */}
       {/* ═══════════════════════════════════════════════════════════════ */}
       <section className="relative z-10 py-16 px-6">
         <motion.div
@@ -677,7 +798,7 @@ export function LandingPage() {
         >
           <motion.div variants={fadeUp} className="flex items-center justify-center gap-6 text-xs text-white/20">
             <a
-              href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud/issues"
+              href="https://github.com/wingdingspenpal/poop/issues"
               target="_blank"
               rel="noopener noreferrer"
               className="hover:text-white/40 transition-colors underline underline-offset-2"
@@ -686,7 +807,7 @@ export function LandingPage() {
             </a>
             <span className="text-white/10">&middot;</span>
             <a
-              href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud/discussions"
+              href="https://github.com/wingdingspenpal/poop/discussions"
               target="_blank"
               rel="noopener noreferrer"
               className="hover:text-white/40 transition-colors underline underline-offset-2"
@@ -695,12 +816,21 @@ export function LandingPage() {
             </a>
             <span className="text-white/10">&middot;</span>
             <a
-              href="/docs/whitepaper.md"
+              href="/whitepaper.md"
               target="_blank"
               rel="noopener noreferrer"
               className="hover:text-white/40 transition-colors underline underline-offset-2"
             >
-              Read the white paper
+              White paper
+            </a>
+            <span className="text-white/10">&middot;</span>
+            <a
+              href="/agent-package.json"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-white/40 transition-colors underline underline-offset-2"
+            >
+              Agent file
             </a>
           </motion.div>
 

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   GlassPanel, GlowBadge, UtilizationGauge,
   EarningsChart, CertificationBadge, MaintenanceTimelineItem,
+  AmountDisplay,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
@@ -91,6 +92,36 @@ export function OperatorDashboardPage() {
                 </GlassPanel>
               ))}
             </div>
+          </div>
+
+          {/* IP Revenue summary card */}
+          <div className="space-y-2">
+            <span className="text-xs text-white/30">Story Protocol IP Revenue</span>
+            <GlassPanel
+              hover
+              padding="md"
+              glow="green"
+              className="cursor-pointer"
+              onClick={() => navigate("/ip")}
+            >
+              <div className="flex items-center justify-between">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium text-white/80">IP Revenue Dashboard</div>
+                  <div className="text-xs text-white/40">3 IP assets &middot; 43 derivatives</div>
+                  <div className="flex items-center gap-3 mt-2">
+                    <div>
+                      <div className="text-[10px] text-white/25">Total Revenue</div>
+                      <AmountDisplay amount="6,119.50" currency="USD" size="sm" />
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-white/25">Unclaimed</div>
+                      <div className="text-sm font-mono text-yellow-400/80">$429.50</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="text-white/20 text-2xl leading-none">›</div>
+              </div>
+            </GlassPanel>
           </div>
         </div>
       )}

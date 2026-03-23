@@ -39,3 +39,4 @@ export const SWFIcon = () => icon("M10 2l3 3H7l3-3zM5 7h10v2H5V7zM6 11h8v2H6v-2z
 export const TelemetryIcon = () => icon("M3 15l4-8 3 5 2-3 3 6M3 5h14M17 3v4");
 export const TracesIcon = () => icon("M3 10h4l2-6 3 12 2-8 2 4h3M3 17h14");
 export const NegotiationIcon = () => icon("M4 7h5M4 10h8M4 13h5M13 15l2 2 4-4M15 4a4 4 0 010 8");
+export const IPRevenueIcon = () => icon("M10 2a8 8 0 100 16 8 8 0 000-16zM10 6v8M7 9l3-3 3 3M7 12l3 3 3-3");

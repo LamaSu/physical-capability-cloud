@@ -1,3 +1,11 @@
+// BabelPCC compiler
+export { BabelPCC } from "./babel-pcc/index.js";
+export type { CompileOptions, CompileResult } from "./babel-pcc/index.js";
+export { InterfaceGenerator, generateInterface, deriveTypeName } from "./babel-pcc/index.js";
+export { ValidatorGenerator, generateValidator } from "./babel-pcc/index.js";
+export { PricingGenerator, generatePricing } from "./babel-pcc/index.js";
+export { TestDataGenerator, generateTestData } from "./babel-pcc/index.js";
+
 // Public API
 export { ContractBuilder } from "./builder.js";
 export { TemplateResolver } from "./resolver.js";
