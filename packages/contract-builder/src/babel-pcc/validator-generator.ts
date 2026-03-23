@@ -9,7 +9,8 @@
  *   - Constraint condition checks (from CSD constraints with "reject" action)
  */
 
-import type { CSD, CsdConstraint, CsdConstraintCondition } from "@pcc/spec";
+import type { CSD, CsdConstraint } from "@pcc/spec";
+type CsdConstraintCondition = CsdConstraint["when"][number];
 import { deriveTypeName } from "./interface-generator.js";
 
 /**
@@ -28,12 +29,12 @@ function emitConditionExpr(cond: CsdConstraintCondition): string {
 
     case "in": {
       const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
-      return `[${arr.map((v) => JSON.stringify(v)).join(", ")}].includes(${paramRef} as string | number)`;
+      return `[${arr.map((v: unknown) => JSON.stringify(v)).join(", ")}].includes(${paramRef} as string | number)`;
     }
 
     case "notIn": {
       const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
-      return `![${arr.map((v) => JSON.stringify(v)).join(", ")}].includes(${paramRef} as string | number)`;
+      return `![${arr.map((v: unknown) => JSON.stringify(v)).join(", ")}].includes(${paramRef} as string | number)`;
     }
 
     case "gt":
