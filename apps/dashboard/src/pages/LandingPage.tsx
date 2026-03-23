@@ -192,11 +192,7 @@ export function LandingPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (input.trim()) {
-      navigate(`/setup/agent?q=${encodeURIComponent(input.trim())}`);
-    } else {
-      navigate("/setup/agent");
-    }
+    navigate(`/go${input.trim() ? `?q=${encodeURIComponent(input.trim())}` : ""}`);
   };
 
   return (
