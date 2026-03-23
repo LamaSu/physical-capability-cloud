@@ -1142,7 +1142,6 @@ server.tool(
     status: {
       type: "string" as const,
       description: "Filter by proposal status: active, passed, rejected, executed",
-      optional: true,
     },
   },
   async ({ status }: { status?: string }) => {
