@@ -43,7 +43,7 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
-ARG BUILD_BUST=1
+ARG BUILD_BUST=2
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Build all packages except dashboard (tsc only — turbo handles concurrency)
 RUN npx turbo build --filter='!@pcc/dashboard' --concurrency=1
