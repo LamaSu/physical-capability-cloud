@@ -9,15 +9,21 @@ import { motion, useInView } from "framer-motion";
 function Typewriter({ text, speed = 30, onDone }: { text: string; speed?: number; onDone?: () => void }) {
   const [displayed, setDisplayed] = useState("");
   const [done, setDone] = useState(false);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
   const prefersReduced = useRef(
     typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
+  const hasRun = useRef(false);
 
   useEffect(() => {
+    if (hasRun.current) return;
+    hasRun.current = true;
+
     if (prefersReduced.current) {
       setDisplayed(text);
       setDone(true);
-      onDone?.();
+      onDoneRef.current?.();
       return;
     }
     let i = 0;
@@ -27,11 +33,11 @@ function Typewriter({ text, speed = 30, onDone }: { text: string; speed?: number
       if (i >= text.length) {
         clearInterval(iv);
         setDone(true);
-        onDone?.();
+        onDoneRef.current?.();
       }
     }, speed);
     return () => clearInterval(iv);
-  }, [text, speed, onDone]);
+  }, [text, speed]);
 
   return (
     <span>
