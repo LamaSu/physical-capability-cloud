@@ -190,3 +190,21 @@ body {
   from { --angle: 0deg; }
   to { --angle: 360deg; }
 }
+
+/* ── Holographic Landing Page ────────────────────────────────── */
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes holo-drift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .holo-card { transform: none !important; }
+  @keyframes holo-drift { 0%, 100% { background-position: 50% 50%; } }
+  @keyframes cursor-blink { 0%, 100% { opacity: 1; } }
+}
