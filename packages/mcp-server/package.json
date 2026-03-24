@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "pcc-mcp": "./dist/index.js"
+    "pcc-mcp": "./dist/index.js",
+    "pcc": "./dist/cli.js"
   },
   "main": "dist/index.js",
   "scripts": {
