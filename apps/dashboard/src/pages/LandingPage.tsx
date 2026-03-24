@@ -247,7 +247,7 @@ export function LandingPage() {
               className="text-[13px] tracking-[0.35em] uppercase font-medium"
               style={{ color: "#7B7B9A", fontFamily: "'Space Grotesk', sans-serif" }}
             >
-              capability.network
+              the physical capability cloud for agents
             </h1>
           </motion.div>
 
@@ -315,7 +315,7 @@ export function LandingPage() {
             className="flex items-center justify-center gap-6"
           >
             <a
-              href="/whitepaper.pdf"
+              href="/whitepaper.md"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs tracking-wide transition-colors duration-300"
