@@ -53,3 +53,42 @@ export * from "./adapters/index.js";
 export { KernelKeychain } from "./kernel-keychain.js";
 export { LogCaptureService } from "./log-capture-service.js";
 export type { LogEntry, LogChainVerification } from "./log-capture-service.js";
+// Opentrons operator stack
+export {
+  OpentronsMachineAdapter,
+  DeviceQueue,
+  ProtocolCompiler,
+  OpentronOperator,
+  ProtocolEstimator,
+  OperatorHealthTracker,
+} from "./opentrons/index.js";
+export type {
+  QueuedJob,
+  QueueStatus,
+  EnqueueResult,
+  QueueEvent,
+  CompiledProtocol,
+  OperatorConfig,
+  OperatorJob,
+  OpentronAdapterConfig,
+  OpentronRobotInfo,
+  DeckLayout,
+  LabwareDef,
+  DeckSlot,
+  PipetteInfo,
+  PipetteMount,
+  OpentronModule,
+  ModuleType,
+  OTProtocol,
+  OTRun,
+  OTCommand,
+  LiquidHandlerCapability,
+  LiquidAction,
+  TimeEstimate,
+  ConsumableEstimate,
+  CostEstimate,
+  FullEstimate,
+  JobHistoryEntry,
+  OperatorInfo,
+  CompletionRecord,
+} from "./opentrons/index.js";

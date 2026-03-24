@@ -9,7 +9,7 @@
 // ── Device Adapter Types ────────────────────────────────────────────────────
 
 /** Supported device adapter protocols */
-export type AdapterType = "octoprint" | "modbus" | "opcua" | "sila" | "generic-http";
+export type AdapterType = "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "opentrons";
 
 /**
  * Adapter configuration for a device.

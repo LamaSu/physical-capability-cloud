@@ -51,7 +51,8 @@ export type BuiltinCapabilityType =
   | "sample-prep"
   | "compound-synthesis"
   | "assay"
-  | "chromatography";
+  | "chromatography"
+  | "liquid-handler";
 
 /** Open string union: autocompletes builtins but accepts any string for extensibility */
 export type CapabilityType = BuiltinCapabilityType | (string & {});
