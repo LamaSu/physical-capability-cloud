@@ -281,7 +281,7 @@ export function LandingPage() {
               className="text-[11px] sm:text-xs tracking-[0.2em] uppercase"
               style={{ color: "#7B7B9A", fontFamily: "'Space Grotesk', sans-serif" }}
             >
-              CNC milling &middot; 3D printing &middot; HPLC analysis &middot; PCB fabrication &middot; injection molding &middot; laser cutting &middot; wet lab assays &middot; robotic assembly &middot; precision metrology &middot; chemical synthesis &middot; welding &middot; electroplating &middot; bioreactor runs &middot; soldering &middot; powder coating &middot; sterilization &middot; gene sequencing &middot; spectroscopy &middot; quality inspection &middot; calibration
+              CNC milling &middot; same-day delivery &middot; HPLC analysis &middot; PCB fabrication &middot; 3D printing &middot; furniture assembly &middot; laser cutting &middot; wet lab assays &middot; drone surveys &middot; chemical synthesis &middot; welding &middot; photo &amp; video &middot; gene sequencing &middot; equipment repair &middot; injection molding &middot; last-mile logistics &middot; quality inspection &middot; notary services &middot; robotic assembly &middot; on-site installation &middot; spectroscopy &middot; soil sampling &middot; vehicle wrapping &middot; calibration
             </p>
           </motion.div>
 
