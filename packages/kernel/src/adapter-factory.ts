@@ -20,6 +20,7 @@ import { ModbusSensorAdapter } from "./adapters/modbus-sensor-adapter.js";
 import { OPCUAAdapter } from "./adapters/opcua-adapter.js";
 import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
 import { IppAdapter } from "./adapters/ipp-adapter.js";
+import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
 
 // ---------------------------------------------------------------------------
 // Machine adapters
@@ -69,6 +70,16 @@ export function createMachineAdapter(
         kernelId,
         pollIntervalMs: cfg.pollIntervalMs as number | undefined,
         mockMode: (cfg.mockMode as boolean | undefined) ?? true,
+      });
+    }
+
+    case "opentrons": {
+      return new OpentronsMachineAdapter(device.id, {
+        url: (cfg.url as string | undefined) ?? "http://localhost:31950",
+        apiVersion: (cfg.apiVersion as string | undefined) ?? "2.18",
+        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+        maxQueueDepth: cfg.maxQueueDepth as number | undefined,
       });
     }
 
