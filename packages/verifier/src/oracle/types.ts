@@ -85,7 +85,7 @@ export const DEFAULT_ORACLE_CONFIG: OracleConfig = {
   chainId: 84532, // Base Sepolia
   rpcUrl: "https://sepolia.base.org",
   livenessSeconds: 7200,
-  bondAmount: BigInt(500_000_000), // 500 USDC (6 decimals)
+  bondAmount: BigInt(1_000_000), // 1 USDC (6 decimals) — low for testnet
   minScoreThreshold: 0.6,
   mock: true, // default to mock for dev
 };
@@ -101,8 +101,8 @@ export function configFromEnv(): OracleConfig {
     rpcUrl: process.env.BASE_RPC_URL ?? "https://sepolia.base.org",
     umaOracleAddress: process.env.UMA_OOV3_ADDRESS,
     bondTokenAddress:
-      process.env.UMA_BOND_TOKEN ?? "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-    bondAmount: BigInt(process.env.UMA_BOND_AMOUNT ?? "500000000"),
+      process.env.UMA_BOND_TOKEN ?? "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9",
+    bondAmount: BigInt(process.env.UMA_BOND_AMOUNT ?? "1000000"),
     livenessSeconds: parseInt(process.env.UMA_LIVENESS_SECONDS ?? "7200"),
     chainlinkRouter:
       process.env.CHAINLINK_ROUTER ??

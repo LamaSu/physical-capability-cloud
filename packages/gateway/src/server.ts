@@ -46,6 +46,8 @@ import { discoverRoutes } from "./routes/discover.js";
 import { ipRoutes } from "./routes/ip.js";
 import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
+import { statusRoutes } from "./routes/status.js";
+import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
@@ -126,6 +128,9 @@ export async function createGateway(port = 3200) {
     version: "0.1.0",
   }));
 
+  // Service status (public — shows which services are mock vs real)
+  await app.register(statusRoutes);
+
   // Auth routes (before other routes so session is available)
   await app.register(authRoutes);
 
@@ -184,6 +189,7 @@ export async function createGateway(port = 3200) {
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);
   await app.register(swfRoutes);
+  await app.register(subnetRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
