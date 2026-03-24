@@ -270,6 +270,21 @@ export function LandingPage() {
             </p>
           </motion.div>
 
+          {/* Capability ticker */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={showInput ? { opacity: 1 } : {}}
+            transition={{ duration: 1.2, delay: 0.1 }}
+            className="overflow-hidden"
+          >
+            <p
+              className="text-[11px] sm:text-xs tracking-[0.2em] uppercase"
+              style={{ color: "#7B7B9A", fontFamily: "'Space Grotesk', sans-serif" }}
+            >
+              CNC milling &middot; 3D printing &middot; HPLC analysis &middot; PCB fabrication &middot; injection molding &middot; laser cutting &middot; wet lab assays &middot; robotic assembly &middot; precision metrology &middot; chemical synthesis &middot; welding &middot; electroplating &middot; bioreactor runs &middot; soldering &middot; powder coating &middot; sterilization &middot; gene sequencing &middot; spectroscopy &middot; quality inspection &middot; calibration
+            </p>
+          </motion.div>
+
           {/* Input — the CTA */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
