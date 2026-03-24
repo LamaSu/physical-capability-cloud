@@ -10,4 +10,8 @@ export { ProtocolEstimator } from "./estimator.js";
 export type { TimeEstimate, ConsumableEstimate, CostEstimate, FullEstimate, JobHistoryEntry } from "./estimator.js";
 export { OperatorHealthTracker } from "./health.js";
 export type { OperatorInfo, CompletionRecord } from "./health.js";
+export { buildCapabilityCard } from "./capability-card.js";
+export type { CapabilityCard, ActionSchema, ParamSchema, LabwareOption, DeckSlotState } from "./capability-card.js";
+export { BundleValidator } from "./execution-bundle.js";
+export type { ExecutionBundle, BundleStep, BundleValidationResult, BundleValidationError, BundleErrorCode } from "./execution-bundle.js";
 export * from "./types.js";

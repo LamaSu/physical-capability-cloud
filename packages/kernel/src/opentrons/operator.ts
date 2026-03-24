@@ -30,6 +30,8 @@ import { ProtocolCompiler, type CompiledProtocol } from "./compiler.js";
 import type { OpentronAdapterConfig, DeckLayout, LabwareDef } from "./types.js";
 import { ProtocolEstimator, type FullEstimate, type JobHistoryEntry } from "./estimator.js";
 import { OperatorHealthTracker, type OperatorInfo, type CompletionRecord } from "./health.js";
+import { buildCapabilityCard, type CapabilityCard, type DeckSlotState } from "./capability-card.js";
+import { BundleValidator, type ExecutionBundle, type BundleValidationResult } from "./execution-bundle.js";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 import { JobRunner } from "../job-runner.js";
 
@@ -92,6 +94,8 @@ export class OpentronOperator {
   private config: OperatorConfig;
   private jobs: Map<string, OperatorJob> = new Map();
   private capability: Capability | null = null;
+  private bundleValidator: BundleValidator;
+  private lastCard: CapabilityCard | null = null;
   private jobCounter = 0;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -109,6 +113,7 @@ export class OpentronOperator {
     this.compiler = new ProtocolCompiler();
     this.estimator = new ProtocolEstimator();
     this.health = new OperatorHealthTracker();
+    this.bundleValidator = new BundleValidator();
     this.evidenceEmitter = new EvidenceEmitter(config.kernelId);
 
     // Wire queue executor to run jobs on the adapter
@@ -423,6 +428,187 @@ export class OpentronOperator {
         cancellationFeePercent: 0,
         fullRefundWindowMs: 5 * 60_000, // 5 minutes
       },
+    };
+  }
+
+  // ── Capability Card & Execution Bundle ──────────────────────────
+
+  /** Build a CapabilityCard — the full schema an agent needs to build a bundle */
+  async getCapabilityCard(): Promise<CapabilityCard> {
+    const pipettes = await this.adapter.getPipettes();
+    const modules = await this.adapter.getModules();
+    const queueStatus = this.queue.getStatus();
+
+    // Build deck slot states (default: 11 slots, all empty and configurable)
+    const deckSlots: DeckSlotState[] = [];
+    for (let i = 1; i <= 11; i++) {
+      const slot = String(i);
+      const mod = modules.find((m) => m.slot === slot);
+      deckSlots.push({
+        slot,
+        currentLabware: null,
+        configurable: !mod,
+        module: mod ? mod.moduleType : null,
+      });
+    }
+    // Slot 12 is fixed trash
+    deckSlots.push({ slot: "12", currentLabware: "opentrons_1_trash_1100ml_fixed", configurable: false, module: null });
+
+    const card = buildCapabilityCard(
+      this.kernelId,
+      this.name,
+      this.config.location,
+      pipettes,
+      modules,
+      deckSlots,
+      this.config.pricing,
+      queueStatus.depth,
+      queueStatus.estimatedWaitMs,
+    );
+
+    this.lastCard = card;
+    return card;
+  }
+
+  /**
+   * Submit an ExecutionBundle — validate against hardware, compile, and enqueue.
+   *
+   * This is the main entry point for the user agent → operator agent → machine flow.
+   * Returns validation result. If valid, the job is enqueued and executing.
+   */
+  async submitBundle(bundle: ExecutionBundle): Promise<BundleValidationResult & { jobId?: string; queuePosition?: number; estimatedWaitMs?: number }> {
+    // Get fresh card if we don't have one
+    const card = this.lastCard ?? await this.getCapabilityCard();
+    const pipettes = await this.adapter.getPipettes();
+
+    // Validate
+    const validation = this.bundleValidator.validate(bundle, card, pipettes);
+
+    if (!validation.valid) {
+      return validation;
+    }
+
+    // Convert bundle steps to ProtocolTemplate steps for the compiler
+    const deck: DeckLayout = {
+      slots: {},
+      modules: [],
+    };
+    for (const entry of bundle.deck) {
+      deck.slots[entry.slot] = {
+        loadName: entry.labwareLoadName,
+        displayName: entry.labwareDisplayName,
+        namespace: "opentrons",
+        version: 1,
+        slot: entry.slot,
+      };
+    }
+
+    // Build a ProtocolTemplate from bundle steps
+    const templateSteps = bundle.steps.map((s) => ({
+      id: s.id,
+      capabilityType: "liquid-handler" as const,
+      label: s.label ?? s.action,
+      action: s.action,
+      params: s.params as Record<string, unknown>,
+      estimatedDurationMs: 5000,
+      producesEvidence: true,
+      dependsOn: s.dependsOn,
+    }));
+
+    const template = {
+      id: `bundle-${bundle.idempotencyKey}`,
+      name: bundle.metadata?.name ?? "Execution Bundle",
+      description: bundle.metadata?.description ?? "",
+      version: "1.0",
+      authorId: bundle.submitter.agentId,
+      authorName: bundle.submitter.agentId,
+      status: "published" as const,
+      tags: bundle.metadata?.tags ?? [],
+      requiredCapabilities: ["liquid-handler"],
+      steps: templateSteps,
+      transfers: [],
+      parameters: [],
+      defaultValues: {},
+      estimatedTotalDurationMs: 0,
+      forkCount: 0,
+      runCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Compile to Opentrons Python
+    const compiled = this.compiler.compile(template, {}, deck);
+
+    // Estimate
+    const estimate = this.estimator.estimateFull(
+      template,
+      {},
+      this.config.pricing,
+      this.queue.getStatus().estimatedWaitMs,
+    );
+
+    // Check cost doesn't exceed budget
+    if (parseFloat(bundle.maxCost.amount) < estimate.cost.totalCost) {
+      return {
+        valid: false,
+        errors: [{
+          location: "constraint",
+          code: "COST_EXCEEDS_BUDGET",
+          message: `Estimated cost ${estimate.cost.totalCost.toFixed(2)} ${estimate.cost.currency} exceeds budget ${bundle.maxCost.amount} ${bundle.maxCost.currency}`,
+          suggestion: `Increase maxCost to at least ${estimate.cost.totalCost.toFixed(2)} or reduce protocol steps`,
+        }],
+        warnings: validation.warnings,
+      };
+    }
+
+    // Submit to queue
+    const jobId = `job-${this.kernelId}-${++this.jobCounter}`;
+    const queueResult = this.queue.enqueue({
+      id: jobId,
+      submittedBy: bundle.submitter.walletAddress,
+      estimatedDurationMs: estimate.time.executionMs,
+      payload: { protocolSource: compiled.source, bundle },
+    });
+
+    if (!queueResult.accepted) {
+      return {
+        valid: false,
+        errors: [{
+          location: "constraint",
+          code: "TOO_MANY_STEPS" as any,
+          message: queueResult.reason ?? "Queue full",
+          suggestion: "Try again later or find another operator",
+        }],
+        warnings: [],
+      };
+    }
+
+    // Track job
+    this.jobs.set(jobId, {
+      id: jobId,
+      submittedBy: bundle.submitter.walletAddress,
+      protocol: compiled,
+      protocolSource: compiled.source,
+      queueResult,
+      status: "queued",
+      progress: 0,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (this.capability) {
+      this.capability.queueDepth = this.queue.getStatus().depth;
+    }
+
+    return {
+      ...validation,
+      compiledProtocolSource: compiled.source,
+      estimatedDurationMs: estimate.time.executionMs,
+      estimatedCost: {
+        amount: estimate.cost.totalCost.toFixed(2),
+        currency: estimate.cost.currency,
+      },
+      jobId,
+      queuePosition: queueResult.position,
+      estimatedWaitMs: queueResult.estimatedWaitMs,
     };
   }
 
