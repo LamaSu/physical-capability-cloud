@@ -17,56 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
-const PCC_URL = (process.env.PCC_URL ?? "https://pcc-gateway-production.up.railway.app").replace(
-  /\/$/,
-  "",
-);
-
-// ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
-
-interface FetchOptions {
-  method?: "GET" | "POST";
-  body?: unknown;
-  query?: Record<string, string | undefined>;
-}
-
-async function pccFetch(path: string, opts: FetchOptions = {}): Promise<unknown> {
-  const url = new URL(path, PCC_URL);
-
-  // Append query parameters (skip undefined values)
-  if (opts.query) {
-    for (const [k, v] of Object.entries(opts.query)) {
-      if (v !== undefined && v !== "") {
-        url.searchParams.set(k, v);
-      }
-    }
-  }
-
-  const init: RequestInit = {
-    method: opts.method ?? "GET",
-    headers: { "Content-Type": "application/json" },
-  };
-
-  if (opts.method === "POST" && opts.body !== undefined) {
-    init.body = JSON.stringify(opts.body);
-  }
-
-  const res = await fetch(url.toString(), init);
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`PCC API ${res.status}: ${text || res.statusText}`);
-  }
-
-  return res.json();
-}
+import { PCC_URL, pccFetch } from "./api.js";
 
 // ---------------------------------------------------------------------------
 // Tool result helper
@@ -1120,10 +1071,7 @@ server.tool(
   "pcc_swf_participant_dashboard",
   "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history.",
   {
-    participantId: {
-      type: "string" as const,
-      description: "SWF participant ID (swf_part_XXXX)",
-    },
+    participantId: z.string().describe("SWF participant ID (swf_part_XXXX)"),
   },
   async ({ participantId }: { participantId: string }) => {
     const data = await pccFetch(`/api/swf/participants/${participantId}`);
@@ -1139,10 +1087,7 @@ server.tool(
   "pcc_swf_list_proposals",
   "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed).",
   {
-    status: {
-      type: "string" as const,
-      description: "Filter by proposal status: active, passed, rejected, executed",
-    },
+    status: z.string().optional().describe("Filter by proposal status: active, passed, rejected, executed"),
   },
   async ({ status }: { status?: string }) => {
     const query = status ? `?status=${status}` : "";
