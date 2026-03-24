@@ -52,6 +52,8 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
+import { provisionRoutes } from "./routes/provision.js";
+import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -99,6 +101,8 @@ export async function createGateway(port = 3200) {
 
   // Decorate request with userId (set by requireAuth / optionalAuth hooks)
   app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.decorateRequest("operatorId", null);
 
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
@@ -125,11 +129,17 @@ export async function createGateway(port = 3200) {
   // Auth routes (before other routes so session is available)
   await app.register(authRoutes);
 
+  // API key provisioning routes (under /api/auth/ — must be before apiGate)
+  await app.register(provisionRoutes);
+
   // AEGIS content scanning gate (before payment + REST routes — scans request bodies)
   const aegisEnabled = process.env.PCC_AEGIS_ENABLED !== "false";
   if (aegisEnabled) {
     await app.register(aegisGate);
   }
+
+  // API key gate — requires API key or session on all /api/* routes
+  await app.register(apiGate);
 
   // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);

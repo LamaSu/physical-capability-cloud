@@ -1,0 +1,134 @@
+/**
+ * API Key provisioning routes.
+ *
+ * POST /api/auth/provision  — create a new API key (public — this is how operators register)
+ * GET  /api/auth/keys       — list your active keys (requires auth)
+ * DELETE /api/auth/keys/:id — revoke a key (requires auth)
+ */
+
+import type { FastifyInstance } from "fastify";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { getRepos } from "../db.js";
+
+export async function provisionRoutes(app: FastifyInstance) {
+  // ── POST /api/auth/provision ──────────────────────────────────────
+  // Public endpoint — this is how new operators get their API key.
+  // They provide email + capability description, we issue a key.
+  app.post("/api/auth/provision", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      email?: string;
+      name?: string;
+      capability?: string;
+    };
+
+    if (!body.email) {
+      return reply.status(400).send({
+        error: "email_required",
+        message: "Email is required to provision an API key",
+      });
+    }
+
+    // Basic email validation
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+      return reply.status(400).send({
+        error: "invalid_email",
+        message: "Please provide a valid email address",
+      });
+    }
+
+    try {
+      const { rawKey, record } = provisionApiKey({
+        operatorId: body.email,
+        name: body.name,
+        description: body.capability
+          ? `Operator capability: ${body.capability}`
+          : undefined,
+        scopes: ["*"],
+        metadata: {
+          capability: body.capability,
+          provisionedAt: new Date().toISOString(),
+          source: "landing-page",
+        },
+      });
+
+      return reply.status(201).send({
+        api_key: rawKey,
+        key_id: record.id,
+        operator_id: body.email,
+        scopes: JSON.parse(record.scopes),
+        rate_limit: record.rateLimit,
+        expires_at: record.expiresAt,
+        created_at: record.createdAt,
+        warning: "Save this API key now — it will not be shown again.",
+        usage: {
+          header: `Authorization: Bearer ${rawKey}`,
+          example: `curl -H "Authorization: Bearer ${rawKey}" ${req.protocol}://${req.hostname}/api/capabilities/types`,
+        },
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to provision key";
+      if (message.includes("Maximum 5")) {
+        return reply.status(429).send({ error: "too_many_keys", message });
+      }
+      return reply.status(500).send({ error: "provision_failed", message });
+    }
+  });
+
+  // ── GET /api/auth/keys ────────────────────────────────────────────
+  // List active keys for the authenticated operator.
+  // Requires existing API key or SIWE session.
+  app.get("/api/auth/keys", async (req, reply) => {
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.status(401).send({ error: "Authentication required" });
+    }
+
+    const repo = getRepos().apiKeys;
+    const keys = repo.findByOperator(operatorId);
+
+    return reply.send({
+      keys: keys.map((k) => ({
+        id: k.id,
+        prefix: k.keyPrefix,
+        name: k.name,
+        description: k.description,
+        scopes: JSON.parse(k.scopes ?? "[]"),
+        rate_limit: k.rateLimit,
+        usage_count: parseInt(k.usageCount ?? "0", 10),
+        last_used_at: k.lastUsedAt,
+        created_at: k.createdAt,
+        expires_at: k.expiresAt,
+        revoked_at: k.revokedAt,
+        active: !k.revokedAt,
+      })),
+    });
+  });
+
+  // ── DELETE /api/auth/keys/:keyId ──────────────────────────────────
+  // Revoke an API key. Requires auth + must own the key.
+  app.delete("/api/auth/keys/:keyId", async (req, reply) => {
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.status(401).send({ error: "Authentication required" });
+    }
+
+    const { keyId } = req.params as { keyId: string };
+    const repo = getRepos().apiKeys;
+    const key = repo.findById(keyId);
+
+    if (!key) {
+      return reply.status(404).send({ error: "Key not found" });
+    }
+
+    if (key.operatorId !== operatorId) {
+      return reply.status(403).send({ error: "Not your key" });
+    }
+
+    if (key.revokedAt) {
+      return reply.status(409).send({ error: "Key already revoked" });
+    }
+
+    repo.revoke(keyId);
+    return reply.send({ ok: true, key_id: keyId, revoked_at: new Date().toISOString() });
+  });
+}

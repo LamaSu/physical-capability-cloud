@@ -63,4 +63,5 @@ export {
   BatchRepository,
   StoryRepository,
   SWFRepository,
+  ApiKeyRepository,
 } from "./repositories/index.js";

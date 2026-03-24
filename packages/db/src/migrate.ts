@@ -757,6 +757,24 @@ export function migrateDatabase(sqlite: Database.Database): void {
       ip_address TEXT
     );
 
+    -- ── API Keys ──────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      key_hash TEXT NOT NULL UNIQUE,
+      key_prefix TEXT NOT NULL,
+      operator_id TEXT NOT NULL,
+      name TEXT,
+      description TEXT,
+      scopes TEXT NOT NULL,
+      rate_limit TEXT NOT NULL DEFAULT '1000/hour',
+      usage_count TEXT NOT NULL DEFAULT '0',
+      last_used_at TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT,
+      metadata TEXT
+    );
+
     -- ── Story Protocol ────────────────────────────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS story_ip_registrations (
