@@ -25,6 +25,10 @@ declare module "fastify" {
   interface FastifyRequest {
     /** Authenticated ethereum address (set by requireAuth hook) */
     userId: `0x${string}` | null;
+    /** API key ID (set by apiGate middleware) */
+    apiKeyId: string | null;
+    /** Operator identifier — email or wallet address (set by apiGate middleware) */
+    operatorId: string | null;
   }
 }
 
