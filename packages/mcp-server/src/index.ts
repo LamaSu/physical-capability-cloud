@@ -1152,6 +1152,137 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Fiat Ramp tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_wallet_balance",
+  "Check agent wallet USDC balance, pending deposits, and API credits",
+  {},
+  async () => {
+    const data = await pccFetch("/api/fiat-ramp/status");
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_get_funding_options",
+  "Show available fiat-to-crypto funding options — Stripe for US/EU (card/ACH) and Yellowcard for 34 emerging market countries (bank transfer/mobile money)",
+  {},
+  async () => {
+    const data = await pccFetch("/api/fiat-ramp/status");
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_create_onramp_session",
+  "Create a fiat-to-crypto funding session — user pays with card/ACH/bank transfer/mobile money and receives USDC",
+  {
+    provider: z.enum(["stripe", "yellowcard"]).describe("Payment provider"),
+    amount: z.string().describe("Amount in source currency"),
+    walletAddress: z.string().describe("Destination wallet address"),
+    currency: z.string().optional().describe("Source fiat currency"),
+    country: z.string().optional().describe("Country code (for Yellowcard)"),
+    channelId: z.string().optional().describe("Payment channel ID (for Yellowcard)"),
+  },
+  async ({ provider, amount, walletAddress, currency, country, channelId }: { provider: "stripe" | "yellowcard"; amount: string; walletAddress: string; currency?: string; country?: string; channelId?: string }) => {
+    if (provider === "stripe") {
+      const data = await pccFetch("/api/fiat-ramp/stripe/onramp", {
+        method: "POST",
+        body: { walletAddress, sourceAmount: amount },
+      });
+      return toolResult(data);
+    }
+    const data = await pccFetch("/api/fiat-ramp/yellowcard/deposit", {
+      method: "POST",
+      body: {
+        walletAddress,
+        fiatAmount: amount,
+        fiatCurrency: currency ?? "NGN",
+        country: country ?? "NG",
+        channelId: channelId ?? "ch_ng_bank",
+        recipient: { name: "PCC Agent", country: country ?? "NG", phone: "+0000000000", address: "PCC", dob: "01/01/2000", idNumber: "000000", idType: "passport" },
+      },
+    });
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_get_provider_rates",
+  "Get live exchange rates from Yellowcard for emerging market currencies",
+  {},
+  async () => {
+    const data = await pccFetch("/api/fiat-ramp/yellowcard/rates");
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_submit_withdrawal",
+  "Withdraw USDC earnings to local fiat via bank transfer or mobile money (Yellowcard) — supports 34 countries",
+  {
+    amountUsd: z.string().describe("Amount in USD to withdraw"),
+    fiatCurrency: z.string().describe("Target fiat currency (NGN, KES, ZAR, BRL, MXN, etc.)"),
+    country: z.string().describe("Country code (NG, KE, ZA, BR, MX, etc.)"),
+    channelId: z.string().describe("Payment channel ID"),
+    accountName: z.string().describe("Account holder name"),
+    accountNumber: z.string().describe("Bank account number or phone number"),
+    accountType: z.string().describe("bank_transfer or mobile_money"),
+    walletAddress: z.string().describe("Source wallet address"),
+  },
+  async ({ amountUsd, fiatCurrency, country, channelId, accountName, accountNumber, accountType, walletAddress }: { amountUsd: string; fiatCurrency: string; country: string; channelId: string; accountName: string; accountNumber: string; accountType: string; walletAddress: string }) => {
+    const data = await pccFetch("/api/fiat-ramp/yellowcard/withdraw", {
+      method: "POST",
+      body: {
+        walletAddress,
+        amountUsd,
+        fiatCurrency,
+        country,
+        channelId,
+        destination: { type: accountType, accountName, accountNumber, country },
+        sender: { name: "PCC Agent", country, address: "PCC", dob: "01/01/2000", email: "agent@pcc.dev", idNumber: "000000", idType: "passport" },
+      },
+    });
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_get_ramp_activity",
+  "Show recent fiat on/off ramp activity — deposits, withdrawals, and statuses across all providers",
+  {
+    provider: z.string().optional().describe("Filter by provider: stripe, yellowcard, wise"),
+  },
+  async ({ provider }: { provider?: string }) => {
+    const query = provider ? { provider } : undefined;
+    const data = await pccFetch("/api/fiat-ramp/sessions", { query });
+    return toolResult(data);
+  },
+);
+
+server.tool(
+  "pcc_send_enterprise_payout",
+  "Send fiat payout to institutional bank account via Wise — 40+ currencies, no crypto exposure for enterprise operators",
+  {
+    amount: z.number().describe("Amount in USD"),
+    recipientName: z.string().describe("Recipient name"),
+    currency: z.string().describe("Target currency (GBP, EUR, INR, etc.)"),
+    accountType: z.string().describe("Account type (sort_code, iban, aba, etc.)"),
+    details: z.record(z.unknown()).describe("Bank account details"),
+    reference: z.string().describe("Payment reference"),
+  },
+  async ({ amount, recipientName, currency, accountType, details, reference }: { amount: number; recipientName: string; currency: string; accountType: string; details: Record<string, unknown>; reference: string }) => {
+    const data = await pccFetch("/api/fiat-ramp/wise/payout", {
+      method: "POST",
+      body: { sourceAmount: amount, recipient: { name: recipientName, currency, type: accountType, details }, reference },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 

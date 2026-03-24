@@ -315,7 +315,7 @@ export function LandingPage() {
             className="flex items-center justify-center gap-6"
           >
             <a
-              href="/whitepaper.md"
+              href="/whitepaper"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs tracking-wide transition-colors duration-300"

@@ -78,8 +78,8 @@ Every capability advertises the assurance level it can provide, from 0 to 3:
 
 - **Tier 0**: Self-reported completion. Job receipt with timestamp. Suitable for low-stakes jobs where the buyer trusts the operator.
 - **Tier 1**: Protocol verification. Machine-generated logs (OctoPrint completion state, IPP job-state, Modbus register snapshots) proving the adapter executed. Evidence is content-addressed to IPFS.
-- **Tier 2**: Quality verification. Sensor readings, QC photographs, dimensional measurements, or chromatography results. Evidence is encrypted via Lit Protocol and content-addressed. Bittensor subnet scores quality.
-- **Tier 3**: Third-party attestation. Independent EvaluatorAgent reviews evidence. ZK Merkle proof anchors the commitment on Starknet. Disputes go to UMA arbitration.
+- **Tier 2**: Quality verification. Sensor readings, QC photographs, dimensional measurements, or chromatography results. Evidence is encrypted via Lit Protocol and content-addressed. Oracle verification cascade (UMA Optimistic Oracle → Chainlink Functions → EigenLayer AVS) scores quality.
+- **Tier 3**: Third-party attestation. Independent EvaluatorAgent reviews evidence. ZK Merkle proof anchors the commitment on Starknet. Disputes resolved via UMA's DVM (Data Verification Mechanism) — token-holder vote with economic bonds.
 
 Higher tiers require larger bonds from the operator. A Tier-2 job requires the operator to post a slashable bond before the job begins. If evidence is rejected during the challenge window, the bond is slashed and redistributed to the challenger and the network treasury.
 
@@ -92,7 +92,7 @@ Settlement in PCC is not payment processing — it is programmable escrow with a
 3. Job executes. Evidence flows from the Kernel to IPFS and the evidence DB.
 4. Challenge window opens (duration varies by tier: 0–72 hours). Any party with standing can challenge by submitting counter-evidence.
 5. If no challenge is raised, funds release automatically to the operator. The bond is returned.
-6. If a challenge is raised, evidence goes to the verification layer (Bittensor consensus for Tier 2, UMA for Tier 3). The bond is slashed proportionally to the finding.
+6. If a challenge is raised, evidence goes to the oracle verification cascade (UMA Optimistic Oracle for Tier 2, UMA DVM escalation for Tier 3). The bond is slashed proportionally to the finding.
 
 This structure means operators have an economic incentive to do the work correctly, not just to complete it.
 
@@ -265,11 +265,17 @@ The `StarknetProofAnchoringService` computes Merkle proofs over evidence bundle 
 
 Three gateway routes expose this: `POST /api/zk/anchor-starknet`, `GET /api/zk/verify-starknet`, and `GET /api/zk/starknet-status`.
 
-### 5.4 Bittensor Verification Subnet
+### 5.4 Oracle Verification Cascade
 
-Tier-2 and Tier-3 evidence is scored by a Bittensor subnet. MockMiner nodes evaluate evidence quality against the tier's requirements (Did the sensor readings arrive? Are they in the plausible range? Does the QC photo match the job description?). A MockValidator applies Yuma Consensus to aggregate miner scores into a network-level quality verdict.
+Tier-2 and Tier-3 evidence is verified through a three-tier oracle cascade that prioritizes reliability and proven dispute resolution over novel consensus mechanisms:
 
-The subnet design is testnet-ready: the `BittensorSubnetBridge` connects PCC's evidence verification to a real Bittensor subnet, where economic incentives keep miners honest. Miners that consistently score incorrectly lose stake; miners that score correctly earn from the network.
+**UMA Optimistic Oracle v3 (primary)**: Evidence claims are submitted as on-chain assertions on Base with a USDC bond. A 2-hour liveness window allows any party to dispute. If undisputed, the assertion settles automatically and the bond is returned — net cost ~$0.01 per verification. UMA's track record: 98.2% of assertions resolve without dispute (battle-tested on Polymarket with $1B+ volume). If disputed, UMA's DVM (Data Verification Mechanism) escalates to a token-holder vote on Ethereum mainnet, resolving within 48-96 hours.
+
+**Chainlink Functions (fallback)**: If UMA is unavailable, evidence verification falls back to Chainlink's Decentralized Oracle Network on Base. JavaScript source code is executed by DON nodes that independently verify evidence hashes and tier compliance, reaching consensus via Chainlink's off-chain reporting protocol. Cost: 0.1-0.5 LINK per request. No dispute mechanism — this is a fast pre-screening fallback, not a dispute oracle.
+
+**EigenLayer AVS (future)**: A future upgrade path where restaked ETH collateral backs a custom Active Validator Service for evidence verification. EigenLayer's slashing conditions would provide cryptoeconomic security without UMA's liveness delay. Currently stubbed — production AVS development is a 6-12 month track.
+
+The `OracleVerificationBridge` cascades through these adapters automatically: if the primary oracle fails or is unavailable, it falls through to the next. All three implement the same `VerificationOracle` interface and share the same evidence evaluation logic (hash integrity, tier compliance, sensor plausibility, timestamp ordering).
 
 ### 5.5 W3C DIDs and Verifiable Credentials
 
@@ -325,7 +331,7 @@ CSD: pcc://capabilities/cnc-3axis/v1   →  ipId: 0xA1... (parent IP)
        └── Inspection report output    →  ipId: 0xC3... (grandchild, derivative)
 ```
 
-This creates an on-chain provenance chain. Anyone can trace: this part was made using that process, which was derived from that capability definition, authored by that person, verified by that subnet, and settled at that escrow address. The chain is immutable and publicly auditable.
+This creates an on-chain provenance chain. Anyone can trace: this part was made using that process, which was derived from that capability definition, authored by that person, verified by the oracle cascade, and settled at that escrow address. The chain is immutable and publicly auditable.
 
 Royalty flows are automatic: when the job's escrow releases on Base Sepolia, a configured portion (default 5% of job value) flows as a royalty payment to the parent CSD's IP Royalty Vault via `StoryIPService.payJobRoyalty()`. The vault accumulates revenue; Royalty Token holders claim their share whenever they choose via `claimRevenue()`.
 
@@ -432,7 +438,7 @@ This structure means the economic risk is symmetric and clearly allocated before
 Operators who consistently execute verified work earn additional rewards from the network treasury through DePIN epoch scoring. The `RewardEngine` evaluates operators on three axes:
 
 - **Uptime**: What fraction of scheduled hours was the device available and accepting jobs?
-- **Quality**: What is the mean evidence quality score from the Bittensor subnet?
+- **Quality**: What is the mean evidence quality score from the oracle verification cascade?
 - **Throughput**: How many verified jobs were completed in the epoch?
 
 Epoch rewards create a baseline income floor for operators who maintain reliable infrastructure, even during periods of low demand. This incentivizes sustained participation rather than cherry-picking only high-value jobs.
@@ -447,7 +453,7 @@ This creates a secondary market for manufacturing process IP. A researcher who d
 
 PCC's network treasury receives 10% of every job's royalty payment. These funds finance:
 
-- Bittensor subnet incentives (paying miners to evaluate evidence)
+- Oracle verification costs (UMA bonds, Chainlink DON fees, EigenLayer AVS operator incentives)
 - ZK proof anchoring costs (Starknet transaction fees)
 - Story Protocol transaction fees (IP registration and royalty distribution)
 - Protocol development grants
@@ -552,7 +558,7 @@ PCC is a pnpm monorepo of 22 packages and one application, implemented in TypeSc
 | `@pcc/kernel` | Shop Kernel runtime: adapters, EvidenceEmitter, JobRunner, SensorPipeline, BatchTracker, EncryptionService, IPFS/Storacha storage |
 | `@pcc/contracts` | Solidity: MilestoneEscrow, MockUSDC; TS: CapabilityCertificateService, RewardEngine, StoryIPService |
 | `@pcc/scheduler` | WorkflowCompiler (DAG/topo-sort), CapabilityRouter, competitive auction |
-| `@pcc/verifier` | VerifierMarket, EvidenceVerifier, CommitmentService (Merkle), ZKProofService, BittensorSubnetBridge |
+| `@pcc/verifier` | VerifierMarket, EvidenceVerifier, CommitmentService (Merkle), ZKProofService, OracleVerificationBridge (UMA + Chainlink + EigenLayer cascade) |
 | `@pcc/payments` | x402 middleware + client; Meteora DLMM capability pricing pools |
 | `@pcc/contract-builder` | Schema-driven contract builder: templates, profiles, resolver, pricing, validator |
 | `@pcc/orchestrator` | TransferGraph, ResourcePool, SampleTracker, ProtocolEngine, ProtocolRunner |
@@ -570,11 +576,12 @@ PCC is a pnpm monorepo of 22 packages and one application, implemented in TypeSc
 
 ### 10.2 Test Coverage
 
-The test suite has 1,174 passing tests across 69 test files. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
+The test suite has 2,245 passing tests across 118 test files. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
 
 - `scripts/e2e-simulation.ts`: Kernel-level E2E (job submit → adapter execute → evidence → settlement)
 - `scripts/agent-e2e-simulation.ts`: Agent-to-agent negotiation (UserAgent → BrokerAgent → KernelAgent)
-- `scripts/sovereign-e2e-simulation.ts`: 9-phase sovereign infrastructure test (DIDs, IPFS, Lit, ZK, Bittensor, DePIN, cNFTs)
+- `scripts/sovereign-e2e-simulation.ts`: 10-phase sovereign infrastructure test (DIDs, IPFS, Lit, ZK, Oracle Cascade, DePIN, cNFTs)
+- `scripts/oracle-cascade-test.ts`: 6-scenario oracle failover test (UMA → Chainlink → EigenLayer → all-fail → recovery)
 - `scripts/openclaw-print-deliver-e2e.ts`: OpenClaw print-and-deliver scenario (3 variations, 37 assertions)
 
 ### 10.3 Dual-Chain Architecture
@@ -643,7 +650,7 @@ Current Story integration targets the Aeneid testnet (chain 1513). Migration to 
 
 ## 12. Conclusion
 
-Physical Capability Cloud is the missing coordination layer for the physical world. It applies the three principles that made cloud infrastructure succeed — capability abstraction, unit pricing, and credible commitment — to physical manufacturing, adding the sovereign infrastructure (encrypted IPFS evidence, Lit Protocol access control, Bittensor quality verification, Starknet ZK anchoring) needed for trustless operation, and the IP layer (Story Protocol) needed to make physical work financially composable.
+Physical Capability Cloud is the missing coordination layer for the physical world. It applies the three principles that made cloud infrastructure succeed — capability abstraction, unit pricing, and credible commitment — to physical manufacturing, adding the sovereign infrastructure (encrypted IPFS evidence, Lit Protocol access control, oracle verification cascade with UMA + Chainlink + EigenLayer, Starknet ZK anchoring) needed for trustless operation, and the IP layer (Story Protocol) needed to make physical work financially composable.
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 

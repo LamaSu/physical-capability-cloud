@@ -32,6 +32,7 @@ import {
   TracesIcon,
   NegotiationIcon,
   IPRevenueIcon,
+  WalletIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -92,6 +93,7 @@ export const navGroups: NavGroup[] = [
     title: "Infrastructure",
     items: [
       { label: "Kernels", path: "/kernels", icon: <KernelsIcon /> },
+      { label: "Wallet", path: "/wallet", icon: <WalletIcon /> },
       { label: "Escrow", path: "/escrow", icon: <EscrowIcon /> },
       { label: "Settlement", path: "/settlement", icon: <EscrowIcon /> },
     ],
@@ -105,7 +107,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "Sovereign",
     items: [
-      { label: "Subnet", path: "/subnet", icon: <SubnetIcon /> },
+      { label: "Oracles", path: "/subnet", icon: <SubnetIcon /> },
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
       { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
       { label: "IP Revenue", path: "/ip", icon: <IPRevenueIcon /> },

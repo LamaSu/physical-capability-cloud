@@ -21,7 +21,8 @@ import {
   EvidenceVerifier,
   CommitmentService,
   ZKProofService,
-  BittensorSubnetBridge,
+  OracleVerificationBridge,
+  configFromEnv,
 } from "@pcc/verifier";
 import type { BenchmarkProofEnvelope } from "@pcc/verifier";
 
@@ -30,12 +31,13 @@ import type { BenchmarkProofEnvelope } from "@pcc/verifier";
 const tmpTasks: Map<string, MilestoneProcurement> = new Map();
 
 // ── Singleton Validator Bridge ───────────────────────────────────────
+// Config driven by env vars — set ORACLE_MOCK=false for live verification.
 
 const validatorBridge = new TMPValidatorBridge(
   new EvidenceVerifier("tmp-validator", "0x0000000000000000000000000000000000000001"),
   new CommitmentService(),
   new ZKProofService(),
-  new BittensorSubnetBridge({ numMinersToQuery: 5, minScoreThreshold: 0.6 }),
+  new OracleVerificationBridge(configFromEnv()),
 );
 
 // ── Routes ───────────────────────────────────────────────────────────
