@@ -1,115 +1,1717 @@
 {
-  "schema": "pcc-agent-package/1.0",
+  "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
-  "api_base": "https://pcc-gateway-production.up.railway.app",
+  "api_base": "https://capability.network",
 
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) — a verifiable on-chain network for physical capabilities. Machines register what they can do. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## FIRST: Get your API key\nBefore calling any other tool, you MUST call provision_api_key with the operator's email. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown once.\n\n## Key concepts\n- Shop Kernels = physical sites with equipment (labs, workshops, factories)\n- Capabilities = verified machine skills, proven by soulbound Metaplex Core NFTs\n- Assurance Tiers = evidence depth (0=self-reported, 1=sensor, 2=third-party, 3=ZK-proven+bonds)\n- Contracts = job specs with on-chain milestone escrow\n- Protocols = reusable workflow templates (DAG of steps + transfers)\n- Investment Pools = stake in capabilities, earn protocol fees\n\n## What you can do\n1. Provision your API key (MUST do first)\n2. Discover capabilities across the network\n3. Configure and price manufacturing jobs\n4. Build and submit contracts with escrow\n5. Onboard new machines and register devices\n6. Monitor jobs, evidence collection, and sensor data\n7. Archive and verify evidence with ZK proofs\n8. Browse, fork, and run protocol workflows\n9. Manage logistics: shipments, bookings, installations\n10. Track settlement epochs, escrow, and DePIN rewards\n11. Manage investment pools and bounties\n12. Communicate with other agents via A2A protocol\n\n## How to make API calls\nAll tool endpoints resolve against api_base. For example:\n  GET https://pcc-gateway-production.up.railway.app/api/capabilities/types\nAlways include your API key in the Authorization header.\n\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows (provision → discover → price → build → submit), guide step by step.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a verifiable on-chain network for physical capabilities. Machines register what they can do. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAfter step 5, your machines are discoverable and you can accept jobs.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
 
   "tools": [
-    { "name": "provision_api_key", "description": "CALL THIS FIRST. Provisions an API key for the operator. Returns a pcc_live_* key that must be included as 'Authorization: Bearer <key>' on all subsequent requests. The key is shown once — save it. Without it, all other endpoints return 401.", "input_schema": { "type": "object", "properties": { "email": { "type": "string", "description": "Operator's email address (required)" }, "name": { "type": "string", "description": "Operator's name (optional)" }, "capability": { "type": "string", "description": "What the operator does — e.g. 'FDM 3D printing', 'CNC milling', 'HPLC analysis'" } }, "required": ["email"] }, "endpoint": { "method": "POST", "path": "/api/auth/provision" } },
-    { "name": "setup_detect", "description": "Auto-detect current setup state: env vars, database, adapters, chain connectivity, storage, identity. Use this to see what's configured and what's missing.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/setup/detect" } },
-    { "name": "setup_generate_config", "description": "Generate a KERNEL_CONFIG JSON from device descriptions. Tell it what machines you have and it produces the config.", "input_schema": { "type": "object", "properties": { "devices": { "type": "array", "items": { "type": "object" }, "description": "Array of device descriptions with type, model, connection info" } }, "required": ["devices"] }, "endpoint": { "method": "POST", "path": "/api/setup/generate-config" } },
-    { "name": "setup_validate", "description": "Validate a kernel config (20+ checks: JSON structure, device connectivity, adapter compatibility).", "input_schema": { "type": "object", "properties": { "config": { "type": "object", "description": "Kernel config JSON to validate" } }, "required": ["config"] }, "endpoint": { "method": "POST", "path": "/api/setup/validate" } },
-    { "name": "setup_register_device", "description": "Register a device in the database with adapter config and capabilities.", "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string" }, "type": { "type": "string" }, "model": { "type": "string" }, "adapterType": { "type": "string", "description": "octoprint, modbus, opcua, sila, opentrons, generic-http" }, "adapterConfig": { "type": "object" } }, "required": ["kernelId", "type", "model"] }, "endpoint": { "method": "POST", "path": "/api/setup/register-device" } },
-    { "name": "setup_test_job", "description": "Submit a test job to verify the full pipeline works end-to-end.", "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string" }, "deviceId": { "type": "string" } }, "required": ["kernelId"] }, "endpoint": { "method": "POST", "path": "/api/setup/test-job" } },
-    { "name": "setup_status", "description": "Comprehensive setup status across 6 categories: gateway, database, adapters, chain, storage, identity.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/setup/status" } },
-    { "name": "list_capability_types", "description": "List all capability types on the network (FDM, SLA, CNC, HPLC, etc).", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/capabilities/types" } },
-    { "name": "search_capabilities", "description": "Search capability templates by type or keyword. Returns templates with pricing.", "input_schema": { "type": "object", "properties": { "query": { "type": "string", "description": "Search query" } }, "required": ["query"] }, "endpoint": { "method": "GET", "path": "/api/capabilities/templates" } },
-    { "name": "get_build_options", "description": "Get configuration options for a capability type (materials, dimensions, tolerances).", "input_schema": { "type": "object", "properties": { "type": { "type": "string" }, "selections": { "type": "object" }, "profileId": { "type": "string" } }, "required": ["type"] }, "endpoint": { "method": "POST", "path": "/api/build/options" } },
-    { "name": "calculate_price", "description": "Calculate price for a capability configuration.", "input_schema": { "type": "object", "properties": { "type": { "type": "string" }, "selections": { "type": "object" }, "profileId": { "type": "string" } }, "required": ["type", "selections"] }, "endpoint": { "method": "POST", "path": "/api/build/price" } },
-    { "name": "build_contract", "description": "Build and submit a capability contract with escrow.", "input_schema": { "type": "object", "properties": { "type": { "type": "string" }, "selections": { "type": "object" }, "assuranceTier": { "type": "number", "description": "0-3" }, "profileId": { "type": "string" } }, "required": ["type", "selections", "assuranceTier"] }, "endpoint": { "method": "POST", "path": "/api/build/contract" } },
-    { "name": "list_jobs", "description": "List all jobs with status.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/jobs" } },
-    { "name": "get_job", "description": "Get job details including progress and evidence.", "input_schema": { "type": "object", "properties": { "jobId": { "type": "string" } }, "required": ["jobId"] }, "endpoint": { "method": "GET", "path": "/api/jobs/{jobId}" } },
-    { "name": "list_kernels", "description": "List all Shop Kernels with status and capabilities.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/kernels" } },
-    { "name": "get_kernel", "description": "Get kernel details including devices and queue.", "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string" } }, "required": ["kernelId"] }, "endpoint": { "method": "GET", "path": "/api/kernels/{kernelId}" } },
-    { "name": "list_escrows", "description": "List escrow contracts with milestones and bonds.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/escrow" } },
-    { "name": "get_escrow", "description": "Get escrow details with milestones, bonds, challenge windows.", "input_schema": { "type": "object", "properties": { "escrowId": { "type": "string" } }, "required": ["escrowId"] }, "endpoint": { "method": "GET", "path": "/api/escrow/{escrowId}" } },
-    { "name": "get_marketplace_overview", "description": "Equipment marketplace demand/supply metrics.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/marketplace" } },
-    { "name": "get_operator_dashboard", "description": "Operator machines, earnings, maintenance.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/operator" } },
-    { "name": "list_batches", "description": "List active and completed batches.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/batches" } },
-    { "name": "list_evidence", "description": "List encrypted evidence bundles.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/evidence" } },
-    { "name": "get_logistics_overview", "description": "Logistics hub: shipments, installations, bookings.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/logistics" } },
-    { "name": "list_protocols", "description": "Protocol templates in the library.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/protocols" } },
-    { "name": "get_depin_stats", "description": "DePIN treasury, certificates, reward epochs.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/rewards" } },
-    { "name": "get_subnet_status", "description": "Bittensor verification subnet health.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/agents/status" } },
-    { "name": "submit_demand", "description": "Signal that you want a capability that doesn't exist on the network yet. Creates a demand signal and may auto-create a bounty if enough demand accumulates.", "input_schema": { "type": "object", "properties": { "requesterId": { "type": "string", "description": "ID of the requester" }, "capabilityType": { "type": "string", "description": "Type of capability wanted (e.g. electron-beam-welding, cryo-em)" }, "description": { "type": "string", "description": "Description of what you need" }, "estimatedJobValue": { "type": "number", "description": "Estimated payment per job in USD" }, "estimatedFrequency": { "type": "string", "enum": ["one-time", "weekly", "monthly", "daily"], "description": "How often you would use this capability" }, "assuranceTier": { "type": "number", "description": "Required assurance tier (0-3)" } }, "required": ["requesterId", "capabilityType", "description"] }, "endpoint": { "method": "POST", "path": "/api/bounty/demand" } },
-    { "name": "list_bounties", "description": "List open bounties for capabilities the network needs. Operators can claim these to earn rewards by onboarding new capabilities.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["open", "claimed", "verified", "paid", "expired"], "description": "Filter by bounty status" }, "capabilityType": { "type": "string", "description": "Filter by capability type" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/bounty/list" } },
-    { "name": "claim_bounty", "description": "Claim a bounty to onboard a new capability. The operator commits to registering the capability and completing verification.", "input_schema": { "type": "object", "properties": { "bountyId": { "type": "string", "description": "ID of the bounty to claim" }, "operatorId": { "type": "string", "description": "ID of the operator claiming the bounty" } }, "required": ["bountyId", "operatorId"] }, "endpoint": { "method": "POST", "path": "/api/bounty/claim" } },
-    { "name": "create_investment_pool", "description": "Create an investment pool for a capability bounty. Stakers earn future protocol fees.", "input_schema": { "type": "object", "properties": { "capabilityType": { "type": "string", "description": "Type of capability to invest in (e.g. cnc-milling, sla-printing)" }, "description": { "type": "string", "description": "Description of the capability pool" }, "targetAmount": { "type": "number", "description": "Funding target amount" }, "currency": { "type": "string", "enum": ["USDC", "CREDITS"], "description": "Currency for the pool" } }, "required": ["capabilityType", "description"] }, "endpoint": { "method": "POST", "path": "/api/pool/create" } },
-    { "name": "stake_in_pool", "description": "Stake USDC or credits into a capability investment pool", "input_schema": { "type": "object", "properties": { "poolId": { "type": "string", "description": "ID of the investment pool" }, "staker": { "type": "string", "description": "Address or DID of the staker" }, "amount": { "type": "number", "description": "Amount to stake" } }, "required": ["poolId", "staker", "amount"] }, "endpoint": { "method": "POST", "path": "/api/pool/stake" } },
-    { "name": "get_pool_earnings", "description": "Check your earnings from capability investment pools", "input_schema": { "type": "object", "properties": { "staker": { "type": "string", "description": "Address or DID of the staker" } }, "required": ["staker"] }, "endpoint": { "method": "GET", "path": "/api/pool/earnings/{staker}" } },
+    {
+      "name": "provision_api_key",
+      "description": "CALL THIS FIRST. Provisions an API key for the operator. Returns a pcc_live_* key that must be included as 'Authorization: Bearer <key>' on all subsequent requests. Accepts either email OR walletAddress. The key is shown once — save it. Without it, all other endpoints return 401.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "description": "Operator email address (use this OR walletAddress)" },
+          "walletAddress": { "type": "string", "description": "EVM wallet address (use this OR email)" },
+          "name": { "type": "string", "description": "Operator display name (optional)" },
+          "capability": { "type": "string", "description": "What the operator does — e.g. 'FDM 3D printing', 'CNC milling', 'HPLC analysis'" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/auth/provision" }
+    },
+    {
+      "name": "list_api_keys",
+      "description": "List all active API keys for the authenticated operator. Returns key IDs, prefixes, scopes, rate limits, usage counts, and creation/expiry timestamps. Requires a valid API key or SIWE session.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/auth/keys" }
+    },
+    {
+      "name": "revoke_api_key",
+      "description": "Revoke an API key permanently. The key will immediately stop working. You must own the key. Use list_api_keys to find the key ID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keyId": { "type": "string", "description": "Key ID to revoke (from list_api_keys)" }
+        },
+        "required": ["keyId"]
+      },
+      "endpoint": { "method": "DELETE", "path": "/api/auth/keys/{keyId}" }
+    },
 
-    { "name": "onboard_machine", "description": "Register a new machine on the PCC network. Provide machine details (name, category, manufacturer, model, capabilities, pricing, operator info) to create a registration.", "input_schema": { "type": "object", "properties": { "name": { "type": "string", "description": "Machine name" }, "category": { "type": "string", "description": "Machine category (e.g. fdm, cnc, laser-cut, hplc)" }, "manufacturer": { "type": "string", "description": "Manufacturer name" }, "model": { "type": "string", "description": "Model identifier" }, "description": { "type": "string", "description": "Machine description" }, "capabilities": { "type": "array", "items": { "type": "object" }, "description": "Array of capability objects" } }, "required": ["name", "category"] }, "endpoint": { "method": "POST", "path": "/api/onboard/register" } },
-    { "name": "analyze_machine_docs", "description": "AI analysis of machine documentation. Upload docs to get suggested capabilities, extracted specs, materials, and tolerances.", "input_schema": { "type": "object", "properties": { "document": { "type": "string", "description": "Document content or reference to analyze" } }, "required": [] }, "endpoint": { "method": "POST", "path": "/api/onboard/analyze" } },
-    { "name": "redeem_invite", "description": "One-click agent onboarding with an invite code. Provisions wallet, identity, LLM access, and PCC tools in a single call.", "input_schema": { "type": "object", "properties": { "inviteCode": { "type": "string", "description": "Invite code to redeem" }, "email": { "type": "string", "description": "Email address for the account" }, "password": { "type": "string", "description": "Password for the account" }, "name": { "type": "string", "description": "Display name (optional)" } }, "required": ["inviteCode", "email", "password"] }, "endpoint": { "method": "POST", "path": "/api/onboard/redeem" } },
-    { "name": "check_invite", "description": "Validate an invite code before redeeming it. Returns whether the code is valid and what it includes.", "input_schema": { "type": "object", "properties": { "code": { "type": "string", "description": "Invite code to check" } }, "required": ["code"] }, "endpoint": { "method": "GET", "path": "/api/onboard/check/{code}" } },
+    {
+      "name": "setup_detect",
+      "description": "Auto-detect current setup state: env vars, database, adapters, chain connectivity, storage, identity. Use this to see what's configured and what's missing before onboarding.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/setup/detect" }
+    },
+    {
+      "name": "setup_generate_config",
+      "description": "Generate a KERNEL_CONFIG JSON from device descriptions. Tell it what machines you have and it produces the config ready to paste into your environment.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "devices": { "type": "array", "items": { "type": "object" }, "description": "Array of device descriptions with type, model, and connection info" }
+        },
+        "required": ["devices"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/setup/generate-config" }
+    },
+    {
+      "name": "setup_validate",
+      "description": "Validate a kernel config (20+ checks: JSON structure, device connectivity, adapter compatibility). Returns validation errors and warnings.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "config": { "type": "object", "description": "Kernel config JSON to validate" }
+        },
+        "required": ["config"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/setup/validate" }
+    },
+    {
+      "name": "setup_register_device",
+      "description": "Register a device in the database with adapter config and capabilities. Part of Step 3 in the onboarding flow.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to register the device under" },
+          "type": { "type": "string", "description": "Device type (e.g. fdm-printer, cnc-mill, hplc)" },
+          "model": { "type": "string", "description": "Device model identifier" },
+          "adapterType": { "type": "string", "description": "Adapter type: octoprint, modbus, opcua, sila, opentrons, generic-http" },
+          "adapterConfig": { "type": "object", "description": "Adapter-specific configuration (host, port, auth, etc.)" }
+        },
+        "required": ["kernelId", "type", "model"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/setup/register-device" }
+    },
+    {
+      "name": "setup_test_job",
+      "description": "Submit a test job to verify the full pipeline works end-to-end (Step 4 of onboarding). Returns job ID and result.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to test" },
+          "deviceId": { "type": "string", "description": "Specific device ID to test (optional)" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/setup/test-job" }
+    },
+    {
+      "name": "setup_status",
+      "description": "Comprehensive setup status across 6 categories: gateway, database, adapters, chain, storage, identity. Use to confirm everything is green before going live.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/setup/status" }
+    },
 
-    { "name": "archive_evidence", "description": "Archive an evidence bundle to IPFS/Storacha for permanent decentralized storage. Returns the content-addressed CID.", "input_schema": { "type": "object", "properties": { "bundle": { "type": "object", "description": "Evidence bundle object to archive" } }, "required": ["bundle"] }, "endpoint": { "method": "POST", "path": "/api/evidence/archive" } },
-    { "name": "get_evidence_bundle", "description": "Get an encrypted evidence bundle by its bundle ID. Returns the encrypted payload and key capsules.", "input_schema": { "type": "object", "properties": { "bundleId": { "type": "string", "description": "Evidence bundle ID" } }, "required": ["bundleId"] }, "endpoint": { "method": "GET", "path": "/api/evidence/encrypted/{bundleId}" } },
-    { "name": "verify_evidence_zk", "description": "Verify a ZK proof by its proof ID. Checks the proof against its verification key and public inputs.", "input_schema": { "type": "object", "properties": { "proofId": { "type": "string", "description": "ID of the ZK proof to verify" } }, "required": ["proofId"] }, "endpoint": { "method": "POST", "path": "/api/zk/verify" } },
-    { "name": "commit_evidence", "description": "Create a Merkle commitment for an evidence bundle hash. Used as the first step in ZK proof generation.", "input_schema": { "type": "object", "properties": { "bundleHash": { "type": "string", "description": "SHA-256 hash of the evidence bundle" } }, "required": ["bundleHash"] }, "endpoint": { "method": "POST", "path": "/api/zk/commit" } },
-    { "name": "get_subnet_miners", "description": "List verification subnet miners on the Bittensor network. Returns miner addresses, scores, and leaderboard positions.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/verification/miners" } },
+    {
+      "name": "list_capability_types",
+      "description": "List all capability types registered on the network (FDM, SLA, CNC, HPLC, etc.) with metadata.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/capabilities/types" }
+    },
+    {
+      "name": "search_capabilities",
+      "description": "Search capability templates by type or keyword. Returns templates with pricing, assurance tiers, and availability.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search query (type name, material, process, etc.)" }
+        },
+        "required": ["query"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/capabilities/templates" }
+    },
+    {
+      "name": "get_build_options",
+      "description": "Get configuration options for a capability type (materials, dimensions, tolerances, assurance tiers). Use before calling calculate_price.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "description": "Capability type (e.g. fdm, cnc-3axis, hplc)" },
+          "selections": { "type": "object", "description": "Current selections to refine available options" },
+          "profileId": { "type": "string", "description": "Optional capability profile ID" }
+        },
+        "required": ["type"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/build/options" }
+    },
+    {
+      "name": "calculate_price",
+      "description": "Calculate price for a capability configuration. Returns base price, tier premiums, and estimated total cost.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "description": "Capability type" },
+          "selections": { "type": "object", "description": "Configuration selections (material, dimensions, quantity, etc.)" },
+          "profileId": { "type": "string", "description": "Optional capability profile ID" }
+        },
+        "required": ["type", "selections"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/build/price" }
+    },
+    {
+      "name": "build_contract",
+      "description": "Build and submit a capability contract with on-chain milestone escrow. Returns job ID and escrow address.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "description": "Capability type" },
+          "selections": { "type": "object", "description": "Configuration selections" },
+          "assuranceTier": { "type": "number", "description": "Assurance tier 0-3 (0=self-reported, 3=ZK-proven+bonds)" },
+          "profileId": { "type": "string", "description": "Optional capability profile ID" }
+        },
+        "required": ["type", "selections", "assuranceTier"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/build/contract" }
+    },
 
-    { "name": "get_protocol", "description": "Get protocol template details by ID. Returns steps, transfers, parameters, and metadata.", "input_schema": { "type": "object", "properties": { "id": { "type": "string", "description": "Protocol template ID" } }, "required": ["id"] }, "endpoint": { "method": "GET", "path": "/api/protocols/{id}" } },
-    { "name": "fork_protocol", "description": "Fork a protocol template to create your own version with parameter overrides.", "input_schema": { "type": "object", "properties": { "id": { "type": "string", "description": "Protocol template ID to fork" }, "name": { "type": "string", "description": "Name for the forked protocol" }, "parameterOverrides": { "type": "object", "description": "Parameter values to override from the source template" } }, "required": ["id"] }, "endpoint": { "method": "POST", "path": "/api/protocols/{id}/fork" } },
-    { "name": "publish_protocol", "description": "Publish a draft protocol template, making it visible in the protocol library for others to use.", "input_schema": { "type": "object", "properties": { "id": { "type": "string", "description": "Protocol template ID to publish" } }, "required": ["id"] }, "endpoint": { "method": "POST", "path": "/api/protocols/{id}/publish" } },
-    { "name": "start_protocol_run", "description": "Start execution of a protocol run that is in 'ready' or 'binding' state.", "input_schema": { "type": "object", "properties": { "runId": { "type": "string", "description": "Protocol run ID to start" } }, "required": ["runId"] }, "endpoint": { "method": "POST", "path": "/api/protocol-runs/{runId}/start" } },
-    { "name": "get_protocol_run", "description": "Get protocol run status including step progress, transfer status, and current phase.", "input_schema": { "type": "object", "properties": { "runId": { "type": "string", "description": "Protocol run ID" } }, "required": ["runId"] }, "endpoint": { "method": "GET", "path": "/api/protocol-runs/{runId}" } },
+    {
+      "name": "list_kernels",
+      "description": "List all Shop Kernels on the network with status and capability types. Optionally filter by status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by kernel status (online, offline, maintenance)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/kernels" }
+    },
+    {
+      "name": "get_kernel",
+      "description": "Get kernel details including full capability objects, devices, and queue.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/kernels/{kernelId}" }
+    },
+    {
+      "name": "get_kernel_devices",
+      "description": "List all devices registered under a specific kernel, including adapter configs and device types.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/kernels/{kernelId}/devices" }
+    },
+    {
+      "name": "get_kernel_jobs",
+      "description": "List all jobs submitted to a specific kernel, including job status and progress.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/kernels/{kernelId}/jobs" }
+    },
+    {
+      "name": "create_kernel",
+      "description": "Register a new Shop Kernel (physical site) on the PCC network. Part of Step 2 in the onboarding flow.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Kernel/site name (e.g. 'BioPunk Lab - Bay A')" },
+          "description": { "type": "string", "description": "Description of the site and its capabilities" },
+          "location": { "type": "object", "description": "Location object with address and geo coordinates" },
+          "config": { "type": "object", "description": "Kernel configuration JSON" }
+        },
+        "required": ["name"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/kernels" }
+    },
 
-    { "name": "get_workflows", "description": "List active instrument workflows in the orchestrator. Optionally filter by status.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "description": "Filter by workflow status (e.g. running, completed)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/orchestrator/workflows" } },
-    { "name": "get_workflow", "description": "Get detailed workflow information including steps, node assignments, and progress.", "input_schema": { "type": "object", "properties": { "workflowId": { "type": "string", "description": "Workflow ID" } }, "required": ["workflowId"] }, "endpoint": { "method": "GET", "path": "/api/orchestrator/workflows/{workflowId}" } },
-    { "name": "get_transfer_graphs", "description": "Get resource transfer graphs showing instrument topology, transfer edges, and mechanisms for all kernels.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/orchestrator/graphs" } },
+    {
+      "name": "list_jobs",
+      "description": "List all jobs with status. Optionally filter by kernelId or status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Filter by kernel ID" },
+          "status": { "type": "string", "description": "Filter by status (pending, running, completed, failed)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/jobs" }
+    },
+    {
+      "name": "get_job",
+      "description": "Get job details including progress, evidence bundles, and milestones.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID" }
+        },
+        "required": ["jobId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/jobs/{jobId}" }
+    },
+    {
+      "name": "update_job_status",
+      "description": "Update a job's status and optional progress percentage. Used by kernels to report job progress.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID" },
+          "status": { "type": "string", "description": "New status (pending, running, completed, failed, cancelled)" },
+          "progress": { "type": "number", "description": "Progress percentage 0-100 (optional)" }
+        },
+        "required": ["jobId", "status"]
+      },
+      "endpoint": { "method": "PATCH", "path": "/api/jobs/{jobId}/status" }
+    },
 
-    { "name": "get_shipments", "description": "List equipment shipments with tracking status. Optionally filter by status.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "description": "Filter by shipment status (e.g. in_transit, delivered, pickup_scheduled)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/logistics/shipments" } },
-    { "name": "create_shipment", "description": "Create a new equipment shipment with origin, destination, package details, and provider.", "input_schema": { "type": "object", "properties": { "equipmentDescription": { "type": "string", "description": "Description of equipment being shipped" }, "providerId": { "type": "string", "description": "Logistics provider ID" }, "origin": { "type": "object", "description": "Origin location with label, address, geo coordinates" }, "destination": { "type": "object", "description": "Destination location with label, address, geo coordinates" }, "package": { "type": "object", "description": "Package details (weightKg, dimensions, fragile, etc.)" } }, "required": ["equipmentDescription"] }, "endpoint": { "method": "POST", "path": "/api/logistics/shipments" } },
-    { "name": "get_shipment_quote", "description": "Get shipping quotes from logistics providers based on origin, destination, weight, and priority.", "input_schema": { "type": "object", "properties": { "originZip": { "type": "string", "description": "Origin ZIP code" }, "destinationZip": { "type": "string", "description": "Destination ZIP code" }, "weightKg": { "type": "number", "description": "Package weight in kg" }, "priority": { "type": "string", "enum": ["standard", "expedited", "rush"], "description": "Shipping priority level" } }, "required": [] }, "endpoint": { "method": "POST", "path": "/api/logistics/shipments/quote" } },
-    { "name": "get_installations", "description": "List equipment installation orders with step progress and status.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "description": "Filter by installation status (e.g. draft, scheduled, in_progress, completed)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/logistics/installations" } },
-    { "name": "get_space_bookings", "description": "List space bookings for hosting equipment. Optionally filter by status or space.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "description": "Filter by booking status" }, "spaceId": { "type": "string", "description": "Filter by space ID" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/logistics/bookings" } },
+    {
+      "name": "list_escrows",
+      "description": "List escrow contracts with milestones and bonds. Optionally filter by status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by escrow status" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow" }
+    },
+    {
+      "name": "get_escrow",
+      "description": "Get escrow details. Pass a DB ID for database record (with milestones and disputes), or an EVM address (0x...) to read directly from the blockchain.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "escrowId": { "type": "string", "description": "DB escrow ID or on-chain contract address (0x...)" }
+        },
+        "required": ["escrowId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/{escrowId}" }
+    },
+    {
+      "name": "get_escrow_chain_state",
+      "description": "Read full on-chain escrow state with all milestone details from the blockchain. More detailed than get_escrow for on-chain contracts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "On-chain escrow contract address (0x...)" }
+        },
+        "required": ["address"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/{address}/state" }
+    },
+    {
+      "name": "get_escrow_events",
+      "description": "Get on-chain event history for an escrow contract. Returns funding, release, dispute, and bond events.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "On-chain escrow contract address (0x...)" },
+          "fromBlock": { "type": "string", "description": "Starting block number (optional)" }
+        },
+        "required": ["address"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/{address}/events" }
+    },
+    {
+      "name": "get_token_balance",
+      "description": "Read an ERC-20 token balance for an account address from the blockchain.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tokenAddress": { "type": "string", "description": "ERC-20 token contract address (0x...)" },
+          "account": { "type": "string", "description": "Account address to check balance for (0x...)" }
+        },
+        "required": ["tokenAddress", "account"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/token/{tokenAddress}/balance/{account}" }
+    },
+    {
+      "name": "get_token_allowance",
+      "description": "Read the ERC-20 token allowance granted by an owner to a spender from the blockchain.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tokenAddress": { "type": "string", "description": "ERC-20 token contract address (0x...)" },
+          "owner": { "type": "string", "description": "Token owner address (0x...)" },
+          "spender": { "type": "string", "description": "Spender address (0x...)" }
+        },
+        "required": ["tokenAddress", "owner", "spender"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/token/{tokenAddress}/allowance/{owner}/{spender}" }
+    },
+    {
+      "name": "get_escrow_dispute",
+      "description": "Read dispute state for a specific milestone from the blockchain.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index (0-based)" }
+        },
+        "required": ["address", "milestoneIndex"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/{address}/dispute/{milestoneIndex}" }
+    },
+    {
+      "name": "get_write_status",
+      "description": "Check if on-chain write operations are enabled (requires PCC_GATEWAY_PRIVATE_KEY to be configured). Returns write status and signer address.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/escrow/chain/write-status" }
+    },
+    {
+      "name": "fund_escrow",
+      "description": "Fund an escrow contract on-chain. The payer must have already approved the token transfer (use approve_token first). Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" }
+        },
+        "required": ["address"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/fund" }
+    },
+    {
+      "name": "approve_token",
+      "description": "Approve ERC-20 token spending for an escrow contract on-chain. Call this before fund_escrow. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...) to approve as spender" },
+          "amount": { "type": "string", "description": "Amount to approve in wei (as string to avoid precision loss)" },
+          "tokenAddress": { "type": "string", "description": "ERC-20 token address to approve (optional, uses default if omitted)" }
+        },
+        "required": ["address", "amount"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/approve" }
+    },
+    {
+      "name": "release_milestone",
+      "description": "Release a milestone payment on-chain after the challenge window has expired. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index to release (0-based)" }
+        },
+        "required": ["address", "milestoneIndex"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/release/{milestoneIndex}" }
+    },
+    {
+      "name": "file_escrow_dispute",
+      "description": "File a dispute against a milestone on-chain. Challenger must post a bond and provide evidence hash. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index to dispute (0-based)" },
+          "challengerBond": { "type": "string", "description": "Bond amount in wei (as string)" },
+          "challengerEvidenceHash": { "type": "string", "description": "Evidence hash as 0x-prefixed hex bytes32" },
+          "reason": { "type": "string", "description": "Human-readable dispute reason" }
+        },
+        "required": ["address", "milestoneIndex", "challengerBond", "challengerEvidenceHash", "reason"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/dispute/{milestoneIndex}" }
+    },
+    {
+      "name": "deposit_bond",
+      "description": "Deposit an operator bond for a milestone on-chain. Required for Assurance Tier 3 jobs. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index to post bond for (0-based)" }
+        },
+        "required": ["address", "milestoneIndex"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/deposit-bond/{milestoneIndex}" }
+    },
+    {
+      "name": "submit_evidence_hash",
+      "description": "Submit an evidence bundle hash for a milestone on-chain. Links the physical evidence to the on-chain settlement record. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index (0-based)" },
+          "evidenceBundleHash": { "type": "string", "description": "Evidence bundle hash as 0x-prefixed hex bytes32" }
+        },
+        "required": ["address", "milestoneIndex", "evidenceBundleHash"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/evidence/{milestoneIndex}" }
+    },
+    {
+      "name": "submit_attestation",
+      "description": "Submit a verifier attestation for a milestone on-chain. Used by third-party verifiers (Bittensor subnet) to confirm evidence quality. Returns transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Escrow contract address (0x...)" },
+          "milestoneIndex": { "type": "number", "description": "Milestone index (0-based)" },
+          "attestationHash": { "type": "string", "description": "Attestation hash as 0x-prefixed hex bytes32" }
+        },
+        "required": ["address", "milestoneIndex", "attestationHash"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/chain/{address}/attestation/{milestoneIndex}" }
+    },
 
-    { "name": "search_spaces", "description": "Search for lab/workshop hosting spaces. Filter by size, access schedule, and other requirements.", "input_schema": { "type": "object", "properties": { "maxSqft": { "type": "number", "description": "Maximum square footage" }, "access": { "type": "string", "description": "Access schedule filter (24/7, business-hours, all)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/spaces" } },
-    { "name": "get_space", "description": "Get detailed information about a hosting space including power, amenities, safety features, and pricing.", "input_schema": { "type": "object", "properties": { "id": { "type": "string", "description": "Space ID" } }, "required": ["id"] }, "endpoint": { "method": "GET", "path": "/api/spaces/{id}" } },
-    { "name": "match_spaces", "description": "Find hosting spaces that match specific machine requirements (voltage, area, etc.). Returns scored matches.", "input_schema": { "type": "object", "properties": { "voltage": { "type": "number", "description": "Required voltage (e.g. 208, 480)" }, "minArea": { "type": "number", "description": "Minimum floor area in square feet" } }, "required": [] }, "endpoint": { "method": "POST", "path": "/api/spaces/match" } },
+    {
+      "name": "archive_evidence",
+      "description": "Archive an evidence bundle to IPFS/Storacha for permanent decentralized storage. Returns the content-addressed CID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundle": { "type": "object", "description": "Evidence bundle object to archive" }
+        },
+        "required": ["bundle"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/evidence/archive" }
+    },
+    {
+      "name": "get_evidence_bundle",
+      "description": "Get an encrypted evidence bundle by its bundle ID. Returns the encrypted payload and key capsules.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Evidence bundle ID" }
+        },
+        "required": ["bundleId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/evidence/encrypted/{bundleId}" }
+    },
+    {
+      "name": "grant_evidence_access",
+      "description": "Grant a new recipient access to an encrypted evidence bundle. Creates a re-encrypted key capsule for the recipient.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Evidence bundle ID" },
+          "recipientAddress": { "type": "string", "description": "Recipient EVM address (0x...)" },
+          "accessLevel": { "type": "string", "enum": ["full", "selective", "summary_only"], "description": "Level of access to grant (default: full)" }
+        },
+        "required": ["bundleId", "recipientAddress"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/evidence/encrypted/{bundleId}/grant" }
+    },
+    {
+      "name": "list_evidence_grants",
+      "description": "List all evidence access grants for an address. Returns bundles the address has been granted access to.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "EVM address to look up grants for (0x...)" }
+        },
+        "required": ["address"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/evidence/grants/{address}" }
+    },
+    {
+      "name": "archive_encrypted_bundle",
+      "description": "Archive an encrypted evidence bundle to IPFS and store the resulting CID in the database. Idempotent — returns existing CID if already archived.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Encrypted evidence bundle ID" }
+        },
+        "required": ["bundleId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/evidence/{bundleId}/archive" }
+    },
+    {
+      "name": "get_bundle_ipfs",
+      "description": "Get IPFS CIDs for a bundle — returns the primary CID, metadata CID, and Filecoin deal ID if available.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Evidence bundle ID" }
+        },
+        "required": ["bundleId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/evidence/{bundleId}/ipfs" }
+    },
+    {
+      "name": "retrieve_ipfs",
+      "description": "Retrieve raw data from IPFS by CID. Used to fetch archived evidence bundles from decentralized storage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cid": { "type": "string", "description": "IPFS content identifier (CID)" }
+        },
+        "required": ["cid"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/evidence/ipfs/{cid}" }
+    },
+    {
+      "name": "get_lit_conditions",
+      "description": "Get Lit Protocol access conditions for a Lit-encrypted evidence bundle. Returns the conditions that gate decryption.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Evidence bundle ID (must be Lit-encrypted)" }
+        },
+        "required": ["bundleId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/evidence/{bundleId}/lit-conditions" }
+    },
+    {
+      "name": "lit_decrypt",
+      "description": "Decrypt a Lit Protocol-encrypted evidence bundle using a Lit auth signature. Returns the decrypted bundle payload.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleId": { "type": "string", "description": "Evidence bundle ID (must be Lit-encrypted)" },
+          "authSig": {
+            "type": "object",
+            "description": "Lit auth signature object with sig, derivedVia, signedMessage, and address fields",
+            "properties": {
+              "sig": { "type": "string" },
+              "derivedVia": { "type": "string" },
+              "signedMessage": { "type": "string" },
+              "address": { "type": "string" }
+            }
+          }
+        },
+        "required": ["bundleId", "authSig"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/evidence/{bundleId}/lit-decrypt" }
+    },
 
-    { "name": "get_operator_machines", "description": "List all machines registered under the operator account with utilization and uptime stats.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/operator/machines" } },
-    { "name": "get_operator_earnings", "description": "Get operator earnings breakdown over a time period. Includes daily earnings and cumulative totals.", "input_schema": { "type": "object", "properties": { "period": { "type": "string", "enum": ["7d", "30d", "90d", "1y"], "description": "Time period for earnings data" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/operator/earnings" } },
-    { "name": "get_operator_certs", "description": "List operator certifications (OSHA, safety training, PCC network certs) with validity status.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/operator/certifications" } },
+    {
+      "name": "verify_evidence_zk",
+      "description": "Verify a ZK proof by its proof ID. Checks the proof against its verification key and public inputs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "proofId": { "type": "string", "description": "ID of the ZK proof to verify" }
+        },
+        "required": ["proofId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/zk/verify" }
+    },
+    {
+      "name": "commit_evidence",
+      "description": "Create a Merkle commitment for an evidence bundle hash. Used as the first step in ZK proof generation for Tier 3 assurance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleHash": { "type": "string", "description": "SHA-256 hash of the evidence bundle" }
+        },
+        "required": ["bundleHash"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/zk/commit" }
+    },
 
-    { "name": "get_sensor_channels", "description": "List all registered sensor channels across kernels. Returns channel descriptors with units and ranges.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/sensors/channels" } },
-    { "name": "get_kernel_sensors", "description": "Get sensor channels for a specific kernel. Returns live channel descriptors.", "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string", "description": "Kernel ID to get sensors for" } }, "required": ["kernelId"] }, "endpoint": { "method": "GET", "path": "/api/sensors/channels/{kernelId}" } },
+    {
+      "name": "get_telemetry_stats",
+      "description": "Get aggregate pipeline telemetry statistics including phase timings, success rates, and throughput metrics across all jobs.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/telemetry/stats" }
+    },
+    {
+      "name": "get_active_telemetry",
+      "description": "List currently active jobs with their current pipeline phase and telemetry status.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/telemetry/active" }
+    },
+    {
+      "name": "get_job_telemetry",
+      "description": "Get full event timeline for a specific job — all pipeline phase transitions with timings and metadata.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID to get pipeline timeline for" }
+        },
+        "required": ["jobId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/telemetry/pipeline/{jobId}" }
+    },
+    {
+      "name": "get_telemetry_logs",
+      "description": "Query structured logs with filters for level, source, jobId, kernelId, time range, and full-text search.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "level": { "type": "string", "enum": ["debug", "info", "warn", "error"], "description": "Filter by log level" },
+          "source": { "type": "string", "description": "Filter by source module" },
+          "jobId": { "type": "string", "description": "Filter by job ID" },
+          "kernelId": { "type": "string", "description": "Filter by kernel ID" },
+          "search": { "type": "string", "description": "Full-text search query" },
+          "after": { "type": "string", "description": "Return logs after this ISO timestamp" },
+          "before": { "type": "string", "description": "Return logs before this ISO timestamp" },
+          "limit": { "type": "number", "description": "Max entries to return (default 200)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/telemetry/logs" }
+    },
+    {
+      "name": "emit_telemetry",
+      "description": "Manually emit a telemetry event for a job pipeline phase. Used by kernels and agents to report execution progress.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID" },
+          "phase": { "type": "string", "description": "Pipeline phase name (e.g. intake, binding, execution, evidence, settlement)" },
+          "status": { "type": "string", "enum": ["started", "completed", "failed", "skipped"], "description": "Phase status" },
+          "duration_ms": { "type": "number", "description": "Phase duration in milliseconds" },
+          "level": { "type": "string", "enum": ["info", "warn", "error", "debug"], "description": "Log level for this event" },
+          "source": { "type": "string", "description": "Source module or component" },
+          "metadata": { "type": "object", "description": "Additional event metadata" }
+        },
+        "required": ["jobId", "phase", "status"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/telemetry/emit" }
+    },
 
-    { "name": "get_settlement_status", "description": "Get settlement pipeline status including pending operations count, total value queued, and smart account address.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/settlement/status" } },
-    { "name": "get_settlement_epochs", "description": "Get settlement epoch history showing past batch settlements with timing and operation counts.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/settlement/epochs" } },
+    {
+      "name": "submit_for_human_verification",
+      "description": "Submit an evidence bundle for human verification. Selects a panel of verifiers from the network and returns assigned verifier IDs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundleHash": { "type": "string", "description": "SHA-256 hash of the evidence bundle" },
+          "photoRef": { "type": "string", "description": "Reference to the photo evidence (CID or URL)" },
+          "referenceRef": { "type": "string", "description": "Reference to the reference/spec document" },
+          "comparisonScore": { "type": "number", "description": "Pre-computed comparison score 0-1 (optional)" },
+          "verifierCount": { "type": "number", "description": "Number of verifiers to assign (default 5)" }
+        },
+        "required": ["bundleHash", "photoRef", "referenceRef"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/verification/submit" }
+    },
+    {
+      "name": "get_verification_assignments",
+      "description": "Get pending verification assignments for a verifier node. Returns requests this verifier has been assigned but not yet responded to.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "verifierId": { "type": "string", "description": "Verifier node ID" }
+        },
+        "required": ["verifierId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/verification/assignments" }
+    },
+    {
+      "name": "get_verification_status",
+      "description": "Get verification status for a request. Returns vote tally, consensus state, dispute list, and pending response count.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "requestId": { "type": "string", "description": "Verification request ID (hvreq_...)" }
+        },
+        "required": ["requestId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/verification/{requestId}" }
+    },
+    {
+      "name": "respond_to_verification",
+      "description": "Submit a verifier's verdict for a verification request. Returns consensus state after this vote.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "requestId": { "type": "string", "description": "Verification request ID (hvreq_...)" },
+          "verifierId": { "type": "string", "description": "Verifier node ID" },
+          "verdict": { "type": "string", "enum": ["match", "no_match", "inconclusive"], "description": "Verifier's verdict" },
+          "notes": { "type": "string", "description": "Optional notes explaining the verdict" },
+          "signature": { "type": "string", "description": "Cryptographic signature of the verdict" }
+        },
+        "required": ["requestId", "verifierId", "verdict", "signature"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/verification/{requestId}/respond" }
+    },
+    {
+      "name": "dispute_verification",
+      "description": "File a dispute against the consensus verdict. Only verifiers who submitted a response can dispute. Requires additional evidence CID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "requestId": { "type": "string", "description": "Verification request ID (hvreq_...)" },
+          "disputerId": { "type": "string", "description": "Verifier node ID filing the dispute" },
+          "reason": { "type": "string", "description": "Reason for disputing the consensus" },
+          "evidenceCid": { "type": "string", "description": "IPFS CID of the counter-evidence" }
+        },
+        "required": ["requestId", "disputerId", "reason", "evidenceCid"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/verification/{requestId}/dispute" }
+    },
 
-    { "name": "get_equipment_classes", "description": "List equipment classes (FDM printers, CNC mills, etc.) with market snapshot data including utilization and demand.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/marketplace/classes" } },
-    { "name": "get_demand_supply", "description": "Get network-wide demand vs supply timeline data for capacity planning and market analysis.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/marketplace/demand-supply" } },
-    { "name": "calculate_roi", "description": "Calculate ROI projection for onboarding equipment. Returns month-by-month revenue, cost, and break-even analysis.", "input_schema": { "type": "object", "properties": { "monthlyCost": { "type": "number", "description": "Monthly operating cost in USD" }, "avgJobValue": { "type": "number", "description": "Average revenue per job in USD" }, "utilization": { "type": "number", "description": "Expected utilization percentage (0-100)" } }, "required": [] }, "endpoint": { "method": "POST", "path": "/api/marketplace/roi" } },
+    {
+      "name": "register_capability_ip",
+      "description": "Register a capability as a Story Protocol IP Asset. Returns an ipId and NFT token. The designer earns royalties whenever this capability is used.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "capability": {
+            "type": "object",
+            "description": "Capability object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "type": { "type": "string" },
+              "kernelId": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "required": ["id", "name", "type", "kernelId"]
+          },
+          "designerAddress": { "type": "string", "description": "EVM address of the capability designer" },
+          "designerName": { "type": "string", "description": "Display name of the designer" },
+          "commercialRevShare": { "type": "number", "description": "Revenue share percentage for commercial use (0-100)" },
+          "ipfsCid": { "type": "string", "description": "IPFS CID of the capability spec document (optional)" }
+        },
+        "required": ["capability", "designerAddress", "designerName"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/register-capability" }
+    },
+    {
+      "name": "register_job_evidence_ip",
+      "description": "Register job evidence as a derivative IP asset on Story Protocol, linking it to the parent capability's IP. Operators earn royalties from derivative use.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "parentIpId": { "type": "string", "description": "IP ID of the parent capability" },
+          "jobId": { "type": "string", "description": "Job ID whose evidence is being registered" },
+          "evidenceBundleHash": { "type": "string", "description": "Hash of the evidence bundle" },
+          "operatorAddress": { "type": "string", "description": "EVM address of the operator" },
+          "operatorName": { "type": "string", "description": "Display name of the operator" },
+          "ipfsCid": { "type": "string", "description": "IPFS CID of the evidence bundle (optional)" }
+        },
+        "required": ["parentIpId", "jobId", "evidenceBundleHash", "operatorAddress", "operatorName"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/register-job-evidence" }
+    },
+    {
+      "name": "distribute_royalties",
+      "description": "Set revenue splits for an IP asset among stakeholders (designer, operator, verifier, assembler, curator). Splits must sum to 100.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID" },
+          "splits": {
+            "type": "array",
+            "description": "Revenue splits — must sum to 100",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": { "type": "string", "description": "Recipient EVM address" },
+                "role": { "type": "string", "enum": ["designer", "operator", "verifier", "assembler", "curator"] },
+                "percentage": { "type": "number", "description": "Percentage share (0-100)" },
+                "label": { "type": "string", "description": "Human-readable label" }
+              },
+              "required": ["address", "role", "percentage", "label"]
+            }
+          }
+        },
+        "required": ["ipId", "splits"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/distribute-royalties" }
+    },
+    {
+      "name": "pay_ip_royalty",
+      "description": "Pay royalties to an IP asset vault. The payer sends tokens that flow to stakeholders via the royalty splits.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID" },
+          "amount": { "type": "string", "description": "Amount to pay in wei (as string)" },
+          "payerAddress": { "type": "string", "description": "EVM address of the payer" }
+        },
+        "required": ["ipId", "amount", "payerAddress"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/{ipId}/pay" }
+    },
+    {
+      "name": "claim_ip_revenue",
+      "description": "Claim earned revenue from an IP asset vault. Returns the claimed amount and transaction hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID" },
+          "tokenIds": { "type": "array", "items": { "type": "string" }, "description": "Specific royalty token IDs to claim (optional — claims all if omitted)" }
+        },
+        "required": ["ipId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/{ipId}/claim" }
+    },
+    {
+      "name": "get_ip_revenue",
+      "description": "Get a revenue snapshot for an IP asset — total earned, pending claims, and recent payments.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID" }
+        },
+        "required": ["ipId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ip/{ipId}/revenue" }
+    },
+    {
+      "name": "get_ip_lineage",
+      "description": "Get the full IP lineage chain for an asset — parent capabilities and all derivative job registrations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID" }
+        },
+        "required": ["ipId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ip/{ipId}/lineage" }
+    },
+    {
+      "name": "get_capability_ip",
+      "description": "Get the Story Protocol IP registration for a capability by its capability ID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "capabilityId": { "type": "string", "description": "Capability ID to look up IP registration for" }
+        },
+        "required": ["capabilityId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ip/capability/{capabilityId}" }
+    },
+    {
+      "name": "raise_ip_dispute",
+      "description": "Raise a Story Protocol IP dispute against an asset. Provide evidence hash and reason.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ipId": { "type": "string", "description": "IP asset ID to dispute" },
+          "evidenceHash": { "type": "string", "description": "Hash of the dispute evidence" },
+          "reason": { "type": "string", "description": "Reason for the dispute" }
+        },
+        "required": ["ipId", "evidenceHash", "reason"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ip/{ipId}/dispute" }
+    },
 
-    { "name": "get_pool", "description": "Get details of a specific investment pool including stakes, status, and revenue share terms.", "input_schema": { "type": "object", "properties": { "poolId": { "type": "string", "description": "Investment pool ID" } }, "required": ["poolId"] }, "endpoint": { "method": "GET", "path": "/api/pool/{poolId}" } },
-    { "name": "list_pools", "description": "List all investment pools. Optionally filter by status or capability type.", "input_schema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["open", "funded", "active", "sunset", "cancelled"], "description": "Filter by pool status" }, "capabilityType": { "type": "string", "description": "Filter by capability type" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/pool/list" } },
-    { "name": "close_pool", "description": "Close an investment pool to new stakes. Pool enters sunset phase.", "input_schema": { "type": "object", "properties": { "poolId": { "type": "string", "description": "Pool ID to close" } }, "required": ["poolId"] }, "endpoint": { "method": "POST", "path": "/api/pool/close/{poolId}" } },
-    { "name": "claim_pool", "description": "Operator claims an investment pool reward after capability verification.", "input_schema": { "type": "object", "properties": { "poolId": { "type": "string", "description": "Pool ID to claim" }, "operatorId": { "type": "string", "description": "Operator ID making the claim" } }, "required": ["poolId", "operatorId"] }, "endpoint": { "method": "POST", "path": "/api/pool/claim/{poolId}" } },
-    { "name": "convert_bounty_to_pool", "description": "Convert an existing bounty into an investment pool. Allows community staking toward the bounty's capability.", "input_schema": { "type": "object", "properties": { "bountyId": { "type": "string", "description": "Bounty ID to convert" } }, "required": ["bountyId"] }, "endpoint": { "method": "POST", "path": "/api/pool/from-bounty/{bountyId}" } },
+    {
+      "name": "list_protocols",
+      "description": "List protocol templates in the library. Filter by tags, required capabilities, search query, or status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tags": { "type": "string", "description": "Comma-separated tag filter (e.g. 'biotech,protein')" },
+          "capabilities": { "type": "string", "description": "Comma-separated required capability filter (e.g. 'hplc,centrifuge')" },
+          "search": { "type": "string", "description": "Full-text search query" },
+          "status": { "type": "string", "enum": ["draft", "published", "archived"], "description": "Filter by template status" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocols" }
+    },
+    {
+      "name": "get_protocol",
+      "description": "Get protocol template details by ID. Returns steps, transfers, parameters, and metadata.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocols/{id}" }
+    },
+    {
+      "name": "create_protocol",
+      "description": "Create a new protocol template draft. Returns the new template ID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Protocol name" },
+          "description": { "type": "string", "description": "Protocol description" },
+          "steps": { "type": "array", "description": "Array of protocol step objects" },
+          "transfers": { "type": "array", "description": "Array of transfer objects between steps" },
+          "parameters": { "type": "array", "description": "Array of parameter definitions" },
+          "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for discovery" },
+          "requiredCapabilities": { "type": "array", "items": { "type": "string" }, "description": "Required capability types" }
+        },
+        "required": ["name"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocols" }
+    },
+    {
+      "name": "update_protocol",
+      "description": "Update an existing protocol template (must be in draft status). Returns updated name and version.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID" },
+          "name": { "type": "string", "description": "Updated name" },
+          "description": { "type": "string", "description": "Updated description" },
+          "version": { "type": "string", "description": "New version string (semver)" },
+          "steps": { "type": "array", "description": "Updated steps array" },
+          "parameters": { "type": "array", "description": "Updated parameters array" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "PUT", "path": "/api/protocols/{id}" }
+    },
+    {
+      "name": "publish_protocol",
+      "description": "Publish a draft protocol template, making it visible in the protocol library for others to discover and use.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID to publish" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocols/{id}/publish" }
+    },
+    {
+      "name": "fork_protocol",
+      "description": "Fork a protocol template to create your own version with parameter overrides. Returns the new fork ID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID to fork" },
+          "name": { "type": "string", "description": "Name for the forked protocol" },
+          "parameterOverrides": { "type": "object", "description": "Parameter values to override from the source template" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocols/{id}/fork" }
+    },
+    {
+      "name": "get_protocol_forks",
+      "description": "List all forks of a protocol template. Shows who forked it and what parameters they changed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocols/{id}/forks" }
+    },
+    {
+      "name": "validate_protocol",
+      "description": "Validate a protocol template against a specific kernel — checks capability availability, transfer compatibility, and automation level feasibility.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID" },
+          "kernelId": { "type": "string", "description": "Kernel ID to validate against (optional)" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocols/{id}/validate" }
+    },
+    {
+      "name": "list_protocol_runs",
+      "description": "List protocol runs. Filter by status or kernelId.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["binding", "ready", "running", "paused", "completed", "cancelled", "failed"], "description": "Filter by run status" },
+          "kernelId": { "type": "string", "description": "Filter by kernel ID" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocol-runs" }
+    },
+    {
+      "name": "get_protocol_run",
+      "description": "Get protocol run status including step progress, transfer status, current phase, and evidence hashes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string", "description": "Protocol run ID" }
+        },
+        "required": ["runId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocol-runs/{runId}" }
+    },
+    {
+      "name": "create_protocol_run",
+      "description": "Instantiate a protocol template as a run on a specific kernel with given parameter values.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Protocol template ID" },
+          "kernelId": { "type": "string", "description": "Kernel ID to run the protocol on" },
+          "parameterValues": { "type": "object", "description": "Runtime parameter values (overrides template defaults)" },
+          "sampleIds": { "type": "array", "items": { "type": "string" }, "description": "Sample IDs being processed in this run" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocols/{id}/runs" }
+    },
+    {
+      "name": "start_protocol_run",
+      "description": "Start execution of a protocol run that is in 'ready' or 'binding' state.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string", "description": "Protocol run ID to start" }
+        },
+        "required": ["runId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocol-runs/{runId}/start" }
+    },
+    {
+      "name": "pause_protocol_run",
+      "description": "Pause a running protocol run. Use resume_protocol_run to continue.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string", "description": "Protocol run ID to pause" }
+        },
+        "required": ["runId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocol-runs/{runId}/pause" }
+    },
+    {
+      "name": "resume_protocol_run",
+      "description": "Resume a paused protocol run from where it stopped.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string", "description": "Protocol run ID to resume" }
+        },
+        "required": ["runId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocol-runs/{runId}/resume" }
+    },
+    {
+      "name": "cancel_protocol_run",
+      "description": "Cancel a protocol run. Cannot be cancelled once completed or already cancelled.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string", "description": "Protocol run ID to cancel" }
+        },
+        "required": ["runId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocol-runs/{runId}/cancel" }
+    },
 
-    { "name": "get_top_demand", "description": "Get top demand signals aggregated by capability type. Shows which capabilities are most wanted on the network.", "input_schema": { "type": "object", "properties": { "limit": { "type": "number", "description": "Number of top demand entries to return (default 10)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/bounty/demand/top" } },
-    { "name": "verify_bounty", "description": "Verify bounty completion by scoring the delivered capability against requirements.", "input_schema": { "type": "object", "properties": { "bountyId": { "type": "string", "description": "Bounty ID to verify" }, "jobId": { "type": "string", "description": "Job ID that fulfilled the bounty" }, "score": { "type": "number", "description": "Verification score (0-1)" } }, "required": ["bountyId", "jobId", "score"] }, "endpoint": { "method": "POST", "path": "/api/bounty/verify" } },
-    { "name": "get_bounty_leaderboard", "description": "Get the bounty hunter leaderboard showing top operators by bounties claimed and verified.", "input_schema": { "type": "object", "properties": { "limit": { "type": "number", "description": "Number of entries to return (default 10)" } }, "required": [] }, "endpoint": { "method": "GET", "path": "/api/bounty/leaderboard" } },
+    {
+      "name": "get_workflows",
+      "description": "List active instrument workflows in the orchestrator. Optionally filter by status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by workflow status (e.g. running, completed)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/orchestrator/workflows" }
+    },
+    {
+      "name": "get_workflow",
+      "description": "Get detailed workflow information including steps, node assignments, and progress.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflowId": { "type": "string", "description": "Workflow ID" }
+        },
+        "required": ["workflowId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/orchestrator/workflows/{workflowId}" }
+    },
+    {
+      "name": "get_transfer_graphs",
+      "description": "Get resource transfer graphs showing instrument topology, transfer edges, and mechanisms for all kernels.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/orchestrator/graphs" }
+    },
+    {
+      "name": "list_automation_status",
+      "description": "List automation status for all instrument transfer pairs. Shows current automation level, episode count, and training readiness. Filter by kernelId.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Filter by kernel ID" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/automation-status" }
+    },
+    {
+      "name": "get_automation_status",
+      "description": "Get automation status for a specific instrument-to-instrument transfer pair.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "fromNodeId": { "type": "string", "description": "Source instrument node ID" },
+          "toNodeId": { "type": "string", "description": "Destination instrument node ID" }
+        },
+        "required": ["fromNodeId", "toNodeId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/automation-status/{fromNodeId}/{toNodeId}" }
+    },
+    {
+      "name": "record_episode",
+      "description": "Record a transfer episode for a node pair. Increments episode count toward VLA training threshold.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "fromNodeId": { "type": "string", "description": "Source instrument node ID" },
+          "toNodeId": { "type": "string", "description": "Destination instrument node ID" },
+          "episodeId": { "type": "string", "description": "Episode ID (optional)" },
+          "success": { "type": "boolean", "description": "Whether the episode succeeded" }
+        },
+        "required": ["fromNodeId", "toNodeId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/automation-status/{fromNodeId}/{toNodeId}/episode" }
+    },
+    {
+      "name": "advance_automation",
+      "description": "Advance the automation level for a transfer pair (manual → teleoperated → pilot_operated → vla_assisted → fully_autonomous). Requires sufficient training episodes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "fromNodeId": { "type": "string", "description": "Source instrument node ID" },
+          "toNodeId": { "type": "string", "description": "Destination instrument node ID" }
+        },
+        "required": ["fromNodeId", "toNodeId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/automation-status/{fromNodeId}/{toNodeId}/advance" }
+    },
+    {
+      "name": "list_transfer_agents",
+      "description": "List all transfer agents (robots and human operators) available for instrument-to-instrument transfers.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/transfer-agents" }
+    },
 
-    { "name": "get_telemetry_stats", "description": "Get aggregate pipeline telemetry statistics including phase timings and throughput metrics.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/telemetry/stats" } },
-    { "name": "get_active_telemetry", "description": "List currently active jobs with their current pipeline phase and telemetry status.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/telemetry/active" } },
+    {
+      "name": "get_logistics_overview",
+      "description": "Logistics hub overview: active shipments, pending installations, and upcoming bookings.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/logistics" }
+    },
+    {
+      "name": "get_shipments",
+      "description": "List equipment shipments with tracking status. Optionally filter by status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by shipment status (in_transit, delivered, pickup_scheduled, etc.)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/logistics/shipments" }
+    },
+    {
+      "name": "create_shipment",
+      "description": "Create a new equipment shipment with origin, destination, package details, and provider.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "equipmentDescription": { "type": "string", "description": "Description of equipment being shipped" },
+          "providerId": { "type": "string", "description": "Logistics provider ID" },
+          "origin": { "type": "object", "description": "Origin location with label, address, geo coordinates" },
+          "destination": { "type": "object", "description": "Destination location with label, address, geo coordinates" },
+          "package": { "type": "object", "description": "Package details (weightKg, dimensions, fragile, etc.)" }
+        },
+        "required": ["equipmentDescription"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/logistics/shipments" }
+    },
+    {
+      "name": "get_shipment_quote",
+      "description": "Get shipping quotes from logistics providers based on origin, destination, weight, and priority.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "originZip": { "type": "string", "description": "Origin ZIP code" },
+          "destinationZip": { "type": "string", "description": "Destination ZIP code" },
+          "weightKg": { "type": "number", "description": "Package weight in kg" },
+          "priority": { "type": "string", "enum": ["standard", "expedited", "rush"], "description": "Shipping priority level" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/logistics/shipments/quote" }
+    },
+    {
+      "name": "get_installations",
+      "description": "List equipment installation orders with step progress and status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by installation status (draft, scheduled, in_progress, completed)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/logistics/installations" }
+    },
+    {
+      "name": "get_space_bookings",
+      "description": "List space bookings for hosting equipment. Optionally filter by status or space.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by booking status" },
+          "spaceId": { "type": "string", "description": "Filter by space ID" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/logistics/bookings" }
+    },
 
-    { "name": "submit_feedback", "description": "Submit a bug report, suggestion, or general feedback about the PCC network.", "input_schema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["bug", "comment", "difficulty", "suggestion"], "description": "Feedback type" }, "message": { "type": "string", "description": "Feedback message (max 5000 chars)" }, "page": { "type": "string", "description": "Page or feature the feedback relates to" } }, "required": ["message"] }, "endpoint": { "method": "POST", "path": "/api/feedback" } },
+    {
+      "name": "search_spaces",
+      "description": "Search for lab/workshop hosting spaces. Filter by size, access schedule, and other requirements.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "maxSqft": { "type": "number", "description": "Maximum square footage" },
+          "access": { "type": "string", "description": "Access schedule (24/7, business-hours, all)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/spaces" }
+    },
+    {
+      "name": "get_space",
+      "description": "Get detailed information about a hosting space including power, amenities, safety features, and pricing.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Space ID" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/spaces/{id}" }
+    },
+    {
+      "name": "match_spaces",
+      "description": "Find hosting spaces that match specific machine requirements (voltage, area, etc.). Returns scored matches.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "voltage": { "type": "number", "description": "Required voltage (e.g. 208, 480)" },
+          "minArea": { "type": "number", "description": "Minimum floor area in square feet" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/spaces/match" }
+    },
 
-    { "name": "mint_certificate", "description": "Mint a soulbound capability certificate (cNFT) for a kernel. Proves a verified capability on-chain.", "input_schema": { "type": "object", "properties": { "kernelDid": { "type": "string", "description": "DID of the kernel (e.g. did:pcc:kernel:biolab-01)" }, "capabilityType": { "type": "string", "description": "Capability type (e.g. fdm, cnc-3axis, hplc)" }, "assuranceTier": { "type": "number", "description": "Assurance tier (0-3)" }, "metadata": { "type": "object", "description": "Additional metadata (tolerances, materials, calibration proof CID)" } }, "required": ["kernelDid", "capabilityType"] }, "endpoint": { "method": "POST", "path": "/api/certificates/mint" } },
+    {
+      "name": "get_marketplace_overview",
+      "description": "Equipment marketplace overview with demand/supply metrics across all capability types.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/marketplace" }
+    },
+    {
+      "name": "get_equipment_classes",
+      "description": "List equipment classes (FDM printers, CNC mills, etc.) with market snapshot data including utilization, demand, and pricing.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/classes" }
+    },
+    {
+      "name": "get_demand_supply",
+      "description": "Get network-wide demand vs supply timeline data for capacity planning and market analysis.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/demand-supply" }
+    },
+    {
+      "name": "calculate_roi",
+      "description": "Calculate ROI projection for onboarding equipment. Returns month-by-month revenue, cost, and break-even analysis.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "monthlyCost": { "type": "number", "description": "Monthly operating cost in USD" },
+          "avgJobValue": { "type": "number", "description": "Average revenue per job in USD" },
+          "utilization": { "type": "number", "description": "Expected utilization percentage (0-100)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/marketplace/roi" }
+    },
 
-    { "name": "list_conversations", "description": "List agent-to-agent conversations showing topic, participants, message count, and status.", "input_schema": { "type": "object", "properties": {}, "required": [] }, "endpoint": { "method": "GET", "path": "/api/agents/conversations" } }
+    {
+      "name": "get_operator_dashboard",
+      "description": "Operator dashboard overview: machines, earnings summary, and maintenance alerts.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/operator" }
+    },
+    {
+      "name": "get_operator_machines",
+      "description": "List all machines registered under the operator account with utilization and uptime stats.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/operator/machines" }
+    },
+    {
+      "name": "get_operator_earnings",
+      "description": "Get operator earnings breakdown over a time period. Includes daily earnings and cumulative totals.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "period": { "type": "string", "enum": ["7d", "30d", "90d", "1y"], "description": "Time period for earnings data" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/operator/earnings" }
+    },
+    {
+      "name": "get_operator_certs",
+      "description": "List operator certifications (OSHA, safety training, PCC network certs) with validity status.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/operator/certifications" }
+    },
+
+    {
+      "name": "get_sensor_channels",
+      "description": "List all registered sensor channels across kernels. Returns channel descriptors with units and ranges.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/sensors/channels" }
+    },
+    {
+      "name": "get_kernel_sensors",
+      "description": "Get sensor channels for a specific kernel. Returns live channel descriptors.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to get sensors for" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/sensors/channels/{kernelId}" }
+    },
+
+    {
+      "name": "get_settlement_status",
+      "description": "Get settlement pipeline status including pending operations count, total value queued, and smart account address.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/settlement/status" }
+    },
+    {
+      "name": "get_settlement_epochs",
+      "description": "Get settlement epoch history showing past batch settlements with timing and operation counts.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/settlement/epochs" }
+    },
+    {
+      "name": "get_depin_stats",
+      "description": "DePIN treasury, soulbound capability certificates, and current reward epoch stats.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/rewards" }
+    },
+    {
+      "name": "mint_certificate",
+      "description": "Mint a soulbound capability certificate (cNFT via Metaplex Core) for a kernel. Proves a verified capability on-chain as an immutable credential. Step 5 of onboarding.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelDid": { "type": "string", "description": "DID of the kernel (e.g. did:pcc:kernel:biolab-01)" },
+          "capabilityType": { "type": "string", "description": "Capability type (e.g. fdm, cnc-3axis, hplc)" },
+          "assuranceTier": { "type": "number", "description": "Assurance tier (0-3)" },
+          "metadata": { "type": "object", "description": "Additional metadata (tolerances, materials, calibration proof CID)" }
+        },
+        "required": ["kernelDid", "capabilityType"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/certificates/mint" }
+    },
+
+    {
+      "name": "onboard_machine",
+      "description": "Register a new machine on the PCC network. Provide machine details to create a registration record.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Machine name" },
+          "category": { "type": "string", "description": "Machine category (e.g. fdm, cnc, laser-cut, hplc)" },
+          "manufacturer": { "type": "string", "description": "Manufacturer name" },
+          "model": { "type": "string", "description": "Model identifier" },
+          "description": { "type": "string", "description": "Machine description" },
+          "capabilities": { "type": "array", "items": { "type": "object" }, "description": "Array of capability objects" }
+        },
+        "required": ["name", "category"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/register" }
+    },
+    {
+      "name": "analyze_machine_docs",
+      "description": "AI analysis of machine documentation. Upload docs to get suggested capabilities, extracted specs, materials, and tolerances.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document": { "type": "string", "description": "Document content or reference to analyze" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/analyze" }
+    },
+    {
+      "name": "redeem_invite",
+      "description": "One-click agent onboarding with an invite code. Provisions wallet, identity, LLM access, and PCC tools in a single call.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "inviteCode": { "type": "string", "description": "Invite code to redeem" },
+          "email": { "type": "string", "description": "Email address for the account" },
+          "password": { "type": "string", "description": "Password for the account" },
+          "name": { "type": "string", "description": "Display name (optional)" }
+        },
+        "required": ["inviteCode", "email", "password"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/redeem" }
+    },
+    {
+      "name": "check_invite",
+      "description": "Validate an invite code before redeeming it. Returns whether the code is valid and what it includes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "description": "Invite code to check" }
+        },
+        "required": ["code"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/onboard/check/{code}" }
+    },
+
+    {
+      "name": "list_batches",
+      "description": "List active and completed settlement batches.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/batches" }
+    },
+    {
+      "name": "list_evidence",
+      "description": "List encrypted evidence bundles stored in the gateway.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/evidence" }
+    },
+
+    {
+      "name": "submit_demand",
+      "description": "Signal that you want a capability that doesn't exist on the network yet. Creates a demand signal and may auto-create a bounty if enough demand accumulates.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "requesterId": { "type": "string", "description": "ID of the requester" },
+          "capabilityType": { "type": "string", "description": "Type of capability wanted (e.g. electron-beam-welding, cryo-em)" },
+          "description": { "type": "string", "description": "Description of what you need" },
+          "estimatedJobValue": { "type": "number", "description": "Estimated payment per job in USD" },
+          "estimatedFrequency": { "type": "string", "enum": ["one-time", "weekly", "monthly", "daily"], "description": "How often you would use this capability" },
+          "assuranceTier": { "type": "number", "description": "Required assurance tier (0-3)" }
+        },
+        "required": ["requesterId", "capabilityType", "description"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/bounty/demand" }
+    },
+    {
+      "name": "list_bounties",
+      "description": "List open bounties for capabilities the network needs. Operators can claim these to earn rewards by onboarding new capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["open", "claimed", "verified", "paid", "expired"], "description": "Filter by bounty status" },
+          "capabilityType": { "type": "string", "description": "Filter by capability type" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/bounty/list" }
+    },
+    {
+      "name": "claim_bounty",
+      "description": "Claim a bounty to onboard a new capability. The operator commits to registering the capability and completing verification.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bountyId": { "type": "string", "description": "ID of the bounty to claim" },
+          "operatorId": { "type": "string", "description": "ID of the operator claiming the bounty" }
+        },
+        "required": ["bountyId", "operatorId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/bounty/claim" }
+    },
+    {
+      "name": "verify_bounty",
+      "description": "Verify bounty completion by scoring the delivered capability against requirements.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bountyId": { "type": "string", "description": "Bounty ID to verify" },
+          "jobId": { "type": "string", "description": "Job ID that fulfilled the bounty" },
+          "score": { "type": "number", "description": "Verification score (0-1)" }
+        },
+        "required": ["bountyId", "jobId", "score"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/bounty/verify" }
+    },
+    {
+      "name": "get_top_demand",
+      "description": "Get top demand signals aggregated by capability type. Shows which capabilities are most wanted on the network.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "number", "description": "Number of top demand entries to return (default 10)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/bounty/demand/top" }
+    },
+    {
+      "name": "get_bounty_leaderboard",
+      "description": "Get the bounty hunter leaderboard showing top operators by bounties claimed and verified.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "number", "description": "Number of entries to return (default 10)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/bounty/leaderboard" }
+    },
+
+    {
+      "name": "create_investment_pool",
+      "description": "Create an investment pool for a capability bounty. Stakers earn future protocol fees when the capability goes live.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "capabilityType": { "type": "string", "description": "Type of capability to invest in (e.g. cnc-milling, sla-printing)" },
+          "description": { "type": "string", "description": "Description of the capability pool" },
+          "targetAmount": { "type": "number", "description": "Funding target amount" },
+          "currency": { "type": "string", "enum": ["USDC", "CREDITS"], "description": "Currency for the pool" }
+        },
+        "required": ["capabilityType", "description"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/pool/create" }
+    },
+    {
+      "name": "stake_in_pool",
+      "description": "Stake USDC or credits into a capability investment pool.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "poolId": { "type": "string", "description": "Investment pool ID" },
+          "staker": { "type": "string", "description": "Address or DID of the staker" },
+          "amount": { "type": "number", "description": "Amount to stake" }
+        },
+        "required": ["poolId", "staker", "amount"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/pool/stake" }
+    },
+    {
+      "name": "get_pool_earnings",
+      "description": "Check earnings from capability investment pools for a staker address.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "staker": { "type": "string", "description": "Address or DID of the staker" }
+        },
+        "required": ["staker"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/pool/earnings/{staker}" }
+    },
+    {
+      "name": "get_pool",
+      "description": "Get details of a specific investment pool including stakes, status, and revenue share terms.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "poolId": { "type": "string", "description": "Investment pool ID" }
+        },
+        "required": ["poolId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/pool/{poolId}" }
+    },
+    {
+      "name": "list_pools",
+      "description": "List all investment pools. Optionally filter by status or capability type.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["open", "funded", "active", "sunset", "cancelled"], "description": "Filter by pool status" },
+          "capabilityType": { "type": "string", "description": "Filter by capability type" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/pool/list" }
+    },
+    {
+      "name": "close_pool",
+      "description": "Close an investment pool to new stakes. Pool enters sunset phase.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "poolId": { "type": "string", "description": "Pool ID to close" }
+        },
+        "required": ["poolId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/pool/close/{poolId}" }
+    },
+    {
+      "name": "claim_pool",
+      "description": "Operator claims an investment pool reward after capability verification.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "poolId": { "type": "string", "description": "Pool ID to claim" },
+          "operatorId": { "type": "string", "description": "Operator ID making the claim" }
+        },
+        "required": ["poolId", "operatorId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/pool/claim/{poolId}" }
+    },
+    {
+      "name": "convert_bounty_to_pool",
+      "description": "Convert an existing bounty into an investment pool. Allows community staking toward the bounty's capability.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bountyId": { "type": "string", "description": "Bounty ID to convert to a pool" }
+        },
+        "required": ["bountyId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/pool/from-bounty/{bountyId}" }
+    },
+
+    {
+      "name": "get_subnet_status",
+      "description": "Get Bittensor verification subnet health, agent bridge status, and network connectivity.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/agents/status" }
+    },
+    {
+      "name": "get_subnet_miners",
+      "description": "List verification subnet miners on the Bittensor network. Returns miner addresses, scores, and leaderboard positions.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/verification/miners" }
+    },
+    {
+      "name": "list_conversations",
+      "description": "List agent-to-agent conversations showing topic, participants, message count, and status.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/agents/conversations" }
+    },
+
+    {
+      "name": "submit_feedback",
+      "description": "Submit a bug report, suggestion, or general feedback about the PCC network.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["bug", "comment", "difficulty", "suggestion"], "description": "Feedback type" },
+          "message": { "type": "string", "description": "Feedback message (max 5000 chars)" },
+          "page": { "type": "string", "description": "Page or feature the feedback relates to" }
+        },
+        "required": ["message"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/feedback" }
+    }
   ],
 
   "quickstart": {
-    "claude": "const Anthropic = require('@anthropic-ai/sdk');\nconst pkg = require('./agent-package.json');\nconst client = new Anthropic();\n\nconst tools = pkg.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }));\n\nasync function chat(userMessage) {\n  const response = await client.messages.create({\n    model: 'claude-sonnet-4-20250514',\n    max_tokens: 4096,\n    system: pkg.system_prompt,\n    tools,\n    messages: [{ role: 'user', content: userMessage }],\n  });\n  \n  for (const block of response.content) {\n    if (block.type === 'tool_use') {\n      const tool = pkg.tools.find(t => t.name === block.name);\n      const url = `${PCC_BASE_URL}${tool.endpoint.path}`;\n      const result = await fetch(url, {\n        method: tool.endpoint.method,\n        headers: { 'Content-Type': 'application/json' },\n        body: tool.endpoint.method === 'POST' ? JSON.stringify(block.input) : undefined,\n      }).then(r => r.json());\n      // Feed result back as tool_result...\n    }\n  }\n}",
-    "openai": "const OpenAI = require('openai');\nconst pkg = require('./agent-package.json');\nconst client = new OpenAI();\n\nconst tools = pkg.tools.map(t => ({\n  type: 'function',\n  function: { name: t.name, description: t.description, parameters: t.input_schema },\n}));\n\nasync function chat(userMessage) {\n  const response = await client.chat.completions.create({\n    model: 'gpt-4o',\n    tools,\n    messages: [\n      { role: 'system', content: pkg.system_prompt },\n      { role: 'user', content: userMessage },\n    ],\n  });\n  // Handle tool_calls in response.choices[0].message...\n}"
+    "claude": "const Anthropic = require('@anthropic-ai/sdk');\nconst pkg = require('./agent-package.json');\nconst client = new Anthropic();\n\nconst PCC_BASE = pkg.api_base; // https://capability.network\nconst tools = pkg.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }));\n\nlet apiKey = null;\n\nasync function callTool(tool, input) {\n  let path = tool.endpoint.path;\n  // Replace path params like {jobId} with actual values\n  for (const [k, v] of Object.entries(input)) {\n    path = path.replace(`{${k}}`, v);\n  }\n  const url = `${PCC_BASE}${path}`;\n  const headers = { 'Content-Type': 'application/json' };\n  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;\n  const res = await fetch(url, {\n    method: tool.endpoint.method,\n    headers,\n    body: tool.endpoint.method !== 'GET' ? JSON.stringify(input) : undefined,\n  });\n  const data = await res.json();\n  // Cache API key from provision_api_key response\n  if (tool.name === 'provision_api_key' && data.api_key) apiKey = data.api_key;\n  return data;\n}\n\nasync function chat(userMessage) {\n  const messages = [{ role: 'user', content: userMessage }];\n  while (true) {\n    const response = await client.messages.create({\n      model: 'claude-sonnet-4-20250514',\n      max_tokens: 4096,\n      system: pkg.system_prompt,\n      tools,\n      messages,\n    });\n    messages.push({ role: 'assistant', content: response.content });\n    if (response.stop_reason !== 'tool_use') break;\n    const results = [];\n    for (const block of response.content) {\n      if (block.type !== 'tool_use') continue;\n      const tool = pkg.tools.find(t => t.name === block.name);\n      const result = await callTool(tool, block.input);\n      results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });\n    }\n    messages.push({ role: 'user', content: results });\n  }\n  return messages;\n}\n\nchat('I want to register my HPLC lab and start accepting jobs on the PCC network.');",
+    "openai": "const OpenAI = require('openai');\nconst pkg = require('./agent-package.json');\nconst client = new OpenAI();\n\nconst PCC_BASE = pkg.api_base; // https://capability.network\nconst tools = pkg.tools.map(t => ({\n  type: 'function',\n  function: { name: t.name, description: t.description, parameters: t.input_schema },\n}));\n\nlet apiKey = null;\n\nasync function callTool(toolName, input) {\n  const tool = pkg.tools.find(t => t.name === toolName);\n  let path = tool.endpoint.path;\n  for (const [k, v] of Object.entries(input)) path = path.replace(`{${k}}`, v);\n  const headers = { 'Content-Type': 'application/json' };\n  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;\n  const res = await fetch(`${PCC_BASE}${path}`, {\n    method: tool.endpoint.method,\n    headers,\n    body: tool.endpoint.method !== 'GET' ? JSON.stringify(input) : undefined,\n  });\n  const data = await res.json();\n  if (toolName === 'provision_api_key' && data.api_key) apiKey = data.api_key;\n  return data;\n}\n\nasync function chat(userMessage) {\n  const messages = [\n    { role: 'system', content: pkg.system_prompt },\n    { role: 'user', content: userMessage },\n  ];\n  while (true) {\n    const response = await client.chat.completions.create({ model: 'gpt-4o', tools, messages });\n    const msg = response.choices[0].message;\n    messages.push(msg);\n    if (!msg.tool_calls) break;\n    for (const call of msg.tool_calls) {\n      const result = await callTool(call.function.name, JSON.parse(call.function.arguments));\n      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });\n    }\n  }\n  return messages;\n}\n\nchat('I want to register my HPLC lab and start accepting jobs on the PCC network.');"
   }
 }

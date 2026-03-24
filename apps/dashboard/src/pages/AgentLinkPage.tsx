@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 
-const API_BASE = "https://pcc-gateway-production.up.railway.app";
+const API_BASE = "https://capability.network";
 
 type AgentPackage = {
   schema: string;
