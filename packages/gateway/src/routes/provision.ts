@@ -17,28 +17,41 @@ export async function provisionRoutes(app: FastifyInstance) {
   app.post("/api/auth/provision", async (req, reply) => {
     const body = (req.body ?? {}) as {
       email?: string;
+      walletAddress?: string;
       name?: string;
       capability?: string;
     };
 
-    if (!body.email) {
-      return reply.status(400).send({
-        error: "email_required",
-        message: "Email is required to provision an API key",
-      });
-    }
+    let operatorId: string;
 
-    // Basic email validation
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+    if (body.walletAddress) {
+      // Wallet address path
+      if (!/^0x[0-9a-fA-F]{40}$/.test(body.walletAddress)) {
+        return reply.status(400).send({
+          error: "invalid_wallet_address",
+          message: "walletAddress must be a valid EVM address (0x + 40 hex chars)",
+        });
+      }
+      operatorId = body.walletAddress;
+    } else if (body.email) {
+      // Email path
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+        return reply.status(400).send({
+          error: "invalid_email",
+          message: "Please provide a valid email address",
+        });
+      }
+      operatorId = body.email;
+    } else {
       return reply.status(400).send({
-        error: "invalid_email",
-        message: "Please provide a valid email address",
+        error: "identifier_required",
+        message: "Either email or walletAddress is required to provision an API key",
       });
     }
 
     try {
       const { rawKey, record } = provisionApiKey({
-        operatorId: body.email,
+        operatorId,
         name: body.name,
         description: body.capability
           ? `Operator capability: ${body.capability}`
@@ -54,7 +67,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,
-        operator_id: body.email,
+        operator_id: operatorId,
         scopes: JSON.parse(record.scopes),
         rate_limit: record.rateLimit,
         expires_at: record.expiresAt,
