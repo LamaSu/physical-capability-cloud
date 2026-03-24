@@ -350,7 +350,7 @@ export class UMAOracleAdapter implements VerificationOracle {
       this.config.umaOracleAddress ?? DEFAULT_OOV3_ADDRESS_BASE_SEPOLIA
     ) as `0x${string}`;
     const bondToken = (
-      this.config.bondTokenAddress ?? "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      this.config.bondTokenAddress ?? "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9"
     ) as `0x${string}`;
     const bondAmount = this.config.bondAmount ?? BigInt(500_000_000);
 
