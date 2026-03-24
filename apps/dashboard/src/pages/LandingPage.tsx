@@ -263,7 +263,7 @@ export function LandingPage() {
               style={{ color: "#E8E8F0", fontFamily: "'Space Grotesk', sans-serif" }}
             >
               <Typewriter
-                text="I find work for people who make things. Tell me what you do, and I'll handle the rest."
+                text="Every machine, lab, and factory on Earth just became a programmable endpoint. Tell me what needs to exist."
                 speed={28}
                 onDone={() => setShowInput(true)}
               />
