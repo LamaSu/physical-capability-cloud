@@ -65,3 +65,41 @@ export {
   type SWFConfig,
   type ParticipantEpochInput,
 } from "./swf/index.js";
+// Stripe (fiat on-ramp + prepaid credits)
+export {
+  StripeOnrampClient,
+  type StripeOnrampConfig,
+  type CreateOnrampSessionParams,
+  type StripeOnrampSession,
+  StripeCreditService,
+  type StripeCreditConfig,
+  type CreditBalance,
+} from "./stripe/index.js";
+// Yellowcard (emerging market fiat on/off-ramp)
+export {
+  YellowcardClient,
+  type YellowcardConfig,
+  type YellowcardChannel,
+  type YellowcardNetwork,
+  type YellowcardRate,
+  YellowcardOfframp,
+  type OfframpParams,
+  type OfframpResult,
+  YellowcardOnramp,
+  type OnrampParams,
+  type OnrampResult,
+} from "./yellowcard/index.js";
+// Wise (enterprise fiat distribution)
+export {
+  WiseClient,
+  type WiseConfig,
+  type WiseProfile,
+  type WiseQuote,
+  type WiseRecipient,
+  type WiseTransfer,
+  WisePayoutService,
+  type PayoutRecipient,
+  type PayoutRequest,
+  type PayoutResult,
+  type BatchPayoutResult,
+} from "./wise/index.js";

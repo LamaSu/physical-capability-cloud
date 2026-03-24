@@ -8,7 +8,7 @@
  *   4. Job runs → evidence bundle produced
  *   5. Evidence encrypted (AES-256-GCM envelope)
  *   6. Evidence archived to IPFS → CID committed to Merkle tree
- *   7. Evidence submitted to Bittensor subnet for verification (mock)
+ *   7. Evidence submitted to oracle cascade for verification (UMA → Chainlink → EigenLayer)
  *   8. Verification passes → escrow milestone met
  *   9. ZK proof generated for dispute readiness
  *  10. Kernel earns DePIN reward tokens (simulated)
@@ -23,7 +23,7 @@ import {
   verifyCredential,
 } from "@pcc/spec/identity";
 import { EvidenceEmitter, MockFDMAdapter, MockPowerMonitorAdapter, MockCameraAdapter, JobRunner, EncryptionService } from "@pcc/kernel";
-import { CommitmentService, ZKProofService, EvidenceVerifier, BittensorSubnetBridge } from "@pcc/verifier";
+import { CommitmentService, ZKProofService, EvidenceVerifier, OracleVerificationBridge } from "@pcc/verifier";
 import { SolanaAgentWallet, SpendingTracker, createBrokerAgentPolicy } from "@pcc/agent-runtime";
 import { CapabilityCertificateService, RewardEngine } from "@pcc/contracts";
 import type { CWM, Capability, Verifier, SHA256 } from "@pcc/spec";
@@ -369,38 +369,50 @@ async function main() {
   // Phase 8: Bittensor Subnet Verification
   // ══════════════════════════════════════════════════════════════════════
 
-  console.log("▸ PHASE 8: Bittensor Subnet Verification\n" + SUB_DIVIDER);
+  console.log("▸ PHASE 8: Oracle Verification Cascade (UMA → Chainlink → EigenLayer)\n" + SUB_DIVIDER);
 
-  const bridge = new BittensorSubnetBridge();
-  log("SUBNET", `Available:       ${bridge.isAvailable() ? "✓ ONLINE" : "✗ OFFLINE"}`);
+  const oracleBridge = new OracleVerificationBridge({
+    chainId: 84532,
+    rpcUrl: "https://sepolia.base.org",
+    minScoreThreshold: 0.6,
+    mock: true,
+  });
+  log("ORACLE", `Available:       ${oracleBridge.isAvailable() ? "✓ ONLINE" : "✗ OFFLINE"}`);
 
-  const preMetrics = bridge.getMetrics();
-  log("SUBNET", `Active miners:   ${preMetrics.activeMinerCount}`);
-  log("SUBNET", "Submitting evidence bundle for decentralized verification...");
+  const preMetrics = oracleBridge.getMetrics();
+  log("ORACLE", `Active oracles:  ${preMetrics.activeOracles}`);
+  log("ORACLE", `Primary oracle:  ${preMetrics.primaryOracle}`);
+  log("ORACLE", `Fallbacks:       ${preMetrics.fallbackOracles.join(", ")}`);
+  log("ORACLE", "Submitting evidence bundle for oracle verification...");
 
-  const subnetResult = await bridge.submitForVerification(
+  const oracleResult = await oracleBridge.submitForVerification(
     bundle.bundleHash,
     JSON.stringify(bundle),
     2, // requiredTier
   );
 
-  log("SUBNET", `Consensus score: ${subnetResult.consensusScore}`);
-  log("SUBNET", `Tier compliant:  ${subnetResult.tierCompliant ? "✓" : "✗"}`);
-  log("SUBNET", `Miners queried:  ${subnetResult.minerCount}`);
-  log("SUBNET", `Defects found:   ${subnetResult.defects.length > 0 ? subnetResult.defects.join(", ") : "none"}`);
-  log("SUBNET", `Verification:    ${subnetResult.passed ? "✓ PASSED" : "✗ FAILED"}`);
-  log("SUBNET", `Round time:      ${subnetResult.totalTimeMs}ms`);
-
-  // Show miner leaderboard
-  const leaderboard = bridge.getMinerLeaderboard();
-  log("SUBNET", "\nMiner Leaderboard:");
-  for (const miner of leaderboard.slice(0, 5)) {
-    log("SUBNET", `  UID ${miner.uid}  stake=${miner.stake}  trust=${miner.trust.toFixed(3)}  incentive=${miner.incentive.toFixed(3)}  ${miner.hotkey.slice(0, 12)}...`);
+  log("ORACLE", `Oracle used:     ${oracleResult.oracle}`);
+  log("ORACLE", `Score:           ${oracleResult.score}`);
+  log("ORACLE", `Tier compliant:  ${oracleResult.tierCompliant ? "✓" : "✗"}`);
+  log("ORACLE", `Defects found:   ${oracleResult.defects.length > 0 ? oracleResult.defects.join(", ") : "none"}`);
+  log("ORACLE", `Verification:    ${oracleResult.passed ? "✓ PASSED" : "✗ FAILED"}`);
+  log("ORACLE", `Round time:      ${oracleResult.totalTimeMs}ms`);
+  if (oracleResult.assertionId) {
+    log("ORACLE", `Assertion ID:    ${oracleResult.assertionId.slice(0, 18)}...`);
+    log("ORACLE", `Dispute window:  ${oracleResult.disputeWindow}s (${(oracleResult.disputeWindow! / 3600).toFixed(1)}hr)`);
+    log("ORACLE", `Bond amount:     ${oracleResult.bondAmount} (USDC units)`);
   }
 
-  const postMetrics = bridge.getMetrics();
-  log("SUBNET", `\nTotal verifications: ${postMetrics.totalVerifications}`);
-  log("SUBNET", `Average score:       ${postMetrics.averageScore.toFixed(3)}`);
+  // Show oracle leaderboard
+  const leaderboard = oracleBridge.getOracleLeaderboard();
+  log("ORACLE", "\nOracle Status:");
+  for (const oracle of leaderboard) {
+    log("ORACLE", `  ${oracle.name.padEnd(12)} available=${oracle.available ? "✓" : "✗"}  verifications=${oracle.totalVerifications}  avg=${oracle.averageScore.toFixed(3)}  ${oracle.isPrimary ? "(PRIMARY)" : ""}`);
+  }
+
+  const postMetrics = oracleBridge.getMetrics();
+  log("ORACLE", `\nTotal verifications: ${postMetrics.totalVerifications}`);
+  log("ORACLE", `Average score:       ${postMetrics.averageScore.toFixed(3)}`);
 
   console.log();
 

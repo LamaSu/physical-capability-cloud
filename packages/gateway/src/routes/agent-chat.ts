@@ -92,6 +92,50 @@ const TOOL_ENDPOINTS: Record<string, ToolEndpoint> = {
   get_depin_stats: { method: "GET", path: "/rewards" },
   get_subnet_status: { method: "GET", path: "/agents/status" },
   list_conversations: { method: "GET", path: "/agents/conversations" },
+  // Fiat ramp tools
+  get_wallet_balance: { method: "GET", path: "/fiat-ramp/status" },
+  get_funding_options: { method: "GET", path: "/fiat-ramp/status" },
+  create_onramp_session: {
+    method: "POST",
+    path: (i) => i.provider === "yellowcard" ? "/fiat-ramp/yellowcard/deposit" : "/fiat-ramp/stripe/onramp",
+    body: (i) => i,
+  },
+  get_provider_rates: { method: "GET", path: "/fiat-ramp/yellowcard/rates" },
+  get_withdraw_channels: { method: "GET", path: (i) => `/fiat-ramp/yellowcard/channels${i.country ? `?country=${i.country}` : ""}` },
+  submit_withdrawal: {
+    method: "POST",
+    path: "/fiat-ramp/yellowcard/withdraw",
+    body: (i) => ({
+      walletAddress: i.walletAddress ?? "0x0000000000000000000000000000000000000000",
+      amountUsd: i.amountUsd,
+      fiatCurrency: i.fiatCurrency,
+      country: i.country,
+      channelId: i.channelId,
+      destination: {
+        type: i.accountType,
+        accountName: i.accountName,
+        accountNumber: i.accountNumber,
+        country: i.country,
+      },
+      sender: i.sender ?? { name: "PCC Agent", country: i.country, address: "PCC", dob: "01/01/2000", email: "agent@pcc.dev", idNumber: "000000", idType: "passport" },
+    }),
+  },
+  get_ramp_activity: { method: "GET", path: (i) => `/fiat-ramp/sessions${i.provider ? `?provider=${i.provider}` : ""}` },
+  get_credit_balance: { method: "GET", path: (i) => `/fiat-ramp/stripe/credits/${i.userId}` },
+  buy_credits: {
+    method: "POST",
+    path: "/fiat-ramp/stripe/credits/deposit",
+    body: (i) => ({ userId: i.userId, amountUsd: i.amountUsd }),
+  },
+  send_enterprise_payout: {
+    method: "POST",
+    path: "/fiat-ramp/wise/payout",
+    body: (i) => ({
+      sourceAmount: i.amount,
+      recipient: { name: i.recipientName, currency: i.currency, type: i.accountType, details: i.details },
+      reference: i.reference,
+    }),
+  },
 };
 
 const PCC_TOOLS = [
@@ -114,4 +158,14 @@ const PCC_TOOLS = [
   { name: "list_protocols", description: "List protocol templates.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_depin_stats", description: "DePIN statistics.", input_schema: { type: "object", properties: {}, required: [] } },
   { name: "get_subnet_status", description: "Bittensor subnet status.", input_schema: { type: "object", properties: {}, required: [] } },
+  { name: "get_wallet_balance", description: "Check agent wallet USDC balance, pending deposits, and API credits.", input_schema: { type: "object", properties: {}, required: [] } },
+  { name: "get_funding_options", description: "Show funding options — Stripe (US/EU) and Yellowcard (34 countries).", input_schema: { type: "object", properties: {}, required: [] } },
+  { name: "create_onramp_session", description: "Create a fiat-to-crypto funding session.", input_schema: { type: "object", properties: { provider: { type: "string" }, amount: { type: "string" }, currency: { type: "string" }, country: { type: "string" }, channelId: { type: "string" } }, required: ["provider", "amount"] } },
+  { name: "get_provider_rates", description: "Get live exchange rates for emerging market currencies.", input_schema: { type: "object", properties: {}, required: [] } },
+  { name: "get_withdraw_channels", description: "Get withdrawal channels for a country.", input_schema: { type: "object", properties: { country: { type: "string" } }, required: [] } },
+  { name: "submit_withdrawal", description: "Withdraw USDC to local fiat via bank/mobile money.", input_schema: { type: "object", properties: { amountUsd: { type: "string" }, fiatCurrency: { type: "string" }, country: { type: "string" }, channelId: { type: "string" }, accountName: { type: "string" }, accountNumber: { type: "string" }, accountType: { type: "string" } }, required: ["amountUsd", "fiatCurrency", "country", "channelId", "accountName", "accountNumber", "accountType"] } },
+  { name: "get_ramp_activity", description: "Show recent fiat on/off ramp activity.", input_schema: { type: "object", properties: { provider: { type: "string" } }, required: [] } },
+  { name: "get_credit_balance", description: "Check API credit balance.", input_schema: { type: "object", properties: { userId: { type: "string" } }, required: ["userId"] } },
+  { name: "buy_credits", description: "Buy API credits with USD.", input_schema: { type: "object", properties: { userId: { type: "string" }, amountUsd: { type: "number" } }, required: ["userId", "amountUsd"] } },
+  { name: "send_enterprise_payout", description: "Send fiat payout via Wise to 40+ currencies.", input_schema: { type: "object", properties: { amount: { type: "number" }, recipientName: { type: "string" }, currency: { type: "string" }, accountType: { type: "string" }, details: { type: "object" }, reference: { type: "string" } }, required: ["amount", "recipientName", "currency", "accountType", "details", "reference"] } },
 ];

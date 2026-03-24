@@ -16,6 +16,7 @@ import { EvidenceVerifier } from "./evidence-verifier.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ZKProofService } from "./zk-proof-service.js";
 import { BittensorSubnetBridge } from "./bittensor/subnet-bridge.js";
+import { OracleVerificationBridge } from "./oracle/oracle-bridge.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -38,12 +39,16 @@ export interface BenchmarkProofEnvelope {
     | "sensor_evidence"
     | "zk_proof"
     | "merkle_commitment"
-    | "bittensor_verification";
+    | "bittensor_verification"
+    | "oracle_verification";
   /** Proof-type-specific payload */
   proof: Record<string, unknown>;
   /** When the proof was submitted */
   submittedAt: Timestamp;
 }
+
+// Alias for backward compatibility
+export type { BenchmarkProofEnvelope as BenchmarkProofEnvelopeCompat };
 
 /** Result of a benchmark validation */
 export interface ValidationResult {
@@ -72,7 +77,8 @@ export class TMPValidatorBridge {
     private evidenceVerifier: EvidenceVerifier,
     private commitmentService: CommitmentService,
     private zkProofService: ZKProofService,
-    private bittensorBridge?: BittensorSubnetBridge,
+    /** Accepts either BittensorSubnetBridge (legacy) or OracleVerificationBridge (new) */
+    private bittensorBridge?: BittensorSubnetBridge | OracleVerificationBridge,
   ) {}
 
   /**
@@ -91,6 +97,8 @@ export class TMPValidatorBridge {
         return this.validateMerkleCommitment(envelope);
       case "bittensor_verification":
         return this.validateViaBittensor(envelope);
+      case "oracle_verification":
+        return this.validateViaOracle(envelope);
       default:
         return {
           valid: false,
@@ -277,14 +285,82 @@ export class TMPValidatorBridge {
       requiredTier,
     );
 
+    // OracleVerificationBridge returns .score + .oracle; BittensorSubnetBridge returns .consensusScore + .minerCount
+    const isLegacyBittensor = "consensusScore" in result && !("oracle" in result);
+    const score = "consensusScore" in result ? result.consensusScore : (result as { score: number }).score;
+    const minerCount = "minerCount" in result ? result.minerCount : 1;
+    const oracleName = "oracle" in result ? (result as { oracle?: string }).oracle : "bittensor";
+    const checkName = isLegacyBittensor ? "bittensor_consensus" : "oracle_consensus";
+
     return {
       valid: result.passed,
-      confidence: result.consensusScore,
+      confidence: score,
       findings: [
         {
-          check: "bittensor_consensus",
+          check: checkName,
           passed: result.passed,
-          details: `Bittensor consensus: ${result.passed ? "PASS" : "FAIL"} (score: ${(result.consensusScore * 100).toFixed(1)}%, miners: ${result.minerCount})`,
+          details: `${isLegacyBittensor ? "Bittensor" : "Oracle"} consensus (${oracleName ?? "unknown"}): ${result.passed ? "PASS" : "FAIL"} (score: ${(score * 100).toFixed(1)}%, sources: ${minerCount})`,
+        },
+      ],
+    };
+  }
+
+  /**
+   * validateViaOracle — new oracle cascade routing.
+   * Accepts oracle_verification proof type.
+   */
+  async validateViaOracle(
+    envelope: BenchmarkProofEnvelope,
+  ): Promise<ValidationResult> {
+    if (!this.bittensorBridge || !this.bittensorBridge.isAvailable()) {
+      return {
+        valid: false,
+        confidence: 0,
+        findings: [
+          {
+            check: "oracle_available",
+            passed: false,
+            details: "No verification oracle is available",
+          },
+        ],
+      };
+    }
+
+    const bundleHash = envelope.proof.bundleHash as string | undefined;
+    const bundleData = envelope.proof.bundleData as string | undefined;
+    const requiredTier = (envelope.proof.requiredTier as number) ?? 1;
+
+    if (!bundleHash || !bundleData) {
+      return {
+        valid: false,
+        confidence: 0,
+        findings: [
+          {
+            check: "oracle_input",
+            passed: false,
+            details: "Missing bundleHash or bundleData for oracle verification",
+          },
+        ],
+      };
+    }
+
+    const result = await this.bittensorBridge.submitForVerification(
+      bundleHash,
+      bundleData,
+      requiredTier,
+    );
+
+    const score = "consensusScore" in result ? result.consensusScore : (result as { score: number }).score;
+    const oracleName = "oracle" in result ? (result as { oracle?: string }).oracle : "oracle";
+
+    return {
+      valid: result.passed,
+      confidence: score,
+      findings: [
+        {
+          check: "oracle_verification",
+          passed: result.passed,
+          details: `Oracle (${oracleName ?? "unknown"}): ${result.passed ? "PASS" : "FAIL"} (score: ${(score * 100).toFixed(1)}%)`,
         },
       ],
     };

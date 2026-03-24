@@ -96,4 +96,43 @@ const cardExtractors: Record<string, CardExtractor> = {
     if (!data.connected) return [{ type: "wallet_connect", data: {} }];
     return [];
   },
+
+  // -- Fiat Ramp --
+
+  get_wallet_balance: (_name, data) => {
+    return [{ type: "wallet_balance", data }];
+  },
+
+  get_funding_options: (_name, data) => {
+    return [{ type: "fund_options", data }];
+  },
+
+  create_onramp_session: (_name, data) => {
+    if (data.session) return [{ type: "onramp_session", data }];
+    return [];
+  },
+
+  get_provider_rates: (_name, data) => {
+    if (data.rates) return [{ type: "provider_rates", data }];
+    return [];
+  },
+
+  get_ramp_activity: (_name, data) => {
+    const sessions = data.sessions as unknown[];
+    if (sessions?.length) return [{ type: "ramp_activity", data }];
+    return [];
+  },
+
+  submit_withdrawal: (_name, data) => {
+    if (data.session) return [{ type: "withdraw_form", data: { ...data, submitted: true } }];
+    return [];
+  },
+
+  get_credit_balance: (_name, data) => {
+    return [{ type: "credit_balance", data }];
+  },
+
+  get_withdraw_channels: (_name, data) => {
+    return [{ type: "withdraw_form", data: { ...data, submitted: false } }];
+  },
 };

@@ -223,10 +223,10 @@ export const agentTools: ToolDef[] = [
     input_schema: { type: "object", properties: {}, required: [] },
   },
 
-  // -- Subnet --
+  // -- Oracle Verification --
   {
     name: "get_subnet_status",
-    description: "Get Bittensor verification subnet status (health, miner leaderboard).",
+    description: "Get verification oracle status (cascade health, oracle leaderboard: UMA, Chainlink, EigenLayer).",
     input_schema: { type: "object", properties: {}, required: [] },
   },
 
@@ -258,6 +258,116 @@ export const agentTools: ToolDef[] = [
     name: "check_wallet_status",
     description: "Check if the user has a wallet connected and their authentication status.",
     input_schema: { type: "object", properties: {}, required: [] },
+  },
+
+  // -- Wallet & Funding --
+  {
+    name: "get_wallet_balance",
+    description: "Check the agent wallet balance including USDC holdings, pending deposits, and API credits.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "get_funding_options",
+    description: "Show available options to fund the wallet — Stripe (US/EU, card/ACH) and Yellowcard (emerging markets, bank/mobile money). Returns provider cards for the user to choose.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "create_onramp_session",
+    description: "Create a fiat-to-crypto funding session. User pays with card/ACH (Stripe) or bank transfer/mobile money (Yellowcard) and receives USDC in their wallet.",
+    input_schema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider: 'stripe' or 'yellowcard'" },
+        amount: { type: "string", description: "Amount in source currency" },
+        currency: { type: "string", description: "Source fiat currency (USD, NGN, KES, BRL, etc.)" },
+        country: { type: "string", description: "Country code (for Yellowcard)" },
+        channelId: { type: "string", description: "Payment channel ID (for Yellowcard)" },
+      },
+      required: ["provider", "amount"],
+    },
+  },
+  {
+    name: "get_provider_rates",
+    description: "Get live exchange rates from Yellowcard for emerging market currencies (NGN, KES, ZAR, BRL, MXN, etc.).",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "get_withdraw_channels",
+    description: "Get available withdrawal channels for a country — shows bank transfer, mobile money, IBAN options with supported currencies.",
+    input_schema: {
+      type: "object",
+      properties: {
+        country: { type: "string", description: "Country code (NG, KE, ZA, BR, MX, etc.)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "submit_withdrawal",
+    description: "Withdraw USDC earnings to local fiat currency via bank transfer or mobile money. Converts crypto to local currency and sends to the operator's account.",
+    input_schema: {
+      type: "object",
+      properties: {
+        amountUsd: { type: "string", description: "Amount in USD to withdraw" },
+        fiatCurrency: { type: "string", description: "Target fiat currency" },
+        country: { type: "string", description: "Country code" },
+        channelId: { type: "string", description: "Payment channel ID" },
+        accountName: { type: "string", description: "Account holder name" },
+        accountNumber: { type: "string", description: "Bank account or phone number" },
+        accountType: { type: "string", description: "'bank_transfer' or 'mobile_money'" },
+      },
+      required: ["amountUsd", "fiatCurrency", "country", "channelId", "accountName", "accountNumber", "accountType"],
+    },
+  },
+  {
+    name: "get_ramp_activity",
+    description: "Show recent fiat on/off ramp activity — deposits, withdrawals, and their statuses across all providers.",
+    input_schema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Filter by provider: 'stripe', 'yellowcard', 'wise'" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_credit_balance",
+    description: "Check prepaid API credit balance. Credits are used for PCC API calls as an alternative to on-chain x402 micropayments.",
+    input_schema: {
+      type: "object",
+      properties: {
+        userId: { type: "string", description: "User ID" },
+      },
+      required: ["userId"],
+    },
+  },
+  {
+    name: "buy_credits",
+    description: "Purchase API credits with USD. 100 credits = $1. Credits are deducted per API call instead of requiring wallet payments.",
+    input_schema: {
+      type: "object",
+      properties: {
+        userId: { type: "string", description: "User ID" },
+        amountUsd: { type: "number", description: "Amount in USD to spend on credits" },
+      },
+      required: ["userId", "amountUsd"],
+    },
+  },
+  {
+    name: "send_enterprise_payout",
+    description: "Send fiat payout to an institutional bank account via Wise. Supports 40+ currencies for enterprise operators who don't use crypto.",
+    input_schema: {
+      type: "object",
+      properties: {
+        amount: { type: "number", description: "Amount in source currency (USD)" },
+        recipientName: { type: "string", description: "Recipient name" },
+        currency: { type: "string", description: "Target currency (GBP, EUR, etc.)" },
+        accountType: { type: "string", description: "Account type (sort_code, iban, aba, etc.)" },
+        details: { type: "object", description: "Bank account details (varies by type)" },
+        reference: { type: "string", description: "Payment reference" },
+      },
+      required: ["amount", "recipientName", "currency", "accountType", "details", "reference"],
+    },
   },
 ];
 
@@ -310,4 +420,48 @@ export const toolEndpoints: Record<string, ToolEndpoint> = {
   list_conversations: { method: "GET", path: "/agents/conversations" },
   navigate_to_page: { method: "GET", path: "", clientOnly: true },
   check_wallet_status: { method: "GET", path: "", clientOnly: true },
+  // Fiat ramp tools
+  get_wallet_balance: { method: "GET", path: "/fiat-ramp/status" },
+  get_funding_options: { method: "GET", path: "/fiat-ramp/status" },
+  create_onramp_session: {
+    method: "POST",
+    path: (i) => i.provider === "yellowcard" ? "/fiat-ramp/yellowcard/deposit" : "/fiat-ramp/stripe/onramp",
+    body: (i) => i,
+  },
+  get_provider_rates: { method: "GET", path: "/fiat-ramp/yellowcard/rates" },
+  get_withdraw_channels: { method: "GET", path: (i) => `/fiat-ramp/yellowcard/channels${i.country ? `?country=${i.country}` : ""}` },
+  submit_withdrawal: {
+    method: "POST",
+    path: "/fiat-ramp/yellowcard/withdraw",
+    body: (i) => ({
+      walletAddress: i.walletAddress ?? "0x0000000000000000000000000000000000000000",
+      amountUsd: i.amountUsd,
+      fiatCurrency: i.fiatCurrency,
+      country: i.country,
+      channelId: i.channelId,
+      destination: {
+        type: i.accountType,
+        accountName: i.accountName,
+        accountNumber: i.accountNumber,
+        country: i.country,
+      },
+      sender: i.sender ?? { name: "PCC Agent", country: i.country, address: "PCC", dob: "01/01/2000", email: "agent@pcc.dev", idNumber: "000000", idType: "passport" },
+    }),
+  },
+  get_ramp_activity: { method: "GET", path: (i) => `/fiat-ramp/sessions${i.provider ? `?provider=${i.provider}` : ""}` },
+  get_credit_balance: { method: "GET", path: (i) => `/fiat-ramp/stripe/credits/${i.userId}` },
+  buy_credits: {
+    method: "POST",
+    path: "/fiat-ramp/stripe/credits/deposit",
+    body: (i) => ({ userId: i.userId, amountUsd: i.amountUsd }),
+  },
+  send_enterprise_payout: {
+    method: "POST",
+    path: "/fiat-ramp/wise/payout",
+    body: (i) => ({
+      sourceAmount: i.amount,
+      recipient: { name: i.recipientName, currency: i.currency, type: i.accountType, details: i.details },
+      reference: i.reference,
+    }),
+  },
 };

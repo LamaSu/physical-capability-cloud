@@ -29,7 +29,14 @@ export type UICardType =
   | "escrow_summary"
   | "wallet_connect"
   | "sensor_chart"
-  | "depin_stats";
+  | "depin_stats"
+  | "wallet_balance"
+  | "fund_options"
+  | "onramp_session"
+  | "withdraw_form"
+  | "provider_rates"
+  | "ramp_activity"
+  | "credit_balance";
 
 export interface UICard {
   type: UICardType;

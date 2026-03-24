@@ -1,14 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
-import { BittensorSubnetBridge, StarknetProofAnchoringService } from "@pcc/verifier";
+import { OracleVerificationBridge, StarknetProofAnchoringService, configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
 
-// Singleton Bittensor subnet bridge
-const subnetBridge = new BittensorSubnetBridge({
-  numMinersToQuery: 5,
-  minScoreThreshold: 0.6,
-});
+// Singleton oracle verification bridge — config driven by env vars.
+// Set ORACLE_MOCK=false to activate live UMA/Chainlink verification.
+const subnetBridge = new OracleVerificationBridge(configFromEnv());
 
 // Singleton Starknet proof anchoring service (mock mode unless env vars are set)
 const starknetService = new StarknetProofAnchoringService({
@@ -154,20 +152,22 @@ export async function zkProofRoutes(app: FastifyInstance) {
     return { commitment };
   });
 
-  // ── Bittensor Verification Subnet Routes ────────────────────────────
+  // ── Oracle Verification Routes ──────────────────────────────────────
 
-  // Get subnet status and metrics
+  // Get oracle status and metrics (backward-compat path: /api/verification/subnet-status)
   app.get("/api/verification/subnet-status", async () => {
     const available = subnetBridge.isAvailable();
     const metrics = subnetBridge.getMetrics();
     const minerCount = subnetBridge.getMinerLeaderboard().length;
 
+    const oracles = subnetBridge.getOracleLeaderboard();
     return {
       available,
       metrics,
-      minerCount,
+      oracles,
+      minerCount: oracles.length,
       subnetId: 42,
-      network: "mock-local",
+      network: "oracle-cascade",
     };
   });
 
@@ -182,7 +182,7 @@ export async function zkProofRoutes(app: FastifyInstance) {
       };
 
       if (!subnetBridge.isAvailable()) {
-        return { error: "subnet_unavailable", message: "Bittensor verification subnet is not available" };
+        return { error: "subnet_unavailable", message: "No verification oracle is available" };
       }
 
       try {
@@ -194,10 +194,10 @@ export async function zkProofRoutes(app: FastifyInstance) {
     },
   );
 
-  // Get miner leaderboard
+  // Get oracle leaderboard (backward-compat: /api/verification/miners)
   app.get("/api/verification/miners", async () => {
-    const miners = subnetBridge.getMinerLeaderboard();
-    return { miners, count: miners.length };
+    const oracles = subnetBridge.getOracleLeaderboard();
+    return { miners: oracles, oracles, count: oracles.length };
   });
 
   // ── Starknet Proof Anchoring Routes ─────────────────────────────────

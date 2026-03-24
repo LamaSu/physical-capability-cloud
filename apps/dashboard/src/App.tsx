@@ -72,6 +72,7 @@ const SWFDashboardPage = lazy(() => import("./pages/SWFDashboardPage.js").then(m
 const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then(m => ({ default: m.SWFGovernancePage })));
 const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
+const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -256,6 +257,14 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <StartPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === "/whitepaper") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WhitepaperPage />
       </Suspense>
     );
   }

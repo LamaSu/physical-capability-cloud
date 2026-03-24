@@ -48,6 +48,7 @@ import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
+import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
@@ -156,6 +157,7 @@ export async function createGateway(port = 3200) {
   await app.register(registryRoutes);
   await app.register(agentChatRoutes);
   await app.register(settlementRoutes);
+  await app.register(fiatRampRoutes);
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
   await app.register(telemetryRoutes);

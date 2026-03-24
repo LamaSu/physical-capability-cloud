@@ -67,7 +67,8 @@ export interface BenchmarkConfig {
     | "sensor_evidence"
     | "zk_proof"
     | "merkle_commitment"
-    | "bittensor_verification";
+    | "bittensor_verification"
+    | "oracle_verification";
 }
 
 export interface AuctionConfig {
