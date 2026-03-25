@@ -1,4 +1,5 @@
 export { EvidenceEmitter } from "./evidence-emitter.js";
+export { AnomalyDetector, type AnomalyReport, type AnomalyDetectorConfig } from "./anomaly-detector.js";
 export { loadKernelConfig } from "./kernel-config.js";
 export type { KernelConfig, DeviceConfig, DeviceRole, AdapterType } from "./kernel-config.js";
 export {

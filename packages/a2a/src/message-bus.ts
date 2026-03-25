@@ -7,21 +7,43 @@
  * or a peer-to-peer protocol.
  */
 
-import type { A2AMessage, AgentCard, Conversation, Intent } from "./types.js";
+import type {
+  A2AMessage,
+  AgentCard,
+  Conversation,
+  Intent,
+  AnomalyDetectedIntent,
+  ProtocolFailureIntent,
+  SystemAlertIntent,
+} from "./types.js";
 import type { SecurityMiddleware } from "./security-middleware.js";
 import * as Sentry from "@sentry/node";
 
 type MessageHandler = (message: A2AMessage) => void | Promise<void>;
+type AnomalyHandler = (intent: AnomalyDetectedIntent | ProtocolFailureIntent | SystemAlertIntent) => void;
+
+/** Intent types that trigger anomaly broadcast in addition to point-to-point delivery */
+const ANOMALY_INTENT_TYPES = new Set(["anomaly_detected", "protocol_failure", "system_alert"]);
 
 export class MessageBus {
   private agents: Map<string, AgentCard> = new Map();
   private handlers: Map<string, MessageHandler[]> = new Map();
   private conversations: Map<string, Conversation> = new Map();
   private security?: SecurityMiddleware;
+  private anomalyListeners: AnomalyHandler[] = [];
 
   /** Set security middleware — if set, all messages are scanned before delivery */
   setSecurityMiddleware(mw: SecurityMiddleware): void {
     this.security = mw;
+  }
+
+  /**
+   * Register an anomaly listener. All anomaly_detected, protocol_failure, and
+   * system_alert intents are broadcast to every registered listener regardless
+   * of the message's `to` field (fan-out pattern — not point-to-point).
+   */
+  onAnomaly(callback: AnomalyHandler): void {
+    this.anomalyListeners.push(callback);
   }
 
   /** Register an agent on the bus */
@@ -90,6 +112,18 @@ export class MessageBus {
         );
       } catch (err) {
         console.error(`Handler error for agent ${message.to}:`, err);
+      }
+    }
+
+    // Anomaly broadcast — fan-out to all anomaly listeners regardless of `to`
+    if (ANOMALY_INTENT_TYPES.has(message.intent.type)) {
+      const anomalyIntent = message.intent as AnomalyDetectedIntent | ProtocolFailureIntent | SystemAlertIntent;
+      for (const listener of this.anomalyListeners) {
+        try {
+          listener(anomalyIntent);
+        } catch (err) {
+          console.error(`Anomaly listener error for intent ${message.intent.type}:`, err);
+        }
       }
     }
   }

@@ -3,6 +3,8 @@ export {
   SmartAccountClient,
   ENTRY_POINT_V07,
   SIMPLE_ACCOUNT_FACTORY_V07,
+  createGaslessClient,
+  buildCoinbasePaymasterUrl,
 } from "./smart-account.js";
 
 // UserOp Queue
@@ -40,4 +42,5 @@ export type {
   PaymasterConfig,
   SponsorshipResult,
   SmartAccountState,
+  CoinbasePaymasterConfig,
 } from "./types.js";

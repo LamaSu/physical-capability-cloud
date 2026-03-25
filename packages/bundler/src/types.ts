@@ -112,7 +112,26 @@ export interface PaymasterConfig {
   /** Paymaster policy ID (for Pimlico/Alchemy hosted paymasters) */
   policyId?: string;
   /** Sponsorship mode */
-  mode: "full" | "partial" | "none";
+  mode: "full" | "partial" | "none" | "coinbase";
+}
+
+// ---------------------------------------------------------------------------
+// Coinbase Paymaster
+// ---------------------------------------------------------------------------
+
+export interface CoinbasePaymasterConfig {
+  /**
+   * CDP API key (from https://portal.cdp.coinbase.com/).
+   * Used to construct: https://api.developer.coinbase.com/rpc/v1/base-sepolia/<API_KEY>
+   */
+  cdpApiKey?: string;
+  /**
+   * Full paymaster+bundler URL (alternative to cdpApiKey).
+   * When provided, overrides the cdpApiKey-based URL construction.
+   */
+  paymasterBundlerUrl?: string;
+  /** Target chain */
+  chain: "base" | "base-sepolia";
 }
 
 export interface SponsorshipResult {
