@@ -43,10 +43,10 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
-ARG BUILD_BUST=2
+ARG BUILD_BUST=3
 ENV NODE_OPTIONS="--max-old-space-size=4096"
-# Build all packages except dashboard (tsc only — turbo handles concurrency)
-RUN npx turbo build --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --concurrency=1
+# Build all packages except dashboard and mcp-server (tsc only — turbo handles deps)
+RUN npx turbo build --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --filter='!@pcc/onboard-kit' --concurrency=1
 # Build dashboard with vite only (skip tsc -b which OOMs on large workspace)
 RUN cd apps/dashboard && npx vite build
 
