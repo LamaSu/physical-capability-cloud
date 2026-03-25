@@ -3,15 +3,20 @@
  *
  * Exposes PCC's Story Protocol integration via REST:
  *
- *   POST /api/ip/register-capability       — Register a CSD as Story IP Asset
- *   POST /api/ip/register-job-evidence     — Register job evidence as derivative IP
- *   POST /api/ip/distribute-royalties      — Set revenue split for an IP Asset
- *   POST /api/ip/:ipId/pay                 — Pay royalty to an IP vault
- *   POST /api/ip/:ipId/claim               — Claim revenue from a vault
- *   GET  /api/ip/:ipId/revenue             — Revenue snapshot
- *   GET  /api/ip/:ipId/lineage             — Full IP lineage chain
- *   GET  /api/ip/capability/:capabilityId  — Get IP registration for a capability
- *   POST /api/ip/:ipId/dispute             — Raise a dispute
+ *   POST /api/ip/register-capability         — Register a CSD as Story IP Asset
+ *   POST /api/ip/register-job-evidence       — Register job evidence as derivative IP
+ *   POST /api/ip/distribute-royalties        — Set revenue split for an IP Asset
+ *   POST /api/ip/set-licensing-terms         — Designer sets auto-license conditions
+ *   POST /api/ip/settle-royalties            — Trigger royalty settlement for completed job
+ *   GET  /api/ip/:ipId/licensing-terms       — Get licensing terms for an IP Asset
+ *   GET  /api/ip/:ipId/derivative-tree       — Get full derivative tree with revenue shares
+ *   GET  /api/ip/:ipId/royalty-distribution  — Calculate royalty distribution for a job amount
+ *   POST /api/ip/:ipId/pay                   — Pay royalty to an IP vault
+ *   POST /api/ip/:ipId/claim                 — Claim revenue from a vault
+ *   GET  /api/ip/:ipId/revenue               — Revenue snapshot
+ *   GET  /api/ip/:ipId/lineage               — Full IP lineage chain
+ *   GET  /api/ip/capability/:capabilityId    — Get IP registration for a capability
+ *   POST /api/ip/:ipId/dispute               — Raise a dispute
  *
  * DB persistence: registrations and derivative links are stored in the
  * story_ip_registrations / story_derivative_links tables via @pcc/store.
@@ -20,7 +25,8 @@
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
-import { getStoryIPService } from "@pcc/contracts";
+import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
+import type { LicensingTerms } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Body / Params interfaces
@@ -73,6 +79,45 @@ interface RaiseDisputeBody {
   reason: string;
 }
 
+interface SetLicensingTermsBody {
+  ipId: string;
+  designerAddress: string;
+  autoLicense: {
+    minRevSharePercent: number;
+    minAssuranceTier: number;
+    allowedCapabilityTypes: string[];
+    allowedKinds: Array<"base" | "profile" | "extension" | "workflow">;
+    cloneThreshold: number;
+    derivativeThreshold: number;
+    commercialUse: boolean;
+    allowedRegions: string[];
+  };
+  standingOffers: Array<{
+    name: string;
+    revSharePercent: number;
+    conditions: {
+      maxMonthlyJobs: number;
+      minTier: number;
+      capabilityTypes: string[];
+    };
+    autoAccept: boolean;
+  }>;
+  defaultRevShare: number;
+  allowSubDerivatives: boolean;
+  derivativeDecayRate: number;
+}
+
+interface SettleRoyaltiesBody {
+  jobId: string;
+  childIpId: string;
+  jobRevenue: string;
+  payerAddress: string;
+}
+
+interface RoyaltyDistributionQuerystring {
+  amount: string;
+}
+
 interface IpIdParams {
   ipId: string;
 }
@@ -87,6 +132,7 @@ interface CapabilityIdParams {
 
 export async function ipRoutes(app: FastifyInstance) {
   const svc = getStoryIPService();
+  const engine = getLicensingEngine();
 
   // ── POST /api/ip/register-capability ─────────────────────────────────────
 
@@ -249,6 +295,137 @@ export async function ipRoutes(app: FastifyInstance) {
       } catch (err) {
         return reply.code(500).send({
           error: "distribute_royalties_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  // ── POST /api/ip/set-licensing-terms ─────────────────────────────────────
+  // IMPORTANT: static path segments must be defined BEFORE /:ipId/* routes.
+
+  app.post<{ Body: SetLicensingTermsBody }>(
+    "/api/ip/set-licensing-terms",
+    async (req, reply) => {
+      const body = req.body;
+      if (!body?.ipId || !body?.designerAddress) {
+        return reply.code(400).send({ error: "ipId and designerAddress are required" });
+      }
+
+      const terms: LicensingTerms = {
+        id: uuidv4(),
+        ipId: body.ipId,
+        designerAddress: body.designerAddress,
+        autoLicense: body.autoLicense,
+        standingOffers: body.standingOffers ?? [],
+        defaultRevShare: body.defaultRevShare ?? 5,
+        allowSubDerivatives: body.allowSubDerivatives ?? true,
+        derivativeDecayRate: body.derivativeDecayRate ?? 0.5,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      engine.setTerms(body.ipId, terms);
+      return { terms };
+    },
+  );
+
+  // ── POST /api/ip/settle-royalties ─────────────────────────────────────────
+
+  app.post<{ Body: SettleRoyaltiesBody }>(
+    "/api/ip/settle-royalties",
+    async (req, reply) => {
+      const { jobId, childIpId, jobRevenue, payerAddress } = req.body ?? {};
+
+      if (!jobId || !childIpId || !jobRevenue || !payerAddress) {
+        return reply.code(400).send({
+          error: "jobId, childIpId, jobRevenue, and payerAddress are required",
+        });
+      }
+
+      try {
+        const distributions = engine.getRoyaltyDistribution(childIpId, jobRevenue);
+        const settled: Array<{ recipientAddress: string; amount: string; ipId: string; txHash: string }> = [];
+        let totalDistributed = 0n;
+
+        for (const dist of distributions) {
+          if (dist.amount === "0") continue;
+          try {
+            const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, payerAddress);
+            settled.push({ recipientAddress: dist.recipientAddress, amount: dist.amount, ipId: dist.ipId, txHash });
+            totalDistributed += BigInt(dist.amount);
+          } catch (err) {
+            console.warn(`[ip] Royalty settlement failed for ${dist.ipId}:`, err instanceof Error ? err.message : err);
+          }
+        }
+
+        return {
+          jobId,
+          childIpId,
+          distributions: settled,
+          totalDistributed: String(totalDistributed),
+        };
+      } catch (err) {
+        return reply.code(500).send({
+          error: "settle_royalties_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  // ── GET /api/ip/:ipId/licensing-terms ─────────────────────────────────────
+
+  app.get<{ Params: IpIdParams }>(
+    "/api/ip/:ipId/licensing-terms",
+    async (req, reply) => {
+      const { ipId } = req.params;
+      const terms = engine.getTerms(ipId);
+      if (!terms) {
+        return reply.code(404).send({ error: "licensing_terms_not_found" });
+      }
+      return { terms };
+    },
+  );
+
+  // ── GET /api/ip/:ipId/derivative-tree ─────────────────────────────────────
+
+  app.get<{ Params: IpIdParams }>(
+    "/api/ip/:ipId/derivative-tree",
+    async (req, reply) => {
+      const { ipId } = req.params;
+      try {
+        const chain = engine.calculateEffectiveRevShare(ipId);
+        const children = engine.getChildren(ipId);
+        return {
+          ipId,
+          ancestorChain: chain.chain,
+          totalAncestorShare: chain.totalAncestorShare,
+          directChildren: children,
+        };
+      } catch (err) {
+        return reply.code(500).send({
+          error: "derivative_tree_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  // ── GET /api/ip/:ipId/royalty-distribution ────────────────────────────────
+
+  app.get<{ Params: IpIdParams; Querystring: RoyaltyDistributionQuerystring }>(
+    "/api/ip/:ipId/royalty-distribution",
+    async (req, reply) => {
+      const { ipId } = req.params;
+      const amount = (req.query as RoyaltyDistributionQuerystring).amount ?? "1000000";
+
+      try {
+        const distributions = engine.getRoyaltyDistribution(ipId, amount);
+        return { ipId, amount, distributions };
+      } catch (err) {
+        return reply.code(500).send({
+          error: "royalty_distribution_failed",
           message: err instanceof Error ? err.message : String(err),
         });
       }
