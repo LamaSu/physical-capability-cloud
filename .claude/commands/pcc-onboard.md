@@ -1,34 +1,91 @@
-Onboard a new machine or capability to the PCC network.
+# PCC Onboard — CLI
 
-Prompt-to-build onboarding: describe equipment in natural language, AI generates kernel configuration.
+Onboard a new machine or capability to the PCC network using CLI tools.
 
-## Steps
+## When to use
+- "I have a new machine to add" / "Onboard my printer" / "Register equipment"
+- "Set up a new kernel" / "Add my CNC mill to PCC"
 
-1. Ask the user to describe their equipment and what it can do
-2. Parse the description to infer:
-   - Capability type (map to PCC taxonomy: hplc, cnc-3axis, cnc-5axis, fdm-printer, mass-spec, flow-reactor, etc.)
-   - Key specifications (detector type, axis count, build volume, resolution, etc.)
-   - Location
-   - Typical turnaround time
-   - Price range
-3. Suggest an assurance tier based on the capability type and specifications
-4. Generate a kernel configuration using `pcc_build_options` to validate parameters
-5. Show the configuration for review:
-   - Kernel name and description
-   - Capability type and specifications
-   - Suggested pricing
-   - Required evidence types for the chosen assurance tier
-   - ERC-8004 Agent Registration File preview
-6. Let the user adjust anything
-7. Register: guide through on-chain registration steps
+## Prerequisites
+- PCC gateway reachable at PCC_URL (default: https://pcc-gateway-production.up.railway.app)
+- Build CLI: `cd packages/mcp-server && npx tsc`
 
-## Example prompts
-- "I have a Shimadzu HPLC with UV detector, we do pharma purity analysis in 4 hours"
-- "Onboard my Haas VF-2 CNC mill, we can machine aluminum and steel"
-- "Register a Prusa i3 MK3S+ for FDM printing, PLA/PETG materials"
-- "Add my Waters mass spec for molecular weight confirmation"
+## Commands
 
-## Data sources
-- `pcc_list_capabilities` — validate capability types
-- `pcc_build_options` — validate parameter configurations
-- `pcc_agent_registration` — preview the generated ERC-8004 registration file
+### Auto-detect configuration state
+```bash
+node packages/mcp-server/dist/cli.js setup detect [--pretty]
+```
+Check what's configured, what env vars are set, database status. **Start here.**
+
+### Scan for devices on network
+```bash
+node packages/mcp-server/dist/cli.js discover scan [--protocols=ipp] [--timeout=3000] [--pretty]
+```
+Find IPP printers and other discoverable devices on the local network.
+
+### One-command onboard pipeline
+```bash
+node packages/mcp-server/dist/cli.js discover onboard [--uri=ipp://192.168.1.50/ipp/print] [--protocol=ipp] [--pretty]
+```
+Auto-discover → generate CSD → register in PCC registry. All in one command.
+
+### Generate kernel config
+```bash
+node packages/mcp-server/dist/cli.js setup config '<devicesJson>' [--kernelId=my-shop] [--mockMode] [--pretty]
+```
+Generate KERNEL_CONFIG JSON from device descriptions. The devicesJson is an array of `{name, type, adapterType, url?, apiKey?, host?, port?}`.
+
+### Validate config
+```bash
+node packages/mcp-server/dist/cli.js setup validate [--config='{}'] [--pretty]
+```
+Check adapter connectivity and config completeness. Omit --config to validate current.
+
+### Register a device
+```bash
+node packages/mcp-server/dist/cli.js setup register-device --kernelId=x --deviceId=y --type=machine|sensor|camera --adapter=octoprint|modbus|opcua|sila|generic-http|mock [--model="Prusa MK4"] [--pretty]
+```
+
+### Health check
+```bash
+node packages/mcp-server/dist/cli.js setup health [--deviceId=x] [--pretty]
+```
+Connectivity status and response time for all or specific devices.
+
+### Run test job
+```bash
+node packages/mcp-server/dist/cli.js setup test-job [--kernelId=x] [--deviceId=y] [--tier=0] [--pretty]
+```
+End-to-end pipeline test: submit → execute → evidence → (optional) settlement.
+
+### Generate .env file
+```bash
+node packages/mcp-server/dist/cli.js setup env dev|testnet|mainnet [--pretty]
+```
+
+### Overall setup status
+```bash
+node packages/mcp-server/dist/cli.js setup status [--pretty]
+```
+
+## Workflow: Full machine onboarding
+1. `pcc setup detect --pretty` — check current state
+2. `pcc discover scan --pretty` — find devices
+3. `pcc discover onboard --pretty` — auto-onboard first found device
+4. `pcc setup health --pretty` — verify connectivity
+5. `pcc setup test-job --pretty` — run end-to-end test
+6. `pcc setup status --pretty` — confirm everything green
+
+## Workflow: Manual setup from scratch
+1. `pcc setup env dev --pretty` — generate .env
+2. `pcc setup config '[{"name":"My Printer","type":"machine","adapterType":"octoprint","url":"http://192.168.1.50"}]' --pretty`
+3. `pcc setup validate --pretty`
+4. `pcc setup register-device --kernelId=my-shop --deviceId=printer-01 --type=machine --adapter=octoprint --pretty`
+5. `pcc setup health --deviceId=printer-01 --pretty`
+6. `pcc setup test-job --kernelId=my-shop --pretty`
+
+## Tips
+- Use `--mockMode` with setup config for testing without real hardware
+- Adapter types: octoprint, modbus, opcua, sila, generic-http, mock
+- Device types: machine, sensor, camera

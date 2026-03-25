@@ -1,29 +1,66 @@
-Submit a manufacturing job to PCC with milestone escrow.
+# PCC Submit Job — CLI
 
-Walk the user through the full job submission flow using the contract builder.
+Submit a manufacturing job to PCC with milestone escrow using the contract builder CLI.
 
-## Steps
+## When to use
+- "Submit a job" / "I need CNC machining" / "Build a contract for 3D printing"
+- "Price a job" / "What parameters are available for HPLC?"
 
-1. **Select capability type**: Use `pcc_build_options` with the capability type to get available parameters
-2. **Configure parameters**: Show parameter groups, let user select values. Call `pcc_build_options` with partial selections to get dependent options
-3. **Calculate price**: Use `pcc_calculate_price` with complete selections
-4. **Set assurance tier**: Explain the tiers:
-   - Tier 0: Self-attested (cheapest, no evidence required)
-   - Tier 1: Basic verification (peer review)
-   - Tier 2: Standard (evidence chain + bonds)
-   - Tier 3: Full (ZK proofs + Bittensor + challenge window)
-5. **Build contract**: Use `pcc_build_contract` to generate the full contract
-6. **Review**: Show the user the complete contract with milestones, pricing, evidence requirements
-7. **Submit**: Confirm and submit the job via `POST /api/jobs`
+## Prerequisites
+- PCC gateway reachable at PCC_URL (default: https://pcc-gateway-production.up.railway.app)
+- Build CLI: `cd packages/mcp-server && npx tsc`
 
-## Key MCP tools
-- `pcc_build_options` — get available parameter choices
-- `pcc_calculate_price` — calculate price for selections
-- `pcc_build_contract` — generate complete contract
-- `pcc_list_capabilities` — find capability types
-- `pcc_search_capabilities` — search with details
+## Commands
 
-## Example flows
-- "I need HPLC purity analysis for a peptide sample"
-- "Build a contract for 5-axis CNC machining, aluminum, ±0.01mm tolerance"
-- "Submit a flow chemistry job at Tier 2 assurance"
+### List capability types
+```bash
+node packages/mcp-server/dist/cli.js capabilities list [--pretty]
+```
+Shows all registered PCC capability types (fdm-printer, cnc-3axis, hplc, etc.).
+
+### Search capabilities with details
+```bash
+node packages/mcp-server/dist/cli.js capabilities search [--pretty]
+```
+Full details: type, name, version, parameter count, groups, base pricing.
+
+### Get build options (parameter discovery)
+```bash
+node packages/mcp-server/dist/cli.js build options <type> [--selections='{}'] [--profileId=x] [--pretty]
+```
+Interactive parameter discovery. Pass partial selections to get next available choices.
+
+### Calculate price
+```bash
+node packages/mcp-server/dist/cli.js build price <type> --selections='{"material":"pla","infill":20}' [--profileId=x] [--pretty]
+```
+
+### Build complete contract
+```bash
+node packages/mcp-server/dist/cli.js build contract <type> --selections='{"material":"pla","infill":20}' --tier=2 [--profileId=x] [--pretty]
+```
+Full contract with pricing, milestones, and assurance tier. Ready for escrow.
+
+### Compile multi-step workflow
+```bash
+node packages/mcp-server/dist/cli.js workflows compile --steps='[{"id":"print","capabilityType":"fdm-printer"},{"id":"verify","capabilityType":"cmm","dependsOn":["print"]}]' [--pretty]
+```
+Compiles into execution DAG with topologically sorted waves.
+
+## Workflow: Submit a job
+1. `pcc capabilities list --pretty` — find capability type
+2. `pcc build options fdm-printer --pretty` — see available parameters
+3. `pcc build options fdm-printer --selections='{"material":"pla"}' --pretty` — progressive refinement
+4. `pcc build price fdm-printer --selections='{"material":"pla","infill":20,"layer_height":0.2}' --pretty` — check price
+5. `pcc build contract fdm-printer --selections='{"material":"pla","infill":20,"layer_height":0.2}' --tier=2 --pretty` — build contract
+
+## Assurance tiers
+- **Tier 0**: Self-attested (cheapest, no evidence required)
+- **Tier 1**: Basic verification (peer review)
+- **Tier 2**: Standard (evidence chain + bonds)
+- **Tier 3**: Full (ZK proofs + Bittensor subnet + challenge window)
+
+## Tips
+- Call build options iteratively with growing selections to discover dependent parameters
+- Higher assurance tiers cost more but provide stronger guarantees
+- Workflows with dependencies compile into parallel execution waves

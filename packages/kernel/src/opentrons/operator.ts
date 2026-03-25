@@ -142,7 +142,7 @@ export class OpentronOperator {
       materials: ["liquid", "reagent", "buffer", "media", "dna", "rna", "protein"],
       assuranceTiers: [0, 1, 2],
       pricing: {
-        currency: this.config.pricing.currency,
+        currency: this.config.pricing.currency as "USDC" | "ETH" | "DAI" | "SOL",
         baseCost: this.config.pricing.baseCost,
         perMinute: this.config.pricing.perMinute,
         minimum: this.config.pricing.minimum,
@@ -171,7 +171,7 @@ export class OpentronOperator {
     this.health.recordHeartbeat(info !== null);
     this.health.recordCalibration(); // assume calibrated at start
 
-    return { online: info !== null, capability: this.capability };
+    return { online: info !== null, capability: this.capability! };
   }
 
   /** Shut down the operator */

@@ -22,6 +22,7 @@ export type AdapterType =
   | "opcua"
   | "sila"
   | "ipp"
+  | "opentrons"
   | "generic-http"
   | "mock";
 
