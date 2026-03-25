@@ -46,9 +46,9 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       ...config,
     };
     this.source = {
-      type: "machine",
       deviceId: id,
-      label: `Opentrons (${config.url})`,
+      deviceType: "instrument" as const,
+      kernelId: id.split("-")[0] ?? id,
     };
   }
 
