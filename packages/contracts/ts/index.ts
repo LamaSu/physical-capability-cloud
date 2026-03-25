@@ -72,3 +72,22 @@ export type {
   ResolvedSplit,
   DistributionEntry,
 } from "./story-defaults.js";
+
+// Licensing Engine — automatic IP licensing logic
+export {
+  LicensingEngine,
+  getLicensingEngine,
+  resetLicensingEngine,
+} from "./licensing-engine.js";
+export type {
+  LicenseEvaluation,
+  EffectiveRevShareChain,
+  RoyaltyDistribution,
+} from "./licensing-engine.js";
+
+// IP Enforcement Bridge — similarity → licensing → Story Protocol
+export { IPEnforcementBridge } from "./ip-enforcement.js";
+export type {
+  EnforcementResult,
+  RoyaltySettlement,
+} from "./ip-enforcement.js";
