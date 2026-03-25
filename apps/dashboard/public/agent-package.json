@@ -1707,6 +1707,85 @@
         "required": ["message"]
       },
       "endpoint": { "method": "POST", "path": "/api/feedback" }
+    },
+
+    {
+      "name": "report_anomaly",
+      "description": "Report a detected anomaly — protocol failure, evidence mismatch, stuck job, or suspicious behavior. All agents on the network are notified.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["info", "warning", "critical"], "description": "Anomaly severity" },
+          "category": { "type": "string", "enum": ["protocol_failure", "evidence_mismatch", "consensus_failure", "timeout", "rate_anomaly", "trust_violation"], "description": "Anomaly category" },
+          "description": { "type": "string", "description": "Human-readable description of what went wrong" },
+          "targetAgentId": { "type": "string", "description": "Agent or kernel ID being reported (optional)" },
+          "jobId": { "type": "string", "description": "Related job ID (optional)" }
+        },
+        "required": ["severity", "category", "description"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/anomaly/report" }
+    },
+    {
+      "name": "get_unresolved_anomalies",
+      "description": "List all unresolved anomalies on the network. Filter by severity, category, or target agent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "description": "Filter by severity: info, warning, critical" },
+          "category": { "type": "string", "description": "Filter by category" },
+          "targetId": { "type": "string", "description": "Filter by target agent/kernel ID" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/anomaly/unresolved" }
+    },
+    {
+      "name": "get_agent_anomalies",
+      "description": "Get anomalies involving a specific agent, plus their trust impact score.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agentId": { "type": "string", "description": "Agent or kernel ID" }
+        },
+        "required": ["agentId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/anomaly/by-agent/{agentId}" }
+    },
+    {
+      "name": "resolve_anomaly",
+      "description": "Mark an anomaly as resolved with a resolution note.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "anomalyId": { "type": "string", "description": "Anomaly ID to resolve" },
+          "resolution": { "type": "string", "description": "How the anomaly was resolved" }
+        },
+        "required": ["anomalyId", "resolution"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/anomaly/{anomalyId}/resolve" }
+    },
+    {
+      "name": "get_anomaly_stats",
+      "description": "Get aggregate anomaly statistics — total, unresolved, by severity, by category.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/anomaly/stats" }
+    },
+    {
+      "name": "report_protocol_failure",
+      "description": "Report a protocol failure — when a step in the evidence/escrow/verification pipeline breaks. System may auto-recover.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "protocol": { "type": "string", "description": "Which protocol failed: evidence_submission, escrow_release, verification_consensus, settlement" },
+          "errorCode": { "type": "string", "description": "Error code" },
+          "errorMessage": { "type": "string", "description": "Error description" },
+          "involvedAgents": { "type": "array", "items": { "type": "string" }, "description": "Agent IDs involved" },
+          "jobId": { "type": "string", "description": "Related job ID" },
+          "recoveryAction": { "type": "string", "enum": ["retry", "escalate", "rollback", "ignore"], "description": "Suggested recovery" }
+        },
+        "required": ["protocol", "errorCode", "errorMessage", "involvedAgents"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/anomaly/protocol-failure" }
     }
   ],
 

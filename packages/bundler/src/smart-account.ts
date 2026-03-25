@@ -17,19 +17,21 @@ import {
   type Address,
   type Chain,
   type Hex,
-  type Transport,
   type PublicClient,
   encodeFunctionData,
-  type Account,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia, base, localhost } from "viem/chains";
+import { baseSepolia, base } from "viem/chains";
+import { createSmartAccountClient as permissionlessCreateSmartAccountClient } from "permissionless";
+import { toSimpleSmartAccount } from "permissionless/accounts";
+import { createPimlicoClient } from "permissionless/clients/pimlico";
 
 import type {
   BundlerConfig,
   SmartAccountConfig,
   SmartAccountState,
   QueuedOperation,
+  CoinbasePaymasterConfig,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,9 @@ export const ENTRY_POINT_V07: Address = "0x0000000071727De22E5E9d8BAf0edAc6f37da
 // SimpleAccount factory (deployed by eth-infinitism on all major chains)
 export const SIMPLE_ACCOUNT_FACTORY_V07: Address = "0x91E60e0613810449d098b0b5Ec8b51A0FE8c8985";
 
+// Coinbase CDP Paymaster URL pattern
+const COINBASE_PAYMASTER_BASE_URL = "https://api.developer.coinbase.com/rpc/v1";
+
 // ---------------------------------------------------------------------------
 // SmartAccountClient
 // ---------------------------------------------------------------------------
@@ -48,40 +53,94 @@ export const SIMPLE_ACCOUNT_FACTORY_V07: Address = "0x91E60e0613810449d098b0b5Ec
 /**
  * A viem-based smart account client that wraps an EOA signer.
  *
- * Instead of sending raw transactions, it constructs UserOperations and
- * submits them to a bundler. The bundler packs multiple UserOps into a
- * single on-chain transaction via the EntryPoint contract.
+ * Delegates to permissionless.js for:
+ * - Correct CREATE2 address computation via toSimpleSmartAccount
+ * - ERC-4337 compliant UserOp signing (keccak256(abi.encode(userOpHash, entryPoint, chainId)))
+ * - Nonce management, gas estimation, and paymaster integration
  */
 export class SmartAccountClient {
   readonly signerAddress: Address;
-  readonly smartAccountAddress: Address;
+  smartAccountAddress: Address;
   readonly implementation: "simple" | "kernel" | "safe";
   readonly chain: Chain;
 
-  private signer: Account;
-  private publicClient: PublicClient;
   private bundlerUrl: string;
   private paymasterUrl?: string;
   private deployed = false;
   private nonce = 0n;
   private saltNonce: bigint;
+  publicClient: PublicClient;
 
-  constructor(config: SmartAccountConfig) {
-    this.signer = privateKeyToAccount(config.privateKey);
-    this.signerAddress = this.signer.address;
-    this.implementation = config.implementation ?? "simple";
-    this.chain = config.bundler.chain;
-    this.bundlerUrl = config.bundler.bundlerUrl;
-    this.paymasterUrl = config.bundler.paymasterUrl;
-    this.saltNonce = config.saltNonce ?? 0n;
+  // permissionless account — set after async init
+  _account: Awaited<ReturnType<typeof toSimpleSmartAccount>> | null = null;
+
+  /**
+   * Direct constructor — accepts pre-computed addresses.
+   * Prefer `SmartAccountClient.create()` for proper CREATE2 address derivation.
+   *
+   * This constructor is kept public for testing/mocking compatibility.
+   * In production code, always use `SmartAccountClient.create()`.
+   *
+   * When called without addresses (e.g., in tests), placeholder zero addresses
+   * are used — always use `SmartAccountClient.create()` for real deployments.
+   */
+  constructor(
+    config: SmartAccountConfig,
+    smartAccountAddress?: Address,
+    signerAddress?: Address,
+  ) {
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+
+    this.signerAddress = signerAddress ?? (config?.privateKey
+      ? (privateKeyToAccount(config.privateKey as Hex).address)
+      : ZERO_ADDRESS);
+    this.smartAccountAddress = smartAccountAddress ?? ZERO_ADDRESS;
+    this.implementation = config?.implementation ?? "simple";
+    this.chain = config?.bundler?.chain ?? ({} as Chain);
+    this.bundlerUrl = config?.bundler?.bundlerUrl ?? "";
+    this.paymasterUrl = config?.bundler?.paymasterUrl;
+    this.saltNonce = config?.saltNonce ?? 0n;
 
     this.publicClient = createPublicClient({
       chain: this.chain,
+      transport: http(config?.bundler?.rpcUrl),
+    });
+  }
+
+  /**
+   * Factory method — async because toSimpleSmartAccount does CREATE2 address derivation
+   * by calling getSenderAddress on-chain (or falling back to local computation).
+   * This replaces the buggy XOR/truncation approach.
+   */
+  static async create(config: SmartAccountConfig): Promise<SmartAccountClient> {
+    const signer = privateKeyToAccount(config.privateKey);
+    const chain = config.bundler.chain;
+
+    const publicClient = createPublicClient({
+      chain,
       transport: http(config.bundler.rpcUrl),
     });
 
-    // Compute counterfactual address from factory + signer + salt
-    this.smartAccountAddress = this.computeCounterfactualAddress();
+    // Use permissionless toSimpleSmartAccount for proper CREATE2 address computation.
+    // This calls getSenderAddress via the EntryPoint which uses CREATE2:
+    //   address = keccak256(0xff ++ factory ++ salt ++ keccak256(initCode))[12:]
+    const account = await toSimpleSmartAccount({
+      client: publicClient,
+      owner: signer,
+      entryPoint: {
+        address: ENTRY_POINT_V07,
+        version: "0.7",
+      },
+      factoryAddress: SIMPLE_ACCOUNT_FACTORY_V07,
+      index: config.saltNonce ?? 0n,
+    });
+
+    const smartAccountAddress = await account.getAddress();
+    const client = new SmartAccountClient(config, smartAccountAddress, signer.address);
+    client._account = account;
+    client.publicClient = publicClient;
+
+    return client;
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -144,49 +203,51 @@ export class SmartAccountClient {
 
   /**
    * Send a UserOperation to the bundler.
-   * Returns the UserOp hash (not a tx hash — the bundler will include it in a future block).
+   *
+   * Uses createSmartAccountClient from permissionless which handles:
+   * - Correct ERC-4337 UserOp signing: keccak256(abi.encode(userOpHash, entryPoint, chainId))
+   * - Nonce management
+   * - Gas estimation
+   * - Paymaster integration
+   *
+   * Returns the UserOp hash (not a tx hash).
    */
   async sendUserOp(callData: Hex): Promise<Hex> {
-    await this.refreshNonce();
-
-    const initCode = this.deployed ? "0x" as Hex : this.getInitCode();
-
-    // Estimate gas via bundler RPC
-    const gasEstimate = await this.estimateUserOpGas(callData, initCode);
-
-    // Get fee data from chain
-    const feeData = await this.publicClient.estimateFeesPerGas();
-
-    const userOp = {
-      sender: this.smartAccountAddress,
-      nonce: `0x${this.nonce.toString(16)}`,
-      initCode,
-      callData,
-      callGasLimit: `0x${gasEstimate.callGasLimit.toString(16)}`,
-      verificationGasLimit: `0x${gasEstimate.verificationGasLimit.toString(16)}`,
-      preVerificationGas: `0x${gasEstimate.preVerificationGas.toString(16)}`,
-      maxFeePerGas: `0x${(feeData.maxFeePerGas ?? 1000000000n).toString(16)}`,
-      maxPriorityFeePerGas: `0x${(feeData.maxPriorityFeePerGas ?? 100000000n).toString(16)}`,
-      paymasterAndData: "0x" as Hex,
-      signature: "0x" as Hex,
-    };
-
-    // Request paymaster sponsorship if configured
-    if (this.paymasterUrl) {
-      const sponsorship = await this.requestSponsorship(userOp);
-      if (sponsorship) {
-        userOp.paymasterAndData = sponsorship;
-      }
+    if (!this._account) {
+      throw new Error("SmartAccountClient not initialized. Use SmartAccountClient.create()");
     }
 
-    // Sign the UserOp
-    userOp.signature = await this.signUserOp(userOp);
+    // Build the permissionless smart account client
+    const smClient = permissionlessCreateSmartAccountClient({
+      account: this._account,
+      chain: this.chain,
+      bundlerTransport: http(this.bundlerUrl),
+      ...(this.paymasterUrl
+        ? {
+            paymaster: createPimlicoClient({
+              transport: http(this.paymasterUrl),
+              entryPoint: {
+                address: ENTRY_POINT_V07,
+                version: "0.7",
+              },
+            }),
+          }
+        : {}),
+    });
 
-    // Submit to bundler
-    const userOpHash = await this.submitToBundler(userOp);
+    // sendUserOperation handles signing with proper ERC-4337 hash
+    const userOpHash = await smClient.sendUserOperation({
+      calls: [
+        {
+          to: this.smartAccountAddress,
+          data: callData,
+          value: 0n,
+        },
+      ],
+    });
+
     this.nonce += 1n;
-
-    return userOpHash;
+    return userOpHash as Hex;
   }
 
   /**
@@ -219,116 +280,9 @@ export class SmartAccountClient {
 
   // ── Internals ───────────────────────────────────────────────────────
 
-  private computeCounterfactualAddress(): Address {
-    // In production, this is computed via CREATE2 from the factory.
-    // For now, derive deterministically from signer + salt for consistency.
-    // The real address comes from the factory's getAddress() view function.
-    const hash = BigInt(this.signerAddress) ^ this.saltNonce;
-    const bytes = hash.toString(16).padStart(40, "0").slice(0, 40);
-    return `0x${bytes}` as Address;
-  }
-
-  private getInitCode(): Hex {
-    // Factory address + createAccount(owner, salt) calldata
-    const createCalldata = encodeFunctionData({
-      abi: SIMPLE_ACCOUNT_FACTORY_ABI,
-      functionName: "createAccount",
-      args: [this.signerAddress, this.saltNonce],
-    });
-    return `${SIMPLE_ACCOUNT_FACTORY_V07}${createCalldata.slice(2)}` as Hex;
-  }
-
   private async checkDeployment(): Promise<void> {
     const code = await this.publicClient.getCode({ address: this.smartAccountAddress });
     this.deployed = !!code && code !== "0x";
-  }
-
-  private async refreshNonce(): Promise<void> {
-    try {
-      const nonce = await this.publicClient.readContract({
-        address: ENTRY_POINT_V07,
-        abi: ENTRY_POINT_NONCE_ABI,
-        functionName: "getNonce",
-        args: [this.smartAccountAddress, 0n],
-      });
-      this.nonce = nonce as bigint;
-    } catch {
-      // Account not deployed yet — nonce is 0
-      this.nonce = 0n;
-    }
-  }
-
-  private async estimateUserOpGas(
-    callData: Hex,
-    initCode: Hex,
-  ): Promise<{ callGasLimit: bigint; verificationGasLimit: bigint; preVerificationGas: bigint }> {
-    try {
-      const result = await this.bundlerRpc("eth_estimateUserOperationGas", [
-        {
-          sender: this.smartAccountAddress,
-          nonce: `0x${this.nonce.toString(16)}`,
-          initCode,
-          callData,
-          paymasterAndData: "0x",
-          signature: "0x" + "ff".repeat(65), // dummy signature for estimation
-        },
-        ENTRY_POINT_V07,
-      ]);
-      return {
-        callGasLimit: BigInt(result.callGasLimit),
-        verificationGasLimit: BigInt(result.verificationGasLimit),
-        preVerificationGas: BigInt(result.preVerificationGas),
-      };
-    } catch {
-      // Fallback: use conservative defaults
-      return {
-        callGasLimit: 500_000n,
-        verificationGasLimit: 500_000n,
-        preVerificationGas: 100_000n,
-      };
-    }
-  }
-
-  private async signUserOp(userOp: Record<string, unknown>): Promise<Hex> {
-    // Hash the UserOp fields and sign with the EOA signer
-    const message = JSON.stringify({
-      sender: userOp.sender,
-      nonce: userOp.nonce,
-      callData: userOp.callData,
-      callGasLimit: userOp.callGasLimit,
-      verificationGasLimit: userOp.verificationGasLimit,
-      preVerificationGas: userOp.preVerificationGas,
-      maxFeePerGas: userOp.maxFeePerGas,
-      maxPriorityFeePerGas: userOp.maxPriorityFeePerGas,
-    });
-
-    return this.signer.signMessage!({ message }) as Promise<Hex>;
-  }
-
-  private async requestSponsorship(userOp: Record<string, unknown>): Promise<Hex | null> {
-    if (!this.paymasterUrl) return null;
-
-    try {
-      const result = await fetch(this.paymasterUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "pm_sponsorUserOperation",
-          params: [userOp, ENTRY_POINT_V07],
-        }),
-      });
-      const json = await result.json();
-      return json.result?.paymasterAndData as Hex ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async submitToBundler(userOp: Record<string, unknown>): Promise<Hex> {
-    const result = await this.bundlerRpc("eth_sendUserOperation", [userOp, ENTRY_POINT_V07]);
-    return result as Hex;
   }
 
   private async bundlerRpc(method: string, params: unknown[]): Promise<any> {
@@ -348,6 +302,64 @@ export class SmartAccountClient {
     }
     return json.result;
   }
+}
+
+// ---------------------------------------------------------------------------
+// createGaslessClient — convenience factory for Coinbase Paymaster
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates a SmartAccountClient configured with Coinbase CDP Paymaster.
+ *
+ * The Coinbase paymaster URL acts as BOTH bundler AND paymaster:
+ *   https://api.developer.coinbase.com/rpc/v1/base-sepolia/<API_KEY>
+ *
+ * Usage:
+ *   const client = await createGaslessClient({
+ *     privateKey: "0x...",
+ *     coinbaseConfig: { cdpApiKey: "...", chain: "base-sepolia" }
+ *   });
+ */
+export async function createGaslessClient(params: {
+  privateKey: Hex;
+  coinbaseConfig: CoinbasePaymasterConfig;
+  saltNonce?: bigint;
+}): Promise<SmartAccountClient> {
+  const { privateKey, coinbaseConfig, saltNonce } = params;
+
+  // Build paymaster+bundler URL
+  const paymasterBundlerUrl = coinbaseConfig.paymasterBundlerUrl
+    ?? buildCoinbasePaymasterUrl(coinbaseConfig);
+
+  // Coinbase uses the same URL for bundler and paymaster
+  const chain = coinbaseConfig.chain === "base" ? base : baseSepolia;
+
+  const config: SmartAccountConfig = {
+    privateKey,
+    implementation: "simple",
+    saltNonce: saltNonce ?? 0n,
+    bundler: {
+      bundlerUrl: paymasterBundlerUrl,
+      paymasterUrl: paymasterBundlerUrl,
+      chain,
+      rpcUrl: paymasterBundlerUrl,
+      entryPoint: "0.7",
+    },
+  };
+
+  return SmartAccountClient.create(config);
+}
+
+/**
+ * Build the Coinbase CDP Paymaster URL from an API key.
+ */
+export function buildCoinbasePaymasterUrl(config: CoinbasePaymasterConfig): string {
+  if (config.paymasterBundlerUrl) return config.paymasterBundlerUrl;
+  if (!config.cdpApiKey) {
+    throw new Error("Either cdpApiKey or paymasterBundlerUrl is required for Coinbase paymaster");
+  }
+  const chainPath = config.chain === "base" ? "base" : "base-sepolia";
+  return `${COINBASE_PAYMASTER_BASE_URL}/${chainPath}/${config.cdpApiKey}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,31 +391,5 @@ const SIMPLE_ACCOUNT_BATCH_ABI = [
       { name: "func", type: "bytes[]" },
     ],
     outputs: [],
-  },
-] as const;
-
-const SIMPLE_ACCOUNT_FACTORY_ABI = [
-  {
-    name: "createAccount",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "salt", type: "uint256" },
-    ],
-    outputs: [{ name: "ret", type: "address" }],
-  },
-] as const;
-
-const ENTRY_POINT_NONCE_ABI = [
-  {
-    name: "getNonce",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "sender", type: "address" },
-      { name: "key", type: "uint192" },
-    ],
-    outputs: [{ name: "nonce", type: "uint256" }],
   },
 ] as const;

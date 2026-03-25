@@ -51,10 +51,12 @@ import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
+import { anomalyRoutes } from "./routes/anomaly.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
 import { provisionRoutes } from "./routes/provision.js";
+import { gaslessRoutes } from "./routes/gasless.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -188,8 +190,10 @@ export async function createGateway(port = 3200) {
   await app.register(docRoutes);
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);
+  await app.register(anomalyRoutes);
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
+  await app.register(gaslessRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);

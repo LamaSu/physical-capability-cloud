@@ -61,8 +61,8 @@ export async function subnetRoutes(app: FastifyInstance) {
   app.post<{ Body: SimilarityScoringSynapse }>("/api/subnet/similarity", async (req) => {
     const synapse = req.body as SimilarityScoringSynapse;
 
-    if (!synapse.candidate || !synapse.registered) {
-      return { error: "Missing candidate or registered CSDs in body" };
+    if (!synapse.candidateCsd || !synapse.registeredCsds) {
+      return { error: "Missing candidateCsd or registeredCsds in body" };
     }
 
     const result = await router.detectSimilarity(synapse);

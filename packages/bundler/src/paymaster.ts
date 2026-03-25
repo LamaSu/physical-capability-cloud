@@ -88,6 +88,25 @@ export class PaymasterClient {
       return { paymasterAndData: "0x" as Hex, gasSaved: 0n, sponsored: false };
     }
 
+    // Coinbase mode: delegate to Coinbase CDP Paymaster endpoint
+    if (this.config.mode === "coinbase") {
+      const policyCheck = this.checkPolicy(agentAddress);
+      if (!policyCheck.allowed) {
+        return { paymasterAndData: "0x" as Hex, gasSaved: 0n, sponsored: false };
+      }
+
+      try {
+        const result = await this.requestSponsorship(userOp);
+        if (result.sponsored) {
+          this.recordUsage(agentAddress);
+          this.dailySpend += result.gasSaved;
+        }
+        return result;
+      } catch {
+        return { paymasterAndData: "0x" as Hex, gasSaved: 0n, sponsored: false };
+      }
+    }
+
     // Policy checks
     const policyCheck = this.checkPolicy(agentAddress);
     if (!policyCheck.allowed) {

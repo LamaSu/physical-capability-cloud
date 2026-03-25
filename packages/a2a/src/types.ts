@@ -153,6 +153,11 @@ export type Intent =
   | SWFDividendsResultIntent
   | SWFClaimDividendsIntent
   | SWFClaimResultIntent
+  // Anomaly Detection
+  | AnomalyDetectedIntent
+  | ProtocolFailureIntent
+  | TrustDowngradeIntent
+  | SystemAlertIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -877,6 +882,60 @@ export interface IPSplitResponseIntent {
   splits?: IPRevenueSplitEntry[];
   /** Whether this is a counter-proposal (accepted=false but splits contains a counter-offer) */
   counterProposal?: boolean;
+}
+
+// ── Anomaly Detection Intents ────────────────────────────────────
+// These enable agents to report, propagate, and respond to anomalies
+// across the network. All three broadcast types (anomaly_detected,
+// protocol_failure, system_alert) are fanned out to all anomaly listeners
+// on the MessageBus in addition to normal point-to-point delivery.
+
+export interface AnomalyDetectedIntent {
+  type: "anomaly_detected";
+  severity: "info" | "warning" | "critical";
+  category: "protocol_failure" | "evidence_mismatch" | "consensus_failure" | "timeout" | "rate_anomaly" | "trust_violation";
+  sourceAgentId: string;
+  /** The agent or kernel being reported (optional — omit for self-reports) */
+  targetAgentId?: string;
+  description: string;
+  evidence: {
+    jobId?: string;
+    bundleHash?: string;
+    expectedValue?: string;
+    actualValue?: string;
+    timestamp: string;
+  };
+}
+
+export interface ProtocolFailureIntent {
+  type: "protocol_failure";
+  /** Which protocol step failed, e.g. "evidence_submission", "escrow_release", "verification_consensus" */
+  failedProtocol: string;
+  errorCode: string;
+  errorMessage: string;
+  involvedAgents: string[];
+  jobId?: string;
+  recoveryAction?: "retry" | "escalate" | "rollback" | "ignore";
+}
+
+export interface TrustDowngradeIntent {
+  type: "trust_downgrade";
+  targetAgentId: string;
+  previousTrustScore: number;
+  newTrustScore: number;
+  reason: string;
+  /** List of anomaly IDs that triggered this downgrade */
+  evidence: string[];
+}
+
+export interface SystemAlertIntent {
+  type: "system_alert";
+  alertType: "stuck_job" | "consensus_timeout" | "escrow_expiry" | "evidence_tampering" | "rate_spike" | "node_offline";
+  severity: "info" | "warning" | "critical";
+  message: string;
+  metadata: Record<string, unknown>;
+  autoResolves: boolean;
+  resolveTimeoutMs?: number;
 }
 
 // ── General Intents ─────────────────────────────────────────────
