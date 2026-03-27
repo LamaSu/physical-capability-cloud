@@ -21,8 +21,11 @@ import { JobRunner } from "@pcc/kernel";
 import { MockFDMAdapter } from "@pcc/kernel";
 import { MockPowerMonitorAdapter } from "@pcc/kernel";
 import { MockCameraAdapter } from "@pcc/kernel";
+import type { MachineAdapter, SensorAdapter, CameraAdapter } from "@pcc/kernel";
+import { evaluatePolicy, type PolicyContext } from "@pcc/kernel";
 
-import type { MachineProfile } from "@pcc/spec";
+import type { MachineProfile, OperatorPolicy } from "@pcc/spec";
+import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 
 export interface KernelAgentConfig {
   kernelId: string;
@@ -41,6 +44,16 @@ export interface KernelAgentConfig {
   unbrowseUrl?: string;
   /** Supplier URLs to monitor for stock/pricing changes */
   supplierUrls?: string[];
+  /** Pluggable adapters — override mock defaults for real hardware */
+  adapters?: {
+    machine?: MachineAdapter;
+    sensors?: SensorAdapter[];
+    camera?: CameraAdapter;
+  };
+  /** Network memberships for dual-network operation */
+  networks?: string[];
+  /** Operator policy for guardrails (default: safe manual-approval policy) */
+  operatorPolicy?: OperatorPolicy;
 }
 
 interface ActiveJob {
@@ -62,15 +75,19 @@ export class KernelAgent extends BaseAgent {
 
   private activeJobs: Map<string, ActiveJob> = new Map();
   private evidenceEmitter: EvidenceEmitter;
-  private fdm: MockFDMAdapter;
-  private powerMonitor: MockPowerMonitorAdapter;
-  private camera: MockCameraAdapter;
+  private machine: MachineAdapter;
+  private sensors: SensorAdapter[];
+  private camera: CameraAdapter;
   private jobQueue: string[] = [];
   private isProcessing = false;
   private settlement?: SettlementClient;
   private escrowMappings: Map<string, { escrowAddress: `0x${string}`; milestoneIndex: number }> = new Map();
   private unbrowse?: UnbrowseClient;
   private supplierUrls: string[];
+  /** Networks this kernel participates in */
+  readonly networks: string[];
+  /** Operator policy for job guardrails */
+  private policy: OperatorPolicy;
 
   constructor(bus: MessageBus, config: KernelAgentConfig) {
     super({
@@ -84,11 +101,16 @@ export class KernelAgent extends BaseAgent {
     this.capabilities = config.capabilities;
     this.location = config.location;
     this.machineProfiles = config.machineProfiles ?? [];
+    this.networks = config.networks ?? ["default"];
+    this.policy = config.operatorPolicy ?? DEFAULT_OPERATOR_POLICY;
 
-    // Initialize mock devices
-    this.fdm = new MockFDMAdapter(`dev_fdm_${config.kernelId}`, config.kernelId, config.mockPrintDuration ?? 3000);
-    this.powerMonitor = new MockPowerMonitorAdapter(`dev_power_${config.kernelId}`, config.kernelId);
-    this.camera = new MockCameraAdapter(`dev_cam_${config.kernelId}`, config.kernelId);
+    // Initialize adapters — use pluggable overrides or fall back to mock
+    this.machine = config.adapters?.machine ??
+      new MockFDMAdapter(`dev_fdm_${config.kernelId}`, config.kernelId, config.mockPrintDuration ?? 3000);
+    this.sensors = config.adapters?.sensors ??
+      [new MockPowerMonitorAdapter(`dev_power_${config.kernelId}`, config.kernelId)];
+    this.camera = config.adapters?.camera ??
+      new MockCameraAdapter(`dev_cam_${config.kernelId}`, config.kernelId);
     this.evidenceEmitter = new EvidenceEmitter(config.kernelId, async (data: string) => {
       const sig = await this.wallet.signMessage(data);
       return { signer: this.wallet.address, algorithm: "secp256k1" as const, value: sig };
@@ -123,6 +145,16 @@ export class KernelAgent extends BaseAgent {
   /** Get advertised capabilities (for broker registration) */
   getCapabilities(): Capability[] {
     return [...this.capabilities];
+  }
+
+  /** Update operator policy at runtime */
+  setPolicy(policy: OperatorPolicy): void {
+    this.policy = policy;
+  }
+
+  /** Get current operator policy */
+  getPolicy(): OperatorPolicy {
+    return { ...this.policy };
   }
 
   /** Get machine profiles for the contract builder */
@@ -232,6 +264,45 @@ export class KernelAgent extends BaseAgent {
     const jobId = intent.jobId ?? ids.job();
     const stepId = intent.stepId ?? ids.job();
 
+    // ── Policy Enforcement ──────────────────────────────────────
+    const policyCtx: PolicyContext = {
+      agentId: msg.from,
+      capabilityType: intent.capabilityType,
+      material: intent.params?.material ?? intent.material,
+      estimatedDurationMs: intent.estimatedDurationMs,
+      estimatedCost: intent.estimatedCost,
+      currentTime: new Date(),
+      rateCounts: {
+        jobsThisHour: [...this.activeJobs.values()].filter(
+          (j) => j.startedAt && Date.now() - new Date(j.startedAt).getTime() < 3600_000,
+        ).length,
+        jobsToday: this.activeJobs.size,
+        costToday: 0,
+      },
+      quantity: intent.quantity,
+      escrowFunded: intent.escrowFunded,
+    };
+
+    const evaluation = evaluatePolicy(this.policy, policyCtx);
+
+    if (!evaluation.allowed && !evaluation.requiresApproval) {
+      return {
+        type: "error",
+        code: "policy_violation",
+        message: `Job rejected by operator policy: ${evaluation.violations.map((v) => v.message).join("; ")}`,
+        retryable: false,
+      };
+    }
+
+    if (evaluation.requiresApproval) {
+      return {
+        type: "text_message",
+        text: `Job ${jobId} requires operator approval. Status: pending_approval. ` +
+          `The operator will review your request within ${Math.round(this.policy.approvalTimeoutMs / 60_000)} minutes.`,
+      };
+    }
+
+    // ── Approved — queue the job ────────────────────────────────
     const activeJob: ActiveJob = {
       jobId,
       stepId,
@@ -332,7 +403,7 @@ export class KernelAgent extends BaseAgent {
       job.startedAt = new Date().toISOString();
 
       try {
-        const runner = new JobRunner(this.fdm, [this.powerMonitor], this.camera, this.evidenceEmitter);
+        const runner = new JobRunner(this.machine, this.sensors, this.camera, this.evidenceEmitter);
         const result = await runner.run({
           jobId: job.jobId,
           stepId: job.stepId,

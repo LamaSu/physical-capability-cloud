@@ -183,6 +183,27 @@ export async function onboardRoutes(app: FastifyInstance) {
           unbrowse_api: `${baseUrl}/api/unbrowse`,
           wallet: `${GATECRAFT_URL}/api/v2/proxy/wallet`,
         },
+
+        // Fiat on-ramp — fund agent wallet with credit card
+        funding: {
+          message: "Fund your agent wallet with a credit card or bank transfer",
+          stripe: {
+            endpoint: `${baseUrl}/api/fiat-ramp/onramp/session`,
+            method: "POST",
+            body: { walletAddress: keys.evm.address, amount: 50, currency: "USD" },
+            description: "Visa/Mastercard/AMEX → USDC on Base",
+          },
+          yellowcard: {
+            endpoint: `${baseUrl}/api/fiat-ramp/onramp/yellowcard`,
+            method: "POST",
+            description: "Mobile money in 34 emerging market countries → USDC",
+          },
+          wise: {
+            endpoint: `${baseUrl}/api/fiat-ramp/payout`,
+            method: "POST",
+            description: "Enterprise bank payouts in 40+ currencies",
+          },
+        },
       });
     } catch (err) {
       app.log.error(err, "Onboard redeem failed");

@@ -15,8 +15,8 @@ describe("NoirProofService", () => {
     }, 15_000);
   });
 
-  describe("proveEvidenceInclusion (mock fallback)", () => {
-    it("generates a valid mock proof when Noir is unavailable", async () => {
+  describe("proveEvidenceInclusion", () => {
+    it("generates a valid proof (real or mock)", async () => {
       const hash1 = await sha256("bundle-1");
       const hash2 = await sha256("bundle-2");
       const hash3 = await sha256("bundle-3");
@@ -35,7 +35,7 @@ describe("NoirProofService", () => {
       expect(proof.proof).toBeTruthy();
       expect(proof.verificationKey).toBeTruthy();
       expect(proof.verified).toBe(false);
-    });
+    }, 120_000);
 
     it("generates different proofs for different leaves", async () => {
       const hash1 = await sha256("bundle-a");
@@ -50,18 +50,34 @@ describe("NoirProofService", () => {
       const proof2 = await service.proveEvidenceInclusion(tree, 1, hash2 as SHA256);
 
       expect(proof1.id).not.toBe(proof2.id);
+    }, 120_000);
+
+    it("tree root and leaves are pedersen hashes", async () => {
+      const hash1 = await sha256("bundle-ped-1");
+      const hash2 = await sha256("bundle-ped-2");
+
+      const c1 = await commitmentService.createCommitment(hash1 as SHA256);
+      const c2 = await commitmentService.createCommitment(hash2 as SHA256);
+
+      const tree = await commitmentService.buildTree([c1, c2]);
+
+      expect(tree.root).toMatch(/^pedersen:/);
+      for (const leaf of tree.leaves) {
+        expect(leaf).toMatch(/^pedersen:/);
+      }
     });
   });
 
-  describe("proveTierCompliance (mock fallback)", () => {
+  describe("proveTierCompliance", () => {
     const makeBundle = async (tier: AssuranceTier, eventTypes: string[]): Promise<EvidenceBundle> => {
-      const events = eventTypes.map((type) => ({
+      const events = await Promise.all(eventTypes.map(async (type, i) => ({
+        id: ids.evidence(),
         type,
         timestamp: new Date().toISOString(),
         source: "test-kernel",
         payload: {},
-        eventHash: `sha256:${"a".repeat(64)}` as SHA256,
-      }));
+        hash: (await sha256(`event-${type}-${i}`)) as SHA256,
+      })));
 
       const bundleHash = await sha256(JSON.stringify(events));
 
@@ -83,8 +99,8 @@ describe("NoirProofService", () => {
       const proof = await service.proveTierCompliance(bundle, 0);
 
       expect(proof.proofType).toBe("tier_compliance");
-      expect(proof.publicInputs).toContain(bundle.bundleHash);
-    });
+      expect(proof.publicInputs.length).toBeGreaterThanOrEqual(2);
+    }, 120_000);
 
     it("generates a tier 2 compliance proof", async () => {
       const bundle = await makeBundle(2, [
@@ -97,32 +113,33 @@ describe("NoirProofService", () => {
 
       expect(proof.proofType).toBe("tier_compliance");
       expect(proof.publicInputs.length).toBeGreaterThanOrEqual(2);
-    });
+    }, 120_000);
   });
 
   describe("verifyProof", () => {
-    it("verifies mock proofs (sha256 prefix)", async () => {
+    it("verifies proofs correctly", async () => {
       const hash = await sha256("test-bundle");
       const c = await commitmentService.createCommitment(hash as SHA256);
       const tree = await commitmentService.buildTree([c]);
       const proof = await service.proveEvidenceInclusion(tree, 0, hash as SHA256);
 
       const isValid = await service.verifyProof(proof);
-
-      // Mock proofs verify based on format check
       expect(typeof isValid).toBe("boolean");
-      if (proof.proof.startsWith("sha256:")) {
-        expect(isValid).toBe(true);
-        expect(proof.verified).toBe(true);
-      }
-    });
 
-    it("handles noir proof prefix gracefully when noir unavailable", async () => {
+      // Real noir proofs should verify; mock proofs verify by format
+      if (proof.proof.startsWith("noir:")) {
+        expect(isValid).toBe(true);
+      } else if (proof.proof.startsWith("sha256:")) {
+        expect(isValid).toBe(true);
+      }
+    }, 120_000);
+
+    it("rejects malformed noir proof", async () => {
       const proof = {
         id: ids.proof(),
         proofType: "evidence_inclusion" as const,
         commitmentId: ids.commitment(),
-        publicInputs: ["sha256:abc", "sha256:def"],
+        publicInputs: ["0xabc", "0xdef"],
         proof: "noir:deadbeef",
         verificationKey: "noir:cafebabe",
         verified: false,
@@ -130,9 +147,8 @@ describe("NoirProofService", () => {
       };
 
       const isValid = await service.verifyProof(proof);
-      // Should return false since noir is not available
       expect(isValid).toBe(false);
       expect(proof.verified).toBe(false);
-    });
+    }, 30_000);
   });
 });

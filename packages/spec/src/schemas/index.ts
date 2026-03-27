@@ -5,6 +5,8 @@ import { z } from "zod";
 // ============================================================
 
 export const SHA256Schema = z.string().regex(/^sha256:[a-f0-9]{64}$/, "Must be sha256:<64 hex chars>");
+export const PedersenHashSchema = z.string().regex(/^pedersen:[a-f0-9]{64}$/, "Must be pedersen:<64 hex chars>");
+export const HashDigestSchema = z.union([SHA256Schema, PedersenHashSchema]);
 export const AddressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Must be 0x<40 hex chars>");
 export const TimestampSchema = z.string().datetime();
 export const AmountSchema = z.string().regex(/^\d+(\.\d+)?$/, "Must be numeric string");

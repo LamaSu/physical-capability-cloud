@@ -96,6 +96,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   app.get("/api/fiat-ramp/status", async () => {
     return {
       providers: {
+        coinbase: {
+          available: true,
+          mock: !process.env.COINBASE_APP_ID,
+          capabilities: ["onramp"],
+          note: "Primary on-ramp. No merchant account needed. User pays via Coinbase or credit card → USDC on Base.",
+        },
         stripe: {
           available: true,
           mock: !process.env.STRIPE_SECRET_KEY,
@@ -112,6 +118,102 @@ export async function fiatRampRoutes(app: FastifyInstance) {
           capabilities: ["payout"],
         },
       },
+      recommended: "coinbase",
+    };
+  });
+
+  // ── Coinbase Onramp (PRIMARY — no merchant account needed) ──────
+
+  /**
+   * POST /api/fiat-ramp/coinbase/onramp
+   *
+   * Generates a Coinbase Onramp URL. The user opens this URL,
+   * pays with credit card or Coinbase account, and receives USDC
+   * directly in their wallet on Base. Zero merchant setup.
+   *
+   * Coinbase CDP App ID: set COINBASE_APP_ID env var, or uses default.
+   * Get one free at: https://portal.cdp.coinbase.com
+   */
+  app.post("/api/fiat-ramp/coinbase/onramp", async (req, reply) => {
+    const body = req.body as {
+      walletAddress: string;
+      amount?: number;
+      currency?: string;
+      asset?: string;
+      network?: string;
+    } | undefined;
+
+    if (!body?.walletAddress) {
+      return reply.status(400).send({ error: "walletAddress is required" });
+    }
+
+    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
+    const asset = body.asset ?? "USDC";
+    const network = body.network ?? "base";
+    const fiatCurrency = body.currency ?? "USD";
+
+    // Build Coinbase Onramp URL
+    // Docs: https://docs.cdp.coinbase.com/onramp/docs/api-initializing
+    const params = new URLSearchParams();
+    params.set("appId", appId);
+    params.set("defaultAsset", asset);
+    params.set("defaultNetwork", network);
+    params.set("fiatCurrency", fiatCurrency);
+    if (body.amount) params.set("presetFiatAmount", String(body.amount));
+
+    // Encode addresses as JSON: {"0xAddr": ["base"]}
+    const addresses = JSON.stringify({ [body.walletAddress]: [network] });
+    params.set("addresses", addresses);
+
+    // Lock to USDC on Base (prevent user from switching to BTC etc.)
+    params.set("assets", JSON.stringify([asset]));
+
+    const onrampUrl = `https://pay.coinbase.com/buy/select-asset?${params.toString()}`;
+
+    return {
+      provider: "coinbase",
+      onrampUrl,
+      walletAddress: body.walletAddress,
+      asset,
+      network,
+      fiatCurrency,
+      amount: body.amount ?? null,
+      instructions: "Open the URL to fund your wallet. Pay with credit card, debit card, or Coinbase account. USDC arrives on Base in ~1 minute.",
+      mock: !process.env.COINBASE_APP_ID,
+      note: process.env.COINBASE_APP_ID
+        ? "Live Coinbase Onramp"
+        : "Using default app ID. Set COINBASE_APP_ID env var for production. Get one at https://portal.cdp.coinbase.com",
+    };
+  });
+
+  /** GET /api/fiat-ramp/coinbase/onramp-url — Quick URL generator (GET for easy linking) */
+  app.get("/api/fiat-ramp/coinbase/onramp-url", async (req) => {
+    const { wallet, amount, currency } = req.query as {
+      wallet?: string;
+      amount?: string;
+      currency?: string;
+    };
+
+    if (!wallet) {
+      return {
+        error: "wallet query param required",
+        example: "/api/fiat-ramp/coinbase/onramp-url?wallet=0x...&amount=50&currency=USD",
+      };
+    }
+
+    const appId = process.env.COINBASE_APP_ID ?? "pcc-hackathon";
+    const params = new URLSearchParams();
+    params.set("appId", appId);
+    params.set("defaultAsset", "USDC");
+    params.set("defaultNetwork", "base");
+    params.set("addresses", JSON.stringify({ [wallet]: ["base"] }));
+    params.set("assets", JSON.stringify(["USDC"]));
+    if (amount) params.set("presetFiatAmount", amount);
+    if (currency) params.set("fiatCurrency", currency);
+
+    return {
+      url: `https://pay.coinbase.com/buy/select-asset?${params.toString()}`,
+      wallet,
     };
   });
 

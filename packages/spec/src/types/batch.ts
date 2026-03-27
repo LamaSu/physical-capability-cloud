@@ -6,7 +6,8 @@
  * position. BatchEvents track the lifecycle of the run.
  */
 
-import type { Address, Id, SHA256, Timestamp } from "./common.js";
+import type { Address, Amount, Currency, Id, SHA256, Timestamp } from "./common.js";
+import type { CapabilityType } from "./capability.js";
 
 /** Batch manifest for shared instruments (chromatography autosampler, etc.) */
 export interface BatchManifest {
@@ -41,6 +42,52 @@ export interface SampleSlot {
   acquisitionEnd?: Timestamp;
   resultHash?: SHA256;
   resultRef?: string;
+}
+
+// ── Multi-User Shared Batches ─────────────────────────────────────
+
+/** A shared batch run — multiple users claiming slots on one execution */
+export interface SharedBatch {
+  id: Id;
+  kernelId: Id;
+  capabilityType: CapabilityType;
+  /** Total slots available (e.g., 96 for a 96-well plate) */
+  totalSlots: number;
+  /** Slots that have been claimed */
+  claimedSlots: BatchSlotClaim[];
+  /** Protocol type for this batch */
+  protocolType: string;
+  /** Batch status */
+  status: "open" | "filling" | "full" | "running" | "completed" | "cancelled";
+  /** Minimum slots that must be claimed before the batch runs */
+  minSlotsToRun: number;
+  /** When this batch was created */
+  createdAt: Timestamp;
+  /** When claims close */
+  closesAt: Timestamp;
+  /** Per-slot pricing */
+  pricePerSlot: Amount;
+  currency: Currency;
+  /** Evidence bundle ID (set on completion) */
+  evidenceBundleId?: Id;
+}
+
+/** A user's claim on slots in a shared batch */
+export interface BatchSlotClaim {
+  id: Id;
+  /** Which user agent claimed this */
+  agentId: string;
+  /** Slot indices claimed (e.g., [0, 1, 2, 3] for wells A1-A4) */
+  slotIndices: number[];
+  /** Sample labels for each slot */
+  sampleLabels: string[];
+  /** Status of this claim */
+  status: "claimed" | "paid" | "completed" | "refunded";
+  /** Amount owed for this claim */
+  amount: Amount;
+  /** Escrow address for this user's portion */
+  escrowAddress?: Address;
+  claimedAt: Timestamp;
 }
 
 /** Batch lifecycle event */

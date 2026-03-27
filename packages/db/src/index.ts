@@ -44,6 +44,8 @@ export function createStore(options: StoreOptions = {}): Store {
 }
 export type { StoreDB, Repositories };
 export { schema, buildRepositories, createDatabase, migrateDatabase, seedAll };
+// Re-export drizzle-orm operators for gateway routes that need direct table queries
+export { eq, and, or, sql, count } from "drizzle-orm";
 
 // Re-export repository classes for direct use
 export {

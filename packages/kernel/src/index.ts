@@ -54,6 +54,9 @@ export * from "./adapters/index.js";
 export { KernelKeychain } from "./kernel-keychain.js";
 export { LogCaptureService } from "./log-capture-service.js";
 export type { LogEntry, LogChainVerification } from "./log-capture-service.js";
+// Policy engine
+export { evaluatePolicy, applyPricingRules, sanitizeText, scanGcode } from "./policy-engine.js";
+export type { PolicyContext } from "./policy-engine.js";
 // Opentrons operator stack
 export {
   OpentronsMachineAdapter,

@@ -14,13 +14,14 @@
   },
   "dependencies": {
     "@pcc/spec": "workspace:*",
+    "@aztec/bb.js": "0.58.0",
+    "@noir-lang/noir_js": "0.36.0",
+    "@noir-lang/backend_barretenberg": "0.36.0",
     "starknet": "^9.4.2",
     "tweetnacl": "^1.0.3",
     "viem": "^2.21.0"
   },
   "devDependencies": {
-    "@noir-lang/backend_barretenberg": "^0.36.0",
-    "@noir-lang/noir_js": "1.0.0-beta.19",
     "vitest": "^1.6.0"
   }
 }
