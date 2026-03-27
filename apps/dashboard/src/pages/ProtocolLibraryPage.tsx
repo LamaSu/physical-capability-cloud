@@ -5,6 +5,7 @@ import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { ProtocolTemplate, ProtocolRun, AutomationStatus, AutomationLevel } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useProtocolLibraryStore } from "../stores/protocol-library-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 const GATEWAY = "/api";
 
@@ -84,17 +85,17 @@ export function ProtocolLibraryPage() {
   // Fetch data
   const { data: templateData } = useQuery({
     queryKey: ["protocol-templates"],
-    queryFn: () => fetch(`${GATEWAY}/protocols`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/protocols`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   const { data: runData } = useQuery({
     queryKey: ["protocol-runs"],
-    queryFn: () => fetch(`${GATEWAY}/protocol-runs`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/protocol-runs`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   const { data: automationData } = useQuery({
     queryKey: ["automation-statuses"],
-    queryFn: () => fetch(`${GATEWAY}/automation-status`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/automation-status`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   React.useEffect(() => {

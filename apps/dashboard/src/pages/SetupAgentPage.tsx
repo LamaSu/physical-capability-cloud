@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useUIStore } from "../stores/ui-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 type UIRenderComponent = "photo_capture" | "network_scan_results" | "machine_config_preview" | "test_results" | "setup_complete" | "text_input" | "selection";
 
@@ -131,7 +132,7 @@ async function agentStep(
       try {
         const res = await fetch(`${gatewayUrl}/api/setup/scan-network`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
           body: JSON.stringify({}),
         });
         const data = res.ok ? await res.json() as { devices?: NetworkDevice[] } : { devices: [] };
@@ -260,7 +261,7 @@ async function agentStep(
     try {
       const res = await fetch(`${gatewayUrl}/api/ai/identify-machine`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ imageBase64: userInput.replace(/^data:image\/[^;]+;base64,/, "") }),
       });
       const data = res.ok ? await res.json() as { make?: string; model?: string; type?: string; confidence?: number; suggestedAdapterType?: string } : null;
@@ -324,7 +325,7 @@ async function agentStep(
     try {
       const regRes = await fetch(`${gatewayUrl}/api/setup/register-device`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ kernelId: "kernel_dev_001", deviceId: `dev_${Date.now()}`, type: "machine", adapterType: "mock" }),
       });
       const regData = regRes.ok ? await regRes.json() as { registered?: boolean } : { registered: false };

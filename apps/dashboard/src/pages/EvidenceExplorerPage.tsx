@@ -5,6 +5,7 @@ import { GlassPanel, GlowBadge, IPFSLink, DIDBadge, ChainTxLink } from "@pcc/ui"
 import type { EncryptedEvidenceBundle, EvidenceCommitment, ZKProof } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEvidenceExplorerStore } from "../stores/evidence-explorer-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 const GATEWAY = "/api";
 
@@ -96,7 +97,7 @@ export function EvidenceExplorerPage() {
   const handleVerifyProof = async (bundle: EncryptedEvidenceBundle) => {
     const resp = await fetch(`${GATEWAY}/zk/commit`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ bundleHash: bundle.bundleHash }),
     });
     const { commitment } = await resp.json();

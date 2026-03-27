@@ -1,3 +1,5 @@
+import { getAuthHeaders } from "../stores/auth-store.js";
+
 const BASE_URL = "/api";
 
 let sessionId: string | undefined;
@@ -5,6 +7,7 @@ let sessionId: string | undefined;
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getAuthHeaders(),
     ...(sessionId ? { "x-pcc-session": sessionId } : {}),
   };
 
@@ -103,6 +106,7 @@ export const api = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...getAuthHeaders(),
         ...(sessionId ? { "x-pcc-session": sessionId } : {}),
       },
       body: JSON.stringify(body),

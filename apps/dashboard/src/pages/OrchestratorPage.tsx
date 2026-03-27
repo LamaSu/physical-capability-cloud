@@ -5,6 +5,7 @@ import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
 import type { TransferGraph, TransferNode, Sample, InstrumentWorkflow, ResourceClaim } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOrchestratorStore } from "../stores/orchestrator-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 const GATEWAY = "/api";
 
@@ -62,22 +63,22 @@ export function OrchestratorPage() {
   // Fetch all data
   const { data: graphData } = useQuery({
     queryKey: ["orchestrator-graphs"],
-    queryFn: () => fetch(`${GATEWAY}/orchestrator/graphs`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/orchestrator/graphs`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   const { data: sampleData } = useQuery({
     queryKey: ["orchestrator-samples"],
-    queryFn: () => fetch(`${GATEWAY}/orchestrator/samples`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/orchestrator/samples`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   const { data: workflowData } = useQuery({
     queryKey: ["orchestrator-workflows"],
-    queryFn: () => fetch(`${GATEWAY}/orchestrator/workflows`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/orchestrator/workflows`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   const { data: claimData } = useQuery({
     queryKey: ["orchestrator-claims"],
-    queryFn: () => fetch(`${GATEWAY}/orchestrator/claims`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/orchestrator/claims`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   React.useEffect(() => {

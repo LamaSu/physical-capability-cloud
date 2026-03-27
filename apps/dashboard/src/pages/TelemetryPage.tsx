@@ -3,6 +3,7 @@ import { GlassPanel, GlowBadge } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/gateway.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -129,19 +130,19 @@ const PHASE_LABELS: Record<PipelinePhase, string> = {
 // ---------------------------------------------------------------------------
 
 async function fetchTelemetryActive(): Promise<{ active: ActiveJobSummary[]; count: number }> {
-  const res = await fetch("/api/telemetry/active");
+  const res = await fetch("/api/telemetry/active", { headers: { ...getAuthHeaders() } });
   if (!res.ok) return { active: [], count: 0 };
   return res.json();
 }
 
 async function fetchTelemetryStats(): Promise<{ stats: TelemetryStats }> {
-  const res = await fetch("/api/telemetry/stats");
+  const res = await fetch("/api/telemetry/stats", { headers: { ...getAuthHeaders() } });
   if (!res.ok) return { stats: { totalJobs: 0, activeJobs: 0, avgDuration_ms: 0, successRate: 0, totalEvents: 0, byPhase: {} as TelemetryStats["byPhase"], eventsPerMinute: 0 } };
   return res.json();
 }
 
 async function fetchTelemetryTimeline(jobId: string): Promise<{ timeline: TelemetryEvent[] }> {
-  const res = await fetch(`/api/telemetry/pipeline/${jobId}`);
+  const res = await fetch(`/api/telemetry/pipeline/${jobId}`, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return { timeline: [] };
   return res.json();
 }
@@ -152,7 +153,7 @@ async function fetchLogs(params: { level?: string; source?: string; search?: str
   if (params.source && params.source !== "all") qs.set("source", params.source);
   if (params.search) qs.set("search", params.search);
   if (params.limit) qs.set("limit", String(params.limit));
-  const res = await fetch(`/api/telemetry/logs?${qs}`);
+  const res = await fetch(`/api/telemetry/logs?${qs}`, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return { entries: [], sources: [] };
   return res.json();
 }

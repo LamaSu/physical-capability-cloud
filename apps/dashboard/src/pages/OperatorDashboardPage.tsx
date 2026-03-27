@@ -7,6 +7,7 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
@@ -57,7 +58,7 @@ export function OperatorDashboardPage() {
     try {
       await fetch(`${API}/api/operator/emergency-stop`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
       setEmergencyStopped(true);
@@ -75,7 +76,7 @@ export function OperatorDashboardPage() {
     try {
       await fetch(`${API}/api/operator/emergency-resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
       setEmergencyStopped(false);
@@ -95,7 +96,9 @@ export function OperatorDashboardPage() {
     setApprovalsLoading(true);
     setApprovalsError(null);
     try {
-      const res = await fetch(`${API}/api/operator/approvals?status=pending`);
+      const res = await fetch(`${API}/api/operator/approvals?status=pending`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const data = await res.json();
       setApprovals(data.approvals ?? []);
@@ -115,7 +118,10 @@ export function OperatorDashboardPage() {
 
   async function handleApprovalAction(id: string, action: "approve" | "reject") {
     try {
-      await fetch(`${API}/api/operator/approvals/${id}/${action}`, { method: "POST" });
+      await fetch(`${API}/api/operator/approvals/${id}/${action}`, {
+        method: "POST",
+        headers: { ...getAuthHeaders() },
+      });
       setApprovals((prev) => prev.filter((a) => a.id !== id));
     } catch {
       // silently fail — next auto-refresh will reconcile

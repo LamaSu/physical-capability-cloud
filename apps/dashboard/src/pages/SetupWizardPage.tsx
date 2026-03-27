@@ -16,6 +16,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useSetupWizardStore } from "../stores/setup-wizard-store.js";
 import { apiPost } from "../lib/api.js";
 import type { ValidateResponse } from "../lib/api.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 /* ------------------------------------------------------------------ */
 /*  Step definitions                                                   */
@@ -49,7 +50,7 @@ function StepWelcome() {
 
   React.useEffect(() => {
     setGatewayStatus("checking");
-    fetch("http://localhost:3200/api/capabilities")
+    fetch("http://localhost:3200/api/capabilities", { headers: { ...getAuthHeaders() } })
       .then((res) => {
         setGatewayStatus(res.ok ? "online" : "offline");
       })

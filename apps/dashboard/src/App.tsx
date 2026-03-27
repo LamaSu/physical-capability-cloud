@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppShell, Sidebar, TopBar, StatusBar, ParticleBackground } from "@pcc/ui";
 import { navGroups } from "./components/nav-config.js";
 import { useUIStore } from "./stores/ui-store.js";
+import { useAuthStore } from "./stores/auth-store.js";
+import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
 import { OnboardingTour, TourRestartButton } from "./components/OnboardingTour.js";
@@ -141,6 +143,18 @@ function AgentShell() {
 // Dashboard Shell — full 45-page shell with sidebar
 // ---------------------------------------------------------------------------
 
+function LogoutButton() {
+  const logout = useAuthStore((s) => s.logout);
+  return (
+    <button
+      onClick={logout}
+      className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
+    >
+      Disconnect
+    </button>
+  );
+}
+
 function DashboardShell() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -152,13 +166,20 @@ function DashboardShell() {
       <AppShell
         particles={<ParticleBackground />}
         sidebar={
-          <Sidebar
-            groups={navGroups}
-            currentPath={location.pathname}
-            onNavigate={navigate}
-            collapsed={sidebarCollapsed}
-            onToggle={toggleSidebar}
-          />
+          <div className="flex flex-col h-full">
+            <div className="flex-1 overflow-y-auto">
+              <Sidebar
+                groups={navGroups}
+                currentPath={location.pathname}
+                onNavigate={navigate}
+                collapsed={sidebarCollapsed}
+                onToggle={toggleSidebar}
+              />
+            </div>
+            <div className="border-t border-white/[0.06] p-2">
+              <LogoutButton />
+            </div>
+          </div>
         }
         topBar={
           <TopBar
@@ -250,6 +271,16 @@ function DashboardShell() {
 function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+
+  // Public pages that don't require auth
+  const publicPaths = ["/", "/start", "/whitepaper", "/go"];
+  const isPublicPage = publicPaths.includes(location.pathname);
+
+  // Auth gate — redirect to login for non-public pages
+  if (!isAuthenticated && !isPublicPage) {
+    return <LoginPage />;
+  }
 
   // Landing page — agent-first (root)
   if (location.pathname === "/") {
