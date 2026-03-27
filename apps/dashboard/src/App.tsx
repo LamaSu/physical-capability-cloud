@@ -73,6 +73,9 @@ const SWFGovernancePage = lazy(() => import("./pages/SWFGovernancePage.js").then
 const IPRevenuePage = lazy(() => import("./pages/IPRevenuePage.js").then(m => ({ default: m.IPRevenuePage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
+const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
+const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
+const AgentPackagePage = lazy(() => import("./pages/AgentPackagePage.js").then(m => ({ default: m.AgentPackagePage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -225,6 +228,9 @@ function DashboardShell() {
               <Route path="/setup" element={<SetupWizardPage />} />
               <Route path="/setup/agent" element={<SetupAgentPage />} />
               <Route path="/negotiate" element={<NegotiationPage />} />
+              <Route path="/negotiate/session" element={<NegotiationSessionPage />} />
+              <Route path="/batch-board" element={<BatchBoardPage />} />
+              <Route path="/agent-package" element={<AgentPackagePage />} />
               <Route path="/ip" element={<IPRevenuePage />} />
             </Routes>
           </Suspense>
