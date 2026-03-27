@@ -1,6 +1,8 @@
 import { create } from "zustand";
 
-export type InterfaceMode = "agent" | "dashboard";
+export type InterfaceMode = "agent" | "dashboard" | "spatial";
+
+const MODE_CYCLE: InterfaceMode[] = ["spatial", "agent", "dashboard"];
 
 interface UIState {
   sidebarCollapsed: boolean;
@@ -19,7 +21,12 @@ export const useUIStore = create<UIState>((set) => ({
   currentPageTitle: "Dashboard",
   currentPageSubtitle: "",
   setPageMeta: (title, subtitle = "") => set({ currentPageTitle: title, currentPageSubtitle: subtitle }),
-  interfaceMode: "agent",
-  toggleMode: () => set((s) => ({ interfaceMode: s.interfaceMode === "agent" ? "dashboard" : "agent" })),
+  interfaceMode: "spatial",
+  toggleMode: () =>
+    set((s) => {
+      const idx = MODE_CYCLE.indexOf(s.interfaceMode);
+      const next = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length];
+      return { interfaceMode: next };
+    }),
   setMode: (mode) => set({ interfaceMode: mode }),
 }));

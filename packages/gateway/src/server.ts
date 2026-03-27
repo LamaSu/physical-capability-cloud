@@ -60,6 +60,7 @@ import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
 import { provisionRoutes } from "./routes/provision.js";
 import { gaslessRoutes } from "./routes/gasless.js";
+import { contextPackRoutes } from "./routes/context-pack.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -123,6 +124,8 @@ export async function createGateway(port = 3200) {
 
   // ERC-8004 domain verification (public, before auth)
   await app.register(wellKnownRoutes);
+  // Agent context pack (public, before auth — this is the primary product)
+  await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
   await app.register(feedbackRoutes);
 
