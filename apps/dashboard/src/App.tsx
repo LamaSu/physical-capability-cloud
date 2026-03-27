@@ -13,6 +13,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { ModeToggle } from "./components/ModeToggle.js";
 import { Sentry } from "./lib/telemetry.js";
 import { usePageTracking } from "./hooks/use-page-tracking.js";
+import { SpatialApp } from "./SpatialApp.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
@@ -250,7 +251,7 @@ function Shell() {
   const interfaceMode = useUIStore((s) => s.interfaceMode);
   const location = useLocation();
 
-  // Landing page and Start page render outside the shell (no sidebar, no top bar)
+  // Landing page — agent-first (root)
   if (location.pathname === "/") {
     return (
       <Suspense fallback={<PageLoader />}>
@@ -289,6 +290,25 @@ function Shell() {
         <OperatorMobilePage />
       </Suspense>
     );
+  }
+
+  // /app and /app/* — Spatial fallback web dashboard (with agent prompt banner)
+  if (location.pathname === "/app" || location.pathname.startsWith("/app/")) {
+    return <SpatialApp />;
+  }
+
+  // Direct route to spatial interface (legacy compat)
+  if (location.pathname === "/spatial") {
+    return <SpatialApp />;
+  }
+
+  // /legacy/* — Legacy dashboard shell for bookmarked old routes
+  if (location.pathname.startsWith("/legacy/")) {
+    return <DashboardShell />;
+  }
+
+  if (interfaceMode === "spatial") {
+    return <SpatialApp />;
   }
 
   if (interfaceMode === "agent") {
