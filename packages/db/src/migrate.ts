@@ -914,5 +914,89 @@ export function migrateDatabase(sqlite: Database.Database): void {
       FOREIGN KEY (proposal_id) REFERENCES swf_proposals(id),
       FOREIGN KEY (participant_id) REFERENCES swf_participants(id)
     );
+
+    -- ── Operator Policies ──────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS operator_policies (
+      kernel_id TEXT PRIMARY KEY REFERENCES shop_kernels(id),
+      policy TEXT NOT NULL,       -- JSON OperatorPolicy
+      updated_at TEXT NOT NULL,
+      updated_by TEXT             -- who last changed it
+    );
+
+    -- ── Pending Approvals ──────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      job_id TEXT NOT NULL,
+      session_id TEXT,            -- links to negotiation_sessions
+      submitted_by TEXT NOT NULL,
+      job_summary TEXT NOT NULL,  -- JSON
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      rejection_reason TEXT,
+      expires_at TEXT NOT NULL
+    );
+
+    -- ── Negotiation Sessions ───────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS negotiation_sessions (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'created',
+      user_agent_id TEXT NOT NULL,
+      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      capability_type TEXT NOT NULL,
+      capability_id TEXT,
+      network TEXT,
+      selections TEXT NOT NULL DEFAULT '{}',     -- JSON
+      operator_constraints TEXT NOT NULL,         -- JSON snapshot
+      scheduling TEXT,                            -- JSON
+      quote TEXT,                                 -- JSON
+      contract_terms TEXT,                        -- JSON
+      job_id TEXT,
+      escrow_address TEXT,
+      cwm_id TEXT,
+      transitions TEXT NOT NULL DEFAULT '[]',     -- JSON SessionTransition[]
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      committed_at TEXT
+    );
+
+    -- ── Policy Rate Counters ───────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS policy_rate_counters (
+      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      window_key TEXT NOT NULL,   -- "hour:2026-03-26T14" or "day:2026-03-26"
+      count INTEGER NOT NULL DEFAULT 0,
+      total_cost TEXT NOT NULL DEFAULT '0',
+      PRIMARY KEY (kernel_id, window_key)
+    );
+
+    -- ── Shared Batches (multi-user runs) ───────────────────────────
+    CREATE TABLE IF NOT EXISTS shared_batches (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      capability_type TEXT NOT NULL,
+      total_slots INTEGER NOT NULL,
+      protocol_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      min_slots_to_run INTEGER NOT NULL DEFAULT 1,
+      price_per_slot TEXT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USDC',
+      evidence_bundle_id TEXT,
+      created_at TEXT NOT NULL,
+      closes_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS batch_slot_claims (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL REFERENCES shared_batches(id),
+      agent_id TEXT NOT NULL,
+      slot_indices TEXT NOT NULL,  -- JSON number[]
+      sample_labels TEXT NOT NULL, -- JSON string[]
+      status TEXT NOT NULL DEFAULT 'claimed',
+      amount TEXT NOT NULL,
+      escrow_address TEXT,
+      claimed_at TEXT NOT NULL
+    );
   `);
 }

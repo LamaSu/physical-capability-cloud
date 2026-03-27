@@ -7,6 +7,7 @@ import { fdmTemplate } from "./fdm.js";
 import { slaTemplate } from "./sla.js";
 import { cnc3AxisTemplate } from "./cnc-3axis.js";
 import { laserCutTemplate } from "./laser-cut.js";
+import { liquidHandlerTemplate } from "./liquid-handler.js";
 
 const registry = new Map<CapabilityType, CapabilityTemplate>();
 
@@ -35,3 +36,4 @@ registerTemplate(fdmTemplate);
 registerTemplate(slaTemplate);
 registerTemplate(cnc3AxisTemplate);
 registerTemplate(laserCutTemplate);
+registerTemplate(liquidHandlerTemplate);

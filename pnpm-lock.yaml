@@ -700,6 +700,15 @@ importers:
 
   packages/verifier:
     dependencies:
+      '@aztec/bb.js':
+        specifier: 0.58.0
+        version: 0.58.0
+      '@noir-lang/backend_barretenberg':
+        specifier: 0.36.0
+        version: 0.36.0
+      '@noir-lang/noir_js':
+        specifier: 0.36.0
+        version: 0.36.0
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
@@ -713,12 +722,6 @@ importers:
         specifier: ^2.21.0
         version: 2.46.3(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@3.25.76)
     devDependencies:
-      '@noir-lang/backend_barretenberg':
-        specifier: ^0.36.0
-        version: 0.36.0
-      '@noir-lang/noir_js':
-        specifier: 1.0.0-beta.19
-        version: 1.0.0-beta.19
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
@@ -1747,23 +1750,20 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@noir-lang/acvm_js@1.0.0-beta.19':
-    resolution: {integrity: sha512-J4i5SkZ8SYMAfl3yNyneI3DorEfE5zsgsHljm0aY6mV4x+LcbqxzM6hdsSbXqboZ1ZUXXmmHjE9WqFMkJC94eQ==}
+  '@noir-lang/acvm_js@0.52.0':
+    resolution: {integrity: sha512-QEREOIbq+jK/Bqs9jk0+XAS/KYmQX7lBEUYhdFMxkNIQf3hDQ3hr9PcelOWQtoxiDn6IJ2sr7t7yeZFdRqCvhg==}
 
   '@noir-lang/backend_barretenberg@0.36.0':
     resolution: {integrity: sha512-TShUJfMZskV8LOKY22jbofKnPAhMxBgUIi2FxcoNJ9y52i56GibrF0iuse3atEMWc8LnOE0ci69wsqZ2yYP8iw==}
 
-  '@noir-lang/noir_js@1.0.0-beta.19':
-    resolution: {integrity: sha512-KtuO37XuBn+7PHReLGCyLVxKGBk+hSvUQs0r/rtNFTYty/KmSq/NwEXkwiA7aQTNUykrzTJGFbIForQWjIJT4g==}
+  '@noir-lang/noir_js@0.36.0':
+    resolution: {integrity: sha512-qMAfqkcWfERxS1IOeAjTssZGVolNLVIQhHI/Ers7iIx3tZYhejHRe30cMFdhgdJ9nfpqJea+TvlsKLsXbEBMfw==}
 
-  '@noir-lang/noirc_abi@1.0.0-beta.19':
-    resolution: {integrity: sha512-rCEVNmXwfxC70VVJqOjvgP9mga+HVOIYzmsTQV9JeNG/BiWbxdHPJ+K0gT7EoCpz7VOVwfgWjFepxfbQk++GSw==}
+  '@noir-lang/noirc_abi@0.36.0':
+    resolution: {integrity: sha512-xRs13RQArV+m4ehkWpbAB/67z7WBfB/EgFJTJtd2/QMdtJSDWJ+8zcf5oOjX+YpDt38c9qY9d/SRdIzws34m3w==}
 
   '@noir-lang/types@0.36.0':
     resolution: {integrity: sha512-3A/yJtnbTsn0o3T/D3YPs5b0vPOxYwos6Y5Ko6NhZsE6V31rYPv2a2NYmbfJRYuriwwzFbdE8+ui3UiV5BmvWw==}
-
-  '@noir-lang/types@1.0.0-beta.19':
-    resolution: {integrity: sha512-px/gpC8tvOvCPY6TbVYqMDqDadA75I2woOZ3b5vbyjxqaE4UtsKtcdsWQ9titSCslkYCe1WYRGiFE/LPyRgOpQ==}
 
   '@number-flow/react@0.6.0':
     resolution: {integrity: sha512-77Yfc9+zkV2UDSP8phhZzxJGuwxi/Tt1TikmipL+1r3e9GFKEYDZ1XwInj67NoSt3OnOB0KLvvcl3lfPZgBHVQ==}
@@ -9693,7 +9693,7 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
-  '@noir-lang/acvm_js@1.0.0-beta.19': {}
+  '@noir-lang/acvm_js@0.52.0': {}
 
   '@noir-lang/backend_barretenberg@0.36.0':
     dependencies:
@@ -9703,20 +9703,17 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@noir-lang/noir_js@1.0.0-beta.19':
+  '@noir-lang/noir_js@0.36.0':
     dependencies:
-      '@noir-lang/acvm_js': 1.0.0-beta.19
-      '@noir-lang/noirc_abi': 1.0.0-beta.19
-      '@noir-lang/types': 1.0.0-beta.19
-      pako: 2.1.0
+      '@noir-lang/acvm_js': 0.52.0
+      '@noir-lang/noirc_abi': 0.36.0
+      '@noir-lang/types': 0.36.0
 
-  '@noir-lang/noirc_abi@1.0.0-beta.19':
+  '@noir-lang/noirc_abi@0.36.0':
     dependencies:
-      '@noir-lang/types': 1.0.0-beta.19
+      '@noir-lang/types': 0.36.0
 
   '@noir-lang/types@0.36.0': {}
-
-  '@noir-lang/types@1.0.0-beta.19': {}
 
   '@number-flow/react@0.6.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
     dependencies:

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { CommitmentService } from "../commitment-service.js";
-import type { SHA256 } from "@pcc/spec";
+import type { SHA256, HashDigest } from "@pcc/spec";
 
 describe("CommitmentService", () => {
   const service = new CommitmentService();
@@ -14,7 +14,8 @@ describe("CommitmentService", () => {
       const commitment = await service.createCommitment(hash1);
       expect(commitment.id).toMatch(/^cmt_/);
       expect(commitment.bundleHash).toBe(hash1);
-      expect(commitment.commitmentHash).toMatch(/^sha256:/);
+      // Commitment hash is now Pedersen
+      expect(commitment.commitmentHash).toMatch(/^pedersen:/);
       expect(commitment.commitmentTimestamp).toBeTruthy();
     });
 
@@ -29,6 +30,12 @@ describe("CommitmentService", () => {
       const c2 = await service.createCommitment(hash1);
       expect(c1.commitmentHash).toBe(c2.commitmentHash);
     });
+
+    it("bundleHash remains SHA256 while commitmentHash is Pedersen", async () => {
+      const commitment = await service.createCommitment(hash1);
+      expect(commitment.bundleHash).toMatch(/^sha256:/);
+      expect(commitment.commitmentHash).toMatch(/^pedersen:/);
+    });
   });
 
   describe("buildTree", () => {
@@ -40,7 +47,7 @@ describe("CommitmentService", () => {
       const tree = await service.buildTree(commitments);
 
       expect(tree.id).toMatch(/^cmt_/);
-      expect(tree.root).toMatch(/^sha256:/);
+      expect(tree.root).toMatch(/^pedersen:/);
       expect(tree.leafCount).toBe(2);
       expect(tree.depth).toBeGreaterThan(0);
       // Padded to power of 2
@@ -63,7 +70,7 @@ describe("CommitmentService", () => {
       const commitments = [await service.createCommitment(hash1)];
       const tree = await service.buildTree(commitments);
       expect(tree.leafCount).toBe(1);
-      expect(tree.root).toMatch(/^sha256:/);
+      expect(tree.root).toMatch(/^pedersen:/);
     });
 
     it("handles odd number of commitments (pads to power of 2)", async () => {
@@ -79,6 +86,18 @@ describe("CommitmentService", () => {
 
     it("throws on empty commitments", async () => {
       await expect(service.buildTree([])).rejects.toThrow("empty");
+    });
+
+    it("all leaves are pedersen hashes", async () => {
+      const commitments = await Promise.all([
+        service.createCommitment(hash1),
+        service.createCommitment(hash2),
+        service.createCommitment(hash3),
+      ]);
+      const tree = await service.buildTree(commitments);
+      for (const leaf of tree.leaves) {
+        expect(leaf).toMatch(/^pedersen:/);
+      }
     });
   });
 
@@ -119,7 +138,7 @@ describe("CommitmentService", () => {
       const tree = await service.buildTree(commitments);
 
       const proof = await service.generateMerkleProof(tree, 0);
-      const fakeRoot = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as SHA256;
+      const fakeRoot = "pedersen:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as HashDigest;
       const valid = await service.verifyMerkleProof(fakeRoot, tree.leaves[0], proof);
       expect(valid).toBe(false);
     });
@@ -128,6 +147,19 @@ describe("CommitmentService", () => {
       const commitments = [await service.createCommitment(hash1)];
       const tree = await service.buildTree(commitments);
       await expect(service.generateMerkleProof(tree, 5)).rejects.toThrow("out of range");
+    });
+
+    it("proof path elements are pedersen hashes", async () => {
+      const commitments = await Promise.all([
+        service.createCommitment(hash1),
+        service.createCommitment(hash2),
+        service.createCommitment(hash3),
+      ]);
+      const tree = await service.buildTree(commitments);
+      const proof = await service.generateMerkleProof(tree, 0);
+      for (const element of proof.path) {
+        expect(element).toMatch(/^pedersen:/);
+      }
     });
   });
 });

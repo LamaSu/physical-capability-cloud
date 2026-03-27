@@ -6,7 +6,7 @@
  * ZK proofs allow dispute resolution without revealing raw data.
  */
 
-import type { Address, Id, SHA256, Timestamp } from "./common.js";
+import type { Address, Id, SHA256, HashDigest, Timestamp } from "./common.js";
 
 /** Encrypted evidence bundle (AES-256-GCM envelope) */
 export interface EncryptedEvidenceBundle {
@@ -73,15 +73,15 @@ export interface AccessGrant {
   revoked: boolean;
 }
 
-/** On-chain commitment (Poseidon/SHA-256 hash of evidence) */
+/** On-chain commitment (Pedersen hash for ZK circuits, SHA-256 for content addressing) */
 export interface EvidenceCommitment {
   id: Id;
-  /** Hash of the original bundle */
+  /** Hash of the original bundle (content-addressed, always SHA-256) */
   bundleHash: SHA256;
-  /** Poseidon hash for ZK circuits (mock: SHA-256) */
-  commitmentHash: SHA256;
+  /** Pedersen hash for ZK circuits (tree-internal) */
+  commitmentHash: HashDigest;
   /** Merkle root if part of a tree */
-  merkleRoot?: SHA256;
+  merkleRoot?: HashDigest;
   /** Leaf index in tree */
   merkleIndex?: number;
   commitmentTimestamp: Timestamp;
@@ -108,11 +108,11 @@ export interface ZKProof {
 /** Merkle tree for batching commitments */
 export interface CommitmentTree {
   id: Id;
-  root: SHA256;
+  root: HashDigest;
   depth: number;
   leafCount: number;
   /** Ordered leaf hashes */
-  leaves: SHA256[];
+  leaves: HashDigest[];
   createdAt: Timestamp;
 }
 

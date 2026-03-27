@@ -4,10 +4,15 @@
  * Wraps @noir-lang/noir_js + @noir-lang/backend_barretenberg to compile and execute
  * Noir circuits for evidence inclusion and tier compliance proofs.
  *
- * Falls back to mock proofs if Noir dependencies are not installed.
+ * Falls back to mock proofs if Noir dependencies are not installed or WASM init fails.
  *
- * Circuit artifacts are loaded from pre-compiled JSON files in circuits/build/.
+ * Circuit artifacts are loaded from pre-compiled JSON files in circuits/<name>/target/.
  * To compile: `nargo compile` in each circuit directory.
+ *
+ * Version alignment (all 0.36.0):
+ *   - @noir-lang/noir_js@0.36.0 (witness generation)
+ *   - @noir-lang/backend_barretenberg@0.36.0 (proof generation via @aztec/bb.js@0.58.0)
+ *   - Circuit artifacts compiled with nargo 0.36.0
  */
 
 import type {
@@ -17,11 +22,13 @@ import type {
   EvidenceBundle,
   AssuranceTier,
   SHA256,
+  HashDigest,
 } from "@pcc/spec";
 import { sha256, canonicalize, ids } from "@pcc/spec";
 import { CommitmentService } from "./commitment-service.js";
+import { pedersenHash, sha256ToField, hashToField } from "./pedersen.js";
 
-// Dynamic imports for Noir — may not be installed
+// Dynamic imports for Noir — may fail if WASM init fails at runtime
 type NoirModule = typeof import("@noir-lang/noir_js");
 type BackendModule = typeof import("@noir-lang/backend_barretenberg");
 
@@ -53,7 +60,11 @@ export class NoirProofService {
       this.noirModule = await import("@noir-lang/noir_js");
       this.backendModule = await import("@noir-lang/backend_barretenberg");
       this.noirAvailable = true;
-    } catch {
+    } catch (err) {
+      console.warn(
+        "[NoirProofService] Noir WASM packages not available, using mock proofs:",
+        (err as Error).message,
+      );
       this.noirAvailable = false;
     }
     return this.noirAvailable;
@@ -61,6 +72,7 @@ export class NoirProofService {
 
   /**
    * Load a compiled circuit artifact and initialize Noir + Barretenberg backend.
+   * Uses threads=1 to reduce memory usage on constrained environments (Railway).
    */
   private async loadCircuit(name: string): Promise<NoirInstance | null> {
     if (this.circuits.has(name)) return this.circuits.get(name)!;
@@ -79,7 +91,10 @@ export class NoirProofService {
       const artifactJson = await readFile(artifactPath, "utf-8");
       const artifact: CircuitArtifact = JSON.parse(artifactJson);
 
-      const backend = new this.backendModule!.BarretenbergBackend(artifact as any);
+      // Use threads=1 to reduce WASM memory footprint on Railway (512MB free tier)
+      const backend = new this.backendModule!.BarretenbergBackend(artifact as any, {
+        threads: 1,
+      });
       const noir = new this.noirModule!.Noir(artifact as any);
 
       const instance: NoirInstance = { noir, backend };
@@ -92,15 +107,28 @@ export class NoirProofService {
   }
 
   /**
-   * Convert a SHA256 string ("sha256:abcdef...") to a Field element string for Noir.
-   * Truncates to 254 bits (BN254 scalar field) by masking the top 2 bits.
+   * Destroy all loaded circuit backends, freeing WASM memory.
+   * Call this on server shutdown for clean resource release.
    */
-  private sha256ToField(hash: SHA256): string {
-    const hex = hash.replace("sha256:", "");
-    // Truncate to 254 bits: mask top 2 bits of the first byte
-    const firstByte = parseInt(hex.substring(0, 2), 16) & 0x3f; // 6 bits
-    const truncatedHex = firstByte.toString(16).padStart(2, "0") + hex.substring(2);
-    return "0x" + truncatedHex;
+  async destroy(): Promise<void> {
+    for (const [name, instance] of this.circuits) {
+      try {
+        await instance.backend.destroy();
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+    this.circuits.clear();
+  }
+
+  /**
+   * Convert any hash digest string to a Noir Field element string.
+   * Supports both "sha256:..." and "pedersen:..." prefixes.
+   * Reduces modulo the BN254 scalar field to guarantee the value is in range.
+   */
+  private digestToField(hash: string): string {
+    const field = hashToField(hash);
+    return "0x" + field.toString(16).padStart(64, "0");
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -139,17 +167,17 @@ export class NoirProofService {
 
     // Build Noir inputs (Field elements, not byte arrays)
     const MAX_DEPTH = 8;
-    const siblingPath: string[] = Array(MAX_DEPTH).fill("0x0");
-    const pathIndices: string[] = Array(MAX_DEPTH).fill("0x0");
+    const siblingPath: string[] = Array(MAX_DEPTH).fill("0x" + "0".repeat(64));
+    const pathIndices: string[] = Array(MAX_DEPTH).fill("0x" + "0".repeat(64));
 
     for (let i = 0; i < merkleProof.path.length && i < MAX_DEPTH; i++) {
-      siblingPath[i] = this.sha256ToField(merkleProof.path[i]);
+      siblingPath[i] = this.digestToField(merkleProof.path[i]);
       pathIndices[i] = `0x${merkleProof.indices[i].toString(16)}`;
     }
 
     const inputs = {
-      merkle_root: this.sha256ToField(tree.root),
-      leaf_hash: this.sha256ToField(tree.leaves[leafIndex]),
+      merkle_root: this.digestToField(tree.root),
+      leaf_hash: this.digestToField(tree.leaves[leafIndex]),
       sibling_path: siblingPath,
       path_indices: pathIndices,
       tree_depth: `0x${tree.depth.toString(16)}`,
@@ -157,14 +185,14 @@ export class NoirProofService {
 
     try {
       const { witness } = await circuit.noir.execute(inputs);
-      const proof = await circuit.backend.generateProof(witness);
+      const noirProof = await circuit.backend.generateProof(witness);
 
       return {
         id: ids.proof(),
         proofType: "evidence_inclusion",
         commitmentId: commitment.id,
-        publicInputs: [tree.root, tree.leaves[leafIndex]],
-        proof: `noir:${Buffer.from(proof.proof).toString("hex")}`,
+        publicInputs: noirProof.publicInputs,
+        proof: `noir:${Buffer.from(noirProof.proof).toString("hex")}`,
         verificationKey: `noir:${Buffer.from(await circuit.backend.getVerificationKey()).toString("hex")}`,
         verified: false,
         generatedAt: new Date().toISOString(),
@@ -192,11 +220,13 @@ export class NoirProofService {
   ): Promise<ZKProof> {
     const circuit = await this.loadCircuit("tier_compliance");
 
-    const commitmentHash = await sha256(bundle.bundleHash);
+    // Compute Pedersen commitment hash matching the circuit's pedersen_hash([bundleHashField])
+    const bundleField = sha256ToField(bundle.bundleHash);
+    const commitmentHash = await pedersenHash([bundleField]);
     const commitment: EvidenceCommitment = {
       id: ids.commitment(),
       bundleHash: bundle.bundleHash,
-      commitmentHash: commitmentHash as SHA256,
+      commitmentHash,
       commitmentTimestamp: new Date().toISOString(),
     };
 
@@ -224,33 +254,36 @@ export class NoirProofService {
     if (eventTypes.has("camera_snapshot")) flags |= 8;
     if (eventTypes.has("cv_inspection_result")) flags |= 16;
 
-    // events_hash is what the bundle_hash was computed from
-    // We need to reconstruct: bundle_hash = sha256(events_hash)
-    // So events_hash is the canonical hash of sorted event hashes
+    // events_hash: SHA256 of canonical sorted event hashes, reduced to BN254 field
     const eventsHashStr = await sha256(
       canonicalize(bundle.events.map((e) => e.hash).sort()),
     );
+    const eventsField = sha256ToField(eventsHashStr as SHA256);
+
+    // Circuit expects: bundle_hash == pedersen_hash([events_hash])
+    // So bundle_hash is the Pedersen output, events_hash is the preimage
+    const bundlePedersen = await pedersenHash([eventsField]);
 
     const inputs = {
-      bundle_hash: this.sha256ToField(bundle.bundleHash),
+      bundle_hash: this.digestToField(bundlePedersen),
       required_tier: `0x${requiredTier.toString(16)}`,
       event_count: `0x${bundle.events.length.toString(16)}`,
       has_execution_completed: (flags & 1) ? "0x1" : "0x0",
       has_sensor_data: (flags & 2) ? "0x1" : "0x0",
       has_tee_attestation: (flags & 4) ? "0x1" : "0x0",
-      events_hash: this.sha256ToField(eventsHashStr as SHA256),
+      events_hash: "0x" + eventsField.toString(16).padStart(64, "0"),
     };
 
     try {
       const { witness } = await circuit.noir.execute(inputs);
-      const proof = await circuit.backend.generateProof(witness);
+      const noirProof = await circuit.backend.generateProof(witness);
 
       return {
         id: ids.proof(),
         proofType: "tier_compliance",
         commitmentId: commitment.id,
-        publicInputs: [bundle.bundleHash, String(requiredTier)],
-        proof: `noir:${Buffer.from(proof.proof).toString("hex")}`,
+        publicInputs: noirProof.publicInputs,
+        proof: `noir:${Buffer.from(noirProof.proof).toString("hex")}`,
         verificationKey: `noir:${Buffer.from(await circuit.backend.getVerificationKey()).toString("hex")}`,
         verified: false,
         generatedAt: new Date().toISOString(),

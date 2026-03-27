@@ -4,6 +4,13 @@ export { CommitmentService } from "./commitment-service.js";
 export { ZKProofService } from "./zk-proof-service.js";
 export { NoirProofService } from "./noir-proof-service.js";
 export {
+  pedersenHash,
+  pedersenHashPair,
+  pedersenZeroHash,
+  sha256ToField,
+  hashToField,
+} from "./pedersen.js";
+export {
   StarknetProofAnchoringService,
   type StarknetAnchor,
   type AnchorStatus,

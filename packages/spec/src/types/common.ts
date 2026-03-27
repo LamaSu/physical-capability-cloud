@@ -5,6 +5,12 @@
 /** SHA-256 hex-encoded hash */
 export type SHA256 = `sha256:${string}`;
 
+/** Pedersen hash (BN254 field element, Barretenberg-compatible) */
+export type PedersenHash = `pedersen:${string}`;
+
+/** Any hash digest used in tree-internal operations */
+export type HashDigest = SHA256 | PedersenHash;
+
 /** Ethereum address */
 export type Address = `0x${string}`;
 

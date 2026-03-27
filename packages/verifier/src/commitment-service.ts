@@ -1,24 +1,28 @@
 /**
  * CommitmentService — Merkle tree construction and on-chain commitment hashing.
  *
- * Uses SHA-256 as a stand-in for Poseidon. When Noir circuits are integrated,
- * only the hash function changes.
+ * Uses Barretenberg Pedersen hash (BN254) for all tree-internal operations,
+ * matching Noir's `std::hash::pedersen_hash` in the circuits.
+ *
+ * bundleHash fields remain SHA-256 (content addressing).
+ * commitmentHash, merkleRoot, and tree leaves use Pedersen.
  */
 
-import type { EvidenceCommitment, CommitmentTree, SHA256 } from "@pcc/spec";
-import { sha256 } from "@pcc/spec";
+import type { EvidenceCommitment, CommitmentTree, SHA256, HashDigest } from "@pcc/spec";
 import { ids } from "@pcc/spec";
+import { pedersenHash, pedersenHashPair, pedersenZeroHash, sha256ToField } from "./pedersen.js";
 
 export class CommitmentService {
   /** Create a commitment hash for an evidence bundle */
   async createCommitment(bundleHash: SHA256): Promise<EvidenceCommitment> {
-    // Mock Poseidon: use SHA-256 of the bundle hash
-    const commitmentHash = await sha256(bundleHash);
+    // Pedersen hash of the bundle hash (as a BN254 field element)
+    const field = sha256ToField(bundleHash);
+    const commitmentHash = await pedersenHash([field]);
 
     return {
       id: ids.commitment(),
       bundleHash,
-      commitmentHash: commitmentHash as SHA256,
+      commitmentHash,
       commitmentTimestamp: new Date().toISOString(),
     };
   }
@@ -29,25 +33,25 @@ export class CommitmentService {
       throw new Error("Cannot build tree from empty commitments");
     }
 
-    const leaves = commitments.map((c) => c.commitmentHash);
+    const leaves: HashDigest[] = commitments.map((c) => c.commitmentHash);
 
     // Pad to next power of 2
     const nextPow2 = Math.pow(2, Math.ceil(Math.log2(leaves.length)));
-    const paddedLeaves = [...leaves];
+    const paddedLeaves: HashDigest[] = [...leaves];
+    const zeroHash = await pedersenZeroHash();
     while (paddedLeaves.length < nextPow2) {
-      paddedLeaves.push(`sha256:${"0".repeat(64)}` as SHA256);
+      paddedLeaves.push(zeroHash);
     }
 
-    // Build tree bottom-up
+    // Build tree bottom-up using Pedersen pair hashing
     let currentLevel = paddedLeaves;
     let depth = 0;
 
     while (currentLevel.length > 1) {
-      const nextLevel: SHA256[] = [];
+      const nextLevel: HashDigest[] = [];
       for (let i = 0; i < currentLevel.length; i += 2) {
-        const combined = currentLevel[i] + currentLevel[i + 1];
-        const hash = await sha256(combined);
-        nextLevel.push(hash as SHA256);
+        const hash = await pedersenHashPair(currentLevel[i], currentLevel[i + 1]);
+        nextLevel.push(hash);
       }
       currentLevel = nextLevel;
       depth++;
@@ -75,12 +79,12 @@ export class CommitmentService {
   async generateMerkleProof(
     tree: CommitmentTree,
     leafIndex: number,
-  ): Promise<{ path: SHA256[]; indices: number[] }> {
+  ): Promise<{ path: HashDigest[]; indices: number[] }> {
     if (leafIndex < 0 || leafIndex >= tree.leaves.length) {
       throw new Error(`Leaf index ${leafIndex} out of range`);
     }
 
-    const path: SHA256[] = [];
+    const path: HashDigest[] = [];
     const indices: number[] = [];
 
     let currentLevel = [...tree.leaves];
@@ -92,11 +96,10 @@ export class CommitmentService {
       indices.push(idx % 2); // 0 = left, 1 = right
 
       // Compute next level
-      const nextLevel: SHA256[] = [];
+      const nextLevel: HashDigest[] = [];
       for (let i = 0; i < currentLevel.length; i += 2) {
-        const combined = currentLevel[i] + currentLevel[i + 1];
-        const hash = await sha256(combined);
-        nextLevel.push(hash as SHA256);
+        const hash = await pedersenHashPair(currentLevel[i], currentLevel[i + 1]);
+        nextLevel.push(hash);
       }
       currentLevel = nextLevel;
       idx = Math.floor(idx / 2);
@@ -107,18 +110,21 @@ export class CommitmentService {
 
   /** Verify a Merkle proof */
   async verifyMerkleProof(
-    root: SHA256,
-    leaf: SHA256,
-    proof: { path: SHA256[]; indices: number[] },
+    root: HashDigest,
+    leaf: HashDigest,
+    proof: { path: HashDigest[]; indices: number[] },
   ): Promise<boolean> {
     let current = leaf;
 
     for (let i = 0; i < proof.path.length; i++) {
       const sibling = proof.path[i];
-      const combined = proof.indices[i] === 0
-        ? current + sibling    // current is left
-        : sibling + current;   // current is right
-      current = await sha256(combined) as SHA256;
+      if (proof.indices[i] === 0) {
+        // current is left child
+        current = await pedersenHashPair(current, sibling);
+      } else {
+        // current is right child
+        current = await pedersenHashPair(sibling, current);
+      }
     }
 
     return current === root;

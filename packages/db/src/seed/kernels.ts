@@ -117,6 +117,22 @@ export function seedKernels(db: StoreDB): void {
         lastHeartbeat: now,
         version: "1.4.0",
       },
+      // ── NanoClaw — Opentrons OT-2 Liquid Handler ──────────────────
+      {
+        id: "kernel-nanoclaw",
+        name: "NanoClaw OT-2",
+        operatorAddress: "0x8888888888888888888888888888888888888888",
+        location: { lat: 37.7836, lng: -122.4089 },
+        physicalAddress: "995 Market St, 4th Floor, San Francisco, CA 94103",
+        maxAssuranceTier: 2,
+        publicKey: "0x04b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+        reputation: 850,
+        totalJobsCompleted: 0,
+        status: "online",
+        registeredAt: "2026-03-26T00:00:00Z",
+        lastHeartbeat: now,
+        version: "1.5.0",
+      },
     ])
     .run();
 
@@ -308,6 +324,27 @@ export function seedKernels(db: StoreDB): void {
         firmware: "3.11.17",
         status: "idle",
         contributesToCapabilities: ["cap-frontier-assay"],
+        lastUpdated: now,
+      },
+      // ── NanoClaw devices ──────────────────────────────────────────
+      {
+        id: "dev-ot2-nanoclaw",
+        kernelId: "kernel-nanoclaw",
+        type: "machine",
+        model: "Opentrons OT-2",
+        firmware: "2.18.0",
+        status: "idle",
+        contributesToCapabilities: ["cap-nanoclaw-liquid"],
+        lastUpdated: now,
+      },
+      {
+        id: "dev-cam-nanoclaw",
+        kernelId: "kernel-nanoclaw",
+        type: "camera",
+        model: "Raspberry Pi Camera v3",
+        firmware: "1.0.0",
+        status: "idle",
+        contributesToCapabilities: ["cap-nanoclaw-liquid"],
         lastUpdated: now,
       },
     ])
@@ -580,6 +617,21 @@ export function seedKernels(db: StoreDB): void {
         location: { lat: 37.7836, lng: -122.4089 },
         queueDepth: 0,
         tags: ["assay", "plate-reader", "biotech", "screening"],
+      },
+      // ── NanoClaw capabilities ─────────────────────────────────────
+      {
+        id: "cap-nanoclaw-liquid",
+        kernelId: "kernel-nanoclaw",
+        type: "liquid-handler",
+        name: "NanoClaw OT-2 Liquid Handling",
+        description: "Automated liquid handling via Opentrons OT-2 — transfers, serial dilutions, plate formatting, mixing. Dual pipettes (P300 + P20), 11 deck slots, thermocycler/temperature/magnetic module support.",
+        materials: ["aqueous", "organic", "biological", "chemical"],
+        assuranceTiers: [0, 1, 2],
+        pricing: { currency: "USDC", baseCost: "10.00", perMinute: "0.15", minimum: "10.00" },
+        availability: { timezone: "America/Los_Angeles", windows: {} },
+        location: { lat: 37.7836, lng: -122.4089 },
+        queueDepth: 0,
+        tags: ["liquid-handler", "opentrons", "ot-2", "biotech", "automation", "nanoclaw"],
       },
     ])
     .run();

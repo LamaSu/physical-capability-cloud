@@ -1,0 +1,73 @@
+{
+  "$schema": "./packages/spec/nanoclaw-config.schema.json",
+  "kernelId": "kernel-nanoclaw",
+  "name": "NanoClaw OT-2",
+  "operatorAddress": "0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B",
+  "location": {
+    "lat": 37.7836,
+    "lng": -122.4089,
+    "label": "Frontier Tower 4F Lab, 995 Market St, San Francisco"
+  },
+  "networks": ["biopunk", "frontier-devices"],
+  "opentrons": {
+    "url": "http://192.168.1.100:31950",
+    "apiVersion": "2.18",
+    "pollIntervalMs": 1000,
+    "maxQueueDepth": 10,
+    "mockMode": true,
+    "_comment_url": "Change mockMode to false and url to your OT-2's IP for real hardware"
+  },
+  "pricing": {
+    "baseCost": "10.00",
+    "perMinute": "0.15",
+    "minimum": "10.00",
+    "currency": "USDC"
+  },
+  "gateway": {
+    "url": "https://pcc-gateway-production.up.railway.app",
+    "_local": "http://localhost:3200"
+  },
+  "deployment": {
+    "_comment": "Deployment options for the NanoClaw kernel process",
+    "options": [
+      {
+        "platform": "raspberry-pi",
+        "notes": "RPi 4/5 with network access to both PCC gateway and OT-2. Install Node 22+, run kernel server on port 3100. Connect OT-2 via USB or Ethernet.",
+        "requirements": "Node.js 22+, 2GB RAM, network to OT-2 (port 31950) and internet (PCC gateway)"
+      },
+      {
+        "platform": "dgx-spark-vps",
+        "notes": "Run as a container on the DGX Spark (192.168.108.72). SSH in, start kernel process. OT-2 must be on same network or tunneled.",
+        "requirements": "SSH access to spark, Node.js 22+"
+      },
+      {
+        "platform": "railway",
+        "notes": "Deploy as a separate Railway service. OT-2 needs port forwarding or Tailscale/WireGuard tunnel.",
+        "requirements": "Railway account, Dockerfile, OT-2 accessible via public IP or tunnel"
+      }
+    ]
+  },
+  "dualNetwork": {
+    "_comment": "The NanoClaw kernel can register on multiple PCC networks simultaneously",
+    "how": "The kernel-agent registers capabilities on each network's message bus. Set 'networks' array to list all networks. The gateway routes discovery requests across all registered networks.",
+    "biopunk": {
+      "description": "BioPunk Lab network — your lab inventory and biotech equipment",
+      "gatewayUrl": "https://pcc-gateway-production.up.railway.app"
+    },
+    "frontier-devices": {
+      "description": "Frontier Tower 4F Lab — shared lab equipment at Frontier",
+      "gatewayUrl": "https://pcc-gateway-production.up.railway.app"
+    }
+  },
+  "fiatRamp": {
+    "_comment": "Agent can be funded via credit card through PCC's fiat ramp",
+    "stripe": {
+      "enabled": true,
+      "endpoint": "/api/fiat-ramp/onramp/session"
+    },
+    "yellowcard": {
+      "enabled": true,
+      "endpoint": "/api/fiat-ramp/onramp/yellowcard"
+    }
+  }
+}

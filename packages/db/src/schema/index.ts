@@ -14,3 +14,4 @@ export * from "./marketplace.js";
 export * from "./auth.js";
 export * from "./story.js";
 export * from "./swf.js";
+export * from "./operator-policy.js";
