@@ -4,6 +4,7 @@
 
 import type { ToolCall } from "./agent-types.js";
 import { toolEndpoints } from "./agent-tools.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 /** Execute a tool call by calling the gateway API. Returns the result. */
 export async function executeToolCall(
@@ -31,8 +32,10 @@ export async function executeToolCall(
   const path = typeof endpoint.path === "function" ? endpoint.path(toolCall.input) : endpoint.path;
   const options: RequestInit = { method: endpoint.method };
 
+  options.headers = { ...getAuthHeaders() };
+
   if (endpoint.method === "POST" && endpoint.body) {
-    options.headers = { "Content-Type": "application/json" };
+    options.headers = { ...options.headers, "Content-Type": "application/json" };
     options.body = JSON.stringify(endpoint.body(toolCall.input));
   }
 

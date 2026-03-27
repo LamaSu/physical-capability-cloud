@@ -5,6 +5,7 @@ import { GlassPanel, GlowBadge } from "@pcc/ui";
 import type { BatchManifest, SampleSlot } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useBatchTrackerStore } from "../stores/batch-tracker-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 const GATEWAY = "/api";
 
@@ -39,7 +40,7 @@ export function BatchTrackingPage() {
   // Fetch batches
   const { data: batchData } = useQuery({
     queryKey: ["batches"],
-    queryFn: () => fetch(`${GATEWAY}/batches`).then((r) => r.json()),
+    queryFn: () => fetch(`${GATEWAY}/batches`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
   });
 
   React.useEffect(() => {

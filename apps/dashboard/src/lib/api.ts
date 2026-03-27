@@ -3,12 +3,14 @@
  * Vite proxy: /api routes → http://localhost:3200
  */
 
+import { getAuthHeaders } from "../stores/auth-store.js";
+
 const API_BASE = "/api";
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -26,7 +28,9 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { ...getAuthHeaders() },
+  });
   if (!res.ok) {
     let message = `API error: ${res.status}`;
     try {

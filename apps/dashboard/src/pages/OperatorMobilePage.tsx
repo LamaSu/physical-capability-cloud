@@ -1,5 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,7 +74,7 @@ function statusColor(status: Job["status"]): string {
 
 async function fetchActiveJobs(): Promise<Job[]> {
   try {
-    const res = await fetch("/api/jobs?status=active");
+    const res = await fetch("/api/jobs?status=active", { headers: { ...getAuthHeaders() } });
     if (res.ok) return res.json() as Promise<Job[]>;
   } catch {
     // fall through to mock
@@ -112,7 +113,7 @@ async function uploadPhoto(
   try {
     const res = await fetch("/api/photo/upload", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ image: base64, sha256: hash, notes }),
     });
     if (res.ok) return res.json() as Promise<UploadResult>;
@@ -131,7 +132,7 @@ async function comparePhoto(base64: string, jobId: string): Promise<CompareResul
   try {
     const res = await fetch("/api/photo/compare", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ image: base64, jobId }),
     });
     if (res.ok) return res.json() as Promise<CompareResult>;
@@ -150,7 +151,7 @@ async function reportIssue(
   try {
     const res = await fetch("/api/issues", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ image: base64, text, jobId }),
     });
     if (res.ok) return res.json() as Promise<{ issueId: string }>;

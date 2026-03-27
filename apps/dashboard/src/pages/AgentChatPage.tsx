@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useUIStore } from "../stores/ui-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 import { GlowBadge, cn } from "@pcc/ui";
 
 // ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }
     try {
       const res = await fetch("/api/feedback", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ type, message, page: window.location.pathname }),
       });
       if (res.ok) {

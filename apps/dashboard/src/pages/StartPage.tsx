@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -438,7 +439,7 @@ export function StartPage() {
 
       await fetch("/api/setup/register-device", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({
           kernelId,
           deviceId,

@@ -9,6 +9,7 @@ import {
   EmptyState,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -249,7 +250,7 @@ function FundWalletTab() {
     setStripeSubmitting(true);
     await fetch("/api/fiat-ramp/stripe/onramp", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ amountUsd: stripeAmount }),
     }).catch(() => {});
     setTimeout(() => setStripeSubmitting(false), 1500);
@@ -259,7 +260,7 @@ function FundWalletTab() {
     setYcSubmitting(true);
     await fetch("/api/fiat-ramp/yellowcard/deposit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({
         amountUsd: ycAmount,
         country: selectedCountry.code,
@@ -467,7 +468,7 @@ function WithdrawTab() {
     setSubmitting(true);
     await fetch("/api/fiat-ramp/yellowcard/withdrawal", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({
         amountUsd: amount,
         country: selectedCountry.code,
@@ -689,7 +690,7 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
     setBuying(true);
     await fetch("/api/credits/purchase", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
       body: JSON.stringify({ amountUsd: buyAmount }),
     }).catch(() => {});
     setTimeout(() => setBuying(false), 1500);
@@ -904,7 +905,7 @@ export function WalletPage() {
   const [sessions, setSessions] = React.useState<FiatRampSession[]>(MOCK_SESSIONS);
 
   React.useEffect(() => {
-    fetch("/api/wallet/balance")
+    fetch("/api/wallet/balance", { headers: { ...getAuthHeaders() } })
       .then((r) => r.json())
       .then((d) => {
         if (d.balance) setWalletBalance(d.balance);
@@ -914,7 +915,7 @@ export function WalletPage() {
       })
       .catch(() => {}); // keep mock
 
-    fetch("/api/fiat-ramp/sessions")
+    fetch("/api/fiat-ramp/sessions", { headers: { ...getAuthHeaders() } })
       .then((r) => r.json())
       .then((d) => {
         if (Array.isArray(d.sessions) && d.sessions.length > 0) setSessions(d.sessions);

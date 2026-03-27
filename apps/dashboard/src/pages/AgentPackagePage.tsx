@@ -1,6 +1,7 @@
 import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 const API = import.meta.env.VITE_PCC_URL ?? "";
 
@@ -67,7 +68,9 @@ function SDKSnippets({ kernelId }: { kernelId: string }) {
     const langs = ["python", "javascript", "curl"] as const;
     Promise.all(
       langs.map((lang) =>
-        fetch(`${API}/api/kernels/${kernelId}/sdk/${lang}`)
+        fetch(`${API}/api/kernels/${kernelId}/sdk/${lang}`, {
+          headers: { ...getAuthHeaders() },
+        })
           .then((r) => (r.ok ? r.text() : `# Failed to load ${lang} snippet`))
           .then((text) => [lang, text] as const)
           .catch(() => [lang, `# Error loading ${lang} snippet`] as const),
@@ -142,7 +145,9 @@ export function AgentPackagePage() {
   // Fetch kernels list
   React.useEffect(() => {
     setKernelsLoading(true);
-    fetch(`${API}/api/kernels`)
+    fetch(`${API}/api/kernels`, {
+      headers: { ...getAuthHeaders() },
+    })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -163,7 +168,9 @@ export function AgentPackagePage() {
     setLoading(true);
     setError(null);
     setAgentPackage(null);
-    fetch(`${API}/api/kernels/${selectedKernelId}/agent-package`)
+    fetch(`${API}/api/kernels/${selectedKernelId}/agent-package`, {
+      headers: { ...getAuthHeaders() },
+    })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -187,7 +194,9 @@ export function AgentPackagePage() {
   // Fetch wizard prompt
   function fetchWizardPrompt() {
     setWizardLoading(true);
-    fetch(`${API}/api/onboard/wizard-prompt`)
+    fetch(`${API}/api/onboard/wizard-prompt`, {
+      headers: { ...getAuthHeaders() },
+    })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();

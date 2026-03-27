@@ -6,6 +6,7 @@ import {
   AddressDisplay,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store";
+import { getAuthHeaders } from "../stores/auth-store.js";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -96,14 +97,14 @@ export function SettlementPage() {
 
   // Try to fetch live data, fall back to mock
   React.useEffect(() => {
-    fetch("/api/settlement/status")
+    fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } })
       .then((r) => r.json())
       .then((data) => {
         if (data.batchEnabled !== undefined) setStatus(data);
       })
       .catch(() => {}); // keep mock
 
-    fetch("/api/settlement/epochs")
+    fetch("/api/settlement/epochs", { headers: { ...getAuthHeaders() } })
       .then((r) => r.json())
       .then((data) => {
         if (data.epochs?.length) setEpochs(data.epochs);
@@ -114,9 +115,9 @@ export function SettlementPage() {
   const handleFlush = async () => {
     setFlushing(true);
     try {
-      await fetch("/api/settlement/flush", { method: "POST" });
+      await fetch("/api/settlement/flush", { method: "POST", headers: { ...getAuthHeaders() } });
       // Refresh status
-      const r = await fetch("/api/settlement/status");
+      const r = await fetch("/api/settlement/status", { headers: { ...getAuthHeaders() } });
       const data = await r.json();
       if (data.batchEnabled !== undefined) setStatus(data);
     } catch {
