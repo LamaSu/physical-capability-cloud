@@ -87,11 +87,26 @@ export async function provisionRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── GET /api/auth/validate ────────────────────────────────────────
+  // Validate an API key — returns 200 if valid, 401 if not.
+  // Used by the dashboard login screen.
+  app.get("/api/auth/validate", async (req, reply) => {
+    const { resolveApiKey } = await import("../auth/api-key-auth.js");
+    const keyRecord = resolveApiKey(req);
+    if (!keyRecord) {
+      return reply.status(401).send({ error: "invalid_key" });
+    }
+    return { valid: true, operatorId: keyRecord.operatorId };
+  });
+
   // ── GET /api/auth/keys ────────────────────────────────────────────
   // List active keys for the authenticated operator.
   // Requires existing API key or SIWE session.
   app.get("/api/auth/keys", async (req, reply) => {
-    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    // Try resolveApiKey directly since this route is before the gate
+    const { resolveApiKey } = await import("../auth/api-key-auth.js");
+    const keyRecord = resolveApiKey(req);
+    const operatorId = keyRecord?.operatorId ?? (req as any).operatorId ?? (req as any).userId;
     if (!operatorId) {
       return reply.status(401).send({ error: "Authentication required" });
     }

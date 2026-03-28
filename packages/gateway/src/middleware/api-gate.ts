@@ -13,6 +13,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 const PUBLIC_PREFIXES = [
   "/api/health",
   "/api/auth/provision",        // Key provisioning is public
+  "/api/auth/validate",         // Key validation is public (checks key itself)
   "/api/feedback",
   "/api/onboard/check/",      // Invite code validation is public
   "/.well-known/",

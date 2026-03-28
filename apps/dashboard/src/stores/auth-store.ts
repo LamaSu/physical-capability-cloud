@@ -37,7 +37,7 @@ export const useAuthStore = create<AuthState>((set) => {
 
     login: async (key: string): Promise<boolean> => {
       try {
-        const res = await fetch(`${API}/api/auth/keys`, {
+        const res = await fetch(`${API}/api/auth/validate`, {
           headers: { Authorization: `Bearer ${key}` },
         });
         if (res.ok) {
