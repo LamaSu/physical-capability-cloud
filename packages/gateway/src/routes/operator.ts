@@ -232,6 +232,41 @@ export async function operatorRoutes(app: FastifyInstance) {
   // Pending Approvals
   // ═════════════════════════════════════════════════════════════════
 
+  /** POST /api/operator/approvals — Submit a job for approval */
+  app.post("/api/operator/approvals", async (req, reply) => {
+    const { kernelId, agentId, capabilityType, parameters, autoApprove } = (req.body ?? {}) as {
+      kernelId?: string; agentId?: string; capabilityType?: string;
+      parameters?: Record<string, unknown>; autoApprove?: boolean;
+    };
+    if (!kernelId || !agentId) {
+      return reply.status(400).send({ error: "kernelId and agentId required" });
+    }
+    try {
+      const { db } = getStore();
+      const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      db.insert(pendingApprovals).values({
+        id,
+        kernelId,
+        jobId,
+        submittedBy: agentId,
+        jobSummary: { capabilityType: capabilityType ?? "liquid-handler", parameters: parameters ?? {} },
+        status: autoApprove ? "approved" : "pending",
+        createdAt: now,
+        decidedAt: autoApprove ? now : null,
+        expiresAt: expires,
+      }).run();
+
+      const row = db.select().from(pendingApprovals).where(eq(pendingApprovals.id, id)).get();
+      return { approval: row, created: true };
+    } catch (e) {
+      return reply.status(500).send({ error: "Failed to create approval" });
+    }
+  });
+
   /** GET /api/operator/approvals — List pending approvals */
   app.get("/api/operator/approvals", async (req) => {
     const { kernelId, status } = req.query as { kernelId?: string; status?: string };
