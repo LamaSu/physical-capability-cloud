@@ -71,10 +71,10 @@ export async function kernelRoutes(app: FastifyInstance) {
   );
 
   app.post<{
-    Body: { name?: string; operatorAddress?: string; location?: string; physicalAddress?: string };
+    Body: { id?: string; name?: string; operatorAddress?: string; location?: string; physicalAddress?: string };
   }>("/api/kernels", async (req, reply) => {
     const repos = getRepos();
-    const id = `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = req.body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const kernel = {
       id,
       name: req.body.name || "New Kernel",
