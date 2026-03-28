@@ -264,6 +264,18 @@ OT2_TOOLS = [
         },
     },
     {
+        "name": "ot2_shell",
+        "description": "Run a shell command on the OT-2. Use for checking hardware (cameras, USB devices), reading files, installing Python packages, or starting services. The OT-2 runs Linux (BusyBox) with Python 3.10.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run (e.g. 'ls /dev/video*', 'pip3 install mjpg-streamer', 'cat /etc/os-release')"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
         "name": "pcc_emit_telemetry",
         "description": "Emit telemetry data to PCC (temperature, progress, events)",
         "input_schema": {
@@ -366,6 +378,19 @@ def execute_tool(name, args):
             secs = args.get("seconds", 5)
             s, r = ot2("POST", f"/identify?seconds={secs}")
             return json.dumps(r, indent=2)
+
+        elif name == "ot2_shell":
+            import subprocess
+            cmd = args["command"]
+            timeout = args.get("timeout", 30)
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                )
+                output = result.stdout + result.stderr
+                return json.dumps({"exit_code": result.returncode, "output": output[:4000]})
+            except subprocess.TimeoutExpired:
+                return json.dumps({"error": "Command timed out", "timeout": timeout})
 
         elif name == "pcc_report_status":
             job_id = args["jobId"]
