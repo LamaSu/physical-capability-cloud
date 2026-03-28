@@ -6,6 +6,11 @@
  * comes from the PCC_DB_PATH environment variable (defaults to
  * ./data/pcc.sqlite). Set PCC_DB_PATH=":memory:" for ephemeral use.
  *
+ * DB path priority:
+ *   1. DATABASE_URL env var (explicit override)
+ *   2. RAILWAY_VOLUME_MOUNT_PATH + "/pcc.db" (persistent Railway volume)
+ *   3. PCC_DB_PATH env var (legacy, default "./data/pcc.sqlite")
+ *
  * Call `initStore()` once at startup; after that every route can
  * import `getRepos()` / `getStore()` synchronously.
  */
@@ -23,7 +28,11 @@ let _store: Store | undefined;
 export function initStore(options?: { seed?: boolean }): Store {
   if (_store) return _store;
 
-  const dbPath = process.env.PCC_DB_PATH ?? "./data/pcc.sqlite";
+  // Prefer explicit DATABASE_URL, then Railway volume mount, then local path
+  const dbPath = process.env.DATABASE_URL
+    ?? (process.env.RAILWAY_VOLUME_MOUNT_PATH
+      ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/pcc.db`
+      : (process.env.PCC_DB_PATH ?? "./data/pcc.sqlite"));
 
   // Ensure the parent directory exists when using a file path (not :memory:)
   if (dbPath !== ":memory:") {
