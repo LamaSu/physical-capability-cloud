@@ -276,6 +276,17 @@ OT2_TOOLS = [
         },
     },
     {
+        "name": "ot2_self_update",
+        "description": "Download and install the latest agent code from PCC. The agent restarts itself with the new code. Use when told to update or when a new version is available.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to download the new agent from (default: PCC gateway)"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "pcc_emit_telemetry",
         "description": "Emit telemetry data to PCC (temperature, progress, events)",
         "input_schema": {
@@ -378,6 +389,24 @@ def execute_tool(name, args):
             secs = args.get("seconds", 5)
             s, r = ot2("POST", f"/identify?seconds={secs}")
             return json.dumps(r, indent=2)
+
+        elif name == "ot2_self_update":
+            url = args.get("url", f"{PCC_BASE}/api/ot2/agent-code")
+            import subprocess
+            r = subprocess.run(
+                f"curl -sL '{url}' -o /data/ot2-agent-new.py",
+                shell=True, capture_output=True, text=True, timeout=30,
+            )
+            # Verify it's valid Python
+            r2 = subprocess.run(
+                "python3 -c 'compile(open(\"/data/ot2-agent-new.py\").read(), \"agent\", \"exec\")'",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+            if r2.returncode == 0:
+                subprocess.run("cp /data/ot2-agent-new.py /data/ot2-agent.py", shell=True)
+                return json.dumps({"updated": True, "message": "Agent updated. Restart required."})
+            else:
+                return json.dumps({"updated": False, "error": r2.stderr[:500]})
 
         elif name == "ot2_shell":
             import subprocess
@@ -512,22 +541,31 @@ def run_agent_turn(messages, tools=OT2_TOOLS):
 def poll_for_jobs():
     """Poll PCC for pending approved jobs."""
     s, r = pcc("GET", f"/api/operator/approvals?status=approved&kernelId={KERNEL_ID}")
-    if s == 200 and isinstance(r, list) and len(r) > 0:
-        return r
+    if s != 200:
+        return []
+    # Gateway returns {"approvals": [...]} or a bare list
+    jobs = r.get("approvals", r) if isinstance(r, dict) else r
+    if isinstance(jobs, list) and len(jobs) > 0:
+        return jobs
     return []
 
 
 def handle_job(job):
     """Handle a single job from PCC."""
-    job_id = job.get("id", "unknown")
-    log.info(f"Processing job {job_id}: {json.dumps(job)[:200]}")
+    job_id = job.get("jobId", job.get("id", "unknown"))
+    summary = job.get("jobSummary", {})
+    params = summary.get("parameters", {}) if isinstance(summary, dict) else {}
+    cap_type = summary.get("capabilityType", job.get("capabilityType", "liquid-handler"))
+    agent = job.get("submittedBy", job.get("agentId", "unknown"))
+    task = params.get("task", json.dumps(params))
+    log.info(f"Processing job {job_id}: {task[:200]}")
 
     # Build the user message from the job
     user_msg = f"""New job from PCC:
 - Job ID: {job_id}
-- Type: {job.get('capabilityType', 'liquid-handler')}
-- Parameters: {json.dumps(job.get('parameters', {}), indent=2)}
-- Agent: {job.get('agentId', 'unknown')}
+- Type: {cap_type}
+- Task: {task}
+- Agent: {agent}
 
 Please execute this job. Start by checking robot health and calibration,
 then create and run the appropriate protocol. Report status to PCC throughout."""
@@ -563,21 +601,100 @@ def interactive_mode():
         messages = run_agent_turn(messages)
 
 
+def poll_chat():
+    """Poll PCC for pending chat messages."""
+    s, r = pcc("GET", f"/api/ot2/chat/pending?kernelId={KERNEL_ID}")
+    if s != 200:
+        return []
+    messages = r.get("messages", r) if isinstance(r, dict) else r
+    return messages if isinstance(messages, list) else []
+
+
+def handle_chat_message(msg):
+    """Handle a chat message from a user via PCC."""
+    msg_id = msg.get("id", "unknown")
+    content = msg.get("content", "")
+    log.info(f"Chat message {msg_id}: {content[:200]}")
+
+    messages = [{"role": "user", "content": content}]
+    messages = run_agent_turn(messages)
+
+    # Extract the last assistant text response
+    response_text = ""
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            for block in (m.get("content", []) if isinstance(m.get("content"), list) else []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    response_text = block["text"]
+                    break
+            if isinstance(m.get("content"), str):
+                response_text = m["content"]
+            if response_text:
+                break
+
+    # Post response back to PCC
+    pcc("POST", "/api/ot2/chat/respond", {
+        "messageId": msg_id,
+        "response": response_text or "(no text response)",
+    })
+    log.info(f"Chat response sent for {msg_id}")
+
+
+def push_camera_frame():
+    """Capture a frame from the camera and push to PCC."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["dd", "if=/dev/video0", "bs=512", "count=200"],
+            capture_output=True, timeout=5,
+        )
+        data = r.stdout
+        start = data.find(b"\xff\xd8")
+        end = data.find(b"\xff\xd9", start)
+        if start >= 0 and end >= 0:
+            import base64
+            frame_b64 = base64.b64encode(data[start:end + 2]).decode("ascii")
+            pcc("POST", "/api/ot2/camera/frame", {
+                "kernelId": KERNEL_ID,
+                "frame": frame_b64,
+            })
+            log.debug("Camera frame pushed to PCC")
+    except Exception as e:
+        log.debug(f"Camera capture failed: {e}")
+
+
 def daemon_mode():
-    """Daemon mode — poll PCC for jobs and execute them."""
+    """Daemon mode — poll PCC for jobs and chat, push camera frames."""
     log.info(f"Daemon mode. Polling {PCC_BASE} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
 
     # Register as online
     pcc("POST", f"/api/kernels/{KERNEL_ID}/heartbeat", {"status": "online"})
 
+    camera_counter = 0
+    CAMERA_INTERVAL = 5  # push camera every N poll cycles
+
     while True:
         try:
+            # Poll for approved jobs
             jobs = poll_for_jobs()
             if jobs:
                 for job in jobs:
                     handle_job(job)
-            else:
-                log.debug("No pending jobs")
+
+            # Poll for chat messages
+            chat_msgs = poll_chat()
+            if chat_msgs:
+                for msg in chat_msgs:
+                    handle_chat_message(msg)
+
+            # Push camera frame periodically
+            camera_counter += 1
+            if camera_counter >= CAMERA_INTERVAL:
+                push_camera_frame()
+                camera_counter = 0
+
+            if not jobs and not chat_msgs:
+                log.debug("No pending jobs or messages")
         except KeyboardInterrupt:
             log.info("Shutting down...")
             pcc("POST", f"/api/kernels/{KERNEL_ID}/heartbeat", {"status": "offline"})
