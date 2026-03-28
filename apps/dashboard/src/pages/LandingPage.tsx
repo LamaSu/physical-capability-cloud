@@ -300,7 +300,7 @@ export function LandingPage() {
       </section>
 
       {/* ═══ YOUR AGENT IS YOUR INTERFACE ═══ */}
-      <section className="relative z-10 py-32 px-6">
+      <section className="relative z-10 py-12 px-6">
         <div className="max-w-2xl mx-auto text-center space-y-10">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
