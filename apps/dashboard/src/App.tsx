@@ -274,10 +274,19 @@ function Shell() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   // Public pages that don't require auth
-  const publicPaths = ["/whitepaper", "/go"];
+  const publicPaths = ["/", "/start", "/whitepaper", "/go"];
   const isPublicPage = publicPaths.includes(location.pathname);
 
-  // Auth gate — show login for all non-public pages (including /)
+  // Login page at /login
+  if (location.pathname === "/login") {
+    return isAuthenticated ? (
+      <Suspense fallback={<PageLoader />}><LandingPage /></Suspense>
+    ) : (
+      <LoginPage />
+    );
+  }
+
+  // Auth gate — redirect to login for non-public pages
   if (!isAuthenticated && !isPublicPage) {
     return <LoginPage />;
   }
