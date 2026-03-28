@@ -262,8 +262,8 @@ export async function operatorRoutes(app: FastifyInstance) {
 
       const row = db.select().from(pendingApprovals).where(eq(pendingApprovals.id, id)).get();
       return { approval: row, created: true };
-    } catch (e) {
-      return reply.status(500).send({ error: "Failed to create approval" });
+    } catch (e: any) {
+      return reply.status(500).send({ error: "Failed to create approval", detail: e?.message ?? String(e) });
     }
   });
 
