@@ -56,3 +56,22 @@ export const policyRateCounters = sqliteTable("policy_rate_counters", {
 }, (table) => ({
   pk: primaryKey({ columns: [table.kernelId, table.windowKey] }),
 }));
+
+/** OT-2 chat messages — relay between user and remote OT-2 agent */
+export const ot2ChatMessages = sqliteTable("ot2_chat_messages", {
+  id: text("id").primaryKey(),
+  kernelId: text("kernel_id").notNull(),
+  role: text("role").notNull(), // "user" | "assistant" | "system"
+  content: text("content").notNull(),
+  toolCalls: text("tool_calls", { mode: "json" }).$type<unknown[]>(),
+  status: text("status").notNull().default("pending"), // "pending" | "processing" | "completed"
+  createdAt: text("created_at").notNull(),
+});
+
+/** OT-2 camera frames — relay camera from remote OT-2 */
+export const ot2CameraFrames = sqliteTable("ot2_camera_frames", {
+  id: text("id").primaryKey(),
+  kernelId: text("kernel_id").notNull(),
+  frameData: text("frame_data").notNull(), // base64 JPEG
+  capturedAt: text("captured_at").notNull(),
+});

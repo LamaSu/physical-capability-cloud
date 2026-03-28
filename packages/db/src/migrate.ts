@@ -998,5 +998,24 @@ export function migrateDatabase(sqlite: Database.Database): void {
       escrow_address TEXT,
       claimed_at TEXT NOT NULL
     );
+
+    -- ── OT-2 Chat ────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS ot2_chat_messages (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      role TEXT NOT NULL,            -- "user" | "assistant" | "system"
+      content TEXT NOT NULL,
+      tool_calls TEXT,               -- JSON array
+      status TEXT NOT NULL DEFAULT 'pending',  -- "pending" | "processing" | "completed"
+      created_at TEXT NOT NULL
+    );
+
+    -- ── OT-2 Camera ─────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS ot2_camera_frames (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      frame_data TEXT NOT NULL,      -- base64 JPEG
+      captured_at TEXT NOT NULL
+    );
   `);
 }
