@@ -12,7 +12,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
   "/api/health",
-  "/api/auth/",
+  "/api/auth/provision",        // Key provisioning is public
   "/api/feedback",
   "/api/onboard/check/",      // Invite code validation is public
   "/.well-known/",
