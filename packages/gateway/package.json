@@ -33,6 +33,7 @@
     "@pcc/agent-user": "workspace:*",
     "@pcc/bundler": "workspace:*",
     "@pcc/contract-builder": "workspace:*",
+    "@pcc/dht": "workspace:*",
     "@pcc/contracts": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/orchestrator": "workspace:*",
