@@ -79,7 +79,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - **DePIN** = soulbound NFT certificates + reward epochs for infrastructure operators
 - **IP Layer** = Story Protocol integration for CSD royalties and revenue splits
 
-**Scale**: 22 packages + 1 dashboard app, 1514+ tests across 83 test files, 49 MCP tools, 65+ REST endpoints, 13 A2A intents, 5 SSE streams
+**Scale**: 25 packages + 1 dashboard app, 3300+ tests across 100+ test files, 154 agent tools, 347 REST endpoints across 54 route files, 34 A2A intents, 6 SSE streams
 
 **Live**: https://pcc-gateway-production.up.railway.app (Railway, healthcheck passing)
 
@@ -92,7 +92,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 **Foundation**
 | Package | Role |
 |---------|------|
-| `packages/spec` | Single source of truth for ALL types, schemas, Zod validation |
+| `packages/spec` | Single source of truth for ALL types, schemas, Zod validation, P2P types (PeerIdentity, CapabilityAnnouncement, EncryptedEnvelope) |
 | `packages/contracts` | Solidity: MilestoneEscrow with bonds/slashing; Solana: soulbound NFTs, reward engine |
 | `packages/db` | SQLite via better-sqlite3, shared database layer |
 
@@ -117,6 +117,12 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 | `packages/agent-evaluator` | Evaluator Agent — third-party quality assessment, attestation VCs, ACP↔A2A bridge, reputation bridge |
 | `packages/agent-support` | Support Agent — diagnostic engine, escalation manager, setup guidance |
 
+**Distributed Infrastructure**
+| Package | Role |
+|---------|------|
+| `packages/pcc-node` | pip-installable Python CLI (`pcc-node start`): hardware auto-detection, Ed25519 key management, device adapters (OT-2, OctoPrint, generic HTTP), camera streaming, daemon loop |
+| `packages/dht` | WebSocket gossip DHT for decentralized capability discovery: AnnouncementRegistry, CapabilityQuery engine, bootstrap node management |
+
 **Tooling**
 | Package | Role |
 |---------|------|
@@ -129,11 +135,12 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 **Frontend**
 | Package | Role |
 |---------|------|
-| `apps/ui` | Vite + React 19 dashboard — 52+ routes, setup wizard, onboarding wizard |
+| `apps/ui` | Vite + React 19 dashboard — 57+ routes, setup wizard, onboarding wizard, auth gate |
 
 ### Sovereign Infrastructure
 
 - `packages/spec/src/identity/` — W3C DIDs (did:key + did:pcc) + Verifiable Credentials
+- `packages/spec/src/types/p2p.ts` — P2P types: PeerIdentity, CapabilityAnnouncement, EncryptedEnvelope, ConnectionState
 - `packages/kernel/src/evidence-storage.ts` — IPFS evidence via Helia (ESM-only — import from dist path)
 - `packages/kernel/src/lit-encryption-service.ts` — Lit Protocol mock with real AES-256-GCM
 - `packages/kernel/src/lit-encryption-real.ts` — Real Lit Protocol via @lit-protocol/lit-node-client v6 (datil-test)
@@ -143,6 +150,8 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - `packages/contracts/ts/capability-certificates.ts` — Soulbound capability NFTs via Metaplex Core + PermanentFreezeDelegate
 - `packages/contracts/ts/reward-engine.ts` — DePIN reward epoch scoring + distribution
 - `packages/payments/src/meteora/` — Meteora DLMM pools for dynamic capability pricing
+- `packages/pcc-node/pcc_node/crypto.py` — Ed25519 key generation and signing (PyNaCl), HMAC-SHA256 fallback
+- `packages/dht/src/registry.ts` — AnnouncementRegistry with TTL-based expiry and capability query engine
 
 ## Invariants
 
@@ -152,32 +161,56 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 4. Shop Kernel is the only external interface to a physical site
 5. Every capability has an assurance tier; every tier has defined evidence requirements
 6. Escrow only settles when evidence meets the contract's tier requirements
+7. SCOPED WRITE tool calls require an active execution scope — fail-safe, not fail-open
+8. Capability announcements are Ed25519-signed and independently verifiable
+9. P2P messages are NaCl-box encrypted — the relay cannot read contents
+
+## Execution Scope Protocol
+
+See `docs/EXECUTION_SCOPE_PROTOCOL.md` for full specification.
+
+- **4 operation classes**: READ (always), SAFE CONTROL (during active job), SCOPED WRITE (requires scope), PRIVILEGED (requires operator)
+- **Scope lifecycle**: PROPOSED -> ACTIVE -> COMPLETED / EXPIRED / REVOKED
+- **Validation**: Every Class 3 tool call checked against scope's allowedTools, commandCount, expiry, and protocolHash
+- **Troubleshooting ladder**: Auto-retry -> Brain recovery -> Operator escalation -> Emergency stop
+- **Gateway routes**: `POST /api/ot2/scope`, `GET /api/ot2/scope/:id`, `POST /api/ot2/scope/:id/revoke`, `GET /api/ot2/scope/:id/audit`
+- **Tool relay**: `POST /api/ot2/tool-call`, `GET /api/ot2/tool-call/pending`, `POST /api/ot2/tool-result`, `GET /api/ot2/tool-result/:id`
+- **Chat relay**: `POST /api/ot2/chat`, `GET /api/ot2/chat/messages`, `GET /api/ot2/chat/pending`, `POST /api/ot2/chat/respond`
+- **Camera relay**: `POST /api/ot2/camera/frame`, `GET /api/ot2/camera/latest`, `GET /api/ot2/camera/stream`, `GET /api/ot2/camera/snapshot`
 
 ## Protocols
 
 - **ERC-8004**: Identity Registry + Reputation Registry + Validation Registry for machines/agents
 - **x402**: HTTP 402 Payment Required protocol (Coinbase) for per-request micropayments
 - **CSD**: Capability StructureDefinition — FHIR-inspired schema for defining capabilities with versioning and lifecycle (base/profile/extension/workflow)
-- **A2A**: Agent-to-Agent typed intent bus — 13 intents across User/Broker/Kernel/Verifier/Settlement agents
-- **Fiat Ramp**: Stripe (US/EU card/ACH) + Yellowcard (34 emerging market countries) + Wise (enterprise bank payouts)
+- **A2A**: Agent-to-Agent typed intent bus — 34 intents across User/Broker/Kernel/Verifier/Settlement agents
+- **P2P**: NaCl-box encrypted messages, Ed25519-signed capability announcements, WebSocket gossip DHT
+- **Execution Scope**: 4-class security model (READ/SAFE/SCOPED/PRIVILEGED) for remote equipment control
+- **Brain/Executor**: LLM reasoning on Spark, tool execution on device, PCC as relay
+- **Fiat Ramp**: Coinbase Onramp + testnet faucet + Yellowcard (34 emerging market countries) + Wise (enterprise bank payouts)
 
 ## Deployed Infrastructure
 
 - **Railway**: https://pcc-gateway-production.up.railway.app
+- **Custom domain**: https://capability.network (Cloudflare CNAME -> Railway)
 - **Ethereum Sepolia contracts**:
   - MockUSDC: `0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb`
   - MilestoneEscrow: `0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454`
 - **Deployer**: `0x61B4e2a7347a529b8B19A2a3444Bd3500E693890`
-- **Agent Registration**: `/.well-known/agent-registration.json` (ERC-8004, 49 tools)
+- **Agent Registration**: `/.well-known/agent-registration.json` (ERC-8004)
+- **Agent Package**: `/agent-package.json` (154 tools for any LLM agent)
+- **DHT Bootstrap**: `wss://capability.network/ws/dht`
 
-## MCP Server (49 Tools)
+## MCP Server (49 Tools) + Agent Package (154 Tools)
 
-**Entry points**:
+**MCP entry points**:
 - MCP stdio: `node packages/mcp-server/dist/index.js` (set `PCC_URL` env var)
 - Claude Code settings: `"pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"] }`
 - Gateway default: `https://pcc-gateway-production.up.railway.app`
 
-**Tool groups** (49 tools total):
+**Agent Package**: `apps/dashboard/public/agent-package.json` — 154 tools for any LLM agent (Claude, GPT-4, etc.)
+
+**MCP tool groups** (49 tools):
 
 | # | Tool | What It Does |
 |---|------|--------------|
@@ -262,10 +295,20 @@ The gateway (`packages/gateway`) exposes these REST route groups:
 | spaces.ts | /api/spaces | Equipment hosting spaces |
 | logistics.ts | /api/logistics | Shipments, bookings, installations |
 | orchestrator.ts | /api/orchestrator | Multi-instrument transfer graphs |
+| ot2-relay.ts | /api/ot2/tool-call, /api/ot2/tool-result | Brain/executor tool call relay |
+| ot2-scope.ts | /api/ot2/scope | Execution scope create, get, revoke, audit |
+| ot2-chat.ts | /api/ot2/chat | Chat relay: send, history, pending, respond |
+| ot2-camera.ts | /api/ot2/camera | Camera frame push, latest, stream, snapshot |
+| negotiation.ts | /api/negotiation | Negotiation session protocol (CREATED->COMMITTED) |
+| agent-chat.ts | /api/agent-chat | Agent-to-agent chat |
+| auth.ts | /api/auth | API key provisioning, SIWE, key management |
+| bounty.ts | /api/bounty | Demand signals, bounties, leaderboard |
+| pool.ts | /api/pool | Investment pools, staking, earnings |
+| provision.ts | /api/auth/provision | API key provisioning endpoint |
 | well-known.ts | /.well-known | agent-registration.json (ERC-8004) |
 | status.ts | /health, /api/status | Healthcheck |
 
-**SSE streams** (`/sse/stream/`): job/:jobId, kernel/:kernelId, device/:deviceId, batch/:batchId, /sse/notifications
+**SSE streams** (`/sse/stream/`): job/:jobId, kernel/:kernelId, device/:deviceId, batch/:batchId, /sse/notifications, /api/ot2/camera/stream
 
 ## Dev Commands
 
@@ -294,13 +337,25 @@ DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-base-sepolia.ts  # deploy to S
 
 # Onboard-kit CLI
 node packages/onboard-kit/dist/cli.js quick-start       # generate kernel config interactively
+
+# pcc-node (Python operator node)
+pip install -e packages/pcc-node                         # install in dev mode
+pip install -e "packages/pcc-node[all]"                  # install with crypto + discovery
+pcc-node start                                           # detect hardware, register, run daemon
+pcc-node detect                                          # hardware scan only
+pcc-node status                                          # check daemon status
+pcc-node config                                          # interactive config wizard
+
+# pcc-node tests
+cd packages/pcc-node && python -m pytest                 # run Python tests
 ```
 
 ## Testing
 
-- **Framework**: vitest
+- **Framework**: vitest (TypeScript), pytest (Python/pcc-node)
 - **Command**: `pnpm --workspace-concurrency=1 -r test` (sequential, prevents OOM)
-- **Count**: 1514+ tests across 83 test files
+- **Python tests**: `cd packages/pcc-node && python -m pytest`
+- **Count**: 3300+ tests across 100+ test files (3200+ TypeScript + 99 Python)
 - **ALWAYS use `spark-run`** for tests — local machine will OOM
 
 ## Environment Variables
@@ -320,6 +375,9 @@ node packages/onboard-kit/dist/cli.js quick-start       # generate kernel config
 | `ESCROW_CONTRACT_ADDRESS=0x...` | Testnet/mainnet | Deployed MilestoneEscrow address |
 | `KERNEL_CONFIG='{...}'` | Kernel runtime | JSON kernel configuration inline |
 | `KERNEL_CONFIG_FILE=./...` | Kernel runtime | Path to kernel config JSON file |
+| `PCC_BASE` | pcc-node | Gateway URL (default: https://capability.network) |
+| `PCC_API_KEY` | pcc-node | Bearer token for gateway API |
+| `KERNEL_ID` | pcc-node | Override kernel ID (optional) |
 
 ## Orchestration Patterns
 
@@ -337,6 +395,12 @@ node packages/onboard-kit/dist/cli.js quick-start       # generate kernel config
 **Capability contract workflow**: `pcc_list_capabilities` → `pcc_build_options` → `pcc_calculate_price` → `pcc_build_contract` → (fund escrow) → `pcc_list_jobs`
 
 **IP registration workflow**: `pcc_csd_register` → `pcc_ip_register_capability` → `pcc_ip_set_splits` → `pcc_ip_revenue_snapshot`
+
+**pcc-node onboarding** (operators): `pip install pcc-node` → `pcc-node start` (auto: detect hardware → generate keys → provision API key → register kernel → announce capabilities → start daemon)
+
+**Execution scope workflow** (remote equipment control): `pcc_create_scope` → `pcc_relay_tool_call` (repeat) → `pcc_get_tool_result` (poll) → scope completes or `pcc_revoke_scope`
+
+**DHT discovery workflow**: `pcc_dht_query` (find operators) → `pcc_dht_announce` (advertise capabilities) → `pcc_dht_peers` (check connectivity)
 
 ## Git Notes
 

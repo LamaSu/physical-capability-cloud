@@ -1,6 +1,6 @@
 # Physical Capability Cloud: A Credibly Neutral Coordination Layer for Physical Manufacturing
 
-**Version**: 1.0 | **Date**: March 21, 2026
+**Version**: 2.0 | **Date**: March 29, 2026
 
 ---
 
@@ -9,6 +9,8 @@
 Physical manufacturing is fragmented. A CNC shop in Detroit, a plating operation in Austin, and a quality-inspection lab in Munich cannot form a trustless workflow without a broker, a contract, and months of relationship-building. No neutral coordination layer exists for physical capabilities the way AWS exists for compute. The Physical Capability Cloud (PCC) is that layer.
 
 PCC abstracts physical manufacturing capabilities into composable, verifiable, settleable services discoverable by AI agents. Shop Kernels are the Availability Zones — physical sites with equipment connected to the network. Capabilities are the billing units — not machines, but what machines can do: 5-axis milling at ±0.01mm, FDM extrusion in PETG up to 250×210×210mm, HPLC purity analysis down to 0.1% peak area. Assurance Tiers are the SLAs — escalating evidence requirements and slashable bonds that make claims credible. Milestone escrow with cryptographic evidence makes settlement automatic and auditable.
+
+PCC is not a centralized marketplace with a relay in the middle. Operators run their own nodes (`pip install pcc-node && pcc-node start`) which auto-detect hardware, register capabilities, and communicate peer-to-peer using NaCl-encrypted messages with Ed25519-signed capability announcements. The gateway is a bootstrap and discovery service, not a required intermediary. A DHT-based capability discovery layer allows agents to find operators without querying any central server.
 
 The key innovation is that PCC does not just coordinate work — it creates permanent intellectual property from it. Capability StructureDefinitions (CSDs) are machine-readable design artifacts registered as IP Assets on Story Protocol. Every job run is a derivative of the CSD it was built from, creating an on-chain provenance chain. Every CSD fork pays royalties to the original designer. Physical work becomes programmable IP, and operators, designers, and verifiers earn from the network they build.
 
@@ -504,9 +506,294 @@ The agent's machine-readable `AGENT_INSTRUCTIONS.md` provides a 12-step onboardi
 
 ---
 
-## 9. Related Work
+## 9. Distributed Architecture: Operators Run Their Own Nodes
 
-### 9.1 Asset Administration Shell (AASX/AAS)
+### 9.1 The Centralization Problem
+
+Early versions of PCC routed all communication through a central gateway. This worked for development but introduced a single point of failure, a privacy bottleneck (the gateway sees all traffic), and a trust dependency (operators must trust the gateway operator). A credibly neutral protocol cannot have a centralized relay as an architectural requirement.
+
+### 9.2 pcc-node: Join the Network in One Command
+
+The `pcc-node` package is a pip-installable CLI that turns any Linux machine with equipment into a PCC network node. The onboarding flow:
+
+```bash
+pip install pcc-node
+pcc-node start
+```
+
+On startup, `pcc-node` executes a deterministic pipeline:
+
+1. **Hardware detection**: Scans V4L2 cameras (`/dev/video*`), Opentrons OT-2 robots (HTTP health endpoint at `:31950`), OctoPrint instances (HTTP API), serial ports (`/dev/ttyUSB*`, `/dev/ttyACM*`), and mDNS network instruments (via optional `zeroconf` dependency). All probes are best-effort; missing tools or unreachable devices are silently skipped.
+
+2. **Key generation**: Creates an Ed25519 key pair (via PyNaCl) for signing capability announcements and encrypting P2P messages. Keys are persisted to `~/.pcc-keys.json` with 0600 permissions. A fallback HMAC-SHA256 scheme is available for development without PyNaCl.
+
+3. **API key provisioning**: Calls `POST /api/auth/provision` on the gateway to obtain a Bearer token. This is the only required interaction with the gateway.
+
+4. **Kernel registration**: Registers the node's detected hardware as a Shop Kernel on the network.
+
+5. **Capability announcement**: Signs and publishes a `CapabilityAnnouncement` describing what the node's equipment can do — capability types, materials, price ranges, and queue depth.
+
+6. **Daemon loop**: Enters a long-running event loop that polls for pending jobs, executes them through device adapters, pushes camera frames, and sends heartbeats to maintain online status.
+
+The node supports four CLI commands:
+- `pcc-node start` — full pipeline: detect, register, run daemon
+- `pcc-node detect` — hardware scan only (no network interaction)
+- `pcc-node status` — check if the daemon is running, show uptime and job count
+- `pcc-node config` — interactive configuration wizard
+
+### 9.3 Device Adapters
+
+The executor module implements a pluggable adapter pattern. Each adapter wraps a specific device protocol:
+
+| Adapter | Device Type | Protocol | Operations |
+|---------|-------------|----------|------------|
+| `OpentronAdapter` | Opentrons OT-2 | HTTP REST (port 31950) | Health, pipettes, modules, calibration, protocol upload, run create/action/status, home, lights, identify, shell |
+| `OctoPrintAdapter` | 3D printers | OctoPrint REST API | Version, connection, state, job, files, print, cancel, pause |
+| `GenericHTTPAdapter` | Any HTTP device | Generic HTTP passthrough | Configurable method/path/body forwarding |
+
+Adapters are instantiated dynamically from detected device metadata. When a job arrives, the executor tries each adapter until one handles the tool call. Results are posted back to PCC.
+
+### 9.4 Brain/Executor Split
+
+For complex operations (especially those requiring LLM reasoning), PCC implements a brain/executor architecture:
+
+- **Brain** (runs on powerful hardware like DGX Spark): The LLM agent that reasons about what operations to perform, handles error recovery, and makes decisions about retries and escalation.
+- **Executor** (runs on the device's local machine via `pcc-node`): Receives tool calls from the brain via the PCC relay, executes them against local hardware, and returns results.
+
+This split is critical for lab instruments on private networks. An OT-2 robot on a lab's internal network cannot be directly reached by a cloud LLM. Instead:
+
+1. Brain posts `POST /api/ot2/tool-call` to PCC with tool name and arguments
+2. Executor polls `GET /api/ot2/tool-call/pending` from PCC
+3. Executor runs the tool call locally against the OT-2
+4. Executor posts result via `POST /api/ot2/tool-result`
+5. Brain retrieves result via `GET /api/ot2/tool-result/:id`
+
+PCC is a relay, not a controller. The relay stores nothing permanently — tool calls and results have a TTL and are garbage-collected.
+
+### 9.5 Camera Streaming
+
+Operators can stream camera frames from their equipment to the PCC dashboard for remote monitoring. The camera module:
+
+1. Auto-detects V4L2 capture devices on Linux
+2. Captures JPEG frames via `v4l2-ctl`, `ffmpeg`, or `dd` (automatic fallback)
+3. Pushes base64-encoded frames to `POST /api/ot2/camera/frame`
+4. Dashboard users view frames via `GET /api/ot2/camera/latest` (raw JPEG) or subscribe to `GET /api/ot2/camera/stream` (SSE notifications)
+
+Only the latest 5 frames per kernel are retained to avoid database bloat.
+
+---
+
+## 10. Peer-to-Peer Protocol
+
+### 10.1 Encrypted A2A Messages
+
+Agent-to-agent messages are encrypted end-to-end using NaCl box (Curve25519-XSalsa20-Poly1305). Each message is wrapped in an `EncryptedEnvelope`:
+
+```typescript
+interface EncryptedEnvelope {
+  ciphertext: string;         // base64-encoded encrypted payload
+  ephemeralPublicKey: string;  // hex-encoded Curve25519 ephemeral key
+  nonce: string;               // base64-encoded 24-byte nonce
+}
+```
+
+This means the gateway (or any relay) cannot read message contents even if it is compromised. Only the intended recipient, holding the corresponding private key, can decrypt.
+
+### 10.2 Signed Capability Announcements
+
+Every node signs its capability announcements with Ed25519. A `CapabilityAnnouncement` contains:
+
+- `kernelDid` — W3C DID of the announcing kernel
+- `kernelId` — human-readable kernel identifier
+- `capabilities[]` — array of `CapabilitySummary` objects (type, materials, price range, queue depth)
+- `endpoints[]` — how to reach this node (WebSocket direct, WebSocket relay, WebRTC, HTTP poll)
+- `ttlSeconds` — announcement validity period (default 300s)
+- `timestamp` — ISO 8601 creation time
+- `signature` — Ed25519 signature over canonical JSON of all other fields
+
+Announcements are self-contained and independently verifiable. Any node receiving an announcement can verify its authenticity without contacting the signer.
+
+### 10.3 DHT-Based Capability Discovery
+
+The `@pcc/dht` package implements a WebSocket-based gossip DHT for decentralized capability discovery. Its components:
+
+- **AnnouncementRegistry**: In-memory store with TTL-based expiry. Stores one active announcement per kernel. A periodic prune timer evicts expired entries every 30 seconds.
+- **CapabilityQuery**: Structured query object supporting filters by capability type, materials, max price, minimum assurance tier, and geographic proximity (haversine distance).
+- **Query engine**: `matchesQuery()` applies AND logic across all specified filters. `rankResults()` scores announcements by queue depth, price, and material breadth.
+- **Bootstrap nodes**: Default bootstrap node is `wss://capability.network/ws/dht`. Operators can extend the list with a local JSON config file.
+
+When an agent needs a capability, it queries the DHT instead of (or in addition to) the gateway. This provides censorship resistance: even if the gateway goes offline, nodes that know each other can still discover and coordinate.
+
+### 10.4 Transport Layer
+
+PCC supports four transport types, negotiated at connection time:
+
+| Transport | Latency | NAT Traversal | Use Case |
+|-----------|---------|---------------|----------|
+| `websocket-direct` | Low | Requires open port | Lab-to-lab on same network |
+| `websocket-relay` | Medium | Via PCC gateway | Default; works through NATs |
+| `webrtc` | Low | ICE/STUN/TURN | Future: direct P2P with NAT traversal |
+| `http-poll` | High | Always works | Fallback for restrictive networks |
+
+Each peer advertises its available transports in its `PeerEndpoint[]` with priority ordering (lower number = preferred). Connecting peers negotiate the best mutual transport.
+
+---
+
+## 11. Execution Scope Protocol
+
+### 11.1 The Security Problem
+
+When an AI agent controls physical equipment remotely, the blast radius of a bug or compromise must be bounded. A language model that has been instructed to "run this HPLC protocol" should not be able to issue arbitrary shell commands on the lab's server. The question is not whether to restrict access — it is how to do so without making the system so rigid that it cannot recover from routine failures.
+
+### 11.2 Four Operation Classes
+
+PCC classifies every tool call into one of four security classes:
+
+| Class | Policy | Examples |
+|-------|--------|----------|
+| **READ** | Always allowed; no scope needed | Health check, pipette status, calibration data, run history, camera snapshot |
+| **SAFE CONTROL** | Allowed during active jobs without scope | Home axes, toggle deck lights, identify (blink) |
+| **SCOPED WRITE** | Requires active execution scope | Upload protocol, create run, play/pause/stop run |
+| **PRIVILEGED** | Requires explicit operator approval | Shell commands, self-update |
+
+This classification is enforced at the gateway. Every `POST /api/ot2/tool-call` is validated before relay:
+
+1. Class 1/2 tools pass immediately
+2. Class 3 tools require a `scopeId` in the request body. The gateway checks: is the scope active? Has it expired? Is this tool in the scope's `allowedTools`? Has the command budget been exhausted?
+3. Class 4 tools are always rejected at the API level; they require out-of-band operator approval
+
+### 11.3 Scope Lifecycle
+
+An execution scope moves through a defined state machine:
+
+```
+PROPOSED → ACTIVE → COMPLETED / EXPIRED / REVOKED
+```
+
+**Creation** (`POST /api/ot2/scope`): The user agent proposes a scope specifying which tools are needed, which pipettes and deck slots will be used, a command budget, a retry budget, a time limit, and optionally a protocol hash (SHA-256 of the protocol file content). The operator (or an auto-approve policy) activates the scope.
+
+**Validation**: On every Class 3 tool call, the gateway increments the scope's `commandCount`, checks it against `maxCommands`, and verifies tool membership. Protocol uploads are hash-verified: the SHA-256 of the uploaded content must match the scope's `protocolHash`, preventing the brain from uploading a different protocol than what was approved.
+
+**Termination**: A scope ends when all work is complete (agent calls scope completion), the time limit expires, or the operator revokes it. Revocation is immediate and atomic — all pending tool calls are rejected.
+
+### 11.4 Graduated Troubleshooting
+
+Physical operations fail routinely. A tip pickup misses. A well plate is offset. The scope protocol includes a four-level troubleshooting ladder:
+
+1. **Auto-retry**: Tool call fails; retry within the scope's retry budget using Class 1/2 diagnostics (check calibration, home, inspect via camera)
+2. **Brain recovery**: Claude examines error context, camera frames, and calibration data to decide on a recovery strategy within the scope's command budget
+3. **Operator escalation**: Brain cannot resolve; pauses the job, notifies the operator via the dashboard with diagnostic context. Operator can extend the scope, grant temporary elevated access, manually fix hardware, or abort.
+4. **Emergency stop**: Safety concern detected; all scopes for the kernel are revoked, all active runs receive "stop" actions, kernel status set to `emergency_stopped`. Requires manual resume and new scope creation.
+
+### 11.5 Audit Trail
+
+Every tool call is logged with scope ID, tool name, arguments (hashed for sensitive data), validation result (allowed/rejected with reason), execution result, timestamp, and requestor identity. The audit trail is queryable via `GET /api/ot2/scope/:id/audit`.
+
+### 11.6 Chat Relay
+
+Operators and agents can communicate in real-time through the chat relay (`/api/ot2/chat`). This provides a human-in-the-loop communication channel for escalation, status updates, and manual override coordination. Messages are persisted per-kernel and queryable by role.
+
+---
+
+## 12. Protocol Fee and Business Model
+
+### 12.1 Open Protocol, On-Chain Monetization
+
+PCC is an open protocol, not a SaaS platform. All code is open source. All specifications are public. Any operator can run a node, and any agent can interact with the network. The protocol monetizes through a transparent, on-chain fee applied at the settlement layer.
+
+### 12.2 Escrow Protocol Fee
+
+The `MilestoneEscrow` contract charges a protocol fee of 0.5-2% on every settlement. This fee is:
+
+- **Automatic**: Deducted at escrow release, not invoiced separately
+- **Transparent**: The fee percentage is encoded in the contract and visible to all parties before they fund the escrow
+- **On-chain**: Fee flows to the protocol treasury address, auditable by anyone
+- **Configurable**: Different assurance tiers may carry different fee percentages (higher tiers = more verification infrastructure to fund)
+
+### 12.3 Fee Distribution
+
+Protocol fees fund the infrastructure that makes the network trustworthy:
+
+| Allocation | Purpose |
+|------------|---------|
+| Bittensor subnet incentives | Paying miners to evaluate evidence quality |
+| ZK proof anchoring | Starknet transaction fees for Merkle root commits |
+| Story Protocol transactions | IP registration and royalty distribution gas |
+| Gateway infrastructure | Bootstrap nodes, DHT relays, dashboard hosting |
+| Protocol development | Open-source development grants |
+| Dispute resolution pool | Bond pool for challenger incentives |
+
+### 12.4 Fiat On-Ramp
+
+To lower the barrier to entry, PCC integrates fiat-to-crypto on-ramps:
+
+- **Coinbase Onramp**: Card and ACH payments for US/EU users, converting to USDC on Base
+- **Testnet faucet**: Free testnet USDC for development and testing
+- **Yellowcard**: Mobile money and bank transfers for 34 emerging market countries
+
+Operators can receive payment in fiat via off-ramp integrations (Yellowcard for emerging markets, Wise for enterprise bank payouts in 40+ currencies).
+
+---
+
+## 13. Real Hardware Integration: OT-2 as Proof of Concept
+
+### 13.1 Why a Liquid Handler
+
+The Opentrons OT-2 is the ideal first real-hardware integration for PCC because it is:
+
+- **API-accessible**: Full REST API at port 31950 with versioned endpoints for health, pipettes, modules, calibration, protocols, and runs
+- **Programmable**: Python protocols uploaded and executed via the API
+- **Physically complex**: Multi-axis liquid handler with pipette tips, well plates, temperature modules, and magnetic modules — enough complexity to stress-test the execution scope protocol
+- **Safety-critical**: Incorrect pipetting can contaminate samples, waste expensive reagents, or damage equipment — making the graduated security model essential
+
+### 13.2 Integration Architecture
+
+The OT-2 integration demonstrates the complete PCC stack:
+
+```
+Claude (Brain, on DGX Spark)
+    |
+    | POST /api/ot2/tool-call
+    v
+PCC Gateway (capability.network)
+    |
+    | GET /api/ot2/tool-call/pending
+    v
+pcc-node (on OT-2's Raspberry Pi)
+    |
+    | HTTP to localhost:31950
+    v
+Opentrons OT-2 Robot
+```
+
+The gateway validates every tool call against the active execution scope before relaying it. The node's `OpentronAdapter` translates PCC tool calls into OT-2 API requests. Camera frames from a USB camera connected to the OT-2's Raspberry Pi stream through the camera relay for remote monitoring.
+
+### 13.3 13 OT-2 Tool Calls
+
+| Tool | Class | What It Does |
+|------|-------|-------------|
+| `ot2_health` | READ | Robot health, firmware version, serial number |
+| `ot2_pipettes` | READ | Attached pipettes with calibration status |
+| `ot2_modules` | READ | Temperature, magnetic, and heater-shaker modules |
+| `ot2_deck_calibration` | READ | Deck calibration matrix and status |
+| `ot2_pipette_offset` | READ | Per-pipette offset calibration data |
+| `ot2_tip_length` | READ | Tip length calibration data |
+| `ot2_protocols_list` | READ | Uploaded protocol files |
+| `ot2_runs_list` | READ | Run history with status |
+| `ot2_run_status` | READ | Status of a specific run |
+| `ot2_home` | SAFE | Home all or specified axes |
+| `ot2_lights` | SAFE | Toggle deck illumination |
+| `ot2_identify` | SAFE | Blink LEDs for physical identification |
+| `ot2_protocol_upload` | SCOPED | Upload a Python protocol (hash-verified against scope) |
+| `ot2_run_create` | SCOPED | Create a run from an uploaded protocol |
+| `ot2_run_action` | SCOPED | Play, pause, or stop a run |
+| `ot2_shell` | PRIVILEGED | Arbitrary shell command (operator approval required) |
+
+---
+
+## 14. Related Work
+
+### 14.1 Asset Administration Shell (AASX/AAS)
 
 The Asset Administration Shell (AASX), developed under IEC 63278 and maintained by the Industrial Digital Twin Association (IDTA), is the closest existing standard to PCC's CSD. AAS defines digital twins of physical assets with typed Submodels (NameplateV2, TechnicalDataV1, etc.) and hierarchical inheritance via SubmodelTemplates.
 
@@ -520,35 +807,35 @@ PCC's CSD differs from AASX in three critical ways:
 
 PCC plans to build a bidirectional CSD ↔ AASX Submodel Template translator for industry interoperability.
 
-### 9.2 MTConnect
+### 14.2 MTConnect
 
 MTConnect (IIC/ANSI) is a read-only telemetry standard for CNC machine tools. It answers "what is this machine doing right now?" — not "what can this machine do?" The SensorPipeline in `@pcc/kernel` uses MTConnect-compatible semantics for sensor data taxonomy, but MTConnect is not suitable as a capability advertisement format.
 
-### 9.3 OPC UA Companion Specifications
+### 14.3 OPC UA Companion Specifications
 
 OPC UA's companion specification system (OPC UA for Machine Tools, OPC 40501) is structurally analogous to CSD base types and device profiles. OPC UA's type hierarchy supports subtype inheritance and device-level instantiation. The key gap: no cross-field constraint mechanism. OPC UA types can specialize further (additive inheritance) but cannot narrow the valid range of a base type's fields. PCC's CSD constraint system explicitly solves this.
 
 PCC's adapter layer includes an OPC-UA adapter, and CSD profiles can reference OPC UA node addresses for parameter mapping, enabling PCC to serve as an IP and coordination layer on top of existing OPC UA infrastructure.
 
-### 9.4 SiLA 2
+### 14.4 SiLA 2
 
 SiLA 2 (Standardization in Lab Automation) is the closest analog to PCC's CSD for laboratory instruments. SiLA Feature Definitions (FDLs) describe instrument commands with typed parameters and return values, exposed via gRPC. PCC includes a `SiLAAdapter` that connects SiLA 2 instruments to the kernel, with CSD profiles for HPLC, PCR, and liquid handling capabilities.
 
-### 9.5 The FHIR Inspiration
+### 14.5 The FHIR Inspiration
 
 PCC's CSD format was directly inspired by BabelFHIR-TS, a FHIR StructureDefinition compiler that generates TypeScript interfaces and runtime validators from FHIR profiles. The planned `BabelPCC` compiler will compile CSDs to TypeScript interfaces, runtime validators, pricing calculators, adapter scaffolds, and test data generators — the same toolchain that FHIR developers use for healthcare interoperability, applied to physical manufacturing.
 
 ---
 
-## 10. Technical Implementation
+## 15. Technical Implementation
 
-PCC is a pnpm monorepo of 22 packages and one application, implemented in TypeScript (ES2022, NodeNext module resolution, strict mode) with Turbo for build orchestration.
+PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), one dashboard application, and over 3,300 tests. It is implemented in TypeScript (ES2022, NodeNext module resolution, strict mode) with Turbo for build orchestration, plus Python for the operator node package.
 
-### 10.1 Package Architecture
+### 15.1 Package Architecture
 
 | Package | Description |
 |---------|-------------|
-| `@pcc/spec` | Canonical types, Zod schemas, ID generation, W3C DIDs, VCs, Story IP types |
+| `@pcc/spec` | Canonical types, Zod schemas, ID generation, W3C DIDs, VCs, Story IP types, P2P types |
 | `@pcc/kernel` | Shop Kernel runtime: adapters, EvidenceEmitter, JobRunner, SensorPipeline, BatchTracker, EncryptionService, IPFS/Storacha storage |
 | `@pcc/contracts` | Solidity: MilestoneEscrow, MockUSDC; TS: CapabilityCertificateService, RewardEngine, StoryIPService |
 | `@pcc/scheduler` | WorkflowCompiler (DAG/topo-sort), CapabilityRouter, competitive auction |
@@ -562,22 +849,25 @@ PCC is a pnpm monorepo of 22 packages and one application, implemented in TypeSc
 | `@pcc/agent-broker` | BrokerAgent: routing, escrow, NLP, FundingHandler |
 | `@pcc/agent-kernel` | KernelAgent: wraps kernel, jobs, evidence |
 | `@pcc/agent-evaluator` | EvaluatorAgent: quality assessment, ACP bridge, reputation |
+| `@pcc/agent-support` | SupportAgent: diagnostic engine, escalation manager, setup guidance |
 | `@pcc/identity-8004` | ERC-8004 identity/reputation/validation registry clients, cross-chain registration |
 | `@pcc/onboard-kit` | quickStart, scaffold, validate, CLI, AGENT_INSTRUCTIONS.md |
+| `@pcc/dht` | Distributed capability discovery: WebSocket gossip DHT, AnnouncementRegistry, CapabilityQuery engine |
+| `pcc-node` | pip-installable Python CLI: hardware auto-detection, key management, device adapters, camera streaming, daemon loop |
 | `@pcc/ui` | Solarpunk component library: 64+ components, DIDBadge, IPFSLink, ChainTxLink |
-| `@pcc/gateway` | Fastify REST/SSE: 130+ endpoints, StreamHub, SIWE auth, x402 gate |
-| `@pcc/dashboard` | Vite SPA: 52 routes, React Flow builders, Recharts, 18-step onboarding tour |
+| `@pcc/gateway` | Fastify REST/SSE: 347 endpoints across 54 route files, StreamHub, SIWE auth, x402 gate |
+| `@pcc/dashboard` | Vite SPA: 57+ routes, React Flow builders, Recharts, 18-step onboarding tour |
 
-### 10.2 Test Coverage
+### 15.2 Test Coverage
 
-The test suite has 1,174 passing tests across 69 test files. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
+The test suite has 3,300+ passing tests across 100+ test files (TypeScript + Python). Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
 
 - `scripts/e2e-simulation.ts`: Kernel-level E2E (job submit → adapter execute → evidence → settlement)
 - `scripts/agent-e2e-simulation.ts`: Agent-to-agent negotiation (UserAgent → BrokerAgent → KernelAgent)
 - `scripts/sovereign-e2e-simulation.ts`: 9-phase sovereign infrastructure test (DIDs, IPFS, Lit, ZK, Bittensor, DePIN, cNFTs)
 - `scripts/openclaw-print-deliver-e2e.ts`: OpenClaw print-and-deliver scenario (3 variations, 37 assertions)
 
-### 10.3 Dual-Chain Architecture
+### 15.3 Dual-Chain Architecture
 
 PCC operates across two blockchains with distinct roles:
 
@@ -587,7 +877,7 @@ PCC operates across two blockchains with distinct roles:
 
 x402 (HTTP 402 Payment Required) handles per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup.
 
-### 10.4 Dashboard
+### 15.4 Dashboard
 
 The dashboard is a 52-route Vite/React 19 SPA with React Router v7, TanStack Query v5, Zustand v5, Tailwind v4, React Flow (DAG visualization), and Recharts. Key views:
 
@@ -599,9 +889,9 @@ The dashboard is a 52-route Vite/React 19 SPA with React Router v7, TanStack Que
 
 ---
 
-## 11. Future Work
+## 16. Future Work
 
-### 11.1 BabelPCC Compiler
+### 16.1 BabelPCC Compiler
 
 The `BabelPCC` compiler will transform CSDs into type-safe TypeScript artifacts: interfaces for job parameters, runtime validators, pricing calculators, adapter scaffolds, and test data generators. The compiler will be published as an npm package (`babelpcc`) and integrated into the PCC CLI:
 
@@ -615,7 +905,7 @@ babelpcc compile pcc://capabilities/fdm/v2 --output ./generated/
 # generated/fdm.test.ts          — test data generators
 ```
 
-### 11.2 Cross-Chain Bridges
+### 16.2 Cross-Chain Bridges
 
 Story Network, Base, and Solana operate as independent settlement and identity chains. Cross-chain bridges will enable:
 
@@ -623,27 +913,29 @@ Story Network, Base, and Solana operate as independent settlement and identity c
 - Solana soulbound cNFTs to carry Story IP lineage metadata
 - Cross-chain escrow settlement: customer funds in USDC on Base → royalties distributed in WIP on Story → certificates minted on Solana in a single atomic transaction
 
-### 11.3 Real Hardware Integration at Scale
+### 16.3 Additional Hardware Integrations
 
-The current integration targets OctoPrint, Modbus, OPC-UA, SiLA 2, and IPP. Future adapters will include:
+The current integration covers OctoPrint (3D printers), Opentrons OT-2 (liquid handling), Modbus (industrial sensors), OPC-UA (CNC/automation), SiLA 2 (lab instruments), and IPP (2D printers). Future adapters will include:
 
 - **OpenClaw / OpenDroids**: Robot arm control via ROS 2 + Isaac ROS for lab automation tasks
 - **GMP pharmaceutical**: Batch manufacturing via SiLA 2 + 21 CFR Part 11 evidence for regulatory compliance
 - **Semiconductor equipment**: Fab-grade interfaces via SECS/GEM and SEMI E164 standards
 
-### 11.4 Industry 4.0 Interop via AASX Mapping
+### 16.4 Industry 4.0 Interop via AASX Mapping
 
 A bidirectional CSD ↔ AASX Submodel Template translator will enable PCC to interoperate with Industry 4.0 systems that already speak AASX. A CNC shop running a Siemens MES can export its AAS to PCC, which translates it to a CSD and registers it on the network. PCC capabilities can also be exported as AASX for consumption by traditional industrial systems — allowing PCC to overlay IP and settlement on top of existing Industry 4.0 infrastructure rather than requiring a full replacement.
 
-### 11.5 Story Protocol Mainnet Migration
+### 16.5 Story Protocol Mainnet Migration
 
 Current Story integration targets the Aeneid testnet (chain 1513). Migration to Story mainnet (chain 1514) requires funded IP wallets and production-grade royalty vault management. The `StoryIPService` is designed for zero-configuration switching: setting `STORY_NETWORK=story` and `STORY_MOCK=false` activates production mode with no code changes required.
 
 ---
 
-## 12. Conclusion
+## 17. Conclusion
 
 Physical Capability Cloud is the missing coordination layer for the physical world. It applies the three principles that made cloud infrastructure succeed — capability abstraction, unit pricing, and credible commitment — to physical manufacturing, adding the sovereign infrastructure (encrypted IPFS evidence, Lit Protocol access control, Bittensor quality verification, Starknet ZK anchoring) needed for trustless operation, and the IP layer (Story Protocol) needed to make physical work financially composable.
+
+With the March 2026 session, PCC crossed from prototype to working distributed system. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
 
 The result is a network where a machinist in Detroit and a biologist in Boston can form a trustless workflow without a broker, a marketplace, or a negotiated contract. Where the intellectual property embedded in a manufacturing process earns royalties for its designer forever. Where verified physical work builds permanent on-chain credentials. Where any AI agent can discover, book, and settle a physical capability through a typed API, the same way it calls any other microservice.
 
@@ -690,7 +982,11 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 
 ---
 
-**Live Gateway**: [pcc-gateway-production.up.railway.app](https://pcc-gateway-production.up.railway.app)
+**Live Network**: [capability.network](https://capability.network)
+
+**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (154 tools for any LLM agent)
+
+**Operator Node**: `pip install pcc-node && pcc-node start`
 
 **Repository**: [github.com/global-mysterysnailrevolution/physical-capability-cloud](https://github.com/global-mysterysnailrevolution/physical-capability-cloud)
 

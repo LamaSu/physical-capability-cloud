@@ -7,7 +7,7 @@
 
   "api_base": "https://capability.network",
 
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a verifiable on-chain network for physical capabilities. Machines register what they can do. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAfter step 5, your machines are discoverable and you can accept jobs.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_announce, pcc_dht_peers\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
 
   "tools": [
     {
@@ -1786,6 +1786,169 @@
         "required": ["protocol", "errorCode", "errorMessage", "involvedAgents"]
       },
       "endpoint": { "method": "POST", "path": "/api/anomaly/protocol-failure" }
+    },
+
+    {
+      "name": "pcc_dht_query",
+      "description": "Query the DHT for capabilities matching your requirements. Returns announcements from operators whose equipment matches the type, materials, and price range you specify.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "description": "Capability type to search for (e.g. 'fdm_print', 'liquid-handler', 'cnc-3axis')" },
+          "materials": { "type": "array", "items": { "type": "string" }, "description": "Materials you need (matches if operator supports ANY of these)" },
+          "maxPrice": { "type": "number", "description": "Maximum price per job — matches operators whose min price is at or below this" },
+          "limit": { "type": "number", "description": "Maximum results to return (default 10)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "POST", "path": "/api/dht/query" }
+    },
+    {
+      "name": "pcc_dht_announce",
+      "description": "Announce capabilities to the DHT network. Signs the announcement with your node's Ed25519 key and broadcasts to connected peers.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID announcing capabilities" },
+          "capabilities": {
+            "type": "array",
+            "description": "Array of capability summaries to announce",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "description": "Capability type" },
+                "materials": { "type": "array", "items": { "type": "string" } },
+                "priceRange": { "type": "object", "properties": { "min": { "type": "number" }, "max": { "type": "number" }, "currency": { "type": "string" } } },
+                "queueDepth": { "type": "number" }
+              },
+              "required": ["type"]
+            }
+          },
+          "ttlSeconds": { "type": "number", "description": "How long the announcement is valid (default 300)" }
+        },
+        "required": ["kernelId", "capabilities"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/dht/announce" }
+    },
+    {
+      "name": "pcc_dht_peers",
+      "description": "List known DHT peers and their connection status. Shows which nodes are currently connected to the gossip network.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/dht/peers" }
+    },
+
+    {
+      "name": "pcc_create_scope",
+      "description": "Create an execution scope for a job. Scopes define exactly which tool calls are allowed on a kernel during a job, with command budgets, retry limits, and time-to-live. Required before issuing SCOPED WRITE operations (protocol upload, run create, run action).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to create the scope for" },
+          "jobId": { "type": "string", "description": "Job ID this scope is bound to (optional)" },
+          "allowedTools": { "type": "array", "items": { "type": "string" }, "description": "List of tool names allowed in this scope (e.g. ['ot2_protocol_upload', 'ot2_run_create', 'ot2_run_action'])" },
+          "allowedPipettes": { "type": "array", "items": { "type": "string" }, "description": "Which pipettes may be used (e.g. ['left'])" },
+          "allowedSlots": { "type": "array", "items": { "type": "number" }, "description": "Which deck slots may be accessed (e.g. [1, 2, 3, 9])" },
+          "maxCommands": { "type": "number", "description": "Maximum tool calls allowed in this scope (default 100)" },
+          "maxRetries": { "type": "number", "description": "Maximum retries allowed (default 3)" },
+          "ttlMinutes": { "type": "number", "description": "Scope duration in minutes (default 30)" },
+          "protocolHash": { "type": "string", "description": "SHA-256 hash of the approved protocol content. If set, protocol uploads are hash-verified." }
+        },
+        "required": ["kernelId", "allowedTools"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ot2/scope" }
+    },
+    {
+      "name": "pcc_revoke_scope",
+      "description": "Revoke an execution scope immediately (emergency stop). All pending tool calls under this scope are rejected. The kernel enters a stopped state. A new scope must be created to resume.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scopeId": { "type": "string", "description": "Scope ID to revoke" }
+        },
+        "required": ["scopeId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ot2/scope/{scopeId}/revoke" }
+    },
+    {
+      "name": "pcc_scope_audit",
+      "description": "Get the audit trail for an execution scope — every tool call made under this scope, with validation results, timestamps, and outcomes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scopeId": { "type": "string", "description": "Scope ID to audit" }
+        },
+        "required": ["scopeId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ot2/scope/{scopeId}/audit" }
+    },
+
+    {
+      "name": "pcc_relay_tool_call",
+      "description": "Relay a tool call to a device executor. The brain (LLM) posts tool calls here; the executor (on the device) polls for them and executes locally. Used for the brain/executor split architecture.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID of the target device" },
+          "toolName": { "type": "string", "description": "Tool to execute (e.g. 'ot2_health', 'ot2_run_create')" },
+          "toolArgs": { "type": "object", "description": "Arguments for the tool call" },
+          "scopeId": { "type": "string", "description": "Execution scope ID (required for SCOPED WRITE tools)" }
+        },
+        "required": ["kernelId", "toolName", "toolArgs"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ot2/tool-call" }
+    },
+    {
+      "name": "pcc_get_tool_result",
+      "description": "Get the result of a previously relayed tool call. Poll this endpoint until the executor has processed the call and posted results.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "callId": { "type": "string", "description": "Tool call ID returned from pcc_relay_tool_call" }
+        },
+        "required": ["callId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ot2/tool-result/{callId}" }
+    },
+
+    {
+      "name": "pcc_camera_latest",
+      "description": "Get the latest camera frame from a kernel as a JSON snapshot (base64 JPEG + metadata). For raw JPEG image, use GET /api/ot2/camera/latest directly.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to get camera frame from" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ot2/camera/snapshot" }
+    },
+
+    {
+      "name": "pcc_chat_send",
+      "description": "Send a chat message to a kernel's operator or agent. Used for human-in-the-loop communication during job execution, troubleshooting, and escalation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to send the message to" },
+          "message": { "type": "string", "description": "Message content" },
+          "role": { "type": "string", "enum": ["user", "agent", "operator", "system"], "description": "Sender role (default: user)" }
+        },
+        "required": ["kernelId", "message"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/ot2/chat" }
+    },
+    {
+      "name": "pcc_chat_history",
+      "description": "Get chat history with a kernel. Returns messages between agents, operators, and users for a specific kernel.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID to get chat history for" },
+          "limit": { "type": "number", "description": "Maximum messages to return (default 50)" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/ot2/chat/messages" }
     }
   ],
 
