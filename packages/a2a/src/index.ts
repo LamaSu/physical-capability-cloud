@@ -11,3 +11,15 @@ export { SecurityMiddleware, SecurityError } from "./security-middleware.js";
 export type { SecurityMiddlewareConfig } from "./security-middleware.js";
 export { SIRENMonitor } from "./siren-monitor.js";
 export type { SIRENConfig } from "./siren-monitor.js";
+export {
+  generateSigningKeyPair,
+  generateEncryptionKeyPair,
+  encryptMessage,
+  decryptMessage,
+  sign,
+  verify,
+  signAnnouncement,
+  verifyAnnouncement,
+} from "./crypto.js";
+export { EncryptedBus } from "./encrypted-bus.js";
+export type { BusLike } from "./encrypted-bus.js";

@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: pcc-node
+Version: 0.1.0
+Summary: Physical Capability Cloud node - join the network with any equipment
+License: MIT
+Requires-Python: >=3.9
+Requires-Dist: click>=8.0
+Provides-Extra: crypto
+Requires-Dist: pynacl>=1.5; extra == "crypto"
+Provides-Extra: discovery
+Requires-Dist: zeroconf>=0.100; extra == "discovery"
+Provides-Extra: all
+Requires-Dist: pynacl>=1.5; extra == "all"
+Requires-Dist: zeroconf>=0.100; extra == "all"

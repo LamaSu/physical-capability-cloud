@@ -22,7 +22,8 @@
   "dependencies": {
     "@pcc/spec": "workspace:*",
     "@sentry/node": "^10.45.0",
-    "nanoid": "^5.0.0"
+    "nanoid": "^5.0.0",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@fastify/websocket": "^10.0.1",
