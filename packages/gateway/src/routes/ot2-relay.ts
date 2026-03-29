@@ -121,6 +121,15 @@ export async function ot2RelayRoutes(app: FastifyInstance) {
     }
 
     const { db } = getStore();
+    const callerId = (req as any).operatorId ?? "anonymous";
+
+    // Non-safe tools require a scope (no free writes)
+    if (!SAFE_TOOLS.includes(toolName) && !scopeId) {
+      return reply.status(403).send({
+        error: "scope_required",
+        message: "Write operations require an execution scope. Create one via POST /api/ot2/scope",
+      });
+    }
 
     // If a scopeId is provided, validate the tool call against the scope
     if (scopeId) {
@@ -132,6 +141,19 @@ export async function ot2RelayRoutes(app: FastifyInstance) {
 
       if (!scope) {
         return reply.status(404).send({ error: "Scope not found", scopeId });
+      }
+
+      // Verify caller owns this scope (or is the kernel operator)
+      if (scope.createdBy !== callerId && callerId !== "anonymous") {
+        // Check if caller is the kernel operator (they can use any scope on their kernel)
+        const kernel = db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get();
+        const isOperator = kernel && (kernel as any).operatorAddress === callerId;
+        if (!isOperator) {
+          return reply.status(403).send({
+            error: "scope_not_yours",
+            message: "This scope belongs to a different agent. You can only use scopes you created.",
+          });
+        }
       }
 
       const validation = validateToolCall(scope, toolName);
