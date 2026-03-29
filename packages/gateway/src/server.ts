@@ -63,6 +63,8 @@ import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { ot2ChatRoutes } from "./routes/ot2-chat.js";
 import { ot2CameraRoutes } from "./routes/ot2-camera.js";
+import { ot2RelayRoutes } from "./routes/ot2-relay.js";
+import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -206,9 +208,11 @@ export async function createGateway(port = 3200) {
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
 
-  // OT-2 remote agent relay (chat + camera)
+  // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
   await app.register(ot2ChatRoutes);
   await app.register(ot2CameraRoutes);
+  await app.register(ot2RelayRoutes);
+  await app.register(ot2ScopeRoutes);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);

@@ -75,3 +75,40 @@ export const ot2CameraFrames = sqliteTable("ot2_camera_frames", {
   frameData: text("frame_data").notNull(), // base64 JPEG
   capturedAt: text("captured_at").notNull(),
 });
+
+/** Execution scope — approved set of operations for a job */
+export const executionScopes = sqliteTable("execution_scopes", {
+  id: text("id").primaryKey(),
+  kernelId: text("kernel_id").notNull(),
+  jobId: text("job_id"),
+  createdBy: text("created_by").notNull(), // agent ID that created the scope
+  status: text("status").notNull().default("active"), // active | completed | revoked | expired
+  // What's allowed
+  allowedTools: text("allowed_tools", { mode: "json" }).notNull().$type<string[]>(),
+  allowedPipettes: text("allowed_pipettes", { mode: "json" }).$type<string[]>(),
+  allowedSlots: text("allowed_slots", { mode: "json" }).$type<number[]>(),
+  maxCommands: integer("max_commands").notNull().default(100),
+  commandCount: integer("command_count").notNull().default(0),
+  // Troubleshooting budget
+  maxRetries: integer("max_retries").notNull().default(3),
+  retryCount: integer("retry_count").notNull().default(0),
+  // Safe operations (always allowed regardless of scope):
+  // home, lights, identify, health, pipettes, calibration status
+  createdAt: text("created_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+});
+
+/** Tool call relay — brain posts calls, executor picks them up */
+export const toolCallRelay = sqliteTable("tool_call_relay", {
+  id: text("id").primaryKey(),
+  scopeId: text("scope_id"), // null for unscoped calls
+  kernelId: text("kernel_id").notNull(),
+  toolName: text("tool_name").notNull(),
+  toolArgs: text("tool_args", { mode: "json" }).notNull().$type<Record<string, unknown>>(),
+  status: text("status").notNull().default("pending"), // pending | claimed | completed | failed | rejected
+  result: text("result"),
+  error: text("error"),
+  createdAt: text("created_at").notNull(),
+  claimedAt: text("claimed_at"),
+  completedAt: text("completed_at"),
+});
