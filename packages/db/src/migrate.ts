@@ -1017,5 +1017,38 @@ export function migrateDatabase(sqlite: Database.Database): void {
       frame_data TEXT NOT NULL,      -- base64 JPEG
       captured_at TEXT NOT NULL
     );
+
+    -- ── Execution Scopes ────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS execution_scopes (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      job_id TEXT,
+      created_by TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      allowed_tools TEXT NOT NULL,          -- JSON string[]
+      allowed_pipettes TEXT,               -- JSON string[]
+      allowed_slots TEXT,                  -- JSON number[]
+      max_commands INTEGER NOT NULL DEFAULT 100,
+      command_count INTEGER NOT NULL DEFAULT 0,
+      max_retries INTEGER NOT NULL DEFAULT 3,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    -- ── Tool Call Relay ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS tool_call_relay (
+      id TEXT PRIMARY KEY,
+      scope_id TEXT,
+      kernel_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_args TEXT NOT NULL,             -- JSON
+      status TEXT NOT NULL DEFAULT 'pending',
+      result TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      claimed_at TEXT,
+      completed_at TEXT
+    );
   `);
 }

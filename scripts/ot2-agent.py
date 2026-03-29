@@ -53,6 +53,7 @@ _ctx.verify_mode = ssl.CERT_NONE
 def http(method, url, body=None, headers=None, timeout=30):
     """Make an HTTP request using stdlib. Returns (status, parsed_json | text)."""
     hdrs = headers or {}
+    hdrs.setdefault("User-Agent", "PCC-OT2-Agent/1.0 (falling-bush)")
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
