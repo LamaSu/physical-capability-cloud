@@ -24,3 +24,4 @@ export * from "./fiat-ramp.js";
 export * from "./licensing.js";
 export * from "./operator-policy.js";
 export * from "./negotiation.js";
+export * from "./p2p.js";

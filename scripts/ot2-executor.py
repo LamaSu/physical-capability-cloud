@@ -16,6 +16,8 @@ import os
 import ssl
 import subprocess
 import logging
+import glob as globmod
+import base64
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -77,6 +79,166 @@ def pcc(method, path, body=None):
     url = f"{PCC_BASE}{path}"
     headers = {"Authorization": f"Bearer {PCC_API_KEY}"}
     return http(method, url, body, headers)
+
+
+# ── Camera Utilities ──────────────────────────────────────────────────
+
+# Cached camera device path (detected once, reused)
+_camera_device = None
+
+
+def detect_camera_device():
+    """Auto-detect a working V4L2 camera device.
+
+    Scans /dev/video* and returns the first device that can produce frames.
+    Prefers /dev/video6 (known Innomaker USB camera on the OT-2).
+    Caches the result for subsequent calls.
+    """
+    global _camera_device
+    if _camera_device is not None:
+        return _camera_device
+
+    # Candidate list: prefer /dev/video6, then scan all
+    candidates = []
+    # Add /dev/video6 first (known working device)
+    if os.path.exists("/dev/video6"):
+        candidates.append("/dev/video6")
+    # Add /dev/video0 as second preference
+    if os.path.exists("/dev/video0"):
+        candidates.append("/dev/video0")
+    # Scan for any other video devices
+    for dev in sorted(globmod.glob("/dev/video*")):
+        if dev not in candidates:
+            candidates.append(dev)
+
+    if not candidates:
+        log.warning("No /dev/video* devices found")
+        return None
+
+    for dev in candidates:
+        log.info(f"Probing camera device: {dev}")
+        # Quick probe: try v4l2-ctl --all to check if device is a capture device
+        try:
+            r = subprocess.run(
+                ["v4l2-ctl", "--device", dev, "--all"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and "Video Capture" in r.stdout:
+                log.info(f"Found capture device: {dev}")
+                _camera_device = dev
+                return dev
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # v4l2-ctl not available, try a basic stat check
+            pass
+
+        # Fallback: just check the device exists and is readable
+        if os.path.exists(dev):
+            log.info(f"Using device (unverified): {dev}")
+            _camera_device = dev
+            return dev
+
+    log.warning("No working camera device found")
+    return None
+
+
+def capture_frame_jpeg():
+    """Capture a single JPEG frame from the camera.
+
+    Tries methods in order of reliability:
+      1. v4l2-ctl --stream-mmap (works with MJPEG and H264 cameras)
+      2. ffmpeg single-frame capture
+      3. dd from device (last resort, unreliable with H264)
+
+    Returns JPEG bytes or None on failure.
+    """
+    dev = detect_camera_device()
+    if not dev:
+        return None
+
+    tmpfile = "/tmp/pcc_frame.jpg"
+
+    # ── Method 1: v4l2-ctl ──────────────────────────────────────────
+    try:
+        # First try to set MJPEG format, then capture
+        subprocess.run(
+            ["v4l2-ctl", "--device", dev,
+             "--set-fmt-video=width=640,height=480,pixelformat=MJPG"],
+            capture_output=True, timeout=3,
+        )
+        r = subprocess.run(
+            ["v4l2-ctl", "--device", dev,
+             "--stream-mmap", "--stream-count=1",
+             f"--stream-to={tmpfile}"],
+            capture_output=True, timeout=8,
+        )
+        if r.returncode == 0 and os.path.exists(tmpfile):
+            with open(tmpfile, "rb") as f:
+                data = f.read()
+            if len(data) > 100 and data[:2] == b"\xff\xd8":
+                log.debug(f"v4l2-ctl capture OK: {len(data)} bytes")
+                return data
+            # Maybe the file has embedded JPEG — search for markers
+            start = data.find(b"\xff\xd8")
+            end = data.find(b"\xff\xd9", max(start, 0))
+            if start >= 0 and end > start:
+                log.debug(f"v4l2-ctl capture OK (extracted): {end - start + 2} bytes")
+                return data[start:end + 2]
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug(f"v4l2-ctl not available or timed out: {e}")
+
+    # ── Method 2: ffmpeg ────────────────────────────────────────────
+    try:
+        # Remove stale file
+        if os.path.exists(tmpfile):
+            os.remove(tmpfile)
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-f", "v4l2", "-input_format", "mjpeg",
+             "-video_size", "640x480", "-i", dev,
+             "-frames:v", "1", "-f", "mjpeg", tmpfile],
+            capture_output=True, timeout=8,
+        )
+        if r.returncode == 0 and os.path.exists(tmpfile):
+            with open(tmpfile, "rb") as f:
+                data = f.read()
+            if len(data) > 100:
+                log.debug(f"ffmpeg capture OK: {len(data)} bytes")
+                return data
+        # Try with h264 input format
+        if os.path.exists(tmpfile):
+            os.remove(tmpfile)
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-f", "v4l2", "-input_format", "h264",
+             "-video_size", "640x480", "-i", dev,
+             "-frames:v", "1", "-f", "mjpeg", tmpfile],
+            capture_output=True, timeout=8,
+        )
+        if r.returncode == 0 and os.path.exists(tmpfile):
+            with open(tmpfile, "rb") as f:
+                data = f.read()
+            if len(data) > 100:
+                log.debug(f"ffmpeg h264 capture OK: {len(data)} bytes")
+                return data
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug(f"ffmpeg not available or timed out: {e}")
+
+    # ── Method 3: dd from device (last resort) ─────────────────────
+    try:
+        r = subprocess.run(
+            ["dd", f"if={dev}", "bs=512", "count=400"],
+            capture_output=True, timeout=5,
+        )
+        data = r.stdout
+        start = data.find(b"\xff\xd8")
+        end = data.find(b"\xff\xd9", max(start, 0))
+        if start >= 0 and end > start:
+            frame = data[start:end + 2]
+            log.debug(f"dd capture OK: {len(frame)} bytes")
+            return frame
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.debug(f"dd capture failed: {e}")
+
+    log.warning("All capture methods failed")
+    return None
 
 
 # ── Tool Execution (same as before, no Claude needed) ───────────────────
@@ -169,18 +331,21 @@ def execute_tool(name, args):
             return json.dumps({"exit_code": result.returncode, "output": (result.stdout + result.stderr)[:4000]})
 
         elif name == "ot2_camera_snapshot":
-            r = subprocess.run(
-                ["dd", "if=/dev/video0", "bs=512", "count=200"],
-                capture_output=True, timeout=5,
-            )
-            data = r.stdout
-            start = data.find(b"\xff\xd8")
-            end = data.find(b"\xff\xd9", start)
-            if start >= 0 and end >= 0:
-                import base64
-                frame_b64 = base64.b64encode(data[start:end + 2]).decode("ascii")
-                return json.dumps({"snapshot": True, "size": len(frame_b64), "format": "jpeg_base64"})
-            return json.dumps({"snapshot": False, "error": "no frame captured"})
+            frame = capture_frame_jpeg()
+            if frame:
+                frame_b64 = base64.b64encode(frame).decode("ascii")
+                return json.dumps({
+                    "snapshot": True,
+                    "size": len(frame_b64),
+                    "jpeg_bytes": len(frame),
+                    "device": detect_camera_device(),
+                    "format": "jpeg_base64",
+                })
+            return json.dumps({
+                "snapshot": False,
+                "error": "no frame captured",
+                "device": detect_camera_device(),
+            })
 
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
@@ -194,23 +359,23 @@ def execute_tool(name, args):
 def push_camera_frame():
     """Capture and push a camera frame to PCC."""
     try:
-        r = subprocess.run(
-            ["dd", "if=/dev/video0", "bs=512", "count=200"],
-            capture_output=True, timeout=5,
-        )
-        data = r.stdout
-        start = data.find(b"\xff\xd8")
-        end = data.find(b"\xff\xd9", start)
-        if start >= 0 and end >= 0:
-            import base64
-            frame_b64 = base64.b64encode(data[start:end + 2]).decode("ascii")
-            pcc("POST", "/api/ot2/camera/frame", {
-                "kernelId": KERNEL_ID,
-                "frame": frame_b64,
-            })
-            log.debug("Camera frame pushed")
+        frame = capture_frame_jpeg()
+        if frame is None:
+            log.warning("Camera frame capture failed — no frame data")
+            return
+
+        frame_b64 = base64.b64encode(frame).decode("ascii")
+        s, r = pcc("POST", "/api/ot2/camera/frame", {
+            "kernelId": KERNEL_ID,
+            "frame": frame_b64,
+            "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+        if s in (200, 201):
+            log.info(f"Camera frame pushed ({len(frame)} bytes JPEG)")
+        else:
+            log.warning(f"Camera frame push failed: HTTP {s} — {r}")
     except Exception as e:
-        log.debug(f"Camera failed: {e}")
+        log.warning(f"Camera push error: {e}")
 
 
 # ── Main Loop ───────────────────────────────────────────────────────────
@@ -284,6 +449,18 @@ def run():
 
     log.info(f"Connected to OT-2 '{health.get('name')}' (API {health.get('api_version')})")
     log.info(f"Executor mode. Polling {PCC_BASE} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
+
+    # Probe camera at startup
+    cam = detect_camera_device()
+    if cam:
+        log.info(f"Camera device: {cam}")
+        test_frame = capture_frame_jpeg()
+        if test_frame:
+            log.info(f"Camera probe OK: {len(test_frame)} byte JPEG")
+        else:
+            log.warning("Camera detected but frame capture failed — will retry in loop")
+    else:
+        log.warning("No camera device detected — camera frames will be skipped")
 
     # Register online
     pcc("POST", f"/api/kernels/{KERNEL_ID}/heartbeat", {"status": "online"})

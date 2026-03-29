@@ -1,0 +1,11 @@
+click>=8.0
+
+[all]
+pynacl>=1.5
+zeroconf>=0.100
+
+[crypto]
+pynacl>=1.5
+
+[discovery]
+zeroconf>=0.100

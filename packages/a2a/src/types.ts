@@ -6,7 +6,7 @@
  * Messages carry Intents — structured requests/responses that agents understand.
  */
 
-import type { Address, Id } from "@pcc/spec";
+import type { Address, Id, EncryptedEnvelope } from "@pcc/spec";
 
 // ── Agent Identity ──────────────────────────────────────────────
 
@@ -63,6 +63,8 @@ export interface A2AMessage {
   inReplyTo?: Id;
   /** Signature from sender's wallet */
   signature?: string;
+  /** End-to-end encrypted envelope (when present, intent payload is encrypted) */
+  encrypted?: EncryptedEnvelope;
 }
 
 /** A conversation between agents */

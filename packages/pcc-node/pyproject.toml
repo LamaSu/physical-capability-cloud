@@ -1,0 +1,24 @@
+[project]
+name = "pcc-node"
+version = "0.1.0"
+description = "Physical Capability Cloud node - join the network with any equipment"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+crypto = ["pynacl>=1.5"]
+discovery = ["zeroconf>=0.100"]
+all = ["pynacl>=1.5", "zeroconf>=0.100"]
+
+[project.scripts]
+pcc-node = "pcc_node.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
