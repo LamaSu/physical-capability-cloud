@@ -144,6 +144,19 @@ def run_daemon(config):
     heartbeat_counter = 0
     heartbeat_cycles = max(1, 60 // max(1, config.poll_interval))  # heartbeat every ~60s
 
+    # Start UI server in background
+    try:
+        from .ui_server import start_ui_server
+        start_ui_server(
+            port=3200,
+            background=True,
+            pcc_base=config.pcc_base,
+            pcc_api_key=config.pcc_api_key,
+        )
+        log.info("UI server: http://localhost:3200")
+    except Exception as e:
+        log.warning(f"UI server failed to start: {e}")
+
     log.info(
         f"Daemon running. Kernel={config.kernel_id}, "
         f"PCC={config.pcc_base}, poll={config.poll_interval}s"

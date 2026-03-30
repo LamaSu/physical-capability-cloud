@@ -1,0 +1,9 @@
+Well,Volume,Sample,Concentration
+A1,50,Sample_Alpha,1.0
+A2,50,Sample_Beta,0.5
+A3,100,Sample_Gamma,0.25
+B1,75,Sample_Delta,2.0
+B2,25,Control_Blank,0.0
+B3,50,Sample_Epsilon,1.5
+C1,200,Sample_Zeta,0.1
+C2,50,Sample_Eta,3.0

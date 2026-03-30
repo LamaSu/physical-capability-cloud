@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Status Monitor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a; color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 1.5rem; line-height: 1.5;
+}
+h1 { color: #fff; font-size: 1.4rem; margin-bottom: 0.3rem; }
+.subtitle { color: #666; font-size: 0.8rem; margin-bottom: 1.5rem; }
+
+/* Status cards */
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.status-card {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem;
+}
+.status-card .label { color: #888; font-size: 0.75rem; margin-bottom: 0.25rem; }
+.status-card .value { color: #fff; font-size: 1.2rem; font-weight: 700; }
+.status-card .value.online { color: #4ade80; }
+.status-card .value.pending { color: #fbbf24; }
+.status-card .value.error { color: #ef4444; }
+
+/* Progress bar */
+.progress-container {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-bottom: 1.5rem;
+}
+.progress-container h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.75rem; }
+.progress-bar-bg {
+  width: 100%; height: 24px; background: #1a1a1a; border-radius: 12px;
+  overflow: hidden; position: relative;
+}
+.progress-bar-fill {
+  height: 100%; background: linear-gradient(90deg, #4ade80, #22c55e);
+  border-radius: 12px; transition: width 0.5s ease;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; font-weight: 700; color: #0a0a0a;
+  min-width: 30px;
+}
+.progress-label { text-align: center; color: #888; font-size: 0.8rem; margin-top: 0.5rem; }
+
+/* Tool call log */
+.log-container {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-bottom: 1.5rem;
+}
+.log-container h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.75rem; }
+.log-list { max-height: 300px; overflow-y: auto; }
+.log-entry {
+  padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a;
+  font-size: 0.8rem; display: flex; gap: 0.75rem;
+}
+.log-time { color: #555; white-space: nowrap; }
+.log-action { color: #4ade80; }
+.log-detail { color: #aaa; }
+.log-error { color: #ef4444; }
+
+/* Evidence */
+.evidence-container {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-bottom: 1.5rem;
+}
+.evidence-container h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.75rem; }
+.evidence-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a; font-size: 0.8rem;
+}
+.evidence-type { color: #aaa; }
+.badge {
+  display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px;
+  font-size: 0.7rem; font-weight: 700;
+}
+.badge-collected { background: #052e16; color: #4ade80; }
+.badge-pending { background: #422006; color: #fbbf24; }
+.badge-missing { background: #450a0a; color: #ef4444; }
+
+/* Camera feed placeholder */
+.camera-container {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-bottom: 1.5rem;
+}
+.camera-container h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.75rem; }
+.camera-placeholder {
+  width: 100%; height: 200px; background: #0a0a0a; border: 1px dashed #333;
+  border-radius: 4px; display: flex; align-items: center; justify-content: center;
+  color: #555; font-size: 0.85rem;
+}
+</style>
+</head>
+<body>
+<h1>Job Status Monitor</h1>
+<p class="subtitle">Live job monitoring. Auto-refreshes every 3 seconds.</p>
+
+<div class="status-grid">
+  <div class="status-card">
+    <div class="label">Job Status</div>
+    <div class="value online" id="s-status">running</div>
+  </div>
+  <div class="status-card">
+    <div class="label">Job ID</div>
+    <div class="value" id="s-jobid">--</div>
+  </div>
+  <div class="status-card">
+    <div class="label">Kernel</div>
+    <div class="value" id="s-kernel">--</div>
+  </div>
+  <div class="status-card">
+    <div class="label">Elapsed</div>
+    <div class="value" id="s-elapsed">0:00</div>
+  </div>
+</div>
+
+<div class="progress-container">
+  <h2>Progress</h2>
+  <div class="progress-bar-bg">
+    <div class="progress-bar-fill" id="progress-fill" style="width: 0%">0%</div>
+  </div>
+  <div class="progress-label" id="progress-label">Waiting for job data...</div>
+</div>
+
+<div class="camera-container">
+  <h2>Camera Feed</h2>
+  <div class="camera-placeholder" id="camera-feed">
+    No camera feed available. Connect via /api/pcc/ot2/camera/latest
+  </div>
+</div>
+
+<div class="log-container">
+  <h2>Tool Call Log</h2>
+  <div class="log-list" id="log-list">
+    <div class="log-entry">
+      <span class="log-time">--:--:--</span>
+      <span class="log-detail">Waiting for activity...</span>
+    </div>
+  </div>
+</div>
+
+<div class="evidence-container">
+  <h2>Evidence Collection</h2>
+  <div id="evidence-list">
+    <div class="evidence-item">
+      <span class="evidence-type">Photo evidence</span>
+      <span class="badge badge-pending">pending</span>
+    </div>
+    <div class="evidence-item">
+      <span class="evidence-type">Sensor log</span>
+      <span class="badge badge-pending">pending</span>
+    </div>
+    <div class="evidence-item">
+      <span class="evidence-type">Tool call audit</span>
+      <span class="badge badge-pending">pending</span>
+    </div>
+    <div class="evidence-item">
+      <span class="evidence-type">Hash chain</span>
+      <span class="badge badge-pending">pending</span>
+    </div>
+  </div>
+</div>
+
+<div style="display:flex;gap:0.75rem;margin-top:1.5rem;">
+  <button style="background:#4ade80;color:#0a0a0a;border:none;padding:0.6rem 1.2rem;border-radius:4px;cursor:pointer;font-family:inherit;font-size:0.85rem;font-weight:700;" onclick="submitAction('approve')">Approve Job</button>
+  <button style="background:#333;color:#e0e0e0;border:none;padding:0.6rem 1.2rem;border-radius:4px;cursor:pointer;font-family:inherit;font-size:0.85rem;" onclick="submitAction('cancel')">Cancel Job</button>
+  <button style="background:#333;color:#e0e0e0;border:none;padding:0.6rem 1.2rem;border-radius:4px;cursor:pointer;font-family:inherit;font-size:0.85rem;" onclick="submitAction('pause')">Pause</button>
+</div>
+<div id="action-msg" style="font-size:0.85rem;margin-top:0.5rem;"></div>
+
+<script>
+var startTime = Date.now();
+var logEntries = [];
+
+function submitAction(action) {
+  var port = window.location.port || '3200';
+  var payload = {
+    action: action,
+    job_id: document.getElementById('s-jobid').textContent,
+    timestamp: new Date().toISOString()
+  };
+  fetch('http://localhost:' + port + '/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-UI-Source': 'job-status'
+    },
+    body: JSON.stringify(payload)
+  }).then(function(r) { return r.json(); })
+    .then(function() {
+      document.getElementById('action-msg').style.color = '#4ade80';
+      document.getElementById('action-msg').textContent = 'Action "' + action + '" submitted.';
+      addLogEntry(action, 'User action submitted', false);
+    })
+    .catch(function(e) {
+      document.getElementById('action-msg').style.color = '#ef4444';
+      document.getElementById('action-msg').textContent = 'Error: ' + e.message;
+    });
+}
+
+function updateElapsed() {
+  var elapsed = Math.floor((Date.now() - startTime) / 1000);
+  var min = Math.floor(elapsed / 60);
+  var sec = elapsed % 60;
+  document.getElementById('s-elapsed').textContent =
+    min + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function addLogEntry(action, detail, isError) {
+  var now = new Date();
+  var time = now.toTimeString().split(' ')[0];
+  var entry = { time: time, action: action, detail: detail, isError: isError };
+  logEntries.push(entry);
+  renderLog();
+}
+
+function renderLog() {
+  var list = document.getElementById('log-list');
+  var html = '';
+  var recent = logEntries.slice(-50).reverse();
+  recent.forEach(function(e) {
+    html += '<div class="log-entry">';
+    html += '<span class="log-time">' + e.time + '</span>';
+    if (e.isError) {
+      html += '<span class="log-error">' + e.action + '</span>';
+    } else {
+      html += '<span class="log-action">' + e.action + '</span>';
+    }
+    html += '<span class="log-detail">' + e.detail + '</span>';
+    html += '</div>';
+  });
+  list.innerHTML = html || '<div class="log-entry"><span class="log-detail">No entries</span></div>';
+}
+
+function pollSubmissions() {
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      document.getElementById('s-status').textContent = data.status || 'unknown';
+      addLogEntry('poll', 'Health check OK', false);
+    })
+    .catch(function(e) {
+      addLogEntry('error', e.message, true);
+    });
+}
+
+setInterval(updateElapsed, 1000);
+setInterval(pollSubmissions, 5000);
+
+// Initial
+addLogEntry('init', 'Job monitor started', false);
+updateElapsed();
+</script>
+</body>
+</html>
