@@ -39,9 +39,9 @@ contract DeployLocalScript is Script {
         usdc.mint(deployer, 100_000e6);
         console.log("Minted 100,000 mUSDC to deployer");
 
-        // 3. Deploy sample escrow
+        // 3. Deploy sample escrow (standalone mode — no protocol fee)
         bytes32 cwmId = keccak256("local-workflow-001");
-        MilestoneEscrow escrow = new MilestoneEscrow(deployer, arbiter, address(usdc), cwmId);
+        MilestoneEscrow escrow = new MilestoneEscrow(deployer, arbiter, address(usdc), cwmId, address(0));
         console.log("MilestoneEscrow deployed at:", address(escrow));
 
         vm.stopBroadcast();

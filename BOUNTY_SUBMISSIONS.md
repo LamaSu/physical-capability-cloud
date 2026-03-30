@@ -79,6 +79,29 @@ PCC is, literally, physical AI infrastructure. The entire protocol exists to let
 
 ---
 
+### NEAR Protocol — Chain Abstraction ($500)
+
+**Status**: Submitting
+
+PCC integrates NEAR's 1Click chain abstraction API (chaindefuser.com) so that PCC agents can fund escrow contracts on any supported chain using any source asset — without managing bridges or wrapped tokens. The integration surfaces four gateway routes:
+
+- `GET /api/near/status` — reports network, solver capabilities, and supported chains/assets
+- `POST /api/near/quote` — calls the 1Click solver network to get an atomic cross-chain quote (fromChain/fromAsset → toChain/toAsset, with fee + slippage)
+- `POST /api/near/intent` — submits a signed cross-chain payment intent for solver routing
+- `GET /api/near/intent/:id` — polls intent settlement status (`pending → submitted → settled`)
+
+Four new A2A intent types (`near_payment_intent`, `near_payment_quote_result`, `near_payment_submit`, `near_payment_settled`) let PCC User and Broker agents coordinate cross-chain escrow funding in a typed, auditable conversation flow. A PCC agent can now request a job on Base Sepolia and pay for it with NEAR-native USDC via a single `near_payment_intent` message — the solver network handles the atomic swap.
+
+**Relevant files**:
+- `packages/gateway/src/routes/near.ts` — 4 REST routes
+- `packages/gateway/src/contracts/near-client.ts` — 1Click API client (plain fetch, no SDK) + mock mode
+- `packages/gateway/src/__tests__/near.test.ts` — 25 tests covering all routes + full e2e flow
+- `packages/a2a/src/types.ts` — `NearPaymentIntentRequest`, `NearPaymentQuoteResult`, `NearPaymentSubmit`, `NearPaymentSettled`
+
+**Test**: `pnpm --filter @pcc/gateway test`
+
+---
+
 ### Impulse AI — AI Agent Integration ($300)
 
 **Status**: Integration pending
@@ -95,6 +118,29 @@ PCC is open infrastructure for the physical economy. The protocol is credibly ne
 
 ---
 
+### Flow EVM — Deploy Smart Contracts ($1,000)
+
+**Status**: Contracts ready to deploy — wallet pending FLOW testnet funding
+
+PCC's `MilestoneEscrow` and `MockUSDC` contracts have been ported to Flow EVM Testnet (chain 545). The Flow EVM chain is configured in `packages/contracts/ts/chain-config.ts` as `flowEVMTestnet` (chain ID 545, RPC `https://testnet.evm.nodes.onflow.org`). A dedicated deployment script `scripts/deploy-flow-evm.ts` handles the full deploy flow: MockUSDC + MilestoneEscrow deployment, test token minting, and chain-config update. The gateway escrow client (`packages/gateway/src/contracts/escrow-client.ts`) supports `PCC_NETWORK=flow-evm-testnet` for routing all escrow reads and writes to Flow EVM.
+
+**Deployed Contracts** (Flow EVM Testnet, chain 545):
+- MockUSDC: _pending wallet funding — see instructions below_
+- MilestoneEscrow: _pending wallet funding — see instructions below_
+- Explorer: https://evm-testnet.flowscan.io
+
+**To complete deployment**:
+1. Fund deployer wallet `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B` with FLOW testnet tokens via https://faucet.flow.com/fund-account
+2. Run: `DEPLOYER_PRIVATE_KEY=$DEPLOYER_PRIVATE_KEY npx tsx scripts/deploy-flow-evm.ts`
+3. Addresses will be auto-written to `packages/contracts/ts/chain-config.ts`
+
+**Relevant files**:
+- `packages/contracts/ts/chain-config.ts` — `flowEVMTestnet` chain definition + `"flow-evm-testnet"` deployment entry
+- `scripts/deploy-flow-evm.ts` — deployment script
+- `packages/gateway/src/contracts/escrow-client.ts` — gateway supports `PCC_NETWORK=flow-evm-testnet`
+
+---
+
 ## Qualification Summary
 
 | Bounty | Qualification Basis | Key Evidence |
@@ -106,5 +152,7 @@ PCC is open infrastructure for the physical economy. The protocol is credibly ne
 | Lit Protocol ($500) | `@lit-protocol/lit-node-client` v6, real access conditions | `packages/kernel/src/lit-encryption-real.ts` |
 | Starknet (ZK) | `starknet.js` proof anchoring on Sepolia | `packages/verifier/src/starknet-proof-service.ts` |
 | Physical AI ($500) | The protocol IS physical AI infrastructure | Entire codebase |
+| NEAR Protocol ($500) | 1Click chain abstraction: 4 routes + 4 A2A intents + 25 tests | `packages/gateway/src/routes/near.ts`, `packages/a2a/src/types.ts` |
 | Impulse AI ($300) | Agent package ready for integration | `/agent-package.json`, `packages/mcp-server/` |
 | Funding the Commons (EIR) | Open infrastructure, emerging market access | Yellowcard integration, Apache 2.0 license |
+| Flow EVM ($1,000) | MilestoneEscrow + MockUSDC on Flow EVM Testnet (chain 545) | `packages/contracts/ts/chain-config.ts`, `scripts/deploy-flow-evm.ts` |

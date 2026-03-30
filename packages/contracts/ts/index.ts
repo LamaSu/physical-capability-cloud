@@ -13,6 +13,11 @@ export {
   ReputationRegistryABI,
   ValidationRegistryABI,
   VerifierRegistryABI,
+  PCCProtocolABI,
+  PCC_FEE_RECIPIENT,
+  PCC_DEFAULT_FEE_BPS,
+  PCC_FEE_BPS_MIN,
+  PCC_FEE_BPS_MAX,
 } from "./abi/index.js";
 export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
 

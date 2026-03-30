@@ -10,8 +10,9 @@
  * through agent wallets; this client is for admin / operator tooling.
  *
  * Network selection:
- *   PCC_NETWORK=sepolia       → Ethereum Sepolia (deployed contracts)
- *   PCC_NETWORK=base-sepolia  → Base Sepolia (default, legacy)
+ *   PCC_NETWORK=sepolia            → Ethereum Sepolia (deployed contracts)
+ *   PCC_NETWORK=base-sepolia       → Base Sepolia (default, legacy)
+ *   PCC_NETWORK=flow-evm-testnet   → Flow EVM Testnet (chain 545)
  *
  * Env vars:
  *   ESCROW_CONTRACT_ADDRESS — default escrow contract (optional, per-request override)

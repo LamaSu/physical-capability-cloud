@@ -40,6 +40,23 @@ export const storyAeneid = defineChain({
   testnet: true,
 });
 
+// ── Flow EVM Chain ────────────────────────────────────────────────────────────
+
+/** Flow EVM Testnet (chain 545) */
+export const flowEVMTestnet = defineChain({
+  id: 545,
+  name: "Flow EVM Testnet",
+  nativeCurrency: { name: "Flow", symbol: "FLOW", decimals: 18 },
+  rpcUrls: {
+    default: { http: ["https://testnet.evm.nodes.onflow.org"] },
+    public: { http: ["https://testnet.evm.nodes.onflow.org"] },
+  },
+  blockExplorers: {
+    default: { name: "FlowScan EVM Testnet", url: "https://evm-testnet.flowscan.io" },
+  },
+  testnet: true,
+});
+
 export interface ChainDeployment {
   chain: Chain;
   rpcUrl?: string;
@@ -48,6 +65,8 @@ export interface ChainDeployment {
     mockUSDC?: Address;
     /** Real USDC on base-sepolia (Circle-deployed) */
     usdc?: Address;
+    /** PCCProtocol root contract — collects 1.5% from all settlements */
+    pccProtocol?: Address;
     /** ERC-8004 registries */
     identityRegistry?: Address;
     reputationRegistry?: Address;
@@ -143,6 +162,24 @@ export const deployments: Record<string, ChainDeployment> = {
       pilLicenseTemplate: "0x2E896b0b2Fdb7457499B56AAaA4AE55BCB4Cd316",
     },
     blockExplorer: "https://aeneid.explorer.story.foundation",
+  },
+
+  // ── Flow EVM Networks ─────────────────────────────────────────────────────
+
+  /**
+   * Flow EVM Testnet (chain 545).
+   * Deployed for PL Genesis hackathon — Flow EVM bounty.
+   * Use PCC_NETWORK=flow-evm-testnet to target this network.
+   */
+  "flow-evm-testnet": {
+    chain: flowEVMTestnet,
+    rpcUrl: "https://testnet.evm.nodes.onflow.org",
+    contracts: {
+      // Filled after deployment — run scripts/deploy-flow-evm.ts
+      milestoneEscrowFactory: undefined,
+      mockUSDC: undefined,
+    },
+    blockExplorer: "https://evm-testnet.flowscan.io",
   },
 };
 

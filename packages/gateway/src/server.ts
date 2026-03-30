@@ -16,6 +16,7 @@ import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { kernelRoutes } from "./routes/kernels.js";
 import { escrowRoutes } from "./routes/escrow.js";
+import { pccProtocolRoutes } from "./routes/pcc-protocol.js";
 import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
@@ -66,6 +67,7 @@ import { provisionRoutes } from "./routes/provision.js";
 import { auditRoutes } from "./routes/audit.js";
 import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
+import { nearRoutes } from "./routes/near.js";
 import { ot2ChatRoutes } from "./routes/ot2-chat.js";
 import { ot2CameraRoutes } from "./routes/ot2-camera.js";
 import { ot2RelayRoutes } from "./routes/ot2-relay.js";
@@ -177,6 +179,7 @@ export async function createGateway(port = 3200) {
   await app.register(jobRoutes);
   await app.register(kernelRoutes);
   await app.register(escrowRoutes);
+  await app.register(pccProtocolRoutes);
   await app.register(agentRoutes);
   await app.register(onboardRoutes);
   await app.register(marketplaceRoutes);
@@ -217,6 +220,7 @@ export async function createGateway(port = 3200) {
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
+  await app.register(nearRoutes);
 
   // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
   await app.register(ot2ChatRoutes);

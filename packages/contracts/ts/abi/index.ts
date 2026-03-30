@@ -7,3 +7,10 @@ export type { EntityTypeName, EntityStatusName } from "./IdentityRegistry.js";
 export { ReputationRegistryABI } from "./ReputationRegistry.js";
 export { ValidationRegistryABI } from "./ValidationRegistry.js";
 export { VerifierRegistryABI } from "./VerifierRegistry.js";
+export {
+  PCCProtocolABI,
+  PCC_FEE_RECIPIENT,
+  PCC_DEFAULT_FEE_BPS,
+  PCC_FEE_BPS_MIN,
+  PCC_FEE_BPS_MAX,
+} from "./PCCProtocol.js";

@@ -45,7 +45,8 @@ contract DeployScript is Script {
 
         // 3. Deploy a sample escrow (for demo — normally created per-workflow)
         bytes32 cwmId = keccak256("demo-workflow-001");
-        MilestoneEscrow escrow = new MilestoneEscrow(deployer, arbiter, address(usdc), cwmId);
+        // address(0) = standalone mode (no protocol fee). Use PCCProtocol.createEscrow() for production.
+        MilestoneEscrow escrow = new MilestoneEscrow(deployer, arbiter, address(usdc), cwmId, address(0));
         console.log("MilestoneEscrow deployed at:", address(escrow));
 
         vm.stopBroadcast();
