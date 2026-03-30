@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IPGTRForwarder} from "./interfaces/IPGTRForwarder.sol";
+import {IPCCProtocol} from "./interfaces/IPCCProtocol.sol";
 
 /**
  * @title MilestoneEscrow
@@ -61,6 +62,10 @@ contract MilestoneEscrow {
     IERC20 public token;
     bytes32 public cwmId;
 
+    /// @notice The PCCProtocol root contract. Set at deployment (immutable).
+    /// @dev Zero address means no protocol root (standalone / legacy deployment).
+    address public immutable protocolRoot;
+
     Milestone[] public milestones;
     mapping(uint256 => Dispute) public disputes;
 
@@ -106,16 +111,26 @@ contract MilestoneEscrow {
 
     // ── Constructor ──────────────────────────────────────────────────────
 
+    /**
+     * @param _payer      Address that funds the escrow and can add milestones.
+     * @param _arbiter    Address that resolves disputes.
+     * @param _token      ERC-20 token used for payments.
+     * @param _cwmId      Canonical Workflow Model identifier.
+     * @param _protocolRoot PCCProtocol root address. Set to address(0) for standalone/legacy use.
+     *                    When non-zero, a 1.5% (configurable) fee is deducted on release().
+     */
     constructor(
         address _payer,
         address _arbiter,
         address _token,
-        bytes32 _cwmId
+        bytes32 _cwmId,
+        address _protocolRoot
     ) {
         payer = _payer;
         arbiter = _arbiter;
         token = IERC20(_token);
         cwmId = _cwmId;
+        protocolRoot = _protocolRoot;
     }
 
     // ── PGTR Forwarder Management ──────────────────────────────────────
@@ -253,14 +268,41 @@ contract MilestoneEscrow {
 
     /**
      * @notice Release funds to operator after challenge window expires.
+     *
+     * If a protocolRoot is set, deducts the protocol fee from the milestone
+     * payment (not the bond) and transfers it to the fee recipient before
+     * paying the operator. The bond is always returned to the operator in full.
+     *
+     * Fee flow (when protocolRoot is set):
+     *   fee = milestone.amount * protocolRoot.protocolFeeBps() / 10000
+     *   token.transfer(protocolRoot.feeRecipient(), fee)
+     *   token.transfer(operator, milestone.amount - fee + operatorBond)
+     *   protocolRoot.collectFee(token, fee)  // accounting
      */
     function release(uint256 milestoneIndex) external milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
         require(m.status == MilestoneStatus.Attested, "Not attested");
         require(block.timestamp >= m.challengeWindowEnd, "Challenge window open");
 
-        uint256 payout = m.amount + m.operatorBond; // Return bond + payment
-        require(token.transfer(m.operator, payout), "Transfer failed");
+        if (protocolRoot != address(0)) {
+            IPCCProtocol root = IPCCProtocol(protocolRoot);
+            uint256 feeBps = root.protocolFeeBps();
+            uint256 fee = (m.amount * feeBps) / 10000;
+            address recipient = root.feeRecipient();
+
+            // Transfer fee to recipient
+            require(token.transfer(recipient, fee), "Fee transfer failed");
+
+            // Transfer net payment + bond to operator
+            uint256 operatorPayout = m.amount - fee + m.operatorBond;
+            require(token.transfer(m.operator, operatorPayout), "Transfer failed");
+
+            // Accounting callback
+            root.collectFee(address(token), fee);
+        } else {
+            uint256 payout = m.amount + m.operatorBond; // Return bond + payment
+            require(token.transfer(m.operator, payout), "Transfer failed");
+        }
 
         m.status = MilestoneStatus.Released;
         emit MilestoneReleased(milestoneIndex, m.operator, m.amount);

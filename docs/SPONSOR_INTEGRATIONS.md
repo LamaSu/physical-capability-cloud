@@ -274,3 +274,102 @@ This chain gives PCC five guarantees for every job:
 3. The evidence was included in a specific commitment batch (Merkle proof).
 4. The commitment is recorded permanently on a public chain (Starknet anchor).
 5. Access to the evidence is governed by programmable on-chain conditions (Lit Protocol).
+
+---
+
+## NEAR Protocol — Chain Abstraction
+
+### What It Does
+
+NEAR's chain abstraction layer lets agents initiate payments on any chain from any source asset, without managing bridges or cross-chain token approvals. PCC integrates the [1Click API](https://1click.chaindefuser.com/v0/) — a solver network that routes atomic cross-chain swaps using NEAR as the settlement layer. A PCC agent can request a manufacturing job priced in Base USDC and pay for it with NEAR-native USDC in a single API call.
+
+### How PCC Uses It
+
+The flow is:
+
+1. A User or Broker agent determines that an escrow contract on a given destination chain needs funding.
+2. The agent sends a `near_payment_intent` A2A message to the gateway.
+3. The gateway calls `POST /api/near/quote` → 1Click returns an atomic cross-chain quote with output amount, fee, and a validity window.
+4. The agent confirms (or auto-accepts) the quote and calls `POST /api/near/intent` to submit the intent to the solver network.
+5. The gateway polls `GET /api/near/intent/:id` until the status reaches `settled`.
+
+No SDK dependency — the integration uses plain `fetch()` against the 1Click REST API.
+
+### Files
+
+| File | Role |
+|------|------|
+| `packages/gateway/src/routes/near.ts` | 4 REST routes: status, quote, intent, intent status |
+| `packages/gateway/src/contracts/near-client.ts` | 1Click API client with mock mode for testing |
+| `packages/gateway/src/__tests__/near.test.ts` | 25 tests covering all routes + full e2e flow |
+| `packages/a2a/src/types.ts` | `NearPaymentIntentRequest`, `NearPaymentQuoteResult`, `NearPaymentSubmit`, `NearPaymentSettled` |
+
+### Key Code Path
+
+```
+User/Broker Agent: near_payment_intent message
+       │ { workflowId, fromChain, fromAsset, toChain, toAsset, amount }
+       ▼
+POST /api/near/quote
+       │ → 1Click POST /v0/quote
+       │ ← { quoteId, toAmount, estimatedFee, validUntil }
+       ▼
+POST /api/near/intent
+       │ → 1Click POST /v0/intent  (quoteId + workflowId)
+       │ ← { intentId, status: "submitted", txHash }
+       ▼
+GET /api/near/intent/:intentId (poll)
+       │ ← { status: "settled", settlementTxHash }
+       ▼
+escrow on destination chain is funded → job execution begins
+```
+
+### A2A Intent Types
+
+```typescript
+// User agent requests a cross-chain payment
+NearPaymentIntentRequest {
+  type: "near_payment_intent";
+  workflowId: string;
+  fromChain: string;   // "near"
+  fromAsset: string;   // "USDC"
+  toChain: string;     // "base"
+  toAsset: string;     // "USDC"
+  amount: string;      // smallest denomination
+}
+
+// Gateway responds with solver quote
+NearPaymentQuoteResult {
+  type: "near_payment_quote_result";
+  quoteId: string;
+  fromAmount: string;
+  toAmount: string;
+  estimatedFee: string;
+  validUntil: string;
+}
+
+// Agent confirms and submits
+NearPaymentSubmit { type: "near_payment_submit"; quoteId: string; workflowId: string; }
+
+// Gateway confirms settlement
+NearPaymentSettled { type: "near_payment_settled"; intentId: string; status: "settled"; txHash?: string; }
+```
+
+### How to Verify
+
+**Mock mode** (always available):
+```bash
+pnpm --filter @pcc/gateway test
+# Runs near.test.ts — 25 tests covering quote, intent, status, e2e flow
+```
+
+**Live API** (points at real 1Click solver network):
+```bash
+# Check integration status
+curl https://capability.network/api/near/status
+
+# Get a quote (NEAR USDC → Base USDC, 1 USDC = 1_000_000 micro-USDC)
+curl -X POST https://capability.network/api/near/quote \
+  -H "Content-Type: application/json" \
+  -d '{"fromChain":"near","fromAsset":"USDC","toChain":"base","toAsset":"USDC","amount":"1000000"}'
+```

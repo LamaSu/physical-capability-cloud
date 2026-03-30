@@ -160,6 +160,11 @@ export type Intent =
   | ProtocolFailureIntent
   | TrustDowngradeIntent
   | SystemAlertIntent
+  // NEAR Protocol — Cross-Chain Payment Intents
+  | NearPaymentIntentRequest
+  | NearPaymentQuoteResult
+  | NearPaymentSubmit
+  | NearPaymentSettled
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -993,4 +998,66 @@ export interface ErrorIntent {
   code: string;
   message: string;
   retryable: boolean;
+}
+
+// ── NEAR Protocol — Cross-Chain Payment Intents ────────────────────
+//
+// Agents use these intents to request and confirm cross-chain escrow
+// funding via NEAR's 1Click chain abstraction solver network.
+// Flow: near_payment_intent → near_payment_quote_result →
+//       near_payment_submit → near_payment_settled
+
+/** Request a cross-chain payment via NEAR's 1Click chain abstraction */
+export interface NearPaymentIntentRequest {
+  type: "near_payment_intent";
+  /** PCC workflow or escrow ID being funded */
+  workflowId: string;
+  /** Source chain (e.g. "near", "eth", "base") */
+  fromChain: string;
+  /** Source asset (e.g. "USDC", "NEAR") */
+  fromAsset: string;
+  /** Destination chain where escrow lives */
+  toChain: string;
+  /** Destination asset */
+  toAsset: string;
+  /** Amount in source asset smallest denomination */
+  amount: string;
+  /** Optional recipient address on destination chain */
+  recipient?: string;
+}
+
+/** Quote result from the 1Click solver network */
+export interface NearPaymentQuoteResult {
+  type: "near_payment_quote_result";
+  workflowId: string;
+  quoteId: string;
+  fromChain: string;
+  fromAsset: string;
+  toChain: string;
+  toAsset: string;
+  fromAmount: string;
+  toAmount: string;
+  estimatedFee: string;
+  /** ISO8601 — quote expires at this time */
+  validUntil: string;
+  /** Name of the solver that produced this quote */
+  solver?: string;
+}
+
+/** Request to submit a previously-quoted intent */
+export interface NearPaymentSubmit {
+  type: "near_payment_submit";
+  workflowId: string;
+  quoteId: string;
+}
+
+/** Confirmation that an intent was submitted and is being settled */
+export interface NearPaymentSettled {
+  type: "near_payment_settled";
+  workflowId: string;
+  intentId: string;
+  quoteId: string;
+  status: "pending" | "submitted" | "settled" | "failed";
+  txHash?: string;
+  explorerUrl?: string;
 }

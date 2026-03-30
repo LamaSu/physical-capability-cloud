@@ -19,7 +19,8 @@ contract MilestoneEscrowTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC(1_000_000e6); // 1M USDC
-        escrow = new MilestoneEscrow(payer, arbiter, address(usdc), cwmId);
+        // address(0) for protocolRoot = standalone mode, no fee deducted
+        escrow = new MilestoneEscrow(payer, arbiter, address(usdc), cwmId, address(0));
 
         // Distribute tokens
         usdc.mint(payer, 100_000e6);
@@ -213,9 +214,10 @@ contract MilestoneEscrowTest is Test {
         assertEq(uint8(escrow.getMilestone(0).status), 8); // Slashed
 
         // Payer gets refund (100 USDC)
-        // Challenger gets their bond back (5) + operator bond (10)
+        // Challenger gets their bond back (5) + operator bond (10) = 15 total payout
+        // Challenger: started 10000, deposited 5 bond, receives 15 → 10000 - 5 + 15 = 10010
         assertEq(usdc.balanceOf(payer), 100_000e6); // original 100k (refunded)
-        assertEq(usdc.balanceOf(challenger), 10_015e6); // 10k - 5 (bond) + 5 (bond back) + 10 (operator bond)
+        assertEq(usdc.balanceOf(challenger), 10_010e6); // 10k - 5 (bond deposited) + 15 (bond back + operator slash)
     }
 
     function test_dispute_operatorWins() public {
