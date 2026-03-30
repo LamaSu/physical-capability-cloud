@@ -32,10 +32,12 @@ COPY packages/agent-support/package.json packages/agent-support/
 COPY packages/onboard-kit/package.json packages/onboard-kit/
 COPY packages/identity-8004/package.json packages/identity-8004/
 COPY packages/bundler/package.json packages/bundler/
+COPY packages/dht/package.json packages/dht/
+COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # Cache-bust: change this value to force pnpm install to re-run
-ARG CACHE_BUST=4
+ARG CACHE_BUST=5
 RUN pnpm install --frozen-lockfile
 
 # Verify correct @fastify/static version installed (must be 8.x for Fastify 4)
@@ -43,7 +45,7 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
-ARG BUILD_BUST=3
+ARG BUILD_BUST=4
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Build all packages except dashboard and mcp-server (tsc only — turbo handles deps)
 RUN npx turbo build --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --filter='!@pcc/onboard-kit' --concurrency=1
