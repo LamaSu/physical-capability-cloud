@@ -1050,5 +1050,24 @@ export function migrateDatabase(sqlite: Database.Database): void {
       claimed_at TEXT,
       completed_at TEXT
     );
+
+    -- ── Audit Log ────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      actor TEXT,
+      resource_type TEXT,
+      resource_id TEXT,
+      action TEXT NOT NULL,
+      metadata TEXT,        -- JSON blob
+      ip TEXT,
+      user_agent TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS audit_log_event_type ON audit_log(event_type);
+    CREATE INDEX IF NOT EXISTS audit_log_actor ON audit_log(actor);
+    CREATE INDEX IF NOT EXISTS audit_log_resource_type ON audit_log(resource_type);
+    CREATE INDEX IF NOT EXISTS audit_log_timestamp ON audit_log(timestamp);
   `);
 }

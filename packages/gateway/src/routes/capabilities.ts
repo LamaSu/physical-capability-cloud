@@ -1,10 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { getAllTemplates, getRegisteredTypes } from "@pcc/contract-builder";
 import { getRepos } from "../db.js";
+import { pipelineTelemetry } from "../telemetry.js";
 
 export async function capabilityRoutes(app: FastifyInstance) {
   // List all registered capability types (from contract-builder templates)
   app.get("/api/capabilities/types", async () => {
+    pipelineTelemetry.emit("pipeline-" + Date.now(), "discovery", "completed", { metadata: { endpoint: "/api/capabilities/types" } });
     return { types: getRegisteredTypes() };
   });
 
@@ -32,6 +34,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
     try {
       const repos = getRepos();
       const capabilities = repos.capabilities.findAll();
+      pipelineTelemetry.emit("pipeline-" + Date.now(), "discovery", "completed", { metadata: { endpoint: "/api/capabilities", count: capabilities.length } });
       return { capabilities };
     } catch {
       return { capabilities: [] };

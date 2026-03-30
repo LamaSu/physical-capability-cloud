@@ -9,6 +9,8 @@
 import type { FastifyInstance } from "fastify";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
+import { auditService } from "../services/audit-service.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -64,6 +66,17 @@ export async function provisionRoutes(app: FastifyInstance) {
         },
       });
 
+      auditService.log({
+        eventType: "auth.key_provisioned",
+        actor: operatorId,
+        resourceType: "api_key",
+        resourceId: record.id,
+        action: "create",
+        metadata: { name: body.name, capability: body.capability },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      trackServerEvent("api_key_provisioned", { email: body.email, capability: body.capability });
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,

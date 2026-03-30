@@ -34,7 +34,10 @@ export type PipelinePhase =
   | "settlement_complete"
   | "delivery_dispatch"
   | "delivery_pickup"
-  | "delivery_complete";
+  | "delivery_complete"
+  | "operator_register"
+  | "operator_verify"
+  | "dht_query";
 
 export type TelemetryStatus = "started" | "completed" | "failed" | "skipped";
 
@@ -92,6 +95,9 @@ export const PIPELINE_PHASES: PipelinePhase[] = [
   "delivery_dispatch",
   "delivery_pickup",
   "delivery_complete",
+  "operator_register",
+  "operator_verify",
+  "dht_query",
 ];
 
 // ---------------------------------------------------------------------------

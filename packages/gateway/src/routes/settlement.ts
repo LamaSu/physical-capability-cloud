@@ -13,6 +13,7 @@
 import type { FastifyInstance } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import { getRepos } from "../db.js";
+import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { swfAccrue } from "./swf.js";
 import {
@@ -258,6 +259,7 @@ export async function settlementRoutes(app: FastifyInstance) {
 
     try {
       const summary = await flushSettlements();
+      pipelineTelemetry.emit("epoch-" + summary.epochId, "settlement_claim", "completed", { metadata: { epochId: summary.epochId, totalIntents: summary.totalIntents } });
       return {
         epoch: summary.epochId,
         totalIntents: summary.totalIntents,

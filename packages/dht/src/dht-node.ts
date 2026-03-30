@@ -24,6 +24,7 @@ import { DHTTransport, type DHTMessage } from "./transport.js";
 import type { CapabilityQuery } from "./query.js";
 import { rankResults } from "./query.js";
 import { loadBootstrapNodes } from "./bootstrap.js";
+import { dhtTelemetry } from "./telemetry.js";
 
 export interface DHTNodeOpts {
   identity: PeerIdentity;
@@ -75,6 +76,7 @@ export class DHTNode {
     if (this.started) return;
     this.started = true;
     this.registry.startPruning();
+    dhtTelemetry.nodeStarted();
 
     // Start local server
     if (this.port > 0) {
@@ -114,21 +116,29 @@ export class DHTNode {
    * responses within the query timeout.
    */
   async query(filter: CapabilityQuery): Promise<CapabilityAnnouncement[]> {
+    const queryStartMs = Date.now();
+    const filterRecord = filter as Record<string, unknown>;
+    dhtTelemetry.queryStarted(filterRecord);
+
     // Local results
     const localResults = this.registry.query(filter);
 
     // If we have no peers, just return local
     if (this.transport.peerCount === 0) {
-      return rankResults(localResults, filter);
+      const ranked = rankResults(localResults, filter);
+      dhtTelemetry.queryCompleted(ranked.length, Date.now() - queryStartMs);
+      return ranked;
     }
 
     // Broadcast query and collect remote responses
     const queryId = `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let timedOut = false;
     const remoteResults = await new Promise<CapabilityAnnouncement[]>(
       (resolve) => {
         const timer = setTimeout(() => {
           const pending = this.pendingQueries.get(queryId);
           this.pendingQueries.delete(queryId);
+          timedOut = true;
           resolve(pending?.results ?? []);
         }, this.queryTimeoutMs);
 
@@ -143,6 +153,10 @@ export class DHTNode {
       },
     );
 
+    if (timedOut) {
+      dhtTelemetry.queryTimeout(filterRecord);
+    }
+
     // Merge local + remote, deduplicate by kernelDid
     const seen = new Set<string>();
     const merged: CapabilityAnnouncement[] = [];
@@ -153,7 +167,11 @@ export class DHTNode {
       }
     }
 
-    return rankResults(merged, filter);
+    const ranked = rankResults(merged, filter);
+    if (!timedOut) {
+      dhtTelemetry.queryCompleted(ranked.length, Date.now() - queryStartMs);
+    }
+    return ranked;
   }
 
   /** Get known peer identities (from connected transport peers) */
@@ -192,6 +210,7 @@ export class DHTNode {
     this.registry.stopPruning();
     await this.transport.close();
     this.seenAnnouncements.clear();
+    dhtTelemetry.nodeStopped();
   }
 
   /**
@@ -238,7 +257,10 @@ export class DHTNode {
     const key = announcementKey(msg.announcement);
 
     // Dedup: skip if we've already seen this announcement
-    if (this.seenAnnouncements.has(key)) return;
+    if (this.seenAnnouncements.has(key)) {
+      dhtTelemetry.gossipDropped(key, "already_seen");
+      return;
+    }
     this.seenAnnouncements.add(key);
 
     // Evict old seen keys to prevent unbounded growth
@@ -265,6 +287,9 @@ export class DHTNode {
         { type: "announce", announcement: msg.announcement, ttl: msg.ttl - 1 },
         peerId, // exclude the sender
       );
+      dhtTelemetry.gossipForwarded(key, msg.ttl - 1);
+    } else {
+      dhtTelemetry.gossipDropped(key, "ttl_exhausted");
     }
   }
 

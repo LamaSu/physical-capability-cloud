@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { getStore } from "../db.js";
+import { pipelineTelemetry } from "../telemetry.js";
 import { schema, eq } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
@@ -114,6 +115,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         ? resolver.resolve(template, session.selections)
         : null;
 
+      pipelineTelemetry.emit(sessionId, "negotiation", "started", { metadata: { kernelId: body.kernelId, capabilityType: body.capabilityType } });
       return {
         session,
         resolvedOptions,

@@ -524,6 +524,9 @@ importers:
       fastify:
         specifier: ^4.26.0
         version: 4.29.1
+      posthog-node:
+        specifier: ^4.2.0
+        version: 4.18.0
       uuid:
         specifier: ^9.0.0
         version: 9.0.1
@@ -6550,6 +6553,10 @@ packages:
 
   posthog-js@1.363.1:
     resolution: {integrity: sha512-iaDtRxCs/FiB+RXe83uo7RZXgpLlyB6qFoNHl3bNMgRCgrPI2nkzx2m9Va1l30HHl/zA1kPOXSy2/tZC5Ql5kg==}
+
+  posthog-node@4.18.0:
+    resolution: {integrity: sha512-XROs1h+DNatgKh/AlIlCtDxWzwrKdYDb2mOs58n4yN8BkGN9ewqeQwG5ApS4/IzwCb7HPttUkOVulkYatd2PIw==}
+    engines: {node: '>=15.0.0'}
 
   preact@10.29.0:
     resolution: {integrity: sha512-wSAGyk2bYR1c7t3SZ3jHcM6xy0lcBcDel6lODcs9ME6Th++Dx2KU+6D3HD8wMMKGA8Wpw7OMd3/4RGzYRpzwRg==}
@@ -16283,6 +16290,12 @@ snapshots:
       preact: 10.29.0
       query-selector-shadow-dom: 1.0.1
       web-vitals: 5.1.0
+
+  posthog-node@4.18.0:
+    dependencies:
+      axios: 1.13.6(debug@4.4.3)
+    transitivePeerDependencies:
+      - debug
 
   preact@10.29.0: {}
 

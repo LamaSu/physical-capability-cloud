@@ -66,4 +66,5 @@ export {
   StoryRepository,
   SWFRepository,
   ApiKeyRepository,
+  AuditLogRepository,
 } from "./repositories/index.js";

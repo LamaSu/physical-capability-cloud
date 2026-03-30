@@ -1,6 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DocumentAnalysisResult, MachineRegistration } from "@pcc/spec";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
+import { auditService } from "../services/audit-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -74,6 +77,18 @@ export async function onboardRoutes(app: FastifyInstance) {
       submittedAt: new Date().toISOString(),
     };
     registrations.push(registration);
+    pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
+    trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
+    auditService.log({
+      eventType: "operator.registered",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? registration.operator?.walletAddress,
+      resourceType: "registration",
+      resourceId: registration.id,
+      action: "create",
+      metadata: { name: registration.name, category: registration.category },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return { status: "ok", registration };
   });
 
@@ -98,6 +113,16 @@ export async function onboardRoutes(app: FastifyInstance) {
     }
     reg.status = "approved";
     reg.approvedAt = new Date().toISOString();
+    auditService.log({
+      eventType: "operator.approved",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId,
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "approve",
+      metadata: { name: reg.name },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return { registration: reg, approved: true };
   });
 
@@ -112,6 +137,16 @@ export async function onboardRoutes(app: FastifyInstance) {
     reg.status = "rejected";
     (reg as unknown as Record<string, unknown>).rejectionReason = body?.reason ?? "No reason provided";
     (reg as unknown as Record<string, unknown>).rejectedAt = new Date().toISOString();
+    auditService.log({
+      eventType: "operator.rejected",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId,
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "reject",
+      metadata: { name: reg.name, reason: body?.reason },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return { registration: reg, rejected: true };
   });
 
@@ -242,6 +277,8 @@ export async function onboardRoutes(app: FastifyInstance) {
     ext.evidenceBundleHash = evidence.bundleHash ?? null;
     ext.evidenceIpfsCid = evidence.ipfsCid ?? null;
 
+    pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true } });
+    trackServerEvent("operator_proved", { proofCount: proofs.length });
     return {
       registration: reg,
       autoApproved: true,

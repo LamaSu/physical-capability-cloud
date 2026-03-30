@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { Address } from "@pcc/spec";
 import { encryptionService, litEncryptionService, getEvidenceStorage } from "../services.js";
+import { auditService } from "../services/audit-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
 import type { LitAuthSig } from "@pcc/kernel";
 import { kernelKeyStore } from "@pcc/kernel";
 import { getRepos } from "../db.js";
@@ -96,6 +98,17 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       }
       const storage = await getEvidenceStorage();
       const result = await storage.archiveBundle(bundle);
+      pipelineTelemetry.emit(bundle.jobId ?? "pipeline-" + Date.now(), "evidence_archive", "completed", { metadata: { cid: result.cid } });
+      auditService.log({
+        eventType: "evidence.archived",
+        actor: (req as any).operatorId ?? (req as any).apiKeyId,
+        resourceType: "evidence",
+        resourceId: bundle.id ?? bundle.jobId,
+        action: "archive",
+        metadata: { cid: result.cid, metadataCid: result.metadataCid },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
       return { archived: true, cid: result.cid, metadataCid: result.metadataCid };
     } catch (err) {
       const message = err instanceof Error ? err.message : "Archive failed";
@@ -122,6 +135,16 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       repos.encryption.updateEncryptedBundle(encBundle.id, {
         ipfsCid: result.cid,
         ipfsMetadataCid: result.metadataCid,
+      });
+      auditService.log({
+        eventType: "evidence.archived",
+        actor: (req as any).operatorId ?? (req as any).apiKeyId,
+        resourceType: "evidence",
+        resourceId: req.params.bundleId,
+        action: "archive",
+        metadata: { cid: result.cid, metadataCid: result.metadataCid, encrypted: true },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
       });
       return { archived: true, cid: result.cid, metadataCid: result.metadataCid };
     } catch (err) {

@@ -12,6 +12,9 @@ import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { auditService } from "../services/audit-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 // ---------------------------------------------------------------------------
 // Body / Params interfaces
@@ -110,6 +113,18 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
         deviceId,
         gcodeHash,
         assuranceTier,
+      });
+      pipelineTelemetry.emit(result.jobId, "job_submit", "completed", { metadata: { kernelId, stepId, deviceId: result.deviceId } });
+      trackServerEvent("job_submitted", { kernelId, capabilityType: capabilityId }, (req as any).operatorId);
+      auditService.log({
+        eventType: "job.submitted",
+        actor: (req as any).operatorId ?? (req as any).apiKeyId,
+        resourceType: "job",
+        resourceId: result.jobId,
+        action: "create",
+        metadata: { kernelId, stepId, deviceId: result.deviceId, assuranceTier },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
       });
       return { jobId: result.jobId, deviceId: result.deviceId, status: result.status };
     } catch (err) {

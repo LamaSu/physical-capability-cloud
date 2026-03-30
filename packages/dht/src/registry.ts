@@ -8,6 +8,7 @@
 import type { CapabilityAnnouncement } from "@pcc/spec";
 import type { CapabilityQuery } from "./query.js";
 import { matchesQuery } from "./query.js";
+import { dhtTelemetry } from "./telemetry.js";
 
 export interface StoredAnnouncement {
   announcement: CapabilityAnnouncement;
@@ -56,6 +57,10 @@ export class AnnouncementRegistry {
       expiresAt: now + ttlMs,
       hops,
     });
+    dhtTelemetry.announcementReceived(
+      announcement.kernelDid,
+      announcement.capabilities.map((c) => c.type),
+    );
   }
 
   /** Query announcements using a CapabilityQuery filter */
@@ -77,8 +82,12 @@ export class AnnouncementRegistry {
     for (const [key, stored] of this.announcements) {
       if (stored.expiresAt <= now) {
         this.announcements.delete(key);
+        dhtTelemetry.announcementExpired(key);
         pruned++;
       }
+    }
+    if (pruned > 0) {
+      dhtTelemetry.registryPruned(pruned);
     }
     return pruned;
   }
