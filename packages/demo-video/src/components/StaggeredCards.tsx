@@ -54,7 +54,7 @@ export const StaggeredCards: React.FC<{
             <div
               style={{
                 fontFamily: FONTS.brutalist,
-                fontSize: 44,
+                fontSize: 94,
                 fontWeight: 700,
                 color: card.color || COLORS.accent1,
                 fontVariantNumeric: "tabular-nums",
@@ -67,7 +67,7 @@ export const StaggeredCards: React.FC<{
             <div
               style={{
                 fontFamily: FONTS.swiss,
-                fontSize: 11,
+                fontSize: 60,
                 fontWeight: 600,
                 color: COLORS.muted,
                 textTransform: "uppercase",

@@ -19,7 +19,7 @@ export const TypewriterText: React.FC<{
   text,
   delay = 0,
   charsPerFrame = 0.8,
-  fontSize = 24,
+  fontSize = 40,
   showCursor = true,
   cursorColor = COLORS.discord,
   color = COLORS.fg,

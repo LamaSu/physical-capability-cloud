@@ -2,12 +2,14 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
-  "version": "2.1.0",
+  "version": "2.2.0",
+  "toolCount": 179,
+  "lastUpdated": "2026-03-28T00:00:00Z",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
   "api_base": "https://capability.network",
 
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers — query the distributed gossip network for capabilities. Public, no auth needed.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration — manage operator equipment registrations. Two paths to go live:\n- Manual: submitted → approved → active (requires admin review)\n- Fast-track: submitted → prove_registration (submit evidence bundle) → auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers — query the distributed gossip network for capabilities. Public, no auth needed.\npcc_dht_announce — broadcast capabilities to all connected peers.\npcc_dht_metrics — DHT telemetry counters and recent events.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration — manage operator equipment registrations. Two paths to go live:\n- Manual: submitted → approved → active (requires admin review)\n- Fast-track: submitted → prove_registration (submit evidence bundle) → auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Equipment Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Supplies & Materials Marketplace\nmarketplace_categories, marketplace_list_listings, marketplace_get_listing, marketplace_create_listing, marketplace_update_listing, marketplace_delete_listing, marketplace_place_order, marketplace_list_orders, marketplace_get_order — buy and sell raw materials, lab reagents, tooling, consumables, and other physical production inputs.\n\n### NEAR Cross-Chain Payments\nnear_status, near_quote, near_intent, near_intent_status — fund escrow contracts using any asset on any chain via NEAR 1Click solver network (chaindefuser.com).\n\n### PCCProtocol (On-Chain)\nprotocol_state, protocol_fee, protocol_token_fees, protocol_escrow_fees, protocol_create_escrow — read protocol fee rates and create factory-deployed escrow contracts.\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
 
   "tools": [
     {
@@ -1952,28 +1954,6 @@
     },
 
     {
-      "name": "pcc_dht_query",
-      "description": "Query the distributed hash table for capabilities matching your criteria. Returns ranked results from the gossip network. Works without auth — discovery is public.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "type": { "type": "string", "description": "Capability type to search for (e.g. 'fdm', 'document-printing', 'cnc-3axis')" },
-          "materials": { "type": "string", "description": "Comma-separated materials filter (e.g. 'PLA,PETG')" },
-          "maxPrice": { "type": "number", "description": "Maximum price filter (USDC)" },
-          "limit": { "type": "number", "description": "Max results to return (default 10)" }
-        },
-        "required": []
-      },
-      "endpoint": { "method": "GET", "path": "/api/dht/query" }
-    },
-    {
-      "name": "pcc_dht_peers",
-      "description": "List peers connected to the DHT gossip network and registry statistics. Shows how many operators are announcing capabilities and network health.",
-      "input_schema": { "type": "object", "properties": {}, "required": [] },
-      "endpoint": { "method": "GET", "path": "/api/dht/peers" }
-    },
-
-    {
       "name": "approve_registration",
       "description": "Approve a submitted machine registration. Moves it from 'submitted' to 'approved' status, enabling the operator to activate and start accepting jobs.",
       "input_schema": {
@@ -2069,6 +2049,248 @@
         "required": ["registrationId"]
       },
       "endpoint": { "method": "GET", "path": "/api/onboard/registrations/{registrationId}" }
+    },
+
+    {
+      "name": "near_status",
+      "description": "Get NEAR Protocol chain-abstraction integration status. Returns supported chains (near, eth, base, arbitrum, optimism, polygon), supported assets (USDC, USDT, NEAR, ETH, WBTC), and capability flags. Use this to confirm cross-chain settlement is available before requesting quotes.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/near/status" }
+    },
+    {
+      "name": "near_quote",
+      "description": "Get a cross-chain payment quote from the NEAR 1Click solver network (chaindefuser.com). Provides optimal routing and fee estimates for funding PCC escrow contracts using any source asset on any supported chain. Call near_status first to confirm available chains/assets.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "fromChain": { "type": "string", "description": "Source chain (e.g. 'eth', 'base', 'near', 'arbitrum')" },
+          "fromAsset": { "type": "string", "description": "Source asset symbol (e.g. 'USDC', 'ETH', 'NEAR')" },
+          "toChain": { "type": "string", "description": "Destination chain (e.g. 'base', 'eth')" },
+          "toAsset": { "type": "string", "description": "Destination asset symbol (e.g. 'USDC')" },
+          "amount": { "type": "string", "description": "Amount as an integer string in the smallest denomination (e.g. '1000000' for 1 USDC with 6 decimals)" },
+          "recipient": { "type": "string", "description": "Recipient address on the destination chain (optional)" }
+        },
+        "required": ["fromChain", "fromAsset", "toChain", "toAsset", "amount"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/near/quote" }
+    },
+    {
+      "name": "near_intent",
+      "description": "Submit a cross-chain payment intent to the NEAR 1Click solver network. Creates a signed intent that routes the payment atomically across chains. Call near_quote first to obtain a quoteId. Intents typically settle within 30-60 seconds — poll near_intent_status to track progress.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "quoteId": { "type": "string", "description": "Quote ID returned from near_quote" },
+          "workflowId": { "type": "string", "description": "PCC workflow or job ID this payment is for" },
+          "recipient": { "type": "string", "description": "Recipient address on the destination chain (optional)" }
+        },
+        "required": ["quoteId", "workflowId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/near/intent" }
+    },
+    {
+      "name": "near_intent_status",
+      "description": "Check the settlement status of a submitted NEAR 1Click cross-chain payment intent. Statuses progress: pending → submitted → settled | failed. Returns txHash and explorerUrl when settled.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "intentId": { "type": "string", "description": "Intent ID returned from near_intent" }
+        },
+        "required": ["intentId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/near/intent/{intentId}" }
+    },
+
+    {
+      "name": "protocol_state",
+      "description": "Read the PCCProtocol root contract state: current fee rate, total protocol fees collected, total escrow count, and registry addresses. Requires PCC_PROTOCOL_ADDRESS to be configured on the gateway.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/protocol/state" }
+    },
+    {
+      "name": "protocol_fee",
+      "description": "Calculate the protocol fee for a given USDC amount (6-decimal units). Returns the fee, the net amount after fee, and formatted versions of both. Use this before building escrow contracts to understand the true cost.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "amount": { "type": "string", "description": "Amount as a BigInt string in USDC 6-decimal units (e.g. '1000000000' = 1000 USDC)" }
+        },
+        "required": ["amount"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocol/fee/{amount}" }
+    },
+    {
+      "name": "protocol_token_fees",
+      "description": "Get total protocol fees collected for a specific ERC-20 token address across all escrows. Returns raw wei amount and human-readable formatted value.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tokenAddress": { "type": "string", "description": "ERC-20 token contract address (0x...)" }
+        },
+        "required": ["tokenAddress"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocol/token/{tokenAddress}/fees" }
+    },
+    {
+      "name": "protocol_escrow_fees",
+      "description": "Get protocol fees collected from a specific escrow contract. Also returns whether the escrow was deployed via the protocol factory. Useful for auditing fee flows.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "escrowAddress": { "type": "string", "description": "Escrow contract address (0x...)" }
+        },
+        "required": ["escrowAddress"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/protocol/escrow/{escrowAddress}/fees" }
+    },
+    {
+      "name": "protocol_create_escrow",
+      "description": "Create a new MilestoneEscrow contract via the PCCProtocol factory on-chain. Protocol-deployed escrows have fee collection and registry tracking built in. Requires PCC_GATEWAY_PRIVATE_KEY write access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "payer": { "type": "string", "description": "Payer EVM address (0x...)" },
+          "arbiter": { "type": "string", "description": "Arbiter EVM address (0x...) — resolves disputes" },
+          "token": { "type": "string", "description": "ERC-20 token address for payment (0x...)" },
+          "cwmId": { "type": "string", "description": "Capability Work Module ID as a 32-byte hex string (0x + 64 chars)" }
+        },
+        "required": ["payer", "arbiter", "token", "cwmId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/protocol/create-escrow" }
+    },
+
+    {
+      "name": "pcc_dht_metrics",
+      "description": "Get a snapshot of DHT telemetry counters and recent events. Returns message counts, peer connection stats, query/announce rates, and a list of the last 50 metric events. Use for monitoring network health.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/dht/metrics" }
+    },
+
+    {
+      "name": "marketplace_categories",
+      "description": "List all supplies and materials marketplace categories with the count of active listings in each. Categories cover the full spectrum of physical production inputs: raw metals, plastics, lab reagents, consumables, electronics, tooling, and more.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/categories" }
+    },
+    {
+      "name": "marketplace_list_listings",
+      "description": "Search and filter supplies/materials marketplace listings. Operators buy raw materials here to fulfill capability contracts. Filter by category, in-stock status, location, or free-text query.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "category": { "type": "string", "description": "Filter by category: raw-metals, plastics-polymers, lab-reagents, lab-consumables, electronics, chemicals, biologicals, tooling, packaging, calibration, safety, other" },
+          "query": { "type": "string", "description": "Full-text search across name, description, and tags" },
+          "inStock": { "type": "string", "enum": ["true", "false"], "description": "Filter to only in-stock listings" },
+          "location": { "type": "string", "description": "Filter by region (e.g. 'US-Midwest', 'EU-West', 'Asia-Pacific')" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/listings" }
+    },
+    {
+      "name": "marketplace_get_listing",
+      "description": "Get full details of a specific supplies/materials marketplace listing by ID. Returns pricing, availability, lead time, location, and tags.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Listing ID (e.g. 'lst-al6061-bar')" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/listings/{id}" }
+    },
+    {
+      "name": "marketplace_create_listing",
+      "description": "Create a new supplies/materials listing in the marketplace. Suppliers post available raw materials, lab reagents, tooling, or consumables for other operators to purchase.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "sellerId": { "type": "string", "description": "Supplier entity ID" },
+          "category": { "type": "string", "description": "Category: raw-metals, plastics-polymers, lab-reagents, lab-consumables, electronics, chemicals, biologicals, tooling, packaging, calibration, safety, other" },
+          "name": { "type": "string", "description": "Product name" },
+          "description": { "type": "string", "description": "Detailed product description" },
+          "unit": { "type": "string", "description": "Unit of sale: kg, L, each, box, plate, etc." },
+          "pricePerUnit": { "type": "number", "description": "Price per unit in USDC" },
+          "minOrder": { "type": "number", "description": "Minimum order quantity" },
+          "maxOrder": { "type": "number", "description": "Maximum order quantity" },
+          "inStock": { "type": "boolean", "description": "Whether the item is currently available" },
+          "leadTimeDays": { "type": "number", "description": "Estimated lead time in business days" },
+          "location": { "type": "string", "description": "Supplier region or country" },
+          "tags": { "type": "array", "items": { "type": "string" }, "description": "Search tags" }
+        },
+        "required": ["category", "name", "pricePerUnit", "unit"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/marketplace/listings" }
+    },
+    {
+      "name": "marketplace_update_listing",
+      "description": "Update an existing supplies/materials listing (price, stock status, description, etc.). Pass only the fields you want to change.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Listing ID to update" },
+          "pricePerUnit": { "type": "number", "description": "New price per unit in USDC" },
+          "inStock": { "type": "boolean", "description": "Stock availability" },
+          "description": { "type": "string", "description": "Updated description" },
+          "leadTimeDays": { "type": "number", "description": "Updated lead time in days" },
+          "tags": { "type": "array", "items": { "type": "string" }, "description": "Updated search tags" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "PUT", "path": "/api/marketplace/listings/{id}" }
+    },
+    {
+      "name": "marketplace_delete_listing",
+      "description": "Remove a supplies/materials listing from the marketplace. The listing is immediately hidden from search results.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Listing ID to remove" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "DELETE", "path": "/api/marketplace/listings/{id}" }
+    },
+    {
+      "name": "marketplace_place_order",
+      "description": "Place a purchase order for supplies or materials. Calculates total price automatically (quantity × pricePerUnit). Returns an order with 'pending' status. Optionally links to an on-chain escrow for trustless settlement.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "listingId": { "type": "string", "description": "Listing ID to order from" },
+          "quantity": { "type": "number", "description": "Quantity to order (must meet listing minOrder/maxOrder)" },
+          "buyerId": { "type": "string", "description": "Buyer entity ID (operator kernel ID, etc.)" },
+          "escrowAddress": { "type": "string", "description": "Optional on-chain escrow address for trustless settlement" }
+        },
+        "required": ["listingId", "quantity"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/marketplace/orders" }
+    },
+    {
+      "name": "marketplace_list_orders",
+      "description": "List marketplace supply orders. Filter by buyerId, sellerId, or status. Returns order history with pricing and status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "buyerId": { "type": "string", "description": "Filter to orders placed by this buyer" },
+          "sellerId": { "type": "string", "description": "Filter to orders received by this seller" },
+          "status": { "type": "string", "enum": ["pending", "confirmed", "shipped", "delivered", "cancelled"], "description": "Filter by order status" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/orders" }
+    },
+    {
+      "name": "marketplace_get_order",
+      "description": "Get details of a specific supply order including the associated listing details, quantity, total price, status, and optional escrow address.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Order ID (e.g. 'ord-demo-001')" }
+        },
+        "required": ["id"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/marketplace/orders/{id}" }
     }
   ],
 

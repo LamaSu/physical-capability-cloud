@@ -1,412 +1,335 @@
 /**
- * S04_Circuit — "The Living Pipeline"
+ * S04_AgentNegotiation — "THE MARKET"
  *
- * 870 frames (29 seconds). Hero scene. The machine revealed.
+ * 870 frames (29 seconds). The longest scene. A2A protocol in action.
+ * Target: David Sneider, Elliot Braem, Eshan Chordia (AI agent judges).
  *
- * Frame 0-20:   Title whispers in (Expressive thin — restraint before power).
- * Frame 20-120: Six phase cards SLAM in with 15-frame stagger (fast, aggressive).
- * Frame 60-150: SVG connectors draw at 2x speed between nodes.
- * Frame 160:    LIGHT PULSE travels through all 6 nodes — 4 frames each.
- *               Each node's glow SPIKES as the pulse passes.
- * Frame 200:    Glow ripple — faster, more aggressive (4-frame stagger).
- * Frame 300:    Three key insights WHIP UP from bottom.
- * Frame 500+:   Code fragments scroll slowly in background (TypeScript texture).
- * Frame 830:    Everything dims for transition.
+ * Frame 0-15:    "COMPETITIVE BIDDING" SLAMS in — Monument, 56px, accent2.
+ *                "34 typed A2A intents" label below, Swiss muted.
+ * Frame 25-60:   3 operator cards stagger in (12-frame apart).
+ *                Surface panels: name (Swiss semibold 16px), capability (Brutalist 12px).
+ *                PulseIndicators: green, blue, discord.
+ * Frame 70-700:  TerminalLog — NEGOTIATION_LOG, framesPerEntry: 55 (slow, deliberate).
+ * Frame 720+:    Status bar — Brutalist, small. 3 PulseIndicator dots.
+ * Frame 750:     "Zero middlemen. Pure market-driven pricing." — Editorial italic,
+ *                accent1, 24px. The Brad Holden line.
+ * Frame 830:     Dim to black over 40 frames.
  *
- * Axiom I: Phases are the heroes. Title whispers to let them speak.
- * Axiom II: ESCROW (index 2) has discord border. The "lock" moment stands apart.
- * Axiom III: Sequential reveal → pulse → ripple → insights. Layered time.
- *
- * Voices: Expressive thin (title), Monument (phase names), Swiss (descriptions, insights)
+ * Voices: Monument (title), Swiss (operator names, label), Brutalist (capabilities, status),
+ *         Editorial (closing line)
  */
 import React from "react";
 import {
   useCurrentFrame,
   useVideoConfig,
   AbsoluteFill,
-  spring,
   interpolate,
   Easing,
 } from "remotion";
-import { noise2D } from "@remotion/noise";
 import {
   COLORS,
   FONTS,
-  SIX_PHASES,
-  CODE_FRAGMENTS,
+  NEGOTIATION_LOG,
+  slamScale,
   slamSpring,
   smoothSpring,
-  fadeSlideUp,
-  whipUp,
   flashBurst,
   beatPulse,
+  whipUp,
 } from "../lib";
-import { PulseIndicator } from "../components/PulseIndicator";
+import { TerminalLog, PulseIndicator } from "../components";
 
-const NODE_STAGGER = 15; // frames between each node (was 50)
+// ─── Operator data ────────────────────────────────────────────────────────────
+const OPERATORS = [
+  {
+    name: "BioLab Alpha",
+    capability: "HPLC · 99.2% PURITY",
+    dotColor: COLORS.emerald,
+  },
+  {
+    name: "MachineShop Beta",
+    capability: "CNC · ±0.01MM",
+    dotColor: COLORS.accent2,
+  },
+  {
+    name: "CourierNet Gamma",
+    capability: "SAME-DAY DELIVERY",
+    dotColor: COLORS.discord,
+  },
+] as const;
 
-const PhaseCard: React.FC<{
-  phase: (typeof SIX_PHASES)[number];
-  index: number;
-}> = ({ phase, index }) => {
+// ─── OperatorCard ─────────────────────────────────────────────────────────────
+const OperatorCard: React.FC<{
+  name: string;
+  capability: string;
+  dotColor: string;
+  delay: number;
+}> = ({ name, capability, dotColor, delay }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const nodeDelay = 20 + index * NODE_STAGGER;
-  const progress = slamSpring(frame, fps, nodeDelay);
-  const enterScale = interpolate(progress, [0, 1], [1.8, 1]); // slam from 1.8x
-  const enterOpacity = Math.min(progress * 4, 1);
+  const progress = smoothSpring(frame, fps, delay);
+  const opacity = interpolate(progress, [0, 1], [0, 1]);
+  const y = interpolate(progress, [0, 1], [20, 0]);
 
-  // Light pulse — travels through at frame 160 + index*4
-  const pulseFrame = 160 + index * 4;
-  const pulseFlash = flashBurst(frame, pulseFrame, 6);
-
-  // Glow ripple at frame 200 + index*4
-  const rippleDelay = 200 + index * 4;
-  const ripple = spring({
-    frame: frame - rippleDelay,
-    fps,
-    config: { stiffness: 600, damping: 10 },
-    durationInFrames: 25,
-  });
-  const rippleGlow = interpolate(ripple, [0, 0.4, 1], [0, 1, 0.15]);
-
-  // Continuous idle glow
-  const idleGlow =
-    frame > nodeDelay + 12
-      ? 0.3 + noise2D(`glow-${index}`, 0, (frame / fps) * 0.5) * 0.2
-      : 0;
-
-  const totalGlow = Math.max(idleGlow, rippleGlow, pulseFlash);
-
-  // Discord override for ESCROW (index 2)
-  const isEscrow = index === 2;
-  const borderColor = isEscrow ? COLORS.discord : phase.color;
-  const glowColor = isEscrow ? COLORS.discord : phase.color;
+  const isDiscord = dotColor === COLORS.discord;
 
   return (
     <div
       style={{
-        opacity: enterOpacity,
-        transform: `scale(${enterScale})`,
+        opacity,
+        transform: `translateY(${y}px)`,
+        padding: "14px 18px",
+        background: COLORS.bg.surface,
+        border: `1px solid ${isDiscord ? COLORS.discord + "55" : COLORS.bg.border}`,
+        borderRadius: 10,
         display: "flex",
-        flexDirection: "column",
         alignItems: "center",
         gap: 12,
-        flex: 1,
-        maxWidth: 220,
+        minWidth: 240,
+        boxShadow: isDiscord
+          ? `0 0 16px rgba(248,113,113,0.12)`
+          : `0 0 12px rgba(148,184,255,0.06)`,
       }}
     >
-      <div
-        style={{
-          width: "100%",
-          padding: "18px 12px 16px",
-          background: COLORS.bg.surface,
-          border: `1px solid ${borderColor}${Math.round((0.3 + totalGlow * 0.7) * 255).toString(16).padStart(2, "0")}`,
-          borderRadius: 12,
-          boxShadow: `
-            0 0 ${12 + totalGlow * 36}px ${glowColor}${Math.round(totalGlow * 180).toString(16).padStart(2, "0")},
-            inset 0 1px 0 rgba(255,255,255,0.04)
-          `,
-          textAlign: "center",
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
-        {/* Radial bg glow */}
-        <div
+      <PulseIndicator color={dotColor} size={9} delay={delay + 4} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <span
           style={{
-            position: "absolute",
-            inset: 0,
-            background: `radial-gradient(ellipse at center, ${glowColor}${Math.round(totalGlow * 40).toString(16).padStart(2, "0")} 0%, transparent 70%)`,
-            pointerEvents: "none",
+            fontFamily: FONTS.swiss,
+            fontSize: 60,
+            fontWeight: 600,
+            color: COLORS.fg,
+            letterSpacing: "0.01em",
           }}
-        />
-
-        {/* Index badge */}
-        <div
+        >
+          {name}
+        </span>
+        <span
           style={{
-            position: "absolute",
-            top: 6,
-            right: 8,
             fontFamily: FONTS.brutalist,
-            fontSize: 14,
-            color: borderColor,
-            opacity: 0.5,
-            letterSpacing: "0.05em",
+            fontSize: 60,
+            fontWeight: 400,
+            color: isDiscord ? COLORS.discord : COLORS.muted,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase" as const,
           }}
         >
-          {String(index + 1).padStart(2, "0")}
-        </div>
-
-        {/* Pulse */}
-        <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}>
-          <PulseIndicator
-            color={isEscrow ? COLORS.discord : phase.color}
-            size={8}
-            delay={nodeDelay + 3}
-          />
-        </div>
-
-        {/* Phase name — Monument */}
-        <div
-          style={{
-            fontFamily: FONTS.monument,
-            fontSize: 22,
-            fontWeight: 700,
-            color: borderColor,
-            letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            position: "relative",
-            lineHeight: 1.2,
-          }}
-        >
-          {phase.name}
-        </div>
-      </div>
-
-      {/* Description — Swiss */}
-      <div
-        style={{
-          fontFamily: FONTS.swiss,
-          fontSize: 16,
-          color: COLORS.muted,
-          textAlign: "center",
-          lineHeight: 1.4,
-          maxWidth: 200,
-        }}
-      >
-        {phase.desc}
+          {capability}
+        </span>
       </div>
     </div>
   );
 };
 
-/** SVG connector — draws at 2x speed */
-const Connector: React.FC<{ fromIndex: number; color: string }> = ({
-  fromIndex,
-  color,
-}) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const connDelay = 20 + fromIndex * NODE_STAGGER + 8;
-  const progress = smoothSpring(frame, fps, connDelay, 10); // faster draw
-  const lineLen = 56;
-  const dashOffset = interpolate(progress, [0, 1], [lineLen, 0]);
-
-  return (
-    <div
-      style={{
-        flex: "0 0 56px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        paddingBottom: 48,
-      }}
-    >
-      <svg width={56} height={10} overflow="visible">
-        <line x1={0} y1={5} x2={56} y2={5} stroke={`${color}2a`} strokeWidth={1.5} />
-        <line
-          x1={0} y1={5} x2={56} y2={5}
-          stroke={color}
-          strokeWidth={1.5}
-          strokeDasharray={lineLen}
-          strokeDashoffset={dashOffset}
-          strokeLinecap="round"
-        />
-        <polygon points="48,1.5 56,5 48,8.5" fill={color} opacity={progress} />
-      </svg>
-    </div>
-  );
-};
-
-/** Key insights — WHIP UP from bottom, not gentle fade */
-const KeyInsights: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const insights = [
-    "AI agents discover & negotiate automatically",
-    "Milestone escrow locks funds before work starts",
-    "Cryptographic evidence proves every step",
-  ];
-
-  return (
-    <div style={{ display: "flex", gap: 18, justifyContent: "center", flexWrap: "wrap", padding: "0 20px" }}>
-      {insights.map((text, i) => {
-        const delay = 300 + i * 12;
-        const { opacity, translateY } = whipUp(frame, fps, delay, 80);
-
-        return (
-          <div
-            key={i}
-            style={{
-              opacity,
-              transform: `translateY(${translateY}px)`,
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "10px 18px",
-              background: "rgba(255,255,255,0.03)",
-              border: `1px solid rgba(255,255,255,0.08)`,
-              borderRadius: 40,
-            }}
-          >
-            <div
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: COLORS.emerald,
-                boxShadow: `0 0 7px rgba(52,211,153,0.7)`,
-                flexShrink: 0,
-              }}
-            />
-            <span
-              style={{
-                fontFamily: FONTS.swiss,
-                fontSize: 22,
-                color: COLORS.fg,
-                fontWeight: 400,
-              }}
-            >
-              {text}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-/** Scrolling code fragments — background texture */
-const CodeTexture: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const codeOpacity = interpolate(frame, [500, 540], [0, 0.08], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  if (codeOpacity <= 0) return null;
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        overflow: "hidden",
-        opacity: codeOpacity,
-        pointerEvents: "none",
-      }}
-    >
-      {CODE_FRAGMENTS.map((line, i) => {
-        const y = ((i * 68 - (frame * 0.3)) % 1200) + 100;
-        const x = 100 + (i % 3) * 600;
-        return (
-          <div
-            key={i}
-            style={{
-              position: "absolute",
-              top: y,
-              left: x,
-              fontFamily: FONTS.brutalist,
-              fontSize: 18,
-              color: COLORS.accent2,
-              whiteSpace: "nowrap",
-              opacity: 0.4 + noise2D(`code-${i}`, 0, (frame / fps) * 0.1) * 0.3,
-            }}
-          >
-            {line}
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
+// ─── Main scene ───────────────────────────────────────────────────────────────
 export const S04_AgentNegotiation: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const titleProgress = smoothSpring(frame, fps, 0);
-  const titleY = interpolate(titleProgress, [0, 1], [15, 0]);
+  // Title SLAM
+  const titleProgress = slamSpring(frame, fps, 0);
+  const titleScale = slamScale(frame, fps, 0, 2.5);
+  const titleOpacity = Math.min(titleProgress * 5, 1);
 
-  // End dim
-  const endDim = interpolate(frame, [830, 868], [1, 0.2], {
+  const labelProgress = smoothSpring(frame, fps, 12);
+  const labelOpacity = interpolate(labelProgress, [0, 1], [0, 0.7]);
+  const labelY = interpolate(labelProgress, [0, 1], [10, 0]);
+
+  const slamFlash = flashBurst(frame, 0, 2);
+  const beat = beatPulse(frame, fps, 170, 0.03);
+
+  // Terminal log — appears at frame 70
+  const terminalProgress = smoothSpring(frame, fps, 70);
+  const terminalOpacity = interpolate(terminalProgress, [0, 1], [0, 1]);
+  const terminalY = interpolate(terminalProgress, [0, 1], [24, 0]);
+
+  // Status bar — frame 720
+  const statusProgress = smoothSpring(frame, fps, 720);
+  const statusOpacity = interpolate(statusProgress, [0, 1], [0, 1]);
+
+  // Closing editorial line — frame 750
+  const closingProgress = smoothSpring(frame, fps, 750);
+  const closingOpacity = interpolate(closingProgress, [0, 1], [0, 1]);
+  const closingY = interpolate(closingProgress, [0, 1], [16, 0]);
+
+  // End dim — frame 830 over 40 frames
+  const endDim = interpolate(frame, [830, 870], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
+    easing: Easing.in(Easing.cubic),
   });
-
-  const beat = beatPulse(frame, fps, 170, 0.02);
 
   return (
     <AbsoluteFill
       style={{
         backgroundColor: COLORS.bg.deep,
-        padding: "42px 52px 36px",
+        padding: "36px 60px 32px",
         display: "flex",
         flexDirection: "column",
-        gap: 28,
+        gap: 20,
+        opacity: endDim,
       }}
     >
-      {/* Code texture */}
-      <CodeTexture />
-
-      {/* Beat-synced ambient glow */}
+      {/* Ambient glow */}
       <div
         style={{
           position: "absolute",
           inset: 0,
-          background: `radial-gradient(ellipse at 50% 30%, rgba(148,184,255,${0.03 + beat}) 0%, transparent 55%)`,
+          background: `radial-gradient(ellipse at 50% 30%, rgba(148,184,255,${0.04 + beat}) 0%, transparent 52%)`,
           pointerEvents: "none",
         }}
       />
 
-      {/* Title — Expressive thin voice (whisper before the machine speaks) */}
-      <div
-        style={{
-          opacity: titleProgress * endDim,
-          transform: `translateY(${titleY}px)`,
-          fontFamily: FONTS.expressive,
-          fontSize: 52,
-          fontWeight: 100,
-          color: COLORS.fg,
-          textAlign: "center",
-          letterSpacing: "0.01em",
-          lineHeight: 1.1,
-          zIndex: 1,
-        }}
-      >
-        How It Works
-      </div>
-
-      {/* Phase nodes — fast stagger, vertically centered */}
+      {/* ── Title row ── */}
       <div
         style={{
           display: "flex",
+          flexDirection: "column",
           alignItems: "center",
-          justifyContent: "center",
-          flex: 1,
+          gap: 8,
           zIndex: 1,
-          gap: 0,
-          opacity: endDim,
         }}
       >
-        {SIX_PHASES.map((phase, i) => (
-          <React.Fragment key={phase.name}>
-            <PhaseCard phase={phase} index={i} />
-            {i < SIX_PHASES.length - 1 && (
-              <Connector fromIndex={i} color={phase.color} />
-            )}
-          </React.Fragment>
+        {/* COMPETITIVE BIDDING */}
+        <div
+          style={{
+            fontFamily: FONTS.monument,
+            fontSize: 94,
+            fontWeight: 700,
+            color: COLORS.accent2,
+            textTransform: "uppercase",
+            letterSpacing: "-0.02em",
+            lineHeight: 1.0,
+            textAlign: "center",
+            opacity: titleOpacity,
+            transform: `scale(${titleScale})`,
+            textShadow: `0 0 50px rgba(148,184,255,0.5), 0 0 100px rgba(148,184,255,0.2)`,
+          }}
+        >
+          COMPETITIVE BIDDING
+        </div>
+
+        {/* A2A label */}
+        <div
+          style={{
+            fontFamily: FONTS.swiss,
+            fontSize: 66,
+            fontWeight: 400,
+            color: COLORS.muted,
+            letterSpacing: "0.18em",
+            textTransform: "uppercase",
+            opacity: labelOpacity,
+            transform: `translateY(${labelY}px)`,
+          }}
+        >
+          34 typed A2A intents
+        </div>
+      </div>
+
+      {/* ── Operator cards ── */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: 16,
+          flexWrap: "wrap",
+          zIndex: 1,
+        }}
+      >
+        {OPERATORS.map((op, i) => (
+          <OperatorCard
+            key={op.name}
+            name={op.name}
+            capability={op.capability}
+            dotColor={op.dotColor}
+            delay={25 + i * 12}
+          />
         ))}
       </div>
 
-      {/* Key insights — whip up */}
-      <div style={{ zIndex: 1, opacity: endDim }}>
-        <KeyInsights />
+      {/* ── Terminal log ── */}
+      <div
+        style={{
+          opacity: terminalOpacity,
+          transform: `translateY(${terminalY}px)`,
+          flex: 1,
+          zIndex: 1,
+          minHeight: 0,
+        }}
+      >
+        <TerminalLog
+          entries={NEGOTIATION_LOG}
+          delay={70}
+          framesPerEntry={55}
+          fontSize={32}
+        />
       </div>
+
+      {/* ── Status bar ── */}
+      {frame >= 720 && (
+        <div
+          style={{
+            opacity: statusOpacity,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 18,
+            zIndex: 1,
+          }}
+        >
+          <PulseIndicator color={COLORS.emerald} size={8} delay={720} />
+          <PulseIndicator color={COLORS.accent2} size={8} delay={724} />
+          <PulseIndicator color={COLORS.discord} size={8} delay={728} />
+          <span
+            style={{
+              fontFamily: FONTS.brutalist,
+              fontSize: 34,
+              color: COLORS.muted,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            3 operators&nbsp;&nbsp;|&nbsp;&nbsp;15 bids&nbsp;&nbsp;|&nbsp;&nbsp;$3,932 locked on Base Sepolia
+          </span>
+        </div>
+      )}
+
+      {/* ── Closing editorial line — Brad Holden ── */}
+      {frame >= 750 && (
+        <div
+          style={{
+            opacity: closingOpacity,
+            transform: `translateY(${closingY}px)`,
+            textAlign: "center",
+            zIndex: 1,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: FONTS.editorial,
+              fontSize: 60,
+              fontWeight: 400,
+              fontStyle: "italic",
+              color: COLORS.accent1,
+              letterSpacing: "0.01em",
+              textShadow: `0 0 28px rgba(245,166,35,0.35)`,
+            }}
+          >
+            Zero middlemen. Pure market-driven pricing.
+          </span>
+        </div>
+      )}
+
+      {/* Slam flash */}
+      {slamFlash > 0 && (
+        <AbsoluteFill
+          style={{
+            backgroundColor: `rgba(148,184,255,${slamFlash * 0.15})`,
+            pointerEvents: "none",
+          }}
+        />
+      )}
     </AbsoluteFill>
   );
 };

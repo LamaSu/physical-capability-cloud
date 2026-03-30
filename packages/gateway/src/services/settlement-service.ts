@@ -21,6 +21,8 @@ import {
 } from "../contracts/escrow-client.js";
 import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "./audit-service.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,10 +123,16 @@ export class SettlementService {
                 await storage.init();
                 const archiveResult = await storage.archiveBundle(bundle);
                 result.cid = archiveResult.cid;
+                pipelineTelemetry.emit(jobId, "evidence_archive", "completed", {
+                  metadata: { cid: result.cid, bundleId: bundle.id },
+                });
                 traceCollector.endSpan({ traceId: localTraceId, spanId: ipfsSpanId, status: "ok" });
               } catch (err) {
                 // Storage is best-effort — log but continue
                 console.warn("[settlement] Evidence storage failed (best-effort):", err instanceof Error ? err.message : err);
+                pipelineTelemetry.emit(jobId, "evidence_archive", "failed", {
+                  metadata: { error: err instanceof Error ? err.message : String(err) },
+                });
                 traceCollector.endSpan({ traceId: localTraceId, spanId: ipfsSpanId, status: "error" });
               }
             },
@@ -222,6 +230,9 @@ export class SettlementService {
                   } catch {
                     // DB update non-fatal
                   }
+                  pipelineTelemetry.emit(jobId, "verification_request", "completed", {
+                    metadata: { contractAddress, txHash: result.evidenceTxHash },
+                  });
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainSubmitSpanId, status: "ok" });
                 } catch (err) {
                   console.warn("[settlement] On-chain evidence submission failed:", err instanceof Error ? err.message : err);
@@ -240,6 +251,9 @@ export class SettlementService {
             // Find the capability's Story IP registration via the job's capabilityId
             // The job row contains the capabilityId used for this job
             const job = repos.jobs.findById(jobId);
+            pipelineTelemetry.emit(jobId, "settlement_claim", "started", {
+              metadata: { capabilityId: job?.capabilityId },
+            });
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
               if (ipReg) {
@@ -267,11 +281,24 @@ export class SettlementService {
                 } catch (dbErr) {
                   console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
                 }
+                pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                });
+                auditService.log({
+                  eventType: "settlement.story_registered",
+                  resourceType: "job",
+                  resourceId: jobId,
+                  action: "register_derivative",
+                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                });
               }
             }
           } catch (storyErr) {
             // Story registration is best-effort — evidence storage succeeds regardless
             console.warn("[settlement] Story derivative registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+            pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+              metadata: { error: storyErr instanceof Error ? storyErr.message : String(storyErr) },
+            });
           }
 
           // ── Step 4: Auto-release for tier 0 ─────────────────────────────
@@ -305,10 +332,29 @@ export class SettlementService {
                   if (releaseResult.status === "released") {
                     result.releaseTxHash = releaseResult.txHash;
                     result.settled = true;
+                    pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+                      metadata: { released: true, txHash: result.releaseTxHash, contractAddress },
+                    });
+                    auditService.log({
+                      eventType: "settlement.completed",
+                      resourceType: "job",
+                      resourceId: jobId,
+                      action: "settle",
+                      metadata: {
+                        cid: result.cid,
+                        bundleHash: bundle.bundleHash,
+                        txHash: result.releaseTxHash,
+                        contractAddress,
+                        autoRelease: true,
+                      },
+                    });
                   }
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "ok" });
                 } catch (err) {
                   console.warn("[settlement] Auto-release failed:", err instanceof Error ? err.message : err);
+                  pipelineTelemetry.emit(jobId, "settlement_complete", "failed", {
+                    metadata: { error: err instanceof Error ? err.message : String(err) },
+                  });
                   traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "error" });
                 }
               } else {

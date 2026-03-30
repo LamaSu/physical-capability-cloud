@@ -79,6 +79,7 @@ const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => 
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
 const AgentPackagePage = lazy(() => import("./pages/AgentPackagePage.js").then(m => ({ default: m.AgentPackagePage })));
+const SponsorTelemetryPage = lazy(() => import("./pages/SponsorTelemetryPage.js").then(m => ({ default: m.SponsorTelemetryPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -254,6 +255,7 @@ function DashboardShell() {
               <Route path="/batch-board" element={<BatchBoardPage />} />
               <Route path="/agent-package" element={<AgentPackagePage />} />
               <Route path="/ip" element={<IPRevenuePage />} />
+              <Route path="/sponsors" element={<SponsorTelemetryPage />} />
             </Routes>
           </Suspense>
         </PageTransition>

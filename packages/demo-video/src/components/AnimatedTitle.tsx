@@ -19,7 +19,7 @@ export const AnimatedTitle: React.FC<{
 }> = ({
   text,
   delay = 0,
-  fontSize = 64,
+  fontSize = 94,
   color = COLORS.fg,
   gradient = false,
   align = "center",
@@ -44,7 +44,7 @@ export const AnimatedTitle: React.FC<{
         letterSpacing: voice === "monument" ? "-0.03em"
           : voice === "brutalist" ? "0.05em"
           : voice === "swiss" ? "-0.01em" : "0.01em",
-        lineHeight: fontSize > 60 ? 0.85 : 1.1,
+        lineHeight: fontSize > 72 ? 0.85 : 1.1,
         textTransform: voice === "monument" || voice === "brutalist" ? "uppercase" as const : "none" as const,
         color,
         opacity,

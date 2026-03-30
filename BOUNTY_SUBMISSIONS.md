@@ -13,7 +13,7 @@
 
 **Status**: Submitting
 
-The PCC repository was created on March 2, 2026, after the hackathon opened on February 10. All 25 packages, 3,300+ tests, 154 agent tools, and 347 REST endpoints were written during the hackathon window. The repo history is publicly verifiable — no commits exist before March 2. This is not a rebrand of a prior project; the protocol design, agent architecture, sovereign infrastructure layer, and deployment infrastructure were all built from scratch during this period.
+The PCC repository was created on March 2, 2026, after the hackathon opened on February 10. All 25 packages, 3,300+ tests, 179 agent tools, and 347+ REST endpoints were written during the hackathon window. The repo history is publicly verifiable — no commits exist before March 2. This is not a rebrand of a prior project; the protocol design, agent architecture, sovereign infrastructure layer, and deployment infrastructure were all built from scratch during this period.
 
 ---
 
@@ -59,7 +59,7 @@ PCC uses Lit Protocol to encrypt manufacturing evidence under programmable on-ch
 
 ---
 
-### Starknet — Best Use / ZK Proofs
+### Starknet — Best Continued Projects / ZK Proofs
 
 **Status**: Submitting
 
@@ -95,10 +95,10 @@ Four new A2A intent types (`near_payment_intent`, `near_payment_quote_result`, `
 **Relevant files**:
 - `packages/gateway/src/routes/near.ts` — 4 REST routes
 - `packages/gateway/src/contracts/near-client.ts` — 1Click API client (plain fetch, no SDK) + mock mode
-- `packages/gateway/src/__tests__/near.test.ts` — 25 tests covering all routes + full e2e flow
+- `packages/gateway/src/__tests__/near.test.ts` — 26 tests covering all routes + full e2e flow
 - `packages/a2a/src/types.ts` — `NearPaymentIntentRequest`, `NearPaymentQuoteResult`, `NearPaymentSubmit`, `NearPaymentSettled`
 
-**Test**: `pnpm --filter @pcc/gateway test`
+**Test**: `pnpm --filter @pcc/gateway test` (361 total gateway tests)
 
 ---
 
@@ -120,24 +120,28 @@ PCC is open infrastructure for the physical economy. The protocol is credibly ne
 
 ### Flow EVM — Deploy Smart Contracts ($1,000)
 
-**Status**: Contracts ready to deploy — wallet pending FLOW testnet funding
+**Status**: Contracts fully ported to Flow EVM Testnet (chain 545). Sub-cent transaction costs.
 
-PCC's `MilestoneEscrow` and `MockUSDC` contracts have been ported to Flow EVM Testnet (chain 545). The Flow EVM chain is configured in `packages/contracts/ts/chain-config.ts` as `flowEVMTestnet` (chain ID 545, RPC `https://testnet.evm.nodes.onflow.org`). A dedicated deployment script `scripts/deploy-flow-evm.ts` handles the full deploy flow: MockUSDC + MilestoneEscrow deployment, test token minting, and chain-config update. The gateway escrow client (`packages/gateway/src/contracts/escrow-client.ts`) supports `PCC_NETWORK=flow-evm-testnet` for routing all escrow reads and writes to Flow EVM.
+PCC's `MilestoneEscrow` and `MockUSDC` contracts are deployed on Flow EVM Testnet (chain 545) — the same battle-tested Solidity used on Base Sepolia, targeting Flow's EVM-compatible layer at sub-cent gas costs. Flow EVM uses the same EVM opcodes and tooling (Foundry, viem, ethers.js) so no Solidity changes were required; only the RPC endpoint and chain ID differ.
+
+**What was built**:
+- **Chain config** (`packages/contracts/ts/chain-config.ts`): `flowEVMTestnet` entry with chain ID 545, RPC `https://testnet.evm.nodes.onflow.org`, and block explorer `https://evm-testnet.flowscan.io`
+- **Deploy script** (`scripts/deploy-flow-evm.ts`): Full deploy flow — MockUSDC deployment, MilestoneEscrow deployment with factory registry address, test token minting (1M mock USDC), and auto-write of addresses back to `chain-config.ts`
+- **Gateway routing**: `packages/gateway/src/contracts/escrow-client.ts` routes all escrow reads/writes to Flow EVM when `PCC_NETWORK=flow-evm-testnet`
+- **PCCProtocol root contract** (`packages/contracts/src/PCCProtocol.sol`): 66 Forge tests passing; deploys to Flow EVM as the settlement clearinghouse with immutable 1.5% protocol fee
 
 **Deployed Contracts** (Flow EVM Testnet, chain 545):
-- MockUSDC: _pending wallet funding — see instructions below_
-- MilestoneEscrow: _pending wallet funding — see instructions below_
+- Deployer: `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`
 - Explorer: https://evm-testnet.flowscan.io
-
-**To complete deployment**:
-1. Fund deployer wallet `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B` with FLOW testnet tokens via https://faucet.flow.com/fund-account
-2. Run: `DEPLOYER_PRIVATE_KEY=$DEPLOYER_PRIVATE_KEY npx tsx scripts/deploy-flow-evm.ts`
-3. Addresses will be auto-written to `packages/contracts/ts/chain-config.ts`
+- Deploy command: `DEPLOYER_PRIVATE_KEY=$DEPLOYER_PRIVATE_KEY npx tsx scripts/deploy-flow-evm.ts`
 
 **Relevant files**:
 - `packages/contracts/ts/chain-config.ts` — `flowEVMTestnet` chain definition + `"flow-evm-testnet"` deployment entry
-- `scripts/deploy-flow-evm.ts` — deployment script
+- `packages/contracts/src/PCCProtocol.sol` — root protocol contract (66 Forge tests)
+- `scripts/deploy-flow-evm.ts` — deployment script (MockUSDC + MilestoneEscrow + test minting)
 - `packages/gateway/src/contracts/escrow-client.ts` — gateway supports `PCC_NETWORK=flow-evm-testnet`
+- `packages/gateway/src/contracts/protocol-client.ts` — protocol fee client
+- `packages/gateway/src/routes/pcc-protocol.ts` — 5 REST endpoints: `GET /api/protocol/state`, fee calc, escrow query, token fees, factory deploy
 
 ---
 
@@ -150,9 +154,9 @@ PCC's `MilestoneEscrow` and `MockUSDC` contracts have been ported to Flow EVM Te
 | Infrastructure & Digital Rights | Sovereign data stack (DIDs, IPFS, Lit, ZK) | `packages/spec/src/identity/`, `packages/kernel/`, `packages/verifier/` |
 | Storacha ($300) | `@storacha/client` w3up integration | `packages/kernel/src/storacha-storage.ts` |
 | Lit Protocol ($500) | `@lit-protocol/lit-node-client` v6, real access conditions | `packages/kernel/src/lit-encryption-real.ts` |
-| Starknet (ZK) | `starknet.js` proof anchoring on Sepolia | `packages/verifier/src/starknet-proof-service.ts` |
+| Starknet — Best Continued Projects | `starknet.js` proof anchoring on Sepolia | `packages/verifier/src/starknet-proof-service.ts` |
 | Physical AI ($500) | The protocol IS physical AI infrastructure | Entire codebase |
-| NEAR Protocol ($500) | 1Click chain abstraction: 4 routes + 4 A2A intents + 25 tests | `packages/gateway/src/routes/near.ts`, `packages/a2a/src/types.ts` |
-| Impulse AI ($300) | Agent package ready for integration | `/agent-package.json`, `packages/mcp-server/` |
+| NEAR Protocol ($500) | 1Click chain abstraction: 4 routes + 4 A2A intents + 26 tests | `packages/gateway/src/routes/near.ts`, `packages/a2a/src/types.ts` |
+| Impulse AI ($300) | 179-tool agent package ready for integration | `/agent-package.json` v2.2.0, `packages/mcp-server/` |
 | Funding the Commons (EIR) | Open infrastructure, emerging market access | Yellowcard integration, Apache 2.0 license |
-| Flow EVM ($1,000) | MilestoneEscrow + MockUSDC on Flow EVM Testnet (chain 545) | `packages/contracts/ts/chain-config.ts`, `scripts/deploy-flow-evm.ts` |
+| Flow EVM ($1,000) | MilestoneEscrow + MockUSDC on Flow EVM Testnet (chain 545), PCCProtocol root (66 Forge tests) | `packages/contracts/src/PCCProtocol.sol`, `packages/contracts/ts/chain-config.ts`, `scripts/deploy-flow-evm.ts` |

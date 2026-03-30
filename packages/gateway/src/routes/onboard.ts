@@ -4,6 +4,7 @@ import { UnifiedKeychain } from "@pcc/agent-runtime";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { Sentry } from "../sentry.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -166,127 +167,206 @@ export async function onboardRoutes(app: FastifyInstance) {
   // If evidence meets minimum requirements, registration is auto-approved + activated.
   // Fast-track: no manual review needed if the machine can prove it works.
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/prove", async (req, reply) => {
-    const reg = registrations.find((r) => r.id === req.params.id);
-    if (!reg) return reply.status(404).send({ error: "not_found" });
-    if (reg.status === "active") {
-      return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
-    }
-    if (reg.status === "rejected") {
-      return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
-    }
+    return Sentry.startSpan(
+      { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
+      async () => {
+        const reg = registrations.find((r) => r.id === req.params.id);
+        if (!reg) return reply.status(404).send({ error: "not_found" });
+        if (reg.status === "active") {
+          return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
+        }
+        if (reg.status === "rejected") {
+          return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+        }
 
-    const body = req.body as {
-      evidence?: {
-        /** SHA-256 bundle hash of the evidence */
-        bundleHash?: string;
-        /** Evidence events from the test job */
-        events?: Array<{
-          type: string;
-          timestamp: string;
-          payload: Record<string, unknown>;
-        }>;
-        /** Base64-encoded photo of test output (e.g. printed page, machined part) */
-        photoBase64?: string;
-        /** Device health snapshot */
-        deviceHealth?: {
-          status: string;
-          firmware?: string;
-          model?: string;
-          uptime?: number;
-          [key: string]: unknown;
+        const body = req.body as {
+          evidence?: {
+            /** SHA-256 bundle hash of the evidence */
+            bundleHash?: string;
+            /** Evidence events from the test job */
+            events?: Array<{
+              type: string;
+              timestamp: string;
+              payload: Record<string, unknown>;
+            }>;
+            /** Base64-encoded photo of test output (e.g. printed page, machined part) */
+            photoBase64?: string;
+            /** Device health snapshot */
+            deviceHealth?: {
+              status: string;
+              firmware?: string;
+              model?: string;
+              uptime?: number;
+              [key: string]: unknown;
+            };
+            /** IPFS CID if evidence was already uploaded */
+            ipfsCid?: string;
+          };
+        } | undefined;
+
+        const evidence = body?.evidence;
+        if (!evidence) {
+          return reply.status(400).send({
+            error: "evidence_required",
+            message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
+            example: {
+              evidence: {
+                bundleHash: "sha256:abc123...",
+                events: [
+                  { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
+                  { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
+                ],
+                deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
+              },
+            },
+          });
+        }
+
+        // ── Validate bundleHash format ────────────────────────────────────
+        if (evidence.bundleHash !== undefined) {
+          if (!evidence.bundleHash.startsWith("sha256:") || evidence.bundleHash.length < 40) {
+            return reply.status(400).send({
+              error: "invalid_bundle_hash",
+              message: "bundleHash must start with 'sha256:' and be at least 40 characters (e.g. sha256:abc123...).",
+            });
+          }
+        }
+
+        // ── Validate event timestamps ─────────────────────────────────────
+        if (evidence.events && evidence.events.length > 0) {
+          const now = Date.now();
+          const oneHourMs = 60 * 60 * 1000;
+          for (const ev of evidence.events) {
+            const ts = Date.parse(ev.timestamp);
+            if (isNaN(ts)) {
+              return reply.status(400).send({
+                error: "invalid_event_timestamp",
+                message: `Event of type "${ev.type}" has an invalid ISO timestamp: "${ev.timestamp}"`,
+              });
+            }
+            if (ts > now + 5000) {
+              return reply.status(400).send({
+                error: "future_event_timestamp",
+                message: `Event of type "${ev.type}" has a timestamp in the future: "${ev.timestamp}"`,
+              });
+            }
+            if (now - ts > oneHourMs) {
+              return reply.status(400).send({
+                error: "stale_event_timestamp",
+                message: `Event of type "${ev.type}" is older than 1 hour: "${ev.timestamp}". Submit fresh evidence.`,
+              });
+            }
+          }
+        }
+
+        // Validate evidence — need at least one substantial proof
+        const proofs: string[] = [];
+        const warnings: string[] = [];
+
+        // 1. Evidence bundle with events
+        if (evidence.bundleHash && evidence.events && evidence.events.length > 0) {
+          const hasCompletion = evidence.events.some((e) =>
+            ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
+          );
+          if (hasCompletion) {
+            proofs.push(`evidence_bundle: ${evidence.events.length} events, hash=${evidence.bundleHash.slice(0, 20)}...`);
+          } else {
+            warnings.push("Evidence events present but no completion/snapshot event found");
+          }
+        }
+
+        // 2. Photo of test output
+        if (evidence.photoBase64) {
+          const sizeBytes = Math.ceil((evidence.photoBase64.length * 3) / 4);
+          if (sizeBytes > 1024) {
+            proofs.push(`photo: ${(sizeBytes / 1024).toFixed(0)}KB image`);
+          } else {
+            warnings.push("Photo too small to be meaningful (< 1KB)");
+          }
+        }
+
+        // 3. Device health check
+        if (evidence.deviceHealth) {
+          if (evidence.deviceHealth.status && evidence.deviceHealth.model) {
+            proofs.push(`device_health: ${evidence.deviceHealth.model} status=${evidence.deviceHealth.status}`);
+          } else {
+            warnings.push("Device health missing status or model");
+          }
+        }
+
+        // 4. IPFS CID (evidence already uploaded to decentralized storage)
+        if (evidence.ipfsCid) {
+          proofs.push(`ipfs: ${evidence.ipfsCid}`);
+        }
+
+        if (proofs.length === 0) {
+          return reply.status(422).send({
+            error: "insufficient_evidence",
+            message: "Evidence did not meet minimum requirements for auto-approval.",
+            warnings,
+            hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
+          });
+        }
+
+        // ── Determine assurance tier ────────────────────────────────────────
+        const hasEvents = evidence.events && evidence.events.length > 0;
+        const hasCompletion = hasEvents && evidence.events!.some((e) =>
+          ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
+        );
+        const hasPhoto = !!(evidence.photoBase64 && Math.ceil((evidence.photoBase64.length * 3) / 4) > 1024);
+        const hasDeviceHealth = !!(evidence.deviceHealth?.status && evidence.deviceHealth?.model);
+        const hasBundleHash = !!(evidence.bundleHash);
+
+        let assuranceTier: 0 | 1 | 2;
+        let tierWarning: string | undefined;
+
+        if (hasPhoto && hasDeviceHealth && hasEvents) {
+          // Tier 2: photo + device health + events
+          assuranceTier = 2;
+        } else if (hasBundleHash && hasEvents && hasCompletion) {
+          // Tier 1: bundle hash + events with completion event
+          assuranceTier = 1;
+        } else {
+          // Tier 0: self-attested only (deviceHealth only, no events or photo)
+          assuranceTier = 0;
+          tierWarning = "Self-attested only — no independent verification";
+        }
+
+        // Evidence passes — auto-approve and activate
+        const ext = reg as unknown as Record<string, unknown>;
+        reg.status = "active";
+        reg.approvedAt = new Date().toISOString();
+        ext.provedAt = new Date().toISOString();
+        ext.autoApproved = true;
+        ext.proofs = proofs;
+        ext.evidenceBundleHash = evidence.bundleHash ?? null;
+        ext.evidenceIpfsCid = evidence.ipfsCid ?? null;
+        ext.assuranceTier = assuranceTier;
+
+        pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
+        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
+        auditService.log({
+          eventType: "operator.proved",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
+          resourceType: "registration",
+          resourceId: reg.id,
+          action: "prove",
+          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: true, proofs },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        return {
+          registration: reg,
+          autoApproved: true,
+          activated: true,
+          proofs,
+          assuranceTier,
+          warning: tierWarning,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
         };
-        /** IPFS CID if evidence was already uploaded */
-        ipfsCid?: string;
-      };
-    } | undefined;
-
-    const evidence = body?.evidence;
-    if (!evidence) {
-      return reply.status(400).send({
-        error: "evidence_required",
-        message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
-        example: {
-          evidence: {
-            bundleHash: "sha256:abc123...",
-            events: [
-              { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
-              { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
-            ],
-            deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
-          },
-        },
-      });
-    }
-
-    // Validate evidence — need at least one substantial proof
-    const proofs: string[] = [];
-    const warnings: string[] = [];
-
-    // 1. Evidence bundle with events
-    if (evidence.bundleHash && evidence.events && evidence.events.length > 0) {
-      const hasCompletion = evidence.events.some((e) =>
-        ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
-      );
-      if (hasCompletion) {
-        proofs.push(`evidence_bundle: ${evidence.events.length} events, hash=${evidence.bundleHash.slice(0, 20)}...`);
-      } else {
-        warnings.push("Evidence events present but no completion/snapshot event found");
-      }
-    }
-
-    // 2. Photo of test output
-    if (evidence.photoBase64) {
-      const sizeBytes = Math.ceil((evidence.photoBase64.length * 3) / 4);
-      if (sizeBytes > 1024) {
-        proofs.push(`photo: ${(sizeBytes / 1024).toFixed(0)}KB image`);
-      } else {
-        warnings.push("Photo too small to be meaningful (< 1KB)");
-      }
-    }
-
-    // 3. Device health check
-    if (evidence.deviceHealth) {
-      if (evidence.deviceHealth.status && evidence.deviceHealth.model) {
-        proofs.push(`device_health: ${evidence.deviceHealth.model} status=${evidence.deviceHealth.status}`);
-      } else {
-        warnings.push("Device health missing status or model");
-      }
-    }
-
-    // 4. IPFS CID (evidence already uploaded to decentralized storage)
-    if (evidence.ipfsCid) {
-      proofs.push(`ipfs: ${evidence.ipfsCid}`);
-    }
-
-    if (proofs.length === 0) {
-      return reply.status(422).send({
-        error: "insufficient_evidence",
-        message: "Evidence did not meet minimum requirements for auto-approval.",
-        warnings,
-        hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
-      });
-    }
-
-    // Evidence passes — auto-approve and activate
-    const ext = reg as unknown as Record<string, unknown>;
-    reg.status = "active";
-    reg.approvedAt = new Date().toISOString();
-    ext.provedAt = new Date().toISOString();
-    ext.autoApproved = true;
-    ext.proofs = proofs;
-    ext.evidenceBundleHash = evidence.bundleHash ?? null;
-    ext.evidenceIpfsCid = evidence.ipfsCid ?? null;
-
-    pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true } });
-    trackServerEvent("operator_proved", { proofCount: proofs.length });
-    return {
-      registration: reg,
-      autoApproved: true,
-      activated: true,
-      proofs,
-      warnings: warnings.length > 0 ? warnings : undefined,
-      message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
-    };
+      },
+    );
   });
 
   // ═══════════════════════════════════════════════════════════════

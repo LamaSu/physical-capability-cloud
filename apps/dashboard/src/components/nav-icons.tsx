@@ -44,3 +44,4 @@ export const WalletIcon = () => icon("M3 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01
 export const BatchBoardIcon = () => icon("M4 4h3v3H4zM9 4h3v3H9zM14 4h3v3h-3zM4 9h3v3H4zM9 9h3v3H9zM14 9h3v3h-3zM4 14h3v3H4zM9 14h3v3H9z");
 export const NegotiationSessionIcon = () => icon("M3 5h7v4H3zM10 11h7v4h-7zM7 9l3 2M10 5v2h4");
 export const AgentPackageIcon = () => icon("M4 4h12v12H4zM4 4l4 4M16 4l-4 4M8 8h4v4H8zM8 12v4M12 12v4");
+export const SponsorIcon = () => icon("M10 2l2 3h3l-2.5 2 1 3L10 8.5 7.5 10l1-3L6 5h3l1-3zM4 13h2v4H4zM7 11h2v6H7zM11 11h2v6h-2zM14 13h2v4h-2z");

@@ -36,6 +36,7 @@ import {
   BatchBoardIcon,
   NegotiationSessionIcon,
   AgentPackageIcon,
+  SponsorIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -117,6 +118,12 @@ export const navGroups: NavGroup[] = [
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
       { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
       { label: "IP Revenue", path: "/ip", icon: <IPRevenueIcon /> },
+    ],
+  },
+  {
+    title: "Hackathon",
+    items: [
+      { label: "Sponsor Telemetry", path: "/sponsors", icon: <SponsorIcon /> },
     ],
   },
   {

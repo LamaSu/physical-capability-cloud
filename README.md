@@ -12,7 +12,7 @@ Physical Capability Cloud is a credibly neutral protocol that turns every machin
 
 AI agents orchestrate the full pipeline without any human middleman. A user submits an intent ("analyze this compound and print the report"), and the agent swarm decomposes it into a workflow DAG, discovers capable operators via auction pricing, locks milestone escrow on-chain before work starts, streams cryptographic evidence during execution, and settles payment automatically upon verified completion. Operators keep more. Users pay less. No admin overhead.
 
-The protocol fee on the escrow contract is the business model — more operators, more volume, more fees. Like Uniswap, but for physical work.
+The `PCCProtocol` root contract is the business model. It charges a 1.5% protocol fee (150 bps) on every settlement — hardcoded at deployment, governance-adjustable within 0.1%–5%, but can never be zero. The immutable fee recipient is `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`. Only factory-deployed escrows can settle through the root contract. More operators, more volume, more fees. Like Uniswap, but for physical work.
 
 ---
 
@@ -46,8 +46,15 @@ The protocol fee on the escrow contract is the business model — more operators
            └─────────────────────────────────────┘
 
            ┌─────────────────────────────────────┐
+           │         PCCPROTOCOL ROOT             │
+           │  1.5% fee · factory pattern          │
+           │  immutable recipient · 0–5% bounds   │
+           └──────────────┬──────────────────────┘
+                          │
+           ┌──────────────▼──────────────────────┐
            │           SETTLEMENT                 │
            │  MilestoneEscrow · Base Sepolia      │
+           │  Flow EVM Testnet · NEAR 1Click      │
            │  x402 micropayments · Soulbound NFTs │
            └─────────────────────────────────────┘
 ```
@@ -68,6 +75,52 @@ The protocol executes in six phases for every job:
 ---
 
 ## Sponsor Integrations
+
+### PCCProtocol Root Contract
+
+The `PCCProtocol.sol` root contract acts as the clearinghouse for all settlements. It enforces:
+
+- **1.5% protocol fee** (150 bps), adjustable 0.1%–5% by governance, but never zero
+- **Immutable fee recipient**: `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`
+- **Factory pattern**: only escrows created via the protocol factory can settle through the root
+- 66 Forge tests passing
+
+**Files**:
+- `packages/contracts/src/PCCProtocol.sol` — root contract
+- `packages/gateway/src/contracts/protocol-client.ts` — gateway viem client
+- `packages/gateway/src/routes/pcc-protocol.ts` — 5 REST endpoints: `GET /api/protocol/*`
+
+---
+
+### Flow EVM
+
+PCC's `MilestoneEscrow` and `MockUSDC` contracts are deployed to Flow EVM Testnet (chain 545) with sub-cent transaction costs.
+
+**How it works**: The same Solidity contracts targeting Base Sepolia are deployed to Flow EVM via a dedicated script. The gateway escrow client routes reads/writes to Flow EVM when `PCC_NETWORK=flow-evm-testnet`.
+
+**Files**:
+- `packages/contracts/ts/chain-config.ts` — `flowEVMTestnet` chain definition (chain 545)
+- `scripts/deploy-flow-evm.ts` — full deploy script (MockUSDC + MilestoneEscrow + test minting)
+- `packages/gateway/src/contracts/escrow-client.ts` — supports `PCC_NETWORK=flow-evm-testnet`
+
+**Explorer**: https://evm-testnet.flowscan.io
+
+---
+
+### NEAR Protocol
+
+Cross-chain payment intents via NEAR's 1Click API let PCC agents fund escrow contracts on any chain without managing bridges.
+
+**How it works**: The gateway calls NEAR's solver network (chaindefuser.com) to route atomic cross-chain swaps. A PCC agent can request a job on Base Sepolia and pay with NEAR-native USDC in a single intent message.
+
+**Files**:
+- `packages/gateway/src/routes/near.ts` — 4 REST routes (`/api/near/*`)
+- `packages/gateway/src/contracts/near-client.ts` — 1Click API client (plain fetch, mock mode)
+- `packages/a2a/src/types.ts` — 4 new A2A intents: `NearPaymentIntentRequest`, `NearPaymentQuoteResult`, `NearPaymentSubmit`, `NearPaymentSettled`
+
+**Test**: `pnpm --filter @pcc/gateway test` (26 tests)
+
+---
 
 ### Storacha / Filecoin
 
@@ -119,11 +172,12 @@ Evidence bundles are encrypted with AES-256-GCM under Lit Protocol access condit
 | Metric | Count |
 |--------|-------|
 | Packages | 25 + 1 dashboard app |
-| Tests | 3,300+ across 100+ test files |
-| Agent tools | 154 (agent-package.json) |
+| Tests | 361+ gateway tests, 3,300+ total |
+| Agent tools | 179 (agent-package.json v2.2.0) |
 | MCP tools | 49 (stdio server) |
-| REST endpoints | 347 across 54 route files |
-| A2A intents | 34 typed intents |
+| REST endpoints | 347+ across 60+ route files |
+| Forge tests | 66 passing (contracts) |
+| A2A intents | 38 typed intents (34 + 4 NEAR) |
 | SSE streams | 6 real-time streams |
 | Capability types | 30+ (biotech, manufacturing, services) |
 
@@ -178,6 +232,20 @@ npx tsx scripts/openclaw-print-deliver-e2e.ts
 pip install pcc-node
 pcc-node start    # auto-detect hardware, generate keys, register, run daemon
 ```
+
+---
+
+## Supplies Marketplace
+
+The `/api/marketplace/*` endpoints expose a physical supplies marketplace where operators can source raw materials alongside booking capabilities. 9 REST endpoints cover listings, search, ordering, and fulfillment. 12 categories: `raw-metals`, `plastics-polymers`, `lab-reagents`, `lab-consumables`, `electronics`, `chemicals`, `biologicals`, `tooling`, `packaging`, `calibration`, `safety`, and `other`.
+
+**File**: `packages/gateway/src/routes/marketplace.ts`
+
+---
+
+## Sponsor Telemetry
+
+The `/sponsors` dashboard page and `GET /api/status/sponsors` endpoint show live integration status for all 6 sponsor cards (Storacha, Starknet, Lit Protocol, Flow, NEAR, Bittensor).
 
 ---
 

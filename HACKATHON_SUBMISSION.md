@@ -39,7 +39,7 @@ The `PCCProtocol` root contract charges an immutable 1.5% clearing fee on every 
 
 ## What Makes This Different
 
-This is not a prototype. 25 packages, 3,300+ tests, 154 agent tools, 347 REST endpoints, 34 A2A intents — live at capability.network. A real OT-2 liquid handler robot runs as the first operator node. The `pcc-node` Python package lets any operator — from a lab in Kenya to a factory in Shenzhen — register hardware in one command. The DHT gossip network enables decentralized discovery without a central registry.
+This is not a prototype. 25 packages, 3,300+ tests (361+ gateway, 66 Forge), 179 agent tools (v2.2.0), 347+ REST endpoints, 38 A2A intents — live at capability.network. A real OT-2 liquid handler robot runs as the first operator node. The `pcc-node` Python package lets any operator — from a lab in Kenya to a factory in Shenzhen — register hardware in one command. The DHT gossip network enables decentralized discovery without a central registry.
 
 The Yellowcard fiat ramp enables operators in 34 emerging market countries to receive payment in local currency via mobile money — removing the barriers that keep small manufacturers out of global supply chains. The assurance tier system scales from a $0.10 print job to a $50,000 biotech assay.
 

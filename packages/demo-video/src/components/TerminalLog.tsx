@@ -17,7 +17,7 @@ export const TerminalLog: React.FC<{
   delay?: number;
   framesPerEntry?: number;
   fontSize?: number;
-}> = ({ entries, delay = 0, framesPerEntry = 10, fontSize = 18 }) => {
+}> = ({ entries, delay = 0, framesPerEntry = 10, fontSize = 36 }) => {
   const frame = useCurrentFrame();
   const adjustedFrame = Math.max(0, frame - delay);
 

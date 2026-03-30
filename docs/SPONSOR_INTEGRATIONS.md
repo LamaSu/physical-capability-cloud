@@ -242,6 +242,102 @@ console.log(JSON.stringify(conds, null, 2));
 
 ---
 
+## PCCProtocol — Root Contract
+
+### What It Does
+
+The `PCCProtocol` contract is the settlement clearinghouse for the entire network. It sits above all escrow contracts in the architecture: only escrows that were created via the protocol factory can call `settleEscrow()` through the root. This ensures every settlement pays the protocol fee and is tracked on-chain.
+
+### Architecture
+
+```
+PCCProtocol (root)
+├── feeBps: 150  (1.5%, adjustable 10–500, NEVER zero)
+├── feeRecipient: 0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B  (immutable)
+├── factoryRegistry: address[]  (only factory-deployed escrows)
+└── settleEscrow(escrow, amount, token) → transfers fee → remainder to operator
+```
+
+### Fee Model
+
+- **Default**: 150 bps (1.5%) on every settlement
+- **Bounds**: Governance can adjust 10–500 bps (0.1%–5%)
+- **Hard invariant**: Fee can never be set to zero — the setter reverts if `newFeeBps == 0`
+- **Factory gate**: `settleEscrow()` reverts if the caller escrow was not registered via the factory
+
+### Files
+
+| File | Role |
+|------|------|
+| `packages/contracts/src/PCCProtocol.sol` | Root protocol contract (66 Forge tests) |
+| `packages/gateway/src/contracts/protocol-client.ts` | viem client: `getProtocolState`, `calculateProtocolFee`, `getTotalFeesForToken`, `getFeesFromEscrow`, `createEscrowViaProtocol` |
+| `packages/gateway/src/routes/pcc-protocol.ts` | 5 REST endpoints |
+
+### REST Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/protocol/state` | Fee rate, total fees collected, escrow count, registry addresses |
+| `GET` | `/api/protocol/fee/:amount` | Calculate fee for a given settlement amount |
+| `GET` | `/api/protocol/escrow/:addr/fees` | Fees collected from a specific escrow address |
+| `GET` | `/api/protocol/token/:addr/fees` | Total fees across all escrows for a token |
+| `POST` | `/api/protocol/create-escrow` | Create a new escrow via the protocol factory |
+
+### How to Verify
+
+```bash
+# Check protocol state (mock mode if PCC_PROTOCOL_ADDRESS not set)
+curl https://capability.network/api/protocol/state
+
+# Calculate fee for a $100 settlement
+curl https://capability.network/api/protocol/fee/100000000
+
+# Run Forge tests
+cd packages/contracts && forge test --match-contract PCCProtocol
+```
+
+---
+
+## Flow EVM
+
+### What It Does
+
+Flow EVM is Ethereum-compatible (chain 545) with sub-cent transaction costs. PCC deploys the same `MilestoneEscrow` and `MockUSDC` contracts to Flow EVM with no Solidity changes.
+
+### How PCC Uses It
+
+The `flowEVMTestnet` chain config in `packages/contracts/ts/chain-config.ts` defines the RPC, explorer, and contract addresses for Flow. Setting `PCC_NETWORK=flow-evm-testnet` switches the gateway escrow client to route all reads and writes to Flow EVM.
+
+### Files
+
+| File | Role |
+|------|------|
+| `packages/contracts/ts/chain-config.ts` | `flowEVMTestnet` chain definition (chain 545, RPC, explorer) |
+| `scripts/deploy-flow-evm.ts` | Full deploy: MockUSDC + MilestoneEscrow + test minting + config write |
+| `packages/gateway/src/contracts/escrow-client.ts` | Supports `PCC_NETWORK=flow-evm-testnet` routing |
+
+### Key Code Path
+
+```
+PCC_NETWORK=flow-evm-testnet
+  → escrow-client.ts reads flowEVMTestnet chain config
+  → viem createPublicClient({ chain: flowEVMTestnet })
+  → all reads/writes go to https://testnet.evm.nodes.onflow.org
+  → explorer links: https://evm-testnet.flowscan.io/tx/<hash>
+```
+
+### How to Verify
+
+```bash
+# Deploy to Flow EVM
+DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-flow-evm.ts
+
+# Route gateway to Flow EVM
+PCC_NETWORK=flow-evm-testnet curl https://capability.network/api/escrow
+```
+
+---
+
 ## Integration Map
 
 The three sponsors wire together in the verification pipeline:

@@ -16,6 +16,7 @@ import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
+import { pipelineTelemetry } from "../telemetry.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,6 +121,11 @@ export class KernelService {
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
 
+    // Telemetry: job accepted by a device
+    pipelineTelemetry.emit(jobId, "job_accepted", "completed", {
+      metadata: { deviceId, kernelId: this.config.kernelId ?? "default" },
+    });
+
     // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
     const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
       "job.lifecycle",
@@ -152,12 +158,18 @@ export class KernelService {
           },
         },
         (lifecycleSpan) => {
+          // Telemetry: job execution starting
+          pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
           runner
             .run({
               jobId,
               stepId,
               gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
               assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+              // Bridge job-runner phase events to gateway telemetry
+              onPhase: (jid, phase, status, meta) => {
+                pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+              },
             })
             .then(async (result) => {
               this.runningJobs.delete(jobId);
@@ -181,15 +193,22 @@ export class KernelService {
               if (result.success) {
                 const bundle = this.completedBundles.get(jobId);
                 if (bundle) {
+                  // Note: evidence_capture telemetry is already emitted via the
+                  // onPhase callback wired into runner.run() above.
                   try {
                     const settlementService = getSettlementService();
+                    const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
                     await settlementService.processEvidence(bundle, jobId, {
                       // For tier 0 jobs, auto-release immediately (no challenge window)
                       autoRelease: assuranceTier === 0,
+                      contractAddress,
                     });
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
                     console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                  } finally {
+                    // Clean up in-memory evidence data
+                    this.emitter.cleanup(jobId, stepId);
                   }
                   this.completedBundles.delete(jobId);
                 }
@@ -217,12 +236,18 @@ export class KernelService {
       );
     } catch {
       // Sentry not initialised — fall back to plain fire-and-forget
+      // Telemetry: job execution starting (fallback path)
+      pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
       runner
         .run({
           jobId,
           stepId,
           gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
           assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+          // Bridge job-runner phase events to gateway telemetry (fallback path)
+          onPhase: (jid, phase, status, meta) => {
+            pipelineTelemetry.emit(jid, phase, status, { metadata: meta });
+          },
         })
         .then(async (result) => {
           this.runningJobs.delete(jobId);
@@ -245,13 +270,20 @@ export class KernelService {
           if (result.success) {
             const bundle = this.completedBundles.get(jobId);
             if (bundle) {
+              // Note: evidence_capture telemetry is already emitted via the
+              // onPhase callback wired into runner.run() above.
               try {
                 const settlementService = getSettlementService();
+                const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
                 await settlementService.processEvidence(bundle, jobId, {
                   autoRelease: assuranceTier === 0,
+                  contractAddress,
                 });
               } catch (err) {
                 console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+              } finally {
+                // Clean up in-memory evidence data
+                this.emitter.cleanup(jobId, stepId);
               }
               this.completedBundles.delete(jobId);
             }
