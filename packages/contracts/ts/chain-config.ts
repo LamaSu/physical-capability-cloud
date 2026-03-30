@@ -176,8 +176,8 @@ export const deployments: Record<string, ChainDeployment> = {
     rpcUrl: "https://testnet.evm.nodes.onflow.org",
     contracts: {
       // Filled after deployment — run scripts/deploy-flow-evm.ts
-      milestoneEscrowFactory: undefined,
-      mockUSDC: undefined,
+      milestoneEscrowFactory: "0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15",
+      mockUSDC: "0x7e51fbd7c1051847ca3705f382387ef16849f2fd",
     },
     blockExplorer: "https://evm-testnet.flowscan.io",
   },

@@ -4,7 +4,7 @@
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
   "version": "2.2.0",
   "toolCount": 179,
-  "lastUpdated": "2026-03-28T00:00:00Z",
+  "lastUpdated": "2026-03-29T07:30:00Z",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
   "api_base": "https://capability.network",

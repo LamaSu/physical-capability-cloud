@@ -146,7 +146,7 @@ async function main() {
   const escrowHash = await walletClient.deployContract({
     abi: escrowArtifact.abi,
     bytecode: escrowArtifact.bytecode.object as `0x${string}`,
-    args: [account.address, account.address, mockUsdcAddress, cwmId],
+    args: [account.address, account.address, mockUsdcAddress, cwmId, "0x0000000000000000000000000000000000000000"],
   });
   console.log(`   TX: ${escrowHash}`);
   console.log(`   Explorer: https://evm-testnet.flowscan.io/tx/${escrowHash}`);

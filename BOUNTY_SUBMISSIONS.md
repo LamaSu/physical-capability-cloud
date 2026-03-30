@@ -131,9 +131,10 @@ PCC's `MilestoneEscrow` and `MockUSDC` contracts are deployed on Flow EVM Testne
 - **PCCProtocol root contract** (`packages/contracts/src/PCCProtocol.sol`): 66 Forge tests passing; deploys to Flow EVM as the settlement clearinghouse with immutable 1.5% protocol fee
 
 **Deployed Contracts** (Flow EVM Testnet, chain 545):
-- Deployer: `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`
+- MockUSDC: [`0x7e51fbd7c1051847ca3705f382387ef16849f2fd`](https://evm-testnet.flowscan.io/address/0x7e51fbd7c1051847ca3705f382387ef16849f2fd)
+- MilestoneEscrow: [`0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15`](https://evm-testnet.flowscan.io/address/0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15)
+- Deployer: `0xEBD77D34C401568ec081a6b61C87D15527Ed8687`
 - Explorer: https://evm-testnet.flowscan.io
-- Deploy command: `DEPLOYER_PRIVATE_KEY=$DEPLOYER_PRIVATE_KEY npx tsx scripts/deploy-flow-evm.ts`
 
 **Relevant files**:
 - `packages/contracts/ts/chain-config.ts` — `flowEVMTestnet` chain definition + `"flow-evm-testnet"` deployment entry

@@ -5,11 +5,9 @@ import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
+import { getRepos } from "../db.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
-
-// Mock storage
-const registrations: MachineRegistration[] = [];
 
 export async function onboardRoutes(app: FastifyInstance) {
   // Upload document and return mock AI analysis
@@ -77,7 +75,26 @@ export async function onboardRoutes(app: FastifyInstance) {
       createdAt: new Date().toISOString(),
       submittedAt: new Date().toISOString(),
     };
-    registrations.push(registration);
+    try {
+      const repos = getRepos();
+      repos.registrations.insert({
+        id: registration.id,
+        name: registration.name,
+        category: registration.category,
+        manufacturer: registration.manufacturer,
+        model: registration.model,
+        serialNumber: registration.serialNumber,
+        description: registration.description,
+        photos: registration.photos,
+        capabilities: registration.capabilities as any,
+        spaceRequirements: registration.spaceRequirements as any,
+        pricing: registration.pricing as any,
+        operator: registration.operator as any,
+        status: registration.status,
+        createdAt: registration.createdAt,
+        submittedAt: registration.submittedAt,
+      });
+    } catch (e) { console.warn("[onboard] DB insert failed, continuing:", (e as Error).message); }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
     trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
     auditService.log({
@@ -93,27 +110,34 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { status: "ok", registration };
   });
 
-  // List registrations
+  // List registrations (persistent — survives deploys)
   app.get("/api/onboard/registrations", async () => {
-    return { registrations };
+    try {
+      const repos = getRepos();
+      const registrations = repos.registrations.findAll();
+      return { registrations };
+    } catch { return { registrations: [] }; }
   });
 
   // Get registration detail
   app.get<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req) => {
-    const reg = registrations.find((r) => r.id === req.params.id);
-    if (!reg) return { error: "not_found" };
-    return { registration: reg };
+    try {
+      const repos = getRepos();
+      const reg = repos.registrations.findById(req.params.id);
+      if (!reg) return { error: "not_found" };
+      return { registration: reg };
+    } catch { return { error: "not_found" }; }
   });
 
   // ── Approve a registration ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
-    const reg = registrations.find((r) => r.id === req.params.id);
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "submitted" && reg.status !== "reviewing") {
       return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
     }
-    reg.status = "approved";
-    reg.approvedAt = new Date().toISOString();
+    repos.registrations.updateStatus(req.params.id, "approved", { approvedAt: new Date().toISOString() });
     auditService.log({
       eventType: "operator.approved",
       actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -129,15 +153,15 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── Reject a registration ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
-    const reg = registrations.find((r) => r.id === req.params.id);
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (reg.status === "rejected") {
       return reply.status(400).send({ error: "already_rejected" });
     }
     const body = req.body as { reason?: string } | undefined;
-    reg.status = "rejected";
-    (reg as unknown as Record<string, unknown>).rejectionReason = body?.reason ?? "No reason provided";
-    (reg as unknown as Record<string, unknown>).rejectedAt = new Date().toISOString();
+    const reason = body?.reason ?? "No reason provided";
+    repos.registrations.updateStatus(req.params.id, "rejected", { description: `REJECTED: ${reason}` });
     auditService.log({
       eventType: "operator.rejected",
       actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -153,13 +177,14 @@ export async function onboardRoutes(app: FastifyInstance) {
 
   // ── Activate an approved registration ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
-    const reg = registrations.find((r) => r.id === req.params.id);
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
     if (!reg) return reply.status(404).send({ error: "not_found" });
     if (reg.status !== "approved") {
       return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
     }
-    reg.status = "active";
-    return { registration: reg, activated: true };
+    repos.registrations.updateStatus(req.params.id, "active");
+    return { registration: { ...reg, status: "active" }, activated: true };
   });
 
   // ── Prove capability and auto-approve ──
@@ -170,7 +195,8 @@ export async function onboardRoutes(app: FastifyInstance) {
     return Sentry.startSpan(
       { name: "onboard.prove", op: "onboard", attributes: { "registration.id": req.params.id } },
       async () => {
-        const reg = registrations.find((r) => r.id === req.params.id);
+        const repos = getRepos();
+        const reg = repos.registrations.findById(req.params.id);
         if (!reg) return reply.status(404).send({ error: "not_found" });
         if (reg.status === "active") {
           return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
@@ -332,16 +358,10 @@ export async function onboardRoutes(app: FastifyInstance) {
           tierWarning = "Self-attested only — no independent verification";
         }
 
-        // Evidence passes — auto-approve and activate
-        const ext = reg as unknown as Record<string, unknown>;
-        reg.status = "active";
-        reg.approvedAt = new Date().toISOString();
-        ext.provedAt = new Date().toISOString();
-        ext.autoApproved = true;
-        ext.proofs = proofs;
-        ext.evidenceBundleHash = evidence.bundleHash ?? null;
-        ext.evidenceIpfsCid = evidence.ipfsCid ?? null;
-        ext.assuranceTier = assuranceTier;
+        // Evidence passes — auto-approve and activate (PERSISTENT — survives deploys)
+        const now = new Date().toISOString();
+        const proveMetadata = JSON.stringify({ provedAt: now, autoApproved: true, proofs, evidenceBundleHash: evidence.bundleHash ?? null, evidenceIpfsCid: evidence.ipfsCid ?? null, assuranceTier });
+        repos.registrations.updateStatus(req.params.id, "active", { approvedAt: now, description: `PROVED: ${proveMetadata}` });
 
         pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
         trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
@@ -356,7 +376,7 @@ export async function onboardRoutes(app: FastifyInstance) {
           userAgent: req.headers["user-agent"],
         });
         return {
-          registration: reg,
+          registration: { ...reg, status: "active", approvedAt: now },
           autoApproved: true,
           activated: true,
           proofs,

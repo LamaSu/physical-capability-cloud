@@ -96,6 +96,10 @@ The `PCCProtocol.sol` root contract acts as the clearinghouse for all settlement
 
 PCC's `MilestoneEscrow` and `MockUSDC` contracts are deployed to Flow EVM Testnet (chain 545) with sub-cent transaction costs.
 
+**Deployed contracts**:
+- MockUSDC: [`0x7e51fbd7c1051847ca3705f382387ef16849f2fd`](https://evm-testnet.flowscan.io/address/0x7e51fbd7c1051847ca3705f382387ef16849f2fd)
+- MilestoneEscrow: [`0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15`](https://evm-testnet.flowscan.io/address/0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15)
+
 **How it works**: The same Solidity contracts targeting Base Sepolia are deployed to Flow EVM via a dedicated script. The gateway escrow client routes reads/writes to Flow EVM when `PCC_NETWORK=flow-evm-testnet`.
 
 **Files**:
