@@ -3,7 +3,7 @@
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
   "version": "2.3.0",
-  "toolCount": 187,
+  "toolCount": 186,
   "lastUpdated": "2026-03-30T21:00:00Z",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
@@ -2297,6 +2297,89 @@
       "description": "Get comprehensive system telemetry — protocol economics, multi-chain state, operator network, evidence pipeline, marketplace, agent activity, NEAR intents, jobs, sponsor status, gateway health. Single endpoint for full system observability.",
       "input_schema": { "type": "object", "properties": {} },
       "endpoint": { "method": "GET", "path": "/api/telemetry/system" }
+    },
+    {
+      "name": "pcc_submit_paid_job",
+      "description": "Fast-track paid job: one call from DHT discovery to funded escrow + active scope. Auto-negotiates, quotes, creates escrow with milestones, creates execution scope. Returns jobId, scopeId, escrowId, quote with pricing adjustments, contract terms. For testnet, escrow is mock-funded automatically.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Target kernel ID (from DHT query)" },
+          "capabilityType": { "type": "string", "description": "e.g. 'liquid-handler', 'fdm', 'cnc-3axis'" },
+          "parameters": { "type": "object", "description": "Job parameters (protocolType, volume, materials, etc.)" },
+          "paymentMethod": { "type": "string", "enum": ["escrow", "testnet-mock"], "description": "Payment method (testnet-mock for demo)" },
+          "userAgentId": { "type": "string", "description": "Your agent/user ID" }
+        },
+        "required": ["kernelId", "capabilityType", "userAgentId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/jobs/submit-from-discovery" }
+    },
+    {
+      "name": "pcc_job_complete",
+      "description": "Complete a job: gathers tool call audit trail from execution scopes, builds evidence bundle with SHA-256 hash, stores evidence, revokes scopes, and settles escrow (mock or real).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID to complete" },
+          "message": { "type": "string", "description": "Completion message or notes" }
+        },
+        "required": ["jobId"]
+      },
+      "endpoint": { "method": "PUT", "path": "/api/jobs/{jobId}/complete" }
+    },
+    {
+      "name": "pcc_job_settlement",
+      "description": "Get settlement status for a completed job: escrow address, evidence hash, milestones with amounts and status, paid amount, currency, and linked negotiation session.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string", "description": "Job ID" }
+        },
+        "required": ["jobId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/jobs/{jobId}/settlement" }
+    },
+    {
+      "name": "pcc_get_tool_manifest",
+      "description": "Get the tool manifest for a kernel's device type. Lists all available tools with their safety classification (read, safe_control, scoped_write, privileged) and input schemas. Use to understand what tools are available before making tool calls.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Kernel ID" }
+        },
+        "required": ["kernelId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/relay/{kernelId}/manifest" }
+    },
+    {
+      "name": "pcc_relay_generic_tool_call",
+      "description": "Relay a tool call to any kernel's device executor via the generic relay (not OT-2 specific). Works with any device type. Safe tools (read/safe_control) don't need a scope. Scoped write tools require an active execution scope. Returns a call ID — poll pcc_get_tool_result for the response.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string", "description": "Target kernel ID" },
+          "toolName": { "type": "string", "description": "Tool name from the device manifest" },
+          "args": { "type": "object", "description": "Tool arguments" },
+          "scopeId": { "type": "string", "description": "Execution scope ID (required for write operations)" }
+        },
+        "required": ["kernelId", "toolName"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/relay/{kernelId}/tool-call" }
+    },
+    {
+      "name": "pcc_generate_ui",
+      "description": "Generate a dynamic visual interface and serve it locally via pcc-node's UI server (localhost:3200). Supports built-in templates (plate-layout, protocol-builder, job-status, camera-viewer, device-config) or custom HTML. The UI appears in the operator's browser. Form submissions are queued for the agent to read via pcc_get_ui_submissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "template": { "type": "string", "description": "Built-in template name or 'custom'" },
+          "filename": { "type": "string", "description": "Output filename (e.g. 'my-form.html')" },
+          "content": { "type": "string", "description": "Custom HTML content (when template='custom')" },
+          "title": { "type": "string", "description": "UI title" }
+        },
+        "required": ["template"]
+      },
+      "endpoint": { "method": "POST", "path": "http://localhost:3200/api/generate" }
     }
   ],
 
