@@ -55,7 +55,7 @@ export const S01_Hook: React.FC = () => {
         <div
           style={{
             fontFamily: FONTS.brutalist,
-            fontSize: 48,
+            fontSize: 100,
             color: COLORS.accent1,
             letterSpacing: "0.04em",
             textShadow: `0 0 20px rgba(245,166,35,0.4)`,

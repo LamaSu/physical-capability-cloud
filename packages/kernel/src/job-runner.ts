@@ -11,6 +11,14 @@ import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/ty
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import * as Sentry from "@sentry/node";
 
+/** Callback fired at key pipeline phase transitions for external telemetry. */
+export type OnPhaseCallback = (
+  jobId: string,
+  phase: "job_accepted" | "job_started" | "evidence_capture",
+  status: "completed" | "failed",
+  metadata?: Record<string, unknown>,
+) => void;
+
 export interface JobConfig {
   jobId: string;
   stepId: string;
@@ -18,6 +26,13 @@ export interface JobConfig {
   assuranceTier: AssuranceTier;
   /** Input file data (in production: fetch from storage) */
   gcodeData?: string;
+  /**
+   * Optional callback for phase telemetry events.
+   * The kernel package cannot import gateway telemetry directly, so callers
+   * (e.g. kernel-service.ts) inject this to bridge phase events to the
+   * gateway's pipelineTelemetry service.
+   */
+  onPhase?: OnPhaseCallback;
 }
 
 export interface JobResult {
@@ -48,7 +63,7 @@ export class JobRunner {
 
   async run(config: JobConfig): Promise<JobResult> {
     const startTime = Date.now();
-    const { jobId, stepId, gcodeHash, assuranceTier } = config;
+    const { jobId, stepId, gcodeHash, assuranceTier, onPhase } = config;
 
     // Register step with evidence emitter
     this.evidenceEmitter.registerStep(jobId, stepId, assuranceTier);
@@ -150,7 +165,17 @@ export class JobRunner {
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier);
           if (!check.met) {
-            console.warn(`Tier ${assuranceTier} requirements not fully met: ${check.missing.join(", ")}`);
+            // For tier >= 2, unmet requirements are a hard failure
+            if (assuranceTier >= 2) {
+              onPhase?.(jobId, "evidence_capture", "failed", { missing: check.missing });
+              return {
+                success: false,
+                error: `Tier ${assuranceTier} requirements not met: ${check.missing.join(", ")}`,
+                durationMs: Date.now() - startTime,
+              };
+            }
+            // For tier 0-1, warn but continue (self-attested/sensor-only)
+            console.warn(`[job-runner] Tier ${assuranceTier} partially met: ${check.missing.join(", ")}`);
           }
 
           // 9. Finalize evidence bundle
@@ -158,6 +183,12 @@ export class JobRunner {
             { name: "job.finalize_bundle", op: "job.phase", attributes: { "job.id": jobId } },
             async () => this.evidenceEmitter.finalizeBundle(jobId, stepId),
           );
+
+          // Emit phase callback for evidence capture so kernel-service can relay to telemetry
+          onPhase?.(jobId, "evidence_capture", "completed", {
+            eventCount: bundle.events.length,
+            bundleHash: bundle.bundleHash,
+          });
 
           return {
             success: true,

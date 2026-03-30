@@ -1,24 +1,23 @@
 /**
- * S06_Cascade — "The Domino Fall"
+ * S06_Dashboard — "GLOBAL ACCESS"
  *
- * 540 frames (18 seconds). Evidence pipeline as a rapid chain reaction.
+ * 540 frames (18 seconds). Judge target: Sabeen Ali (social impact),
+ * Mashal Waqar (public goods), Lain Calvo (emerging markets),
+ * David Casey (coordination).
  *
- * Each step TRIGGERS the next — a light pulse travels down the chain.
- * 12-frame stagger (was 25). Twice as fast. Relentless.
+ * The EMERGING MARKETS scene. PCC is accessible to anyone, anywhere.
  *
- * Frame 0:     Title — Editorial italic, holographic gradient. Slams (not fades).
- * Frame 18:    Steps cascade at 12-frame stagger (9 steps × 12 = 108 frames).
- * Frame 130:   Steps complete. Light pulse sweeps down (4-frame stagger).
- * Frame 200:   Step 8 (Escrow Settlement) — DISCORD FLASH. 2-frame full-screen burst.
- *              The money moment is the danger moment.
- * Frame 300:   Closer text arrives with authority.
- * Frame 500:   Dim for transition.
+ * Frame 0-5:   Black.
+ * Frame 6:     "ANY OPERATOR. ANYWHERE." SLAMS in — Monument, 64px, accent1. slamScale 2x.
+ * Frame 30:    "pip install pcc-node" — Brutalist, 28px, accent2. Spring entrance.
+ * Frame 60:    "34 countries..." — Swiss, muted. Fade in.
+ * Frame 90-380: Four feature cards, 2x2 grid, staggered 40 frames.
+ * Frame 400:   Impact quote — Editorial italic, accent2.
+ * Frame 480:   "No middlemen..." — Swiss, muted.
+ * Frame 510:   Dim to black.
  *
- * Axiom I: Steps cascade top→bottom. Numbered circles enforce sequence.
- * Axiom II: Step 8 = discord. Money = danger = the intentional break.
- * Axiom III: Cascade → pulse → flash → settle. Time is the proof.
- *
- * Voices: Editorial (title), Swiss (steps), Monument (numbers), Expressive (closer)
+ * Voices: Monument (headline), Brutalist (command, card-stat), Swiss (body, labels),
+ *         Editorial (impact quote)
  */
 import React from "react";
 import {
@@ -28,156 +27,119 @@ import {
   interpolate,
   Easing,
 } from "remotion";
-import { noise2D } from "@remotion/noise";
 import {
   COLORS,
   FONTS,
-  GRADIENTS,
-  EVIDENCE_PIPELINE,
   slamSpring,
+  slamScale,
   smoothSpring,
   fadeSlideUp,
-  flashBurst,
-  beatPulse,
 } from "../lib";
-import { PulseIndicator } from "../components/PulseIndicator";
 
-const STEP_STAGGER = 12; // frames between steps (was 25)
-const STEP_HEIGHT = 48;
-
-const ConnectorLine: React.FC<{ appearFrame: number; color: string }> = ({
-  appearFrame,
-  color,
-}) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const progress = smoothSpring(frame, fps, appearFrame + 6);
-  const h = interpolate(progress, [0, 1], [0, 14]);
-
-  return (
-    <div
-      style={{
-        width: 2,
-        height: h,
-        background: `linear-gradient(to bottom, ${color}88, transparent)`,
-        marginLeft: 35,
-        flexShrink: 0,
-      }}
-    />
-  );
+type FeatureCardData = {
+  stat: string;
+  statColor: string;
+  statSize: number;
+  label: string;
+  caption: string;
+  captionItalic?: boolean;
 };
 
-const EvidenceStep: React.FC<{
-  index: number;
-  step: string;
-  detail: string;
-  color: string;
+const FEATURE_CARDS: FeatureCardData[] = [
+  {
+    stat: "30 MIN",
+    statColor: COLORS.emerald,
+    statSize: 68,
+    label: "from zero to live operator",
+    caption: "Hardware auto-detect → keys → register → go",
+  },
+  {
+    stat: "34",
+    statColor: COLORS.gold,
+    statSize: 68,
+    label: "emerging market countries",
+    caption: "Yellowcard · Stripe · Wise",
+  },
+  {
+    stat: "APACHE 2.0",
+    statColor: COLORS.accent2,
+    statSize: 54,
+    label: "open spec, open protocol",
+    caption: "Not a marketplace. A public good.",
+    captionItalic: true,
+  },
+  {
+    stat: "OT-2",
+    statColor: COLORS.discord,
+    statSize: 68,
+    label: "liquid handling robot",
+    caption: "First node. Live in San Francisco.",
+  },
+];
+
+const FeatureCard: React.FC<{
+  card: FeatureCardData;
   appearFrame: number;
-  isDiscord: boolean;
-}> = ({ index, step, detail, color, appearFrame, isDiscord }) => {
+}> = ({ card, appearFrame }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Slam entrance (faster than before)
-  const progress = slamSpring(frame, fps, appearFrame);
-  const slideX = interpolate(progress, [0, 1], [-60, 0]);
-  const enterOpacity = Math.min(progress * 4, 1);
-
-  // Light pulse sweep at frame 130 + index*4
-  const pulseStart = 130 + index * 4;
-  const pulseFlash = flashBurst(frame, pulseStart, 4);
-
-  // Glow state
-  const glowPulse = pulseFlash;
-
-  const borderColor = isDiscord
-    ? `rgba(248,113,113,${0.4 + glowPulse * 0.6})`
-    : `rgba(255,255,255,${0.06 + glowPulse * 0.4})`;
-
-  const boxShadow = glowPulse > 0.02
-    ? isDiscord
-      ? `0 0 24px rgba(248,113,113,${glowPulse * 0.6})`
-      : `0 0 24px ${color}${Math.round(glowPulse * 80).toString(16).padStart(2, "0")}`
-    : undefined;
+  const progress = smoothSpring(frame, fps, appearFrame);
+  const translateY = interpolate(progress, [0, 1], [24, 0]);
 
   return (
     <div
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 14,
-        height: STEP_HEIGHT,
-        padding: "0 18px",
+        opacity: progress,
+        transform: `translateY(${translateY}px)`,
         background: COLORS.bg.surface,
-        border: `1px solid ${borderColor}`,
-        borderRadius: 10,
-        opacity: enterOpacity,
-        transform: `translateX(${slideX}px)`,
-        boxShadow,
-        flexShrink: 0,
+        border: `1px solid ${COLORS.bg.border}`,
+        borderRadius: 12,
+        padding: 24,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        flex: 1,
+        minWidth: 0,
       }}
     >
-      {/* Number circle */}
       <div
         style={{
-          width: 28,
-          height: 28,
-          borderRadius: "50%",
-          backgroundColor: isDiscord ? COLORS.discord : color,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
+          fontFamily: FONTS.monument,
+          fontSize: card.statSize,
+          fontWeight: 700,
+          color: card.statColor,
+          lineHeight: 1,
+          letterSpacing: card.statSize >= 68 ? "-0.02em" : "-0.01em",
         }}
       >
-        <span
-          style={{
-            fontFamily: FONTS.monument,
-            fontSize: 13,
-            fontWeight: 700,
-            color: COLORS.bg.deep,
-            lineHeight: 1,
-          }}
-        >
-          {index + 1}
-        </span>
+        {card.stat}
       </div>
-
-      {/* Step name + detail */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 22,
-            fontWeight: 700,
-            color: COLORS.fg,
-            lineHeight: 1.2,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {step}
-        </div>
-        <div
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 17,
-            fontWeight: 400,
-            color: COLORS.muted,
-            lineHeight: 1.2,
-            marginTop: 1,
-          }}
-        >
-          {detail}
-        </div>
+      <div
+        style={{
+          fontFamily: FONTS.swiss,
+          fontSize: 34,
+          fontWeight: 600,
+          color: COLORS.fg,
+          textTransform: "uppercase" as const,
+          letterSpacing: "0.08em",
+        }}
+      >
+        {card.label}
       </div>
-
-      <PulseIndicator
-        color={isDiscord ? COLORS.discord : color}
-        size={7}
-        delay={appearFrame}
-      />
+      <div
+        style={{
+          fontFamily: card.captionItalic ? FONTS.editorial : FONTS.brutalist,
+          fontSize: 60,
+          fontWeight: 400,
+          color: COLORS.muted,
+          fontStyle: card.captionItalic ? ("italic" as const) : ("normal" as const),
+          letterSpacing: card.captionItalic ? "0" : "0.04em",
+          marginTop: 2,
+        }}
+      >
+        {card.caption}
+      </div>
     </div>
   );
 };
@@ -186,25 +148,46 @@ export const S06_Dashboard: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Title SLAMS
-  const titleProgress = slamSpring(frame, fps, 0);
-  const titleScale = interpolate(titleProgress, [0, 1], [2, 1]);
-  const titleOpacity = Math.min(titleProgress * 5, 1);
-  const titleDrift = noise2D("s06-title", 0, (frame / fps) * 0.2) * 1.5;
+  // Pure black for first 5 frames
+  if (frame < 5) {
+    return <AbsoluteFill style={{ backgroundColor: "#000000" }} />;
+  }
 
-  // Discord FLASH at step 8 — frame 200
-  const escrowFlash = flashBurst(frame, 200, 3);
+  // Headline SLAM — Monument, 64px, accent1
+  const headlineProgress = slamSpring(frame, fps, 6);
+  const headlineScale = slamScale(frame, fps, 6, 2);
+  const headlineOpacity = Math.min(headlineProgress * 5, 1);
 
-  // Closer text
-  const closerFade = fadeSlideUp(frame, fps, 300);
+  // pip install line — spring entrance at frame 30
+  const cmdProgress = smoothSpring(frame, fps, 30);
+  const cmdTranslateY = interpolate(cmdProgress, [0, 1], [20, 0]);
 
-  // End dim
-  const endDim = interpolate(frame, [500, 538], [1, 0.2], {
+  // Subtext fade at frame 60
+  const subtextOpacity = interpolate(frame, [60, 80], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.out(Easing.cubic),
+  });
+
+  // Grid appears frame 90-380 (4 cards × 40 frames)
+  const CARD_STAGGER = 40;
+  const cardAppearFrames = FEATURE_CARDS.map((_, i) => 90 + i * CARD_STAGGER);
+
+  // Impact quote — fade in at frame 400
+  const quoteFade = fadeSlideUp(frame, fps, 400);
+
+  // No-middlemen line at frame 480
+  const noMiddlemenOpacity = interpolate(frame, [480, 500], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.out(Easing.cubic),
+  });
+
+  // Dim to black
+  const endDim = interpolate(frame, [510, 540], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
-
-  const beat = beatPulse(frame, fps, 170, 0.03);
 
   return (
     <AbsoluteFill
@@ -214,45 +197,80 @@ export const S06_Dashboard: React.FC = () => {
         flexDirection: "column",
         alignItems: "center",
         paddingTop: 44,
-        paddingBottom: 36,
-        paddingLeft: 80,
-        paddingRight: 80,
+        paddingBottom: 32,
+        paddingLeft: 72,
+        paddingRight: 72,
         overflow: "hidden",
+        opacity: endDim,
       }}
     >
-      {/* Cyan ambient */}
+      {/* Subtle gold ambient */}
       <div
         style={{
           position: "absolute",
-          top: "35%",
+          top: "20%",
           left: "50%",
           transform: "translate(-50%, -50%)",
-          width: 800,
-          height: 600,
-          background: `radial-gradient(ellipse, rgba(148,184,255,${0.03 + beat}) 0%, transparent 65%)`,
-          opacity: endDim,
+          width: 700,
+          height: 400,
+          background:
+            "radial-gradient(ellipse, rgba(245,166,35,0.04) 0%, transparent 65%)",
           pointerEvents: "none",
         }}
       />
 
-      {/* Discord ambient — bottom right */}
+      {/* Headline */}
       <div
         style={{
-          position: "absolute",
-          bottom: "10%",
-          right: "15%",
-          width: 300,
-          height: 300,
-          background: "radial-gradient(circle, rgba(248,113,113,0.03) 0%, transparent 70%)",
-          pointerEvents: "none",
+          opacity: headlineOpacity,
+          transform: `scale(${headlineScale})`,
+          textAlign: "center",
+          marginBottom: 20,
+          flexShrink: 0,
         }}
-      />
+      >
+        <span
+          style={{
+            fontFamily: FONTS.monument,
+            fontSize: 106,
+            fontWeight: 700,
+            color: COLORS.accent1,
+            letterSpacing: "-0.02em",
+            textTransform: "uppercase" as const,
+            textShadow: "0 0 40px rgba(245,166,35,0.4)",
+          }}
+        >
+          Any Operator. Anywhere.
+        </span>
+      </div>
 
-      {/* Title — Editorial italic, holographic, SLAM */}
+      {/* pip install pcc-node */}
       <div
         style={{
-          opacity: titleOpacity * endDim,
-          transform: `scale(${titleScale}) translateX(${titleDrift}px)`,
+          opacity: cmdProgress,
+          transform: `translateY(${cmdTranslateY}px)`,
+          marginBottom: 10,
+          textAlign: "center",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: FONTS.brutalist,
+            fontSize: 66,
+            fontWeight: 700,
+            color: COLORS.accent2,
+            letterSpacing: "0.02em",
+          }}
+        >
+          pip install pcc-node
+        </span>
+      </div>
+
+      {/* Subtext */}
+      <div
+        style={{
+          opacity: subtextOpacity,
           marginBottom: 28,
           textAlign: "center",
           flexShrink: 0,
@@ -260,87 +278,87 @@ export const S06_Dashboard: React.FC = () => {
       >
         <span
           style={{
-            fontFamily: FONTS.editorial,
-            fontSize: 48,
+            fontFamily: FONTS.swiss,
+            fontSize: 66,
             fontWeight: 400,
-            fontStyle: "italic",
-            lineHeight: 1.1,
-            background: GRADIENTS.holographic,
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
+            color: COLORS.muted,
+            letterSpacing: "0.01em",
           }}
         >
-          Sovereign Infrastructure
+          34 countries. Fiat ramps. No corporate account.
         </span>
       </div>
 
-      {/* Steps cascade — fast stagger */}
+      {/* 2×2 feature card grid */}
       <div
         style={{
           display: "flex",
           flexDirection: "column",
+          gap: 12,
           width: "100%",
-          maxWidth: 840,
-          gap: 0,
+          maxWidth: 880,
           flex: 1,
-          opacity: endDim,
+          minHeight: 0,
         }}
       >
-        {EVIDENCE_PIPELINE.map((item, i) => {
-          const appearFrame = 18 + i * STEP_STAGGER;
-          const isDiscord = i === 7; // Escrow Settlement
-
-          return (
-            <React.Fragment key={i}>
-              <EvidenceStep
-                index={i}
-                step={item.step}
-                detail={item.detail}
-                color={item.color}
-                appearFrame={appearFrame}
-                isDiscord={isDiscord}
-              />
-              {i < EVIDENCE_PIPELINE.length - 1 && (
-                <ConnectorLine appearFrame={appearFrame} color={item.color} />
-              )}
-            </React.Fragment>
-          );
-        })}
+        {/* Row 1 */}
+        <div style={{ display: "flex", gap: 12, flex: 1 }}>
+          <FeatureCard card={FEATURE_CARDS[0]} appearFrame={cardAppearFrames[0]} />
+          <FeatureCard card={FEATURE_CARDS[1]} appearFrame={cardAppearFrames[1]} />
+        </div>
+        {/* Row 2 */}
+        <div style={{ display: "flex", gap: 12, flex: 1 }}>
+          <FeatureCard card={FEATURE_CARDS[2]} appearFrame={cardAppearFrames[2]} />
+          <FeatureCard card={FEATURE_CARDS[3]} appearFrame={cardAppearFrames[3]} />
+        </div>
       </div>
 
-      {/* Closer — Expressive italic */}
+      {/* Impact quote */}
       <div
         style={{
           marginTop: 20,
-          opacity: closerFade.opacity * endDim,
-          transform: `translateY(${closerFade.translateY}px)`,
+          opacity: quoteFade.opacity,
+          transform: `translateY(${quoteFade.translateY}px)`,
+          textAlign: "center",
+          maxWidth: 780,
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: FONTS.editorial,
+            fontSize: 66,
+            fontWeight: 400,
+            fontStyle: "italic",
+            color: COLORS.accent2,
+            lineHeight: 1.5,
+          }}
+        >
+          Any lab, any shop, any operator — connected to every buyer on Earth.
+        </span>
+      </div>
+
+      {/* No middlemen */}
+      <div
+        style={{
+          marginTop: 10,
+          opacity: noMiddlemenOpacity,
           textAlign: "center",
           flexShrink: 0,
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.expressive,
-            fontSize: 24,
-            fontWeight: 300,
+            fontFamily: FONTS.swiss,
+            fontSize: 66,
+            fontWeight: 400,
             color: COLORS.muted,
-            letterSpacing: "0.01em",
-            fontStyle: "italic",
+            letterSpacing: "0.06em",
           }}
         >
-          Zero trust required. The infrastructure does the coordination.
+          No middlemen. No minimum deal size.
         </span>
       </div>
-
-      {/* DISCORD FLASH on escrow step */}
-      {escrowFlash > 0 && (
-        <AbsoluteFill
-          style={{
-            backgroundColor: `rgba(248,113,113,${escrowFlash * 0.2})`,
-            pointerEvents: "none",
-          }}
-        />
-      )}
     </AbsoluteFill>
   );
 };

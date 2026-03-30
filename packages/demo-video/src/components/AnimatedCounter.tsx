@@ -22,7 +22,7 @@ export const AnimatedCounter: React.FC<{
   delay = 0,
   suffix = "",
   prefix = "",
-  fontSize = 48,
+  fontSize = 70,
   color = COLORS.accent1,
 }) => {
   const frame = useCurrentFrame();

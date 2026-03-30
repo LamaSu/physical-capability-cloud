@@ -445,7 +445,13 @@ Royalty Tokens represent fractional ownership of a capability's revenue stream. 
 
 This creates a secondary market for manufacturing process IP. A researcher who designs a breakthrough polymerization process and encodes it as a CSD can sell a portion of their Royalty Tokens to a lab equipment manufacturer interested in seeing the protocol proliferate. Both parties earn proportionally from the protocol's adoption. Process IP becomes a liquid asset class.
 
-### 7.5 Network Treasury and Protocol Fees
+### 7.5 Supplies Marketplace
+
+Operators need raw materials to run jobs. The PCC supplies marketplace (`/api/marketplace/*`) connects operators to material suppliers within the same protocol. 9 REST endpoints cover listing, searching, ordering, and fulfillment tracking across 12 categories: `raw-metals`, `plastics-polymers`, `lab-reagents`, `lab-consumables`, `electronics`, `chemicals`, `biologicals`, `tooling`, `packaging`, `calibration`, `safety`, and `other`.
+
+This closes the loop for a PCC operator: discover jobs via DHT, source materials via the marketplace, execute using registered capabilities, receive payment via escrow. The entire supply chain is protocol-native.
+
+### 7.6 Network Treasury and Protocol Fees
 
 PCC's network treasury receives 10% of every job's royalty payment. These funds finance:
 
@@ -701,14 +707,17 @@ Operators and agents can communicate in real-time through the chat relay (`/api/
 
 PCC is an open protocol, not a SaaS platform. All code is open source. All specifications are public. Any operator can run a node, and any agent can interact with the network. The protocol monetizes through a transparent, on-chain fee applied at the settlement layer.
 
-### 12.2 Escrow Protocol Fee
+### 12.2 PCCProtocol Root Contract Fee
 
-The `MilestoneEscrow` contract charges a protocol fee of 0.5-2% on every settlement. This fee is:
+The `PCCProtocol` root contract (`packages/contracts/src/PCCProtocol.sol`) is the clearinghouse for all settlements. It enforces a 1.5% protocol fee (150 bps) on every escrow settlement. Design invariants:
 
 - **Automatic**: Deducted at escrow release, not invoiced separately
-- **Transparent**: The fee percentage is encoded in the contract and visible to all parties before they fund the escrow
-- **On-chain**: Fee flows to the protocol treasury address, auditable by anyone
-- **Configurable**: Different assurance tiers may carry different fee percentages (higher tiers = more verification infrastructure to fund)
+- **Transparent**: Fee rate visible on-chain via `getProtocolState()`; queryable at `GET /api/protocol/state`
+- **On-chain**: Fee flows to an immutable fee recipient (`0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`), auditable by anyone
+- **Bounded**: Governance can adjust the rate between 0.1% and 5% — but can never set it to zero
+- **Factory-gated**: Only escrows deployed through the protocol factory can call `settleEscrow()` through the root — preventing fee bypass via direct escrow deployment
+
+This is a step beyond the legacy `MilestoneEscrow` standalone contract. The root contract adds network-level accounting: total fees collected per token, per-escrow fee attribution, and a live factory registry. 66 Forge tests verify the fee mechanics, factory gate, and boundary conditions.
 
 ### 12.3 Fee Distribution
 
@@ -855,25 +864,29 @@ PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), 
 | `@pcc/dht` | Distributed capability discovery: WebSocket gossip DHT, AnnouncementRegistry, CapabilityQuery engine |
 | `pcc-node` | pip-installable Python CLI: hardware auto-detection, key management, device adapters, camera streaming, daemon loop |
 | `@pcc/ui` | Solarpunk component library: 64+ components, DIDBadge, IPFSLink, ChainTxLink |
-| `@pcc/gateway` | Fastify REST/SSE: 347 endpoints across 54 route files, StreamHub, SIWE auth, x402 gate |
+| `@pcc/gateway` | Fastify REST/SSE: 347+ endpoints across 60+ route files, StreamHub, SIWE auth, x402 gate, NEAR 1Click, PCCProtocol routes, marketplace routes |
 | `@pcc/dashboard` | Vite SPA: 57+ routes, React Flow builders, Recharts, 18-step onboarding tour |
 
 ### 15.2 Test Coverage
 
-The test suite has 3,300+ passing tests across 100+ test files (TypeScript + Python). Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
+The test suite has 3,300+ passing tests across 100+ test files (TypeScript + Python), including 361+ gateway API tests and 66 Forge tests for the contracts package. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
 
 - `scripts/e2e-simulation.ts`: Kernel-level E2E (job submit → adapter execute → evidence → settlement)
 - `scripts/agent-e2e-simulation.ts`: Agent-to-agent negotiation (UserAgent → BrokerAgent → KernelAgent)
 - `scripts/sovereign-e2e-simulation.ts`: 9-phase sovereign infrastructure test (DIDs, IPFS, Lit, ZK, Bittensor, DePIN, cNFTs)
 - `scripts/openclaw-print-deliver-e2e.ts`: OpenClaw print-and-deliver scenario (3 variations, 37 assertions)
 
-### 15.3 Dual-Chain Architecture
+### 15.3 Multi-Chain Architecture
 
-PCC operates across two blockchains with distinct roles:
+PCC operates across four chains with distinct roles:
 
-**Base Sepolia (chain 84532)**: Escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified. All economic settlement happens here. Base provides low gas costs and full EVM compatibility.
+**Base Sepolia (chain 84532)**: Primary escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified. The `PCCProtocol` root contract clears all Base Sepolia settlements, collecting the 1.5% protocol fee to `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`.
 
-**Story Network (chain 1514 / Aeneid testnet 1513)**: IP registration, licensing, royalties, and disputes. CSDs are registered as IP Assets here. Royalty Token distribution and revenue claims happen on Story. The `StoryIPService` bridges the two chains: when escrow releases on Base, it triggers a royalty payment on Story.
+**Flow EVM Testnet (chain 545)**: Secondary settlement chain with sub-cent transaction costs. The same `MilestoneEscrow` and `MockUSDC` contracts are deployed to Flow EVM via `scripts/deploy-flow-evm.ts`. Set `PCC_NETWORK=flow-evm-testnet` to route the gateway to Flow. Explorer: https://evm-testnet.flowscan.io
+
+**NEAR / Cross-Chain (1Click)**: Cross-chain payment intents. Agents on any chain can fund PCC escrows through NEAR's solver network without managing bridges. Four gateway routes (`/api/near/*`) and four A2A intent types handle the full quote → submit → settle flow. No SDK dependency — plain `fetch()` against the 1Click REST API.
+
+**Story Network (chain 1514 / Aeneid testnet 1513)**: IP registration, licensing, royalties, and disputes. CSDs are registered as IP Assets here. Royalty Token distribution and revenue claims happen on Story. The `StoryIPService` bridges with Base: when escrow releases on Base, it triggers a royalty payment on Story.
 
 x402 (HTTP 402 Payment Required) handles per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup.
 
@@ -984,7 +997,7 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 
 **Live Network**: [capability.network](https://capability.network)
 
-**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (154 tools for any LLM agent)
+**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (179 tools, v2.2.0, for any LLM agent)
 
 **Operator Node**: `pip install pcc-node && pcc-node start`
 

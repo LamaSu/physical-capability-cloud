@@ -1,403 +1,401 @@
 /**
- * S03_Fracture — "The Rapid-Fire Contrast"
+ * S03_Pipeline — "THE SIX ACTS"
  *
- * 510 frames (17 seconds). NOT a side-by-side comparison.
- * Full-screen ALTERNATING CUTS: OLD (discord) smash → NEW (accent1) smash.
+ * 510 frames (17 seconds). Protocol flow for infrastructure judges.
+ * Target: Juan Benet, Brad Holden, E.G. Galano, David Casey.
  *
- * Structure:
- *   5 pairs × ~80 frames each = 400 frames
- *   + Fee comparison slam = 110 frames
+ * Frame 0:       Title "HOW IT WORKS" — Expressive thin, 48px, centered, fade in.
+ * Frame 20-420:  6 phases revealed left-to-right. Each phase gets ~65 frames.
+ *                Phase i appears at frame 20 + i*65.
+ *                Node: scale 0.85→1 + opacity spring. Connector draws over 15 frames.
+ * Frame 430:     Glow pulse ripples through all nodes (border brightens, 8-frame stagger by 5).
+ * Frame 460:     Three key lines fade in, staggered 12 frames.
+ * Frame 490:     Dim to black.
  *
- * Each pair:
- *   Frame 0-3:   Discord flash (transition beat)
- *   Frame 3-40:  OLD text fills screen — discord color, brutalist, massive
- *   Frame 40-43: Accent flash
- *   Frame 43-80: NEW text fills screen — accent1, monument, massive
+ * Special: ESCROW (index 2) has discord border + brighter glow — the trust lock.
  *
- * Final: "20-40%" SLASHES → "1.5%" EXPLODES in.
- *
- * Axiom I: Each word is the ONLY thing on screen. Maximum hierarchy.
- * Axiom II: OLD IS discord. The wrong color. The system that must break.
- * Axiom III: The RHYTHM of cuts is the design. Fast→faster→fastest→HOLD.
- *
- * Voices: Brutalist (old), Monument (new), Swiss (sub-labels)
+ * Voices: Expressive thin (title), Monument (phase names), Swiss (desc + insights)
  */
 import React from "react";
 import {
   useCurrentFrame,
   useVideoConfig,
   AbsoluteFill,
+  spring,
   interpolate,
   Easing,
 } from "remotion";
 import {
   COLORS,
   FONTS,
-  FRACTURE_PAIRS,
-  slamSpring,
-  slamScale,
-  flashBurst,
-  bouncySpring,
+  SIX_PHASES,
   smoothSpring,
+  slamSpring,
+  whipUp,
   beatPulse,
+  flashBurst,
 } from "../lib";
+import { PulseIndicator } from "../components";
 
-const PAIR_DURATION = 80; // frames per old/new pair
-const OLD_HOLD = 37; // frames old text holds
-const NEW_START = 40; // frame within pair where new starts
-const FEE_START = PAIR_DURATION * FRACTURE_PAIRS.length; // frame 400
+// ─── Layout constants ─────────────────────────────────────────────────────────
+const NODE_APPEAR_BASE = 20;
+const NODE_STAGGER = 65;
+const GLOW_PULSE_START = 430;
+const INSIGHTS_START = 460;
+const OUTRO_START = 490;
 
-export const S03_Pipeline: React.FC = () => {
+// ─── PhaseCard ────────────────────────────────────────────────────────────────
+const PhaseCard: React.FC<{
+  phase: (typeof SIX_PHASES)[number];
+  index: number;
+}> = ({ phase, index }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Which pair are we in?
-  const pairIndex = Math.floor(frame / PAIR_DURATION);
-  const pairFrame = frame % PAIR_DURATION;
-  const inPairs = pairIndex < FRACTURE_PAIRS.length;
+  const nodeDelay = NODE_APPEAR_BASE + index * NODE_STAGGER;
+  const progress = smoothSpring(frame, fps, nodeDelay);
+  const enterScale = interpolate(progress, [0, 1], [0.85, 1]);
+  const enterOpacity = interpolate(progress, [0, 0.4], [0, 1], {
+    extrapolateRight: "clamp",
+  });
 
-  // Fee comparison section (after all pairs)
-  const inFee = frame >= FEE_START;
-  const feeFrame = frame - FEE_START;
+  // Glow pulse — ripples through at GLOW_PULSE_START + index*5 for 8 frames
+  const glowPulseStart = GLOW_PULSE_START + index * 5;
+  const glowPulse = flashBurst(frame, glowPulseStart, 8);
 
-  // Beat pulse for background energy
-  const beat = beatPulse(frame, fps, 170, 0.04);
+  // Idle breathe glow
+  const idleGlow = 0.15 + 0.08 * Math.sin((frame - nodeDelay) * 0.04 + index * 1.1);
+  const totalGlow = Math.max(idleGlow, glowPulse * 0.85);
 
-  if (inPairs) {
-    const pair = FRACTURE_PAIRS[pairIndex];
-    const isOld = pairFrame < OLD_HOLD;
-    const isTransition = pairFrame >= OLD_HOLD && pairFrame < NEW_START;
-    const isNew = pairFrame >= NEW_START;
+  const isEscrow = index === 2;
+  const borderColor = isEscrow ? COLORS.discord : phase.color;
+  const glowHex = isEscrow ? "248,113,113" : hexToRgb(phase.color);
+  const escrowExtraGlow = isEscrow ? totalGlow * 0.4 : 0;
 
-    // OLD phase
-    if (isOld || isTransition) {
-      const oldScale = slamScale(frame, fps, pairIndex * PAIR_DURATION, 2.5);
-      const oldOpacity = interpolate(pairFrame, [0, 3], [0, 1], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      });
-      // Flash at start of OLD
-      const oldFlash = flashBurst(pairFrame, 0, 2);
-      // Fade out at end
-      const oldDim = isTransition
-        ? interpolate(pairFrame, [OLD_HOLD, NEW_START], [1, 0], {
-            extrapolateLeft: "clamp",
-            extrapolateRight: "clamp",
-          })
-        : 1;
+  // Numbered circle background
+  const circleOpacity = interpolate(progress, [0.3, 0.9], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
 
-      return (
-        <AbsoluteFill style={{ backgroundColor: COLORS.bg.deep }}>
-          {/* Coral atmosphere — "old world" tension */}
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              background: `radial-gradient(ellipse at center, rgba(248,113,113,${0.06 + beat}) 0%, transparent 60%)`,
-              pointerEvents: "none",
-            }}
-          />
-
-          <AbsoluteFill
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 12,
-              opacity: oldOpacity * oldDim,
-            }}
-          >
-            {/* OLD text — Brutalist, massive, coral */}
-            <div
-              style={{
-                fontFamily: FONTS.brutalist,
-                fontSize: 76,
-                fontWeight: 700,
-                color: COLORS.discord,
-                textTransform: "uppercase",
-                letterSpacing: "0.04em",
-                lineHeight: 1.1,
-                textAlign: "center",
-                maxWidth: 1400,
-                transform: `scale(${oldScale})`,
-                textShadow: `0 0 40px rgba(248,113,113,0.5)`,
-              }}
-            >
-              {pair.old}
-            </div>
-            {/* Sub-label — Swiss, muted */}
-            <div
-              style={{
-                fontFamily: FONTS.swiss,
-                fontSize: 28,
-                color: COLORS.muted,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                opacity: interpolate(pairFrame, [8, 16], [0, 0.7], {
-                  extrapolateLeft: "clamp",
-                  extrapolateRight: "clamp",
-                }),
-              }}
-            >
-              {pair.oldSub}
-            </div>
-          </AbsoluteFill>
-
-          {/* Coral flash — old world */}
-          {oldFlash > 0 && (
-            <AbsoluteFill
-              style={{
-                backgroundColor: `rgba(248,113,113,${oldFlash * 0.2})`,
-                pointerEvents: "none",
-              }}
-            />
-          )}
-        </AbsoluteFill>
-      );
-    }
-
-    // NEW phase
-    if (isNew) {
-      const newLocalFrame = pairFrame - NEW_START;
-      const newScale = slamScale(frame, fps, pairIndex * PAIR_DURATION + NEW_START, 2.5);
-      const newOpacity = interpolate(newLocalFrame, [0, 3], [0, 1], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      });
-      // Green flash at start of NEW
-      const newFlash = flashBurst(newLocalFrame, 0, 2);
-
-      return (
-        <AbsoluteFill style={{ backgroundColor: COLORS.bg.deep }}>
-          {/* Amber atmosphere — "new world" momentum */}
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              background: `radial-gradient(ellipse at center, rgba(245,166,35,${0.06 + beat}) 0%, transparent 60%)`,
-              pointerEvents: "none",
-            }}
-          />
-
-          <AbsoluteFill
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 12,
-              opacity: newOpacity,
-            }}
-          >
-            {/* NEW text — Monument, massive, amber gold */}
-            <div
-              style={{
-                fontFamily: FONTS.monument,
-                fontSize: 88,
-                fontWeight: 700,
-                color: COLORS.accent1,
-                textTransform: "uppercase",
-                letterSpacing: "-0.02em",
-                lineHeight: 1.1,
-                textAlign: "center",
-                maxWidth: 1400,
-                transform: `scale(${newScale})`,
-                textShadow: `0 0 50px rgba(245,166,35,0.6), 0 0 100px rgba(245,166,35,0.2)`,
-              }}
-            >
-              {pair.new}
-            </div>
-            {/* Sub-label */}
-            <div
-              style={{
-                fontFamily: FONTS.swiss,
-                fontSize: 28,
-                color: COLORS.fg,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                opacity: interpolate(newLocalFrame, [6, 14], [0, 0.8], {
-                  extrapolateLeft: "clamp",
-                  extrapolateRight: "clamp",
-                }),
-              }}
-            >
-              {pair.newSub}
-            </div>
-          </AbsoluteFill>
-
-          {/* Amber flash */}
-          {newFlash > 0 && (
-            <AbsoluteFill
-              style={{
-                backgroundColor: `rgba(245,166,35,${newFlash * 0.15})`,
-                pointerEvents: "none",
-              }}
-            />
-          )}
-        </AbsoluteFill>
-      );
-    }
-  }
-
-  // ── FEE COMPARISON SLAM ──
-  if (inFee) {
-    // Old fee SLAMS in at feeFrame 0
-    const oldFeeProgress = slamSpring(feeFrame, fps, 0);
-    const oldFeeScale = slamScale(feeFrame, fps, 0, 2);
-
-    // Strikethrough draws at feeFrame 20
-    const strikeWidth = interpolate(feeFrame, [20, 30], [0, 100], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-      easing: Easing.out(Easing.cubic),
-    });
-
-    // Arrow appears
-    const arrowOpacity = interpolate(feeFrame, [30, 36], [0, 1], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    });
-
-    // New fee EXPLODES — bouncy spring at feeFrame 35
-    const newFeeProgress = bouncySpring(feeFrame, fps, 35);
-    const newFeeScale = interpolate(newFeeProgress, [0, 1], [0.3, 1]);
-
-    // "protocol fee" label
-    const labelFade = smoothSpring(feeFrame, fps, 55);
-
-    // Discord flash at feeFrame 0
-    const feeFlash = flashBurst(feeFrame, 0, 2);
-
-    return (
-      <AbsoluteFill style={{ backgroundColor: COLORS.bg.deep }}>
-        {/* Dual atmosphere — coral left (old), amber right (new) */}
+  return (
+    <div
+      style={{
+        opacity: enterOpacity,
+        transform: `scale(${enterScale})`,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 10,
+        flex: 1,
+        maxWidth: 200,
+        minWidth: 160,
+      }}
+    >
+      {/* Card */}
+      <div
+        style={{
+          width: "100%",
+          padding: "16px 10px 14px",
+          background: COLORS.bg.surface,
+          border: `1px solid ${borderColor}`,
+          borderRadius: 12,
+          boxShadow: `
+            0 0 ${8 + totalGlow * 32 + escrowExtraGlow * 20}px rgba(${glowHex},${0.12 + totalGlow * 0.65}),
+            inset 0 1px 0 rgba(255,255,255,0.04)
+          `,
+          textAlign: "center",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        {/* Radial inner glow */}
         <div
           style={{
             position: "absolute",
             inset: 0,
-            background: `
-              radial-gradient(ellipse at 30% 50%, rgba(248,113,113,0.05) 0%, transparent 40%),
-              radial-gradient(ellipse at 70% 50%, rgba(245,166,35,0.06) 0%, transparent 40%)
-            `,
+            background: `radial-gradient(ellipse at center, rgba(${glowHex},${totalGlow * 0.18}) 0%, transparent 70%)`,
             pointerEvents: "none",
           }}
         />
 
-        <AbsoluteFill
+        {/* Numbered circle */}
+        <div
           style={{
             display: "flex",
-            alignItems: "center",
             justifyContent: "center",
-            gap: 60,
+            marginBottom: 8,
+            opacity: circleOpacity,
           }}
         >
-          {/* Old fee — Brutalist, discord, with strikethrough */}
           <div
             style={{
-              position: "relative",
-              opacity: oldFeeProgress,
-              transform: `scale(${oldFeeScale})`,
+              width: 26,
+              height: 26,
+              borderRadius: "50%",
+              backgroundColor: borderColor,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: `0 0 12px rgba(${glowHex},0.55)`,
             }}
           >
             <span
               style={{
                 fontFamily: FONTS.brutalist,
-                fontSize: 88,
+                fontSize: 60,
                 fontWeight: 700,
-                color: COLORS.discord,
-                letterSpacing: "-0.02em",
+                color: COLORS.bg.deep,
+                letterSpacing: "0.02em",
               }}
             >
-              20-40%
+              {String(index + 1).padStart(2, "0")}
             </span>
-            {/* Animated strikethrough */}
+          </div>
+        </div>
+
+        {/* Phase name — Monument */}
+        <div
+          style={{
+            fontFamily: FONTS.monument,
+            fontSize: 66,
+            fontWeight: 700,
+            color: borderColor,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            lineHeight: 1.2,
+            position: "relative",
+          }}
+        >
+          {phase.name}
+        </div>
+      </div>
+
+      {/* Description — Swiss */}
+      <div
+        style={{
+          fontFamily: FONTS.swiss,
+          fontSize: 34,
+          color: COLORS.muted,
+          textAlign: "center",
+          lineHeight: 1.45,
+          maxWidth: 190,
+          opacity: interpolate(progress, [0.6, 1], [0, 0.9], {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+          }),
+        }}
+      >
+        {phase.desc}
+      </div>
+    </div>
+  );
+};
+
+// ─── Connector ────────────────────────────────────────────────────────────────
+const Connector: React.FC<{ fromIndex: number; color: string }> = ({
+  fromIndex,
+  color,
+}) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  // Draw 8 frames after the source node appears
+  const connDelay = NODE_APPEAR_BASE + fromIndex * NODE_STAGGER + 8;
+  const progress = smoothSpring(frame, fps, connDelay, 15);
+  const lineLen = 44;
+  const dashOffset = interpolate(progress, [0, 1], [lineLen, 0]);
+
+  return (
+    <div
+      style={{
+        flex: "0 0 44px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        paddingBottom: 52,
+      }}
+    >
+      <svg width={44} height={10} overflow="visible">
+        <line
+          x1={0} y1={5} x2={44} y2={5}
+          stroke={`${color}22`}
+          strokeWidth={1.5}
+        />
+        <line
+          x1={0} y1={5} x2={44} y2={5}
+          stroke={color}
+          strokeWidth={1.5}
+          strokeDasharray={lineLen}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+        />
+        <polygon
+          points="36,1.5 44,5 36,8.5"
+          fill={color}
+          opacity={progress}
+        />
+      </svg>
+    </div>
+  );
+};
+
+// ─── Key Insights ─────────────────────────────────────────────────────────────
+const KeyInsights: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+
+  const lines = [
+    "AI agents discover, negotiate, and orchestrate",
+    "Milestone escrow locks funds before work starts",
+    "Cryptographic evidence proves every step",
+  ];
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      {lines.map((text, i) => {
+        const delay = INSIGHTS_START + i * 12;
+        const { opacity, translateY } = whipUp(frame, fps, delay, 60);
+
+        return (
+          <div
+            key={i}
+            style={{
+              opacity,
+              transform: `translateY(${translateY}px)`,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 20px",
+              background: "rgba(255,255,255,0.025)",
+              border: "1px solid rgba(255,255,255,0.07)",
+              borderRadius: 40,
+            }}
+          >
             <div
               style={{
-                position: "absolute",
-                top: "52%",
-                left: 0,
-                height: 4,
-                width: `${strikeWidth}%`,
-                background: COLORS.discord,
-                borderRadius: 2,
-                boxShadow: `0 0 12px rgba(248,113,113,0.7)`,
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: COLORS.emerald,
+                boxShadow: `0 0 7px rgba(52,211,153,0.7)`,
+                flexShrink: 0,
               }}
             />
-          </div>
-
-          {/* Arrow */}
-          <span
-            style={{
-              fontFamily: FONTS.monument,
-              fontSize: 48,
-              color: COLORS.muted,
-              opacity: arrowOpacity,
-            }}
-          >
-            →
-          </span>
-
-          {/* New fee — Monument, accent1, BOUNCY */}
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <div
-              style={{
-                opacity: newFeeProgress > 0.01 ? 1 : 0,
-                transform: `scale(${newFeeScale})`,
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: FONTS.monument,
-                  fontSize: 120,
-                  fontWeight: 700,
-                  color: COLORS.accent1,
-                  letterSpacing: "-0.04em",
-                  lineHeight: 1,
-                  textShadow: `0 0 60px rgba(245,166,35,0.6), 0 0 120px rgba(245,166,35,0.2)`,
-                }}
-              >
-                1.5%
-              </span>
-            </div>
-            <div
+            <span
               style={{
                 fontFamily: FONTS.swiss,
-                fontSize: 22,
-                fontWeight: 600,
-                color: COLORS.muted,
-                letterSpacing: "0.2em",
-                textTransform: "uppercase",
-                opacity: labelFade,
+                fontSize: 66,
+                color: COLORS.fg,
+                fontWeight: 400,
               }}
             >
-              PROTOCOL FEE
-            </div>
+              {text}
+            </span>
           </div>
-        </AbsoluteFill>
+        );
+      })}
+    </div>
+  );
+};
 
-        {/* Coral flash at fee start */}
-        {feeFlash > 0 && (
-          <AbsoluteFill
-            style={{
-              backgroundColor: `rgba(248,113,113,${feeFlash * 0.15})`,
-              pointerEvents: "none",
-            }}
-          />
-        )}
-      </AbsoluteFill>
-    );
-  }
+// ─── Main scene ───────────────────────────────────────────────────────────────
+export const S03_Pipeline: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
 
-  // Fallback (shouldn't reach)
-  return <AbsoluteFill style={{ backgroundColor: "#000000" }} />;
+  const titleProgress = smoothSpring(frame, fps, 0, 20);
+  const titleOpacity = interpolate(titleProgress, [0, 1], [0, 1]);
+  const titleY = interpolate(titleProgress, [0, 1], [16, 0]);
+
+  const beat = beatPulse(frame, fps, 170, 0.025);
+
+  const endDim = interpolate(frame, [OUTRO_START, 508], [1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.in(Easing.cubic),
+  });
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: COLORS.bg.deep,
+        padding: "44px 52px 36px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 24,
+        opacity: endDim,
+      }}
+    >
+      {/* Ambient glow */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: `radial-gradient(ellipse at 50% 35%, rgba(148,184,255,${0.03 + beat}) 0%, transparent 55%)`,
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* Title */}
+      <div
+        style={{
+          opacity: titleOpacity,
+          transform: `translateY(${titleY}px)`,
+          fontFamily: FONTS.expressive,
+          fontSize: 100,
+          fontWeight: 100,
+          color: COLORS.fg,
+          textAlign: "center",
+          letterSpacing: "0.02em",
+          lineHeight: 1.1,
+          zIndex: 1,
+        }}
+      >
+        HOW IT WORKS
+      </div>
+
+      {/* Phase row */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: 1,
+          zIndex: 1,
+          gap: 0,
+        }}
+      >
+        {SIX_PHASES.map((phase, i) => (
+          <React.Fragment key={phase.name}>
+            <PhaseCard phase={phase} index={i} />
+            {i < SIX_PHASES.length - 1 && (
+              <Connector fromIndex={i} color={phase.color} />
+            )}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* Key insights */}
+      <div style={{ zIndex: 1 }}>
+        <KeyInsights />
+      </div>
+    </AbsoluteFill>
+  );
 };
 
 export default S03_Pipeline;
+
+// ─── Utility ─────────────────────────────────────────────────────────────────
+function hexToRgb(hex: string): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `${r},${g},${b}`;
+}

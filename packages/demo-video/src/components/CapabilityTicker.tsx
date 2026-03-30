@@ -12,7 +12,7 @@ export const CapabilityTicker: React.FC<{
   fontSize?: number;
   /** Frame at which the ticker starts moving (for eased acceleration) */
   tickerStartFrame?: number;
-}> = ({ speed = 2, fontSize = 15, tickerStartFrame = 0 }) => {
+}> = ({ speed = 2, fontSize = 30, tickerStartFrame = 0 }) => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
 

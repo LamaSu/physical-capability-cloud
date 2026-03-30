@@ -36,6 +36,8 @@ export class EvidenceEmitter {
   private bundleListeners: Array<(bundle: EvidenceBundle) => void> = [];
   /** Signing function — async to support HSM/TEE/wallet signers in production */
   private signFn: (data: string) => Promise<Signature>;
+  /** True when a real signing function was provided; false when using the test-only default */
+  private _hasRealSignFn: boolean;
   /** Optional IPFS storage service — when set, bundles are archived after finalization */
   private storageService: EvidenceStorageService | null = null;
   /** Result from the most recent IPFS archive operation */
@@ -46,12 +48,25 @@ export class EvidenceEmitter {
     signFn?: (data: string) => Promise<Signature>,
   ) {
     this.kernelId = kernelId;
+    this._hasRealSignFn = !!signFn;
     // TEST-ONLY default — replace with a real wallet signFn in production
-    this.signFn = signFn ?? (async (data: string) => ({
-      signer: "0x0000000000000000000000000000000000000000" as Address,
-      algorithm: "secp256k1" as const,
-      value: `test_sig_${data.slice(0, 16)}`,
-    }));
+    this.signFn = signFn ?? (async (data: string) => {
+      console.warn(
+        "[evidence-emitter] WARNING: Using test-only signing key (zero address). " +
+          "Evidence bundles are NOT cryptographically verified. " +
+          "Set a real signing key in production.",
+      );
+      return {
+        signer: "0x0000000000000000000000000000000000000000" as Address,
+        algorithm: "secp256k1" as const,
+        value: `test_sig_${data.slice(0, 16)}`,
+      };
+    });
+  }
+
+  /** Returns true when using the test-only zero-address signing key. */
+  isTestSigner(): boolean {
+    return !this._hasRealSignFn;
   }
 
   /** Attach an IPFS storage service for automatic archiving */
@@ -130,6 +145,11 @@ export class EvidenceEmitter {
       kernelSignature: signature,
       createdAt: new Date().toISOString(),
     };
+
+    // Mark bundles signed with the test key so consumers can distinguish them
+    if (!this._hasRealSignFn) {
+      (bundle as unknown as Record<string, unknown>)._testSigned = true;
+    }
 
     // Archive to IPFS if storage service is available (best-effort)
     if (this.storageService?.isReady()) {

@@ -239,7 +239,8 @@ export async function escrowRoutes(app: FastifyInstance) {
 
       try {
         const result = await fundEscrow(address as Address);
-        pipelineTelemetry.emit("pipeline-" + Date.now(), "escrow_fund", "completed", { metadata: { escrow: address } });
+        // Use the escrow address as correlation ID — jobId not available at fund time
+        pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
         trackServerEvent("escrow_funded", { amount: result.toString?.() ?? address }, (req as any).operatorId);
         auditService.log({
           eventType: "escrow.funded",
@@ -322,6 +323,9 @@ export async function escrowRoutes(app: FastifyInstance) {
 
       try {
         const result = await releaseMilestone(idx, address as Address);
+        pipelineTelemetry.emit(address, "settlement_complete", "completed", {
+          metadata: { escrow: address, milestoneIndex: idx, released: true },
+        });
         auditService.log({
           eventType: "escrow.released",
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -386,6 +390,9 @@ export async function escrowRoutes(app: FastifyInstance) {
           body.reason,
           address as Address,
         );
+        pipelineTelemetry.emit(address, "verification_result", "completed", {
+          metadata: { escrow: address, milestoneIndex: idx, dispute: true, reason: body.reason },
+        });
         auditService.log({
           eventType: "escrow.disputed",
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -429,6 +436,19 @@ export async function escrowRoutes(app: FastifyInstance) {
 
       try {
         const result = await depositBond(idx, address as Address);
+        pipelineTelemetry.emit(address, "escrow_fund", "completed", {
+          metadata: { escrow: address, milestoneIndex: idx, action: "depositBond" },
+        });
+        auditService.log({
+          eventType: "escrow.bond_deposited",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "deposit_bond",
+          metadata: { milestoneIndex: idx },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "depositBond", escrow: address, milestoneIndex: idx };
       } catch (err) {
         return reply.status(502).send({
@@ -474,6 +494,19 @@ export async function escrowRoutes(app: FastifyInstance) {
           body.evidenceBundleHash as `0x${string}`,
           address as Address,
         );
+        pipelineTelemetry.emit(address, "verification_request", "completed", {
+          metadata: { escrow: address, milestoneIndex: idx, evidenceBundleHash: body.evidenceBundleHash },
+        });
+        auditService.log({
+          eventType: "escrow.evidence_submitted",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "submit_evidence",
+          metadata: { milestoneIndex: idx, evidenceBundleHash: body.evidenceBundleHash },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "submitEvidence", escrow: address, milestoneIndex: idx };
       } catch (err) {
         return reply.status(502).send({
@@ -519,6 +552,19 @@ export async function escrowRoutes(app: FastifyInstance) {
           body.attestationHash as `0x${string}`,
           address as Address,
         );
+        pipelineTelemetry.emit(address, "verification_result", "completed", {
+          metadata: { escrow: address, milestoneIndex: idx, attestationHash: body.attestationHash },
+        });
+        auditService.log({
+          eventType: "escrow.attestation_submitted",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "submit_attestation",
+          metadata: { milestoneIndex: idx, attestationHash: body.attestationHash },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "submitAttestation", escrow: address, milestoneIndex: idx };
       } catch (err) {
         return reply.status(502).send({

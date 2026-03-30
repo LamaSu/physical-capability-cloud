@@ -1,32 +1,30 @@
 /**
- * S07_Ancient — "The Revelation"
+ * S07_Stats — "THE PROOF"
  *
- * 750 frames (25 seconds). The tempo SHIFTS. Everything slows.
+ * 750 frames (25 seconds). Judge target: Molly Mackinlay (engineering rigor),
+ * Brad Holden (traction), Benjamin Lavergne (infrastructure).
  *
- * This is the "respect the ages, look forward knowing you are ancient" moment.
- * After the DnB fury of the first 6 scenes, we breathe. Giant type.
- * Code whispers in the background. Stats emerge like constellations.
+ * This scene proves PCC is REAL. Slow, reverent. Text IS the design.
  *
- * Frame 0-45:   Pure black. Breathing. The audience rests.
- * Frame 45:     "Every machine." — Editorial voice, 64px, fades in SLOWLY (40 frames).
- * Frame 105:    "Every lab." — same cadence.
- * Frame 165:    "Every factory on Earth." — bigger (72px), brighter.
- * Frame 250:    Pause. Then: "Just became" — Expressive thin, smaller.
- * Frame 320:    "a programmable endpoint." — Monument voice, 88px, accent1 glow.
- *               This is the climax. Hold it.
- * Frame 420:    Code fragments emerge from black — very low opacity (0.06).
- *               The actual TypeScript of PCC, floating.
- * Frame 480:    Stats emerge one by one — 40-frame stagger. Slow. Reverent.
- *               Each stat: big number (Monument) + tiny label (Swiss).
- * Frame 650:    "$3.5T" — gold, massive (120px), breathing glow. Holds.
- * Frame 720:    Everything dims except the glow. Preparing for Eternal.
+ * Frame 0-60:   Pure black, then ANCIENT_LINES revealed slowly.
+ *   Line 0 "Every machine."      — Expressive thin, 56px, accent1. Fade frame 0.
+ *   Line 1 "Every lab."          — Same style, frame 60.
+ *   Line 2 "Every factory on Earth." — Same, 60px, frame 120.
+ *   Line 3 "Just became"         — Editorial italic, 48px, accent2, frame 210.
+ *   Line 4 "a programmable endpoint." — Monument bold, 52px, emerald, frame 280.
  *
- * Axiom I: Text IS the design. No chrome, no panels. Just words on black.
- * Axiom II: No discord here. This is the moment of pure intent. Discord returns in S08.
- * Axiom III: SLOWNESS is the design decision. After DnB fury, stillness is dramatic.
+ * Frame 350-620: 6 stats slam in vertically — 45 frames apart.
+ *   Each: Brutalist value (64px, stat color) + Swiss label (14px tracked uppercase muted).
  *
- * Voices: Editorial (revelation lines), Monument (climax + stats), Swiss (labels),
- *         Expressive ("just became"), Brutalist (code texture)
+ * Frame 670:   "$3.5T" extra-large emphasised version (96px, gold, breathing glow).
+ *
+ * Frame 720:   Dim over 30 frames.
+ *
+ * Background: CODE_FRAGMENTS floating, drifting with noise2D.
+ *
+ * Voices: Expressive (first 3 lines), Editorial ("Just became"),
+ *         Monument (climax + $3.5T), Brutalist (stat values + code),
+ *         Swiss (stat labels)
  */
 import React from "react";
 import {
@@ -40,52 +38,57 @@ import { noise2D } from "@remotion/noise";
 import {
   COLORS,
   FONTS,
-  GRADIENTS,
   CODE_FRAGMENTS,
   SLAM_STATS,
   ANCIENT_LINES,
-  smoothSpring,
   breathe,
+  slamSpring,
 } from "../lib";
 
-/** Single revelation line — fades in SLOWLY */
+/** Slowly-revealed revelation line */
 const RevelationLine: React.FC<{
   text: string;
-  delay: number;
+  startFrame: number;
   fontSize?: number;
+  fontFamily: string;
+  fontWeight?: number;
+  fontStyle?: "normal" | "italic";
+  color: string;
   isClimax?: boolean;
-  voice?: string;
-}> = ({ text, delay, fontSize = 64, isClimax = false, voice }) => {
+}> = ({
+  text,
+  startFrame,
+  fontSize = 94,
+  fontFamily,
+  fontWeight = 400,
+  fontStyle = "normal",
+  color,
+  isClimax = false,
+}) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // SLOW fade — 40 frames to appear (NOT slam)
-  const opacity = interpolate(frame, [delay, delay + 40], [0, 1], {
+  const opacity = interpolate(frame, [startFrame, startFrame + 30], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.out(Easing.cubic),
   });
 
-  // Gentle rise — 20px over 40 frames
-  const translateY = interpolate(frame, [delay, delay + 40], [20, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
+  const translateY = interpolate(
+    frame,
+    [startFrame, startFrame + 30],
+    [20, 0],
+    {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+      easing: Easing.out(Easing.cubic),
+    },
+  );
 
-  // Breathing glow for climax
-  const glowIntensity = isClimax && frame > delay + 40
-    ? breathe(frame, fps, 0.4, 0.7, 3)
-    : 0;
-
-  const fontFamily = voice === "expressive"
-    ? FONTS.expressive
-    : voice === "monument"
-    ? FONTS.monument
-    : FONTS.editorial;
-
-  const fontWeight = voice === "monument" ? 700 : voice === "expressive" ? 300 : 400;
-  const fontStyle = voice === "editorial" || voice === "expressive" ? "italic" as const : "normal" as const;
+  const glowIntensity =
+    isClimax && frame > startFrame + 30
+      ? breathe(frame, fps, 0.4, 0.7, 3)
+      : 0;
 
   return (
     <div
@@ -96,13 +99,14 @@ const RevelationLine: React.FC<{
         fontSize,
         fontWeight,
         fontStyle,
-        color: isClimax ? COLORS.accent1 : COLORS.fg,
+        color,
         textAlign: "center",
-        lineHeight: 1.15,
-        letterSpacing: isClimax ? "-0.02em" : "0.01em",
-        textShadow: isClimax
-          ? `0 0 ${40 + glowIntensity * 60}px rgba(245,166,35,${glowIntensity}), 0 0 ${80 + glowIntensity * 100}px rgba(245,166,35,${glowIntensity * 0.4})`
-          : undefined,
+        lineHeight: 1.2,
+        letterSpacing: isClimax ? "-0.01em" : "0.01em",
+        textShadow:
+          isClimax && glowIntensity > 0
+            ? `0 0 ${40 + glowIntensity * 60}px rgba(52,211,153,${glowIntensity * 0.7}), 0 0 80px rgba(52,211,153,${glowIntensity * 0.3})`
+            : undefined,
       }}
     >
       {text}
@@ -110,84 +114,33 @@ const RevelationLine: React.FC<{
   );
 };
 
-/** Floating code fragments — very subtle background texture */
-const CodeWhisper: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const opacity = interpolate(frame, [420, 460], [0, 0.06], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  if (opacity <= 0) return null;
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        overflow: "hidden",
-        opacity,
-        pointerEvents: "none",
-      }}
-    >
-      {CODE_FRAGMENTS.map((line, i) => {
-        // Very slow scroll
-        const y = ((i * 72 - (frame * 0.15)) % 1300) + 50;
-        const x = 60 + (i % 4) * 480;
-        const lineOpacity = 0.3 + noise2D(`whisper-${i}`, 0, (frame / fps) * 0.08) * 0.4;
-
-        return (
-          <div
-            key={i}
-            style={{
-              position: "absolute",
-              top: y,
-              left: x,
-              fontFamily: FONTS.brutalist,
-              fontSize: 16,
-              color: COLORS.accent2,
-              whiteSpace: "nowrap",
-              opacity: lineOpacity,
-            }}
-          >
-            {line}
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-/** Single stat — emerges slowly */
-const StatItem: React.FC<{
+/** Single stat — slams in then holds */
+const SlamStat: React.FC<{
   value: string;
   label: string;
   color: string;
   delay: number;
-}> = ({ value, label, color, delay }) => {
+  valueSize?: number;
+}> = ({ value, label, color, delay, valueSize = 88 }) => {
   const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
 
-  // Slow emergence — 30 frames
-  const opacity = interpolate(frame, [delay, delay + 30], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
+  const progress = slamSpring(frame, fps, delay);
+  const translateY = interpolate(progress, [0, 1], [30, 0]);
+  const opacity = Math.min(progress * 4, 1);
 
   return (
     <div
       style={{
         opacity,
+        transform: `translateY(${translateY}px)`,
         textAlign: "center",
-        minWidth: 120,
       }}
     >
       <div
         style={{
-          fontFamily: FONTS.monument,
-          fontSize: 44,
+          fontFamily: FONTS.brutalist,
+          fontSize: valueSize,
           fontWeight: 700,
           color,
           lineHeight: 1,
@@ -200,12 +153,12 @@ const StatItem: React.FC<{
       <div
         style={{
           fontFamily: FONTS.swiss,
-          fontSize: 16,
+          fontSize: 66,
           fontWeight: 600,
           color: COLORS.muted,
-          textTransform: "uppercase",
-          letterSpacing: "0.14em",
-          marginTop: 6,
+          textTransform: "uppercase" as const,
+          letterSpacing: "0.18em",
+          marginTop: 8,
         }}
       >
         {label}
@@ -214,96 +167,197 @@ const StatItem: React.FC<{
   );
 };
 
+/** Code fragments floating as background texture */
+const CodeWhisper: React.FC = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+
+  // Fade in early and stay subtle
+  const opacity = interpolate(frame, [0, 60], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  if (opacity <= 0.01) return null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        overflow: "hidden",
+        pointerEvents: "none",
+      }}
+    >
+      {CODE_FRAGMENTS.map((line, i) => {
+        // Noise-based drift
+        const driftX =
+          noise2D(`cw-x-${i}`, 0, (frame / fps) * 0.06) * 18;
+        const driftY =
+          noise2D(`cw-y-${i}`, 1, (frame / fps) * 0.05) * 12;
+
+        // Distribute across screen
+        const baseX = 40 + (i % 4) * 450;
+        const baseY = 30 + Math.floor(i / 4) * 130 + (i % 3) * 42;
+
+        const fragmentOpacity =
+          (0.06 + noise2D(`cw-o-${i}`, 2, (frame / fps) * 0.04) * 0.06) *
+          opacity;
+
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: baseX + driftX,
+              top: baseY + driftY,
+              fontFamily: FONTS.brutalist,
+              fontSize: 66,
+              fontWeight: 400,
+              color: COLORS.accent2,
+              opacity: fragmentOpacity,
+              whiteSpace: "nowrap" as const,
+              userSelect: "none" as const,
+            }}
+          >
+            {line}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 export const S07_Stats: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Market size — frame 650
-  const marketOpacity = interpolate(frame, [650, 690], [0, 1], {
+  // The last SLAM_STATS entry is $3.5T — give it extra treatment at frame 670
+  // But we also include it in the vertical slam list (all 6 at 45-frame stagger from 350)
+  const STAT_STAGGER = 45;
+
+  // Market size breathing glow at frame 670
+  const marketOpacity = interpolate(frame, [660, 695], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.out(Easing.cubic),
   });
-  const marketBreathe = frame > 690
-    ? breathe(frame, fps, 0.85, 1, 4)
-    : 1;
+  const marketBreathe =
+    frame > 695 ? breathe(frame, fps, 0.82, 1, 4) : 0.82;
 
   // End dim
-  const endDim = interpolate(frame, [720, 748], [1, 0.15], {
+  const endDim = interpolate(frame, [720, 750], [1, 0.15], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
+
+  // Map ANCIENT_LINES to specific voices
+  const lineConfigs = [
+    {
+      fontFamily: FONTS.expressive,
+      fontWeight: 100,
+      fontStyle: "normal" as const,
+      fontSize: 94,
+      color: COLORS.accent1,
+    },
+    {
+      fontFamily: FONTS.expressive,
+      fontWeight: 100,
+      fontStyle: "normal" as const,
+      fontSize: 94,
+      color: COLORS.accent1,
+    },
+    {
+      fontFamily: FONTS.expressive,
+      fontWeight: 100,
+      fontStyle: "normal" as const,
+      fontSize: 100,
+      color: COLORS.fg,
+    },
+    {
+      fontFamily: FONTS.editorial,
+      fontWeight: 400,
+      fontStyle: "italic" as const,
+      fontSize: 100,
+      color: COLORS.accent2,
+    },
+    {
+      fontFamily: FONTS.monument,
+      fontWeight: 700,
+      fontStyle: "normal" as const,
+      fontSize: 106,
+      color: COLORS.emerald,
+      isClimax: true,
+    },
+  ];
 
   return (
     <AbsoluteFill style={{ backgroundColor: COLORS.bg.deep }}>
       {/* Code whisper texture */}
       <CodeWhisper />
 
-      {/* Gentle ambient glow */}
+      {/* Gentle gold ambient */}
       <div
         style={{
           position: "absolute",
-          top: "45%",
+          top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
-          width: 800,
-          height: 600,
-          background: "radial-gradient(ellipse, rgba(245,166,35,0.02) 0%, transparent 70%)",
+          width: 900,
+          height: 700,
+          background:
+            "radial-gradient(ellipse, rgba(245,166,35,0.02) 0%, transparent 65%)",
           pointerEvents: "none",
         }}
       />
 
+      {/* All content */}
       <AbsoluteFill
         style={{
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          gap: 8,
+          gap: 10,
+          paddingLeft: 80,
+          paddingRight: 80,
           opacity: endDim,
         }}
       >
-        {/* Revelation lines — slow, reverent */}
-        <RevelationLine text="Every machine." delay={45} fontSize={64} voice="editorial" />
-        <RevelationLine text="Every lab." delay={105} fontSize={64} voice="editorial" />
-        <RevelationLine text="Every factory on Earth." delay={165} fontSize={72} voice="editorial" />
-
-        <div style={{ height: 32 }} />
-
-        <RevelationLine text="Just became" delay={250} fontSize={42} voice="expressive" />
-        <RevelationLine
-          text="a programmable endpoint."
-          delay={320}
-          fontSize={88}
-          voice="monument"
-          isClimax
-        />
-
-        <div style={{ height: 48 }} />
-
-        {/* Stats emerge — slow stagger (40 frames apart) */}
-        <div
-          style={{
-            display: "flex",
-            gap: 40,
-            justifyContent: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          {SLAM_STATS.slice(0, 5).map((stat, i) => (
-            <StatItem
-              key={stat.label}
-              value={stat.value}
-              label={stat.label}
-              color={stat.color}
-              delay={480 + i * 30}
+        {/* Ancient lines — revealed slowly */}
+        {ANCIENT_LINES.map((line, i) => {
+          const cfg = lineConfigs[i];
+          return (
+            <RevelationLine
+              key={i}
+              text={line.text}
+              startFrame={line.delay}
+              fontSize={cfg.fontSize}
+              fontFamily={cfg.fontFamily}
+              fontWeight={cfg.fontWeight}
+              fontStyle={cfg.fontStyle}
+              color={cfg.color}
+              isClimax={(cfg as { isClimax?: boolean }).isClimax ?? false}
             />
-          ))}
-        </div>
+          );
+        })}
 
-        <div style={{ height: 32 }} />
+        <div style={{ height: 36 }} />
 
-        {/* "$3.5T" — massive, gold, breathing */}
+        {/* Stats — vertical list, slam in one by one */}
+        {SLAM_STATS.slice(0, 5).map((stat, i) => (
+          <SlamStat
+            key={stat.label}
+            value={stat.value}
+            label={stat.label}
+            color={stat.color}
+            delay={350 + i * STAT_STAGGER}
+          />
+        ))}
+
+        <div style={{ height: 24 }} />
+
+        {/* $3.5T — extra emphasis, larger slam */}
         <div
           style={{
             opacity: marketOpacity,
@@ -313,13 +367,16 @@ export const S07_Stats: React.FC = () => {
           <div
             style={{
               fontFamily: FONTS.monument,
-              fontSize: 120,
+              fontSize: 140,
               fontWeight: 700,
-              color: COLORS.accent1,
+              color: COLORS.gold,
               lineHeight: 1,
               letterSpacing: "-0.04em",
               opacity: marketBreathe,
-              textShadow: `0 0 60px rgba(245,166,35,0.6), 0 0 120px rgba(245,166,35,0.25)`,
+              textShadow: `
+                0 0 60px rgba(245,166,35,${0.5 + marketBreathe * 0.2}),
+                0 0 120px rgba(245,166,35,${0.2 + marketBreathe * 0.1})
+              `,
             }}
           >
             $3.5T
@@ -327,12 +384,12 @@ export const S07_Stats: React.FC = () => {
           <div
             style={{
               fontFamily: FONTS.swiss,
-              fontSize: 20,
+              fontSize: 66,
               fontWeight: 700,
               color: COLORS.muted,
-              textTransform: "uppercase",
+              textTransform: "uppercase" as const,
               letterSpacing: "0.3em",
-              marginTop: 8,
+              marginTop: 10,
             }}
           >
             Addressable Market

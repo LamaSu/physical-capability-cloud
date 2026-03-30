@@ -1,23 +1,21 @@
 /**
- * S05_Arena — "The Terminal War"
+ * S05_Evidence — "SOVEREIGN STACK"
  *
- * 570 frames (19 seconds). Agent bidding at DnB speed.
+ * 570 frames (19 seconds). Judge target: David Sneider (Lit), Omar Espejel (Starknet),
+ * Dhruv Varshney (Storacha), Molly Mackinlay (IPFS).
  *
- * Frame 0:     Title SLAMS in — Monument, accent2 (cyan, not green for voice variety).
- * Frame 8:     Three operator cards appear SIMULTANEOUSLY — slam from bottom.
- *              No stagger. They arrive together like fighters entering an arena.
- * Frame 30:    Terminal log starts typing — 18 frames per entry (fast, urgent).
- * Frame 300:   Discord card (MachineShop Beta) FLICKERS — it's losing the bid.
- *              Strobe effect: 4-frame on/off for 20 frames.
- * Frame 380:   "Winner: LAB-01" line appears. Discord card dims permanently.
- * Frame 420:   Status bar SNAPS in from bottom.
- * Frame 530:   Everything dims for transition.
+ * The SPONSOR scene. Each integration named and badged.
  *
- * Axiom I: Title → cards → terminal → status. Clear reading order.
- * Axiom II: Middle card IS discord. The loser marked from birth.
- * Axiom III: Simultaneous entrance → sequential typing → strobe → snap. Time layers.
+ * Frame 0:     Title "SOVEREIGN INFRASTRUCTURE" — Editorial italic, holographic, fade in.
+ * Frame 20:    Subtitle — Swiss, muted, small.
+ * Frame 40-440: 9-step evidence cascade from EVIDENCE_PIPELINE.
+ *               Sponsor badges on steps 3-6 (Lit, Storacha, Bittensor, Starknet).
+ * Frame 460:   Glow sweep through all steps.
+ * Frame 480:   "Zero trust required." — Expressive italic, accent2.
+ * Frame 540:   Dim to 0.2.
  *
- * Voices: Monument (title), Swiss (names), Brutalist (capabilities, terminal, status)
+ * Voices: Editorial (title), Swiss (subtitle + step detail), Monument (numbers),
+ *         Brutalist (sponsor badges), Expressive (closer)
  */
 import React from "react";
 import {
@@ -25,258 +23,341 @@ import {
   useVideoConfig,
   AbsoluteFill,
   interpolate,
+  Easing,
 } from "remotion";
-import { noise2D } from "@remotion/noise";
 import {
   COLORS,
   FONTS,
-  NEGOTIATION_LOG,
+  GRADIENTS,
+  EVIDENCE_PIPELINE,
   slamSpring,
-  slamScale,
   smoothSpring,
-  whipUp,
-  strobe,
+  fadeSlideUp,
   beatPulse,
   flashBurst,
 } from "../lib";
 import { PulseIndicator } from "../components/PulseIndicator";
-import { TerminalLog } from "../components/TerminalLog";
 
-type OperatorCard = {
-  name: string;
-  capability: string;
-  dotColor: string;
-  isDiscord?: boolean;
+const STEP_STAGGER = 40;
+const STEP_HEIGHT = 48;
+
+/** Sponsor badge data — indexed by EVIDENCE_PIPELINE position */
+const SPONSOR_BADGES: Record<number, { name: string; borderColor: string }> = {
+  3: { name: "LIT PROTOCOL", borderColor: COLORS.emerald },
+  4: { name: "STORACHA", borderColor: COLORS.accent2 },
+  5: { name: "BITTENSOR", borderColor: COLORS.accent2 },
+  6: { name: "STARKNET", borderColor: COLORS.emerald },
 };
 
-const OPERATORS: OperatorCard[] = [
-  { name: "BioLab Alpha", capability: "HPLC · 99.2% purity · 4hr", dotColor: COLORS.accent2 },
-  { name: "MachineShop Beta", capability: "CNC · ±0.01mm · Same-day", dotColor: COLORS.discord, isDiscord: true },
-  { name: "CourierNet Gamma", capability: "Same-day delivery · 50km", dotColor: COLORS.accent1 },
-];
-
-const OperatorCardItem: React.FC<{ op: OperatorCard; index: number }> = ({
-  op,
-  index,
-}) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  // ALL cards slam in at frame 8 — no stagger
-  const { opacity, translateY } = whipUp(frame, fps, 8, 120);
-
-  // Discord card flickers at frame 300-320
-  const flickerActive = op.isDiscord && frame >= 300 && frame < 320;
-  const flickerOpacity = flickerActive
-    ? strobe(frame, 300, 320, 4, 0.5)
-    : 1;
-
-  // Discord card dims permanently after frame 380
-  const discordDim = op.isDiscord
-    ? interpolate(frame, [380, 400], [1, 0.25], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      })
-    : 1;
-
-  // Noise drift
-  const driftY = noise2D(`card-${index}`, 0, (frame / fps) * 0.25) * 2;
-
-  return (
-    <div
+const SponsorBadge: React.FC<{
+  name: string;
+  borderColor: string;
+  stepColor: string;
+}> = ({ name, borderColor }) => (
+  <div
+    style={{
+      padding: "3px 8px",
+      border: `1px solid ${borderColor}`,
+      borderRadius: 4,
+      background: `${borderColor}10`,
+      flexShrink: 0,
+      marginLeft: 8,
+    }}
+  >
+    <span
       style={{
-        opacity: opacity * flickerOpacity * discordDim,
-        transform: `translateY(${translateY + driftY}px)`,
-        flex: 1,
+        fontFamily: FONTS.brutalist,
+        fontSize: 60,
+        fontWeight: 700,
+        color: borderColor,
+        letterSpacing: "0.12em",
+        textTransform: "uppercase" as const,
+        whiteSpace: "nowrap" as const,
       }}
     >
-      <div
-        style={{
-          padding: "16px 18px",
-          background: COLORS.bg.surface,
-          border: `1px solid ${op.dotColor}${op.isDiscord ? "88" : "3a"}`,
-          borderRadius: 12,
-          boxShadow: op.isDiscord
-            ? `0 0 20px rgba(248,113,113,0.3), inset 0 1px 0 rgba(255,255,255,0.04)`
-            : `0 0 16px ${op.dotColor}18, inset 0 1px 0 rgba(255,255,255,0.04)`,
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse at center top, ${op.dotColor}08 0%, transparent 60%)`, pointerEvents: "none" }} />
+      {name}
+    </span>
+  </div>
+);
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, position: "relative" }}>
-          <PulseIndicator color={op.dotColor} size={9} delay={12} />
-          <span style={{ fontFamily: FONTS.swiss, fontSize: 24, fontWeight: 700, color: COLORS.fg, letterSpacing: "-0.01em" }}>
-            {op.name}
-          </span>
-          {op.isDiscord && (
-            <span style={{ fontFamily: FONTS.brutalist, fontSize: 14, color: COLORS.discord, padding: "3px 9px", border: `1px solid ${COLORS.discord}44`, borderRadius: 3, letterSpacing: "0.1em", marginLeft: "auto" }}>
-              BIDDING
-            </span>
-          )}
-        </div>
-
-        <div style={{ fontFamily: FONTS.brutalist, fontSize: 18, color: COLORS.muted, letterSpacing: "0.04em", paddingLeft: 19, position: "relative" }}>
-          {op.capability}
-        </div>
-
-        <div style={{ marginTop: 12, height: 2, borderRadius: 2, background: `linear-gradient(90deg, ${op.dotColor}66 0%, ${op.dotColor}11 100%)` }} />
-      </div>
-    </div>
-  );
-};
-
-/** Status bar — SNAPS in from bottom at frame 420 */
-const StatusBar: React.FC = () => {
+const EvidenceStep: React.FC<{
+  index: number;
+  step: string;
+  detail: string;
+  color: string;
+  appearFrame: number;
+  glowSweepFrame: number;
+}> = ({ index, step, detail, color, appearFrame, glowSweepFrame }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const { opacity, translateY } = whipUp(frame, fps, 420, 60);
 
-  const stats = [
-    { label: "operators", value: "3", color: COLORS.accent1 },
-    { label: "bids", value: "15", color: COLORS.accent2 },
-    { label: "locked", value: "$3,932", color: COLORS.discord },
-  ];
+  // Slide in from left
+  const progress = smoothSpring(frame, fps, appearFrame);
+  const slideX = interpolate(progress, [0, 1], [-30, 0]);
+  const enterOpacity = progress;
+
+  // Glow sweep at frame 460 + index*6
+  const glowFlash = flashBurst(frame, glowSweepFrame, 6);
+  const borderGlow = 0.06 + glowFlash * 0.5;
+
+  const badge = SPONSOR_BADGES[index];
 
   return (
     <div
       style={{
-        opacity,
-        transform: `translateY(${translateY}px)`,
         display: "flex",
         alignItems: "center",
-        justifyContent: "center",
-        gap: 36,
-        padding: "14px 36px",
-        background: "rgba(0,0,0,0.55)",
-        border: "1px solid rgba(255,255,255,0.07)",
+        gap: 14,
+        height: STEP_HEIGHT,
+        padding: "0 16px 0 14px",
+        background: COLORS.bg.surface,
+        border: `1px solid rgba(${hexToRgb(color)},${borderGlow})`,
         borderRadius: 10,
+        opacity: enterOpacity,
+        transform: `translateX(${slideX}px)`,
+        boxShadow:
+          glowFlash > 0.02
+            ? `0 0 20px rgba(${hexToRgb(color)},${glowFlash * 0.35})`
+            : undefined,
+        flexShrink: 0,
       }}
     >
-      {stats.map((stat, i) => (
-        <React.Fragment key={stat.label}>
-          {i > 0 && <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.08)" }} />}
-          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            <PulseIndicator color={stat.color} size={7} delay={420 + i * 4} />
-            <span style={{ fontFamily: FONTS.brutalist, fontSize: 24, fontWeight: 700, color: stat.color, letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
-              {stat.value}
-            </span>
-            <span style={{ fontFamily: FONTS.swiss, fontSize: 18, color: COLORS.muted, letterSpacing: "0.06em", textTransform: "uppercase" }}>
-              {stat.label}
-            </span>
-          </div>
-        </React.Fragment>
-      ))}
+      {/* Number circle */}
+      <div
+        style={{
+          width: 26,
+          height: 26,
+          borderRadius: "50%",
+          backgroundColor: color,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: FONTS.monument,
+            fontSize: 34,
+            fontWeight: 700,
+            color: COLORS.bg.deep,
+            lineHeight: 1,
+          }}
+        >
+          {index + 1}
+        </span>
+      </div>
+
+      {/* Step name + detail */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontFamily: FONTS.swiss,
+            fontSize: 66,
+            fontWeight: 600,
+            color: COLORS.fg,
+            lineHeight: 1.2,
+            whiteSpace: "nowrap" as const,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {step}
+        </div>
+        <div
+          style={{
+            fontFamily: FONTS.swiss,
+            fontSize: 34,
+            fontWeight: 400,
+            color: COLORS.muted,
+            lineHeight: 1.2,
+            marginTop: 1,
+          }}
+        >
+          {detail}
+        </div>
+      </div>
+
+      {/* Sponsor badge — only on sponsor steps */}
+      {badge && (
+        <SponsorBadge
+          name={badge.name}
+          borderColor={badge.borderColor}
+          stepColor={color}
+        />
+      )}
+
+      <PulseIndicator color={color} size={7} delay={appearFrame} />
     </div>
   );
 };
+
+/** Tiny helper: convert hex to "r,g,b" string */
+function hexToRgb(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `${r},${g},${b}`;
+}
 
 export const S05_Evidence: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Title SLAMS
-  const titleProgress = slamSpring(frame, fps, 0);
-  const titleScale = slamScale(frame, fps, 0, 2);
-  const titleOpacity = Math.min(titleProgress * 5, 1);
-
-  // Terminal opacity
-  const termOpacity = interpolate(frame, [28, 38], [0, 1], {
+  // Title fade in
+  const titleOpacity = interpolate(frame, [0, 25], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
+    easing: Easing.out(Easing.cubic),
   });
+
+  // Subtitle fade
+  const subtitleOpacity = interpolate(frame, [20, 40], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.out(Easing.cubic),
+  });
+
+  // Closer text
+  const closerFade = fadeSlideUp(frame, fps, 480);
 
   // End dim
-  const endDim = interpolate(frame, [530, 568], [1, 0.2], {
+  const endDim = interpolate(frame, [540, 570], [1, 0.2], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  // Discord flash when card flickers
-  const flickerFlash = flashBurst(frame, 300, 2);
-
-  const beat = beatPulse(frame, fps, 170, 0.04);
+  const beat = beatPulse(frame, fps, 170, 0.03);
 
   return (
     <AbsoluteFill
       style={{
         backgroundColor: COLORS.bg.deep,
-        padding: "40px 60px 36px",
         display: "flex",
         flexDirection: "column",
-        gap: 18,
+        alignItems: "center",
+        paddingTop: 36,
+        paddingBottom: 28,
+        paddingLeft: 72,
+        paddingRight: 72,
+        overflow: "hidden",
       }}
     >
-      {/* Blue-white atmosphere */}
+      {/* Ambient glow */}
       <div
         style={{
           position: "absolute",
-          inset: 0,
-          background: `radial-gradient(ellipse at 50% 0%, rgba(148,184,255,${0.05 + beat}) 0%, transparent 50%)`,
+          top: "30%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 700,
+          height: 500,
+          background: `radial-gradient(ellipse, rgba(148,184,255,${0.04 + beat}) 0%, transparent 60%)`,
           pointerEvents: "none",
         }}
       />
 
-      {/* Title — Monument, accent2, SLAM */}
+      {/* Title — Editorial italic, holographic gradient */}
       <div
         style={{
           opacity: titleOpacity * endDim,
-          transform: `scale(${titleScale})`,
-          fontFamily: FONTS.monument,
-          fontSize: 52,
-          fontWeight: 700,
-          color: COLORS.accent2,
+          marginBottom: 6,
           textAlign: "center",
-          letterSpacing: "0.02em",
-          textTransform: "uppercase",
-          textShadow: `0 0 40px rgba(148,184,255,0.4)`,
-          zIndex: 1,
+          flexShrink: 0,
         }}
       >
-        Competitive Bidding
+        <span
+          style={{
+            fontFamily: FONTS.editorial,
+            fontSize: 94,
+            fontWeight: 400,
+            fontStyle: "italic",
+            lineHeight: 1.1,
+            background: GRADIENTS.holographic,
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+          }}
+        >
+          Sovereign Infrastructure
+        </span>
       </div>
 
-      {/* Operator cards — all slam simultaneously */}
-      <div style={{ display: "flex", gap: 16, zIndex: 1, opacity: endDim }}>
-        {OPERATORS.map((op, i) => (
-          <OperatorCardItem key={op.name} op={op} index={i} />
-        ))}
-      </div>
-
-      {/* Terminal — faster typing */}
+      {/* Subtitle */}
       <div
         style={{
-          opacity: termOpacity * endDim,
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          zIndex: 1,
-          minHeight: 0,
+          opacity: subtitleOpacity * endDim,
+          marginBottom: 20,
+          textAlign: "center",
+          flexShrink: 0,
         }}
       >
-        <TerminalLog
-          entries={NEGOTIATION_LOG}
-          delay={30}
-          framesPerEntry={18}
-          fontSize={20}
-        />
-      </div>
-
-      {/* Status bar — snaps in */}
-      <div style={{ zIndex: 1, opacity: endDim }}>
-        <StatusBar />
-      </div>
-
-      {/* Discord flash on flicker */}
-      {flickerFlash > 0 && (
-        <AbsoluteFill
+        <span
           style={{
-            backgroundColor: `rgba(248,113,113,${flickerFlash * 0.12})`,
-            pointerEvents: "none",
+            fontFamily: FONTS.swiss,
+            fontSize: 34,
+            fontWeight: 400,
+            color: COLORS.muted,
+            letterSpacing: "0.02em",
           }}
-        />
-      )}
+        >
+          Every piece of evidence, verified without trusting our servers
+        </span>
+      </div>
+
+      {/* Evidence steps cascade */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          width: "100%",
+          maxWidth: 820,
+          gap: 8,
+          flex: 1,
+          opacity: endDim,
+        }}
+      >
+        {EVIDENCE_PIPELINE.map((item, i) => {
+          const appearFrame = 40 + i * STEP_STAGGER;
+          const glowSweepFrame = 460 + i * 6;
+
+          return (
+            <EvidenceStep
+              key={i}
+              index={i}
+              step={item.step}
+              detail={item.detail}
+              color={item.color}
+              appearFrame={appearFrame}
+              glowSweepFrame={glowSweepFrame}
+            />
+          );
+        })}
+      </div>
+
+      {/* Closer — Expressive italic, accent2 */}
+      <div
+        style={{
+          marginTop: 16,
+          opacity: closerFade.opacity * endDim,
+          transform: `translateY(${closerFade.translateY}px)`,
+          textAlign: "center",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: FONTS.expressive,
+            fontSize: 66,
+            fontWeight: 400,
+            fontStyle: "italic",
+            color: COLORS.accent2,
+            letterSpacing: "0.01em",
+          }}
+        >
+          Zero trust required.
+        </span>
+      </div>
     </AbsoluteFill>
   );
 };
