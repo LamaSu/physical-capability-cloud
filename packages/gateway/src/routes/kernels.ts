@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { getRepos } from "../db.js";
+import { auditService } from "../services/audit-service.js";
 
 export async function kernelRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { status?: string } }>(
@@ -92,6 +93,16 @@ export async function kernelRoutes(app: FastifyInstance) {
       maxAssuranceTier: 2,
     };
     const inserted = repos.kernels.insert(kernel);
+    auditService.log({
+      eventType: "kernel.created",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? kernel.operatorAddress,
+      resourceType: "kernel",
+      resourceId: kernel.id,
+      action: "create",
+      metadata: { name: kernel.name, operatorAddress: kernel.operatorAddress },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return reply.code(201).send({ kernel: inserted });
   });
 }

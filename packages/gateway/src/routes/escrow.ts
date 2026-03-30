@@ -1,5 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { type Address, isAddress } from "viem";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "../services/audit-service.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 import { readEscrow, getEscrowEvents, readTokenBalance, readTokenAllowance, getActiveNetwork } from "../chain-client.js";
 import { getRepos } from "../db.js";
 import {
@@ -236,6 +239,17 @@ export async function escrowRoutes(app: FastifyInstance) {
 
       try {
         const result = await fundEscrow(address as Address);
+        pipelineTelemetry.emit("pipeline-" + Date.now(), "escrow_fund", "completed", { metadata: { escrow: address } });
+        trackServerEvent("escrow_funded", { amount: result.toString?.() ?? address }, (req as any).operatorId);
+        auditService.log({
+          eventType: "escrow.funded",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "fund",
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "fund", escrow: address };
       } catch (err) {
         return reply.status(502).send({
@@ -308,6 +322,16 @@ export async function escrowRoutes(app: FastifyInstance) {
 
       try {
         const result = await releaseMilestone(idx, address as Address);
+        auditService.log({
+          eventType: "escrow.released",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "release",
+          metadata: { milestoneIndex: idx },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "release", escrow: address, milestoneIndex: idx };
       } catch (err) {
         return reply.status(502).send({
@@ -362,6 +386,16 @@ export async function escrowRoutes(app: FastifyInstance) {
           body.reason,
           address as Address,
         );
+        auditService.log({
+          eventType: "escrow.disputed",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "dispute",
+          metadata: { milestoneIndex: idx, reason: body.reason },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { ...result, action: "dispute", escrow: address, milestoneIndex: idx };
       } catch (err) {
         return reply.status(502).send({

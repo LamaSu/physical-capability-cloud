@@ -8,6 +8,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { PeerEndpoint, CapabilityAnnouncement } from "@pcc/spec";
 import type { CapabilityQuery } from "./query.js";
+import { dhtTelemetry } from "./telemetry.js";
 
 // ── DHT Protocol Messages ──────────────────────────────────────────
 
@@ -141,6 +142,8 @@ export class DHTTransport {
   private registerSocket(peerId: string, ws: WebSocket): void {
     this.clients.set(peerId, ws);
 
+    dhtTelemetry.peerConnected(peerId);
+
     for (const h of this.connectHandlers) h(peerId);
 
     ws.on("message", (data) => {
@@ -154,11 +157,13 @@ export class DHTTransport {
 
     ws.on("close", () => {
       this.clients.delete(peerId);
+      dhtTelemetry.peerDisconnected(peerId, "close");
       for (const h of this.disconnectHandlers) h(peerId);
     });
 
     ws.on("error", () => {
       this.clients.delete(peerId);
+      dhtTelemetry.peerDisconnected(peerId, "error");
     });
   }
 }

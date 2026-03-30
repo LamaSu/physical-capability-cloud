@@ -43,6 +43,7 @@
     "@pcc/store": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "@sentry/node": "^10.45.0",
+    "posthog-node": "^4.2.0",
     "fastify": "^4.26.0",
     "uuid": "^9.0.0",
     "viem": "^2"

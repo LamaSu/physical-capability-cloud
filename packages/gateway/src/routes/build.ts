@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { ContractBuilder, getRegisteredTypes } from "@pcc/contract-builder";
 import type { CapabilityType, AssuranceTier } from "@pcc/spec";
+import { pipelineTelemetry } from "../telemetry.js";
 
 const builder = new ContractBuilder();
 
@@ -19,6 +20,7 @@ export async function buildRoutes(app: FastifyInstance) {
       selections as Record<string, string | number | boolean | string[]>,
       profileId,
     );
+    pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/options", type } });
     return { options };
   });
 
@@ -36,6 +38,7 @@ export async function buildRoutes(app: FastifyInstance) {
       selections as Record<string, string | number | boolean | string[]>,
       profileId,
     );
+    pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/price", type } });
     return { pricing: result };
   });
 
@@ -55,6 +58,7 @@ export async function buildRoutes(app: FastifyInstance) {
       assuranceTier as AssuranceTier,
       profileId,
     );
+    pipelineTelemetry.emit("pipeline-" + Date.now(), "contract_build", "completed", { metadata: { endpoint: "/api/build/contract", type, assuranceTier } });
     return { contract };
   });
 }

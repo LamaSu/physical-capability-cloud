@@ -2,6 +2,9 @@ import { initSentry, Sentry } from "./sentry.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
+import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
+initPostHog();
+
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -60,6 +63,7 @@ import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
 import { aegisGate } from "./middleware/aegis-gate.js";
 import { provisionRoutes } from "./routes/provision.js";
+import { auditRoutes } from "./routes/audit.js";
 import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { ot2ChatRoutes } from "./routes/ot2-chat.js";
@@ -106,6 +110,8 @@ export async function createGateway(port = 3200) {
     } catch {
       // Non-fatal
     }
+    // Flush PostHog queue before exit
+    await shutdownPostHog();
   });
 
   await app.register(cors, { origin: true, credentials: true });
@@ -161,6 +167,9 @@ export async function createGateway(port = 3200) {
 
   // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
+
+  // Audit log routes
+  await app.register(auditRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);
@@ -225,8 +234,12 @@ export async function createGateway(port = 3200) {
   await app.register(notificationSSE);
   await app.register(topicSSE);
 
-  // Mock SSE producers (enabled by default; set ENABLE_MOCK_STREAMING=false to disable)
-  const enableMockStreaming = process.env.ENABLE_MOCK_STREAMING !== "false";
+  // Mock SSE producers: ON by default in dev, OFF by default in production.
+  // Override with ENABLE_MOCK_STREAMING=true|false in either environment.
+  const enableMockStreaming =
+    process.env.NODE_ENV !== "production"
+      ? process.env.ENABLE_MOCK_STREAMING !== "false"
+      : process.env.ENABLE_MOCK_STREAMING === "true";
   let producerManager: ProducerManager | null = null;
   if (enableMockStreaming) {
     producerManager = new ProducerManager();

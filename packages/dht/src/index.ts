@@ -43,3 +43,12 @@ export {
   type MessageHandler,
   type PeerHandler,
 } from "./transport.js";
+
+// Telemetry
+export {
+  DHTTelemetry,
+  dhtTelemetry,
+  type DHTMetricEvent,
+  type DHTMetricEventType,
+  type DHTMetrics,
+} from "./telemetry.js";

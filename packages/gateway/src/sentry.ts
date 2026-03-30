@@ -20,8 +20,13 @@ const SENTRY_DSN =
 let _initialized = false;
 
 export function initSentry(): void {
+  if (process.env.SENTRY_DSN || process.env.VITE_SENTRY_DSN) {
+    console.log("[sentry] Active — DSN configured");
+  } else {
+    console.warn("[sentry] INACTIVE — no SENTRY_DSN in environment. Set it in Railway dashboard.");
+  }
+
   if (!SENTRY_DSN) {
-    console.log("[sentry] No DSN configured — tracing disabled");
     return;
   }
   if (_initialized) return;
