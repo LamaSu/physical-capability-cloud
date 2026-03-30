@@ -26,7 +26,7 @@ export interface MachineRegistration {
   spaceRequirements: PhysicalSpaceRequirements;
   pricing: PricingConfig;
   operator: OperatorProfile;
-  status: "draft" | "submitted" | "reviewing" | "approved" | "active" | "suspended";
+  status: "draft" | "submitted" | "reviewing" | "approved" | "active" | "suspended" | "rejected";
   createdAt: Timestamp;
   submittedAt?: Timestamp;
   approvedAt?: Timestamp;

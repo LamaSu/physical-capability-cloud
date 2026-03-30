@@ -89,6 +89,169 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg };
   });
 
+  // ── Approve a registration ──
+  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/approve", async (req, reply) => {
+    const reg = registrations.find((r) => r.id === req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (reg.status !== "submitted" && reg.status !== "reviewing") {
+      return reply.status(400).send({ error: "invalid_status", message: `Cannot approve registration in "${reg.status}" status` });
+    }
+    reg.status = "approved";
+    reg.approvedAt = new Date().toISOString();
+    return { registration: reg, approved: true };
+  });
+
+  // ── Reject a registration ──
+  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/reject", async (req, reply) => {
+    const reg = registrations.find((r) => r.id === req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (reg.status === "rejected") {
+      return reply.status(400).send({ error: "already_rejected" });
+    }
+    const body = req.body as { reason?: string } | undefined;
+    reg.status = "rejected";
+    (reg as unknown as Record<string, unknown>).rejectionReason = body?.reason ?? "No reason provided";
+    (reg as unknown as Record<string, unknown>).rejectedAt = new Date().toISOString();
+    return { registration: reg, rejected: true };
+  });
+
+  // ── Activate an approved registration ──
+  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
+    const reg = registrations.find((r) => r.id === req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (reg.status !== "approved") {
+      return reply.status(400).send({ error: "invalid_status", message: `Must be approved before activating (current: "${reg.status}")` });
+    }
+    reg.status = "active";
+    return { registration: reg, activated: true };
+  });
+
+  // ── Prove capability and auto-approve ──
+  // Operator submits evidence of a test job (photo, sensor data, device health).
+  // If evidence meets minimum requirements, registration is auto-approved + activated.
+  // Fast-track: no manual review needed if the machine can prove it works.
+  app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/prove", async (req, reply) => {
+    const reg = registrations.find((r) => r.id === req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+    if (reg.status === "active") {
+      return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
+    }
+    if (reg.status === "rejected") {
+      return reply.status(400).send({ error: "rejected", message: "Registration was rejected — submit a new one" });
+    }
+
+    const body = req.body as {
+      evidence?: {
+        /** SHA-256 bundle hash of the evidence */
+        bundleHash?: string;
+        /** Evidence events from the test job */
+        events?: Array<{
+          type: string;
+          timestamp: string;
+          payload: Record<string, unknown>;
+        }>;
+        /** Base64-encoded photo of test output (e.g. printed page, machined part) */
+        photoBase64?: string;
+        /** Device health snapshot */
+        deviceHealth?: {
+          status: string;
+          firmware?: string;
+          model?: string;
+          uptime?: number;
+          [key: string]: unknown;
+        };
+        /** IPFS CID if evidence was already uploaded */
+        ipfsCid?: string;
+      };
+    } | undefined;
+
+    const evidence = body?.evidence;
+    if (!evidence) {
+      return reply.status(400).send({
+        error: "evidence_required",
+        message: "Submit evidence to prove your device works. Include at least one of: bundleHash + events, photoBase64, or deviceHealth.",
+        example: {
+          evidence: {
+            bundleHash: "sha256:abc123...",
+            events: [
+              { type: "execution_completed", timestamp: new Date().toISOString(), payload: { jobType: "test", pagesCount: 1 } },
+              { type: "camera_snapshot", timestamp: new Date().toISOString(), payload: { description: "Photo of printed test page" } },
+            ],
+            deviceHealth: { status: "idle", model: "HP OfficeJet Pro 9010", firmware: "2409A" },
+          },
+        },
+      });
+    }
+
+    // Validate evidence — need at least one substantial proof
+    const proofs: string[] = [];
+    const warnings: string[] = [];
+
+    // 1. Evidence bundle with events
+    if (evidence.bundleHash && evidence.events && evidence.events.length > 0) {
+      const hasCompletion = evidence.events.some((e) =>
+        ["execution_completed", "camera_snapshot", "power_profile_summary"].includes(e.type),
+      );
+      if (hasCompletion) {
+        proofs.push(`evidence_bundle: ${evidence.events.length} events, hash=${evidence.bundleHash.slice(0, 20)}...`);
+      } else {
+        warnings.push("Evidence events present but no completion/snapshot event found");
+      }
+    }
+
+    // 2. Photo of test output
+    if (evidence.photoBase64) {
+      const sizeBytes = Math.ceil((evidence.photoBase64.length * 3) / 4);
+      if (sizeBytes > 1024) {
+        proofs.push(`photo: ${(sizeBytes / 1024).toFixed(0)}KB image`);
+      } else {
+        warnings.push("Photo too small to be meaningful (< 1KB)");
+      }
+    }
+
+    // 3. Device health check
+    if (evidence.deviceHealth) {
+      if (evidence.deviceHealth.status && evidence.deviceHealth.model) {
+        proofs.push(`device_health: ${evidence.deviceHealth.model} status=${evidence.deviceHealth.status}`);
+      } else {
+        warnings.push("Device health missing status or model");
+      }
+    }
+
+    // 4. IPFS CID (evidence already uploaded to decentralized storage)
+    if (evidence.ipfsCid) {
+      proofs.push(`ipfs: ${evidence.ipfsCid}`);
+    }
+
+    if (proofs.length === 0) {
+      return reply.status(422).send({
+        error: "insufficient_evidence",
+        message: "Evidence did not meet minimum requirements for auto-approval.",
+        warnings,
+        hint: "Provide a bundleHash with completion events, a photo of test output, or a device health snapshot with model and status.",
+      });
+    }
+
+    // Evidence passes — auto-approve and activate
+    const ext = reg as unknown as Record<string, unknown>;
+    reg.status = "active";
+    reg.approvedAt = new Date().toISOString();
+    ext.provedAt = new Date().toISOString();
+    ext.autoApproved = true;
+    ext.proofs = proofs;
+    ext.evidenceBundleHash = evidence.bundleHash ?? null;
+    ext.evidenceIpfsCid = evidence.ipfsCid ?? null;
+
+    return {
+      registration: reg,
+      autoApproved: true,
+      activated: true,
+      proofs,
+      warnings: warnings.length > 0 ? warnings : undefined,
+      message: "Evidence accepted — registration auto-approved and activated. Your device is now live on the network.",
+    };
+  });
+
   // ═══════════════════════════════════════════════════════════════
   // Agent Onboarding — one invite code provisions everything
   // Uses Gatecraft as identity/wallet/credential layer
