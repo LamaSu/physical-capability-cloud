@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a; color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 1.5rem; line-height: 1.5;
+}
+h1 { color: #fff; font-size: 1.4rem; margin-bottom: 0.3rem; }
+.subtitle { color: #666; font-size: 0.8rem; margin-bottom: 1.5rem; }
+
+.viewer-container {
+  position: relative; display: inline-block;
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  overflow: hidden; max-width: 100%;
+}
+.camera-frame {
+  width: 640px; max-width: 100%; height: 480px;
+  background: #0a0a0a; display: flex; align-items: center;
+  justify-content: center; color: #555; font-size: 0.85rem;
+}
+.camera-frame img {
+  width: 100%; height: 100%; object-fit: contain;
+}
+.overlay {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between;
+  padding: 0.5rem 0.75rem; background: rgba(0,0,0,0.6);
+  font-size: 0.7rem;
+}
+.overlay .kernel-info { color: #4ade80; }
+.overlay .timestamp { color: #aaa; }
+
+/* Controls */
+.controls {
+  display: flex; gap: 0.75rem; margin-top: 1rem;
+  align-items: center; flex-wrap: wrap;
+}
+button {
+  background: #4ade80; color: #0a0a0a; border: none;
+  padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.8rem; font-weight: 700;
+}
+button:hover { background: #22c55e; }
+button.secondary { background: #333; color: #e0e0e0; }
+button.secondary:hover { background: #444; }
+button.active { background: #22c55e; box-shadow: 0 0 8px rgba(74,222,128,0.3); }
+
+.control-label { color: #888; font-size: 0.8rem; }
+.refresh-indicator {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #333; display: inline-block; margin-right: 0.5rem;
+  transition: background 0.2s;
+}
+.refresh-indicator.active { background: #4ade80; }
+
+/* Snapshot gallery */
+.gallery {
+  margin-top: 1.5rem;
+}
+.gallery h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.75rem; }
+.snapshot-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.5rem;
+}
+.snapshot-thumb {
+  background: #111; border: 1px solid #222; border-radius: 4px;
+  padding: 0.25rem; cursor: pointer;
+}
+.snapshot-thumb img { width: 100%; height: 100px; object-fit: cover; border-radius: 2px; }
+.snapshot-thumb .snap-time { color: #666; font-size: 0.65rem; text-align: center; padding: 0.2rem; }
+
+.status-bar {
+  margin-top: 1rem; padding: 0.5rem 0.75rem;
+  background: #111; border: 1px solid #222; border-radius: 4px;
+  font-size: 0.75rem; color: #888;
+}
+</style>
+</head>
+<body>
+<h1>Camera Viewer</h1>
+<p class="subtitle">Auto-refreshing camera feed from PCC kernel.</p>
+
+<div class="viewer-container" id="viewer">
+  <div class="camera-frame" id="camera-frame">
+    Connecting to camera...
+  </div>
+  <div class="overlay">
+    <span class="kernel-info" id="kernel-info">kernel: --</span>
+    <span class="timestamp" id="frame-time">--</span>
+  </div>
+</div>
+
+<div class="controls">
+  <span class="refresh-indicator" id="refresh-dot"></span>
+  <span class="control-label" id="refresh-label">Paused</span>
+  <button id="btn-toggle" onclick="toggleAutoRefresh()">Start Auto-Refresh</button>
+  <button class="secondary" onclick="refreshOnce()">Refresh Once</button>
+  <button class="secondary" onclick="takeSnapshot()">Snapshot</button>
+  <label class="control-label" style="margin-left:1rem;">
+    Interval:
+    <select id="interval-select" onchange="updateInterval()" style="
+      background:#111;border:1px solid #333;color:#e0e0e0;padding:0.2rem 0.4rem;
+      border-radius:3px;font-family:inherit;font-size:0.8rem;">
+      <option value="1000">1s</option>
+      <option value="2000" selected>2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+  </label>
+</div>
+
+<div class="gallery">
+  <h2>Snapshots</h2>
+  <div class="snapshot-grid" id="snapshot-grid">
+    <!-- Snapshots appear here -->
+  </div>
+</div>
+
+<div class="status-bar" id="status-bar">
+  Ready. Configure camera endpoint in PCC node settings.
+</div>
+
+<script>
+var autoRefresh = false;
+var refreshTimer = null;
+var refreshInterval = 2000;
+var snapshots = [];
+var frameCount = 0;
+
+function toggleAutoRefresh() {
+  autoRefresh = !autoRefresh;
+  var btn = document.getElementById('btn-toggle');
+  var dot = document.getElementById('refresh-dot');
+  var label = document.getElementById('refresh-label');
+  if (autoRefresh) {
+    btn.textContent = 'Stop';
+    btn.classList.add('active');
+    dot.classList.add('active');
+    label.textContent = 'Live';
+    startPolling();
+  } else {
+    btn.textContent = 'Start Auto-Refresh';
+    btn.classList.remove('active');
+    dot.classList.remove('active');
+    label.textContent = 'Paused';
+    stopPolling();
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  refreshTimer = setInterval(refreshOnce, refreshInterval);
+  refreshOnce();
+}
+
+function stopPolling() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+function updateInterval() {
+  refreshInterval = parseInt(document.getElementById('interval-select').value);
+  if (autoRefresh) startPolling();
+}
+
+function refreshOnce() {
+  var port = window.location.port || '3200';
+  // Try to fetch camera frame from PCC proxy
+  var url = 'http://localhost:' + port + '/api/pcc/ot2/camera/latest';
+  frameCount++;
+
+  document.getElementById('frame-time').textContent = new Date().toLocaleTimeString();
+  document.getElementById('status-bar').textContent =
+    'Frame #' + frameCount + ' - ' + new Date().toLocaleTimeString();
+
+  fetch(url)
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      if (data.frame) {
+        var frame = document.getElementById('camera-frame');
+        frame.innerHTML = '<img src="data:image/jpeg;base64,' + data.frame + '" alt="Camera frame">';
+      }
+      if (data.kernel_id) {
+        document.getElementById('kernel-info').textContent = 'kernel: ' + data.kernel_id;
+      }
+    })
+    .catch(function(e) {
+      // Show placeholder message when camera not available
+      var frame = document.getElementById('camera-frame');
+      if (frame.querySelector('img') === null) {
+        frame.textContent = 'Camera not connected. Endpoint: /api/pcc/ot2/camera/latest';
+      }
+    });
+}
+
+function takeSnapshot() {
+  var frame = document.getElementById('camera-frame');
+  var img = frame.querySelector('img');
+  if (!img) {
+    document.getElementById('status-bar').textContent = 'No frame to snapshot.';
+    return;
+  }
+  var snapshot = {
+    src: img.src,
+    time: new Date().toLocaleTimeString()
+  };
+  snapshots.push(snapshot);
+  renderSnapshots();
+  document.getElementById('status-bar').textContent = 'Snapshot saved (' + snapshots.length + ' total).';
+
+  // Submit snapshot metadata to agent
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-UI-Source': 'camera-viewer'
+    },
+    body: JSON.stringify({
+      action: 'snapshot',
+      frame_number: frameCount,
+      timestamp: new Date().toISOString(),
+      snapshot_index: snapshots.length
+    })
+  }).catch(function() {});
+}
+
+function renderSnapshots() {
+  var grid = document.getElementById('snapshot-grid');
+  var html = '';
+  snapshots.slice().reverse().forEach(function(s) {
+    html += '<div class="snapshot-thumb">';
+    html += '<img src="' + s.src + '" alt="Snapshot">';
+    html += '<div class="snap-time">' + s.time + '</div>';
+    html += '</div>';
+  });
+  grid.innerHTML = html;
+}
+</script>
+</body>
+</html>

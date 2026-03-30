@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>96-Well Plate Layout Editor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a; color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 1.5rem; line-height: 1.5;
+}
+h1 { color: #fff; font-size: 1.4rem; margin-bottom: 0.5rem; }
+.subtitle { color: #666; font-size: 0.8rem; margin-bottom: 1.5rem; }
+
+/* Plate grid */
+.plate-container { display: inline-block; user-select: none; }
+.plate-grid { display: grid; grid-template-columns: 30px repeat(12, 40px); gap: 2px; }
+.col-header {
+  text-align: center; color: #666; font-size: 0.7rem;
+  padding: 4px 0; font-weight: 700;
+}
+.row-header {
+  display: flex; align-items: center; justify-content: center;
+  color: #666; font-size: 0.75rem; font-weight: 700;
+}
+.well {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: #1a1a1a; border: 2px solid #333;
+  cursor: pointer; transition: all 0.1s;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.55rem; color: #555;
+}
+.well:hover { border-color: #4ade80; }
+.well.selected { border-color: #4ade80; box-shadow: 0 0 8px rgba(74,222,128,0.3); }
+.well[data-type="sample"] { background: #0c4a6e; border-color: #0ea5e9; }
+.well[data-type="control"] { background: #4a1d96; border-color: #a78bfa; }
+.well[data-type="empty"] { background: #1a1a1a; border-color: #333; }
+
+/* Controls */
+.controls {
+  display: flex; gap: 1rem; align-items: center;
+  margin: 1.5rem 0; flex-wrap: wrap;
+}
+.control-group { display: flex; flex-direction: column; gap: 0.25rem; }
+.control-group label { color: #aaa; font-size: 0.75rem; }
+.control-group select, .control-group input {
+  background: #111; border: 1px solid #333; border-radius: 4px;
+  color: #e0e0e0; padding: 0.4rem 0.6rem; font-family: inherit;
+  font-size: 0.85rem;
+}
+.control-group select:focus, .control-group input:focus {
+  outline: none; border-color: #4ade80;
+}
+
+/* Legend */
+.legend { display: flex; gap: 1.5rem; margin-bottom: 1rem; }
+.legend-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
+.legend-dot {
+  width: 14px; height: 14px; border-radius: 50%; border: 2px solid;
+}
+.legend-dot.sample { background: #0c4a6e; border-color: #0ea5e9; }
+.legend-dot.control { background: #4a1d96; border-color: #a78bfa; }
+.legend-dot.empty { background: #1a1a1a; border-color: #333; }
+
+/* Buttons */
+.actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; flex-wrap: wrap; }
+button {
+  background: #4ade80; color: #0a0a0a; border: none;
+  padding: 0.6rem 1.2rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.85rem; font-weight: 700;
+}
+button:hover { background: #22c55e; }
+button.secondary { background: #333; color: #e0e0e0; }
+button.secondary:hover { background: #444; }
+
+/* Summary */
+.summary {
+  margin-top: 1.5rem; padding: 1rem; background: #111;
+  border: 1px solid #222; border-radius: 4px;
+}
+.summary h2 { color: #4ade80; font-size: 1rem; margin-bottom: 0.5rem; }
+.summary-row { display: flex; gap: 2rem; font-size: 0.85rem; color: #aaa; }
+
+.success { color: #4ade80; margin-top: 1rem; font-size: 0.9rem; }
+.error { color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>96-Well Plate Layout</h1>
+<p class="subtitle">Click wells to select, drag to select ranges. Assign type and volume, then submit.</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot sample"></div> Sample</div>
+  <div class="legend-item"><div class="legend-dot control"></div> Control</div>
+  <div class="legend-item"><div class="legend-dot empty"></div> Empty</div>
+</div>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Well Type</label>
+    <select id="well-type">
+      <option value="sample">Sample</option>
+      <option value="control">Control</option>
+      <option value="empty">Empty</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label>Volume (uL)</label>
+    <input type="number" id="volume" value="100" min="0" max="1000" step="1">
+  </div>
+  <div class="control-group">
+    <label>Label</label>
+    <input type="text" id="well-label" placeholder="e.g. Sample-A1" style="width:140px">
+  </div>
+  <button class="secondary" onclick="applyToSelected()">Apply to Selected</button>
+</div>
+
+<div class="plate-container" id="plate">
+  <!-- Grid built by JS -->
+</div>
+
+<div class="actions">
+  <button onclick="submitLayout()">Submit Layout</button>
+  <button class="secondary" onclick="clearAll()">Clear All</button>
+  <button class="secondary" onclick="selectAll()">Select All</button>
+  <button class="secondary" onclick="selectColumn()">Select Column</button>
+  <button class="secondary" onclick="selectRow()">Select Row</button>
+</div>
+
+<div class="summary" id="summary">
+  <h2>Layout Summary</h2>
+  <div class="summary-row">
+    <span>Samples: <strong id="cnt-sample">0</strong></span>
+    <span>Controls: <strong id="cnt-control">0</strong></span>
+    <span>Empty: <strong id="cnt-empty">96</strong></span>
+    <span>Total volume: <strong id="total-vol">0</strong> uL</span>
+  </div>
+</div>
+
+<div id="status-msg"></div>
+
+<script>
+var ROWS = 'ABCDEFGH';
+var COLS = 12;
+var wells = {};  // key: 'A1' => {type, volume, label, selected}
+var isDragging = false;
+var dragStart = null;
+
+// Build grid
+(function buildPlate() {
+  var grid = document.getElementById('plate');
+  var html = '<div class="plate-grid">';
+  // Top-left corner (empty)
+  html += '<div></div>';
+  // Column headers
+  for (var c = 1; c <= COLS; c++) {
+    html += '<div class="col-header">' + c + '</div>';
+  }
+  // Rows
+  for (var r = 0; r < ROWS.length; r++) {
+    html += '<div class="row-header">' + ROWS[r] + '</div>';
+    for (var c = 1; c <= COLS; c++) {
+      var id = ROWS[r] + c;
+      wells[id] = { type: 'empty', volume: 0, label: '', selected: false };
+      html += '<div class="well" id="w-' + id + '" data-well="' + id + '" data-type="empty"'
+        + ' onmousedown="wellDown(\'' + id + '\')"'
+        + ' onmouseenter="wellEnter(\'' + id + '\')"'
+        + ' onmouseup="wellUp()">' + '</div>';
+    }
+  }
+  html += '</div>';
+  grid.innerHTML = html;
+})();
+
+document.addEventListener('mouseup', function() { isDragging = false; });
+
+function wellDown(id) {
+  isDragging = true;
+  dragStart = id;
+  toggleWell(id);
+}
+
+function wellEnter(id) {
+  if (isDragging) toggleWell(id, true);
+}
+
+function wellUp() {
+  isDragging = false;
+}
+
+function toggleWell(id, forceSelect) {
+  var w = wells[id];
+  if (forceSelect) {
+    w.selected = true;
+  } else {
+    w.selected = !w.selected;
+  }
+  var el = document.getElementById('w-' + id);
+  if (w.selected) {
+    el.classList.add('selected');
+  } else {
+    el.classList.remove('selected');
+  }
+}
+
+function applyToSelected() {
+  var wtype = document.getElementById('well-type').value;
+  var vol = parseFloat(document.getElementById('volume').value) || 0;
+  var lbl = document.getElementById('well-label').value;
+  var count = 0;
+  for (var id in wells) {
+    if (wells[id].selected) {
+      wells[id].type = wtype;
+      wells[id].volume = vol;
+      wells[id].label = lbl;
+      var el = document.getElementById('w-' + id);
+      el.setAttribute('data-type', wtype);
+      el.textContent = vol > 0 ? vol : '';
+      count++;
+    }
+  }
+  updateSummary();
+}
+
+function clearAll() {
+  for (var id in wells) {
+    wells[id] = { type: 'empty', volume: 0, label: '', selected: false };
+    var el = document.getElementById('w-' + id);
+    el.setAttribute('data-type', 'empty');
+    el.classList.remove('selected');
+    el.textContent = '';
+  }
+  updateSummary();
+}
+
+function selectAll() {
+  for (var id in wells) {
+    wells[id].selected = true;
+    document.getElementById('w-' + id).classList.add('selected');
+  }
+}
+
+function selectColumn() {
+  var col = prompt('Column number (1-12):');
+  if (!col) return;
+  col = parseInt(col);
+  if (col < 1 || col > 12) return;
+  for (var r = 0; r < ROWS.length; r++) {
+    var id = ROWS[r] + col;
+    wells[id].selected = true;
+    document.getElementById('w-' + id).classList.add('selected');
+  }
+}
+
+function selectRow() {
+  var row = prompt('Row letter (A-H):');
+  if (!row) return;
+  row = row.toUpperCase();
+  if (ROWS.indexOf(row) < 0) return;
+  for (var c = 1; c <= COLS; c++) {
+    var id = row + c;
+    wells[id].selected = true;
+    document.getElementById('w-' + id).classList.add('selected');
+  }
+}
+
+function updateSummary() {
+  var counts = { sample: 0, control: 0, empty: 0 };
+  var totalVol = 0;
+  for (var id in wells) {
+    var w = wells[id];
+    counts[w.type] = (counts[w.type] || 0) + 1;
+    totalVol += w.volume || 0;
+  }
+  document.getElementById('cnt-sample').textContent = counts.sample;
+  document.getElementById('cnt-control').textContent = counts.control;
+  document.getElementById('cnt-empty').textContent = counts.empty;
+  document.getElementById('total-vol').textContent = totalVol.toFixed(1);
+}
+
+function submitLayout() {
+  var layout = [];
+  for (var id in wells) {
+    var w = wells[id];
+    if (w.type !== 'empty' || w.volume > 0) {
+      layout.push({
+        well: id,
+        row: id[0],
+        col: parseInt(id.substring(1)),
+        type: w.type,
+        volume: w.volume,
+        label: w.label
+      });
+    }
+  }
+
+  var payload = {
+    plate_format: '96-well',
+    wells_configured: layout.length,
+    layout: layout,
+    timestamp: new Date().toISOString()
+  };
+
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-UI-Source': 'plate-layout'
+    },
+    body: JSON.stringify(payload)
+  }).then(function(r) { return r.json(); })
+    .then(function() {
+      document.getElementById('status-msg').className = 'success';
+      document.getElementById('status-msg').textContent =
+        'Layout submitted: ' + layout.length + ' wells configured.';
+    })
+    .catch(function(e) {
+      document.getElementById('status-msg').className = 'error';
+      document.getElementById('status-msg').textContent = 'Error: ' + e.message;
+    });
+}
+
+updateSummary();
+</script>
+</body>
+</html>

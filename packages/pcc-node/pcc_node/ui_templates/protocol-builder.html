@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protocol Builder</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a; color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 1.5rem; line-height: 1.5;
+}
+h1 { color: #fff; font-size: 1.4rem; margin-bottom: 0.3rem; }
+.subtitle { color: #666; font-size: 0.8rem; margin-bottom: 1.5rem; }
+h2 { color: #4ade80; font-size: 1rem; margin: 1.5rem 0 0.75rem; }
+
+/* Step list */
+.step-list { list-style: none; }
+.step-item {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-bottom: 0.75rem; position: relative;
+  cursor: grab; transition: border-color 0.15s;
+}
+.step-item:hover { border-color: #333; }
+.step-item.dragging { opacity: 0.5; border-color: #4ade80; }
+.step-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 0.5rem;
+}
+.step-number {
+  color: #4ade80; font-weight: 700; font-size: 0.85rem;
+  width: 28px; height: 28px; display: flex; align-items: center;
+  justify-content: center; background: #052e16; border-radius: 50%;
+}
+.step-type {
+  background: #1a1a1a; color: #aaa; padding: 0.2rem 0.6rem;
+  border-radius: 3px; font-size: 0.75rem; text-transform: uppercase;
+}
+.step-remove {
+  background: none; border: none; color: #666; cursor: pointer;
+  font-size: 1.2rem; padding: 0.2rem 0.4rem;
+}
+.step-remove:hover { color: #ef4444; }
+.step-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; }
+.step-field label { color: #888; font-size: 0.75rem; display: block; margin-bottom: 0.15rem; }
+.step-field input, .step-field select {
+  width: 100%; background: #0a0a0a; border: 1px solid #333;
+  border-radius: 3px; color: #e0e0e0; padding: 0.35rem 0.5rem;
+  font-family: inherit; font-size: 0.8rem;
+}
+.step-field input:focus, .step-field select:focus { outline: none; border-color: #4ade80; }
+
+/* Add step */
+.add-step-row {
+  display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap;
+}
+.add-btn {
+  background: #1a1a1a; color: #4ade80; border: 1px dashed #333;
+  padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.8rem;
+}
+.add-btn:hover { border-color: #4ade80; background: #111; }
+
+/* Preview */
+.preview {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1rem; margin-top: 1.5rem;
+}
+.preview h2 { margin-top: 0; }
+.preview-stats { display: flex; gap: 2rem; font-size: 0.85rem; color: #aaa; }
+.preview-stats strong { color: #e0e0e0; }
+
+/* Actions */
+.actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
+button.primary {
+  background: #4ade80; color: #0a0a0a; border: none;
+  padding: 0.65rem 1.3rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.85rem; font-weight: 700;
+}
+button.primary:hover { background: #22c55e; }
+button.secondary {
+  background: #333; color: #e0e0e0; border: none;
+  padding: 0.65rem 1.3rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.85rem;
+}
+button.secondary:hover { background: #444; }
+
+.success { color: #4ade80; margin-top: 1rem; font-size: 0.9rem; }
+.error { color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Protocol Builder</h1>
+<p class="subtitle">Build step-by-step protocols. Drag to reorder, then submit.</p>
+
+<div class="add-step-row">
+  <button class="add-btn" onclick="addStep('transfer')">+ Transfer</button>
+  <button class="add-btn" onclick="addStep('mix')">+ Mix</button>
+  <button class="add-btn" onclick="addStep('dilute')">+ Dilute</button>
+  <button class="add-btn" onclick="addStep('incubate')">+ Incubate</button>
+</div>
+
+<ul class="step-list" id="step-list"></ul>
+
+<div class="preview" id="preview">
+  <h2>Preview</h2>
+  <div class="preview-stats">
+    <span>Steps: <strong id="p-steps">0</strong></span>
+    <span>Est. time: <strong id="p-time">0 min</strong></span>
+    <span>Tip usage: <strong id="p-tips">0</strong></span>
+    <span>Total volume: <strong id="p-vol">0 uL</strong></span>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="primary" onclick="submitProtocol()">Submit Protocol</button>
+  <button class="secondary" onclick="clearSteps()">Clear All</button>
+</div>
+
+<div id="status-msg"></div>
+
+<script>
+var steps = [];
+var stepCounter = 0;
+var dragIdx = null;
+
+var STEP_DEFS = {
+  transfer: {
+    label: 'Transfer',
+    fields: [
+      { key: 'source', label: 'Source', type: 'text', placeholder: 'e.g. A1' },
+      { key: 'destination', label: 'Destination', type: 'text', placeholder: 'e.g. B1' },
+      { key: 'volume', label: 'Volume (uL)', type: 'number', value: 100 },
+      { key: 'speed', label: 'Speed', type: 'select', options: ['normal','slow','fast'] }
+    ],
+    time_min: 0.5,
+    tips: 1
+  },
+  mix: {
+    label: 'Mix',
+    fields: [
+      { key: 'well', label: 'Well', type: 'text', placeholder: 'e.g. A1' },
+      { key: 'volume', label: 'Volume (uL)', type: 'number', value: 50 },
+      { key: 'cycles', label: 'Cycles', type: 'number', value: 3 },
+      { key: 'speed', label: 'Speed', type: 'select', options: ['normal','slow','fast'] }
+    ],
+    time_min: 0.3,
+    tips: 1
+  },
+  dilute: {
+    label: 'Dilute',
+    fields: [
+      { key: 'source', label: 'Source', type: 'text', placeholder: 'e.g. A1' },
+      { key: 'destination', label: 'Destination', type: 'text', placeholder: 'e.g. C1' },
+      { key: 'sample_volume', label: 'Sample (uL)', type: 'number', value: 10 },
+      { key: 'diluent_volume', label: 'Diluent (uL)', type: 'number', value: 90 }
+    ],
+    time_min: 0.8,
+    tips: 2
+  },
+  incubate: {
+    label: 'Incubate',
+    fields: [
+      { key: 'temperature', label: 'Temp (C)', type: 'number', value: 37 },
+      { key: 'duration', label: 'Duration (min)', type: 'number', value: 30 },
+      { key: 'shake', label: 'Shake', type: 'select', options: ['none','gentle','vigorous'] },
+      { key: 'lid', label: 'Lid', type: 'select', options: ['on','off'] }
+    ],
+    time_min: 30,
+    tips: 0
+  }
+};
+
+function addStep(type) {
+  stepCounter++;
+  var def = STEP_DEFS[type];
+  var step = { id: stepCounter, type: type, values: {} };
+  def.fields.forEach(function(f) {
+    step.values[f.key] = f.value !== undefined ? f.value : '';
+  });
+  steps.push(step);
+  renderSteps();
+}
+
+function removeStep(id) {
+  steps = steps.filter(function(s) { return s.id !== id; });
+  renderSteps();
+}
+
+function renderSteps() {
+  var list = document.getElementById('step-list');
+  var html = '';
+  steps.forEach(function(step, idx) {
+    var def = STEP_DEFS[step.type];
+    html += '<li class="step-item" draggable="true" data-idx="' + idx + '"'
+      + ' ondragstart="dragStart(event,' + idx + ')"'
+      + ' ondragover="dragOver(event)" ondrop="drop(event,' + idx + ')"'
+      + ' ondragend="dragEnd()">';
+    html += '<div class="step-header">';
+    html += '<span class="step-number">' + (idx + 1) + '</span>';
+    html += '<span class="step-type">' + def.label + '</span>';
+    html += '<button class="step-remove" onclick="removeStep(' + step.id + ')">&times;</button>';
+    html += '</div>';
+    html += '<div class="step-fields">';
+    def.fields.forEach(function(f) {
+      html += '<div class="step-field"><label>' + f.label + '</label>';
+      if (f.type === 'select') {
+        html += '<select onchange="updateVal(' + step.id + ',\'' + f.key + '\',this.value)">';
+        f.options.forEach(function(opt) {
+          var sel = step.values[f.key] === opt ? ' selected' : '';
+          html += '<option' + sel + '>' + opt + '</option>';
+        });
+        html += '</select>';
+      } else {
+        var ph = f.placeholder ? ' placeholder="' + f.placeholder + '"' : '';
+        html += '<input type="' + f.type + '" value="' + (step.values[f.key] || '') + '"'
+          + ph
+          + ' onchange="updateVal(' + step.id + ',\'' + f.key + '\',this.value)">';
+      }
+      html += '</div>';
+    });
+    html += '</div></li>';
+  });
+  list.innerHTML = html;
+  updatePreview();
+}
+
+function updateVal(id, key, val) {
+  steps.forEach(function(s) {
+    if (s.id === id) s.values[key] = val;
+  });
+  updatePreview();
+}
+
+function updatePreview() {
+  var totalTime = 0, totalTips = 0, totalVol = 0;
+  steps.forEach(function(s) {
+    var def = STEP_DEFS[s.type];
+    if (s.type === 'incubate') {
+      totalTime += parseFloat(s.values.duration) || def.time_min;
+    } else {
+      totalTime += def.time_min;
+    }
+    totalTips += def.tips;
+    ['volume','sample_volume','diluent_volume'].forEach(function(k) {
+      if (s.values[k]) totalVol += parseFloat(s.values[k]) || 0;
+    });
+  });
+  document.getElementById('p-steps').textContent = steps.length;
+  document.getElementById('p-time').textContent = totalTime.toFixed(1) + ' min';
+  document.getElementById('p-tips').textContent = totalTips;
+  document.getElementById('p-vol').textContent = totalVol.toFixed(1) + ' uL';
+}
+
+/* Drag and drop reorder */
+function dragStart(e, idx) {
+  dragIdx = idx;
+  e.target.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function dragOver(e) { e.preventDefault(); }
+function drop(e, targetIdx) {
+  e.preventDefault();
+  if (dragIdx === null || dragIdx === targetIdx) return;
+  var item = steps.splice(dragIdx, 1)[0];
+  steps.splice(targetIdx, 0, item);
+  dragIdx = null;
+  renderSteps();
+}
+function dragEnd() {
+  dragIdx = null;
+  var items = document.querySelectorAll('.step-item');
+  items.forEach(function(el) { el.classList.remove('dragging'); });
+}
+
+function clearSteps() {
+  steps = [];
+  stepCounter = 0;
+  renderSteps();
+}
+
+function submitProtocol() {
+  if (steps.length === 0) {
+    document.getElementById('status-msg').className = 'error';
+    document.getElementById('status-msg').textContent = 'Add at least one step.';
+    return;
+  }
+  var protocol = steps.map(function(s, idx) {
+    return { step: idx + 1, type: s.type, params: s.values };
+  });
+  var payload = {
+    protocol_name: 'Custom Protocol',
+    step_count: steps.length,
+    steps: protocol,
+    timestamp: new Date().toISOString()
+  };
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-UI-Source': 'protocol-builder'
+    },
+    body: JSON.stringify(payload)
+  }).then(function(r) { return r.json(); })
+    .then(function() {
+      document.getElementById('status-msg').className = 'success';
+      document.getElementById('status-msg').textContent =
+        'Protocol submitted: ' + steps.length + ' steps.';
+    })
+    .catch(function(e) {
+      document.getElementById('status-msg').className = 'error';
+      document.getElementById('status-msg').textContent = 'Error: ' + e.message;
+    });
+}
+</script>
+</body>
+</html>

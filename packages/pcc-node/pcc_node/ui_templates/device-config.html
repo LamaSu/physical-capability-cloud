@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Configuration</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a; color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 1.5rem; line-height: 1.5;
+}
+h1 { color: #fff; font-size: 1.4rem; margin-bottom: 0.3rem; }
+.subtitle { color: #666; font-size: 0.8rem; margin-bottom: 1.5rem; }
+h2 { color: #4ade80; font-size: 1rem; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #222; padding-bottom: 0.5rem; }
+
+/* Detected hardware */
+.hardware-list { list-style: none; margin-bottom: 1rem; }
+.hardware-item {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 0.75rem 1rem; margin-bottom: 0.5rem;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.hw-name { color: #e0e0e0; font-weight: 600; font-size: 0.9rem; }
+.hw-detail { color: #888; font-size: 0.75rem; }
+.badge {
+  display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px;
+  font-size: 0.7rem; font-weight: 700;
+}
+.badge-online { background: #052e16; color: #4ade80; }
+.badge-offline { background: #450a0a; color: #ef4444; }
+.badge-unknown { background: #1a1a1a; color: #888; }
+
+/* Form sections */
+.form-section {
+  background: #111; border: 1px solid #222; border-radius: 6px;
+  padding: 1.25rem; margin-bottom: 1rem;
+}
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem 1.5rem; margin-bottom: 0.5rem; }
+.form-row.full { grid-template-columns: 1fr; }
+label { display: block; color: #aaa; font-size: 0.8rem; margin-bottom: 0.2rem; }
+input, select, textarea {
+  width: 100%; padding: 0.5rem 0.7rem;
+  background: #0a0a0a; border: 1px solid #333; border-radius: 4px;
+  color: #e0e0e0; font-family: inherit; font-size: 0.85rem;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: #4ade80; }
+input[type="number"] { width: 150px; }
+
+/* Checkboxes */
+.checkbox-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.4rem; }
+.checkbox-item {
+  display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.85rem; padding: 0.3rem 0;
+}
+.checkbox-item input[type="checkbox"] {
+  width: auto; accent-color: #4ade80;
+}
+
+/* Actions */
+.actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; flex-wrap: wrap; }
+button {
+  background: #4ade80; color: #0a0a0a; border: none;
+  padding: 0.65rem 1.3rem; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 0.85rem; font-weight: 700;
+}
+button:hover { background: #22c55e; }
+button.secondary { background: #333; color: #e0e0e0; }
+button.secondary:hover { background: #444; }
+
+.success { color: #4ade80; margin-top: 1rem; font-size: 0.9rem; }
+.error { color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Device Configuration</h1>
+<p class="subtitle">Configure your PCC node hardware, pricing, schedule, and capabilities.</p>
+
+<h2>Detected Hardware</h2>
+<ul class="hardware-list" id="hardware-list">
+  <li class="hardware-item">
+    <div>
+      <div class="hw-name">Scanning...</div>
+      <div class="hw-detail">Checking for connected devices</div>
+    </div>
+    <span class="badge badge-unknown">detecting</span>
+  </li>
+</ul>
+<button class="secondary" onclick="detectHardware()" style="margin-bottom:1rem;font-size:0.8rem;">Re-scan Hardware</button>
+
+<h2>Pricing</h2>
+<div class="form-section">
+  <div class="form-row">
+    <div>
+      <label for="base-rate">Base Rate ($)</label>
+      <input type="number" id="base-rate" value="10.00" min="0" step="0.01">
+    </div>
+    <div>
+      <label for="per-minute">Per Minute ($)</label>
+      <input type="number" id="per-minute" value="0.15" min="0" step="0.01">
+    </div>
+  </div>
+  <div class="form-row">
+    <div>
+      <label for="min-job">Minimum Job Value ($)</label>
+      <input type="number" id="min-job" value="5.00" min="0" step="0.01">
+    </div>
+    <div>
+      <label for="currency">Currency</label>
+      <select id="currency">
+        <option value="USDC">USDC</option>
+        <option value="USD">USD (fiat)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<h2>Schedule</h2>
+<div class="form-section">
+  <div class="form-row">
+    <div>
+      <label for="availability">Availability</label>
+      <select id="availability">
+        <option value="always">Always On</option>
+        <option value="business">Business Hours (9-5)</option>
+        <option value="custom">Custom Schedule</option>
+        <option value="manual">Manual Only</option>
+      </select>
+    </div>
+    <div>
+      <label for="timezone">Timezone</label>
+      <select id="timezone">
+        <option value="UTC">UTC</option>
+        <option value="US/Eastern">US/Eastern</option>
+        <option value="US/Pacific">US/Pacific</option>
+        <option value="Europe/London">Europe/London</option>
+        <option value="Asia/Tokyo">Asia/Tokyo</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-row">
+    <div>
+      <label for="max-concurrent">Max Concurrent Jobs</label>
+      <input type="number" id="max-concurrent" value="1" min="1" max="10">
+    </div>
+    <div>
+      <label for="queue-limit">Queue Limit</label>
+      <input type="number" id="queue-limit" value="5" min="0" max="50">
+    </div>
+  </div>
+</div>
+
+<h2>Approval Mode</h2>
+<div class="form-section">
+  <div class="form-row full">
+    <div>
+      <label for="approval-mode">Job Approval</label>
+      <select id="approval-mode">
+        <option value="manual">Manual - approve each job</option>
+        <option value="auto">Auto - accept all jobs</option>
+        <option value="policy">Policy - accept matching criteria only</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<h2>Capabilities</h2>
+<div class="form-section">
+  <div class="checkbox-grid" id="capabilities">
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="3d-printing"> 3D Printing (FDM)</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="3d-printing-sla"> 3D Printing (SLA)</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="liquid-handling"> Liquid Handling</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="pcr"> PCR / qPCR</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="centrifuge"> Centrifuge</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="spectrophotometer"> Spectrophotometry</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="cnc-milling"> CNC Milling</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="laser-cutting"> Laser Cutting</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="camera"> Camera / Inspection</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="incubation"> Incubation</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="hplc"> HPLC Analysis</label>
+    <label class="checkbox-item"><input type="checkbox" name="cap" value="weighing"> Precision Weighing</label>
+  </div>
+</div>
+
+<h2>Materials</h2>
+<div class="form-section">
+  <div class="checkbox-grid" id="materials">
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="pla"> PLA</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="abs"> ABS</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="petg"> PETG</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="resin"> Resin</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="nylon"> Nylon</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="aqueous"> Aqueous Solutions</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="biological"> Biological Samples</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="organic"> Organic Solvents</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="metal"> Metals</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="wood"> Wood</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="acrylic"> Acrylic</label>
+    <label class="checkbox-item"><input type="checkbox" name="mat" value="pcb"> PCB</label>
+  </div>
+</div>
+
+<div class="actions">
+  <button onclick="submitConfig()">Save Configuration</button>
+  <button class="secondary" onclick="resetForm()">Reset to Defaults</button>
+</div>
+
+<div id="status-msg"></div>
+
+<script>
+function detectHardware() {
+  var list = document.getElementById('hardware-list');
+  list.innerHTML = '<li class="hardware-item"><div><div class="hw-name">Scanning...</div>'
+    + '<div class="hw-detail">Probing network and serial ports</div></div>'
+    + '<span class="badge badge-unknown">detecting</span></li>';
+
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/health')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        list.innerHTML = '<li class="hardware-item"><div>'
+          + '<div class="hw-name">PCC Node</div>'
+          + '<div class="hw-detail">UI Server on port ' + data.port + '</div></div>'
+          + '<span class="badge badge-online">online</span></li>';
+      }
+    })
+    .catch(function(e) {
+      list.innerHTML = '<li class="hardware-item"><div>'
+        + '<div class="hw-name">Detection failed</div>'
+        + '<div class="hw-detail">' + e.message + '</div></div>'
+        + '<span class="badge badge-offline">error</span></li>';
+    });
+}
+
+function getCheckedValues(name) {
+  var checked = [];
+  document.querySelectorAll('input[name="' + name + '"]:checked').forEach(function(el) {
+    checked.push(el.value);
+  });
+  return checked;
+}
+
+function submitConfig() {
+  var config = {
+    pricing: {
+      base_rate: parseFloat(document.getElementById('base-rate').value) || 0,
+      per_minute: parseFloat(document.getElementById('per-minute').value) || 0,
+      min_job: parseFloat(document.getElementById('min-job').value) || 0,
+      currency: document.getElementById('currency').value
+    },
+    schedule: {
+      availability: document.getElementById('availability').value,
+      timezone: document.getElementById('timezone').value,
+      max_concurrent: parseInt(document.getElementById('max-concurrent').value) || 1,
+      queue_limit: parseInt(document.getElementById('queue-limit').value) || 5
+    },
+    approval_mode: document.getElementById('approval-mode').value,
+    capabilities: getCheckedValues('cap'),
+    materials: getCheckedValues('mat'),
+    timestamp: new Date().toISOString()
+  };
+
+  var port = window.location.port || '3200';
+  fetch('http://localhost:' + port + '/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-UI-Source': 'device-config'
+    },
+    body: JSON.stringify(config)
+  }).then(function(r) { return r.json(); })
+    .then(function() {
+      document.getElementById('status-msg').className = 'success';
+      document.getElementById('status-msg').textContent = 'Configuration saved.';
+    })
+    .catch(function(e) {
+      document.getElementById('status-msg').className = 'error';
+      document.getElementById('status-msg').textContent = 'Error: ' + e.message;
+    });
+}
+
+function resetForm() {
+  document.getElementById('base-rate').value = '10.00';
+  document.getElementById('per-minute').value = '0.15';
+  document.getElementById('min-job').value = '5.00';
+  document.getElementById('currency').value = 'USDC';
+  document.getElementById('availability').value = 'always';
+  document.getElementById('max-concurrent').value = '1';
+  document.getElementById('queue-limit').value = '5';
+  document.getElementById('approval-mode').value = 'manual';
+  document.querySelectorAll('input[type="checkbox"]').forEach(function(el) { el.checked = false; });
+  document.getElementById('status-msg').textContent = '';
+}
+
+// Auto-detect on load
+detectHardware();
+</script>
+</body>
+</html>
