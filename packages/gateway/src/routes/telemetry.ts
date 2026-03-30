@@ -13,6 +13,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { pipelineTelemetry, PIPELINE_PHASES } from "../telemetry.js";
 import { logger, type LogLevel } from "../structured-logger.js";
 import { streamHub } from "../sse/stream-hub.js";
+import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 
 // Active SSE clients for the live log stream
@@ -144,6 +145,62 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
     // Keep alive
     await new Promise<void>(() => {});
+  });
+
+  // ── GET /api/telemetry/audit ───────────────────────────────────────────
+  //
+  // Returns recent audit log entries from the AuditService.
+  // Useful for hackathon judges to see all activity at a glance.
+  //
+  // Query params:
+  //   limit    — max entries to return (default 50, max 500)
+  //   method   — filter by HTTP method (POST, PUT, DELETE, PATCH)
+  //   eventType — filter by eventType (e.g. "job.submitted")
+  //   actor    — filter by actor
+  //   since    — ISO timestamp cutoff
+
+  app.get<{
+    Querystring: {
+      limit?: string;
+      method?: string;
+      eventType?: string;
+      actor?: string;
+      since?: string;
+    };
+  }>("/api/telemetry/audit", async (req) => {
+    const q = req.query;
+    const limit = Math.min(q.limit ? parseInt(q.limit, 10) : 50, 500);
+
+    // Build audit query — method filter maps to metadata.method for http.write entries
+    // but we also support direct eventType filtering for domain events
+    let entries = auditService.query({
+      eventType: q.eventType,
+      actor: q.actor,
+      since: q.since,
+      limit,
+    });
+
+    // Post-filter by HTTP method if provided (filters metadata.method in http.write entries)
+    if (q.method) {
+      const methodUpper = q.method.toUpperCase();
+      entries = entries.filter(
+        (e) =>
+          e.eventType === "http.write" &&
+          (e.metadata as Record<string, unknown> | undefined)?.method === methodUpper,
+      );
+    }
+
+    return {
+      entries,
+      count: entries.length,
+      filters: {
+        limit,
+        method: q.method ?? null,
+        eventType: q.eventType ?? null,
+        actor: q.actor ?? null,
+        since: q.since ?? null,
+      },
+    };
   });
 
   // ── POST /api/telemetry/emit ───────────────────────────────────────────

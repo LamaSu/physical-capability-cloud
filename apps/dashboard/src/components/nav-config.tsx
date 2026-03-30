@@ -37,6 +37,7 @@ import {
   NegotiationSessionIcon,
   AgentPackageIcon,
   SponsorIcon,
+  SystemDashboardIcon,
 } from "./nav-icons.js";
 
 export const navGroups: NavGroup[] = [
@@ -123,6 +124,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "Hackathon",
     items: [
+      { label: "System Dashboard", path: "/system", icon: <SystemDashboardIcon /> },
       { label: "Sponsor Telemetry", path: "/sponsors", icon: <SponsorIcon /> },
     ],
   },

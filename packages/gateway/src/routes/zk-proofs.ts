@@ -3,6 +3,8 @@ import type { EvidenceCommitment, SHA256, ZKProof } from "@pcc/spec";
 import { commitmentService, zkProofService } from "../services.js";
 import { OracleVerificationBridge, StarknetProofAnchoringService, configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
+import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 
 // Singleton oracle verification bridge — config driven by env vars.
 // Set ORACLE_MOCK=false to activate live UMA/Chainlink verification.
@@ -213,6 +215,22 @@ export async function zkProofRoutes(app: FastifyInstance) {
         const depth = body.treeDepth ?? 0;
         try {
           const anchor = await starknetService.anchorMerkleRoot(body.merkleRoot, depth);
+          trackServerEvent("zk_proof_anchored", {
+            type: "merkle_root",
+            merkleRoot: body.merkleRoot,
+            txHash: anchor.txHash,
+            mock: starknetService.isMock(),
+          }, (req as any).operatorId);
+          auditService.log({
+            eventType: "zk.proof_anchored",
+            actor: (req as any).operatorId ?? (req as any).apiKeyId,
+            resourceType: "zk_anchor",
+            resourceId: anchor.txHash,
+            action: "anchor",
+            metadata: { type: "merkle_root", merkleRoot: body.merkleRoot, depth, mock: starknetService.isMock() },
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
           return { anchor, mode: starknetService.isMock() ? "mock" : "real" };
         } catch (err) {
           return { error: "anchor_failed", message: (err as Error).message };
@@ -240,6 +258,22 @@ export async function zkProofRoutes(app: FastifyInstance) {
 
       try {
         const anchor = await starknetService.anchorProof(proof);
+        trackServerEvent("zk_proof_anchored", {
+          type: "proof",
+          proofId: body.proofId,
+          txHash: anchor.txHash,
+          mock: starknetService.isMock(),
+        }, (req as any).operatorId);
+        auditService.log({
+          eventType: "zk.proof_anchored",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "zk_anchor",
+          resourceId: anchor.txHash,
+          action: "anchor",
+          metadata: { type: "proof", proofId: body.proofId, mock: starknetService.isMock() },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { anchor, mode: starknetService.isMock() ? "mock" : "real" };
       } catch (err) {
         return { error: "anchor_failed", message: (err as Error).message };

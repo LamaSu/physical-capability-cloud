@@ -13,6 +13,8 @@ import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 
 // ---------------------------------------------------------------------------
@@ -540,6 +542,23 @@ export async function setupRoutes(app: FastifyInstance) {
           healthStatus: "healthy",
         });
 
+        trackServerEvent("device_registered", {
+          deviceId,
+          kernelId,
+          type,
+          adapterType,
+          model,
+        }, (req as any).operatorId ?? (req as any).apiKeyId);
+        auditService.log({
+          eventType: "device.registered",
+          actor: (req as any).operatorId ?? (req as any).apiKeyId,
+          resourceType: "device",
+          resourceId: deviceId,
+          action: "create",
+          metadata: { kernelId, type, adapterType, model },
+          ip: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
         return { device, registered: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";

@@ -23,6 +23,8 @@ import {
   type OneClickQuoteRequest,
   type OneClickIntentRequest,
 } from "../contracts/near-client.js";
+import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -109,6 +111,12 @@ export async function nearRoutes(app: FastifyInstance) {
         recipient: body.recipient,
       });
 
+      trackServerEvent("near_quote_requested", {
+        fromChain: body.fromChain,
+        toChain: body.toChain,
+        fromAsset: body.fromAsset,
+        toAsset: body.toAsset,
+      }, (req as any).operatorId);
       return {
         quote,
         _meta: {
@@ -157,6 +165,21 @@ export async function nearRoutes(app: FastifyInstance) {
         recipient: body.recipient,
       });
 
+      trackServerEvent("near_intent_submitted", {
+        quoteId: body.quoteId,
+        workflowId: body.workflowId,
+        intentId: intent.intentId,
+      }, (req as any).operatorId);
+      auditService.log({
+        eventType: "near.intent_submitted",
+        actor: (req as any).operatorId ?? (req as any).apiKeyId,
+        resourceType: "near_intent",
+        resourceId: intent.intentId,
+        action: "create",
+        metadata: { quoteId: body.quoteId, workflowId: body.workflowId },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
       return {
         intent,
         _meta: {

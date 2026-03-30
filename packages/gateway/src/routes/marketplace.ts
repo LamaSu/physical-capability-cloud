@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { EquipmentClass, MarketSnapshot, ROIProjection, MarketplaceListing, MarketplaceOrder, MarketplaceCategory } from "@pcc/spec";
+import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 
 const mockClasses: EquipmentClass[] = [
   {
@@ -345,6 +347,22 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       updatedAt: ts,
     };
     mockListings.push(listing);
+    trackServerEvent("marketplace_listing_created", {
+      listingId: listing.id,
+      category: listing.category,
+      pricePerUnit: listing.pricePerUnit,
+      currency: listing.currency,
+    }, (req as any).operatorId);
+    auditService.log({
+      eventType: "marketplace.listing_created",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? listing.sellerId,
+      resourceType: "listing",
+      resourceId: listing.id,
+      action: "create",
+      metadata: { name: listing.name, category: listing.category, pricePerUnit: listing.pricePerUnit },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return reply.status(201).send({ listing });
   });
 
@@ -401,6 +419,22 @@ export async function marketplaceRoutes(app: FastifyInstance) {
       updatedAt: ts,
     };
     mockOrders.push(order);
+    trackServerEvent("marketplace_order_placed", {
+      orderId: order.id,
+      listingId: order.listingId,
+      quantity: order.quantity,
+      totalPrice: order.totalPrice,
+    }, (req as any).operatorId);
+    auditService.log({
+      eventType: "marketplace.order_placed",
+      actor: (req as any).operatorId ?? (req as any).apiKeyId ?? order.buyerId,
+      resourceType: "order",
+      resourceId: order.id,
+      action: "create",
+      metadata: { listingId: order.listingId, quantity: order.quantity, totalPrice: order.totalPrice },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     return reply.status(201).send({ order });
   });
 

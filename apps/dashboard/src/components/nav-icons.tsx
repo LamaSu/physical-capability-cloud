@@ -45,3 +45,4 @@ export const BatchBoardIcon = () => icon("M4 4h3v3H4zM9 4h3v3H9zM14 4h3v3h-3zM4 
 export const NegotiationSessionIcon = () => icon("M3 5h7v4H3zM10 11h7v4h-7zM7 9l3 2M10 5v2h4");
 export const AgentPackageIcon = () => icon("M4 4h12v12H4zM4 4l4 4M16 4l-4 4M8 8h4v4H8zM8 12v4M12 12v4");
 export const SponsorIcon = () => icon("M10 2l2 3h3l-2.5 2 1 3L10 8.5 7.5 10l1-3L6 5h3l1-3zM4 13h2v4H4zM7 11h2v6H7zM11 11h2v6h-2zM14 13h2v4h-2z");
+export const SystemDashboardIcon = () => icon("M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6zM6 6h0M14 6h0M6 14h0M14 14h0");
