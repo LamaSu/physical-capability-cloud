@@ -12,10 +12,10 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { getStore } from "../db.js";
+import { getStore, getRepos } from "../db.js";
 import { schema, eq, and, sql } from "@pcc/store";
 
-const { toolCallRelay, executionScopes } = schema;
+const { toolCallRelay, executionScopes, negotiationSessions } = schema;
 
 /** Tools that are always allowed regardless of scope */
 const SAFE_TOOLS = [
@@ -188,6 +188,55 @@ export async function ot2RelayRoutes(app: FastifyInstance) {
           .set({ commandCount: scope.commandCount + 1 })
           .where(eq(executionScopes.id, scopeId))
           .run();
+      }
+
+      // ── Escrow verification: ensure job is funded before allowing writes ──
+      if (!SAFE_TOOLS.includes(toolName) && scope.jobId) {
+        try {
+          const repos = getRepos();
+          const job = repos.jobs.findById(scope.jobId);
+          if (job) {
+            // Look up the session to find the escrow
+            const sessionRow = db
+              .select()
+              .from(negotiationSessions)
+              .where(eq(negotiationSessions.jobId, scope.jobId))
+              .get();
+
+            if (sessionRow?.cwmId) {
+              const escrow = repos.escrows.findByCwm(sessionRow.cwmId);
+              if (escrow && escrow.status !== "funded" && escrow.status !== "active" && escrow.status !== "completed") {
+                // For mock settlement, auto-funded escrows have status "funded"
+                // For real escrows, they must be funded before execution
+                const id = generateId();
+                const rejectNow = new Date().toISOString();
+                db.insert(toolCallRelay).values({
+                  id,
+                  scopeId,
+                  kernelId,
+                  toolName,
+                  toolArgs: args ?? {},
+                  status: "rejected",
+                  error: "escrow_not_funded",
+                  createdAt: rejectNow,
+                }).run();
+
+                return reply.status(402).send({
+                  error: "Escrow not funded",
+                  reason: "escrow_not_funded",
+                  escrowStatus: escrow.status,
+                  callId: id,
+                  toolName,
+                  scopeId,
+                  message: "The escrow for this job must be funded before tool execution is allowed.",
+                });
+              }
+            }
+          }
+        } catch {
+          // Escrow check is best-effort — if DB fails, allow the call
+          // This prevents the escrow check from breaking existing flows
+        }
       }
     }
 

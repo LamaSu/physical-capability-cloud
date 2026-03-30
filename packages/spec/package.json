@@ -21,6 +21,11 @@
       "types": "./dist/identity/index.d.ts",
       "import": "./dist/identity/index.js",
       "default": "./dist/identity/index.js"
+    },
+    "./tool-manifests": {
+      "types": "./dist/tool-manifests/index.d.ts",
+      "import": "./dist/tool-manifests/index.js",
+      "default": "./dist/tool-manifests/index.js"
     }
   },
   "scripts": {

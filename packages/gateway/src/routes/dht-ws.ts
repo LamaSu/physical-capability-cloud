@@ -64,6 +64,36 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     return { results, count: results.length };
   });
 
+  // ── REST: announce capabilities ─────────────────────────────────────
+  app.post("/api/dht/announce", async (req, reply) => {
+    const announcement = req.body as any;
+    if (!announcement || !announcement.kernelId || !announcement.capabilities) {
+      return reply.status(400).send({ error: "kernelId and capabilities required" });
+    }
+    // Store in the registry directly
+    const registry = dhtNode.getRegistry();
+    registry.store({
+      kernelDid: announcement.kernelDid ?? `did:pcc:${announcement.kernelId}`,
+      kernelId: announcement.kernelId,
+      capabilities: announcement.capabilities,
+      endpoints: announcement.endpoints ?? [],
+      ttlSeconds: announcement.ttlSeconds ?? 300,
+      timestamp: new Date().toISOString(),
+      signature: announcement.signature ?? "",
+    });
+    // Broadcast to connected DHT peers
+    dhtNode.announce({
+      kernelDid: announcement.kernelDid ?? `did:pcc:${announcement.kernelId}`,
+      kernelId: announcement.kernelId,
+      capabilities: announcement.capabilities,
+      endpoints: announcement.endpoints ?? [],
+      ttlSeconds: announcement.ttlSeconds ?? 300,
+      timestamp: new Date().toISOString(),
+      signature: announcement.signature ?? "",
+    });
+    return { announced: true, kernelId: announcement.kernelId };
+  });
+
   // ── REST: peer info + stats ────────────────────────────────────────
   app.get("/api/dht/peers", async () => {
     return {

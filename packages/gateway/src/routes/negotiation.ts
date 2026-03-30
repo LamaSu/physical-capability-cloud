@@ -30,6 +30,7 @@ import type {
   CreateSessionRequest,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
+import { createJobFromSession } from "./paid-job-flow.js";
 
 const { negotiationSessions, operatorPolicies } = schema;
 
@@ -405,11 +406,38 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .where(eq(negotiationSessions.id, req.params.id))
           .run();
 
+        // ── Wire: COMMITTED -> create escrow + job + scope ────────────
+        let paidJobResult: {
+          jobId: string;
+          scopeId: string;
+          escrowId: string;
+          escrowAddress: string;
+          escrowStatus: string;
+        } | null = null;
+
+        try {
+          const committedRow = db.select().from(negotiationSessions)
+            .where(eq(negotiationSessions.id, req.params.id))
+            .get();
+          if (committedRow) {
+            paidJobResult = await createJobFromSession(committedRow);
+          }
+        } catch (err) {
+          // Paid job flow creation is best-effort — the session is already committed
+          console.warn("[negotiation] Paid job flow wiring failed (best-effort):", err instanceof Error ? err.message : err);
+        }
+
         return {
-          session: { ...row, status: "committed", jobId, cwmId, committedAt: now, transitions },
-          jobId,
+          session: { ...row, status: "committed", jobId: paidJobResult?.jobId ?? jobId, cwmId, committedAt: now, transitions },
+          jobId: paidJobResult?.jobId ?? jobId,
           cwmId,
-          message: "Session committed. Job created and ready for operator processing.",
+          scopeId: paidJobResult?.scopeId ?? null,
+          escrowId: paidJobResult?.escrowId ?? null,
+          escrowAddress: paidJobResult?.escrowAddress ?? null,
+          escrowStatus: paidJobResult?.escrowStatus ?? null,
+          message: paidJobResult
+            ? "Session committed. Job, escrow, and execution scope created."
+            : "Session committed. Job created and ready for operator processing.",
         };
       } catch {
         return reply.status(500).send({ error: "Failed to commit session" });

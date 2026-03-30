@@ -25,3 +25,4 @@ export * from "./licensing.js";
 export * from "./operator-policy.js";
 export * from "./negotiation.js";
 export * from "./p2p.js";
+export * from "./device-tools.js";

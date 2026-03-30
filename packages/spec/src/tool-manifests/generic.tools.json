@@ -1,0 +1,114 @@
+{
+  "deviceType": "generic",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "health",
+      "qualifiedName": "generic.health",
+      "description": "Get device health status",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "status",
+      "qualifiedName": "generic.status",
+      "description": "Get device status",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "info",
+      "qualifiedName": "generic.info",
+      "description": "Get device information and capabilities",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "read_register",
+      "qualifiedName": "generic.read_register",
+      "description": "Read a device register or endpoint",
+      "category": "read",
+      "inputSchema": {
+        "properties": {
+          "register": { "type": "string" },
+          "address": { "type": "number" }
+        }
+      }
+    },
+    {
+      "name": "identify",
+      "qualifiedName": "generic.identify",
+      "description": "Identify device (blink/beep)",
+      "category": "safe_control",
+      "inputSchema": {}
+    },
+    {
+      "name": "reset",
+      "qualifiedName": "generic.reset",
+      "description": "Soft reset device",
+      "category": "safe_control",
+      "inputSchema": {}
+    },
+    {
+      "name": "write_register",
+      "qualifiedName": "generic.write_register",
+      "description": "Write to a device register or endpoint",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "register": { "type": "string" },
+          "address": { "type": "number" },
+          "value": {}
+        },
+        "required": ["register", "value"]
+      }
+    },
+    {
+      "name": "execute",
+      "qualifiedName": "generic.execute",
+      "description": "Execute a device command",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "command": { "type": "string" },
+          "args": { "type": "object" }
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "shell",
+      "qualifiedName": "generic.shell",
+      "description": "Execute a shell command on the device",
+      "category": "privileged",
+      "inputSchema": {
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "camera_snapshot",
+      "qualifiedName": "generic.camera_snapshot",
+      "description": "Take a camera snapshot",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "evidence_snapshot",
+      "qualifiedName": "generic.evidence_snapshot",
+      "description": "Capture an evidence snapshot",
+      "category": "read",
+      "inputSchema": {}
+    }
+  ],
+  "safeTools": [
+    "health",
+    "status",
+    "info",
+    "read_register",
+    "identify",
+    "reset",
+    "camera_snapshot",
+    "evidence_snapshot"
+  ]
+}

@@ -1,0 +1,172 @@
+{
+  "deviceType": "octoprint",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "health",
+      "qualifiedName": "octoprint.health",
+      "description": "Get OctoPrint server health",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "status",
+      "qualifiedName": "octoprint.status",
+      "description": "Get printer status (state, temps, progress)",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "connection",
+      "qualifiedName": "octoprint.connection",
+      "description": "Get printer connection state",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "files_list",
+      "qualifiedName": "octoprint.files_list",
+      "description": "List uploaded files",
+      "category": "read",
+      "inputSchema": {
+        "properties": { "location": { "type": "string", "enum": ["local", "sdcard"] } }
+      }
+    },
+    {
+      "name": "job_status",
+      "qualifiedName": "octoprint.job_status",
+      "description": "Get current print job status",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "temperatures",
+      "qualifiedName": "octoprint.temperatures",
+      "description": "Get current temperatures",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "connect",
+      "qualifiedName": "octoprint.connect",
+      "description": "Connect to printer",
+      "category": "safe_control",
+      "inputSchema": {
+        "properties": {
+          "port": { "type": "string" },
+          "baudrate": { "type": "number" }
+        }
+      }
+    },
+    {
+      "name": "disconnect",
+      "qualifiedName": "octoprint.disconnect",
+      "description": "Disconnect from printer",
+      "category": "safe_control",
+      "inputSchema": {}
+    },
+    {
+      "name": "home",
+      "qualifiedName": "octoprint.home",
+      "description": "Home print axes",
+      "category": "safe_control",
+      "inputSchema": {
+        "properties": { "axes": { "type": "array", "items": { "type": "string" } } }
+      }
+    },
+    {
+      "name": "file_upload",
+      "qualifiedName": "octoprint.file_upload",
+      "description": "Upload a G-code file",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "filename": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["filename", "content"]
+      }
+    },
+    {
+      "name": "print_start",
+      "qualifiedName": "octoprint.print_start",
+      "description": "Start printing a file",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": { "filename": { "type": "string" } },
+        "required": ["filename"]
+      }
+    },
+    {
+      "name": "print_cancel",
+      "qualifiedName": "octoprint.print_cancel",
+      "description": "Cancel current print",
+      "category": "scoped_write",
+      "inputSchema": {}
+    },
+    {
+      "name": "print_pause",
+      "qualifiedName": "octoprint.print_pause",
+      "description": "Pause current print",
+      "category": "scoped_write",
+      "inputSchema": {}
+    },
+    {
+      "name": "print_resume",
+      "qualifiedName": "octoprint.print_resume",
+      "description": "Resume paused print",
+      "category": "scoped_write",
+      "inputSchema": {}
+    },
+    {
+      "name": "set_temperature",
+      "qualifiedName": "octoprint.set_temperature",
+      "description": "Set hotend or bed temperature",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "tool": { "type": "string" },
+          "target": { "type": "number" }
+        },
+        "required": ["tool", "target"]
+      }
+    },
+    {
+      "name": "gcode",
+      "qualifiedName": "octoprint.gcode",
+      "description": "Send raw G-code command",
+      "category": "privileged",
+      "inputSchema": {
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "camera_snapshot",
+      "qualifiedName": "octoprint.camera_snapshot",
+      "description": "Take a camera snapshot",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "evidence_snapshot",
+      "qualifiedName": "octoprint.evidence_snapshot",
+      "description": "Capture an evidence snapshot",
+      "category": "read",
+      "inputSchema": {}
+    }
+  ],
+  "safeTools": [
+    "health",
+    "status",
+    "connection",
+    "files_list",
+    "job_status",
+    "temperatures",
+    "connect",
+    "disconnect",
+    "home",
+    "camera_snapshot",
+    "evidence_snapshot"
+  ]
+}
