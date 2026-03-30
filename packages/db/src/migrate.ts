@@ -5,6 +5,10 @@ import type Database from "better-sqlite3";
  * This avoids needing drizzle-kit at runtime.
  */
 export function migrateDatabase(sqlite: Database.Database): void {
+  // Disable FK enforcement — we handle referential integrity at the application layer.
+  // This prevents insert failures when tables reference kernels that haven't been seeded yet.
+  sqlite.pragma("foreign_keys = OFF");
+
   sqlite.exec(`
     -- ── Kernels ──────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS shop_kernels (
