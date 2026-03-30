@@ -3,6 +3,7 @@ import type { Address } from "@pcc/spec";
 import { encryptionService, litEncryptionService, getEvidenceStorage } from "../services.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 import type { LitAuthSig } from "@pcc/kernel";
 import { kernelKeyStore } from "@pcc/kernel";
 import { getRepos } from "../db.js";
@@ -99,6 +100,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       const storage = await getEvidenceStorage();
       const result = await storage.archiveBundle(bundle);
       pipelineTelemetry.emit(bundle.jobId ?? "pipeline-" + Date.now(), "evidence_archive", "completed", { metadata: { cid: result.cid } });
+      trackServerEvent("evidence_archived", { cid: result.cid, jobId: bundle.jobId }, (req as any).operatorId);
       auditService.log({
         eventType: "evidence.archived",
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -136,6 +138,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
         ipfsCid: result.cid,
         ipfsMetadataCid: result.metadataCid,
       });
+      trackServerEvent("evidence_archived", { cid: result.cid, bundleId: req.params.bundleId, encrypted: true }, (req as any).operatorId);
       auditService.log({
         eventType: "evidence.archived",
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
@@ -230,6 +233,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
 
       try {
         const decrypted = await litEncryptionService.decryptBundle(bundle as any, body.authSig);
+        trackServerEvent("evidence_encrypted", { bundleId: req.params.bundleId, operation: "decrypt" }, (req as any).operatorId);
         return { bundle: decrypted };
       } catch (err) {
         const message = err instanceof Error ? err.message : "Decryption failed";

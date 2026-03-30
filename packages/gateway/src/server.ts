@@ -127,6 +127,38 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
+  // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
+  // to the audit log so every state-changing call is captured without
+  // per-route boilerplate. Individual routes may also log richer events.
+  app.addHook("onResponse", async (request, reply) => {
+    const method = request.method;
+    if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
+
+    const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
+      request.headers.authorization ? "authenticated" : "anonymous"
+    );
+
+    try {
+      const { auditService: audit } = await import("./services/audit-service.js");
+      audit.log({
+        eventType: "http.write",
+        actor,
+        resourceType: "http",
+        action: method.toLowerCase(),
+        metadata: {
+          method,
+          url: request.url,
+          statusCode: reply.statusCode,
+          duration_ms: Math.round(reply.elapsedTime ?? 0),
+        },
+        ip: request.ip,
+        userAgent: request.headers["user-agent"],
+      });
+    } catch {
+      // Audit failures must never affect request handling
+    }
+  });
+
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
 

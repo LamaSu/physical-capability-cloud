@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 export async function kernelRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { status?: string } }>(
@@ -93,6 +94,11 @@ export async function kernelRoutes(app: FastifyInstance) {
       maxAssuranceTier: 2,
     };
     const inserted = repos.kernels.insert(kernel);
+    trackServerEvent("kernel_registered", {
+      kernelId: kernel.id,
+      name: kernel.name,
+      operatorAddress: kernel.operatorAddress,
+    }, (req as any).operatorId ?? (req as any).apiKeyId);
     auditService.log({
       eventType: "kernel.created",
       actor: (req as any).operatorId ?? (req as any).apiKeyId ?? kernel.operatorAddress,
