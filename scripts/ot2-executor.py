@@ -392,8 +392,8 @@ def poll_tool_calls():
 def execute_and_report(call):
     """Execute a tool call and post the result back to PCC."""
     call_id = call.get("id", "unknown")
-    tool_name = call.get("toolName", "")
-    tool_args = call.get("toolArgs", {})
+    tool_name = call.get("toolName", call.get("tool_name", ""))
+    tool_args = call.get("toolArgs", call.get("args", call.get("tool_args", {})))
 
     log.info(f"Executing {tool_name}({json.dumps(tool_args)[:100]}) [call={call_id}]")
 
@@ -464,6 +464,32 @@ def run():
 
     # Register online
     pcc("POST", f"/api/kernels/{KERNEL_ID}/heartbeat", {"status": "online"})
+
+    # Announce to DHT
+    s2, pips = ot2("GET", "/pipettes")
+    pipette_names = []
+    if isinstance(pips, dict):
+        for mount in ["left", "right"]:
+            p = pips.get(mount, {})
+            if p and p.get("name"):
+                pipette_names.append(p["name"])
+    log.info(f"Announcing to DHT: {KERNEL_ID} with pipettes {pipette_names}")
+    pcc("POST", "/api/dht/announce", {
+        "kernelId": KERNEL_ID,
+        "kernelDid": f"did:pcc:{KERNEL_ID}",
+        "capabilities": [
+            {
+                "type": "liquid-handler",
+                "materials": ["aqueous", "biological", "organic"],
+                "priceRange": {"min": 10, "max": 50, "currency": "USDC"},
+                "queueDepth": 0,
+            }
+        ],
+        "endpoints": [
+            {"transport": "http-poll", "url": f"{PCC_BASE}/api/ot2/tool-call", "priority": 1},
+        ],
+        "ttlSeconds": 300,
+    })
 
     camera_counter = 0
     CAMERA_EVERY = 10  # push camera every N cycles (~50s at 5s interval)

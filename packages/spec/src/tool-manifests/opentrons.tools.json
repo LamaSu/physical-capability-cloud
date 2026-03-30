@@ -1,0 +1,163 @@
+{
+  "deviceType": "opentrons",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "health",
+      "qualifiedName": "opentrons.health",
+      "description": "Get OT-2 health status",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "status",
+      "qualifiedName": "opentrons.status",
+      "description": "Get OT-2 system status",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "pipettes",
+      "qualifiedName": "opentrons.pipettes",
+      "description": "Get attached pipettes",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "modules",
+      "qualifiedName": "opentrons.modules",
+      "description": "Get attached modules",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "deck_calibration",
+      "qualifiedName": "opentrons.deck_calibration",
+      "description": "Get deck calibration data",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "protocols_list",
+      "qualifiedName": "opentrons.protocols_list",
+      "description": "List uploaded protocols",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "runs_list",
+      "qualifiedName": "opentrons.runs_list",
+      "description": "List protocol runs",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "run_status",
+      "qualifiedName": "opentrons.run_status",
+      "description": "Get status of a specific run",
+      "category": "read",
+      "inputSchema": {
+        "properties": { "runId": { "type": "string" } },
+        "required": ["runId"]
+      }
+    },
+    {
+      "name": "lights",
+      "qualifiedName": "opentrons.lights",
+      "description": "Control deck lights",
+      "category": "safe_control",
+      "inputSchema": {
+        "properties": { "on": { "type": "boolean" } }
+      }
+    },
+    {
+      "name": "home",
+      "qualifiedName": "opentrons.home",
+      "description": "Home all axes",
+      "category": "safe_control",
+      "inputSchema": {}
+    },
+    {
+      "name": "identify",
+      "qualifiedName": "opentrons.identify",
+      "description": "Blink lights for identification",
+      "category": "safe_control",
+      "inputSchema": {}
+    },
+    {
+      "name": "protocol_upload",
+      "qualifiedName": "opentrons.protocol_upload",
+      "description": "Upload a protocol file",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "filename": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["filename", "content"]
+      }
+    },
+    {
+      "name": "run_create",
+      "qualifiedName": "opentrons.run_create",
+      "description": "Create a new protocol run",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": { "protocolId": { "type": "string" } },
+        "required": ["protocolId"]
+      }
+    },
+    {
+      "name": "run_action",
+      "qualifiedName": "opentrons.run_action",
+      "description": "Play, pause, or stop a run",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "runId": { "type": "string" },
+          "action": { "type": "string" }
+        },
+        "required": ["runId", "action"]
+      }
+    },
+    {
+      "name": "shell",
+      "qualifiedName": "opentrons.shell",
+      "description": "Execute a shell command on the OT-2",
+      "category": "privileged",
+      "inputSchema": {
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "camera_snapshot",
+      "qualifiedName": "opentrons.camera_snapshot",
+      "description": "Take a camera snapshot",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "evidence_snapshot",
+      "qualifiedName": "opentrons.evidence_snapshot",
+      "description": "Capture an evidence snapshot",
+      "category": "read",
+      "inputSchema": {}
+    }
+  ],
+  "safeTools": [
+    "health",
+    "status",
+    "pipettes",
+    "modules",
+    "deck_calibration",
+    "protocols_list",
+    "runs_list",
+    "run_status",
+    "lights",
+    "home",
+    "identify",
+    "camera_snapshot",
+    "evidence_snapshot"
+  ]
+}
