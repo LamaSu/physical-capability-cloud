@@ -25,7 +25,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS kernel_devices (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       type TEXT NOT NULL,
       model TEXT NOT NULL,
       firmware TEXT NOT NULL,
@@ -42,7 +42,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     -- ── Capabilities ─────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS capabilities (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       type TEXT NOT NULL,
       name TEXT NOT NULL,
       description TEXT,
@@ -63,7 +63,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       step_id TEXT NOT NULL,
       cwm_id TEXT NOT NULL,
       capability_id TEXT NOT NULL REFERENCES capabilities(id),
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       status TEXT NOT NULL,
       assigned_devices TEXT NOT NULL,  -- JSON string[]
       started_at TEXT,
@@ -77,7 +77,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       id TEXT PRIMARY KEY,
       job_id TEXT NOT NULL REFERENCES jobs(id),
       step_id TEXT NOT NULL,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       assurance_tier INTEGER NOT NULL,
       bundle_hash TEXT NOT NULL,
       kernel_signature TEXT NOT NULL,  -- JSON
@@ -137,7 +137,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     -- ── Orchestrator ─────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS transfer_graphs (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       created_at TEXT NOT NULL,
       updated_at TEXT
     );
@@ -145,7 +145,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS transfer_nodes (
       id TEXT PRIMARY KEY,
       graph_id TEXT NOT NULL REFERENCES transfer_graphs(id),
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       device_id TEXT,
       label TEXT NOT NULL,
       node_type TEXT NOT NULL,
@@ -194,7 +194,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS instrument_workflows (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       job_id TEXT NOT NULL REFERENCES jobs(id),
       status TEXT NOT NULL,
       started_at TEXT,
@@ -291,7 +291,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       template_id TEXT NOT NULL REFERENCES protocol_templates(id),
       template_version TEXT NOT NULL,
       fork_id TEXT REFERENCES protocol_forks(id),
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       job_id TEXT,
       parameter_values TEXT NOT NULL,  -- JSON
       status TEXT NOT NULL,
@@ -340,7 +340,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS automation_statuses (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       from_node_id TEXT NOT NULL,
       to_node_id TEXT NOT NULL,
       transfer_agent_id TEXT NOT NULL,
@@ -380,7 +380,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS sensor_channel_descriptors (
       id TEXT PRIMARY KEY,
       channel TEXT NOT NULL,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       device_id TEXT NOT NULL REFERENCES kernel_devices(id),
       label TEXT NOT NULL,
       data_type TEXT NOT NULL,
@@ -395,7 +395,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS sensor_aggregates (
       id TEXT PRIMARY KEY,
       channel TEXT NOT NULL,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       device_id TEXT NOT NULL REFERENCES kernel_devices(id),
       window_start TEXT NOT NULL,
       window_end TEXT NOT NULL,
@@ -412,7 +412,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS sensor_anomalies (
       id TEXT PRIMARY KEY,
       timestamp TEXT NOT NULL,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       device_id TEXT NOT NULL REFERENCES kernel_devices(id),
       channel TEXT NOT NULL,
       type TEXT NOT NULL,
@@ -426,7 +426,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     -- ── Batches ──────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS batch_manifests (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       device_id TEXT NOT NULL REFERENCES kernel_devices(id),
       capability_id TEXT NOT NULL REFERENCES capabilities(id),
       status TEXT NOT NULL,
@@ -917,7 +917,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     -- ── Operator Policies ──────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS operator_policies (
-      kernel_id TEXT PRIMARY KEY REFERENCES shop_kernels(id),
+      kernel_id TEXT PRIMARY KEY ,
       policy TEXT NOT NULL,       -- JSON OperatorPolicy
       updated_at TEXT NOT NULL,
       updated_by TEXT             -- who last changed it
@@ -926,7 +926,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     -- ── Pending Approvals ──────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS pending_approvals (
       id TEXT PRIMARY KEY,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       job_id TEXT NOT NULL,
       session_id TEXT,            -- links to negotiation_sessions
       submitted_by TEXT NOT NULL,
@@ -943,7 +943,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'created',
       user_agent_id TEXT NOT NULL,
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL,
       capability_type TEXT NOT NULL,
       capability_id TEXT,
       network TEXT,
@@ -963,7 +963,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
 
     -- ── Policy Rate Counters ───────────────────────────────────────
     CREATE TABLE IF NOT EXISTS policy_rate_counters (
-      kernel_id TEXT NOT NULL REFERENCES shop_kernels(id),
+      kernel_id TEXT NOT NULL ,
       window_key TEXT NOT NULL,   -- "hour:2026-03-26T14" or "day:2026-03-26"
       count INTEGER NOT NULL DEFAULT 0,
       total_cost TEXT NOT NULL DEFAULT '0',
