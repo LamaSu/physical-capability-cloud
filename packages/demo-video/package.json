@@ -1,0 +1,34 @@
+{
+  "name": "@pcc/demo-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PCC hackathon demo video built with Remotion",
+  "scripts": {
+    "studio": "npx remotion studio",
+    "render:draft": "npx remotion render src/index.ts PCCDemo-Full --codec h264 --crf 28 --scale 0.5 --x264-preset ultrafast",
+    "render:final": "npx remotion render src/index.ts PCCDemo-Full --codec h264 --crf 18",
+    "render:scene": "npx remotion render src/index.ts",
+    "render:thumbnail": "npx remotion still src/index.ts Thumbnail --frame 80 --image-format png"
+  },
+  "dependencies": {
+    "@remotion/animation-utils": "^4.0.92",
+    "@remotion/cli": "^4.0.0",
+    "@remotion/google-fonts": "^4.0.0",
+    "@remotion/layout-utils": "^4.0.50",
+    "@remotion/motion-blur": "^4.0.0",
+    "@remotion/noise": "^4.0.0",
+    "@remotion/paths": "^4.0.0",
+    "@remotion/player": "^4.0.0",
+    "@remotion/transitions": "^4.0.53",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "remotion": "^4.0.0",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@remotion/bundler": "^4.0.0",
+    "@remotion/renderer": "^4.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.4.0"
+  }
+}

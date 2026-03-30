@@ -2,12 +2,12 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
   "api_base": "https://capability.network",
 
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_announce, pcc_dht_peers\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network — a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key — it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key — get your Bearer token\n2. create_kernel — register your physical site (lab, workshop, factory)\n3. setup_register_device — add each machine to your kernel\n4. setup_test_job — verify the pipeline end-to-end\n5. mint_certificate — prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers — query the distributed gossip network for capabilities. Public, no auth needed.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration — manage operator equipment registrations. Two paths to go live:\n- Manual: submitted → approved → active (requires admin review)\n- Fast-track: submitted → prove_registration (submit evidence bundle) → auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess — always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
 
   "tools": [
     {
@@ -1949,6 +1949,126 @@
         "required": ["kernelId"]
       },
       "endpoint": { "method": "GET", "path": "/api/ot2/chat/messages" }
+    },
+
+    {
+      "name": "pcc_dht_query",
+      "description": "Query the distributed hash table for capabilities matching your criteria. Returns ranked results from the gossip network. Works without auth — discovery is public.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "description": "Capability type to search for (e.g. 'fdm', 'document-printing', 'cnc-3axis')" },
+          "materials": { "type": "string", "description": "Comma-separated materials filter (e.g. 'PLA,PETG')" },
+          "maxPrice": { "type": "number", "description": "Maximum price filter (USDC)" },
+          "limit": { "type": "number", "description": "Max results to return (default 10)" }
+        },
+        "required": []
+      },
+      "endpoint": { "method": "GET", "path": "/api/dht/query" }
+    },
+    {
+      "name": "pcc_dht_peers",
+      "description": "List peers connected to the DHT gossip network and registry statistics. Shows how many operators are announcing capabilities and network health.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/dht/peers" }
+    },
+
+    {
+      "name": "approve_registration",
+      "description": "Approve a submitted machine registration. Moves it from 'submitted' to 'approved' status, enabling the operator to activate and start accepting jobs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "registrationId": { "type": "string", "description": "Registration ID (e.g. 'reg-1234567890')" }
+        },
+        "required": ["registrationId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/registrations/{registrationId}/approve" }
+    },
+    {
+      "name": "reject_registration",
+      "description": "Reject a machine registration with a reason. The operator can see the rejection reason and resubmit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "registrationId": { "type": "string", "description": "Registration ID" },
+          "reason": { "type": "string", "description": "Reason for rejection" }
+        },
+        "required": ["registrationId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/registrations/{registrationId}/reject" }
+    },
+    {
+      "name": "activate_registration",
+      "description": "Activate an approved registration, making the operator's equipment live on the network and ready to accept jobs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "registrationId": { "type": "string", "description": "Registration ID" }
+        },
+        "required": ["registrationId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/registrations/{registrationId}/activate" }
+    },
+    {
+      "name": "prove_registration",
+      "description": "Fast-track: submit evidence that your device works and get auto-approved + activated immediately. No manual review needed. Submit a photo of test output, device health snapshot, or a full evidence bundle with completion events. If evidence meets requirements, registration jumps straight to 'active'.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "registrationId": { "type": "string", "description": "Registration ID to prove" },
+          "evidence": {
+            "type": "object",
+            "description": "Evidence proving the device works. Include at least one of: bundleHash+events, photoBase64, or deviceHealth.",
+            "properties": {
+              "bundleHash": { "type": "string", "description": "SHA-256 hash of the evidence bundle" },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string", "description": "Event type: execution_completed, camera_snapshot, power_profile_summary, etc." },
+                    "timestamp": { "type": "string", "description": "ISO timestamp" },
+                    "payload": { "type": "object", "description": "Event data" }
+                  }
+                },
+                "description": "Evidence events from a test job"
+              },
+              "photoBase64": { "type": "string", "description": "Base64-encoded photo of test output (printed page, machined part, etc.)" },
+              "deviceHealth": {
+                "type": "object",
+                "properties": {
+                  "status": { "type": "string", "description": "Device status (e.g. 'idle', 'ready')" },
+                  "model": { "type": "string", "description": "Device model name" },
+                  "firmware": { "type": "string", "description": "Firmware version" }
+                },
+                "description": "Live device health snapshot"
+              },
+              "ipfsCid": { "type": "string", "description": "IPFS CID if evidence was already uploaded" }
+            }
+          }
+        },
+        "required": ["registrationId", "evidence"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/onboard/registrations/{registrationId}/prove" }
+    },
+    {
+      "name": "list_registrations",
+      "description": "List all machine registrations on the network. See pending, approved, active, and rejected registrations. Public endpoint — no auth required.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "endpoint": { "method": "GET", "path": "/api/onboard/registrations" }
+    },
+    {
+      "name": "get_registration",
+      "description": "Get details of a specific machine registration by ID, including capabilities, pricing, operator info, and current status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "registrationId": { "type": "string", "description": "Registration ID" }
+        },
+        "required": ["registrationId"]
+      },
+      "endpoint": { "method": "GET", "path": "/api/onboard/registrations/{registrationId}" }
     }
   ],
 

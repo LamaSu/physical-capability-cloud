@@ -52,7 +52,12 @@ export type BuiltinCapabilityType =
   | "compound-synthesis"
   | "assay"
   | "chromatography"
-  | "liquid-handler";
+  | "liquid-handler"
+  // Document services
+  | "document-printing"
+  | "large-format-printing"
+  | "scanning"
+  | "binding";
 
 /** Open string union: autocompletes builtins but accepts any string for extensibility */
 export type CapabilityType = BuiltinCapabilityType | (string & {});

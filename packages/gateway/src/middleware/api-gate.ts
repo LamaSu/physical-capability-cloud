@@ -15,12 +15,17 @@ const PUBLIC_PREFIXES = [
   "/api/auth/provision",        // Key provisioning is public
   "/api/auth/validate",         // Key validation is public (checks key itself)
   "/api/feedback",
-  "/api/onboard/check/",      // Invite code validation is public
+  "/api/onboard/check/",        // Invite code validation is public
+  "/api/onboard/registrations", // Registration browsing is public (operators can check status)
+  "/api/dht/",                  // DHT discovery is public (distributed capability queries)
+  "/api/marketplace/",          // Marketplace browsing is public (see what's available)
   "/.well-known/",
 ];
 
 const PUBLIC_EXACT = [
   "/api/capabilities/types",   // Discovery is public (see what's available)
+  "/api/capabilities",         // Capability listing is public
+  "/api/kernels",              // Kernel listing is public (find operators)
   "/api/agents/status",        // Network status is public
 ];
 
