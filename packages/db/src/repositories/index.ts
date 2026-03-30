@@ -15,6 +15,7 @@ import { StoryRepository } from "./story.js";
 import { SWFRepository } from "./swf.js";
 import { ApiKeyRepository } from "./api-keys.js";
 import { AuditLogRepository } from "./audit-log.js";
+import { RegistrationRepository } from "./registrations.js";
 
 export {
   KernelRepository,
@@ -35,6 +36,7 @@ export {
   SWFRepository,
   ApiKeyRepository,
   AuditLogRepository,
+  RegistrationRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -57,6 +59,7 @@ export function buildRepositories(db: StoreDB) {
     swf: new SWFRepository(db),
     apiKeys: new ApiKeyRepository(db),
     auditLog: new AuditLogRepository(db),
+    registrations: new RegistrationRepository(db),
   };
 }
 
