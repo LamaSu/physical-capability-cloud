@@ -1,0 +1,1 @@
+{"version":1,"contracts":[{"id":"lns3k9s2tp6l2","package_name":"proof_registry","contract_name":"ProofRegistry","module_path":"proof_registry::ProofRegistry","artifacts":{"sierra":"proof_registry_ProofRegistry.contract_class.json","casm":"proof_registry_ProofRegistry.compiled_contract_class.json"}}]}
