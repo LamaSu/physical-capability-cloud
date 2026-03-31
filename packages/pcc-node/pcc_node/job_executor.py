@@ -284,16 +284,51 @@ class JobExecutor:
         from .http_util import http
 
         base_url = device.get("url") or f"http://{device.get('host', 'localhost')}:31950"
+        ot2_headers = {"opentrons-version": "2"}
         params = job.get("parameters", {})
         protocol_id = params.get("protocolId") or params.get("protocol_id")
 
+        # If pythonCode provided instead of protocolId, upload first
+        python_code = params.get("pythonCode") or params.get("python_code")
+        if not protocol_id and python_code:
+            filename = params.get("filename", "pcc_protocol.py")
+            boundary = f"----PCCBoundary{id(job)}"
+            upload_body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+                f"Content-Type: text/x-python\r\n"
+                f"\r\n"
+                f"{python_code}\r\n"
+                f"--{boundary}--"
+            ).encode("utf-8")
+            upload_headers = {
+                **ot2_headers,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            }
+            from urllib.request import Request, urlopen
+            import json as _json
+            import ssl
+            _ctx = ssl.create_default_context()
+            _ctx.check_hostname = False
+            _ctx.verify_mode = ssl.CERT_NONE
+            try:
+                req = Request(f"{base_url}/protocols", data=upload_body, headers=upload_headers, method="POST")
+                with urlopen(req, timeout=30, context=_ctx) as resp:
+                    upload_result = _json.loads(resp.read().decode("utf-8"))
+                protocol_id = (upload_result.get("data", {}) or {}).get("id")
+            except Exception as exc:
+                return {"error": f"protocol upload failed: {exc}", "uploaded": False}
+            if not protocol_id:
+                return {"error": "protocol upload returned no ID", "data": upload_result}
+
         if not protocol_id:
-            return {"error": "no_protocol_id", "note": "opentrons job requires protocolId in parameters"}
+            return {"error": "no_protocol_id", "note": "opentrons job requires protocolId or pythonCode in parameters"}
 
         # Create a run
         status, run_data = http(
             "POST", f"{base_url}/runs",
             body={"data": {"protocolId": protocol_id}},
+            headers=ot2_headers,
             verify_ssl=False,
         )
         if status not in (200, 201):
@@ -307,6 +342,7 @@ class JobExecutor:
         http(
             "POST", f"{base_url}/runs/{run_id}/actions",
             body={"data": {"actionType": "play"}},
+            headers=ot2_headers,
             verify_ssl=False,
         )
 

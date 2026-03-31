@@ -142,17 +142,18 @@ class TestCheckOpentrons:
 
 class TestDetectOpentrons:
     def test_probes_common_urls(self):
-        """Should probe both localhost and link-local."""
+        """Should probe all configured URLs (localhost, link-local, WiFi, USB)."""
+        from pcc_node.detect import OT2_PROBE_URLS
+
         with mock.patch("pcc_node.detect.check_opentrons") as mock_check:
             mock_check.side_effect = [
                 {"name": "ot2", "api_version": "8", "fw_version": "2", "robot_model": "OT-2"},
-                None,
-            ]
+            ] + [None] * (len(OT2_PROBE_URLS) - 1)
             devices = detect_opentrons()
 
         assert len(devices) == 1
         assert devices[0]["type"] == "opentrons"
-        assert mock_check.call_count == 2
+        assert mock_check.call_count == len(OT2_PROBE_URLS)
 
 
 # ---------------------------------------------------------------------------

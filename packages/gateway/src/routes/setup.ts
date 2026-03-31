@@ -560,7 +560,8 @@ export async function setupRoutes(app: FastifyInstance) {
                   assuranceTiers: [0, 1],
                   pricing: { currency: "USDC", baseCost: "0", minimum: "0" },
                   availability: {},
-                });
+                  location: { lat: 0, lng: 0 },
+                } as any);
               } catch (_capErr) {
                 // Non-fatal — capability may already exist from another device
               }
