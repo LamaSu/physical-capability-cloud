@@ -250,6 +250,13 @@ class JobExecutor:
 
         # 3. Capability type -> protocol map
         capability_type = job.get("capabilityType") or job.get("capability_type", "")
+        # Fall back: extract type from capabilityId (e.g. "cap-kernel-nanoclaw-liquid-handler")
+        if not capability_type:
+            cap_id = job.get("capabilityId", "")
+            for known_type in CAPABILITY_PROTOCOL_MAP:
+                if known_type in cap_id:
+                    capability_type = known_type
+                    break
         protocols = CAPABILITY_PROTOCOL_MAP.get(capability_type, [])
         for protocol in protocols:
             devs = self._devices_by_protocol.get(protocol, [])

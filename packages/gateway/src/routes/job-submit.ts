@@ -31,6 +31,7 @@ interface SubmitJobBody {
   capabilityType?: string;
   description?: string;
   title?: string;
+  parameters?: Record<string, unknown>;
 }
 
 interface JobStatusParams {
@@ -63,7 +64,7 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
   // ── POST /api/jobs/submit ──────────────────────────────────────────────────
 
   app.post<{ Body: SubmitJobBody }>("/api/jobs/submit", async (req, reply) => {
-    const { stepId, kernelId, capabilityId, deviceId, gcodeHash, assuranceTier } = req.body;
+    const { stepId, kernelId, capabilityId, deviceId, gcodeHash, assuranceTier, parameters } = req.body;
 
     if (!stepId) {
       return reply.code(400).send({ error: "missing_step_id" });
@@ -160,6 +161,7 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
         assignedDevices: deviceId ? [deviceId] : [],
         startedAt: new Date().toISOString(),
         progress: 0,
+        parameters: parameters ?? null,
       });
     } catch (err) {
       return reply.code(500).send({
