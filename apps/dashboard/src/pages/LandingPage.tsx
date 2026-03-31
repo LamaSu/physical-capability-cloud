@@ -1382,7 +1382,7 @@ const STEPS = [
   {
     step: "4",
     title: "Earn",
-    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on evidence verification. 1.5% fee. Nothing else.",
+    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on oracle-verified evidence. 2.35% fee. Nothing else.",
     badge: "ongoing",
   },
 ];
@@ -1560,9 +1560,25 @@ function ForOperatorsSection() {
 
           {/* CTAs */}
           <Reveal>
-            <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
-              <TerminalCTA text="pip install pcc-node" href="https://pypi.org/project/pcc-node/" />
-              <GhostLink text="Operator guide" href="https://docs.capability.network/operators" />
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
+                <TerminalCTA text="pip install pcc-node && pcc-node start" />
+                <GhostLink text="Operator guide" href="https://docs.capability.network/operators" />
+              </div>
+              <p
+                style={{
+                  fontFamily: inter,
+                  fontSize: "0.8rem",
+                  color: TEXT_DIM,
+                  margin: 0,
+                  maxWidth: "560px",
+                }}
+              >
+                Installs the node, auto-detects hardware, generates keys, and joins the network.
+                Your 207-tool agent package is served at{" "}
+                <span style={{ fontFamily: mono, color: TEXT_MUTED }}>/agent-package.json</span>{" "}
+                automatically.
+              </p>
             </div>
           </Reveal>
         </div>
@@ -1727,7 +1743,7 @@ function ForAgentsSection() {
                 marginBottom: "3rem",
               }}
             >
-              34 typed A2A intents. 154 agent tools. MCP server. Any agent framework, any chain.
+              34 typed A2A intents. 207 agent tools. MCP server. Any agent framework, any chain.
             </p>
           </Reveal>
 
@@ -1855,37 +1871,41 @@ function ForAgentsSection() {
                 MCP Compatible
               </p>
               <p style={{ fontFamily: inter, fontSize: "0.85rem", color: TEXT_MUTED, margin: 0 }}>
-                29 structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
+                207 structured tools. Connect any Claude, GPT-4, or custom agent via the MCP server
                 — no custom integration required.
               </p>
             </div>
           </Reveal>
 
+          {/* Agent package copy block */}
+          <Reveal>
+            <div
+              style={{
+                background: BG_DARK,
+                border: "1px solid rgba(0,255,136,0.15)",
+                borderRadius: "4px",
+                padding: "1.25rem 1.5rem",
+                marginBottom: "2rem",
+              }}
+            >
+              <p style={{ fontFamily: mono, fontSize: "0.7rem", color: TEXT_DIM, marginBottom: "0.75rem" }}>
+                Drop this URL into any agent — tools, auth, system prompt included:
+              </p>
+              <TerminalCTA text="https://capability.network/agent-package.json" />
+              <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                <p style={{ fontFamily: mono, fontSize: "0.65rem", color: TEXT_DIM, margin: 0 }}>
+                  Or install the MCP server for Claude Code / Cursor:
+                </p>
+                <TerminalCTA text="npx @anthropic-ai/sdk mcp add pcc -- node node_modules/.bin/pcc-mcp" />
+              </div>
+            </div>
+          </Reveal>
+
           <Reveal>
             <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
-              <a
-                href="https://docs.capability.network/agents"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  fontFamily: inter,
-                  fontWeight: 600,
-                  fontSize: "0.9rem",
-                  color: BG_DARK,
-                  background: GREEN,
-                  borderRadius: "4px",
-                  padding: "0.75rem 1.5rem",
-                  textDecoration: "none",
-                  transition: "opacity 0.2s",
-                }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLAnchorElement).style.opacity = "0.85")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLAnchorElement).style.opacity = "1")}
-              >
-                Read agent docs
-              </a>
               <GhostLink
                 text="View A2A spec"
-                href="https://github.com/wingdingspenpal/poop/tree/main/packages/a2a"
+                href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud/tree/master/packages/a2a"
               />
             </div>
           </Reveal>
@@ -2267,7 +2287,7 @@ function StatNumber({
 const STATS = [
   { target: 25, suffix: "", label: "packages", sublabel: "TypeScript monorepo", duration: 1200 },
   { target: 3300, suffix: "+", label: "tests", sublabel: "100+ test files", duration: 1500 },
-  { target: 154, suffix: "", label: "agent tools", sublabel: "MCP + direct API", duration: 1200 },
+  { target: 207, suffix: "", label: "agent tools", sublabel: "MCP + direct API", duration: 1200 },
   {
     target: 347,
     suffix: "",
