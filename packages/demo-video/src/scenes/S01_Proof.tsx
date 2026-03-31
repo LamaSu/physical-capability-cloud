@@ -65,8 +65,8 @@ export const S01_Proof: React.FC = () => {
   const labelOpacity = interpolate(labelProgress, [0, 1], [0, 1]);
   const labelY = interpolate(labelProgress, [0, 1], [16, 0]);
 
-  // ── End dim (frame 500-600) ──────────────────────────────────────────────
-  const endDim = interpolate(frame, [500, 600], [1, 0], {
+  // ── End dim (frame 250-330) — shorter scene ─────────────────────────────
+  const endDim = interpolate(frame, [250, 330], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.in(Easing.cubic),
