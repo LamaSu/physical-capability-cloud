@@ -99,4 +99,48 @@ export async function capabilityRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  /** Create a capability instance */
+  app.post<{
+    Body: {
+      id?: string;
+      kernelId: string;
+      type: string;
+      name?: string;
+      description?: string;
+      location?: { lat: number; lng: number };
+      pricing?: { currency: string; baseCost: string; perMinute?: string; minimum: string };
+      materials?: string[];
+      assuranceTiers?: number[];
+    };
+  }>("/api/capabilities", async (req, reply) => {
+    const { kernelId, type } = req.body;
+    if (!kernelId || !type) {
+      return reply.code(400).send({ error: "kernelId and type required" });
+    }
+    const id = req.body.id || `cap-${kernelId}-${type}`;
+    try {
+      const repos = getRepos();
+      const existing = repos.capabilities.findById(id);
+      if (existing) return { capability: existing, created: false };
+      const cap = repos.capabilities.insert({
+        id,
+        kernelId,
+        type,
+        name: req.body.name || `${type} capability`,
+        description: req.body.description || "",
+        location: req.body.location || { lat: 0, lng: 0 },
+        pricing: req.body.pricing || { currency: "USDC", baseCost: "0", minimum: "0" },
+        materials: req.body.materials || [],
+        assuranceTiers: req.body.assuranceTiers || [0, 1],
+        availability: {},
+      } as any);
+      return reply.code(201).send({ capability: cap, created: true });
+    } catch (err) {
+      return reply.code(500).send({
+        error: "insert_failed",
+        message: err instanceof Error ? err.message : "Unknown",
+      });
+    }
+  });
 }
