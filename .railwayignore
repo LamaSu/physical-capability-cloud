@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+.git
+.claude
+ai/research
+ai/memory
+ai/supervisor
+packages/contracts/out
+packages/contracts/cache
+packages/contracts/lib
+packages/pcc-node/__pycache__
+packages/pcc-node/tests/__pycache__
+**/__pycache__
+*.pyc

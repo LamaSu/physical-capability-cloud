@@ -1,0 +1,46 @@
+{
+  "name": "DerbyFish",
+  "tagline": "The ultimate fishing platform that grows with you.",
+  "website": "https://derby.fish",
+  "demoVideo": null,
+  "category": "Sports / Consumer App / Web3",
+  "description": "DerbyFish is a sport fishing competition and community platform where anglers of all skill levels can join or host derbies (fishing tournaments), track catches, compete for cash prizes, and build their fishing brand. The platform uses Flow blockchain for automated prize distribution via smart contracts and features BAIT token (pegged 1:1 to FUSD stablecoin) for verification fees, entry fees, and rewards.",
+  "techStack": [
+    "Next.js",
+    "Supabase (backend/storage)",
+    "Flow blockchain",
+    "BAIT token (FUSD-pegged stablecoin)",
+    "Mapbox GL JS v2.15.0 (maps)",
+    "Facebook Pixel (analytics)",
+    "iOS App (App Store ID: 6738696393)",
+    "Android App (package: fish.derby)"
+  ],
+  "designNotes": {
+    "colorPalette": "Dark navy with aqua/teal accents; ocean-themed color palette with white text on dark backgrounds and vibrant action colors for CTAs",
+    "typography": "DM Sans (body) with custom font variables — clean, modern, approachable sans-serif",
+    "layout": "Feature-rich marketing site with multiple scrolling sections; hero with app download CTA, partner logos, community feed sections, pricing table, and about page; structured around 'Start a Derby' and 'Join a Derby' primary actions",
+    "heroSection": "Bold headline 'The Ultimate Sport Fishing Hub' with app download links and 'Start free' prompt; also promotes 'Learn with AI, Compete in derbies, Grow your influence'",
+    "ctas": ["Download the App", "Start a Derby", "Join a Derby", "Open Web App", "Get Started (pricing tier buttons)"]
+  },
+  "userFlow": "Discover DerbyFish → Download mobile app or open web app → Browse active derbies → Join a derby (entry fee in BAIT or USD) → Submit verified catch (photo/video via BHRV) → Compete on leaderboard → Win instant BAIT payouts via smart contract",
+  "valueProposition": "Fragmented fishing community with no unified competitive platform. DerbyFish creates a single hub that handles competition logistics (verification, payouts, rules enforcement) so anglers can focus on fishing. BHRV (Bend, Hold, Release, Verify) system prevents cheating with photo/video validation.",
+  "businessModel": "Tiered SaaS memberships: Free (browse), Member $2/mo or $20/yr, Captain $6/mo or $60/yr (can host derbies), Pro $100/mo or $1000/yr (branded/sponsored derbies for orgs). Additional revenue from BAIT token transaction spread, Derby entry fees, and merchandise (Shop). Sponsors like GoPro, Supabase, Marine Tech also listed.",
+  "strengths": [
+    "Live product with iOS + Android apps already deployed (App Store ID confirmed)",
+    "Blockchain-powered instant prize payouts solve a real pain point in tournament management",
+    "BHRV verification system for fair competition is a strong technical moat",
+    "Multiple revenue streams: memberships, entry fees, BAIT token, sponsorships, shop",
+    "Clear community flywheel: anglers bring sponsors who attract more anglers",
+    "Youth program and conservation angle broadens appeal beyond hardcore competitors",
+    "Social schema structured data suggests strong SEO and discoverability intent"
+  ],
+  "weaknesses": [
+    "Community stats show '0 Awarded to real anglers' and 'No Trophies Yet' — very early traction",
+    "BAIT token introduces regulatory complexity and may deter non-crypto users",
+    "Deep dependence on Flow blockchain which has limited mainstream awareness vs Ethereum/Solana",
+    "Fishing is a seasonal and geographically fragmented market — high CAC",
+    "DerbyFish.com domain returns 522 (down) — only derby.fish is live, may cause SEO confusion",
+    "Sponsor logos appear to be placeholder/aspirational (GoPro, Fishing Gear Co listed but likely unconfirmed)"
+  ],
+  "lessonsForPCC": "DerbyFish demonstrates how to blend Web3 payment rails (instant smart contract payouts) with a consumer UX that completely hides crypto complexity from end users. PCC should study their 'Start free, earn BAIT' funnel — operators join for free and get paid in familiar currency while the blockchain settlement happens invisibly. The BHRV verification system is analogous to PCC's physical verification pipeline: photo submission + automated validation rules + human consensus. Their membership tier structure (Free/Member/Captain/Pro) maps cleanly to PCC's operator tiers."
+}

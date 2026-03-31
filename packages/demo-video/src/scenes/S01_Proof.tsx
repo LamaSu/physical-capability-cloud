@@ -1,197 +1,255 @@
 /**
- * S01_Proof — "The Cold Open"
+ * S01_Proof — "Cold Open" (REWRITTEN from storyboard.json)
  *
- * 600 frames (20 seconds). Opens on proof, not on a problem.
+ * 600 frames (20 seconds). Opens on proof, not explanation.
+ * OT-2 camera feed right 60%. Content left 40%.
  *
- * Frame 0-30:   Pure black. Silence.
- * Frame 30:     Evidence anchor command types in — BRUTALIST, 48px, accent1.
- *               Cursor blinks in discord. 1.5 chars/frame.
- * Frame 90:     Line complete. Hold 1 second.
- * Frame 120:    3-frame white flash.
- * Frame 123:    "PCC" SLAMS in — SIZE.hero, MONUMENT, accent1, slamScale 2.5x.
- *               Neon glow shadow. Breathing after settle.
- * Frame 180:    "Physical Capability Cloud" — EXPRESSIVE, SIZE.body, fg.
- * Frame 240:    "CAPABILITY NETWORK" — SWISS, SIZE.label, muted.
- * Frame 500:    Begin dim to 0 over 100 frames.
+ * Frame 0–14:   Full-bleed dark bg. Silence. Machine is the only element.
+ * Frame 15:     Terminal line 1 types: "kernel-agent: job_accepted — OT-2..."
+ * Frame 60:     Terminal line 2 types: "evidence: archived — bafy...q7r4 | tier-2"
+ * Frame 120:    "An AI agent submitted this job." — slams from left
+ * Frame 150:    "The proof is permanent." — fade up, muted
+ * Frame 300:    "CAPABILITY NETWORK" — MONUMENT 96px, SLAM
+ * Frame 360:    "capability.network" — accent1, fade up
+ * Frame 596:    Wipe right begins
  *
- * Background: radial glow behind PCC (accent1 at 0.06 opacity).
- *
- * DESIGN RULES:
- * - Min font: 36px (SIZE.label)
- * - Max 5 elements on screen at any time
- * - bg: #050a0e (never pure black except frame 0-30 intentional pause)
- * - Discord (#ff0066) used ONCE total in scenes 1-4 (cursor only)
+ * Discord: NONE in this scene.
+ * Max elements simultaneous: 4
  */
 import React from "react";
-import { useCurrentFrame, useVideoConfig, AbsoluteFill, interpolate, Easing } from "remotion";
-import { C, F, SIZE, smooth, slamScale, flash, breathe } from "../lib";
+import {
+  useCurrentFrame,
+  useVideoConfig,
+  AbsoluteFill,
+  interpolate,
+  Easing,
+} from "remotion";
+import { C, F, SIZE, smooth, slam, fadeUp } from "../lib";
 
-const CMD = '> evidence.anchor("bafy...xq7r")';
+// Typewriter helper
+function typewriter(
+  frame: number,
+  text: string,
+  startFrame: number,
+  durationFrames: number
+): string {
+  if (frame < startFrame) return "";
+  const elapsed = frame - startFrame;
+  const charsPerFrame = text.length / durationFrames;
+  const chars = Math.min(Math.floor(elapsed * charsPerFrame) + 1, text.length);
+  return text.slice(0, chars);
+}
+
+const LINE1 = "kernel-agent: job_accepted — OT-2 liquid transfer protocol v2";
+const LINE2 = "evidence: archived — bafy...q7r4 | tier-2 | 47 sensors";
 
 export const S01_Proof: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // ── Pure black opening ───────────────────────────────────────────────────
-  if (frame < 30) {
-    return <AbsoluteFill style={{ backgroundColor: "#000000" }} />;
-  }
+  // Terminal line 1 — starts frame 15, 40 frames to type
+  const l1 = typewriter(frame, LINE1, 15, 40);
+  const l1Complete = frame >= 15 + 40;
+  const l1CursorBlink = Math.sin((frame - 15) * 0.35) > 0;
 
-  // ── Typewriter ───────────────────────────────────────────────────────────
-  const charsTyped = Math.min(
-    Math.floor((frame - 30) * 1.5),
-    CMD.length
-  );
-  const displayCmd = CMD.slice(0, charsTyped);
-  const cmdComplete = charsTyped >= CMD.length;
-  const cursorVisible = Math.sin((frame - 30) * 0.4) > 0;
+  // Terminal line 2 — starts frame 60, 35 frames to type
+  const l2Visible = frame >= 60;
+  const l2 = typewriter(frame, LINE2, 60, 35);
+  const l2Complete = frame >= 60 + 35;
+  const l2CursorBlink = Math.sin((frame - 60) * 0.35) > 0;
 
-  // ── Flash at frame 120 ───────────────────────────────────────────────────
-  const flashOpacity = flash(frame, 120, 3);
+  // "An AI agent submitted this job." — slam at frame 120
+  const line3Slam = slam(frame, fps, 120);
+  const line3X = interpolate(line3Slam, [0, 1], [-80, 0]);
+  const line3Opacity = Math.min(line3Slam * 6, 1);
 
-  // ── PCC slam (starts frame 123) ──────────────────────────────────────────
-  const pccScale = slamScale(frame, fps, 123, 2.5);
-  const pccProgress = smooth(frame, fps, 123);
-  const pccOpacity = Math.min(pccProgress * 8, 1);
-  const pccBreathe = breathe(frame, fps, 0.97, 1.03);
+  // "The proof is permanent." — fadeUp at frame 150
+  const line4 = fadeUp(frame, fps, 150);
 
-  // ── Subtitle fade in (frame 180) ─────────────────────────────────────────
-  const subtitleProgress = smooth(frame, fps, 180);
-  const subtitleOpacity = interpolate(subtitleProgress, [0, 1], [0, 1]);
-  const subtitleY = interpolate(subtitleProgress, [0, 1], [20, 0]);
+  // "CAPABILITY NETWORK" — slam at frame 300
+  const logoSlam = slam(frame, fps, 300);
+  const logoX = interpolate(logoSlam, [0, 1], [-60, 0]);
+  const logoOpacity = Math.min(logoSlam * 6, 1);
 
-  // ── Label fade in (frame 240) ────────────────────────────────────────────
-  const labelProgress = smooth(frame, fps, 240);
-  const labelOpacity = interpolate(labelProgress, [0, 1], [0, 1]);
-  const labelY = interpolate(labelProgress, [0, 1], [16, 0]);
+  // "capability.network" — fadeUp at frame 360
+  const urlFade = fadeUp(frame, fps, 360);
 
-  // ── End dim (frame 250-330) — shorter scene ─────────────────────────────
-  const endDim = interpolate(frame, [250, 330], [1, 0], {
+  // Wipe right transition out — frames 580–600
+  const wipeClip = interpolate(frame, [580, 600], [0, 100], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
-    easing: Easing.in(Easing.cubic),
+    easing: Easing.inOut(Easing.cubic),
   });
 
   return (
-    <AbsoluteFill style={{ backgroundColor: C.bg }}>
-
-      {/* Radial glow behind PCC */}
+    <AbsoluteFill
+      style={{
+        backgroundColor: C.bg,
+        clipPath: `inset(0 ${wipeClip}% 0 0)`,
+      }}
+    >
+      {/* OT-2 feed — right 60% (simulated with gradient for rendering) */}
       <div
         style={{
           position: "absolute",
-          inset: 0,
-          background: `radial-gradient(ellipse 800px 600px at 50% 45%, rgba(0,255,136,0.06) 0%, transparent 65%)`,
+          left: "40%",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          background: `linear-gradient(135deg,
+            rgba(0,30,60,0.7) 0%,
+            rgba(0,60,80,0.5) 40%,
+            rgba(0,40,60,0.6) 100%)`,
+          opacity: 0.7,
+        }}
+      />
+
+      {/* Subtle grid overlay on OT-2 side */}
+      <div
+        style={{
+          position: "absolute",
+          left: "40%",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          backgroundImage: `
+            linear-gradient(rgba(0,255,136,0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0,255,136,0.03) 1px, transparent 1px)
+          `,
+          backgroundSize: "60px 60px",
           pointerEvents: "none",
         }}
       />
 
-      <AbsoluteFill
+      {/* Left content panel — padding 96px top/bottom, 128px left */}
+      <div
         style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "42%",
+          bottom: 0,
+          padding: "96px 0 96px 128px",
           display: "flex",
           flexDirection: "column",
-          alignItems: "flex-start",
           justifyContent: "flex-start",
-          padding: "96px 128px",
-          opacity: endDim,
         }}
       >
-        {/* Terminal command line */}
+        {/* Vertical spacer — ~45% from top */}
+        <div style={{ flex: "0 0 45%", minHeight: 0 }} />
+
+        {/* Terminal line 1 */}
         <div
           style={{
             fontFamily: F.brutalist,
-            fontSize: 48,
-            fontWeight: 400,
+            fontSize: SIZE.label,
             color: C.accent1,
+            lineHeight: 1.5,
             letterSpacing: "0.02em",
-            lineHeight: 1.4,
-            marginBottom: 0,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
           }}
         >
-          {displayCmd}
-          {!cmdComplete && cursorVisible && (
-            <span style={{ color: C.discord }}>▌</span>
+          {l1}
+          {!l1Complete && (
+            <span style={{ opacity: l1CursorBlink ? 1 : 0, color: C.accent1 }}>▌</span>
           )}
-          {cmdComplete && (
-            <span style={{ color: C.discord, opacity: cursorVisible ? 1 : 0 }}>▌</span>
+          {l1Complete && (
+            <span style={{ opacity: l1CursorBlink ? 1 : 0, color: C.accent1 }}>▌</span>
           )}
         </div>
 
-        {/* PCC hero — centered in remaining space */}
-        <div
-          style={{
-            flex: 1,
-            width: "100%",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 24,
-          }}
-        >
-          {/* PCC */}
+        {/* Terminal line 2 */}
+        {l2Visible && (
           <div
             style={{
-              fontFamily: F.monument,
-              fontSize: SIZE.hero,
-              fontWeight: 700,
-              color: C.accent1,
-              textTransform: "uppercase" as const,
-              letterSpacing: "-0.02em",
-              lineHeight: 1.0,
-              opacity: pccOpacity,
-              transform: `scale(${pccScale * pccBreathe})`,
-              textShadow: `
-                0 0 60px rgba(0,255,136,0.8),
-                0 0 120px rgba(0,255,136,0.4),
-                0 0 200px rgba(0,255,136,0.15)
-              `,
+              fontFamily: F.brutalist,
+              fontSize: SIZE.label,
+              color: C.accent2,
+              lineHeight: 1.5,
+              letterSpacing: "0.02em",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              marginBottom: 32,
             }}
           >
-            PCC
+            {l2}
+            {!l2Complete && (
+              <span style={{ opacity: l2CursorBlink ? 1 : 0, color: C.accent2 }}>▌</span>
+            )}
           </div>
+        )}
 
-          {/* Physical Capability Cloud */}
+        {/* "An AI agent submitted this job." */}
+        {frame >= 120 && (
           <div
             style={{
               fontFamily: F.express,
               fontSize: SIZE.body,
-              fontWeight: 300,
               color: C.fg,
-              letterSpacing: "0.01em",
-              opacity: subtitleOpacity,
-              transform: `translateY(${subtitleY}px)`,
+              lineHeight: 1.4,
+              opacity: line3Opacity,
+              transform: `translateX(${line3X}px)`,
+              marginBottom: 12,
             }}
           >
-            Physical Capability Cloud
+            An AI agent submitted this job.
           </div>
+        )}
 
-          {/* CAPABILITY NETWORK label */}
+        {/* "The proof is permanent." */}
+        {frame >= 150 && (
           <div
             style={{
-              fontFamily: F.swiss,
-              fontSize: SIZE.label,
-              fontWeight: 400,
+              fontFamily: F.express,
+              fontSize: SIZE.body,
               color: C.muted,
-              letterSpacing: "0.22em",
+              lineHeight: 1.4,
+              opacity: line4.opacity,
+              transform: `translateY(${line4.y}px)`,
+              marginBottom: 60,
+            }}
+          >
+            The proof is permanent.
+          </div>
+        )}
+
+        {/* CAPABILITY NETWORK — brand slam */}
+        {frame >= 300 && (
+          <div
+            style={{
+              fontFamily: F.monument,
+              fontSize: SIZE.title,
+              fontWeight: 700,
+              color: C.fg,
               textTransform: "uppercase" as const,
-              opacity: labelOpacity,
-              transform: `translateY(${labelY}px)`,
+              letterSpacing: "0.08em",
+              lineHeight: 1,
+              opacity: logoOpacity,
+              transform: `translateX(${logoX}px)`,
+              marginBottom: 12,
             }}
           >
             CAPABILITY NETWORK
           </div>
-        </div>
-      </AbsoluteFill>
+        )}
 
-      {/* White flash overlay */}
-      {flashOpacity > 0 && (
-        <AbsoluteFill
-          style={{
-            backgroundColor: `rgba(255,255,255,${flashOpacity * 0.9})`,
-            pointerEvents: "none",
-          }}
-        />
-      )}
+        {/* capability.network URL */}
+        {frame >= 360 && (
+          <div
+            style={{
+              fontFamily: F.swiss,
+              fontSize: SIZE.label,
+              color: C.accent1,
+              letterSpacing: "0.04em",
+              opacity: urlFade.opacity,
+              transform: `translateY(${urlFade.y}px)`,
+            }}
+          >
+            capability.network
+          </div>
+        )}
+      </div>
     </AbsoluteFill>
   );
 };

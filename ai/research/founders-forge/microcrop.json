@@ -1,0 +1,65 @@
+{
+  "name": "MicroCrop",
+  "tagline": "Parametric Crop & Livestock Insurance Infrastructure for Africa",
+  "website": "https://microcrop.app",
+  "demoVideo": null,
+  "category": "InsurTech / AgriTech / Web3 Infrastructure",
+  "description": "MicroCrop provides a white-label, multi-tenant platform that enables insurance companies, cooperatives, agri-lenders, and NGOs to launch automated parametric crop and livestock insurance for smallholder farmers and pastoralists across Africa. The platform uses Chainlink oracles, WeatherXM ground stations, NDVI vegetation indices, and satellite data from Planet and Sentinel for automated damage assessment. Payouts are sent directly to farmers via M-Pesa through Swypt integration, with all transactions verifiable on Base (Ethereum L2).",
+  "techStack": [
+    "Next.js (React Server Components)",
+    "Base (Ethereum L2 blockchain)",
+    "Chainlink oracles",
+    "WeatherXM weather data",
+    "NDVI / satellite imagery (Planet, Sentinel)",
+    "M-Pesa / Swypt for last-mile payouts",
+    "Smart contracts (Solidity)",
+    "Tailwind CSS",
+    "TypeScript",
+    "Vercel (hosting, inferred from Next.js)"
+  ],
+  "designNotes": {
+    "colorPalette": "Forest green primary (#1D5B37), olive/lime accent (#759C14), light grey lines (#CBCBCB), white and light grey backgrounds, dark grey text. Clean, trustworthy, agricultural feel.",
+    "typography": "Poppins (body/UI). Multiple woff2 preloads detected — custom font stack. Clean, modern sans-serif.",
+    "layout": "Marketing site: full-width hero with African farmland background image overlaid with black/35 opacity + dashed vertical grid lines (architectural/structural feel). Card-based feature sections. 4-step onboarding flow (numbered). Responsive columns for feature grids.",
+    "heroSection": "Full-bleed background photo of African farmland. Large headline: 'Parametric Crop & Livestock Insurance Infrastructure for Africa'. Subhead explaining the value prop. Two CTAs: 'Request a Demo' (primary) and 'Explore Platform' (secondary). Dashed vertical lines overlay creates a structured, data-grid aesthetic.",
+    "ctas": [
+      "Request a Demo",
+      "Explore Platform"
+    ]
+  },
+  "userFlow": "Partner organization contacts MicroCrop → demo/onboarding call → MicroCrop team deploys dedicated risk pool on Base + configures white-label environment → partner configures insurance products, coverage params, NDVI zones → monitors claims in real-time dashboard → automated smart contract payouts to farmers via M-Pesa when oracle triggers fire.",
+  "valueProposition": "Removes the years of infrastructure development required to offer parametric crop/livestock insurance. Organizations go from zero to live insurance products in weeks: on-chain risk pools, automated oracle-based claims, instant M-Pesa payouts, full audit trails — all without building the underlying tech.",
+  "businessModel": "B2B SaaS / infrastructure-as-a-service. Simple transparent platform fee auto-collected on-chain from each transaction. Partners keep the majority of premiums collected. No hidden costs. Multi-tenant architecture means each partner pays for their isolated pool and usage.",
+  "founders": [
+    {
+      "name": "Mary Gathoni",
+      "role": "Co-Founder & CEO",
+      "focus": "Strategy, partnerships, product direction"
+    }
+  ],
+  "socialLinks": {
+    "twitter": "https://x.com/micro_crop",
+    "linkedin": "https://www.linkedin.com/company/micro-crop/"
+  },
+  "strengths": [
+    "Extremely clear product narrative — every section explains exactly what the platform does and for whom",
+    "End-to-end infrastructure story: oracle data → smart contract → M-Pesa payout is fully connected",
+    "Multi-tenant white-label approach is a strong B2B moat — partners get branded isolation",
+    "On-chain transparency as a compliance and accountability feature (donors, regulators love this)",
+    "4-step onboarding journey makes a complex product feel approachable",
+    "Real integration stack (Chainlink + WeatherXM + Planet/Sentinel + M-Pesa) is technically credible",
+    "Addresses a massive underserved market: 500M+ smallholder farmers globally, <5% insured",
+    "API-first architecture with custom frontend option gives flexibility for enterprise integrations"
+  ],
+  "weaknesses": [
+    "No demo video found — a complex B2B platform for Africa really needs a visual walkthrough",
+    "Pricing not public — requires a 'Request a Demo' gating which slows self-serve discovery",
+    "Stock photos (Unsplash URLs detected in the codebase) rather than real farmer/product screenshots",
+    "No live dashboard preview or interactive demo — hard to evaluate without a sales call",
+    "Blog section exists but unclear how active it is",
+    "No mention of traction metrics, pilot partnerships, or deployed farms — would build credibility fast"
+  ],
+  "lessonsForPCC": "MicroCrop's strongest design move is the 4-step partner journey (Onboard → Configure → Monitor → Payout) which makes a complex multi-party infrastructure feel like a simple product. PCC could adopt a similar 'how a job flows' narrative to explain its multi-step verification pipeline (post job → agents bid → operator executes → evidence verified → payment released). The on-chain transparency angle as a *compliance and accountability feature* (rather than just a tech feature) is the right framing for enterprise buyers — PCC should emphasize verifiable audit trails for enterprise clients. MicroCrop's decision to use a white-label multi-tenant model is also relevant: PCC's operator network could offer branded sub-deployments for enterprise physical task orchestration.",
+  "fetchedAt": "2026-03-30",
+  "sourceUrl": "https://microcrop.app"
+}

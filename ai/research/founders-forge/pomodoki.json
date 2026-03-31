@@ -1,0 +1,98 @@
+{
+  "name": "Pomodoki",
+  "tagline": "A Chrome extension that combines Pomodoro technique with Tamagotchi-style gamification to help you stay focused and productive.",
+  "website": "https://pomodoki.com",
+  "demoVideo": "https://www.youtube.com/embed/kdpp0RDJQSY",
+  "category": "Productivity / Consumer App / Web3 Gamification",
+  "description": "Pomodoki is a Chrome extension (also available as iOS/Android app) that turns the Pomodoro focus technique into a creature-raising game. Users adopt a virtual pet ('Pomodoki'), set focus timers, and earn on-chain reward coins for completing sessions. The pet evolves as the user maintains streaks and consistency. The platform integrates with Slack (auto-DND, focus mode), has Telegram/Twitter integrations coming, and includes a 'Deep Research Learning' feature with AI-generated quiz questions. Built with on-chain records for virtual items and rewards on an unspecified blockchain (gas covered by Pomodoki).",
+  "techStack": [
+    "React (Vite build, client-side SPA)",
+    "Tailwind CSS",
+    "Blockchain (on-chain records for virtual items/rewards — chain unspecified)",
+    "Supabase (inferred from URL patterns)",
+    "AWS App Runner (backend: gbjncbqeqg.us-east-1.awsapprunner.com)",
+    "GPT Engineer (cdn.gpteng.co script detected — built with AI-assisted dev tool)",
+    "i18n (en + pt-BR bilingual)",
+    "Chrome Extensions API",
+    "Mailchimp (newsletter: gmail.us19.list-manage.com)",
+    "Canvas Confetti (animation)"
+  ],
+  "designNotes": {
+    "colorPalette": "Retro pixel/gaming aesthetic. Dark backgrounds implied by gaming theme. Specific colors not extractable from SSR HTML (client-side rendered). Press Start 2P and VT323 fonts strongly suggest 8-bit pixel art color palette — likely neon greens, magentas, and dark backgrounds.",
+    "typography": "Press Start 2P (Google Fonts, 8-bit pixel font for headers/branding) + VT323 (Google Fonts, retro terminal-style font for UI). Distinctive retro gaming identity.",
+    "layout": "Marketing site with hero section, 'How It Works' steps, character showcase, integrations section, blog/articles. Single-page scroll with section anchors. Mobile-responsive.",
+    "heroSection": "Likely features the Pomodoki mascot character prominently with 'welcome.png' OG image. Tagline: 'Your productivity buddy'. CTA: 'and get early access' / newsletter signup. Retro gaming visual style with pixel art creature.",
+    "ctas": [
+      "Get early access",
+      "Free signup • No spam • Exclusive early access",
+      "Install Chrome Extension",
+      "Download on App Store",
+      "Get on Google Play"
+    ]
+  },
+  "appLinks": {
+    "chromeWebStore": "https://chromewebstore.google.com/detail/pomodoki/dnicdbhjloheoinjofcdniflepfofhim",
+    "appStore": "https://apps.apple.com/br/app/pomodoki/id6751268299",
+    "playStore": "https://play.google.com/store/apps/details?id=com.seuapp",
+    "telegram": "https://t.me/+Gp0t7bBjSBsxNjQ0",
+    "instagram": "https://www.instagram.com/pomodoki_app/",
+    "twitter": "https://x.com/pomodoki_app",
+    "medium": "https://medium.com/@pomodoki.app"
+  },
+  "web3Integration": {
+    "onChainRecords": "Some user activity generates immutable on-chain records",
+    "virtualItems": "Virtual items, pets, and rewards may be recorded on-chain (Section 6 of ToS)",
+    "gasPolicy": "Blockchain infrastructure (gas) costs borne by Pomodoki — users don't pay gas",
+    "rewardCoins": "Users earn on-chain reward coins for completed focus sessions",
+    "protocolLabs": "Protocol Labs logo present in the app — confirmed PL Genesis project",
+    "nftTransferability": "Items are non-transferable (per ToS)"
+  },
+  "characters": [
+    {
+      "name": "BUBBIBERRY",
+      "personality": "Calm and mindful. Believes breaks are for breathing, not burning out. Protects focus and absolutely refuses Friday deploys."
+    },
+    {
+      "name": "(unnamed disciplined character)",
+      "personality": "Disciplined and balanced. Timer on, tea in hand, checklist ready. Loves clean code and tidy terminals."
+    }
+  ],
+  "features": [
+    "Pomodoro timer (customizable session length)",
+    "Tamagotchi-style virtual pet that evolves with focus consistency",
+    "On-chain reward coins earned per focus session",
+    "Slack integration: auto-DND + focus mode + /focus command",
+    "Deep Research Learning: paste research doc, read during timer, get AI quiz questions",
+    "Pomodoki Club (premium tier — early access, exclusive battles, feedback access)",
+    "Character battles (PvP productivity competitions)",
+    "Streaks and achievement badges",
+    "Telegram and Twitter integrations (coming soon)",
+    "i18n: English + Portuguese (Brazilian)"
+  ],
+  "userFlow": "Install Chrome extension from Web Store (or download mobile app) → Create account and pick a Pomodoki character → Set focus timer → Work during session → Timer completes → Earn reward coins → Pet levels up → Unlock achievements and engage in community battles via Pomodoki Club.",
+  "valueProposition": "Makes the scientifically-validated Pomodoro technique emotionally engaging by adding a virtual creature that grows with your consistency. Turns abstract productivity discipline into a tangible, gamified relationship — 'Built for Focus. Backed by Science. Loved by ADHD Minds.'",
+  "businessModel": "Freemium: free Chrome extension with core Pomodoro timer + basic pet. 'Pomodoki Club' premium tier for early access to features, exclusive character battles, and feedback channel. Mobile apps (iOS + Android) as additional distribution. On-chain reward system creates potential future token/NFT economy. Built by POMODOKI LTDA (Brazilian company, CNPJ: 43.963.813/0001-90).",
+  "strengths": [
+    "Extremely clear emotional hook: 'your productivity buddy' + retro Tamagotchi nostalgia is instantly relatable",
+    "Actual Chrome Web Store listing confirmed — it ships",
+    "Cross-platform: Chrome extension + iOS + Android + web",
+    "Web3 integration is user-transparent (gas paid by Pomodoki — no friction)",
+    "Characters have distinct personalities which builds attachment and retention",
+    "Slack /focus command integration is a smart B2B foothold in work contexts",
+    "Deep Research + AI quiz feature is genuinely novel for a Pomodoro tool",
+    "Protocol Labs connection adds legitimacy and funding/ecosystem support",
+    "Bilingual (EN + PT-BR) shows intentional market focus (Brazil is huge productivity app market)"
+  ],
+  "weaknesses": [
+    "Website is fully client-side rendered (Vite SPA) — poor SEO, slow initial load, blank page on curl",
+    "GPT Engineer (gptengineer.js) detected in the bundle — suggests rapid/AI-assisted development which may affect code quality",
+    "Blockchain chain not clearly specified in marketing materials — unclear which L2/chain",
+    "Non-transferable virtual items limits the appeal of web3 angle for crypto-native users",
+    "Google Play Store link points to 'com.seuapp' (placeholder!) — Android app may not be live",
+    "Pricing for Pomodoki Club not publicly stated — makes conversion unclear",
+    "No Discord listed — Telegram community only (smaller, more niche)"
+  ],
+  "lessonsForPCC": "Pomodoki's core insight is that gamification creates retention for habits that are inherently repetitive (focus sessions = physical task executions for PCC). The character personality system is directly applicable: PCC operator agents could have 'styles' or personas that users/clients relate to. Their approach of hiding gas costs from users (covering it themselves) is exactly the right UX pattern for PCC's on-chain verification — users shouldn't see gas mechanics, just seamless outcomes. The Slack /focus command integration pattern (one command = full workflow trigger) maps to PCC's potential Slack/Discord bot for job dispatch. Their 'Deep Research Learning' feature shows willingness to extend the core product into adjacent value (focus → learning) — PCC could similarly extend from task execution into analytics dashboards.",
+  "fetchedAt": "2026-03-30",
+  "sourceUrl": "https://pomodoki.com"
+}

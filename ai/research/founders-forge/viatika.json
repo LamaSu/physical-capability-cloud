@@ -1,0 +1,41 @@
+{
+  "name": "Viatika",
+  "tagline": "Unlock the Power of the x402 Web. Without the Chaos.",
+  "website": "https://viatika.ai",
+  "demoVideo": null,
+  "category": "Enterprise FinTech / x402 Infrastructure",
+  "description": "Viatika is an enterprise accounting and payment abstraction layer for x402-powered services. It functions as a 'Brex for blockchain' — enterprises buy credits from Viatika, provision employees with spending policies, and Viatika's SDK intercepts x402 Payment Required responses and settles them using its own HSM-backed wallet. The company is incorporated as Skapa OÜ dba Viatika.",
+  "techStack": [
+    "Next.js",
+    "TypeScript",
+    "x402 protocol",
+    "HSM-backed wallets",
+    "USDC / stablecoin settlement",
+    "SDK interceptor pattern"
+  ],
+  "designNotes": {
+    "colorPalette": "Dark navy/deep blue primary background with white text and a blue-accent CTA button; clean two-tone contrast palette",
+    "typography": "Albert Sans (headings), system sans-serif body — clean and corporate with modern spacing",
+    "layout": "Long-form scroll marketing page; problem/solution narrative structure with full-width sections; left-aligned text blocks with large typographic headers",
+    "heroSection": "Bold headline 'Unlock the Power of the x402 Web. Without the Chaos.' with a 'Join the Waitlist' CTA and minimalist above-the-fold layout",
+    "ctas": ["Join the Waitlist (links to Google Form)", "Get started now", "Docs link in nav"]
+  },
+  "userFlow": "Enterprise signs up to waitlist → buys credits → Viatika provisions employee accounts with spending limits → employees use any x402-enabled service transparently → finance team gets reconciliation exports for QuickBooks/Xero/SAP",
+  "valueProposition": "Enterprises want to access x402-powered AI tools and services but face two blockers: (1) giving employees crypto wallets is a security/training nightmare, and (2) thousands of microtransactions are impossible to reconcile in traditional accounting systems. Viatika eliminates both problems by acting as the crypto layer on behalf of the enterprise.",
+  "businessModel": "Credit-based SaaS — enterprises pre-purchase credits from Viatika (likely with markup). Revenue comes from spread on x402 transaction volume plus potential SaaS fees for policy management and accounting integrations.",
+  "strengths": [
+    "Extremely clear problem/solution narrative targeting a real friction point in enterprise x402 adoption",
+    "Finance team reconciliation angle is a non-obvious but powerful wedge — differentiated from consumer wallets",
+    "HSM-backed centralized settlement reduces enterprise security concerns",
+    "Integrations with QuickBooks, Xero, SAP address CFO buying criteria directly",
+    "Landing page is polished and conversion-focused (waitlist CTA with Google Form)"
+  ],
+  "weaknesses": [
+    "Currently waitlist-only — no live product, no public demo or pricing",
+    "Centralized custodial model contradicts crypto ethos, may deter blockchain-native buyers",
+    "Very early stage — OG metadata still points to localhost:3000 (staging artifact in production)",
+    "No visible team page, investor backing, or social proof",
+    "Relies entirely on x402 adoption momentum — if x402 stagnates, so does Viatika"
+  ],
+  "lessonsForPCC": "Viatika's 'abstraction layer' framing is directly applicable to PCC: enterprises adopting on-chain capability verification face identical friction (wallets, gas, reconciliation). PCC could position its operator dashboard as the enterprise abstraction layer for physical capability services — hiding USDC/escrow complexity behind familiar job management UX. The 'finance team needs clean exports' insight is powerful — PCC should offer QuickBooks/CSV export of operator payment history alongside its crypto rails."
+}

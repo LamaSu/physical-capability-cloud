@@ -1,0 +1,82 @@
+{
+  "name": "Vaultopolis",
+  "tagline": "Edition analytics, marketplace data, pack tools, and token liquidity across NBA Top Shot, NFL All Day, and Disney Pinnacle — all on Flow blockchain",
+  "website": "https://vaultopolis.com",
+  "demoVideo": null,
+  "category": "DeFi / NFT Analytics / Flow Blockchain",
+  "description": "Vaultopolis is a web application providing portfolio analytics, marketplace data, pack tools, and token liquidity for Flow blockchain NFT collectibles — specifically NBA Top Shot (moments), NFL All Day, and Disney Pinnacle. It integrates directly with Flow blockchain via FCL (Flow Client Library) and Cadence smart contracts, and provides a custom TSHOT token for liquidity. Users can view their NFT portfolio, analyze edition data, manage packs, and access token swap functionality. The platform also has an API backend at api.vaultopolis.com.",
+  "techStack": [
+    "React (Create React App, production bundle)",
+    "Flow blockchain (Cadence smart contracts)",
+    "FCL (Flow Client Library) — direct on-chain reads",
+    "WalletConnect (multi-wallet support)",
+    "TSHOT token (custom Flow token for liquidity)",
+    "Umami Analytics (privacy-friendly: umami.vaultopolis.com)",
+    "Google Analytics 4 (G-EXD20N16HX)",
+    "Google Cloud Storage (storage.googleapis.com for assets)",
+    "Custom API backend (api.vaultopolis.com)",
+    "Inter font (Google Fonts)",
+    "NFT image CDN (storage.googleapis.com/flowconnect/topshot/images_small/)",
+    "Dapper Labs profile API (dapper-profile?address=)"
+  ],
+  "designNotes": {
+    "colorPalette": "Dark theme (bg-brand-secondary/95 with backdrop-blur) — dark navy/charcoal primary background, white/light brand text. 'brand-secondary' and 'brand-text' CSS variables detected. Backdrop blur with 10% white border (border-white/10) suggests glassmorphism elements. Shadow-2xl and shadow-black/40 for depth.",
+    "typography": "Inter (variable font, Google Fonts, opsz 14..32, wght 100..900) — clean, data-focused, modern sans-serif. Appropriate for financial/analytics dashboard.",
+    "layout": "Web app dashboard rather than marketing site. Fixed sidebar or top navigation. Heavy data tables, card grids, and analytics panels. Modal overlays (large responsive modal: 95vw max-w-7xl, 85vh). Toasts for notifications. Responsive breakpoints: sm:w-[400px] → md:w-[440px] → lg:w-[480px].",
+    "heroSection": "Application shell — no traditional marketing hero. Users log in via Flow wallet (FCL auth) to see their portfolio. Likely shows a dashboard with collection overview, tier counts, TSHOT balance, and pack status on first authenticated view.",
+    "ctas": [
+      "Connect Wallet (FCL / Dapper)",
+      "Login with Email OTP",
+      "Swap / Trade TSHOT",
+      "View Edition Analytics",
+      "Open Packs"
+    ]
+  },
+  "collectionSupport": [
+    "NBA Top Shot (moments, sets, plays, serial numbers, locking status, subeditions)",
+    "NFL All Day (editions, sets, plays, series, tiers)",
+    "Disney Pinnacle (Pinnacle NFTs)"
+  ],
+  "tshot": {
+    "description": "TSHOT is a custom Flow blockchain token used for liquidity and trading within the Vaultopolis ecosystem",
+    "contractAddress": "Detected via tshotContract reference in source",
+    "features": [
+      "TSHOT/FLOW swap via grailExchange and goatExchange",
+      "Vault balance tracking",
+      "Receipt system for pending swaps (betAmount-based receipts)",
+      "GRAIL and GOAT exchange integrations"
+    ]
+  },
+  "apiEndpoints": [
+    "api.vaultopolis.com/api/dapper-profile?address={address}",
+    "topshot-user-packs-studio?address={address}",
+    "Flow blockchain RPC (direct FCL calls)"
+  ],
+  "userFlow": "Connect Flow wallet (or login with email OTP) → View your NBA Top Shot / NFL All Day / Disney Pinnacle NFT portfolio → Analyze edition data (serial numbers, tier, set/play metadata) → Check pack status and open packs → Access TSHOT token liquidity tools → Track marketplace data and edition analytics across collections.",
+  "valueProposition": "Gives Flow blockchain NFT collectors a unified analytics platform that the official NBA Top Shot / NFL All Day apps don't provide — deep edition statistics, cross-collection portfolio view, pack management, and DeFi liquidity via TSHOT. Fills the gap between 'I own these NFTs' and 'I understand what they're worth and how to trade them efficiently.'",
+  "businessModel": "Free web application (no paywalled features detected). Revenue likely from: TSHOT token mechanics (spread/fees on swaps), potential future premium analytics, or ecosystem/partnership arrangements with Dapper Labs/Flow Foundation. Uses Umami (privacy-first analytics) suggesting they care about user trust. Google Analytics 4 also present.",
+  "socialLinks": {
+    "twitter": "https://x.com/vaultopolis"
+  },
+  "strengths": [
+    "Deep Flow blockchain integration — reads Cadence contracts directly via FCL, not just API wrappers",
+    "Covers all three major Flow NFT platforms (NBA Top Shot + NFL All Day + Disney Pinnacle) in one app",
+    "TSHOT token creates a proprietary liquidity layer and DeFi angle beyond pure analytics",
+    "Privacy-conscious analytics choice (Umami) signals trust-oriented product values",
+    "API backend (api.vaultopolis.com) enables scalable data serving beyond direct blockchain reads",
+    "Subedition support for NBA Top Shot shows deep domain expertise",
+    "WebSocket/subscription support for real-time block data (block subscription detected in source)"
+  ],
+  "weaknesses": [
+    "Niche market — limited to Flow blockchain NFT collectors (NBA Top Shot / NFL All Day / Disney Pinnacle fans)",
+    "No marketing page — landing page is effectively the app itself, high barrier for non-crypto users",
+    "Flow blockchain ecosystem has contracted significantly since 2021-2022 peak",
+    "Disney Pinnacle was shut down in early 2025 — one of three supported platforms may be dead",
+    "No demo video or screenshots on landing page — new users have no idea what they're getting into",
+    "TSHOT exchange mechanics (grailExchange, goatExchange) are unclear from public documentation",
+    "Single Twitter social link — limited community presence compared to Discord-native NFT communities"
+  ],
+  "lessonsForPCC": "Vaultopolis's core architectural lesson for PCC is the FCL pattern: reading blockchain state directly in the client via typed Cadence queries, not proxying everything through a backend API. PCC's viem-based contract reads could adopt a similar 'blockchain as source of truth, UI as renderer' model where the dashboard directly queries on-chain job state rather than relying on a backend cache. Their TSHOT liquidity layer — creating a fungible token that represents value in the ecosystem — maps to PCC's potential USDC/ERC-20 payment token design for capability credits. The receipt system (betAmount receipts for pending swaps) is an elegant pattern for PCC's escrow-pending-verification state. Most importantly: Vaultopolis shows that building deep vertical expertise in one chain's data model creates a defensible niche — PCC should similarly go deep on Base's event/log data for capability verification rather than trying to be chain-agnostic.",
+  "fetchedAt": "2026-03-30",
+  "sourceUrl": "https://vaultopolis.com"
+}
