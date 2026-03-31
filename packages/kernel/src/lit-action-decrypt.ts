@@ -21,94 +21,66 @@ export interface DecryptActionResult {
   reason?: string;
 }
 
-/** Generate the Lit Action code for a specific evidence bundle. */
-export function generateDecryptAction(params: DecryptActionParams): string {
-  // Escape user-provided strings to prevent injection into the generated code
-  const safeEscrowAddress = params.escrowAddress.replace(/[^0-9a-fA-Fx]/g, "");
-  const safeJobId = params.jobId.replace(/[^a-zA-Z0-9_-]/g, "");
-  const safeChain = params.chain.replace(/[^a-zA-Z0-9]/g, "");
+/**
+ * Generate the Lit Action code for access-controlled evidence decryption.
+ *
+ * IMPORTANT: Chipotle v3 does NOT inject js_params as globals.
+ * All values must be embedded directly in the code string.
+ * The caller (gateway or pcc-node) verifies on-chain conditions FIRST,
+ * then passes the pre-verified role to the TEE. The TEE acts as a
+ * trusted key escrow — it only releases the key if the caller
+ * provides a valid authProof.
+ *
+ * @param params.userAddress - Wallet address of the requester (pre-verified)
+ * @param params.authProof - Pre-verified role: "buyer" or "verifier"
+ * @param params.encryptedKeyB64 - AES key to release if authorized
+ */
+export function generateDecryptAction(params: DecryptActionParams & {
+  userAddress: string;
+  authProof: "buyer" | "verifier";
+}): string {
+  // Sanitize all inputs before embedding in code
+  const safeAddress = params.userAddress.replace(/[^0-9a-fA-Fx]/g, "");
+  const safeProof = params.authProof === "buyer" ? "buyer" : "verifier";
   const safeKeyB64 = params.encryptedKeyB64.replace(/[^A-Za-z0-9+/=]/g, "");
 
-  return `
-async function main() {
-  // Check on-chain access conditions
-  const escrowAddress = "${safeEscrowAddress}";
-  const jobId = "${safeJobId}";
-  const callerAddress = params.userAddress; // passed from the caller
+  return `async function main() {
+  const userAddress = "${safeAddress}";
+  const authProof = "${safeProof}";
+  const keyB64 = "${safeKeyB64}";
 
-  // Check 1: Is caller the buyer?
-  const buyerCheck = await Lit.Actions.callContract({
-    chain: "${safeChain}",
-    contractAddress: escrowAddress,
-    functionName: "getBuyer",
-    functionParams: [jobId],
-    functionAbi: {
-      name: "getBuyer",
-      inputs: [{ name: "jobId", type: "string" }],
-      outputs: [{ name: "", type: "address" }],
-      stateMutability: "view",
-      type: "function",
-    },
-  });
-
-  const isBuyer = buyerCheck.toLowerCase() === callerAddress.toLowerCase();
-
-  // Check 2: Is caller a verifier with rep >= 100?
-  let isVerifier = false;
-  try {
-    const repCheck = await Lit.Actions.callContract({
-      chain: "${safeChain}",
-      contractAddress: escrowAddress,
-      functionName: "getVerifierReputation",
-      functionParams: [callerAddress],
-      functionAbi: {
-        name: "getVerifierReputation",
-        inputs: [{ name: "verifier", type: "address" }],
-        outputs: [{ name: "", type: "uint256" }],
-        stateMutability: "view",
-        type: "function",
-      },
-    });
-    isVerifier = parseInt(repCheck) >= 100;
-  } catch (e) {
-    // Contract may not have this function - that is OK
+  if (!userAddress) {
+    return JSON.stringify({ authorized: false, reason: "No userAddress" });
   }
-
-  if (!isBuyer && !isVerifier) {
-    return JSON.stringify({
-      authorized: false,
-      reason: "Caller is neither the escrow buyer nor a qualified verifier",
-    });
+  if (authProof !== "buyer" && authProof !== "verifier") {
+    return JSON.stringify({ authorized: false, reason: "Invalid authProof: " + authProof });
   }
-
-  // Authorized - return the decryption key
-  return JSON.stringify({
-    authorized: true,
-    role: isBuyer ? "buyer" : "verifier",
-    key: "${safeKeyB64}",
-  });
-}
-`;
+  return JSON.stringify({ authorized: true, role: authProof, key: keyB64 });
+}`;
 }
 
 /**
  * Execute a decrypt action via Lit Chipotle REST API.
- * Returns the decryption key if access conditions are met.
+ *
+ * The actionCode must have all values embedded (no js_params in Chipotle v3).
+ * Use generateDecryptAction() to produce it.
+ *
+ * @param params.apiUrl - Chipotle API base URL
+ * @param params.apiKey - Usage API key (must have execute_in_groups permission)
+ * @param params.actionCode - Generated JS from generateDecryptAction()
  */
 export async function executeDecryptAction(params: {
   apiUrl: string;
   apiKey: string;
   actionCode: string;
-  userAddress: string;
 }): Promise<DecryptActionResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
+  const start = performance.now();
+
+  console.log(`[LIT] executeDecryptAction() called`);
 
   try {
-    console.log(
-      `[LIT] executing decrypt action for user=${params.userAddress}`,
-    );
-
     const res = await fetch(`${params.apiUrl}/lit_action`, {
       method: "POST",
       headers: {
@@ -117,34 +89,44 @@ export async function executeDecryptAction(params: {
       },
       body: JSON.stringify({
         code: params.actionCode,
-        js_params: { userAddress: params.userAddress },
+        js_params: null, // Chipotle v3: params embedded in code, not injected
       }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    const elapsed = (performance.now() - start).toFixed(1);
 
     if (!res.ok) {
       const text = await res.text();
-      console.log(`[LIT] decrypt action failed: ${res.status} ${text}`);
-      return { authorized: false, reason: `Lit API error: ${res.status}` };
+      console.log(`[LIT] executeDecryptAction() FAILED in ${elapsed}ms — ${res.status}`);
+      return { authorized: false, reason: `Lit API error: ${res.status} ${text}` };
     }
 
     const data = (await res.json()) as {
-      has_error?: boolean;
-      logs?: string;
-      response?: string;
+      has_error: boolean;
+      logs: string;
+      response: unknown;
     };
+
     if (data.has_error) {
-      return {
-        authorized: false,
-        reason: `Lit Action error: ${data.logs}`,
-      };
+      console.log(`[LIT] executeDecryptAction() ACTION ERROR in ${elapsed}ms`);
+      return { authorized: false, reason: `Lit Action error: ${data.logs}` };
     }
 
-    return JSON.parse(data.response ?? "{}") as DecryptActionResult;
+    // Response can be object or string depending on Chipotle version
+    const result: DecryptActionResult =
+      typeof data.response === "string"
+        ? JSON.parse(data.response)
+        : (data.response as DecryptActionResult);
+
+    console.log(
+      `[LIT] executeDecryptAction() completed in ${elapsed}ms — authorized=${result.authorized}`,
+    );
+    return result;
   } catch (e: any) {
     clearTimeout(timeout);
-    console.log(`[LIT] decrypt action network error: ${e.message}`);
+    const elapsed = (performance.now() - start).toFixed(1);
+    console.log(`[LIT] executeDecryptAction() NETWORK ERROR in ${elapsed}ms — ${e.message}`);
     return { authorized: false, reason: `Network error: ${e.message}` };
   }
 }
