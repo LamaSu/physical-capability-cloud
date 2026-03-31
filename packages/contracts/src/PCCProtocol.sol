@@ -2,18 +2,22 @@
 pragma solidity ^0.8.24;
 
 import {MilestoneEscrow} from "./MilestoneEscrow.sol";
+import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
 
 /**
  * @title PCCProtocol
  * @notice Root protocol contract for Physical Capability Cloud.
  *
- * Collects 1.5% from ALL PCC escrow settlements. The fee recipient address
+ * Collects 2.35% from ALL PCC escrow settlements. The fee recipient address
  * is IMMUTABLE — it is set at deployment and can never be changed.
  *
  * Fee bounds:
  *   - Minimum: 10 bps (0.1%) — fee can NEVER be set to zero
  *   - Maximum: 500 bps (5%)
- *   - Default: 150 bps (1.5%)
+ *   - Default: 235 bps (2.35%)
+ *
+ * Every settlement must pass through the PCC Verification Oracle before
+ * funds can be released. The oracle verifier address is IMMUTABLE.
  *
  * Only escrows deployed by this factory can call collectFee(). This makes
  * it structurally impossible for PCC activity to bypass the fee without
@@ -30,9 +34,12 @@ contract PCCProtocol {
     /// @notice The fee recipient address. IMMUTABLE — hardcoded at deployment, cannot change.
     address public immutable feeRecipient;
 
+    /// @notice The PCC Verification Oracle verifier contract. IMMUTABLE.
+    address public immutable oracleVerifier;
+
     // ── Governance-Adjustable State ──────────────────────────────────
 
-    /// @notice Protocol fee in basis points (150 = 1.5%). Bounded [10, 500].
+    /// @notice Protocol fee in basis points (235 = 2.35%). Bounded [10, 500].
     uint256 public protocolFeeBps;
 
     /// @notice Governor address. Can adjust fee % and registry addresses. Cannot change fee recipient.
@@ -93,25 +100,42 @@ contract PCCProtocol {
         _;
     }
 
+    modifier requiresOracle(IPCCOracle.Attestation calldata attestation) {
+        require(
+            oracleVerifier != address(0),
+            "PCC: oracle verifier not set"
+        );
+        require(
+            IPCCOracle(oracleVerifier).verifyAttestation(attestation),
+            "PCC: invalid oracle attestation"
+        );
+        _;
+    }
+
     // ── Constructor ──────────────────────────────────────────────────
 
     /**
      * @param _feeRecipient IMMUTABLE fee recipient address — cannot be changed after deployment.
-     * @param _initialFeeBps Initial fee in basis points (150 = 1.5%). Must be in [10, 500].
+     * @param _initialFeeBps Initial fee in basis points (235 = 2.35%). Must be in [10, 500].
      * @param _governor Governor address (can adjust fee % and registries, not recipient).
+     * @param _oracleVerifier IMMUTABLE oracle verifier contract address. Every settlement
+     *        must pass through the oracle before funds can be released.
      */
     constructor(
         address _feeRecipient,
         uint256 _initialFeeBps,
-        address _governor
+        address _governor,
+        address _oracleVerifier
     ) {
         require(_feeRecipient != address(0), "Zero fee recipient");
         require(_governor != address(0), "Zero governor");
         require(_initialFeeBps >= FEE_BPS_MIN && _initialFeeBps <= FEE_BPS_MAX, "Fee out of bounds");
+        require(_oracleVerifier != address(0), "Zero oracle verifier");
 
         feeRecipient = _feeRecipient;
         protocolFeeBps = _initialFeeBps;
         governor = _governor;
+        oracleVerifier = _oracleVerifier;
     }
 
     // ── Factory ──────────────────────────────────────────────────────
@@ -200,6 +224,41 @@ contract PCCProtocol {
         require(newGovernor != address(0), "Zero governor");
         emit GovernorTransferred(governor, newGovernor);
         governor = newGovernor;
+    }
+
+    // ── Oracle-Gated Settlement ────────────────────────────────────
+
+    /**
+     * @notice Verify an oracle attestation. Can be called by anyone (view).
+     *         Returns true if the attestation is valid per the oracle verifier.
+     * @param attestation The oracle attestation to verify.
+     * @return valid True if the attestation passes verification.
+     */
+    function verifyOracleAttestation(
+        IPCCOracle.Attestation calldata attestation
+    ) external view returns (bool valid) {
+        if (oracleVerifier == address(0)) {
+            return false;
+        }
+        return IPCCOracle(oracleVerifier).verifyAttestation(attestation);
+    }
+
+    /**
+     * @notice Oracle-gated fee collection. Called by child escrows during settlement.
+     *         Requires a valid oracle attestation before recording fee accounting.
+     *         Only callable by factory-deployed escrows.
+     * @param token The ERC-20 token in which the fee was collected.
+     * @param fee The fee amount collected.
+     * @param attestation The oracle attestation proving the settlement is verified.
+     */
+    function collectFeeWithAttestation(
+        address token,
+        uint256 fee,
+        IPCCOracle.Attestation calldata attestation
+    ) external onlyProtocolEscrow requiresOracle(attestation) {
+        feesFromEscrow[msg.sender] += fee;
+        totalFeesCollectedByToken[token] += fee;
+        emit FeeCollected(msg.sender, token, fee);
     }
 
     // ── Views ────────────────────────────────────────────────────────

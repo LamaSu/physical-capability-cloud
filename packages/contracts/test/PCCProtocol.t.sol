@@ -16,6 +16,7 @@ contract PCCProtocolTest is Test {
     address operator = address(0x2);
     address arbiter = address(0x3);
     address challenger = address(0x4);
+    address oracleVerifier = address(0x5);
 
     bytes32 cwmId = keccak256("cwm-001");
     bytes32 stepId = keccak256("step-001");
@@ -24,7 +25,7 @@ contract PCCProtocolTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC(1_000_000e6);
-        protocol = new PCCProtocol(FEE_RECIPIENT, INITIAL_FEE_BPS, governor);
+        protocol = new PCCProtocol(FEE_RECIPIENT, INITIAL_FEE_BPS, governor, oracleVerifier);
 
         usdc.mint(payer, 100_000e6);
         usdc.mint(operator, 10_000e6);

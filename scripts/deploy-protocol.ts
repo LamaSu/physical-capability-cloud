@@ -31,8 +31,8 @@ const DIVIDER = "═".repeat(70);
 /** Hardcoded fee recipient — set in PCCProtocol constructor and immutable */
 const FEE_RECIPIENT = "0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B" as const;
 
-/** Initial fee: 1.5% = 150 bps */
-const INITIAL_FEE_BPS = 150n;
+/** Initial fee: 2.35% = 235 bps */
+const INITIAL_FEE_BPS = 235n;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,7 @@ async function main() {
   console.log(`Balance:  ${formatEther(balance)} ETH`);
   console.log(`Network:  ${chain.name}`);
   console.log(`Fee Recipient (immutable): ${FEE_RECIPIENT}`);
-  console.log(`Fee Rate: ${INITIAL_FEE_BPS} bps (1.5%)\n`);
+  console.log(`Fee Rate: ${INITIAL_FEE_BPS} bps (2.35%)\n`);
 
   if (balance < 1000000000000000n) {
     console.error("Error: insufficient balance (need at least 0.001 ETH)");
@@ -109,8 +109,9 @@ async function main() {
   console.log(DIVIDER);
   console.log("\nDeployment parameters:");
   console.log(`  FEE_RECIPIENT (immutable): ${FEE_RECIPIENT}`);
-  console.log(`  INITIAL_FEE_BPS: ${INITIAL_FEE_BPS} (1.5%)`);
+  console.log(`  INITIAL_FEE_BPS: ${INITIAL_FEE_BPS} (2.35%)`);
   console.log(`  GOVERNOR: ${account.address} (deployer)`);
+  console.log(`  ORACLE_VERIFIER: (deploy PCCOracleVerifier first, pass address to constructor)`);
   console.log(DIVIDER);
 }
 

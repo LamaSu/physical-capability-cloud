@@ -377,6 +377,8 @@ cd packages/pcc-node && python -m pytest                 # run Python tests
 | `ESCROW_CONTRACT_ADDRESS=0x...` | Testnet/mainnet | Deployed MilestoneEscrow address |
 | `KERNEL_CONFIG='{...}'` | Kernel runtime | JSON kernel configuration inline |
 | `KERNEL_CONFIG_FILE=./...` | Kernel runtime | Path to kernel config JSON file |
+| `PCC_ORACLE_URL` | Settlement | Oracle service URL (default: http://192.168.108.72:4100) |
+| `PCC_ORACLE_KEY` | Settlement | Oracle API key (provisioned from oracle service) |
 | `PCC_BASE` | pcc-node | Gateway URL (default: https://capability.network) |
 | `PCC_API_KEY` | pcc-node | Bearer token for gateway API |
 | `KERNEL_ID` | pcc-node | Override kernel ID (optional) |

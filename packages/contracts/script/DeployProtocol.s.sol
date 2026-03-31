@@ -27,15 +27,17 @@ import "../src/VerifierRegistry.sol";
 contract DeployProtocol is Script {
     // HARDCODED — never changes
     address constant FEE_RECIPIENT = 0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B;
-    uint256 constant INITIAL_FEE_BPS = 150; // 1.5%
+    uint256 constant INITIAL_FEE_BPS = 235; // 2.35%
 
     function run() external {
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
+        address oracleVerifier = vm.envAddress("ORACLE_VERIFIER_ADDRESS");
 
         console.log("Deployer:", deployer);
         console.log("Fee Recipient (immutable):", FEE_RECIPIENT);
-        console.log("Initial Fee:", INITIAL_FEE_BPS, "bps (1.5%)");
+        console.log("Initial Fee:", INITIAL_FEE_BPS, "bps (2.35%)");
+        console.log("Oracle Verifier:", oracleVerifier);
 
         vm.startBroadcast(deployerKey);
 
@@ -44,7 +46,8 @@ contract DeployProtocol is Script {
         PCCProtocol pccProtocol = new PCCProtocol(
             FEE_RECIPIENT,
             INITIAL_FEE_BPS,
-            deployer // governor
+            deployer, // governor
+            oracleVerifier // oracle verifier (immutable)
         );
         console.log("PCCProtocol deployed at:", address(pccProtocol));
 
