@@ -62,13 +62,11 @@ async function main() {
   console.log("  PCC ProofRegistry — Starknet Sepolia Deployment");
   console.log(`${DIVIDER}\n`);
 
-  // Resolve starknet from the verifier package (it's not hoisted to root in this pnpm monorepo)
-  const starknetPath = new URL(
-    "../packages/verifier/node_modules/starknet/dist/index.mjs",
-    import.meta.url,
-  ).href;
-  const { ec, hash, num, RpcProvider, Account, CallData, Contract, cairo } =
-    await import(starknetPath);
+  // Resolve starknet from the verifier package (pnpm monorepo — not hoisted)
+  const starknetPath = resolve(ROOT, "packages/verifier/node_modules/starknet/dist/index.mjs");
+  const starknetUrl = "file:///" + starknetPath.replace(/\\/g, "/");
+  const starknet = await import(starknetUrl);
+  const { ec, hash, num, RpcProvider, Account, CallData, Contract, cairo, Signer } = starknet;
 
   const rpcUrl = process.env.STARKNET_RPC_URL ?? DEFAULT_RPC;
   const provider = new RpcProvider({ nodeUrl: rpcUrl });
@@ -144,8 +142,11 @@ async function main() {
   // Check account balance
   let account: InstanceType<typeof Account>;
   try {
+    // starknet.js v9: options object with Signer
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    account = new (Account as any)(provider, accountAddress, privateKey);
+    const signer = new (Signer as any)(privateKey);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    account = new (Account as any)({ provider, address: accountAddress, signer });
   } catch (e) {
     console.error("Error constructing account:", e);
     process.exit(1);
