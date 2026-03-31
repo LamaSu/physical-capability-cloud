@@ -89,7 +89,17 @@ def detect_cameras():
 OT2_PROBE_URLS = [
     "http://localhost:31950",
     "http://169.254.31.60:31950",
+    # Real robot IPs — WiFi (Frontier:Devices) and USB
+    "http://192.168.16.210:31950",
+    "http://169.254.143.150:31950",
 ]
+
+# Allow runtime override via environment variable (comma-separated)
+import os as _os
+_extra = _os.environ.get("OT2_PROBE_URLS", "")
+if _extra:
+    OT2_PROBE_URLS.extend(f"http://{u.strip()}:31950" if ":" not in u.strip() else u.strip()
+                          for u in _extra.split(",") if u.strip())
 
 
 def check_opentrons(url):
@@ -98,7 +108,8 @@ def check_opentrons(url):
     Returns a dict with robot info or None.
     """
     try:
-        status, data = http("GET", f"{url}/health", timeout=5, verify_ssl=False)
+        headers = {"opentrons-version": "2"}
+        status, data = http("GET", f"{url}/health", headers=headers, timeout=5, verify_ssl=False)
         if status != 200 or not isinstance(data, dict):
             return None
         return {
