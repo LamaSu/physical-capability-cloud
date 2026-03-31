@@ -104,9 +104,35 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
       });
     }
 
-    // Delegate to KernelService (fire-and-forget)
+    // Check if this kernel is externally-managed (has a daemon polling
+    // /api/operator/jobs).  External kernels were registered via the HTTP
+    // registration API and their id differs from the gateway's local
+    // KernelService config.  For these, leave the job as "queued" so the
+    // remote daemon picks it up — do NOT auto-execute via mock adapters.
+    const svc = getKernelService();
+    const localKernelId = (svc as any).config?.kernelId;
+    const isExternalKernel = localKernelId && kernelId !== localKernelId;
+
+    if (isExternalKernel) {
+      // Job is persisted as "queued" — the daemon will poll, execute, and
+      // push evidence back via /api/operator/evidence.
+      pipelineTelemetry.emit(jobId, "job_submit", "completed", { metadata: { kernelId, stepId, external: true } });
+      trackServerEvent("job_submitted", { kernelId, capabilityType: capabilityId, external: true }, (req as any).operatorId);
+      auditService.log({
+        eventType: "job.submitted",
+        actor: (req as any).operatorId ?? (req as any).apiKeyId,
+        resourceType: "job",
+        resourceId: jobId,
+        action: "create",
+        metadata: { kernelId, stepId, external: true, assuranceTier },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      return { jobId, deviceId: null, status: "queued" };
+    }
+
+    // Delegate to KernelService (fire-and-forget) for locally-managed kernels
     try {
-      const svc = getKernelService();
       const result = await svc.submitJob({
         jobId,
         stepId,
