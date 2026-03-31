@@ -263,13 +263,14 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
             jobId: (bundle as any).jobId ?? "",
             chain: (bundle as any).litNetwork === "chipotle" ? "baseSepolia" : "baseSepolia",
             encryptedKeyB64: keyB64,
+            userAddress: body.authSig?.address ?? "",
+            authProof: "buyer" as const,
           });
 
           const result = await executeDecryptAction({
             apiUrl: litApiUrl,
             apiKey: litApiKey,
             actionCode,
-            userAddress: body.authSig.address,
           });
 
           if (result.authorized && result.key) {
