@@ -1382,7 +1382,7 @@ const STEPS = [
   {
     step: "4",
     title: "Earn",
-    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on oracle-verified evidence. 2.35% fee. Nothing else.",
+    text: "Capabilities announced. Jobs arrive. Escrow releases to your wallet on verified evidence. Minimal protocol fee. Nothing else.",
     badge: "ongoing",
   },
 ];
