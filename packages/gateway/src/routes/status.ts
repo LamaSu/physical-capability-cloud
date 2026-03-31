@@ -12,6 +12,7 @@ import { configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
 import { litEncryptionService } from "../services.js";
+import { auditService } from "../services/audit-service.js";
 
 export async function statusRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ export async function statusRoutes(app: FastifyInstance) {
       evidence = repos.evidence.findAll();
       // Devices per kernel
       for (const k of kernels as Array<{ id: string }>) {
-        const devs = repos.kernels.findDevices(k.id);
+        const devs = repos.kernels.findDevicesByKernel(k.id);
         devices.push(...devs);
       }
       registrations = repos.registrations?.findAll?.() ?? [];

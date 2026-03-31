@@ -558,7 +558,8 @@ export async function setupRoutes(app: FastifyInstance) {
                   description: `Auto-registered from device ${deviceId}`,
                   materials: [],
                   assuranceTiers: [0, 1],
-                  pricing: { currency: "USDC", base: 0, perUnit: 0 },
+                  pricing: { currency: "USDC", baseCost: "0", minimum: "0" },
+                  availability: {},
                 });
               } catch (_capErr) {
                 // Non-fatal — capability may already exist from another device
