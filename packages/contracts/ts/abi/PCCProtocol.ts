@@ -1,7 +1,8 @@
 /**
  * PCCProtocol ABI — root protocol contract for Physical Capability Cloud.
  *
- * Collects 1.5% from ALL PCC escrow settlements. Fee recipient is immutable.
+ * Collects 2.35% from ALL PCC escrow settlements. Fee recipient is immutable.
+ * Every settlement must pass through the PCC Verification Oracle.
  * Factory deploys MilestoneEscrow instances that are registered as protocol escrows.
  */
 export const PCCProtocolABI = [
@@ -12,6 +13,7 @@ export const PCCProtocolABI = [
       { name: "_feeRecipient", type: "address" },
       { name: "_initialFeeBps", type: "uint256" },
       { name: "_governor", type: "address" },
+      { name: "_oracleVerifier", type: "address" },
     ],
     stateMutability: "nonpayable",
   },
@@ -37,6 +39,13 @@ export const PCCProtocolABI = [
 
   {
     name: "feeRecipient",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    name: "oracleVerifier",
     type: "function",
     stateMutability: "view",
     inputs: [],
@@ -200,6 +209,55 @@ export const PCCProtocolABI = [
     outputs: [],
   },
 
+  // ── Oracle-Gated Settlement ────────────────────────────────────────
+
+  {
+    name: "verifyOracleAttestation",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      {
+        name: "attestation",
+        type: "tuple",
+        components: [
+          { name: "escrowAddress", type: "address" },
+          { name: "jobId", type: "string" },
+          { name: "evidenceHash", type: "bytes32" },
+          { name: "tier", type: "uint8" },
+          { name: "verified", type: "bool" },
+          { name: "timestamp", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+          { name: "signature", type: "bytes" },
+        ],
+      },
+    ],
+    outputs: [{ name: "valid", type: "bool" }],
+  },
+  {
+    name: "collectFeeWithAttestation",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "fee", type: "uint256" },
+      {
+        name: "attestation",
+        type: "tuple",
+        components: [
+          { name: "escrowAddress", type: "address" },
+          { name: "jobId", type: "string" },
+          { name: "evidenceHash", type: "bytes32" },
+          { name: "tier", type: "uint8" },
+          { name: "verified", type: "bool" },
+          { name: "timestamp", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+          { name: "signature", type: "bytes" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+
   // ── Events ────────────────────────────────────────────────────────
 
   {
@@ -253,8 +311,8 @@ export const PCCProtocolABI = [
 /** Hardcoded fee recipient — the immutable value set in PCCProtocol constructor */
 export const PCC_FEE_RECIPIENT = "0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B" as const;
 
-/** Default protocol fee in basis points (1.5%) */
-export const PCC_DEFAULT_FEE_BPS = 150n;
+/** Default protocol fee in basis points (2.35%) */
+export const PCC_DEFAULT_FEE_BPS = 235n;
 
 /** Minimum protocol fee in basis points (0.1%) */
 export const PCC_FEE_BPS_MIN = 10n;

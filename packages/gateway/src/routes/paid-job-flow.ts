@@ -23,6 +23,7 @@ import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import { verifyWithOracle } from "../services/oracle-client.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -590,6 +591,29 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
+      // ── 4b. Oracle verification ─────────────────────────────────────
+      // Every settlement must pass through the PCC Verification Oracle.
+      // If PCC_ORACLE_KEY is not set, falls back to mock (dev/test).
+      const oracleResponse = await verifyWithOracle({
+        escrowAddress: escrowAddress ?? "0x0000000000000000000000000000000000000000",
+        jobId,
+        kernelId: job.kernelId,
+        evidenceHash: bundleHash,
+        assuranceTier: 0,
+        chainId: 84532, // Base Sepolia
+      });
+
+      if (!oracleResponse.result.verified) {
+        return reply.status(422).send({
+          error: "oracle_verification_failed",
+          reason: oracleResponse.result.reason,
+          checks: oracleResponse.result.checks,
+        });
+      }
+
+      // Store the attestation for potential on-chain submission
+      const oracleAttestation = oracleResponse.attestation;
+
       // ── 5. Settlement ──────────────────────────────────────────────
       let settlementStatus = "evidence_submitted";
       let settledAt: string | null = null;
@@ -621,6 +645,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           settlementStatus,
           mockSettlement: isMockSettlement(),
           toolCallCount: auditTrail.length,
+          oracleVerified: oracleResponse.result.verified,
+          oracleReason: oracleResponse.result.reason,
         },
       });
 
@@ -634,9 +660,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt,
         scopesRevoked: scopes.filter((s) => s.status === "active").length,
         toolCallsRecorded: auditTrail.length,
+        oracleVerified: oracleResponse.result.verified,
+        oracleAttestation: oracleAttestation ? {
+          signature: oracleAttestation.signature,
+          nonce: oracleAttestation.nonce,
+          timestamp: oracleAttestation.timestamp,
+        } : null,
         message: isMockSettlement()
-          ? "Job completed and settled (mock settlement)."
-          : "Job completed. Evidence submitted. Awaiting challenge window expiry for settlement.",
+          ? "Job completed and settled (mock settlement). Oracle verification passed."
+          : "Job completed. Oracle verified. Evidence submitted. Awaiting challenge window expiry for settlement.",
       };
     } catch (err) {
       return reply.status(500).send({

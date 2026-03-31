@@ -2,7 +2,7 @@
  * PCCProtocol contract client — read and write operations for the root protocol contract.
  *
  * The PCCProtocol contract:
- *   - Collects 1.5% fee from ALL PCC escrow settlements
+ *   - Collects 2.35% fee from ALL PCC escrow settlements
  *   - Is the factory for deploying MilestoneEscrow instances
  *   - Has an immutable fee recipient (0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B)
  *
