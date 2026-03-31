@@ -112,6 +112,20 @@ export async function kernelRoutes(app: FastifyInstance) {
       totalJobsCompleted: 0,
       maxAssuranceTier: 2,
     };
+    // Upsert: if kernel already exists, update name/heartbeat instead of failing
+    const existing = repos.kernels.findById(id);
+    if (existing) {
+      const updates: Record<string, unknown> = {
+        lastHeartbeat: new Date().toISOString(),
+        status: "online",
+      };
+      if (req.body.name) updates.name = req.body.name;
+      if (req.body.physicalAddress || req.body.location) {
+        updates.physicalAddress = req.body.physicalAddress || req.body.location;
+      }
+      const updated = repos.kernels.update(id, updates);
+      return { kernel: updated ?? existing, created: false };
+    }
     const inserted = repos.kernels.insert(kernel);
     trackServerEvent("kernel_registered", {
       kernelId: kernel.id,
