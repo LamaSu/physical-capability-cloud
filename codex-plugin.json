@@ -1,0 +1,42 @@
+{
+  "name": "pcc",
+  "version": "0.1.0",
+  "description": "Physical Capability Cloud -- orchestrate physical machines via MCP",
+  "author": "PCC Contributors",
+  "license": "Apache-2.0",
+  "mcp": {
+    "command": "node",
+    "args": ["packages/mcp-server/dist/index.js"],
+    "env": {
+      "PCC_URL": "https://capability.network"
+    }
+  },
+  "skills": [
+    {
+      "name": "pcc-discover",
+      "description": "Discover physical capabilities on the PCC network",
+      "trigger": "find machines|discover capabilities|search printers|search labs"
+    },
+    {
+      "name": "pcc-submit-job",
+      "description": "Submit a paid job to a physical machine",
+      "trigger": "submit job|print something|run protocol|order a part"
+    },
+    {
+      "name": "pcc-setup",
+      "description": "Set up a new machine on the PCC network",
+      "trigger": "register machine|onboard device|setup printer|connect equipment"
+    },
+    {
+      "name": "pcc-monitor",
+      "description": "Monitor running jobs and machine status",
+      "trigger": "check job|job status|machine status|camera feed"
+    },
+    {
+      "name": "pcc-evidence",
+      "description": "View and verify evidence from completed jobs",
+      "trigger": "show evidence|verify job|check proof|evidence bundle"
+    }
+  ],
+  "readme": "AGENTS.md"
+}

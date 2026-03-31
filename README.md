@@ -6,6 +6,30 @@
 
 ---
 
+## Agent Integration
+
+### Claude Code / Claude Desktop
+```json
+{ "pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"], "env": { "PCC_URL": "https://capability.network" } } }
+```
+
+### OpenAI Codex
+```bash
+codex mcp add pcc -- node packages/mcp-server/dist/index.js
+```
+
+### Any LLM Agent
+```bash
+curl https://capability.network/agent-package.json
+```
+
+### Operator Onboarding
+```bash
+pip install pcc-node && pcc-node start
+```
+
+---
+
 ## What is PCC?
 
 Physical Capability Cloud is a credibly neutral protocol that turns every machine, lab, and factory into a programmable, composable endpoint. Operators register their physical capabilities — 3D printers, CNC routers, liquid handlers, mass spectrometers, couriers — and the network handles everything else: discovery, bidding, escrow, execution, cryptographic evidence, and automatic settlement.
