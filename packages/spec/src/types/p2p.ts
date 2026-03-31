@@ -48,3 +48,17 @@ export type ConnectionState = "connecting" | "connected" | "encrypted" | "discon
 
 /** Transport type */
 export type TransportType = "websocket-direct" | "websocket-relay" | "webrtc" | "http-poll";
+
+/** Announcement that encrypted evidence is available on IPFS */
+export interface EvidenceAnnouncement {
+  type: "evidence";
+  bundleId: string;
+  cid: string;                    // IPFS CID of encrypted bundle
+  litNetwork: string;             // "chipotle"
+  accessConditions: object[];     // Lit access conditions (on-chain checks)
+  escrowAddress: string;          // MilestoneEscrow contract address
+  jobId: string;
+  operatorDid: string;            // did:pcc:operator:...
+  timestamp: string;              // ISO 8601
+  signature: string;              // Ed25519 over canonical JSON (minus signature field)
+}

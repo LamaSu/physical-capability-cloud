@@ -172,10 +172,10 @@ export const encryptionService = new EncryptionService();
 // ── Lit Encryption Service ──────────────────────────────────────────
 
 // Use createLitEncryptionService() factory — resolves real vs mock via LIT_PROTOCOL_REAL env var.
-// Network: "datil-dev" (active dev/test) or "datil" (production).
-// NOTE: "datil-test" was decommissioned Feb 25, 2026.
+// Chipotle v3 REST API: set LIT_API_KEY for authenticated access (PKP key management).
+// Default: mock mode (local AES-256-GCM, same cryptography, no network required).
 export const litEncryptionService = createLitEncryptionService({
-  network: "datil-dev",
+  network: "chipotle",
   chain: "baseSepolia",
 });
 

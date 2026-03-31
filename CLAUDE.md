@@ -143,7 +143,7 @@ AWS for the physical world. A cloud control plane for physical manufacturing cap
 - `packages/spec/src/types/p2p.ts` — P2P types: PeerIdentity, CapabilityAnnouncement, EncryptedEnvelope, ConnectionState
 - `packages/kernel/src/evidence-storage.ts` — IPFS evidence via Helia (ESM-only — import from dist path)
 - `packages/kernel/src/lit-encryption-service.ts` — Lit Protocol mock with real AES-256-GCM
-- `packages/kernel/src/lit-encryption-real.ts` — Real Lit Protocol via @lit-protocol/lit-node-client v6 (datil-test)
+- `packages/kernel/src/lit-encryption-real.ts` — Real Lit Protocol via Chipotle v3 REST API (api.dev.litprotocol.com)
 - `packages/agent-runtime/src/solana-wallet.ts` — Solana agent wallets + SPL token transfers
 - `packages/agent-runtime/src/spending-policy.ts` — Budget-aware spending policies
 - `packages/verifier/src/bittensor/` — Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
@@ -363,7 +363,9 @@ cd packages/pcc-node && python -m pytest                 # run Python tests
 | Variable | When Required | Description |
 |----------|--------------|-------------|
 | `PCC_URL` | MCP server | Gateway URL (default: production Railway URL) |
-| `LIT_PROTOCOL_REAL=true` | Optional | Use real Lit Protocol datil-test instead of mock AES |
+| `LIT_PROTOCOL_REAL=true` | Optional | Activate Lit Protocol Chipotle v3 REST API |
+| `LIT_API_KEY=...` | Chipotle mode | Lit account API key (from dashboard.dev.litprotocol.com) |
+| `LIT_USAGE_KEY=...` | Chipotle mode | Lit usage API key (scoped — preferred for production) |
 | `EVIDENCE_STORAGE=storacha` | Optional | Storacha w3up instead of Helia for evidence storage |
 | `STORACHA_PROOF=...` | storacha mode | Storacha delegation proof (base64) |
 | `STORACHA_SPACE_DID=did:key:...` | storacha mode | Storacha space DID |

@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import { configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
+import { litEncryptionService } from "../services.js";
 
 export async function statusRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
@@ -251,6 +252,7 @@ export async function statusRoutes(app: FastifyInstance) {
         totalZkProofs: dbZkProofs,
         storageMode: evidenceBackend,
         encryptionMode: litReal ? "real" : "mock",
+        lit: litEncryptionService.getStatus(),
       },
 
       marketplace: {
@@ -345,6 +347,7 @@ export async function statusRoutes(app: FastifyInstance) {
             ? "Datil-dev threshold encryption — decryption requires on-chain access conditions"
             : "Local AES-256-GCM — no network, no access control enforcement",
           network: litReal ? "datil-dev" : "none",
+          live: litEncryptionService.getStatus(),
         },
         evidence_storage: {
           mode: storachaReal ? "real" : "mock",

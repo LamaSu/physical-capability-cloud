@@ -6,12 +6,9 @@
  *   await svc.connect();
  *   const encrypted = await svc.encryptBundle(bundle, escrowAddress, jobId);
  *
- * Set LIT_PROTOCOL_REAL=true to activate the real Lit Protocol path (datil-dev network by default).
+ * Set LIT_PROTOCOL_REAL=true to activate Lit Protocol Chipotle v3 REST API.
+ * Optionally set LIT_API_KEY for authenticated Chipotle access (PKP key management).
  * Default: mock mode (local AES-256-GCM, no network required).
- * Network options (via LitEncryptionServiceOptions.network):
- *   - "datil-dev" (default when real) -- active dev/test network
- *   - "datil" -- production Lit network
- * NOTE: "datil-test" was decommissioned Feb 25, 2026. Do not use it.
  */
 
 import { LitEncryptionService } from "./lit-encryption-service.js";
@@ -28,11 +25,11 @@ export type AnyLitEncryptionService = LitEncryptionService | RealLitEncryptionSe
  *
  * Resolution order:
  *   1. `options.mock` explicitly set → honour it
- *   2. `LIT_PROTOCOL_REAL=true` env var → real service
- *   3. Default → mock service
+ *   2. `LIT_PROTOCOL_REAL=true` env var → real service (Chipotle REST API)
+ *   3. Default → mock service (local AES-256-GCM)
  *
  * @param options  - Forwarded to whichever service is constructed.
- * @returns LitEncryptionService (mock) or RealLitEncryptionService (real).
+ * @returns LitEncryptionService (mock) or RealLitEncryptionService (Chipotle v3).
  */
 export function createLitEncryptionService(
   options: LitEncryptionServiceOptions = {},

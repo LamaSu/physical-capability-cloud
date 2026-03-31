@@ -195,7 +195,7 @@ describe("AnnouncementRegistry", () => {
   });
 
   it("stats returns empty for empty registry", () => {
-    expect(registry.stats()).toEqual({});
+    expect(registry.stats()).toEqual({ _evidence_total: 0 });
   });
 
   // ── clear ──────────────────────────────────────────────────────

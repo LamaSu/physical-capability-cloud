@@ -1,21 +1,20 @@
 /**
- * S05_Evidence — "SOVEREIGN STACK"
+ * S05_Evidence — "The Live Job"
  *
- * 570 frames (19 seconds). Judge target: David Sneider (Lit), Omar Espejel (Starknet),
- * Dhruv Varshney (Storacha), Molly Mackinlay (IPFS).
+ * 1200 frames (40s). The CENTERPIECE.
  *
- * The SPONSOR scene. Each integration named and badged.
+ * Beat 1 (0-360):   Evidence pipeline — 5 steps, staggered entry.
+ * Beat 2 (360-780):  Settlement economics — $175 vs $7.50, operator keeps $492.50.
+ * Beat 3 (780-1080): Sponsor acknowledgment — 5 sponsors staggered.
+ * Frame 1100-1200:   Dim out.
  *
- * Frame 0:     Title "SOVEREIGN INFRASTRUCTURE" — Editorial italic, holographic, fade in.
- * Frame 20:    Subtitle — Swiss, muted, small.
- * Frame 40-440: 9-step evidence cascade from EVIDENCE_PIPELINE.
- *               Sponsor badges on steps 3-6 (Lit, Storacha, Bittensor, Starknet).
- * Frame 460:   Glow sweep through all steps.
- * Frame 480:   "Zero trust required." — Expressive italic, accent2.
- * Frame 540:   Dim to 0.2.
+ * Discord use #2: Step 5 border (the money moment).
  *
- * Voices: Editorial (title), Swiss (subtitle + step detail), Monument (numbers),
- *         Brutalist (sponsor badges), Expressive (closer)
+ * Design rules enforced:
+ * - Min font 36px everywhere
+ * - Max 5 elements on screen
+ * - bg #050a0e
+ * - Safe margins: 128px left/right, 96px top/bottom
  */
 import React from "react";
 import {
@@ -23,112 +22,81 @@ import {
   useVideoConfig,
   AbsoluteFill,
   interpolate,
-  Easing,
 } from "remotion";
-import {
-  COLORS,
-  FONTS,
-  GRADIENTS,
-  EVIDENCE_PIPELINE,
-  slamSpring,
-  smoothSpring,
-  fadeSlideUp,
-  beatPulse,
-  flashBurst,
-} from "../lib";
-import { PulseIndicator } from "../components/PulseIndicator";
+import { C, F, SIZE, smooth, slamScale, fadeUp } from "../lib";
+import { SPONSORS, SETTLEMENT_MATH } from "../lib";
 
-const STEP_STAGGER = 40;
-const STEP_HEIGHT = 48;
 
-/** Sponsor badge data — indexed by EVIDENCE_PIPELINE position */
-const SPONSOR_BADGES: Record<number, { name: string; borderColor: string }> = {
-  3: { name: "LIT PROTOCOL", borderColor: COLORS.emerald },
-  4: { name: "STORACHA", borderColor: COLORS.accent2 },
-  5: { name: "BITTENSOR", borderColor: COLORS.accent2 },
-  6: { name: "STARKNET", borderColor: COLORS.emerald },
-};
-
-const SponsorBadge: React.FC<{
-  name: string;
-  borderColor: string;
-  stepColor: string;
-}> = ({ name, borderColor }) => (
-  <div
-    style={{
-      padding: "3px 8px",
-      border: `1px solid ${borderColor}`,
-      borderRadius: 4,
-      background: `${borderColor}10`,
-      flexShrink: 0,
-      marginLeft: 8,
-    }}
-  >
-    <span
-      style={{
-        fontFamily: FONTS.brutalist,
-        fontSize: 60,
-        fontWeight: 700,
-        color: borderColor,
-        letterSpacing: "0.12em",
-        textTransform: "uppercase" as const,
-        whiteSpace: "nowrap" as const,
-      }}
-    >
-      {name}
-    </span>
-  </div>
-);
+const EVIDENCE_STEPS = [
+  {
+    name: "Evidence Collected",
+    detail: "6 events: peaks, purity, retention",
+    color: C.accent1,
+    borderColor: C.accent1,
+  },
+  {
+    name: "Encrypted",
+    detail: "Lit Protocol AES-256-GCM",
+    color: C.accent2,
+    borderColor: C.accent2,
+  },
+  {
+    name: "Stored on IPFS",
+    detail: "Storacha content-addressed",
+    color: C.accent2,
+    borderColor: C.accent2,
+  },
+  {
+    name: "ZK Proof Anchored",
+    detail: "Starknet Sepolia",
+    color: C.accent1,
+    borderColor: C.accent1,
+  },
+  {
+    name: "Escrow Released",
+    detail: `$${SETTLEMENT_MATH.operatorReceives} to operator`,
+    color: C.gold,
+    // Step 5 border is discord — USE #2
+    borderColor: C.discord,
+  },
+] as const;
 
 const EvidenceStep: React.FC<{
   index: number;
-  step: string;
-  detail: string;
-  color: string;
+  step: typeof EVIDENCE_STEPS[number];
   appearFrame: number;
-  glowSweepFrame: number;
-}> = ({ index, step, detail, color, appearFrame, glowSweepFrame }) => {
+  dimOpacity: number;
+}> = ({ index, step, appearFrame, dimOpacity }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Slide in from left
-  const progress = smoothSpring(frame, fps, appearFrame);
-  const slideX = interpolate(progress, [0, 1], [-30, 0]);
-  const enterOpacity = progress;
-
-  // Glow sweep at frame 460 + index*6
-  const glowFlash = flashBurst(frame, glowSweepFrame, 6);
-  const borderGlow = 0.06 + glowFlash * 0.5;
-
-  const badge = SPONSOR_BADGES[index];
+  const p = smooth(frame, fps, appearFrame);
+  const translateY = interpolate(p, [0, 1], [24, 0]);
 
   return (
     <div
       style={{
+        opacity: p * dimOpacity,
+        transform: `translateY(${translateY}px)`,
         display: "flex",
         alignItems: "center",
-        gap: 14,
-        height: STEP_HEIGHT,
-        padding: "0 16px 0 14px",
-        background: COLORS.bg.surface,
-        border: `1px solid rgba(${hexToRgb(color)},${borderGlow})`,
+        gap: 24,
+        height: 72,
+        padding: "0 24px",
+        background: C.surface,
+        border: `1.5px solid ${step.borderColor}`,
         borderRadius: 10,
-        opacity: enterOpacity,
-        transform: `translateX(${slideX}px)`,
-        boxShadow:
-          glowFlash > 0.02
-            ? `0 0 20px rgba(${hexToRgb(color)},${glowFlash * 0.35})`
-            : undefined,
         flexShrink: 0,
+        boxSizing: "border-box" as const,
       }}
     >
       {/* Number circle */}
       <div
         style={{
-          width: 26,
-          height: 26,
+          width: 44,
+          height: 44,
           borderRadius: "50%",
-          backgroundColor: color,
+          backgroundColor: step.color,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -137,10 +105,10 @@ const EvidenceStep: React.FC<{
       >
         <span
           style={{
-            fontFamily: FONTS.monument,
-            fontSize: 34,
+            fontFamily: F.brutalist,
+            fontSize: SIZE.label,
             fontWeight: 700,
-            color: COLORS.bg.deep,
+            color: C.bg,
             lineHeight: 1,
           }}
         >
@@ -148,216 +116,380 @@ const EvidenceStep: React.FC<{
         </span>
       </div>
 
-      {/* Step name + detail */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 66,
-            fontWeight: 600,
-            color: COLORS.fg,
-            lineHeight: 1.2,
-            whiteSpace: "nowrap" as const,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {step}
-        </div>
-        <div
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 34,
-            fontWeight: 400,
-            color: COLORS.muted,
-            lineHeight: 1.2,
-            marginTop: 1,
-          }}
-        >
-          {detail}
-        </div>
-      </div>
+      {/* Step name */}
+      <span
+        style={{
+          fontFamily: F.swiss,
+          fontSize: 40,
+          fontWeight: 600,
+          color: C.fg,
+          flexShrink: 0,
+        }}
+      >
+        {step.name}
+      </span>
 
-      {/* Sponsor badge — only on sponsor steps */}
-      {badge && (
-        <SponsorBadge
-          name={badge.name}
-          borderColor={badge.borderColor}
-          stepColor={color}
-        />
-      )}
-
-      <PulseIndicator color={color} size={7} delay={appearFrame} />
+      {/* Detail */}
+      <span
+        style={{
+          fontFamily: F.swiss,
+          fontSize: SIZE.label,
+          fontWeight: 400,
+          color: C.muted,
+        }}
+      >
+        {step.detail}
+      </span>
     </div>
   );
 };
-
-/** Tiny helper: convert hex to "r,g,b" string */
-function hexToRgb(hex: string): string {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `${r},${g},${b}`;
-}
 
 export const S05_Evidence: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Title fade in
-  const titleOpacity = interpolate(frame, [0, 25], [0, 1], {
+  // ── Beat 1: Evidence (0-360) ──
+  const titleP = smooth(frame, fps, 0);
+  const titleScale = slamScale(frame, fps, 0, 2.5);
+  const subtitleFu = fadeUp(frame, fps, 40);
+
+  // Steps stagger: first appears at frame 90, 50 frames apart
+  const STEP_STAGGER = 50;
+
+  // Dim beat1 content when beat2 starts
+  const beat1Dim = interpolate(frame, [360, 410], [1, 0.25], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
   });
 
-  // Subtitle fade
-  const subtitleOpacity = interpolate(frame, [20, 40], [0, 1], {
+  // ── Beat 2: Settlement (360-780) ──
+  const beat2Visible = frame >= 360;
+
+  // $175 — appears at 380
+  const price175P = smooth(frame, fps, 380);
+  const price175Fu = fadeUp(frame, fps, 380);
+  const price175Label = fadeUp(frame, fps, 400);
+
+  // $7.50 — appears at 500, $175 shrinks + moves left
+  const price750P = smooth(frame, fps, 500);
+  const price750Fu = fadeUp(frame, fps, 500);
+  const price750Label = fadeUp(frame, fps, 520);
+
+  // When $7.50 appears, $175 shifts left
+  const leftShift = interpolate(smooth(frame, fps, 500), [0, 1], [0, -260], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
   });
 
-  // Closer text
-  const closerFade = fadeSlideUp(frame, fps, 480);
+  // Summary line at 640
+  const summaryFu = fadeUp(frame, fps, 640);
+
+  // Dim beat2 when beat3 starts
+  const beat2Dim = interpolate(frame, [780, 820], [1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // ── Beat 3: Sponsors (780-1080) ──
+  const beat3HeaderFu = fadeUp(frame, fps, 800);
 
   // End dim
-  const endDim = interpolate(frame, [540, 570], [1, 0.2], {
+  const endDim = interpolate(frame, [1100, 1200], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
-
-  const beat = beatPulse(frame, fps, 170, 0.03);
 
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: COLORS.bg.deep,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        paddingTop: 36,
-        paddingBottom: 28,
-        paddingLeft: 72,
-        paddingRight: 72,
+        backgroundColor: C.bg,
+        padding: "96px 128px",
         overflow: "hidden",
+        boxSizing: "border-box" as const,
       }}
     >
-      {/* Ambient glow */}
-      <div
-        style={{
-          position: "absolute",
-          top: "30%",
-          left: "50%",
-          transform: "translate(-50%, -50%)",
-          width: 700,
-          height: 500,
-          background: `radial-gradient(ellipse, rgba(148,184,255,${0.04 + beat}) 0%, transparent 60%)`,
-          pointerEvents: "none",
-        }}
-      />
-
-      {/* Title — Editorial italic, holographic gradient */}
-      <div
-        style={{
-          opacity: titleOpacity * endDim,
-          marginBottom: 6,
-          textAlign: "center",
-          flexShrink: 0,
-        }}
-      >
-        <span
+      {/* ── BEAT 1: Evidence pipeline ── */}
+      {frame < 800 && (
+        <div
           style={{
-            fontFamily: FONTS.editorial,
-            fontSize: 94,
-            fontWeight: 400,
-            fontStyle: "italic",
-            lineHeight: 1.1,
-            background: GRADIENTS.holographic,
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            padding: "96px 128px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 20,
+            opacity: beat1Dim * endDim,
           }}
         >
-          Sovereign Infrastructure
-        </span>
-      </div>
+          {/* Title */}
+          <div
+            style={{
+              opacity: Math.min(titleP * 5, 1),
+              transform: `scale(${titleScale})`,
+              transformOrigin: "left center",
+              marginBottom: 8,
+            }}
+          >
+            <span
+              style={{
+                fontFamily: F.monument,
+                fontSize: SIZE.title,
+                fontWeight: 700,
+                color: C.accent1,
+                textTransform: "uppercase" as const,
+                letterSpacing: "-0.02em",
+                lineHeight: 1,
+              }}
+            >
+              PROOF OF WORK
+            </span>
+          </div>
 
-      {/* Subtitle */}
-      <div
-        style={{
-          opacity: subtitleOpacity * endDim,
-          marginBottom: 20,
-          textAlign: "center",
-          flexShrink: 0,
-        }}
-      >
-        <span
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 34,
-            fontWeight: 400,
-            color: COLORS.muted,
-            letterSpacing: "0.02em",
-          }}
-        >
-          Every piece of evidence, verified without trusting our servers
-        </span>
-      </div>
+          {/* Subtitle */}
+          <div
+            style={{
+              opacity: subtitleFu.opacity,
+              transform: `translateY(${subtitleFu.y}px)`,
+              marginBottom: 16,
+            }}
+          >
+            <span
+              style={{
+                fontFamily: F.swiss,
+                fontSize: SIZE.label,
+                color: C.muted,
+              }}
+            >
+              Every job produces cryptographic evidence
+            </span>
+          </div>
 
-      {/* Evidence steps cascade */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          width: "100%",
-          maxWidth: 820,
-          gap: 8,
-          flex: 1,
-          opacity: endDim,
-        }}
-      >
-        {EVIDENCE_PIPELINE.map((item, i) => {
-          const appearFrame = 40 + i * STEP_STAGGER;
-          const glowSweepFrame = 460 + i * 6;
-
-          return (
+          {/* 5 evidence steps */}
+          {EVIDENCE_STEPS.map((step, i) => (
             <EvidenceStep
               key={i}
               index={i}
-              step={item.step}
-              detail={item.detail}
-              color={item.color}
-              appearFrame={appearFrame}
-              glowSweepFrame={glowSweepFrame}
+              step={step}
+              appearFrame={90 + i * STEP_STAGGER}
+              dimOpacity={beat1Dim}
             />
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
 
-      {/* Closer — Expressive italic, accent2 */}
-      <div
-        style={{
-          marginTop: 16,
-          opacity: closerFade.opacity * endDim,
-          transform: `translateY(${closerFade.translateY}px)`,
-          textAlign: "center",
-          flexShrink: 0,
-        }}
-      >
-        <span
+      {/* ── BEAT 2: Settlement economics ── */}
+      {beat2Visible && frame < 850 && (
+        <div
           style={{
-            fontFamily: FONTS.expressive,
-            fontSize: 66,
-            fontWeight: 400,
-            fontStyle: "italic",
-            color: COLORS.accent2,
-            letterSpacing: "0.01em",
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 32,
+            opacity: beat2Dim * endDim,
+            padding: "96px 128px",
+            boxSizing: "border-box" as const,
           }}
         >
-          Zero trust required.
-        </span>
-      </div>
+          {/* Row of the two numbers */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "center",
+              gap: 120,
+              width: "100%",
+            }}
+          >
+            {/* $175 — what Xometry keeps */}
+            <div
+              style={{
+                opacity: price175P,
+                transform: `translateY(${price175Fu.y}px) translateX(${leftShift}px)`,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: F.monument,
+                  fontSize: SIZE.data,
+                  fontWeight: 700,
+                  color: C.discord,
+                  lineHeight: 1,
+                  letterSpacing: "-0.03em",
+                }}
+              >
+                $175
+              </span>
+              <span
+                style={{
+                  fontFamily: F.swiss,
+                  fontSize: SIZE.label,
+                  color: C.muted,
+                  textAlign: "center",
+                }}
+              >
+                WHAT XOMETRY KEEPS
+              </span>
+              <span
+                style={{
+                  fontFamily: F.swiss,
+                  fontSize: SIZE.label,
+                  color: C.muted,
+                  textAlign: "center",
+                }}
+              >
+                ON A $500 JOB
+              </span>
+            </div>
+
+            {/* $7.50 — PCC protocol fee */}
+            {frame >= 500 && (
+              <div
+                style={{
+                  opacity: price750P,
+                  transform: `translateY(${price750Fu.y}px)`,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: F.monument,
+                    fontSize: SIZE.data,
+                    fontWeight: 700,
+                    color: C.accent1,
+                    lineHeight: 1,
+                    letterSpacing: "-0.03em",
+                  }}
+                >
+                  $7.50
+                </span>
+                <span
+                  style={{
+                    fontFamily: F.swiss,
+                    fontSize: SIZE.label,
+                    color: C.muted,
+                    textAlign: "center",
+                  }}
+                >
+                  PCC PROTOCOL FEE
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Summary line */}
+          {frame >= 640 && (
+            <div
+              style={{
+                opacity: summaryFu.opacity,
+                transform: `translateY(${summaryFu.y}px)`,
+                textAlign: "center",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: F.express,
+                  fontSize: SIZE.body,
+                  fontWeight: 300,
+                  color: C.fg,
+                  lineHeight: 1.4,
+                }}
+              >
+                Operators keep $492.50, not $325.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── BEAT 3: Sponsors ── */}
+      {frame >= 780 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 32,
+            padding: "96px 128px",
+            opacity: endDim,
+            boxSizing: "border-box" as const,
+          }}
+        >
+          {/* "BUILT ON" header */}
+          <div
+            style={{
+              opacity: beat3HeaderFu.opacity,
+              transform: `translateY(${beat3HeaderFu.y}px)`,
+              marginBottom: 8,
+            }}
+          >
+            <span
+              style={{
+                fontFamily: F.monument,
+                fontSize: SIZE.subtitle,
+                fontWeight: 700,
+                color: C.fg,
+                textTransform: "uppercase" as const,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              BUILT ON
+            </span>
+          </div>
+
+          {/* 5 sponsor lines, staggered 40 frames apart from 840 */}
+          {SPONSORS.map((sponsor, i) => {
+            const delayFrame = 840 + i * 40;
+            const p = smooth(frame, fps, delayFrame);
+            const fu = fadeUp(frame, fps, delayFrame);
+            return (
+              <div
+                key={sponsor.name}
+                style={{
+                  opacity: p,
+                  transform: `translateY(${fu.y}px)`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 24,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: F.swiss,
+                    fontSize: 40,
+                    fontWeight: 600,
+                    color: sponsor.real ? C.accent1 : C.muted,
+                    minWidth: 220,
+                  }}
+                >
+                  {sponsor.name}
+                </span>
+                <span
+                  style={{
+                    fontFamily: F.swiss,
+                    fontSize: SIZE.label,
+                    color: C.muted,
+                  }}
+                >
+                  {sponsor.status}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </AbsoluteFill>
   );
 };

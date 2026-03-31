@@ -5,7 +5,7 @@ import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import type { LitAuthSig } from "@pcc/kernel";
-import { kernelKeyStore } from "@pcc/kernel";
+import { kernelKeyStore, generateDecryptAction, executeDecryptAction, isRealLitEnabled } from "@pcc/kernel";
 import { getRepos } from "../db.js";
 
 /**
@@ -22,6 +22,12 @@ function fetchBundleWithCapsules(bundleId: string) {
 }
 
 export async function evidenceEncryptedRoutes(app: FastifyInstance) {
+  // Log Lit service availability at route registration time
+  const litStatus = litEncryptionService.getStatus();
+  console.log(
+    `[LIT] evidence-encrypted routes registered — litConnected=${litStatus.connected} litMode=${litStatus.mode} litNetwork=${litStatus.network}`,
+  );
+
   // Get encrypted evidence bundle
   app.get<{ Params: { bundleId: string } }>("/api/evidence/encrypted/:bundleId", async (req) => {
     const bundle = fetchBundleWithCapsules(req.params.bundleId);
@@ -188,6 +194,14 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
 
   // ── Lit Protocol endpoints ──────────────────────────────────────
 
+  // Get Lit service status
+  app.get("/api/evidence/lit-status", async () => {
+    return {
+      timestamp: new Date().toISOString(),
+      lit: litEncryptionService.getStatus(),
+    };
+  });
+
   // Get Lit access conditions for a bundle
   app.get<{ Params: { bundleId: string } }>("/api/evidence/:bundleId/lit-conditions", async (req, reply) => {
     const bundle = fetchBundleWithCapsules(req.params.bundleId);
@@ -209,7 +223,9 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
     };
   });
 
-  // Decrypt a Lit-encrypted bundle using an auth signature
+  // Decrypt a Lit-encrypted bundle using an auth signature.
+  // Path 1 (preferred): Lit Action via Chipotle REST API (when LIT_PROTOCOL_REAL=true)
+  // Path 2 (fallback): Local litEncryptionService.decryptBundle()
   app.post<{ Params: { bundleId: string }; Body: { authSig: LitAuthSig } }>(
     "/api/evidence/:bundleId/lit-decrypt",
     async (req, reply) => {
@@ -231,9 +247,73 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
         });
       }
 
+      const litApiUrl = process.env.LIT_API_URL ?? "https://api.dev.litprotocol.com/core/v1";
+      const litApiKey = process.env.LIT_USAGE_KEY ?? process.env.LIT_API_KEY ?? "";
+      const useRealLit = isRealLitEnabled() && !!litApiKey;
+
+      // Path 1: Try Lit Action decrypt via Chipotle REST API
+      if (useRealLit) {
+        try {
+          console.log(`[LIT] attempting Lit Action decrypt for bundleId=${req.params.bundleId}`);
+          const storedKey = kernelKeyStore.retrieve(req.params.bundleId);
+          const keyB64 = storedKey ? Buffer.from(storedKey).toString("base64") : "";
+
+          const actionCode = generateDecryptAction({
+            escrowAddress: (bundle as any).escrowAddress ?? "",
+            jobId: (bundle as any).jobId ?? "",
+            chain: (bundle as any).litNetwork === "chipotle" ? "baseSepolia" : "baseSepolia",
+            encryptedKeyB64: keyB64,
+          });
+
+          const result = await executeDecryptAction({
+            apiUrl: litApiUrl,
+            apiKey: litApiKey,
+            actionCode,
+            userAddress: body.authSig.address,
+          });
+
+          if (result.authorized && result.key) {
+            console.log(`[LIT] Lit Action decrypt authorized (${result.role}) for bundleId=${req.params.bundleId}`);
+            pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
+              metadata: { path: "lit_action", role: result.role, operation: "decrypt" },
+            });
+            trackServerEvent("evidence_encrypted", {
+              bundleId: req.params.bundleId,
+              operation: "decrypt",
+              path: "lit_action",
+              role: result.role,
+            }, (req as any).operatorId);
+            return { bundle: { decryptionKey: result.key, role: result.role, path: "lit_action" } };
+          }
+
+          if (!result.authorized) {
+            console.log(`[LIT] Lit Action decrypt denied: ${result.reason}`);
+            // Do NOT fall back to local — the on-chain check said no
+            return reply.code(403).send({
+              error: "access_denied",
+              message: result.reason ?? "On-chain access conditions not met",
+              path: "lit_action",
+            });
+          }
+        } catch (litErr) {
+          // Lit network failure — fall through to local decrypt
+          const litMsg = litErr instanceof Error ? litErr.message : "Lit Action failed";
+          console.log(`[LIT] Lit Action decrypt failed, falling back to local: ${litMsg}`);
+        }
+      }
+
+      // Path 2: Local decrypt (mock Lit or real Lit unavailable)
       try {
+        console.log(`[LIT] using local decrypt for bundleId=${req.params.bundleId}`);
         const decrypted = await litEncryptionService.decryptBundle(bundle as any, body.authSig);
-        trackServerEvent("evidence_encrypted", { bundleId: req.params.bundleId, operation: "decrypt" }, (req as any).operatorId);
+        pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
+          metadata: { path: "local", operation: "decrypt" },
+        });
+        trackServerEvent("evidence_encrypted", {
+          bundleId: req.params.bundleId,
+          operation: "decrypt",
+          path: "local",
+        }, (req as any).operatorId);
         return { bundle: decrypted };
       } catch (err) {
         const message = err instanceof Error ? err.message : "Decryption failed";

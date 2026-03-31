@@ -1,265 +1,106 @@
 /**
- * S06_Dashboard — "GLOBAL ACCESS"
+ * S06_Dashboard — "Global Access"
  *
- * 540 frames (18 seconds). Judge target: Sabeen Ali (social impact),
- * Mashal Waqar (public goods), Lain Calvo (emerging markets),
- * David Casey (coordination).
+ * 450 frames (15s). Clean, simple, well-spaced.
+ * 5 text elements total. Max 5 on screen.
  *
- * The EMERGING MARKETS scene. PCC is accessible to anyone, anywhere.
+ * Frame 0:   "OPEN ACCESS" SLAM — MONUMENT, 96px, C.fg
+ * Frame 40:  "pip install pcc-node" — BRUTALIST, 64px, C.accent2
+ * Frame 100: "Hardware auto-detect. Keys generated." — SWISS, 44px, C.muted
+ * Frame 160: "Operator live in 30 minutes." — SWISS, 44px, C.muted
+ * Frame 220: "34 countries. Fiat ramps. No gatekeepers." — EXPRESSIVE, 44px, C.fg
+ * Frame 350: Dim over 100 frames
  *
- * Frame 0-5:   Black.
- * Frame 6:     "ANY OPERATOR. ANYWHERE." SLAMS in — Monument, 64px, accent1. slamScale 2x.
- * Frame 30:    "pip install pcc-node" — Brutalist, 28px, accent2. Spring entrance.
- * Frame 60:    "34 countries..." — Swiss, muted. Fade in.
- * Frame 90-380: Four feature cards, 2x2 grid, staggered 40 frames.
- * Frame 400:   Impact quote — Editorial italic, accent2.
- * Frame 480:   "No middlemen..." — Swiss, muted.
- * Frame 510:   Dim to black.
- *
- * Voices: Monument (headline), Brutalist (command, card-stat), Swiss (body, labels),
- *         Editorial (impact quote)
+ * Design rules enforced:
+ * - Min font 36px
+ * - Max 5 elements on screen
+ * - bg #050a0e
+ * - Safe margins: 128px left/right, 96px top/bottom
  */
 import React from "react";
 import {
   useCurrentFrame,
   useVideoConfig,
   AbsoluteFill,
-  interpolate,
-  Easing,
 } from "remotion";
-import {
-  COLORS,
-  FONTS,
-  slamSpring,
-  slamScale,
-  smoothSpring,
-  fadeSlideUp,
-} from "../lib";
-
-type FeatureCardData = {
-  stat: string;
-  statColor: string;
-  statSize: number;
-  label: string;
-  caption: string;
-  captionItalic?: boolean;
-};
-
-const FEATURE_CARDS: FeatureCardData[] = [
-  {
-    stat: "30 MIN",
-    statColor: COLORS.emerald,
-    statSize: 68,
-    label: "from zero to live operator",
-    caption: "Hardware auto-detect → keys → register → go",
-  },
-  {
-    stat: "34",
-    statColor: COLORS.gold,
-    statSize: 68,
-    label: "emerging market countries",
-    caption: "Yellowcard · Stripe · Wise",
-  },
-  {
-    stat: "APACHE 2.0",
-    statColor: COLORS.accent2,
-    statSize: 54,
-    label: "open spec, open protocol",
-    caption: "Not a marketplace. A public good.",
-    captionItalic: true,
-  },
-  {
-    stat: "OT-2",
-    statColor: COLORS.discord,
-    statSize: 68,
-    label: "liquid handling robot",
-    caption: "First node. Live in San Francisco.",
-  },
-];
-
-const FeatureCard: React.FC<{
-  card: FeatureCardData;
-  appearFrame: number;
-}> = ({ card, appearFrame }) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const progress = smoothSpring(frame, fps, appearFrame);
-  const translateY = interpolate(progress, [0, 1], [24, 0]);
-
-  return (
-    <div
-      style={{
-        opacity: progress,
-        transform: `translateY(${translateY}px)`,
-        background: COLORS.bg.surface,
-        border: `1px solid ${COLORS.bg.border}`,
-        borderRadius: 12,
-        padding: 24,
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-        flex: 1,
-        minWidth: 0,
-      }}
-    >
-      <div
-        style={{
-          fontFamily: FONTS.monument,
-          fontSize: card.statSize,
-          fontWeight: 700,
-          color: card.statColor,
-          lineHeight: 1,
-          letterSpacing: card.statSize >= 68 ? "-0.02em" : "-0.01em",
-        }}
-      >
-        {card.stat}
-      </div>
-      <div
-        style={{
-          fontFamily: FONTS.swiss,
-          fontSize: 34,
-          fontWeight: 600,
-          color: COLORS.fg,
-          textTransform: "uppercase" as const,
-          letterSpacing: "0.08em",
-        }}
-      >
-        {card.label}
-      </div>
-      <div
-        style={{
-          fontFamily: card.captionItalic ? FONTS.editorial : FONTS.brutalist,
-          fontSize: 60,
-          fontWeight: 400,
-          color: COLORS.muted,
-          fontStyle: card.captionItalic ? ("italic" as const) : ("normal" as const),
-          letterSpacing: card.captionItalic ? "0" : "0.04em",
-          marginTop: 2,
-        }}
-      >
-        {card.caption}
-      </div>
-    </div>
-  );
-};
+import { C, F, SIZE, smooth, slamScale, fadeUp } from "../lib";
 
 export const S06_Dashboard: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Pure black for first 5 frames
-  if (frame < 5) {
-    return <AbsoluteFill style={{ backgroundColor: "#000000" }} />;
-  }
+  // Title SLAM at frame 0
+  const titleP = smooth(frame, fps, 0);
+  const titleScale = slamScale(frame, fps, 0, 2.5);
 
-  // Headline SLAM — Monument, 64px, accent1
-  const headlineProgress = slamSpring(frame, fps, 6);
-  const headlineScale = slamScale(frame, fps, 6, 2);
-  const headlineOpacity = Math.min(headlineProgress * 5, 1);
+  // pip install at frame 40
+  const pipFu = fadeUp(frame, fps, 40);
 
-  // pip install line — spring entrance at frame 30
-  const cmdProgress = smoothSpring(frame, fps, 30);
-  const cmdTranslateY = interpolate(cmdProgress, [0, 1], [20, 0]);
+  // Line 1 at frame 100
+  const line1Fu = fadeUp(frame, fps, 100);
 
-  // Subtext fade at frame 60
-  const subtextOpacity = interpolate(frame, [60, 80], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
+  // Line 2 at frame 160
+  const line2Fu = fadeUp(frame, fps, 160);
 
-  // Grid appears frame 90-380 (4 cards × 40 frames)
-  const CARD_STAGGER = 40;
-  const cardAppearFrames = FEATURE_CARDS.map((_, i) => 90 + i * CARD_STAGGER);
+  // Line 3 at frame 220
+  const line3Fu = fadeUp(frame, fps, 220);
 
-  // Impact quote — fade in at frame 400
-  const quoteFade = fadeSlideUp(frame, fps, 400);
-
-  // No-middlemen line at frame 480
-  const noMiddlemenOpacity = interpolate(frame, [480, 500], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
-
-  // Dim to black
-  const endDim = interpolate(frame, [510, 540], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  // End dim: frame 350 → 450
+  const endDim =
+    frame >= 350
+      ? Math.max(0, 1 - (frame - 350) / 100)
+      : 1;
 
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: COLORS.bg.deep,
+        backgroundColor: C.bg,
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        paddingTop: 44,
-        paddingBottom: 32,
-        paddingLeft: 72,
-        paddingRight: 72,
-        overflow: "hidden",
+        justifyContent: "center",
+        gap: 40,
+        padding: "96px 128px",
         opacity: endDim,
+        boxSizing: "border-box" as const,
+        overflow: "hidden",
       }}
     >
-      {/* Subtle gold ambient */}
+      {/* OPEN ACCESS */}
       <div
         style={{
-          position: "absolute",
-          top: "20%",
-          left: "50%",
-          transform: "translate(-50%, -50%)",
-          width: 700,
-          height: 400,
-          background:
-            "radial-gradient(ellipse, rgba(245,166,35,0.04) 0%, transparent 65%)",
-          pointerEvents: "none",
-        }}
-      />
-
-      {/* Headline */}
-      <div
-        style={{
-          opacity: headlineOpacity,
-          transform: `scale(${headlineScale})`,
-          textAlign: "center",
-          marginBottom: 20,
-          flexShrink: 0,
+          opacity: Math.min(titleP * 5, 1),
+          transform: `scale(${titleScale})`,
+          transformOrigin: "left center",
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.monument,
-            fontSize: 106,
+            fontFamily: F.monument,
+            fontSize: SIZE.title,
             fontWeight: 700,
-            color: COLORS.accent1,
-            letterSpacing: "-0.02em",
+            color: C.fg,
             textTransform: "uppercase" as const,
-            textShadow: "0 0 40px rgba(245,166,35,0.4)",
+            letterSpacing: "-0.02em",
+            lineHeight: 1,
           }}
         >
-          Any Operator. Anywhere.
+          OPEN ACCESS
         </span>
       </div>
 
       {/* pip install pcc-node */}
       <div
         style={{
-          opacity: cmdProgress,
-          transform: `translateY(${cmdTranslateY}px)`,
-          marginBottom: 10,
-          textAlign: "center",
-          flexShrink: 0,
+          opacity: pipFu.opacity,
+          transform: `translateY(${pipFu.y}px)`,
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.brutalist,
-            fontSize: 66,
+            fontFamily: F.brutalist,
+            fontSize: SIZE.subtitle,
             fontWeight: 700,
-            color: COLORS.accent2,
+            color: C.accent2,
             letterSpacing: "0.02em",
           }}
         >
@@ -267,96 +108,60 @@ export const S06_Dashboard: React.FC = () => {
         </span>
       </div>
 
-      {/* Subtext */}
+      {/* Hardware auto-detect */}
       <div
         style={{
-          opacity: subtextOpacity,
-          marginBottom: 28,
-          textAlign: "center",
-          flexShrink: 0,
+          opacity: line1Fu.opacity,
+          transform: `translateY(${line1Fu.y}px)`,
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 66,
+            fontFamily: F.swiss,
+            fontSize: SIZE.body,
             fontWeight: 400,
-            color: COLORS.muted,
-            letterSpacing: "0.01em",
+            color: C.muted,
           }}
         >
-          34 countries. Fiat ramps. No corporate account.
+          Hardware auto-detect. Keys generated.
         </span>
       </div>
 
-      {/* 2×2 feature card grid */}
+      {/* Operator live in 30 minutes */}
       <div
         style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-          width: "100%",
-          maxWidth: 880,
-          flex: 1,
-          minHeight: 0,
-        }}
-      >
-        {/* Row 1 */}
-        <div style={{ display: "flex", gap: 12, flex: 1 }}>
-          <FeatureCard card={FEATURE_CARDS[0]} appearFrame={cardAppearFrames[0]} />
-          <FeatureCard card={FEATURE_CARDS[1]} appearFrame={cardAppearFrames[1]} />
-        </div>
-        {/* Row 2 */}
-        <div style={{ display: "flex", gap: 12, flex: 1 }}>
-          <FeatureCard card={FEATURE_CARDS[2]} appearFrame={cardAppearFrames[2]} />
-          <FeatureCard card={FEATURE_CARDS[3]} appearFrame={cardAppearFrames[3]} />
-        </div>
-      </div>
-
-      {/* Impact quote */}
-      <div
-        style={{
-          marginTop: 20,
-          opacity: quoteFade.opacity,
-          transform: `translateY(${quoteFade.translateY}px)`,
-          textAlign: "center",
-          maxWidth: 780,
-          flexShrink: 0,
+          opacity: line2Fu.opacity,
+          transform: `translateY(${line2Fu.y}px)`,
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.editorial,
-            fontSize: 66,
+            fontFamily: F.swiss,
+            fontSize: SIZE.body,
             fontWeight: 400,
-            fontStyle: "italic",
-            color: COLORS.accent2,
-            lineHeight: 1.5,
+            color: C.muted,
           }}
         >
-          Any lab, any shop, any operator — connected to every buyer on Earth.
+          Operator live in 30 minutes.
         </span>
       </div>
 
-      {/* No middlemen */}
+      {/* 34 countries */}
       <div
         style={{
-          marginTop: 10,
-          opacity: noMiddlemenOpacity,
-          textAlign: "center",
-          flexShrink: 0,
+          opacity: line3Fu.opacity,
+          transform: `translateY(${line3Fu.y}px)`,
         }}
       >
         <span
           style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 66,
-            fontWeight: 400,
-            color: COLORS.muted,
-            letterSpacing: "0.06em",
+            fontFamily: F.express,
+            fontSize: SIZE.body,
+            fontWeight: 300,
+            color: C.fg,
           }}
         >
-          No middlemen. No minimum deal size.
+          34 countries. Fiat ramps. No gatekeepers.
         </span>
       </div>
     </AbsoluteFill>

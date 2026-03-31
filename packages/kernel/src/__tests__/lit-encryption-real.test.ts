@@ -260,6 +260,78 @@ describe("RealLitEncryptionService", () => {
     });
   });
 
+  // ── getStatus (telemetry) ──────────────────────────────────────────
+
+  describe("getStatus", () => {
+    it("returns status before connect (disconnected, local-aes)", () => {
+      service = new RealLitEncryptionService();
+      const status = service.getStatus();
+
+      expect(status.connected).toBe(false);
+      expect(status.mode).toBe("local-aes");
+      expect(status.network).toBe("chipotle");
+      expect(status.hasPKP).toBe(false);
+      expect(status.apiKeyPresent).toBe(false);
+      expect(status.encryptCount).toBe(0);
+      expect(status.decryptCount).toBe(0);
+      expect(status.lastError).toBeNull();
+    });
+
+    it("returns connected=true after connect (no API key)", async () => {
+      service = new RealLitEncryptionService();
+      await service.connect();
+      const status = service.getStatus();
+
+      expect(status.connected).toBe(true);
+      expect(status.mode).toBe("local-aes");
+      expect(status.hasPKP).toBe(false);
+    });
+
+    it("returns custom network in status", () => {
+      service = new RealLitEncryptionService({ network: "datil-test" });
+      const status = service.getStatus();
+
+      expect(status.network).toBe("datil-test");
+    });
+
+    it("tracks encryptCount after encryption", async () => {
+      service = new RealLitEncryptionService();
+      await service.connect();
+
+      const bundle = {
+        id: "bun_status_test",
+        jobId: "job_test",
+        events: [],
+      } as any;
+
+      await service.encryptBundle(bundle, ESCROW_ADDRESS, JOB_ID);
+      const status = service.getStatus();
+
+      expect(status.encryptCount).toBe(1);
+    });
+
+    it("tracks lastError on failure", async () => {
+      service = new RealLitEncryptionService();
+      // Not connected — encrypt should fail
+      try {
+        await service.encryptBundle({} as any, ESCROW_ADDRESS, JOB_ID);
+      } catch {
+        // expected
+      }
+
+      const status = service.getStatus();
+      expect(status.lastError).toContain("not connected");
+    });
+
+    it("is synchronous", () => {
+      service = new RealLitEncryptionService();
+      // getStatus() should not return a Promise
+      const result = service.getStatus();
+      expect(result).not.toBeInstanceOf(Promise);
+      expect(typeof result.connected).toBe("boolean");
+    });
+  });
+
   // ── Interface compatibility ───────────────────────────────────────
 
   describe("interface compatibility", () => {
@@ -275,6 +347,7 @@ describe("RealLitEncryptionService", () => {
       expect(typeof service.decryptBundle).toBe("function");
       expect(typeof service.getAccessConditions).toBe("function");
       expect(typeof service.validateAccessConditions).toBe("function");
+      expect(typeof service.getStatus).toBe("function");
     });
   });
 });

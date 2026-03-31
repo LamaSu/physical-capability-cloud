@@ -1,4 +1,4 @@
-export { COLORS, GRADIENTS } from "./colors";
-export { FONTS } from "./fonts";
+export { C } from "./colors";
+export { F, SIZE } from "./fonts";
 export * from "./data";
-export * from "./animations";
+export * from "./anim";
