@@ -165,6 +165,10 @@ export type Intent =
   | NearPaymentQuoteResult
   | NearPaymentSubmit
   | NearPaymentSettled
+  // Capability Request Decomposition
+  | CapabilityRequestSubmittedIntent
+  | CapabilityRequestDecomposedIntent
+  | CapabilityNodeAssignedIntent
   // General
   | TextMessageIntent
   | ErrorIntent;
@@ -1060,4 +1064,62 @@ export interface NearPaymentSettled {
   status: "pending" | "submitted" | "settled" | "failed";
   txHash?: string;
   explorerUrl?: string;
+}
+
+// ── Capability Request Decomposition Intents ───────────────────────
+// These intents flow through the agent network when a user submits a
+// high-level natural language request that gets decomposed into a DAG
+// of capability nodes, each becoming a bounty.
+
+/** A new capability request was submitted by a user or agent */
+export interface CapabilityRequestSubmittedIntent {
+  type: "capability_request_submitted";
+  /** The new request ID */
+  requestId: string;
+  /** Short title */
+  title: string;
+  /** Natural language description */
+  description: string;
+  /** Requester identifier (email or wallet) */
+  requesterId: string;
+  /** Total budget in USDC */
+  budget: number;
+  /** ISO deadline */
+  deadline: string;
+  /** Urgency level */
+  urgency: "standard" | "rush" | "emergency";
+}
+
+/** A capability request was decomposed into a DAG by the decomposer */
+export interface CapabilityRequestDecomposedIntent {
+  type: "capability_request_decomposed";
+  /** The request that was decomposed */
+  requestId: string;
+  /** How many capability nodes were created */
+  nodeCount: number;
+  /** IDs of all nodes in dependency order */
+  nodeIds: string[];
+  /** IDs on the critical path */
+  criticalPath: string[];
+  /** Total estimated cost across all nodes */
+  totalEstimatedCost: number;
+  /** Total estimated hours */
+  totalEstimatedHours: number;
+  /** Which template was matched */
+  templateUsed: string;
+}
+
+/** An operator was assigned to a specific capability node */
+export interface CapabilityNodeAssignedIntent {
+  type: "capability_node_assigned";
+  /** The parent request */
+  requestId: string;
+  /** The specific node being assigned */
+  nodeId: string;
+  /** Node name (human-readable) */
+  nodeName: string;
+  /** Assigned operator ID */
+  operatorId: string;
+  /** The bounty ID linked to this node (if any) */
+  bountyId?: string;
 }

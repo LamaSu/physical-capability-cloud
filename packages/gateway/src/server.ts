@@ -59,6 +59,7 @@ import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
+import { requestRoutes } from "./routes/requests.js";
 import { dhtWebSocketRoutes } from "./routes/dht-ws.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -252,6 +253,7 @@ export async function createGateway(port = 3200) {
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);
   await app.register(anomalyRoutes);
+  await app.register(requestRoutes);
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
