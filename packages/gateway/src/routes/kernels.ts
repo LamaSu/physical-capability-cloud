@@ -111,4 +111,51 @@ export async function kernelRoutes(app: FastifyInstance) {
     });
     return reply.code(201).send({ kernel: inserted });
   });
+
+  // ── POST /api/kernels/:kernelId/heartbeat ─────────────────────────────────
+  // Per-kernel heartbeat alias — pcc-node daemons call this path.
+  // Delegates to the same logic as POST /api/operator/heartbeat.
+  app.post<{
+    Params: { kernelId: string };
+    Body: { status?: string; capabilities?: Array<Record<string, unknown>>; timestamp?: number };
+  }>("/api/kernels/:kernelId/heartbeat", async (req) => {
+    const { kernelId } = req.params;
+    const { status = "online", capabilities } = req.body ?? {};
+    const now = new Date().toISOString();
+    const repos = getRepos();
+
+    const kernel = repos.kernels.findById(kernelId);
+    if (kernel) {
+      try {
+        repos.kernels.update(kernelId, { status: status === "offline" ? "offline" : "online" });
+      } catch { /* soft fail */ }
+    }
+
+    return {
+      acknowledged: true,
+      kernelId,
+      status,
+      capabilitiesReceived: capabilities?.length ?? 0,
+      timestamp: now,
+    };
+  });
+
+  // ── POST /api/kernels/:kernelId/capabilities ──────────────────────────────
+  // Capability announcement from pcc-node daemons.
+  app.post<{
+    Params: { kernelId: string };
+    Body: { capabilities?: Array<Record<string, unknown>>; devices?: string[]; signature?: string };
+  }>("/api/kernels/:kernelId/capabilities", async (req) => {
+    const { kernelId } = req.params;
+    const { capabilities = [], devices = [] } = req.body ?? {};
+    const now = new Date().toISOString();
+
+    return {
+      acknowledged: true,
+      kernelId,
+      capabilitiesReceived: capabilities.length,
+      devicesReceived: devices.length,
+      timestamp: now,
+    };
+  });
 }
