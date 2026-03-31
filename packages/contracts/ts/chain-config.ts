@@ -65,8 +65,12 @@ export interface ChainDeployment {
     mockUSDC?: Address;
     /** Real USDC on base-sepolia (Circle-deployed) */
     usdc?: Address;
-    /** PCCProtocol root contract — collects 1.5% from all settlements */
+    /** PCCProtocol root contract — collects 2.35% from all settlements via oracle attestation */
     pccProtocol?: Address;
+    /** PCCOracleVerifier — on-chain EIP-712 attestation verification */
+    oracleVerifier?: Address;
+    /** VerifierRegistry — verifier staking */
+    verifierRegistry?: Address;
     /** ERC-8004 registries */
     identityRegistry?: Address;
     reputationRegistry?: Address;
@@ -112,7 +116,13 @@ export const deployments: Record<string, ChainDeployment> = {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       milestoneEscrowFactory: "0x10059efeeab1ddf013489e9597a3aec4480d95e1",
-      mockUSDC: "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9",
+      mockUSDC: "0x3882f1437ec084D8BD5606eD6549De77C42eb4ba",
+      // PCCProtocol v2 — 2.35% fee, oracle-gated settlement (deployed 2026-03-31)
+      pccProtocol: "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23",
+      identityRegistry: "0xA35972487B8148601E74a92250289b264376c955",
+      reputationRegistry: "0x354860589bE457b4a4D195F4063659c2CD7899E8",
+      validationRegistry: "0xb09ca0eC847e66f67a1288eFF3237E8904C9d395",
+      verifierRegistry: "0x5D84285C487B1dc631B55512D5423A12A48cd97A",
     },
     blockExplorer: "https://sepolia.basescan.org",
   },
