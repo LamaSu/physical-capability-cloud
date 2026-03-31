@@ -1,203 +1,311 @@
 /**
- * S03_Architecture — "The Protocol"
+ * S03_Architecture — "The Protocol" (REWRITTEN from storyboard.json)
  *
- * 600 frames (20 seconds). One animated flow diagram of the full stack.
+ * 540 frames (18 seconds). 6-phase protocol flow diagram.
  *
- * Frame 0:      Title "THE PROTOCOL" — MONUMENT, SIZE.title (96px), C.fg. Fade in.
- * Frame 60-420: Horizontal flow of 6 nodes (SIX_PHASES).
- *               Node i appears at frame 60 + i*60 with smooth spring scale 0.9→1.
- *               Connector line draws between nodes.
- *               Node box: C.surface bg, 1px border in phase color, borderRadius 12px.
- *               Name: MONUMENT, 40px, phase color.
- *               Desc: SWISS, SIZE.label (36px), C.muted.
- * Frame 430:    Sponsor credits — SWISS, SIZE.label, C.muted, centered.
- * Frame 530:    Dim over 70 frames.
+ * Frame 0:     "THE PROTOCOL" — MONUMENT 96px, slam
+ * Frame 30:    Node 1: OPERATOR — slam
+ * Frame 42:    Node 2: SHOP KERNEL — slam
+ * Frame 54:    Node 3: PCC GATEWAY — slam
+ * Frame 66:    Node 4: AI AGENT — slam
+ * Frame 78:    Node 5: EVIDENCE STACK (emerald border) — slam
+ * Frame 90:    Node 6: SETTLEMENT (gold border) — slam
+ * Frame 108:   Connector lines draw left→right over 60 frames
+ * Frame 200:   Caption: "No central registry. Any node failure is non-fatal."
+ * Frame 320:   Discord rule: 2px vertical between Evidence↔Settlement
+ *              Appears #ff0066, resolves to #00ff88 over 15 frames, gone at 350
+ * Frame 420:   Pulse dot runs chain (30 frames)
  *
- * NOTE: The ESCROW node (index 2) has color #ff0066 from SIX_PHASES data.
- * This is data-driven, not a "discord use" for the 3-discord rule.
- *
- * DESIGN RULES:
- * - Min font: SIZE.label = 36px
- * - Max 5 elements at once (nodes stagger so only a few visible per moment)
- * - bg: #050a0e
+ * Discord: #ff0066 on rule between Evidence and Settlement — 30 frames only.
+ * Max elements simultaneous: 5
  */
 import React from "react";
-import { useCurrentFrame, useVideoConfig, AbsoluteFill, interpolate, Easing } from "remotion";
-import { C, F, SIZE, smooth } from "../lib";
-import { SIX_PHASES } from "../lib";
+import {
+  useCurrentFrame,
+  useVideoConfig,
+  AbsoluteFill,
+  interpolate,
+  Easing,
+} from "remotion";
+import { C, F, SIZE, smooth, slam, fadeUp } from "../lib";
 
-const NODE_WIDTH = 200;
-const NODE_HEIGHT = 120;
-const GAP = 40;
-const CONNECTOR_WIDTH = GAP;
-const TITLE_DELAY = 0;
-const SPONSOR_FRAME = 430;
+// Node definitions
+const NODES = [
+  {
+    id: "operator",
+    label: "OPERATOR",
+    sub1: "pcc-node",
+    sub2: "pip install",
+    x: 128,
+    bg: C.surface,
+    border: C.border,
+    glow: "none",
+    delay: 30,
+    labelColor: C.fg,
+  },
+  {
+    id: "shopkernel",
+    label: "SHOP KERNEL",
+    sub1: "Ed25519",
+    sub2: "DHT gossip",
+    x: 404,
+    bg: C.surface,
+    border: C.border,
+    glow: `rgba(0,212,255,0.12)`,
+    delay: 42,
+    labelColor: C.fg,
+  },
+  {
+    id: "gateway",
+    label: "PCC GATEWAY",
+    sub1: "347 endpoints",
+    sub2: "Railway",
+    x: 680,
+    bg: "#121c2a",
+    border: C.border,
+    glow: "none",
+    delay: 54,
+    labelColor: C.fg,
+  },
+  {
+    id: "aiagent",
+    label: "AI AGENT",
+    sub1: "A2A typed",
+    sub2: "34 intents",
+    x: 956,
+    bg: C.surface,
+    border: C.border,
+    glow: `rgba(0,212,255,0.12)`,
+    delay: 66,
+    labelColor: C.fg,
+  },
+  {
+    id: "evidence",
+    label: "EVIDENCE STACK",
+    sub1: "Storacha",
+    sub2: "Lit  Starknet",
+    x: 1232,
+    bg: C.surface,
+    border: C.accent1,
+    glow: `rgba(0,255,136,0.15)`,
+    delay: 78,
+    labelColor: C.fg,
+  },
+  {
+    id: "settlement",
+    label: "SETTLEMENT",
+    sub1: "MilestoneEscrow",
+    sub2: "Flow  NEAR",
+    x: 1508,
+    bg: C.surface,
+    border: C.gold,
+    glow: `rgba(255,170,0,0.10)`,
+    delay: 90,
+    labelColor: C.fg,
+  },
+] as const;
+
+const NODE_W = 220;
+const NODE_H = 140;
+const NODES_Y = 400; // center of nodes
+const NODE_TOP = NODES_Y - NODE_H / 2;
 
 export const S03_Architecture: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // ── Title fade in ────────────────────────────────────────────────────────
-  const titleP = smooth(frame, fps, TITLE_DELAY);
-  const titleOpacity = titleP;
-  const titleY = interpolate(titleP, [0, 1], [24, 0]);
+  // Title
+  const titleSlam = slam(frame, fps, 0);
+  const titleX = interpolate(titleSlam, [0, 1], [-60, 0]);
+  const titleOpacity = Math.min(titleSlam * 6, 1);
 
-  // ── Sponsor credits ──────────────────────────────────────────────────────
-  const sponsorP = smooth(frame, fps, SPONSOR_FRAME);
-  const sponsorOpacity = sponsorP;
-  const sponsorY = interpolate(sponsorP, [0, 1], [16, 0]);
+  // Connector draw progress — frames 108–168
+  const connectorProgress = interpolate(frame, [108, 168], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.inOut(Easing.cubic),
+  });
 
-  // ── End dim ──────────────────────────────────────────────────────────────
-  const endDim = interpolate(frame, [530, 600], [1, 0], {
+  // Caption — frame 200
+  const caption = fadeUp(frame, fps, 200);
+
+  // Discord rule — frames 320–350
+  const ruleVisible = frame >= 320 && frame <= 350;
+  const ruleColor = frame >= 320 && frame < 335
+    ? interpolate(frame, [320, 335], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })
+    : 1;
+  // 0 = discord (#ff0066), 1 = accent1 (#00ff88)
+  const ruleColorValue = frame < 335 ? C.discord : C.accent1;
+
+  // Pulse animation — frames 420–450
+  const pulseProgress = interpolate(frame, [420, 450], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+    easing: Easing.inOut(Easing.cubic),
+  });
+  const pulseVisible = frame >= 420 && frame <= 470;
+  // Pulse dot X: from node1 center to node6 center
+  const pulseX = pulseVisible
+    ? interpolate(pulseProgress, [0, 1], [128 + NODE_W / 2, 1508 + NODE_W / 2])
+    : -100;
+
+  // End fade
+  const endDim = interpolate(frame, [510, 540], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.in(Easing.cubic),
   });
 
-  // ── Node visibility ──────────────────────────────────────────────────────
-  // Total pipeline width
-  const totalWidth = SIX_PHASES.length * NODE_WIDTH + (SIX_PHASES.length - 1) * CONNECTOR_WIDTH;
-
   return (
-    <AbsoluteFill
-      style={{
-        backgroundColor: C.bg,
-        padding: "96px 128px",
-        display: "flex",
-        flexDirection: "column",
-        opacity: endDim,
-      }}
-    >
+    <AbsoluteFill style={{ backgroundColor: C.bg, opacity: endDim }}>
       {/* Title */}
       <div
         style={{
+          position: "absolute",
+          top: 96,
+          left: 128,
           fontFamily: F.monument,
           fontSize: SIZE.title,
           fontWeight: 700,
           color: C.fg,
           textTransform: "uppercase" as const,
-          letterSpacing: "-0.02em",
-          lineHeight: 1.0,
+          letterSpacing: "0.06em",
+          lineHeight: 1,
           opacity: titleOpacity,
-          transform: `translateY(${titleY}px)`,
-          marginBottom: 64,
+          transform: `translateX(${titleX}px)`,
         }}
       >
         THE PROTOCOL
       </div>
 
-      {/* Pipeline — horizontally scrollable / auto-fit */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
+      {/* Connector lines — SVG */}
+      <svg
+        style={{ position: "absolute", top: 0, left: 0, width: 1920, height: 1080 }}
       >
+        {NODES.slice(0, -1).map((node, i) => {
+          const nextNode = NODES[i + 1];
+          const x1 = node.x + NODE_W;
+          const x2 = nextNode.x;
+          const y = NODES_Y;
+          const segmentEnd = connectorProgress * (NODES.length - 1);
+          const segDone = Math.min(Math.max(segmentEnd - i, 0), 1);
+          const segX2 = x1 + (x2 - x1) * segDone;
+          return (
+            <line
+              key={node.id}
+              x1={x1}
+              y1={y}
+              x2={segX2}
+              y2={y}
+              stroke={C.border}
+              strokeWidth={2}
+            />
+          );
+        })}
+
+        {/* Pulse dot */}
+        {pulseVisible && (
+          <circle
+            cx={pulseX}
+            cy={NODES_Y}
+            r={8}
+            fill={C.accent1}
+            style={{
+              filter: `drop-shadow(0 0 8px ${C.accent1})`,
+            }}
+          />
+        )}
+
+        {/* Discord rule between Evidence and Settlement — vertical */}
+        {ruleVisible && (
+          <line
+            x1={NODES[4].x + NODE_W + 8}
+            y1={NODE_TOP - 12}
+            x2={NODES[4].x + NODE_W + 8}
+            y2={NODE_TOP + NODE_H + 12}
+            stroke={ruleColorValue}
+            strokeWidth={2}
+            opacity={frame <= 350 ? interpolate(frame, [340, 350], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }) : 0}
+          />
+        )}
+      </svg>
+
+      {/* Nodes */}
+      {NODES.map((node) => {
+        const p = smooth(frame, fps, node.delay);
+        const nodeX = interpolate(p, [0, 1], [-40, 0]);
+        const nodeOpacity = Math.min(p * 5, 1);
+
+        return (
+          <div
+            key={node.id}
+            style={{
+              position: "absolute",
+              left: node.x,
+              top: NODE_TOP,
+              width: NODE_W,
+              height: NODE_H,
+              backgroundColor: node.bg,
+              border: `1px solid ${node.border}`,
+              borderRadius: 8,
+              boxShadow: node.glow !== "none" ? `0 0 20px ${node.glow}` : undefined,
+              opacity: nodeOpacity,
+              transform: `translateX(${nodeX}px)`,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              padding: "12px 8px",
+            }}
+          >
+            <div
+              style={{
+                fontFamily: F.swiss,
+                fontSize: SIZE.label,
+                fontWeight: 600,
+                color: node.labelColor,
+                textAlign: "center" as const,
+                lineHeight: 1.2,
+              }}
+            >
+              {node.label}
+            </div>
+            <div
+              style={{
+                fontFamily: F.brutalist,
+                fontSize: SIZE.label,
+                color: C.muted,
+                textAlign: "center" as const,
+                lineHeight: 1.3,
+                whiteSpace: "pre-line" as const,
+              }}
+            >
+              {`${node.sub1}\n${node.sub2}`}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Caption */}
+      {frame >= 200 && (
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            width: totalWidth,
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: NODE_TOP + NODE_H + 48,
+            fontFamily: F.swiss,
+            fontSize: SIZE.label,
+            color: C.muted,
+            textAlign: "center" as const,
+            opacity: caption.opacity,
+            transform: `translateY(${caption.y}px)`,
           }}
         >
-          {SIX_PHASES.map((phase, i) => {
-            const nodeDelay = 60 + i * 60;
-            const nodeP = smooth(frame, fps, nodeDelay);
-            const nodeScale = interpolate(nodeP, [0, 1], [0.9, 1]);
-            const nodeOpacity = nodeP;
-
-            // Connector draws after the PREVIOUS node arrives
-            const connectorDelay = nodeDelay - 30;
-            const connectorP = i > 0 ? smooth(frame, fps, connectorDelay) : 0;
-            const connectorWidth = interpolate(connectorP, [0, 1], [0, CONNECTOR_WIDTH]);
-
-            return (
-              <React.Fragment key={phase.name}>
-                {/* Connector line (before each node except first) */}
-                {i > 0 && (
-                  <div
-                    style={{
-                      width: connectorWidth,
-                      height: 1,
-                      backgroundColor: phase.color,
-                      opacity: 0.5,
-                      flexShrink: 0,
-                      overflow: "hidden",
-                    }}
-                  />
-                )}
-
-                {/* Node box */}
-                <div
-                  style={{
-                    width: NODE_WIDTH,
-                    minHeight: NODE_HEIGHT,
-                    backgroundColor: C.surface,
-                    border: `1px solid ${phase.color}`,
-                    borderRadius: 12,
-                    padding: "18px 20px",
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-start",
-                    justifyContent: "center",
-                    gap: 8,
-                    flexShrink: 0,
-                    opacity: nodeOpacity,
-                    transform: `scale(${nodeScale})`,
-                    boxShadow: `0 0 24px ${phase.color}22`,
-                  }}
-                >
-                  {/* Phase name */}
-                  <div
-                    style={{
-                      fontFamily: F.monument,
-                      fontSize: 40,
-                      fontWeight: 700,
-                      color: phase.color,
-                      textTransform: "uppercase" as const,
-                      letterSpacing: "0.02em",
-                      lineHeight: 1.1,
-                    }}
-                  >
-                    {phase.name}
-                  </div>
-
-                  {/* Phase description */}
-                  <div
-                    style={{
-                      fontFamily: F.swiss,
-                      fontSize: SIZE.label,
-                      fontWeight: 400,
-                      color: C.muted,
-                      lineHeight: 1.3,
-                    }}
-                  >
-                    {phase.desc}
-                  </div>
-                </div>
-              </React.Fragment>
-            );
-          })}
+          No central registry. Any node failure is non-fatal.
         </div>
-      </div>
-
-      {/* Sponsor credits */}
-      <div
-        style={{
-          fontFamily: F.swiss,
-          fontSize: SIZE.label,
-          fontWeight: 400,
-          color: C.muted,
-          textAlign: "center",
-          letterSpacing: "0.08em",
-          opacity: sponsorOpacity,
-          transform: `translateY(${sponsorY}px)`,
-        }}
-      >
-        Storacha · Lit Protocol · Starknet · Flow · NEAR
-      </div>
+      )}
     </AbsoluteFill>
   );
 };
