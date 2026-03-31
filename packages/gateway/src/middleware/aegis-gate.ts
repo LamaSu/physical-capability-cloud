@@ -33,6 +33,7 @@ const DEFAULT_SKIP_ROUTES = [
   "GET /api/producers/status",
   "GET /api/agents/status",
   "GET /api/agents/cards",
+  "POST /api/ot2/camera/frame",
 ];
 
 /**
