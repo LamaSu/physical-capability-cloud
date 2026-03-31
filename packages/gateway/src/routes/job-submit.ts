@@ -28,6 +28,9 @@ interface SubmitJobBody {
   deviceId?: string;
   gcodeHash?: string;
   assuranceTier?: number;
+  capabilityType?: string;
+  description?: string;
+  title?: string;
 }
 
 interface JobStatusParams {
@@ -75,12 +78,73 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
     try {
       const repos = getRepos();
 
-      // Resolve capability id — use provided or fall back to the first capability
-      // registered for this kernel.
+      // Resolve capability id — use provided or semantically match from the kernel's capabilities
       let resolvedCapabilityId = capabilityId;
       if (!resolvedCapabilityId) {
         const caps = repos.capabilities.findByKernel(kernelId);
-        resolvedCapabilityId = caps[0]?.id;
+        if (caps.length === 0) {
+          return reply.code(400).send({ error: "no_capability_found_for_kernel" });
+        }
+
+        // Build search terms from all available context clues
+        const searchTerms = [
+          stepId,
+          req.body.capabilityType,
+          req.body.description,
+          req.body.title,
+        ].filter(Boolean).join(" ").toLowerCase();
+
+        // Score each capability by keyword overlap and type aliases
+        const typeAliases: Record<string, string[]> = {
+          "document-printing": ["print", "printer", "document", "paper", "copy", "scan", "laser", "inkjet", "color", "page", "doc"],
+          "2d-print": ["print", "printer", "document", "paper", "poster", "wide-format", "inkjet", "page", "2d"],
+          "liquid-handler": ["pipette", "liquid", "lab", "assay", "hplc", "ot-2", "opentrons", "plate", "well", "dilution"],
+          "fdm": ["3d-print", "fdm", "filament", "pla", "abs", "petg", "extrusion", "3d", "print"],
+          "cnc-3axis": ["cnc", "mill", "machining", "metal", "aluminum", "milling"],
+          "laser-cut": ["laser", "cut", "engrave", "acrylic", "wood", "engraving"],
+          "sla": ["resin", "sla", "dlp", "stereolithography"],
+          "pcr": ["pcr", "qpcr", "genomics", "dna", "amplification"],
+          "sequencing": ["sequencing", "nanopore", "genome", "dna", "rna"],
+          "hplc": ["hplc", "chromatography", "analysis", "separation"],
+          "mass-spec": ["mass-spec", "massspec", "spectrometry", "peptide", "metabolomics"],
+          "electrophysiology": ["patch-clamp", "ephys", "electrophysiology", "neural", "neuron"],
+          "microscopy": ["microscopy", "microscope", "imaging", "fluorescence", "confocal"],
+          "centrifuge": ["centrifuge", "spin", "separation", "sample-prep"],
+          "cell-culture": ["cell-culture", "incubation", "mammalian", "cell-line"],
+          "sample-prep": ["sample-prep", "preparation", "liquid-handling", "automation"],
+          "assay": ["assay", "plate-reader", "absorbance", "fluorescence", "screening"],
+        };
+
+        const scored = caps.map(cap => {
+          const capText = [cap.type, cap.name, cap.description, ...(cap.materials || []), ...(cap.tags as string[] || [])].join(" ").toLowerCase();
+          let score = 0;
+
+          // Exact type match = highest score
+          if (req.body.capabilityType && cap.type === req.body.capabilityType) score += 100;
+
+          // Keyword matching against capability text
+          const keywords = searchTerms.split(/\s+/);
+          for (const kw of keywords) {
+            if (kw.length < 3) continue;
+            if (capText.includes(kw)) score += 10;
+          }
+
+          // Fuzzy type matching via type aliases
+          const aliases = typeAliases[cap.type];
+          if (aliases) {
+            for (const alias of aliases) {
+              if (searchTerms.includes(alias)) score += 20;
+            }
+          }
+
+          return { cap, score };
+        });
+
+        // Sort by score descending, pick the best match
+        scored.sort((a, b) => b.score - a.score);
+
+        // Use best match if any keywords matched, otherwise fall back to first capability
+        resolvedCapabilityId = scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
       }
       if (!resolvedCapabilityId) {
         return reply.code(400).send({ error: "no_capability_found_for_kernel" });

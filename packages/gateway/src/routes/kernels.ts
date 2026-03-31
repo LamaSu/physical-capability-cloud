@@ -5,6 +5,9 @@ import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 
 export async function kernelRoutes(app: FastifyInstance) {
+  // Kernels with lastHeartbeat older than this threshold are considered stale
+  const STALE_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes
+
   app.get<{ Querystring: { status?: string } }>(
     "/api/kernels",
     async (req) => {
@@ -14,11 +17,27 @@ export async function kernelRoutes(app: FastifyInstance) {
           ? repos.kernels.findByStatus(req.query.status)
           : repos.kernels.findAll();
 
-        // Enrich each kernel with its capabilities list (types)
+        const now = Date.now();
+
+        // Enrich each kernel with its capabilities list (types) and staleness flag
         const enriched = kernels.map((k) => {
           const caps = repos.capabilities.findByKernel(k.id);
+
+          // Mark kernels as stale if their lastHeartbeat is older than 5 minutes
+          let effectiveStatus = k.status;
+          let isStale = false;
+          if (k.lastHeartbeat && k.status === "online") {
+            const heartbeatAge = now - new Date(k.lastHeartbeat).getTime();
+            if (heartbeatAge > STALE_HEARTBEAT_MS) {
+              effectiveStatus = "stale";
+              isStale = true;
+            }
+          }
+
           return {
             ...k,
+            status: effectiveStatus,
+            isStale,
             capabilities: caps.map((c) => c.type),
           };
         });
@@ -118,7 +137,7 @@ export async function kernelRoutes(app: FastifyInstance) {
   app.post<{
     Params: { kernelId: string };
     Body: { status?: string; capabilities?: Array<Record<string, unknown>>; timestamp?: number };
-  }>("/api/kernels/:kernelId/heartbeat", async (req) => {
+  }>("/api/kernels/:kernelId/heartbeat", async (req, reply) => {
     const { kernelId } = req.params;
     const { status = "online", capabilities } = req.body ?? {};
     const now = new Date().toISOString();
@@ -127,8 +146,37 @@ export async function kernelRoutes(app: FastifyInstance) {
     const kernel = repos.kernels.findById(kernelId);
     if (kernel) {
       try {
-        repos.kernels.update(kernelId, { status: status === "offline" ? "offline" : "online" });
+        repos.kernels.update(kernelId, {
+          status: status === "offline" ? "offline" : "online",
+          lastHeartbeat: now,
+        });
       } catch { /* soft fail */ }
+    }
+
+    // Upsert capability announcements if provided
+    if (capabilities && capabilities.length > 0) {
+      for (const cap of capabilities) {
+        const capType = (cap.type as string) ?? (cap.capability_type as string);
+        if (!capType) continue;
+        const capId = `cap-${kernelId}-${capType}`;
+        try {
+          const existing = repos.capabilities.findById(capId);
+          if (!existing) {
+            repos.capabilities.insert({
+              id: capId,
+              kernelId,
+              type: capType,
+              name: (cap.name as string) ?? `${capType} — ${kernelId}`,
+              description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
+              materials: (cap.materials as string[]) ?? [],
+              assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
+              pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
+              availability: (cap.availability as any) ?? {},
+              location: (cap.location as any) ?? { lat: 0, lng: 0 },
+            } as any);
+          }
+        } catch { /* non-fatal */ }
+      }
     }
 
     return {

@@ -178,7 +178,10 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         try {
           // Map pcc-node status strings to DB kernel status values
           const kernelStatus = status === "offline" ? "offline" : "online";
-          repos.kernels.update(kernelId, { status: kernelStatus });
+          repos.kernels.update(kernelId, {
+            status: kernelStatus,
+            lastHeartbeat: now,
+          });
         } catch {
           // Kernel update failed — soft failure, heartbeat still acknowledged
         }
@@ -186,13 +189,40 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         app.log.debug(`operator-relay: heartbeat from unknown kernel ${kernelId}`);
       }
 
-      // Store capability announcements if provided
+      // Upsert capability announcements if provided
       if (capabilities && capabilities.length > 0) {
         app.log.info(
-          `operator-relay: kernel ${kernelId} announced ${capabilities.length} capabilities`
+          `operator-relay: kernel ${kernelId} announced ${capabilities.length} capabilities — upserting to DB`
         );
-        // The full capability registration goes through /api/kernels/:id/capabilities
-        // Here we just acknowledge the announcement
+        let upsertCount = 0;
+        for (const cap of capabilities) {
+          const capType = (cap.type as string) ?? (cap.capability_type as string);
+          if (!capType) continue;
+
+          const capId = `cap-${kernelId}-${capType}`;
+          try {
+            const existing = repos.capabilities.findById(capId);
+            if (!existing) {
+              repos.capabilities.insert({
+                id: capId,
+                kernelId,
+                type: capType,
+                name: (cap.name as string) ?? `${capType} — ${kernelId}`,
+                description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
+                materials: (cap.materials as string[]) ?? [],
+                assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
+                pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
+                availability: (cap.availability as any) ?? {},
+                location: (cap.location as any) ?? { lat: 0, lng: 0 },
+              } as any);
+              upsertCount++;
+            }
+          } catch (capErr) {
+            // Non-fatal — log and continue
+            app.log.warn(`operator-relay: capability upsert failed for ${capId}: ${capErr}`);
+          }
+        }
+        app.log.info(`operator-relay: upserted ${upsertCount} new capabilities for kernel ${kernelId}`);
       }
 
       return {
