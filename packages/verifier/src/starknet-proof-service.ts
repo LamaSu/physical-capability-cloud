@@ -1,8 +1,71 @@
+/**
+ * StarknetProofAnchoringService — anchors ZK proof hashes and Merkle roots on Starknet.
+ *
+ * Mock mode (default): simulates Starknet transaction hashes with in-memory storage.
+ * Real mode: uses starknet.js to submit commitment hashes to Starknet testnet.
+ *
+ * This service does NOT re-implement ZK proof generation — it anchors the output
+ * of ZKProofService / NoirProofService on-chain for permanent verifiability.
+ */
+
+import type { ZKProof } from "@pcc/spec";
+import { sha256 } from "@pcc/spec";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export type AnchorStatus = "pending" | "accepted" | "rejected";
+
+export interface StarknetAnchor {
+  txHash: string;
+  blockNumber: number;
+  proofHash: string;
+  anchoredAt: string;
+  chain: "starknet-sepolia";
+}
+
+export interface StarknetProofServiceConfig {
+  /** Run in mock mode without a real Starknet node. Default: true */
+  mock?: boolean;
+  /** Starknet JSON-RPC node URL. Default: https://starknet-sepolia.public.blastapi.io/rpc/v0_7 */
+  nodeUrl?: string;
+  /** Account address for submitting transactions */
+  accountAddress?: string;
+  /** Private key for signing transactions */
+  privateKey?: string;
+}
+
+// ─── Internal types for real Starknet.js ────────────────────────────────────
+
+interface StarknetProvider {
+  getTransactionReceipt(txHash: string): Promise<{ execution_status: string; block_number?: number }>;
+}
+
+interface StarknetAccount {
+  address: string;
+  execute(calls: Array<{ contractAddress: string; entrypoint: string; calldata: string[] }>): Promise<{ transaction_hash: string }>;
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+export class StarknetProofAnchoringService {
+  private readonly mock: boolean;
+  private readonly nodeUrl: string;
+  private readonly accountAddress: string | undefined;
+  private readonly privateKey: string | undefined;
+
+  // Mock-mode in-memory store: txHash → anchor
+  private readonly anchors = new Map<string, StarknetAnchor>();
+  // Mock-mode: txHash → status progression (pending → accepted after 2 checks)
+  private readonly statusChecks = new Map<string, number>();
+
+  // Real-mode lazy-loaded starknet.js handles
+  private _provider: StarknetProvider | null = null;
+  private _account: StarknetAccount | null = null;
+
   /**
    * PCC ProofRegistry deployed on Starknet Sepolia.
    * Deploy TX: 0x7622c6180cd92eb466f9d31a7512e6e52024dfdf44f780f777e7a1d2ac34619
    * Class hash: 0x5aceff2217c8dd931eb1d6027b6c96217d3c09e19ec832b33e8a12a3672bbaf
-   * Deployed: 2026-03-31T02:59:19.436Z
    */
   private static readonly PROOF_REGISTRY_ADDRESS =
     "0x43643ebf182210af4e22eb3b2f5e4dbab50c00471743521b4e80d1328debcd";
