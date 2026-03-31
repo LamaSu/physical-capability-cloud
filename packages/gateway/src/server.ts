@@ -76,6 +76,7 @@ import { ot2RelayRoutes } from "./routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
+import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -221,6 +222,7 @@ export async function createGateway(port = 3200) {
   await app.register(marketplaceRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorRelayRoutes);
   await app.register(negotiationRoutes);
   await app.register(kernelAgentPackageRoutes);
   await app.register(sdkRoutes);
