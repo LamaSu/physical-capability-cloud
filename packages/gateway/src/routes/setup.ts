@@ -542,12 +542,38 @@ export async function setupRoutes(app: FastifyInstance) {
           healthStatus: "healthy",
         });
 
+        // Auto-create capability rows for each capability the device contributes to
+        if (capabilities && capabilities.length > 0) {
+          for (const capType of capabilities) {
+            const capId = `cap-${kernelId}-${capType}`;
+            // Only insert if it doesn't already exist
+            const existing = repos.capabilities.findById(capId);
+            if (!existing) {
+              try {
+                repos.capabilities.insert({
+                  id: capId,
+                  kernelId,
+                  type: capType,
+                  name: `${model ?? "Device"} — ${capType}`,
+                  description: `Auto-registered from device ${deviceId}`,
+                  materials: [],
+                  assuranceTiers: [0, 1],
+                  pricing: { currency: "USDC", base: 0, perUnit: 0 },
+                });
+              } catch (_capErr) {
+                // Non-fatal — capability may already exist from another device
+              }
+            }
+          }
+        }
+
         trackServerEvent("device_registered", {
           deviceId,
           kernelId,
           type,
           adapterType,
           model,
+          capabilitiesRegistered: capabilities?.length ?? 0,
         }, (req as any).operatorId ?? (req as any).apiKeyId);
         auditService.log({
           eventType: "device.registered",
