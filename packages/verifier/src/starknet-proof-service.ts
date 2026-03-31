@@ -5,7 +5,7 @@
    * Deployed: 2026-03-31T02:59:19.436Z
    */
   private static readonly PROOF_REGISTRY_ADDRESS =
-    "0x80aba6939deb83d0aaef4c1796cfa4a6cd7d4aba128d0b5e9315ee1951418a";
+    "0x43643ebf182210af4e22eb3b2f5e4dbab50c00471743521b4e80d1328debcd";
 
   constructor(config: StarknetProofServiceConfig = {}) {
     this.mock = config.mock !== false; // default true
