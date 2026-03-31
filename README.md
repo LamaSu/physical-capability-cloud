@@ -249,7 +249,7 @@ The `/api/marketplace/*` endpoints expose a physical supplies marketplace where 
 
 ## Sponsor Telemetry
 
-The `/sponsors` dashboard page and `GET /api/status/sponsors` endpoint show live integration status for all 6 sponsor cards (Storacha, Starknet, Lit Protocol, Flow, NEAR, Bittensor).
+The `/sponsors` dashboard page and `GET /api/status/integrations` endpoint show live integration status for all connected services (Storacha, Starknet, Lit Protocol, Flow, NEAR, PCCProtocol).
 
 ---
 

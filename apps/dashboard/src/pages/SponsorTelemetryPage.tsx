@@ -81,7 +81,7 @@ interface SponsorsPayload {
 // ---------------------------------------------------------------------------
 
 async function fetchSponsors(): Promise<SponsorsPayload> {
-  const res = await fetch("/api/status/sponsors", {
+  const res = await fetch("/api/status/integrations", {
     headers: { ...getAuthHeaders() },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -593,7 +593,7 @@ export function SponsorTelemetryPage() {
       {/* Footer note */}
       <p className="text-[11px] text-white/20 text-center pb-2">
         Status sourced from{" "}
-        <span className="font-mono text-white/30">/api/status/sponsors</span> — refreshes every 15s.
+        <span className="font-mono text-white/30">/api/status/integrations</span> — refreshes every 15s.
         Set <span className="font-mono text-white/30">EVIDENCE_STORAGE=storacha</span>,{" "}
         <span className="font-mono text-white/30">LIT_PROTOCOL_REAL=true</span>, or{" "}
         <span className="font-mono text-white/30">STARKNET_ACCOUNT_ADDRESS</span> to switch from mock to live.

@@ -3,7 +3,7 @@
  *
  * GET /api/status/live       → JSON map of every verification/storage/crypto service
  *                              with its current operating mode and configuration.
- * GET /api/status/sponsors   → Hackathon sponsor integration telemetry
+ * GET /api/status/integrations → Integration telemetry for all connected services
  * GET /api/telemetry/system  → Comprehensive system telemetry aggregator (all subsystems)
  */
 
@@ -15,10 +15,10 @@ import { litEncryptionService } from "../services.js";
 
 export async function statusRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
-  // GET /api/status/sponsors — hackathon sponsor integration telemetry
+  // GET /api/status/integrations — integration telemetry for all connected services
   // ---------------------------------------------------------------------------
 
-  app.get("/api/status/sponsors", async () => {
+  app.get("/api/status/integrations", async () => {
     const evidenceBackend = process.env["EVIDENCE_STORAGE"] ?? "helia";
     const storachaReal =
       evidenceBackend === "storacha" && Boolean(process.env["STORACHA_PROOF"]);
