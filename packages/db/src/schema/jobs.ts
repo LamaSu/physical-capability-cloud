@@ -15,4 +15,5 @@ export const jobs = sqliteTable("jobs", {
   completedAt: text("completed_at"),
   progress: integer("progress").notNull().default(0),
   evidenceBundleId: text("evidence_bundle_id"),
+  parameters: text("parameters", { mode: "json" }).$type<Record<string, unknown>>(),
 });

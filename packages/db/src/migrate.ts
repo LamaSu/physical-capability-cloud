@@ -73,7 +73,8 @@ export function migrateDatabase(sqlite: Database.Database): void {
       started_at TEXT,
       completed_at TEXT,
       progress INTEGER NOT NULL DEFAULT 0,
-      evidence_bundle_id TEXT
+      evidence_bundle_id TEXT,
+      parameters TEXT
     );
 
     -- ── Evidence ─────────────────────────────────────────────────────
@@ -1074,4 +1075,11 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS audit_log_resource_type ON audit_log(resource_type);
     CREATE INDEX IF NOT EXISTS audit_log_timestamp ON audit_log(timestamp);
   `);
+
+  // ── Safe column additions for existing databases ──────────────────
+  // SQLite ALTER TABLE ADD COLUMN is idempotent-safe when wrapped in try/catch.
+  const safeAddColumn = (table: string, col: string, type: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`); } catch { /* already exists */ }
+  };
+  safeAddColumn("jobs", "parameters", "TEXT");
 }
