@@ -35,9 +35,9 @@ import { wipe } from "@remotion/transitions/wipe";
 import { S01_Proof } from "../scenes/S01_Proof";
 import { S02_Problem } from "../scenes/S02_Problem";
 import { S03_Architecture } from "../scenes/S03_Architecture";
-import { S04A_Onboarding } from "../scenes/S04A_Onboarding";
 import { S04B_LiveJob } from "../scenes/S04B_LiveJob";
 import { S05_EmergingMarkets } from "../scenes/S05_EmergingMarkets";
+import { S05B_Implications } from "../scenes/S05B_Implications";
 import { S06_ScaleProof } from "../scenes/S06_ScaleProof";
 import { S07_Ecosystem } from "../scenes/S07_Ecosystem";
 import { S08_Close } from "../scenes/S08_Close";
@@ -67,25 +67,14 @@ export const PCCDemo: React.FC = () => (
         presentation={fade()}
       />
 
-      {/* ── S03: ARCHITECTURE (540f) ─────────────────────────────────────── */}
-      <TransitionSeries.Sequence durationInFrames={540}>
+      {/* ── S03: ARCHITECTURE + ONBOARDING (720f) ────────────────────────── */}
+      <TransitionSeries.Sequence durationInFrames={720}>
         <S03_Architecture />
       </TransitionSeries.Sequence>
 
-      {/* S03→S04A: 18f horizontal wipe from right */}
+      {/* S03→S04B: 6f fade */}
       <TransitionSeries.Transition
-        timing={linearTiming({ durationInFrames: 18 })}
-        presentation={wipe({ direction: "from-right" })}
-      />
-
-      {/* ── S04A: OPERATOR ONBOARDING (480f) ─────────────────────────────── */}
-      <TransitionSeries.Sequence durationInFrames={480}>
-        <S04A_Onboarding />
-      </TransitionSeries.Sequence>
-
-      {/* S04A→S04B: 4f hard-cut black gap (S04A transition_out: hard cut 4-frame black) */}
-      <TransitionSeries.Transition
-        timing={linearTiming({ durationInFrames: 4 })}
+        timing={linearTiming({ durationInFrames: 6 })}
         presentation={fade()}
       />
 
@@ -105,7 +94,18 @@ export const PCCDemo: React.FC = () => (
         <S05_EmergingMarkets />
       </TransitionSeries.Sequence>
 
-      {/* S05→S06: 4f hard-cut black gap (S05 transition_out: 4-frame black gap) */}
+      {/* S05→S05B: 6f fade */}
+      <TransitionSeries.Transition
+        timing={linearTiming({ durationInFrames: 6 })}
+        presentation={fade()}
+      />
+
+      {/* ── S05B: IMPLICATIONS (480f) ────────────────────────────────────── */}
+      <TransitionSeries.Sequence durationInFrames={480}>
+        <S05B_Implications />
+      </TransitionSeries.Sequence>
+
+      {/* S05B→S06: 4f hard-cut */}
       <TransitionSeries.Transition
         timing={linearTiming({ durationInFrames: 4 })}
         presentation={fade()}

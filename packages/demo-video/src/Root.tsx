@@ -18,9 +18,9 @@ import { PCCDemo } from "./compositions/PCCDemo";
 import { S01_Proof } from "./scenes/S01_Proof";
 import { S02_Problem } from "./scenes/S02_Problem";
 import { S03_Architecture } from "./scenes/S03_Architecture";
-import { S04A_Onboarding } from "./scenes/S04A_Onboarding";
 import { S04B_LiveJob } from "./scenes/S04B_LiveJob";
 import { S05_EmergingMarkets } from "./scenes/S05_EmergingMarkets";
+import { S05B_Implications } from "./scenes/S05B_Implications";
 import { S06_ScaleProof } from "./scenes/S06_ScaleProof";
 import { S07_Ecosystem } from "./scenes/S07_Ecosystem";
 import { S08_Close } from "./scenes/S08_Close";
@@ -32,8 +32,7 @@ const H = 1080;
 // Scene durations from storyboard (frames at 30fps)
 const S01_FRAMES = 600;
 const S02_FRAMES = 480;
-const S03_FRAMES = 540;
-const S04A_FRAMES = 480;
+const S03_FRAMES = 720;
 const S04B_FRAMES = 1140;
 const S05_FRAMES = 420;
 const S06_FRAMES = 330;
@@ -43,20 +42,23 @@ const S08_FRAMES = 300;
 // Transition durations (see PCCDemo.tsx for storyboard source)
 const T_S01_S02 = 18;
 const T_S02_S03 = 6;
-const T_S03_S04A = 18;
-const T_S04A_S04B = 4;
+const T_S03_S04B = 6;
 const T_S04B_S05 = 18;
 const T_S05_S06 = 4;
 const T_S06_S07 = 24; // cross-dissolve — only dissolve in video
 const T_S07_S08 = 18;
 
+const S05B_FRAMES = 480;
+const T_S05_S05B = 6;
+const T_S05B_S06 = 4;
+
 const TOTAL_SCENE_FRAMES =
   S01_FRAMES +
   S02_FRAMES +
   S03_FRAMES +
-  S04A_FRAMES +
   S04B_FRAMES +
   S05_FRAMES +
+  S05B_FRAMES +
   S06_FRAMES +
   S07_FRAMES +
   S08_FRAMES;
@@ -64,10 +66,10 @@ const TOTAL_SCENE_FRAMES =
 const TOTAL_TRANSITION_FRAMES =
   T_S01_S02 +
   T_S02_S03 +
-  T_S03_S04A +
-  T_S04A_S04B +
+  T_S03_S04B +
   T_S04B_S05 +
-  T_S05_S06 +
+  T_S05_S05B +
+  T_S05B_S06 +
   T_S06_S07 +
   T_S07_S08;
 
@@ -106,17 +108,9 @@ export const Root: React.FC = () => (
         height={H}
       />
       <Composition
-        id="S03-Architecture"
+        id="S03-Architecture-Onboarding"
         component={S03_Architecture}
         durationInFrames={S03_FRAMES}
-        fps={FPS}
-        width={W}
-        height={H}
-      />
-      <Composition
-        id="S04A-Onboarding"
-        component={S04A_Onboarding}
-        durationInFrames={S04A_FRAMES}
         fps={FPS}
         width={W}
         height={H}
@@ -133,6 +127,14 @@ export const Root: React.FC = () => (
         id="S05-EmergingMarkets"
         component={S05_EmergingMarkets}
         durationInFrames={S05_FRAMES}
+        fps={FPS}
+        width={W}
+        height={H}
+      />
+      <Composition
+        id="S05B-Implications"
+        component={S05B_Implications}
+        durationInFrames={S05B_FRAMES}
         fps={FPS}
         width={W}
         height={H}
