@@ -3,163 +3,194 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PCC Live Event Stream</title>
+<title>PCC Live Telemetry</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#080b16;color:#e8ecf4;font-family:'SF Mono','Fira Code',monospace;font-size:12px;padding:16px}
-h1{font-size:20px;color:#f5a623}
-h2{font-size:14px;color:#94b8ff;margin:16px 0 6px;border-bottom:1px solid #1e2a42;padding-bottom:4px}
-.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.live{color:#34d399;font-size:13px;font-weight:700}
-.dead{color:#f87171}
-#event-stream{max-height:50vh;overflow-y:auto;background:#0a0f1a;border:1px solid #1e2a42;border-radius:6px;padding:8px}
-.evt{padding:3px 0;border-bottom:1px solid #1e2a4218}
-.evt .ts{color:#4a5568}
-.evt .type{color:#f5a623;font-weight:700}
-.evt .data{color:#94b8ff;white-space:pre-wrap;word-break:break-all}
-pre{background:#0a0f1a;border:1px solid #1e2a42;border-radius:6px;padding:8px;overflow:auto;max-height:40vh;font-size:11px}
-.tabs{display:flex;gap:8px;margin:8px 0}
-.tab{padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid #1e2a42;color:#4a5568}
-.tab.active{background:#1e2a42;color:#f5a623;border-color:#f5a623}
-.section{display:none}.section.visible{display:block}
-#count{color:#4a5568;font-size:11px}
+body{background:#080b16;color:#e8ecf4;font-family:'SF Mono','Fira Code',monospace;font-size:11px;padding:12px}
+h1{font-size:18px;color:#f5a623}
+h3{font-size:12px;color:#94b8ff;margin:0 0 4px}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.live{color:#34d399;font-weight:700}.dead{color:#f87171;font-weight:700}
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+.col{background:#0a0f1a;border:1px solid #1e2a42;border-radius:6px;padding:8px;max-height:70vh;overflow-y:auto}
+.col-header{font-size:12px;color:#f5a623;font-weight:700;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #1e2a42}
+.evt{padding:2px 0;border-bottom:1px solid #1e2a4215;font-size:10px;word-break:break-all}
+.evt .ts{color:#4a5568}.evt .type{color:#f5a623;font-weight:700}.evt .data{color:#94b8ff}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+pre{background:#0a0f1a;border:1px solid #1e2a42;border-radius:4px;padding:6px;overflow:auto;max-height:35vh;font-size:10px;margin:4px 0}
+.btn{background:#1e2a42;color:#f5a623;border:1px solid #f5a623;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:11px}
+.btn:hover{background:#f5a62320}
+#count{color:#4a5568;font-size:10px}
 </style>
 </head>
 <body>
 <div class="top">
   <div>
-    <h1>PCC Live Event Stream</h1>
-    <div style="color:#4a5568;font-size:11px">capability.network &mdash; real events only, no fake data</div>
+    <h1>PCC Live Telemetry</h1>
+    <div style="color:#4a5568">capability.network &mdash; real data only</div>
   </div>
   <div style="text-align:right">
     <div id="sse-status" class="dead">CONNECTING...</div>
     <div id="count">0 events</div>
+    <button class="btn" onclick="loadAll()" style="margin-top:4px">Refresh All</button>
   </div>
 </div>
 
-<div class="tabs">
-  <div class="tab active" onclick="showTab('stream')">Live Stream (SSE)</div>
-  <div class="tab" onclick="showTab('audit')">Audit Log</div>
-  <div class="tab" onclick="showTab('db')">Raw DB State</div>
-  <div class="tab" onclick="showTab('env')">Config</div>
+<div class="grid">
+  <div class="col">
+    <div class="col-header">LIVE EVENT STREAM (SSE)</div>
+    <div id="stream"></div>
+  </div>
+  <div class="col">
+    <div class="col-header">AUDIT LOG (real operations)</div>
+    <div id="audit"></div>
+  </div>
+  <div class="col">
+    <div class="col-header">STRUCTURED LOGS</div>
+    <div id="logs"></div>
+  </div>
 </div>
 
-<div id="sec-stream" class="section visible">
-<h2>Live Event Stream</h2>
-<div style="color:#4a5568;font-size:11px;margin-bottom:6px">Connected to SSE at /api/telemetry/logs/stream &mdash; events appear as they happen</div>
-<div id="event-stream"></div>
+<div class="row">
+  <div>
+    <h3>Kernels</h3>
+    <pre id="db-kernels">Loading...</pre>
+  </div>
+  <div>
+    <h3>Devices</h3>
+    <pre id="db-devices">Loading...</pre>
+  </div>
 </div>
-
-<div id="sec-audit" class="section">
-<h2>Audit Log (last 100 operations)</h2>
-<div id="audit-container"><pre>Loading...</pre></div>
+<div class="row">
+  <div>
+    <h3>Jobs</h3>
+    <pre id="db-jobs">Loading...</pre>
+  </div>
+  <div>
+    <h3>Evidence Bundles</h3>
+    <pre id="db-evidence">Loading...</pre>
+  </div>
 </div>
-
-<div id="sec-db" class="section">
-<h2>Raw Database State</h2>
-<div style="color:#4a5568;font-size:11px;margin-bottom:6px">Actual rows from SQLite &mdash; kernels, devices, jobs, evidence, registrations, capabilities</div>
-<pre id="db-dump">Loading...</pre>
+<div class="row">
+  <div>
+    <h3>Capabilities</h3>
+    <pre id="db-caps">Loading...</pre>
+  </div>
+  <div>
+    <h3>Registrations</h3>
+    <pre id="db-regs">Loading...</pre>
+  </div>
 </div>
-
-<div id="sec-env" class="section">
-<h2>Environment Configuration</h2>
-<pre id="env-dump">Loading...</pre>
+<div class="row">
+  <div>
+    <h3>Agent Conversations</h3>
+    <pre id="db-convos">Loading...</pre>
+  </div>
+  <div>
+    <h3>Environment Config</h3>
+    <pre id="db-env">Loading...</pre>
+  </div>
 </div>
 
 <script>
 var BASE = "https://capability.network";
 var eventCount = 0;
-var streamEl = document.getElementById("event-stream");
-var statusEl = document.getElementById("sse-status");
-var countEl = document.getElementById("count");
 
-function addEvent(type, data) {
-  eventCount++;
-  countEl.textContent = eventCount + " events";
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function addTo(containerId, type, data) {
+  var el = document.getElementById(containerId);
   var div = document.createElement("div");
   div.className = "evt";
-  var ts = new Date().toISOString().slice(11, 23);
+  var ts = new Date().toISOString().slice(11,23);
   var payload;
   try { payload = typeof data === "string" ? data : JSON.stringify(data, null, 2); } catch(e) { payload = String(data); }
-  div.innerHTML = '<span class="ts">' + ts + '</span> <span class="type">[' + type + ']</span>\n<span class="data">' + escapeHtml(payload) + '</span>';
-  streamEl.insertBefore(div, streamEl.firstChild);
-  if (streamEl.children.length > 500) streamEl.removeChild(streamEl.lastChild);
+  div.innerHTML = '<span class="ts">' + ts + '</span> <span class="type">[' + type + ']</span>\n<span class="data">' + esc(payload) + '</span>';
+  el.insertBefore(div, el.firstChild);
+  if (el.children.length > 300) el.removeChild(el.lastChild);
+  eventCount++;
+  document.getElementById("count").textContent = eventCount + " events";
 }
 
-function escapeHtml(s) {
-  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}
-
+// SSE
 function connectSSE() {
   var es = new EventSource(BASE + "/api/telemetry/logs/stream");
   es.onopen = function() {
-    statusEl.textContent = "LIVE";
-    statusEl.className = "live";
-    addEvent("SSE", "Connected to capability.network event stream");
+    document.getElementById("sse-status").textContent = "LIVE";
+    document.getElementById("sse-status").className = "live";
+    addTo("stream", "SSE", "Connected");
   };
   es.addEventListener("log_entry", function(e) {
-    try { addEvent("LOG", JSON.parse(e.data)); } catch(err) { addEvent("LOG", e.data); }
+    try { addTo("stream", "LOG", JSON.parse(e.data)); } catch(err) { addTo("stream", "LOG", e.data); }
   });
   es.addEventListener("telemetry_event", function(e) {
-    try { addEvent("TELEMETRY", JSON.parse(e.data)); } catch(err) { addEvent("TELEMETRY", e.data); }
+    try { addTo("stream", "TELEMETRY", JSON.parse(e.data)); } catch(err) { addTo("stream", "TELEMETRY", e.data); }
   });
-  es.addEventListener("connected", function(e) {
-    addEvent("CONNECTED", "SSE handshake complete");
-  });
+  es.addEventListener("connected", function() { addTo("stream", "READY", "SSE handshake complete"); });
   es.onerror = function() {
-    statusEl.textContent = "RECONNECTING...";
-    statusEl.className = "dead";
-    addEvent("ERROR", "SSE connection lost, reconnecting...");
+    document.getElementById("sse-status").textContent = "RECONNECTING";
+    document.getElementById("sse-status").className = "dead";
   };
-}
-
-function showTab(name) {
-  var tabs = document.querySelectorAll(".tab");
-  var secs = document.querySelectorAll(".section");
-  for (var i = 0; i < tabs.length; i++) tabs[i].className = "tab";
-  for (var i = 0; i < secs.length; i++) secs[i].className = "section";
-  document.querySelector('[onclick*="' + name + '"]').className = "tab active";
-  document.getElementById("sec-" + name).className = "section visible";
-  if (name === "audit") loadAudit();
-  if (name === "db") loadDB();
-  if (name === "env") loadEnv();
 }
 
 function loadAudit() {
-  fetch(BASE + "/api/telemetry/audit?limit=100")
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      document.getElementById("audit-container").innerHTML = "<pre>" + escapeHtml(JSON.stringify(d.entries, null, 2)) + "</pre>";
-    })
-    .catch(function(e) {
-      document.getElementById("audit-container").innerHTML = "<pre>Error: " + e.message + "</pre>";
-    });
+  fetch(BASE + "/api/telemetry/audit?limit=100").then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById("audit");
+    el.innerHTML = "";
+    var entries = d.entries || [];
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var div = document.createElement("div");
+      div.className = "evt";
+      var ts = (e.timestamp || e.createdAt || "").slice(11,23);
+      div.innerHTML = '<span class="ts">' + ts + '</span> <span class="type">[' + (e.eventType||"") + ']</span> ' +
+        (e.action||"") + " " + (e.resourceType||"") + " " + (e.resourceId||"") +
+        '\n<span class="data">' + esc(JSON.stringify(e.metadata||{})) + '</span>';
+      el.appendChild(div);
+    }
+    if (!entries.length) el.textContent = "No audit entries yet";
+  }).catch(function(e) { document.getElementById("audit").textContent = "Error: " + e.message; });
+}
+
+function loadLogs() {
+  fetch(BASE + "/api/telemetry/logs?limit=100").then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById("logs");
+    el.innerHTML = "";
+    var entries = d.entries || [];
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var div = document.createElement("div");
+      div.className = "evt";
+      div.innerHTML = '<span class="ts">' + (e.timestamp||"").slice(11,23) + '</span> <span class="type">[' + (e.level||"") + ']</span> ' +
+        (e.source||"") + ': ' + (e.message||"") +
+        '\n<span class="data">' + esc(JSON.stringify(e.metadata||{})) + '</span>';
+      el.appendChild(div);
+    }
+    if (!entries.length) el.textContent = "No log entries yet";
+  }).catch(function(e) { document.getElementById("logs").textContent = "Error: " + e.message; });
 }
 
 function loadDB() {
-  fetch(BASE + "/api/telemetry/system")
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      document.getElementById("db-dump").textContent = JSON.stringify(d.db, null, 2);
-      document.getElementById("env-dump").textContent = JSON.stringify(d.env, null, 2);
-    })
-    .catch(function(e) {
-      document.getElementById("db-dump").textContent = "Error: " + e.message;
-    });
+  fetch(BASE + "/api/telemetry/system").then(function(r){return r.json();}).then(function(d) {
+    var db = d.db || {};
+    document.getElementById("db-kernels").textContent = JSON.stringify(db.kernels || [], null, 2);
+    document.getElementById("db-devices").textContent = JSON.stringify(db.devices || [], null, 2);
+    document.getElementById("db-jobs").textContent = JSON.stringify(db.jobs || [], null, 2);
+    document.getElementById("db-evidence").textContent = JSON.stringify(db.evidence || [], null, 2);
+    document.getElementById("db-caps").textContent = JSON.stringify(db.capabilities || [], null, 2);
+    document.getElementById("db-regs").textContent = JSON.stringify(db.registrations || [], null, 2);
+    document.getElementById("db-convos").textContent = JSON.stringify(d.agents || {}, null, 2);
+    document.getElementById("db-env").textContent = JSON.stringify(d.env || {}, null, 2);
+  }).catch(function(e) {
+    document.getElementById("db-kernels").textContent = "Error: " + e.message;
+  });
 }
 
-function loadEnv() {
-  fetch(BASE + "/api/telemetry/system")
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      document.getElementById("env-dump").textContent = JSON.stringify(d.env, null, 2);
-    })
-    .catch(function(e) {
-      document.getElementById("env-dump").textContent = "Error: " + e.message;
-    });
-}
+function loadAll() { loadAudit(); loadLogs(); loadDB(); }
 
 connectSSE();
+loadAll();
+setInterval(loadAll, 15000);
 </script>
 </body>
 </html>

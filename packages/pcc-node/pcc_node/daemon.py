@@ -1,10 +1,16 @@
-"""Main daemon loop -- executor + camera + heartbeat.
+"""Main daemon loop -- real end-to-end PCC protocol.
 
 Combines all node subsystems into a single long-running process:
-  - Polls PCC for pending jobs and executes them
-  - Pushes camera frames periodically
-  - Sends heartbeats to maintain "online" status
-  - Handles graceful shutdown on SIGINT/SIGTERM
+  1. Load or generate Ed25519 keys
+  2. Run network discovery
+  3. Register kernel with PCC gateway (HTTP POST)
+  4. Announce capabilities (signed)
+  5. Start HTTP polling loop:
+     - Poll /api/operator/jobs every N seconds
+     - Execute each job via JobExecutor
+     - Push evidence bundle back to gateway
+     - Re-announce capabilities every 60s (heartbeat)
+  6. Handle graceful shutdown on SIGINT/SIGTERM
 """
 
 import json
@@ -15,8 +21,11 @@ import time
 
 from .camera import push_camera_frame, detect_camera_device
 from .config import NodeConfig
-from .executor import create_adapter, poll_pending_jobs, execute_and_report
-from .register import send_heartbeat
+from .crypto import load_or_create_keys
+from .discovery import discover_network, device_to_adapter_config
+from .job_executor import JobExecutor
+from .register import register_kernel, announce_capabilities
+from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
 
@@ -95,8 +104,45 @@ def is_running():
         return False, None
 
 
-def run_daemon(config):
-    """Run the main daemon loop.
+def _build_capabilities_from_devices(devices):
+    """Build capability announcement list from device dicts.
+
+    Maps device types / protocols to PCC capability slugs.
+    """
+    cap_map = {
+        "opentrons": [{"type": "liquid-handler"}, {"type": "pipette-transfer"}],
+        "octoprint": [{"type": "3d-print"}, {"type": "fdm-fabrication"}],
+        "printer": [{"type": "document-printing"}],
+        "ipp": [{"type": "document-printing"}],
+        "camera": [{"type": "visual-inspection"}, {"type": "photo-evidence"}],
+        "serial": [{"type": "serial-instrument"}],
+        "modbus": [{"type": "plc-control"}],
+        "generic": [{"type": "generic-http"}],
+        "http": [{"type": "generic-http"}],
+        "mdns": [{"type": "network-instrument"}],
+    }
+
+    capabilities = []
+    seen_types = set()
+
+    for dev in devices:
+        protocol = dev.get("protocol") or dev.get("type") or "generic"
+        caps = cap_map.get(protocol, [{"type": f"{protocol}-device"}])
+        for cap in caps:
+            cap_type = cap["type"]
+            if cap_type not in seen_types:
+                seen_types.add(cap_type)
+                capabilities.append({
+                    **cap,
+                    "deviceId": dev.get("id") or dev.get("host") or dev.get("ip", ""),
+                    "protocol": protocol,
+                })
+
+    return capabilities
+
+
+def run_daemon(config: NodeConfig):
+    """Run the main daemon loop with the real PCC protocol.
 
     Parameters
     ----------
@@ -118,31 +164,87 @@ def run_daemon(config):
     start_time = time.time()
     jobs_completed = 0
 
-    # Build adapters from configured devices
-    adapters = []
-    for dev in config.devices:
-        adapter = create_adapter(dev)
-        if adapter:
-            adapters.append(adapter)
-            log.info(f"Adapter loaded: {adapter.device_type}")
+    # ------------------------------------------------------------------
+    # 1. Load or generate Ed25519 keys
+    # ------------------------------------------------------------------
+    try:
+        public_key, secret_key = load_or_create_keys()
+        if not config.public_key:
+            config.public_key = public_key
+        log.info(f"Node keys loaded: {public_key[:16]}...")
+    except Exception as e:
+        log.warning(f"Could not load keys: {e}")
+        secret_key = ""
 
-    if not adapters:
-        log.warning("No device adapters loaded -- will only poll and push camera")
+    # ------------------------------------------------------------------
+    # 2. Optional: run network discovery to find new devices
+    # ------------------------------------------------------------------
+    discovered_devices = []
+    if not config.devices:
+        log.info("No devices configured, scanning network...")
+        try:
+            found = discover_network(timeout=0.5)
+            for nd in found:
+                cfg = device_to_adapter_config(nd)
+                if cfg:
+                    discovered_devices.append(cfg)
+                    log.info(f"Discovered: {nd.device_type} at {nd.ip}")
+        except Exception as e:
+            log.warning(f"Network discovery failed: {e}")
 
-    # Probe camera
+    # Merge discovered devices with configured devices
+    all_devices = list(config.devices) + discovered_devices
+
+    if all_devices:
+        log.info(f"Total devices: {len(all_devices)}")
+    else:
+        log.warning("No devices found -- running in relay-only mode")
+
+    # ------------------------------------------------------------------
+    # 3. Register kernel with gateway
+    # ------------------------------------------------------------------
+    try:
+        register_kernel(config.pcc_base, config.pcc_api_key, config)
+        log.info(f"Kernel {config.kernel_id} registered")
+    except Exception as e:
+        log.warning(f"Kernel registration failed: {e}")
+
+    # ------------------------------------------------------------------
+    # 4. Build capabilities + announce
+    # ------------------------------------------------------------------
+    capabilities = _build_capabilities_from_devices(all_devices)
+
+    try:
+        announce_capabilities(
+            config.pcc_base,
+            config.pcc_api_key,
+            config.kernel_id,
+            all_devices,
+            secret_key=secret_key,
+        )
+    except Exception as e:
+        log.warning(f"Capability announcement failed: {e}")
+
+    # ------------------------------------------------------------------
+    # 5. Create gateway client + job executor
+    # ------------------------------------------------------------------
+    gateway_client = PCCGatewayClient(
+        gateway_url=config.pcc_base,
+        api_key=config.pcc_api_key,
+        kernel_id=config.kernel_id,
+        poll_interval=config.poll_interval,
+    )
+
+    job_executor = JobExecutor(devices=all_devices, gateway_client=gateway_client)
+
+    # ------------------------------------------------------------------
+    # 6. Probe camera
+    # ------------------------------------------------------------------
     cam = detect_camera_device()
     if cam:
         log.info(f"Camera device: {cam}")
     elif config.camera_device:
         log.warning(f"Configured camera {config.camera_device} not detected")
-
-    # Initial heartbeat
-    send_heartbeat(config.pcc_base, config.pcc_api_key, config.kernel_id, "online")
-
-    camera_counter = 0
-    camera_cycles = max(1, config.camera_push_interval // max(1, config.poll_interval))
-    heartbeat_counter = 0
-    heartbeat_cycles = max(1, 60 // max(1, config.poll_interval))  # heartbeat every ~60s
 
     # Start UI server in background
     try:
@@ -157,38 +259,58 @@ def run_daemon(config):
     except Exception as e:
         log.warning(f"UI server failed to start: {e}")
 
+    # ------------------------------------------------------------------
+    # 7. Main polling loop
+    # ------------------------------------------------------------------
+    last_announce = time.time()
+    announce_interval = 60  # re-announce capabilities every 60s
+    camera_counter = 0
+    camera_cycles = max(1, config.camera_push_interval // max(1, config.poll_interval))
+
     log.info(
         f"Daemon running. Kernel={config.kernel_id}, "
         f"PCC={config.pcc_base}, poll={config.poll_interval}s"
     )
 
+    # Send initial heartbeat
+    gateway_client.send_heartbeat("online")
+
     while running:
         try:
-            # 1. Poll for pending jobs
-            calls = poll_pending_jobs(
-                config.pcc_base, config.pcc_api_key, config.kernel_id
-            )
-            for call in calls:
-                execute_and_report(
-                    call, adapters, config.pcc_base, config.pcc_api_key
-                )
-                jobs_completed += 1
+            # Poll for queued jobs
+            jobs = gateway_client.poll_for_jobs()
 
-            # 2. Push camera frame periodically
+            for job in jobs:
+                job_id = job.get("id", "?")
+                log.info(f"Received job {job_id}")
+
+                # Mark seen before execution to prevent duplicate runs
+                gateway_client.mark_job_seen(job_id)
+
+                try:
+                    job_executor.execute(job)
+                    jobs_completed += 1
+                except Exception as e:
+                    log.error(f"Job {job_id} execution error: {e}")
+
+            # Push camera frame periodically
             camera_counter += 1
             if camera_counter >= camera_cycles and cam:
-                push_camera_frame(
-                    config.pcc_base, config.pcc_api_key, config.kernel_id
-                )
+                try:
+                    push_camera_frame(
+                        config.pcc_base, config.pcc_api_key, config.kernel_id
+                    )
+                except Exception as e:
+                    log.warning(f"Camera push failed: {e}")
                 camera_counter = 0
 
-            # 3. Heartbeat periodically
-            heartbeat_counter += 1
-            if heartbeat_counter >= heartbeat_cycles:
-                send_heartbeat(
-                    config.pcc_base, config.pcc_api_key, config.kernel_id, "online"
-                )
-                heartbeat_counter = 0
+            # Re-announce capabilities every 60s (heartbeat)
+            if time.time() - last_announce > announce_interval:
+                try:
+                    gateway_client.announce_capabilities(capabilities)
+                except Exception as e:
+                    log.warning(f"Heartbeat announce failed: {e}")
+                last_announce = time.time()
 
             # Update state file
             _write_state(config, start_time, jobs_completed)
@@ -196,14 +318,19 @@ def run_daemon(config):
         except Exception as e:
             log.error(f"Loop error: {e}")
 
-        # Sleep in short increments so we can respond to signals quickly
+        # Interruptible sleep
         sleep_end = time.time() + config.poll_interval
         while running and time.time() < sleep_end:
-            time.sleep(0.5)
+            time.sleep(0.25)
 
+    # ------------------------------------------------------------------
     # Clean shutdown
+    # ------------------------------------------------------------------
     log.info("Shutting down daemon...")
-    send_heartbeat(config.pcc_base, config.pcc_api_key, config.kernel_id, "offline")
+    try:
+        gateway_client.send_heartbeat("offline")
+    except Exception:
+        pass
     _remove_pid()
     try:
         os.remove(STATE_FILE)
