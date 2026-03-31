@@ -2,8 +2,8 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
-  "version": "2.5.0",
-  "toolCount": 200,
+  "version": "2.6.0",
+  "toolCount": 219,
   "lastUpdated": "2026-03-31T06:00:00Z",
   "homepage": "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
 
@@ -2294,9 +2294,33 @@
     },
     {
       "name": "system_telemetry",
-      "description": "Get comprehensive system telemetry — protocol economics, multi-chain state, operator network, evidence pipeline, marketplace, agent activity, NEAR intents, jobs, sponsor status, gateway health. Single endpoint for full system observability.",
+      "description": "Raw system state dump — actual DB rows for kernels, devices, jobs, evidence, registrations, capabilities, agent conversations, audit log. No fake numbers, no summaries.",
       "input_schema": { "type": "object", "properties": {} },
       "endpoint": { "method": "GET", "path": "/api/telemetry/system" }
+    },
+    {
+      "name": "operator_poll_jobs",
+      "description": "Operator polls for pending jobs assigned to their kernel. Returns queued jobs ready for execution. Used by pcc-node daemon.",
+      "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string", "description": "Kernel ID to poll jobs for" } }, "required": ["kernelId"] },
+      "endpoint": { "method": "GET", "path": "/api/operator/jobs" }
+    },
+    {
+      "name": "operator_push_evidence",
+      "description": "Operator pushes evidence bundle from a completed job execution. Contains device ID, execution timestamp, result payload, and event timeline.",
+      "input_schema": { "type": "object", "properties": { "jobId": { "type": "string" }, "kernelId": { "type": "string" }, "evidence": { "type": "object" } }, "required": ["jobId", "kernelId", "evidence"] },
+      "endpoint": { "method": "POST", "path": "/api/operator/evidence" }
+    },
+    {
+      "name": "operator_heartbeat",
+      "description": "Operator sends heartbeat with capability re-announcement. Keeps the kernel alive on the network and updates available capabilities.",
+      "input_schema": { "type": "object", "properties": { "kernelId": { "type": "string" }, "capabilities": { "type": "array", "items": { "type": "object" } } }, "required": ["kernelId"] },
+      "endpoint": { "method": "POST", "path": "/api/operator/heartbeat" }
+    },
+    {
+      "name": "operator_update_job_status",
+      "description": "Operator updates job status during execution (running, completed, failed). Called by pcc-node as jobs progress.",
+      "input_schema": { "type": "object", "properties": { "jobId": { "type": "string" }, "kernelId": { "type": "string" }, "status": { "type": "string", "enum": ["running", "completed", "failed"] }, "metadata": { "type": "object" } }, "required": ["jobId", "kernelId", "status"] },
+      "endpoint": { "method": "POST", "path": "/api/operator/job-status" }
     },
     {
       "name": "pcc_submit_paid_job",
