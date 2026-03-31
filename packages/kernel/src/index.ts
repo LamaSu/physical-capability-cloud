@@ -38,6 +38,8 @@ export type { StorachaStorageOptions } from "./storacha-storage.js";
 export type { IEvidenceStorageService } from "./evidence-storage-factory.js";
 export { createLitEncryptionService, isRealLitEnabled } from "./lit-encryption-factory.js";
 export type { AnyLitEncryptionService } from "./lit-encryption-factory.js";
+export { generateDecryptAction, executeDecryptAction } from "./lit-action-decrypt.js";
+export type { DecryptActionParams, DecryptActionResult } from "./lit-action-decrypt.js";
 export { PhotoCaptureService } from "./photo-capture-service.js";
 export type { PhotoCaptureResult } from "./photo-capture-service.js";
 export { GeminiComparisonService } from "./gemini-comparison-service.js";

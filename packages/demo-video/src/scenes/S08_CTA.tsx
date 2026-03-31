@@ -1,23 +1,24 @@
 /**
- * S08_CTA — "ETERNAL"
+ * S08_CTA — "The Close"
  *
- * 490 frames (~16s). Judge target: ALL judges. The final impression.
+ * 360 frames (12s).
  *
- * Frame 0-15:   Pure black. The final pause.
- * Frame 15:     "PCC" SLAMS in at 200px. Monument, accent1 gold. Breathing glow. Noise drift.
- * Frame 35:     Editorial italic: "Physical Capability Cloud" — holographic gradient, 36px. Fade.
- * Frame 60:     Gradient line draws: discord → accent1. Width 0→500px. Height 2px.
- * Frame 85:     "capability.network" — Swiss, 36px, white. Spring entrance.
- * Frame 115:    "BUILT WITH" label — Swiss, 11px, tracked, muted.
- * Frame 125-175: Sponsor pills stagger in, 8 frames apart. SPONSORS data.
- * Frame 200:    "Open Source · Apache 2.0 · Public Goods Infrastructure" — Swiss, accent2.
- * Frame 260:    "PL Genesis Hackathon 2026" — Brutalist, muted, bottom.
- * Frame 390-430: Content dims to 0. PCC glow persists.
- * Frame 430-460: PCC glow dims to 0.
- * Frame 475:    Pure black.
+ * Frame 0-15:    Pure #000000.
+ * Frame 15:      "PCC" SLAMS in — SIZE.hero (140px), MONUMENT, C.accent1.
+ *                slamScale 2.5x → 1x. Neon glow. Noise drift. Breathing opacity.
+ * Frame 45:      "AWS for the physical world." — EXPRESSIVE, 44px, C.fg
+ * Frame 90:      "capability.network" — SWISS, 64px, C.fg
+ * Frame 140:     "Open source. Apache 2.0. Public goods." — SWISS, 36px, C.muted
+ * Frame 230-320: Content dims. PCC glow persists alone.
+ * Frame 320-360: PCC glow dims to black.
  *
- * Voices: Monument (PCC), Editorial (subtitle), Swiss (URL, built-with, open-source),
- *         Brutalist (sponsor pills, hackathon)
+ * Background: subtle radial glow (C.accent1 at 0.05, centered).
+ *
+ * Design rules enforced:
+ * - Min font 36px
+ * - Max 5 elements on screen (PCC + 3 text lines + glow bg = 5)
+ * - bg #050a0e (except first 15 frames which are pure #000000)
+ * - Safe margins: 128px left/right, 96px top/bottom
  */
 import React from "react";
 import {
@@ -25,131 +26,71 @@ import {
   useVideoConfig,
   AbsoluteFill,
   interpolate,
-  Easing,
 } from "remotion";
 import { noise2D } from "@remotion/noise";
-import {
-  COLORS,
-  FONTS,
-  GRADIENTS,
-  SPONSORS,
-  slamSpring,
-  slamScale,
-  smoothSpring,
-  fadeSlideUp,
-  breathe,
-} from "../lib";
-import { ParticleField } from "../components/ParticleField";
+import { C, F, SIZE, smooth, slamScale, fadeUp, breathe } from "../lib";
 
 export const S08_CTA: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
   // Pure black for first 15 frames
-  if (frame < 14) {
+  if (frame < 15) {
     return <AbsoluteFill style={{ backgroundColor: "#000000" }} />;
   }
 
-  // PCC SLAM — from 2.5x at frame 15
-  const pccProgress = slamSpring(frame, fps, 15);
+  // PCC SLAM at frame 15
+  const pccP = smooth(frame, fps, 15);
   const pccScale = slamScale(frame, fps, 15, 2.5);
-  const pccOpacity = Math.min(pccProgress * 5, 1);
+  const pccOpacity = Math.min(pccP * 5, 1);
 
   // Breathing after settle
-  const pccBreathe =
-    pccProgress > 0.95 ? breathe(frame, fps, 0.82, 1, 3) : pccProgress;
+  const pccBreathe = pccP > 0.95 ? breathe(frame, fps, 0.82, 1) : pccP;
 
   // Noise drift for organic feel
-  const driftX =
-    noise2D("pcc-final-x", 0, (frame / fps) * 0.25) * 4;
-  const driftY =
-    noise2D("pcc-final-y", 1, (frame / fps) * 0.25) * 3;
+  const driftX = noise2D("pcc-close-x", 0, (frame / fps) * 0.2) * 5;
+  const driftY = noise2D("pcc-close-y", 1, (frame / fps) * 0.2) * 3;
 
-  // Subtitle fade at frame 35
-  const subtitleFade = fadeSlideUp(frame, fps, 35);
+  // "AWS for the physical world." — frame 45
+  const tagFu = fadeUp(frame, fps, 45);
 
-  // Gradient line draws frame 60→95
-  const lineWidth = interpolate(frame, [60, 95], [0, 500], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
+  // "capability.network" — frame 90
+  const urlFu = fadeUp(frame, fps, 90);
 
-  // URL entrance at frame 85
-  const urlFade = fadeSlideUp(frame, fps, 85);
+  // "Open source. Apache 2.0. Public goods." — frame 140
+  const ossFu = fadeUp(frame, fps, 140);
 
-  // "Built with" label at frame 115
-  const builtWithFade = fadeSlideUp(frame, fps, 115);
-
-  // Open source line at frame 200
-  const openSourceOpacity = interpolate(frame, [200, 220], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.out(Easing.cubic),
-  });
-
-  // Hackathon label at frame 260
-  const hackathonFade = fadeSlideUp(frame, fps, 260);
-
-  // Content dims frame 390→430
-  const contentDim = interpolate(frame, [390, 430], [1, 0], {
+  // Content dim: 230-320
+  const contentDim = interpolate(frame, [230, 320], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  // PCC glow persists until 430, then dims to 460
-  const pccFinalDim = interpolate(frame, [430, 460], [1, 0], {
+  // PCC glow dim: 320-360
+  const pccDim = interpolate(frame, [320, 360], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
-
-  // Pure black after 475
-  const sceneOpacity =
-    frame >= 475
-      ? 0
-      : frame >= 460
-      ? interpolate(frame, [460, 475], [1, 0], {
-          extrapolateLeft: "clamp",
-          extrapolateRight: "clamp",
-        })
-      : 1;
 
   return (
     <AbsoluteFill
-      style={{ backgroundColor: "#000000", opacity: sceneOpacity }}
+      style={{
+        backgroundColor: C.bg,
+        overflow: "hidden",
+      }}
     >
-      {/* Background particles — very subtle */}
-      <ParticleField opacity={0.1 * contentDim} />
-
-      {/* Amber/gold radial glow — centered */}
+      {/* Background radial glow — C.accent1 at 0.05 */}
       <div
         style={{
           position: "absolute",
-          top: "40%",
+          top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
-          width: 700,
-          height: 500,
-          background:
-            "radial-gradient(ellipse, rgba(245,166,35,0.06) 0%, transparent 65%)",
-          opacity: pccFinalDim,
+          width: 800,
+          height: 600,
+          background: `radial-gradient(ellipse, rgba(0,255,136,0.05) 0%, transparent 65%)`,
           pointerEvents: "none",
-        }}
-      />
-
-      {/* Discord off-center-right glow */}
-      <div
-        style={{
-          position: "absolute",
-          top: "55%",
-          left: "70%",
-          transform: "translate(-50%, -50%)",
-          width: 400,
-          height: 400,
-          background:
-            "radial-gradient(circle, rgba(248,113,113,0.03) 0%, transparent 70%)",
-          opacity: contentDim,
-          pointerEvents: "none",
+          opacity: pccDim,
         }}
       />
 
@@ -160,201 +101,102 @@ export const S08_CTA: React.FC = () => {
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          paddingBottom: 72,
+          padding: "96px 128px",
+          gap: 32,
+          boxSizing: "border-box" as const,
         }}
       >
-        {/* PCC — 200px, gold, SLAM */}
+        {/* PCC — SIZE.hero (140px), MONUMENT, C.accent1 */}
         <div
           style={{
-            fontFamily: FONTS.monument,
-            fontSize: 280,
-            fontWeight: 700,
-            letterSpacing: "-0.04em",
-            lineHeight: 0.85,
-            textTransform: "uppercase" as const,
-            color: COLORS.accent1,
-            opacity: pccOpacity * pccBreathe * pccFinalDim,
+            opacity: pccOpacity * pccBreathe * pccDim,
             transform: `scale(${pccScale}) translate(${driftX}px, ${driftY}px)`,
-            textShadow: `
-              0 0 80px rgba(245,166,35,0.7),
-              0 0 160px rgba(245,166,35,0.3),
-              0 0 240px rgba(245,166,35,0.1)
-            `,
-            marginBottom: 16,
-          }}
-        >
-          PCC
-        </div>
-
-        {/* Editorial subtitle — holographic */}
-        <div
-          style={{
-            fontFamily: FONTS.editorial,
-            fontSize: 66,
-            fontWeight: 400,
-            fontStyle: "italic",
-            letterSpacing: "0.01em",
-            lineHeight: 1.2,
-            background: GRADIENTS.holographic,
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
-            opacity: subtitleFade.opacity * contentDim,
-            transform: `translateY(${subtitleFade.translateY}px)`,
-            marginBottom: 24,
             textAlign: "center",
           }}
         >
-          Physical Capability Cloud
-        </div>
-
-        {/* Gradient line — discord → accent1 */}
-        <div
-          style={{
-            width: lineWidth,
-            height: 2,
-            background: `linear-gradient(90deg, ${COLORS.discord} 0%, ${COLORS.accent1} 100%)`,
-            marginBottom: 24,
-            opacity: 0.85 * contentDim,
-            borderRadius: 1,
-          }}
-        />
-
-        {/* URL */}
-        <div
-          style={{
-            fontFamily: FONTS.swiss,
-            fontSize: 66,
-            fontWeight: 600,
-            color: COLORS.text.bright,
-            opacity: urlFade.opacity * contentDim,
-            transform: `translateY(${urlFade.translateY}px)`,
-            marginBottom: 44,
-            letterSpacing: "-0.01em",
-          }}
-        >
-          capability.network
-        </div>
-
-        {/* Sponsor section */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 12,
-            opacity: contentDim,
-          }}
-        >
-          {/* "BUILT WITH" */}
-          <div
+          <span
             style={{
-              fontFamily: FONTS.swiss,
-              fontSize: 60,
-              fontWeight: 600,
-              color: COLORS.muted,
+              fontFamily: F.monument,
+              fontSize: SIZE.hero,
+              fontWeight: 700,
+              letterSpacing: "-0.04em",
+              lineHeight: 0.9,
               textTransform: "uppercase" as const,
-              letterSpacing: "0.3em",
-              opacity: builtWithFade.opacity,
-              transform: `translateY(${builtWithFade.translateY}px)`,
+              color: C.accent1,
+              textShadow: `
+                0 0 60px rgba(0,255,136,0.8),
+                0 0 120px rgba(0,255,136,0.4),
+                0 0 200px rgba(0,255,136,0.15)
+              `,
             }}
           >
-            Built With
-          </div>
+            PCC
+          </span>
+        </div>
 
-          {/* Sponsor pills — 8-frame stagger */}
-          <div
+        {/* "AWS for the physical world." */}
+        <div
+          style={{
+            opacity: tagFu.opacity * contentDim,
+            transform: `translateY(${tagFu.y}px)`,
+            textAlign: "center",
+          }}
+        >
+          <span
             style={{
-              display: "flex",
-              flexWrap: "wrap",
-              justifyContent: "center",
-              gap: 10,
-              maxWidth: 900,
+              fontFamily: F.express,
+              fontSize: SIZE.body,
+              fontWeight: 300,
+              color: C.fg,
+              lineHeight: 1.4,
             }}
           >
-            {SPONSORS.map((sponsor, i) => {
-              const pillDelay = 125 + i * 8;
-              const pillProgress = smoothSpring(frame, fps, pillDelay);
-              const pillScale = interpolate(pillProgress, [0, 1], [0.85, 1]);
+            AWS for the physical world.
+          </span>
+        </div>
 
-              return (
-                <div
-                  key={sponsor.name}
-                  style={{
-                    padding: "5px 12px",
-                    background: GRADIENTS.glass,
-                    border: `1px solid ${GRADIENTS.glassBorder}`,
-                    borderRadius: 6,
-                    opacity: pillProgress,
-                    transform: `scale(${pillScale})`,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontFamily: FONTS.brutalist,
-                      fontSize: 34,
-                      fontWeight: 400,
-                      color: COLORS.fg,
-                      letterSpacing: "0.1em",
-                      textTransform: "uppercase" as const,
-                      whiteSpace: "nowrap" as const,
-                    }}
-                  >
-                    {sponsor.name}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Open source line */}
-          <div
+        {/* "capability.network" */}
+        <div
+          style={{
+            opacity: urlFu.opacity * contentDim,
+            transform: `translateY(${urlFu.y}px)`,
+            textAlign: "center",
+          }}
+        >
+          <span
             style={{
-              opacity: openSourceOpacity,
-              textAlign: "center",
-              marginTop: 4,
+              fontFamily: F.swiss,
+              fontSize: SIZE.subtitle,
+              fontWeight: 600,
+              color: C.fg,
+              letterSpacing: "-0.01em",
             }}
           >
-            <span
-              style={{
-                fontFamily: FONTS.swiss,
-                fontSize: 34,
-                fontWeight: 400,
-                color: COLORS.accent2,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase" as const,
-              }}
-            >
-              Open Source · Apache 2.0 · Public Goods Infrastructure
-            </span>
-          </div>
+            capability.network
+          </span>
+        </div>
+
+        {/* "Open source. Apache 2.0. Public goods." */}
+        <div
+          style={{
+            opacity: ossFu.opacity * contentDim,
+            transform: `translateY(${ossFu.y}px)`,
+            textAlign: "center",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: F.swiss,
+              fontSize: SIZE.label,
+              fontWeight: 400,
+              color: C.muted,
+              letterSpacing: "0.02em",
+            }}
+          >
+            Open source. Apache 2.0. Public goods.
+          </span>
         </div>
       </AbsoluteFill>
-
-      {/* Hackathon label — pinned to bottom */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 28,
-          left: 0,
-          right: 0,
-          textAlign: "center",
-          opacity: hackathonFade.opacity * contentDim,
-          transform: `translateY(${hackathonFade.translateY}px)`,
-        }}
-      >
-        <span
-          style={{
-            fontFamily: FONTS.brutalist,
-            fontSize: 60,
-            fontWeight: 400,
-            color: COLORS.muted,
-            letterSpacing: "0.18em",
-            textTransform: "uppercase" as const,
-          }}
-        >
-          PL Genesis Hackathon 2026
-        </span>
-      </div>
     </AbsoluteFill>
   );
 };

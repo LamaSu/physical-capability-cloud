@@ -87,12 +87,16 @@ export interface LitEncryptionResult {
 
 /** Options for the LitEncryptionService. */
 export interface LitEncryptionServiceOptions {
-  /** Lit network to use. Default: "datil-test" */
+  /** Lit network to use. Default: "chipotle" */
   network?: string;
   /** Chain for access conditions. Default: "baseSepolia" */
   chain?: string;
   /** Whether to run in mock mode (no real Lit network). Default: true */
   mock?: boolean;
+  /** Chipotle REST API URL. Default: https://api.dev.litprotocol.com/core/v1 */
+  apiUrl?: string;
+  /** Chipotle API key (from dashboard.dev.litprotocol.com). Default: LIT_API_KEY env */
+  apiKey?: string;
 }
 
 // ── Service Implementation ────────────────────────────────────────────
@@ -110,10 +114,19 @@ export class LitEncryptionService {
     { aesKey: Buffer; iv: Buffer; authTag: Buffer }
   >();
 
+  // ── Telemetry counters ──────────────────────────────────────────
+  private encryptCount = 0;
+  private decryptCount = 0;
+  private lastError: string | null = null;
+
   constructor(options: LitEncryptionServiceOptions = {}) {
     this.network = options.network ?? "datil-test";
     this.chain = options.chain ?? "baseSepolia";
     this.mock = options.mock ?? true;
+
+    console.log(
+      `[LIT] LitEncryptionService (mock) constructed — network=${this.network} chain=${this.chain}`,
+    );
   }
 
   /**
@@ -121,8 +134,10 @@ export class LitEncryptionService {
    * In production, this would call `new LitNodeClient().connect()`.
    */
   async connect(): Promise<void> {
+    console.log(`[LIT] mock connect() called — mock=${this.mock}`);
     if (this.mock) {
       this.connected = true;
+      console.log(`[LIT] mock connect() completed — mode=mock-aes`);
       return;
     }
 
@@ -131,11 +146,37 @@ export class LitEncryptionService {
     // await client.connect();
     // this.litClient = client;
     this.connected = true;
+    console.log(`[LIT] mock connect() completed`);
   }
 
   /** Whether the service is connected to the Lit network. */
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * Return current service state for telemetry/observability.
+   */
+  getStatus(): {
+    connected: boolean;
+    mode: "mock-aes";
+    network: string;
+    hasPKP: false;
+    apiKeyPresent: false;
+    encryptCount: number;
+    decryptCount: number;
+    lastError: string | null;
+  } {
+    return {
+      connected: this.connected,
+      mode: "mock-aes",
+      network: this.network,
+      hasPKP: false,
+      apiKeyPresent: false,
+      encryptCount: this.encryptCount,
+      decryptCount: this.decryptCount,
+      lastError: this.lastError,
+    };
   }
 
   /**
@@ -208,9 +249,18 @@ export class LitEncryptionService {
     escrowAddress: Address,
     jobId: Id,
   ): Promise<EncryptedEvidenceBundle> {
+    const encryptStart = performance.now();
+
     if (!this.connected) {
-      throw new Error("LitEncryptionService not connected. Call connect() first.");
+      const err = new Error("LitEncryptionService not connected. Call connect() first.");
+      this.lastError = err.message;
+      console.log(`[LIT] mock encryptBundle() FAILED — not connected`);
+      throw err;
     }
+
+    console.log(
+      `[LIT] mock encryptBundle() called — bundleId=${bundle.id} escrow=${escrowAddress} jobId=${jobId}`,
+    );
 
     const accessConditions = this.buildAccessConditions(escrowAddress, jobId);
     const plaintext = canonicalize(bundle);
@@ -223,6 +273,12 @@ export class LitEncryptionService {
     this.mockKeyStore.set(dataToEncryptHash, { aesKey, iv, authTag });
 
     const bundleHash = await sha256(plaintext);
+
+    this.encryptCount++;
+    const elapsed = (performance.now() - encryptStart).toFixed(1);
+    console.log(
+      `[LIT] mock encryptBundle() completed in ${elapsed}ms — hash=${dataToEncryptHash.slice(0, 16)}... encryptCount=${this.encryptCount}`,
+    );
 
     return {
       id: ids.bundle(),
@@ -255,25 +311,43 @@ export class LitEncryptionService {
     encrypted: EncryptedEvidenceBundle,
     authSig: LitAuthSig,
   ): Promise<EvidenceBundle> {
+    const decryptStart = performance.now();
+
     if (!this.connected) {
-      throw new Error("LitEncryptionService not connected. Call connect() first.");
+      const err = new Error("LitEncryptionService not connected. Call connect() first.");
+      this.lastError = err.message;
+      console.log(`[LIT] mock decryptBundle() FAILED — not connected`);
+      throw err;
     }
 
+    console.log(
+      `[LIT] mock decryptBundle() called — bundleId=${encrypted.bundleId ?? "unknown"} hash=${encrypted.litDataToEncryptHash?.slice(0, 16) ?? "none"}...`,
+    );
+
     if (!encrypted.litDataToEncryptHash) {
-      throw new Error("Bundle was not encrypted with Lit Protocol (missing litDataToEncryptHash).");
+      const err = new Error("Bundle was not encrypted with Lit Protocol (missing litDataToEncryptHash).");
+      this.lastError = err.message;
+      console.log(`[LIT] mock decryptBundle() FAILED — ${err.message}`);
+      throw err;
     }
 
     if (!encrypted.litCiphertext) {
-      throw new Error("Bundle was not encrypted with Lit Protocol (missing litCiphertext).");
+      const err = new Error("Bundle was not encrypted with Lit Protocol (missing litCiphertext).");
+      this.lastError = err.message;
+      console.log(`[LIT] mock decryptBundle() FAILED — ${err.message}`);
+      throw err;
     }
 
     // In mock mode, retrieve the stored key and decrypt
     const keyMaterial = this.mockKeyStore.get(encrypted.litDataToEncryptHash);
     if (!keyMaterial) {
-      throw new Error(
+      const err = new Error(
         "Decryption failed: no key material found for this bundle. " +
         "In production, Lit nodes would perform threshold decryption.",
       );
+      this.lastError = err.message;
+      console.log(`[LIT] mock decryptBundle() FAILED — key not found`);
+      throw err;
     }
 
     // Mock access condition check — in production, Lit nodes enforce this
@@ -286,6 +360,12 @@ export class LitEncryptionService {
       decipher.update(Buffer.from(encrypted.litCiphertext, "base64")),
       decipher.final(),
     ]);
+
+    this.decryptCount++;
+    const elapsed = (performance.now() - decryptStart).toFixed(1);
+    console.log(
+      `[LIT] mock decryptBundle() completed in ${elapsed}ms — decryptCount=${this.decryptCount}`,
+    );
 
     return JSON.parse(decrypted.toString("utf8")) as EvidenceBundle;
   }
@@ -356,6 +436,9 @@ export class LitEncryptionService {
    * Disconnect from the Lit network. Clears mock key store.
    */
   async disconnect(): Promise<void> {
+    console.log(
+      `[LIT] mock disconnect() — encryptCount=${this.encryptCount} decryptCount=${this.decryptCount} keyStoreSize=${this.mockKeyStore.size}`,
+    );
     this.mockKeyStore.clear();
     this.connected = false;
   }

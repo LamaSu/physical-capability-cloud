@@ -11,7 +11,8 @@ dependencies = [
 [project.optional-dependencies]
 crypto = ["pynacl>=1.5"]
 discovery = ["zeroconf>=0.100"]
-all = ["pynacl>=1.5", "zeroconf>=0.100"]
+lit = ["cryptography>=41.0"]
+all = ["pynacl>=1.5", "zeroconf>=0.100", "cryptography>=41.0"]
 
 [project.scripts]
 pcc-node = "pcc_node.cli:main"

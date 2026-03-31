@@ -27,6 +27,8 @@ export {
 export {
   AnnouncementRegistry,
   type StoredAnnouncement,
+  type StoredEvidenceAnnouncement,
+  type EvidenceQuery,
 } from "./registry.js";
 
 // Bootstrap node management

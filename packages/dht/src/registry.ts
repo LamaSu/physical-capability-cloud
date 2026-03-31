@@ -5,7 +5,7 @@
  * (receivedAt, expiresAt, hops). A periodic prune timer evicts expired entries.
  */
 
-import type { CapabilityAnnouncement } from "@pcc/spec";
+import type { CapabilityAnnouncement, EvidenceAnnouncement } from "@pcc/spec";
 import type { CapabilityQuery } from "./query.js";
 import { matchesQuery } from "./query.js";
 import { dhtTelemetry } from "./telemetry.js";
@@ -17,8 +17,26 @@ export interface StoredAnnouncement {
   hops: number;
 }
 
+export interface StoredEvidenceAnnouncement {
+  announcement: EvidenceAnnouncement;
+  receivedAt: number;
+  expiresAt: number;
+  hops: number;
+}
+
+/** Filter for querying evidence announcements */
+export interface EvidenceQuery {
+  jobId?: string;
+  escrowAddress?: string;
+  operatorDid?: string;
+}
+
+/** Default TTL for evidence announcements: 1 hour */
+const EVIDENCE_TTL_SECONDS = 3600;
+
 export class AnnouncementRegistry {
   private announcements = new Map<string, StoredAnnouncement>();
+  private evidenceStore = new Map<string, StoredEvidenceAnnouncement>();
   private expiryTimer: ReturnType<typeof setInterval> | null = null;
   private pruneIntervalMs: number;
 
@@ -75,7 +93,7 @@ export class AnnouncementRegistry {
     return results;
   }
 
-  /** Remove expired announcements. Returns the count of pruned entries. */
+  /** Remove expired announcements (both capability and evidence). Returns the count of pruned entries. */
   prune(): number {
     const now = Date.now();
     let pruned = 0;
@@ -86,6 +104,8 @@ export class AnnouncementRegistry {
         pruned++;
       }
     }
+    // Also prune evidence
+    pruned += this.pruneEvidence();
     if (pruned > 0) {
       dhtTelemetry.registryPruned(pruned);
     }
@@ -108,7 +128,7 @@ export class AnnouncementRegistry {
     return this.announcements.delete(kernelDid);
   }
 
-  /** Count of active announcements by capability type */
+  /** Count of active announcements by capability type, plus evidence stats */
   stats(): Record<string, number> {
     this.prune();
     const counts: Record<string, number> = {};
@@ -117,7 +137,67 @@ export class AnnouncementRegistry {
         counts[cap.type] = (counts[cap.type] ?? 0) + 1;
       }
     }
+    // Include evidence stats
+    counts["_evidence_total"] = this.evidenceStore.size;
     return counts;
+  }
+
+  // ── Evidence Announcements ──────────────────────────────────────
+
+  /**
+   * Store an evidence announcement. Keyed by bundleId (each bundle has one entry).
+   * TTL defaults to 3600 seconds (1 hour).
+   */
+  storeEvidence(announcement: EvidenceAnnouncement, hops = 0): void {
+    const now = Date.now();
+    const ttlMs = EVIDENCE_TTL_SECONDS * 1000;
+    this.evidenceStore.set(announcement.bundleId, {
+      announcement,
+      receivedAt: now,
+      expiresAt: now + ttlMs,
+      hops,
+    });
+    console.log(
+      `[LIT] evidence stored in DHT — bundleId=${announcement.bundleId} cid=${announcement.cid} jobId=${announcement.jobId}`,
+    );
+  }
+
+  /** Query evidence announcements by jobId, escrowAddress, or operatorDid */
+  queryEvidence(filter: EvidenceQuery): EvidenceAnnouncement[] {
+    this.pruneEvidence();
+    const results: EvidenceAnnouncement[] = [];
+    for (const stored of this.evidenceStore.values()) {
+      const a = stored.announcement;
+      if (filter.jobId && a.jobId !== filter.jobId) continue;
+      if (filter.escrowAddress && a.escrowAddress !== filter.escrowAddress) continue;
+      if (filter.operatorDid && a.operatorDid !== filter.operatorDid) continue;
+      results.push(a);
+    }
+    return results;
+  }
+
+  /** Get evidence stats */
+  evidenceStats(): { total: number; byJob: Record<string, number> } {
+    this.pruneEvidence();
+    const byJob: Record<string, number> = {};
+    for (const stored of this.evidenceStore.values()) {
+      const jobId = stored.announcement.jobId;
+      byJob[jobId] = (byJob[jobId] ?? 0) + 1;
+    }
+    return { total: this.evidenceStore.size, byJob };
+  }
+
+  /** Remove expired evidence announcements */
+  private pruneEvidence(): number {
+    const now = Date.now();
+    let pruned = 0;
+    for (const [key, stored] of this.evidenceStore) {
+      if (stored.expiresAt <= now) {
+        this.evidenceStore.delete(key);
+        pruned++;
+      }
+    }
+    return pruned;
   }
 
   /** Total number of stored announcements */
@@ -125,8 +205,9 @@ export class AnnouncementRegistry {
     return this.announcements.size;
   }
 
-  /** Clear all stored announcements */
+  /** Clear all stored announcements (both capability and evidence) */
   clear(): void {
     this.announcements.clear();
+    this.evidenceStore.clear();
   }
 }

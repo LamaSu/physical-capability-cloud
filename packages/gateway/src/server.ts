@@ -68,6 +68,7 @@ import { auditRoutes } from "./routes/audit.js";
 import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { nearRoutes } from "./routes/near.js";
+import { litProvisionRoutes } from "./routes/lit-provision.js";
 import { ot2ChatRoutes } from "./routes/ot2-chat.js";
 import { ot2CameraRoutes } from "./routes/ot2-camera.js";
 import { ot2RelayRoutes } from "./routes/ot2-relay.js";
@@ -255,6 +256,9 @@ export async function createGateway(port = 3200) {
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
   await app.register(nearRoutes);
+
+  // Lit Protocol key provisioning
+  await app.register(litProvisionRoutes);
 
   // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
   await app.register(ot2ChatRoutes);

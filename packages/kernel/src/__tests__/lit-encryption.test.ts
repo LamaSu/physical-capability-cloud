@@ -349,4 +349,67 @@ describe("LitEncryptionService", () => {
       expect(conditions).toBeNull();
     });
   });
+
+  // ── getStatus (telemetry) ──────────────────────────────────────
+
+  describe("getStatus", () => {
+    it("returns mock-aes mode", () => {
+      const status = service.getStatus();
+
+      expect(status.connected).toBe(true);
+      expect(status.mode).toBe("mock-aes");
+      expect(status.network).toBe("datil-test");
+      expect(status.hasPKP).toBe(false);
+      expect(status.apiKeyPresent).toBe(false);
+    });
+
+    it("tracks encryptCount and decryptCount", async () => {
+      // Create a fresh service to isolate count tracking
+      const freshService = new LitEncryptionService({ network: "datil-test", chain: "baseSepolia", mock: true });
+      await freshService.connect();
+
+      const statusBefore = freshService.getStatus();
+      expect(statusBefore.encryptCount).toBe(0);
+      expect(statusBefore.decryptCount).toBe(0);
+
+      const bundle = makeMockBundle();
+      const encrypted = await freshService.encryptBundle(bundle, ESCROW_ADDRESS, JOB_ID);
+
+      const statusAfterEncrypt = freshService.getStatus();
+      expect(statusAfterEncrypt.encryptCount).toBe(1);
+
+      await freshService.decryptBundle(encrypted, makeMockAuthSig());
+
+      const statusAfterDecrypt = freshService.getStatus();
+      expect(statusAfterDecrypt.decryptCount).toBe(1);
+
+      await freshService.disconnect();
+    });
+
+    it("tracks lastError on failure", async () => {
+      const unconnected = new LitEncryptionService();
+      try {
+        await unconnected.encryptBundle(makeMockBundle(), ESCROW_ADDRESS, JOB_ID);
+      } catch {
+        // expected
+      }
+
+      const status = unconnected.getStatus();
+      expect(status.lastError).toContain("not connected");
+    });
+
+    it("returns disconnected state after disconnect", async () => {
+      const tempService = new LitEncryptionService();
+      await tempService.connect();
+      expect(tempService.getStatus().connected).toBe(true);
+      await tempService.disconnect();
+      expect(tempService.getStatus().connected).toBe(false);
+    });
+
+    it("is synchronous (does not return a Promise)", () => {
+      const result = service.getStatus();
+      expect(result).not.toBeInstanceOf(Promise);
+      expect(typeof result.connected).toBe("boolean");
+    });
+  });
 });
