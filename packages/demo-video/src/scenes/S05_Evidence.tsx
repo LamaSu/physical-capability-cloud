@@ -193,8 +193,8 @@ export const S05_Evidence: React.FC = () => {
   // ── Beat 3: Sponsors (780-1080) ──
   const beat3HeaderFu = fadeUp(frame, fps, 800);
 
-  // End dim
-  const endDim = interpolate(frame, [1100, 1200], [1, 0], {
+  // End dim — shortened since Beat 3 removed
+  const endDim = interpolate(frame, [750, 840], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -326,7 +326,7 @@ export const S05_Evidence: React.FC = () => {
                   letterSpacing: "-0.03em",
                 }}
               >
-                $175
+                35%
               </span>
               <span
                 style={{
@@ -336,7 +336,7 @@ export const S05_Evidence: React.FC = () => {
                   textAlign: "center",
                 }}
               >
-                WHAT XOMETRY KEEPS
+                XOMETRY · UBER · FIVERR
               </span>
               <span
                 style={{
@@ -372,7 +372,7 @@ export const S05_Evidence: React.FC = () => {
                     letterSpacing: "-0.03em",
                   }}
                 >
-                  $7.50
+                  1.5%
                 </span>
                 <span
                   style={{
@@ -406,90 +406,49 @@ export const S05_Evidence: React.FC = () => {
                   lineHeight: 1.4,
                 }}
               >
-                Operators keep $492.50, not $325.
+                Value flows to operators, not platforms.
+              </span>
+            </div>
+          )}
+
+          {/* Black market / supply chain line — frame 710 */}
+          {frame >= 710 && (
+            <div
+              style={{
+                opacity: fadeUp(frame, fps, 710).opacity,
+                transform: `translateY(${fadeUp(frame, fps, 710).y}px)`,
+                textAlign: "center",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: F.swiss,
+                  fontSize: SIZE.label,
+                  fontWeight: 400,
+                  color: C.muted,
+                  lineHeight: 1.4,
+                }}
+              >
+                $467B in counterfeit goods vanish when
+              </span>
+              <br />
+              <span
+                style={{
+                  fontFamily: F.swiss,
+                  fontSize: SIZE.label,
+                  fontWeight: 600,
+                  color: C.accent2,
+                  lineHeight: 1.4,
+                }}
+              >
+                every step has cryptographic proof.
               </span>
             </div>
           )}
         </div>
       )}
 
-      {/* ── BEAT 3: Sponsors ── */}
-      {frame >= 780 && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            flexDirection: "column",
-            gap: 32,
-            padding: "96px 128px",
-            opacity: endDim,
-            boxSizing: "border-box" as const,
-          }}
-        >
-          {/* "BUILT ON" header */}
-          <div
-            style={{
-              opacity: beat3HeaderFu.opacity,
-              transform: `translateY(${beat3HeaderFu.y}px)`,
-              marginBottom: 8,
-            }}
-          >
-            <span
-              style={{
-                fontFamily: F.monument,
-                fontSize: SIZE.subtitle,
-                fontWeight: 700,
-                color: C.fg,
-                textTransform: "uppercase" as const,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              BUILT ON
-            </span>
-          </div>
-
-          {/* 5 sponsor lines, staggered 40 frames apart from 840 */}
-          {SPONSORS.map((sponsor, i) => {
-            const delayFrame = 840 + i * 40;
-            const p = smooth(frame, fps, delayFrame);
-            const fu = fadeUp(frame, fps, delayFrame);
-            return (
-              <div
-                key={sponsor.name}
-                style={{
-                  opacity: p,
-                  transform: `translateY(${fu.y}px)`,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 24,
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: F.swiss,
-                    fontSize: 40,
-                    fontWeight: 600,
-                    color: sponsor.real ? C.accent1 : C.muted,
-                    minWidth: 220,
-                  }}
-                >
-                  {sponsor.name}
-                </span>
-                <span
-                  style={{
-                    fontFamily: F.swiss,
-                    fontSize: SIZE.label,
-                    color: C.muted,
-                  }}
-                >
-                  {sponsor.status}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Beat 3 sponsors removed — already shown in architecture scene */}
     </AbsoluteFill>
   );
 };

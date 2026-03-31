@@ -16,7 +16,7 @@ import { S08_CTA } from "../scenes/S08_CTA";
 export const PCCDemo: React.FC = () => (
   <AbsoluteFill style={{ backgroundColor: "#050a0e" }}>
     <TransitionSeries>
-      <TransitionSeries.Sequence durationInFrames={600}>
+      <TransitionSeries.Sequence durationInFrames={360}>
         <S01_Proof />
       </TransitionSeries.Sequence>
 
@@ -40,7 +40,7 @@ export const PCCDemo: React.FC = () => (
 
       <TransitionSeries.Transition timing={linearTiming({ durationInFrames: 6 })} presentation={fade()} />
 
-      <TransitionSeries.Sequence durationInFrames={1200}>
+      <TransitionSeries.Sequence durationInFrames={870}>
         <S05_Evidence />
       </TransitionSeries.Sequence>
 

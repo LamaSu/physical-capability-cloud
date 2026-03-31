@@ -178,7 +178,7 @@ export const S04_Agents: React.FC = () => {
           transform: `translateY(${calloutY}px)`,
         }}
       >
-        No middleware. No chat. Typed contracts.
+        Agents negotiate. Operators earn.
       </div>
     </AbsoluteFill>
   );

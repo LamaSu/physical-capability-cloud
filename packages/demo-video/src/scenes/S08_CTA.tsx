@@ -6,7 +6,7 @@
  * Frame 0-15:    Pure #000000.
  * Frame 15:      "PCC" SLAMS in — SIZE.hero (140px), MONUMENT, C.accent1.
  *                slamScale 2.5x → 1x. Neon glow. Noise drift. Breathing opacity.
- * Frame 45:      "AWS for the physical world." — EXPRESSIVE, 44px, C.fg
+ * Frame 45:      "Every physical capability. One protocol." — EXPRESSIVE, 44px, C.fg
  * Frame 90:      "capability.network" — SWISS, 64px, C.fg
  * Frame 140:     "Open source. Apache 2.0. Public goods." — SWISS, 36px, C.muted
  * Frame 230-320: Content dims. PCC glow persists alone.
@@ -51,7 +51,7 @@ export const S08_CTA: React.FC = () => {
   const driftX = noise2D("pcc-close-x", 0, (frame / fps) * 0.2) * 5;
   const driftY = noise2D("pcc-close-y", 1, (frame / fps) * 0.2) * 3;
 
-  // "AWS for the physical world." — frame 45
+  // "Every physical capability. One protocol." — frame 45
   const tagFu = fadeUp(frame, fps, 45);
 
   // "capability.network" — frame 90
@@ -60,14 +60,14 @@ export const S08_CTA: React.FC = () => {
   // "Open source. Apache 2.0. Public goods." — frame 140
   const ossFu = fadeUp(frame, fps, 140);
 
-  // Content dim: 230-320
-  const contentDim = interpolate(frame, [230, 320], [1, 0], {
+  // Content dim: 230-290 (faster to make room for sponsors)
+  const contentDim = interpolate(frame, [230, 290], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  // PCC glow dim: 320-360
-  const pccDim = interpolate(frame, [320, 360], [1, 0], {
+  // PCC glow dim: 280-360
+  const pccDim = interpolate(frame, [280, 360], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -134,7 +134,7 @@ export const S08_CTA: React.FC = () => {
           </span>
         </div>
 
-        {/* "AWS for the physical world." */}
+        {/* "Every physical capability. One protocol." */}
         <div
           style={{
             opacity: tagFu.opacity * contentDim,
@@ -151,7 +151,7 @@ export const S08_CTA: React.FC = () => {
               lineHeight: 1.4,
             }}
           >
-            AWS for the physical world.
+            Every physical capability. One protocol.
           </span>
         </div>
 
@@ -197,6 +197,8 @@ export const S08_CTA: React.FC = () => {
           </span>
         </div>
       </AbsoluteFill>
+
+      {/* Sponsors removed — already shown in architecture scene */}
     </AbsoluteFill>
   );
 };

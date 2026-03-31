@@ -1,79 +1,40 @@
 /**
- * S02_Problem — "The $40,000 HPLC Run"
+ * S02_Problem — "The Problem"
  *
- * 540 frames (18 seconds). Two-panel contrast. Left = broken world. Right = PCC.
+ * 540 frames (18s). States what's broken, simply.
  *
- * Frame 0:      Title "The $40,000 HPLC Run" — EXPRESSIVE, SIZE.subtitle (64px),
- *               C.fg, centered. Fade in over 30 frames.
- * Frame 60:     LEFT PANEL — BRUTALIST header, C.discord. ← DISCORD USE #1 for scenes 1-4.
- *               3 bullets stagger in (30 frames apart).
- * Frame 180:    RIGHT PANEL — MONUMENT header, C.accent1.
- *               3 bullets stagger in.
- * Frame 420:    Both panels visible. Hold. Let judges READ.
- * Frame 480:    Dim over 60 frames.
- *
- * DESIGN RULES:
- * - Min font: SIZE.label = 36px
- * - Max 5 elements visible at once (stagger enforces this)
- * - Discord used exactly ONCE: left panel header border + text
- * - bg: #050a0e throughout
+ * Frame 0:   "Physical work is trapped behind" — EXPRESSIVE, fade in
+ * Frame 60:  "brokers, procurement, and paperwork" — MONUMENT, accent1
+ * Frame 150: Three lines stagger in:
+ *            "Uber takes 40% from drivers"
+ *            "Xometry takes 34.5% from manufacturers"
+ *            "$9 billion in NIH grants → admin, not research"
+ * Frame 380: "What if operators kept what they earned?" — EXPRESSIVE, accent1
+ * Frame 480: Dim
  */
 import React from "react";
 import { useCurrentFrame, useVideoConfig, AbsoluteFill, interpolate, Easing } from "remotion";
-import { C, F, SIZE, smooth } from "../lib";
+import { C, F, SIZE, smooth, fadeUp } from "../lib";
 
-const LEFT_BULLETS = [
-  "3 months of procurement",
-  "3 NDAs, 2 site visits",
-  "No composable proof",
+const PAIN_POINTS = [
+  { text: "Uber takes 40% from drivers", source: "NELP, 2025" },
+  { text: "Xometry takes 34.5% from manufacturers", source: "Q4 2024 earnings" },
+  { text: "$9B in NIH grants goes to admin, not research", source: "NIH FY2023" },
 ];
-
-const RIGHT_BULLETS = [
-  "47 seconds to match",
-  "Cryptographic evidence",
-  "1.5% protocol fee",
-];
-
-function fadeInAt(frame: number, fps: number, delay: number) {
-  const p = smooth(frame, fps, delay);
-  return {
-    opacity: p,
-    transform: `translateY(${interpolate(p, [0, 1], [20, 0])}px)`,
-  };
-}
 
 export const S02_Problem: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // ── Title fade in ────────────────────────────────────────────────────────
-  const titleStyle = fadeInAt(frame, fps, 0);
+  const line1 = fadeUp(frame, fps, 0);
+  const line2 = fadeUp(frame, fps, 60);
+  const question = fadeUp(frame, fps, 380);
 
-  // ── Left panel appears at frame 60 ──────────────────────────────────────
-  const leftHeaderStyle = fadeInAt(frame, fps, 60);
-
-  // Left bullets stagger: 90, 120, 150
-  const leftBullet1 = fadeInAt(frame, fps, 90);
-  const leftBullet2 = fadeInAt(frame, fps, 120);
-  const leftBullet3 = fadeInAt(frame, fps, 150);
-
-  // ── Right panel appears at frame 180 ────────────────────────────────────
-  const rightHeaderStyle = fadeInAt(frame, fps, 180);
-
-  // Right bullets stagger: 210, 240, 270
-  const rightBullet1 = fadeInAt(frame, fps, 210);
-  const rightBullet2 = fadeInAt(frame, fps, 240);
-  const rightBullet3 = fadeInAt(frame, fps, 270);
-
-  // ── End dim ──────────────────────────────────────────────────────────────
   const endDim = interpolate(frame, [480, 540], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
     easing: Easing.in(Easing.cubic),
   });
-
-  const leftBulletStyles = [leftBullet1, leftBullet2, leftBullet3];
-  const rightBulletStyles = [rightBullet1, rightBullet2, rightBullet3];
 
   return (
     <AbsoluteFill
@@ -82,130 +43,85 @@ export const S02_Problem: React.FC = () => {
         padding: "96px 128px",
         display: "flex",
         flexDirection: "column",
+        justifyContent: "center",
+        gap: 48,
         opacity: endDim,
       }}
     >
-      {/* Title */}
+      {/* Line 1 */}
       <div
         style={{
           fontFamily: F.express,
           fontSize: SIZE.subtitle,
           fontWeight: 300,
           color: C.fg,
-          textAlign: "center",
-          letterSpacing: "0.01em",
-          marginBottom: 64,
-          ...titleStyle,
+          opacity: line1.opacity,
+          transform: `translateY(${line1.y}px)`,
         }}
       >
-        The $40,000 HPLC Run
+        Physical work is trapped behind
       </div>
 
-      {/* Two-panel layout */}
+      {/* Line 2 — the punch */}
       <div
         style={{
-          flex: 1,
-          display: "flex",
-          gap: 0,
-          alignItems: "flex-start",
+          fontFamily: F.monument,
+          fontSize: SIZE.title,
+          fontWeight: 700,
+          color: C.discord,
+          textTransform: "uppercase" as const,
+          letterSpacing: "-0.02em",
+          lineHeight: 1,
+          opacity: line2.opacity,
+          transform: `translateY(${line2.y}px)`,
         }}
       >
-        {/* LEFT PANEL — 45% width */}
-        <div
-          style={{
-            width: "45%",
-            paddingRight: 48,
-            borderLeft: `3px solid ${C.discord}`,
-            paddingLeft: 32,
-          }}
-        >
-          {/* Left header — DISCORD USE #1 */}
-          <div
-            style={{
-              fontFamily: F.brutalist,
-              fontSize: SIZE.label,
-              fontWeight: 700,
-              color: C.discord,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase" as const,
-              marginBottom: 32,
-              ...leftHeaderStyle,
-            }}
-          >
-            THE OLD WAY
-          </div>
+        BROKERS AND OVERHEAD
+      </div>
 
-          {/* Left bullets */}
-          {LEFT_BULLETS.map((bullet, i) => (
+      {/* Pain points */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 24, marginTop: 16 }}>
+        {PAIN_POINTS.map((point, i) => {
+          const fu = fadeUp(frame, fps, 150 + i * 50);
+          return (
             <div
               key={i}
               style={{
-                fontFamily: F.swiss,
-                fontSize: SIZE.label,
-                fontWeight: 400,
-                color: C.muted,
-                lineHeight: 1.5,
-                marginBottom: 20,
-                ...leftBulletStyles[i],
+                opacity: fu.opacity,
+                transform: `translateY(${fu.y}px)`,
+                display: "flex",
+                alignItems: "baseline",
+                gap: 16,
               }}
             >
-              — {bullet}
+              <span
+                style={{
+                  fontFamily: F.swiss,
+                  fontSize: SIZE.body,
+                  fontWeight: 400,
+                  color: C.muted,
+                }}
+              >
+                {point.text}
+              </span>
             </div>
-          ))}
-        </div>
+          );
+        })}
+      </div>
 
-        {/* Divider */}
-        <div
-          style={{
-            width: 1,
-            alignSelf: "stretch",
-            background: C.border,
-            flexShrink: 0,
-          }}
-        />
-
-        {/* RIGHT PANEL — 55% width */}
-        <div
-          style={{
-            width: "55%",
-            paddingLeft: 48,
-            borderLeft: `3px solid ${C.accent1}`,
-          }}
-        >
-          {/* Right header */}
-          <div
-            style={{
-              fontFamily: F.monument,
-              fontSize: SIZE.label,
-              fontWeight: 700,
-              color: C.accent1,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase" as const,
-              marginBottom: 32,
-              ...rightHeaderStyle,
-            }}
-          >
-            PCC
-          </div>
-
-          {/* Right bullets */}
-          {RIGHT_BULLETS.map((bullet, i) => (
-            <div
-              key={i}
-              style={{
-                fontFamily: F.swiss,
-                fontSize: SIZE.label,
-                fontWeight: 400,
-                color: C.fg,
-                lineHeight: 1.5,
-                marginBottom: 20,
-                ...rightBulletStyles[i],
-              }}
-            >
-              — {bullet}
-            </div>
-          ))}
-        </div>
+      {/* The question */}
+      <div
+        style={{
+          fontFamily: F.express,
+          fontSize: SIZE.body,
+          fontWeight: 300,
+          color: C.accent1,
+          opacity: question.opacity,
+          transform: `translateY(${question.y}px)`,
+          marginTop: 32,
+        }}
+      >
+        What if operators kept what they earned?
       </div>
     </AbsoluteFill>
   );
