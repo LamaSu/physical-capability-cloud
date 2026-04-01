@@ -9,7 +9,6 @@
  */
 
 import type { ZKProof } from "@pcc/spec";
-import { sha256 } from "@pcc/spec";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -103,7 +102,8 @@ export class StarknetProofAnchoringService {
    */
   async anchorMerkleRoot(root: string, treeDepth: number): Promise<StarknetAnchor> {
     // Canonical hash: sha256 of root + depth for uniqueness
-    const rootHash = await sha256(`${root}:depth=${treeDepth}`);
+    const { createHash } = await import("node:crypto");
+    const rootHash = "sha256:" + createHash("sha256").update(`${root}:depth=${treeDepth}`).digest("hex");
     const proofHash = rootHash;
 
     if (this.mock) {
@@ -140,9 +140,10 @@ export class StarknetProofAnchoringService {
   // ─── Mock implementation ───────────────────────────────────────────────────
 
   private async mockAnchor(proofHash: string): Promise<StarknetAnchor> {
-    // Generate a realistic-looking Starknet tx hash (0x prefix + 63 hex chars)
-    const rawTxHash = await sha256(`mock-tx:${proofHash}:${Date.now()}`);
-    const txHash = "0x0" + rawTxHash.replace("sha256:", "").slice(0, 62);
+    // Use Node.js crypto (not Web Crypto) for mock tx hash generation
+    const { createHash } = await import("node:crypto");
+    const rawHex = createHash("sha256").update(`mock-tx:${proofHash}:${Date.now()}`).digest("hex");
+    const txHash = "0x0" + rawHex.slice(0, 62);
 
     const anchor: StarknetAnchor = {
       txHash,
@@ -262,8 +263,9 @@ export class StarknetProofAnchoringService {
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
   private async computeProofHash(proof: ZKProof): Promise<string> {
+    const { createHash } = await import("node:crypto");
     const canonical = `${proof.id}:${proof.proofType}:${proof.proof}`;
-    return sha256(canonical);
+    return "sha256:" + createHash("sha256").update(canonical).digest("hex");
   }
 
   /** Expose anchor store for testing / introspection */

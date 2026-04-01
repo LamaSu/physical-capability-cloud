@@ -667,15 +667,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         console.warn("[complete] ZK/Starknet anchor failed (best-effort):", zkErr instanceof Error ? zkErr.message : zkErr);
       }
 
-      // ── 3. Revoke execution scopes ─────────────────────────────────
-      for (const scope of scopes) {
-        if (scope.status === "active") {
-          db.update(executionScopes)
-            .set({ status: "completed" })
-            .where(eq(executionScopes.id, scope.id))
-            .run();
-        }
-      }
+      // ── 3. Execution scopes — left active (not revoked on completion) ──
+      // Scopes remain active so the operator/agent can continue using them
+      // for follow-up tool calls (camera, diagnostics, etc.) until expiry.
 
       // ── 4. Find escrow and submit evidence hash ────────────────────
       // Look up the session that created this job to find the escrow
@@ -770,7 +764,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt,
         ipfsCid,
         starknetAnchorTxHash: starknetTxHash,
-        scopesRevoked: scopes.filter((s) => s.status === "active").length,
+        scopesRevoked: 0,
         toolCallsRecorded: auditTrail.length,
         oracleVerified: oracleResponse.result.verified,
         oracleAttestation: oracleAttestation ? {
