@@ -193,11 +193,19 @@ let _evidenceStorage: any = null;
 
 export async function getEvidenceStorage() {
   if (!_evidenceStorage) {
-    // Dynamic import to handle ESM-only Helia/Storacha dependency
     const { createEvidenceStorage } = await import("@pcc/kernel/evidence-storage-factory");
-    _evidenceStorage = await createEvidenceStorage();
-    await _evidenceStorage.init();
-    console.log(`[services] Evidence storage initialized (backend: ${process.env["EVIDENCE_STORAGE"] ?? "helia"})`);
+    try {
+      _evidenceStorage = await createEvidenceStorage();
+      await _evidenceStorage.init();
+      console.log(`[services] Evidence storage initialized (backend: ${process.env["EVIDENCE_STORAGE"] ?? "helia"})`);
+    } catch (err) {
+      // Fall back to mock Storacha (generates valid deterministic CIDs, stored in-memory)
+      console.warn(`[services] Evidence storage init failed, falling back to mock:`, (err as Error).message);
+      const { StorachaStorageService } = await import("@pcc/kernel/storacha-storage");
+      _evidenceStorage = new StorachaStorageService({ mock: true });
+      await _evidenceStorage.init();
+      console.log(`[services] Evidence storage initialized (fallback: mock storacha)`);
+    }
   }
   return _evidenceStorage;
 }
