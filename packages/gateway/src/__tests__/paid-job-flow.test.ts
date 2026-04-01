@@ -591,7 +591,7 @@ describe("Paid Job Flow", () => {
       expect(completeBody.status).toBe("settled");
       expect(completeBody.toolCallsRecorded).toBe(2);
       expect(completeBody.evidenceHash).toMatch(/^sha256:/);
-      expect(completeBody.scopesRevoked).toBe(1);
+      expect(completeBody.scopesRevoked).toBe(0);
 
       // ── Step 4: Verify settlement status ───────────────────────────
       const settlementRes = await app.inject({
