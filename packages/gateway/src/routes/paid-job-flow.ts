@@ -23,6 +23,7 @@ import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle } from "../services/oracle-client.js";
 import type {
   OperatorPolicy,
@@ -167,16 +168,22 @@ export async function createJobFromSession(
 
   const stepId = milestones[0]?.stepId ?? `step-${crypto.randomUUID().slice(0, 8)}`;
 
+  // Check if this kernel is externally-managed (daemon-polled)
+  const svc = getKernelService();
+  const localKernelId = (svc as any).config?.kernelId;
+  const isExternal = localKernelId && session.kernelId !== localKernelId;
+
   repos.jobs.insert({
     id: jobId,
     stepId,
     cwmId: session.cwmId ?? `cwm-${crypto.randomUUID().slice(0, 12)}`,
     capabilityId,
     kernelId: session.kernelId,
-    status: isMockSettlement() ? "active" : "pending",
+    status: isExternal ? "queued" : (isMockSettlement() ? "active" : "pending"),
     assignedDevices: [],
-    startedAt: isMockSettlement() ? now : undefined,
+    startedAt: now,
     progress: 0,
+    parameters: (session.selections ?? null) as any,
   });
 
   // ── 3. Create execution scope ──────────────────────────────────────
