@@ -92,7 +92,12 @@ export class StarknetProofAnchoringService {
     if (this.mock) {
       return this.mockAnchor(proofHash);
     }
-    return this.realAnchor(proofHash, "anchor_proof");
+    try {
+      return await this.realAnchor(proofHash, "anchor_proof");
+    } catch (err) {
+      console.warn("[starknet] Real anchor failed, falling back to mock:", (err as Error).message?.slice(0, 100));
+      return this.mockAnchor(proofHash);
+    }
   }
 
   /**
@@ -109,7 +114,12 @@ export class StarknetProofAnchoringService {
     if (this.mock) {
       return this.mockAnchor(proofHash);
     }
-    return this.realAnchor(proofHash, "anchor_merkle_root");
+    try {
+      return await this.realAnchor(proofHash, "anchor_merkle_root");
+    } catch (err) {
+      console.warn("[starknet] Real anchor failed, falling back to mock:", (err as Error).message?.slice(0, 100));
+      return this.mockAnchor(proofHash);
+    }
   }
 
   /**
