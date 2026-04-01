@@ -648,7 +648,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       let starknetTxHash: string | null = null;
       try {
         const starknetService = new StarknetProofAnchoringService({
-          mock: process.env.STARKNET_ACCOUNT_ADDRESS === undefined,
+          mock: true, // Use mock until Starknet account is deployed
         });
         // Create a commitment from the evidence hash
         const commitment = await commitmentService.createCommitment(bundleHash as any);
