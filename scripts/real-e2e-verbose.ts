@@ -384,6 +384,144 @@ async function main() {
 
   // ══════════════════════════════════════════════════════════════════
   BIGSEP();
+  L("  PHASE 7b: SOVEREIGN INFRASTRUCTURE — Storacha + Lit + Starknet + NEAR");
+  BIGSEP();
+
+  // ── 7b-1. Storacha / IPFS Evidence Archival ───────────────────────
+  SEP();
+  L("[7b-1] Archive evidence bundle to IPFS (Storacha/Helia)");
+  const archiveResult = await gw("POST", "/api/evidence/archive", {
+    bundle: {
+      id: `evidence-${jobResult.jobId}`,
+      jobId: jobResult.jobId,
+      kernelId: KERNEL,
+      type: "execution_evidence",
+      evidenceHash,
+      status,
+      operator: account.address,
+      escrow: ESCROW,
+      protocol: "PCC Full Telemetry — Slots 1, 3, 5",
+      camera: { bytes: camBytes, type: camResp.headers.get("content-type") },
+      chain: "base-sepolia",
+      chainId: 84532,
+      timestamp: new Date().toISOString(),
+    },
+  });
+  L(`     Archived: ${archiveResult.archived} | CID: ${archiveResult.cid ?? "mock"}`);
+  L(`     Metadata CID: ${archiveResult.metadataCid ?? "none"}`);
+  L("");
+
+  // ── 7b-2. Lit Protocol — Encrypt Evidence ─────────────────────────
+  SEP();
+  L("[7b-2] Lit Protocol status + key provisioning check");
+  const litStatus = await gw("GET", "/api/evidence/lit-status");
+  L(`     Lit connected: ${litStatus?.lit?.connected ?? "unknown"}`);
+  L(`     Lit mode: ${litStatus?.lit?.mode ?? "unknown"}`);
+  L(`     Lit network: ${litStatus?.lit?.network ?? "unknown"}`);
+  L("");
+
+  SEP();
+  L("[7b-3] Lit Protocol — provision operator usage key");
+  const litProvision = await gw("POST", "/api/lit/provision", {
+    kernelId: KERNEL,
+    operatorDid: `did:pcc:${KERNEL}`,
+  });
+  L(`     Provisioned: ${litProvision.usageKey ? "yes" : litProvision.error ?? "no"}`);
+  L("");
+
+  // ── 7b-4. Starknet — ZK Proof Anchoring ───────────────────────────
+  SEP();
+  L("[7b-4] Create ZK commitment from evidence hash");
+  const zkCommit = await gw("POST", "/api/zk/commit", {
+    bundleHash: evidenceHash,
+  });
+  L(`     Commitment ID: ${zkCommit?.commitment?.id ?? "none"}`);
+  L(`     Commitment hash: ${zkCommit?.commitment?.commitmentHash ?? "none"}`);
+  L("");
+
+  SEP();
+  L("[7b-5] Generate tier-compliance proof (tier 2)");
+  const zkProof = await gw("POST", "/api/zk/prove/tier", {
+    bundleHash: evidenceHash,
+    requiredTier: 2,
+  });
+  const proofId = zkProof?.proof?.id;
+  L(`     Proof ID: ${proofId ?? "none"}`);
+  L(`     Proof type: ${zkProof?.proof?.proofType ?? "none"}`);
+  L(`     Verified: ${zkProof?.proof?.verified ?? "unknown"}`);
+  L("");
+
+  SEP();
+  L("[7b-6] Anchor proof on Starknet (ZK proof hash → Starknet Sepolia)");
+  const starknetAnchor = await gw("POST", "/api/zk/anchor-starknet", {
+    proofId: proofId ?? undefined,
+    merkleRoot: proofId ? undefined : evidenceHash,
+  });
+  L(`     Starknet TX: ${starknetAnchor?.anchor?.txHash ?? "none"}`);
+  L(`     Block: ${starknetAnchor?.anchor?.blockNumber ?? "pending"}`);
+  L(`     Mode: ${starknetAnchor?.mode ?? "unknown"}`);
+  L("");
+
+  if (starknetAnchor?.anchor?.txHash) {
+    SEP();
+    L("[7b-7] Poll Starknet anchor status");
+    const anchorStatus = await gw("GET", `/api/zk/anchor-starknet/${starknetAnchor.anchor.txHash}`);
+    L(`     Status: ${anchorStatus?.status ?? "unknown"}`);
+    L("");
+  }
+
+  // ── 7b-8. NEAR — Cross-Chain Payment Quote ────────────────────────
+  SEP();
+  L("[7b-8] NEAR chain abstraction — integration status");
+  const nearStatus = await gw("GET", "/api/near/status");
+  L(`     Integration: ${nearStatus?.integration ?? "unknown"}`);
+  L(`     Network: ${nearStatus?.network ?? "unknown"}`);
+  L(`     Mock: ${nearStatus?.mock ?? "unknown"}`);
+  L(`     Supported chains: ${nearStatus?.supportedChains?.join(", ") ?? "unknown"}`);
+  L("");
+
+  SEP();
+  L("[7b-9] NEAR — cross-chain payment quote (NEAR USDC → Base USDC)");
+  const nearQuote = await gw("POST", "/api/near/quote", {
+    fromChain: "near",
+    fromAsset: "USDC",
+    toChain: "base",
+    toAsset: "USDC",
+    amount: "1000000",
+    recipient: account.address,
+  });
+  const quoteId = nearQuote?.quote?.quoteId;
+  L(`     Quote ID: ${quoteId ?? "none"}`);
+  L(`     Estimated output: ${nearQuote?.quote?.estimatedOutput ?? "none"}`);
+  L(`     Fee: ${nearQuote?.quote?.fee ?? "none"}`);
+  L(`     Route: ${nearQuote?.quote?.route ?? "none"}`);
+  L("");
+
+  if (quoteId) {
+    SEP();
+    L("[7b-10] NEAR — submit cross-chain payment intent");
+    const nearIntent = await gw("POST", "/api/near/intent", {
+      quoteId,
+      workflowId: `pcc-full-telemetry-${Date.now()}`,
+      recipient: account.address,
+    });
+    const intentId = nearIntent?.intent?.intentId;
+    L(`     Intent ID: ${intentId ?? "none"}`);
+    L(`     Status: ${nearIntent?.intent?.status ?? "none"}`);
+    L("");
+
+    if (intentId) {
+      SEP();
+      L("[7b-11] NEAR — poll intent settlement status");
+      const intentStatus = await gw("GET", `/api/near/intent/${intentId}`);
+      L(`     Status: ${intentStatus?.status ?? intentStatus?.intent?.status ?? "unknown"}`);
+      L(`     TX hash: ${intentStatus?.txHash ?? intentStatus?.intent?.txHash ?? "pending"}`);
+      L("");
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  BIGSEP();
   L("  PHASE 8: FINAL STATE");
   BIGSEP();
 

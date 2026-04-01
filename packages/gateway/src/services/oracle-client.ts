@@ -62,6 +62,12 @@ export async function verifyWithOracle(request: OracleVerifyRequest): Promise<Or
     return mockVerification(request);
   }
 
+  // Mock escrow addresses (non-hex) can't be verified on-chain — use mock
+  if (!request.escrowAddress.startsWith("0x") || request.escrowAddress.startsWith("mock")) {
+    console.warn("[oracle] Non-hex escrow address — using mock verification");
+    return mockVerification(request);
+  }
+
   const res = await fetch(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: {

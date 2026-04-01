@@ -15,6 +15,9 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { createWalletClient, createPublicClient, http, keccak256, toBytes } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { PCCProtocolABI, getDeployment, getContractAddress } from "@pcc/contracts";
 import { getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
@@ -25,6 +28,8 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle } from "../services/oracle-client.js";
+import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
+import { StarknetProofAnchoringService } from "@pcc/verifier";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -44,6 +49,19 @@ const resolver = new TemplateResolver();
 /** Whether mock settlement is active (default: true for testnet) */
 function isMockSettlement(): boolean {
   return process.env.MOCK_SETTLEMENT !== "false";
+}
+
+/** Resolve chain ID from PCC_NETWORK env var */
+function resolveChainId(): number {
+  const network = process.env.PCC_NETWORK ?? "base-sepolia";
+  const chainIds: Record<string, number> = {
+    "base-sepolia": 84532,
+    "flow-evm-testnet": 545,
+    sepolia: 11155111,
+    base: 8453,
+    localhost: 31337,
+  };
+  return chainIds[network] ?? 84532;
 }
 
 /** Default write tools for common device types */
@@ -114,9 +132,48 @@ export async function createJobFromSession(
 
   // ── 1. Create or reference escrow ──────────────────────────────────
   const escrowId = `esc-${crypto.randomUUID().slice(0, 12)}`;
-  const escrowAddress = isMockSettlement()
-    ? `mock-escrow-${Date.now().toString(36)}`
-    : (contractTerms?.token as string) ?? "0x0000000000000000000000000000000000000000";
+  let escrowAddress: string;
+  let escrowStatus: string;
+
+  if (isMockSettlement()) {
+    escrowAddress = `mock-escrow-${Date.now().toString(36)}`;
+    escrowStatus = "funded";
+  } else {
+    // Real on-chain escrow via PCCProtocol factory
+    const network = process.env.PCC_NETWORK ?? "base-sepolia";
+    const pk = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
+    if (!pk) throw new Error("PCC_GATEWAY_PRIVATE_KEY required for real settlement");
+
+    const deployment = getDeployment(network);
+    const protocolAddr = getContractAddress(network, "pccProtocol");
+    const tokenAddr = getContractAddress(network, "mockUSDC");
+    const account = privateKeyToAccount(pk);
+    const walletClient = createWalletClient({
+      account,
+      chain: deployment.chain,
+      transport: http(deployment.rpcUrl),
+    });
+    const publicClient = createPublicClient({
+      chain: deployment.chain,
+      transport: http(deployment.rpcUrl),
+    });
+
+    const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
+    const txHash = await walletClient.writeContract({
+      address: protocolAddr,
+      abi: PCCProtocolABI,
+      functionName: "createEscrow",
+      args: [account.address, account.address, tokenAddr, cwmIdBytes],
+    });
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const escrowLog = receipt.logs.find((l) => l.topics.length >= 2);
+    escrowAddress = escrowLog
+      ? ("0x" + (escrowLog.topics[1]?.slice(26) ?? ""))
+      : "0x0000000000000000000000000000000000000000";
+    escrowStatus = "created";
+    console.log(`[paid-job] Created on-chain escrow: ${escrowAddress} (tx: ${txHash})`);
+  }
 
   const totalPrice = quote?.totalPrice as string ?? "10.00";
   const currency = quote?.currency as string ?? "USDC";
@@ -129,7 +186,7 @@ export async function createJobFromSession(
     payer: session.userAgentId,
     totalAmount: totalPrice,
     currency,
-    status: isMockSettlement() ? "funded" : "created",
+    status: escrowStatus,
     createdAt: now,
     deadline,
   });
@@ -141,7 +198,7 @@ export async function createJobFromSession(
       escrowId,
       stepId: ms.stepId,
       amount: ms.amount,
-      status: isMockSettlement() ? "funded" : "pending",
+      status: escrowStatus === "funded" ? "funded" : "pending",
       bondAmount: ms.bondAmount,
     });
   }
@@ -153,7 +210,7 @@ export async function createJobFromSession(
       escrowId,
       stepId: `step-${crypto.randomUUID().slice(0, 8)}`,
       amount: totalPrice,
-      status: isMockSettlement() ? "funded" : "pending",
+      status: escrowStatus === "funded" ? "funded" : "pending",
       bondAmount: quote?.bondAmount as string ?? "0.00",
     });
   }
@@ -231,7 +288,7 @@ export async function createJobFromSession(
     scopeId,
     escrowId,
     escrowAddress,
-    escrowStatus: isMockSettlement() ? "funded" : "created",
+    escrowStatus,
   };
 }
 
@@ -564,6 +621,52 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         status: "evidence_submitted",
       });
 
+      // ── 2b. Archive evidence to IPFS (Storacha/Helia) — best effort ──
+      let ipfsCid: string | null = null;
+      try {
+        const storage = await getEvidenceStorage();
+        const archiveResult = await storage.archiveBundle({
+          id: bundleId,
+          jobId,
+          stepId: job.stepId,
+          kernelId: job.kernelId,
+          assuranceTier: 0,
+          bundleHash,
+          events,
+          kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "sha256", value: "gateway-auto-sign" },
+          createdAt: now,
+        });
+        ipfsCid = archiveResult.cid;
+        pipelineTelemetry.emit(jobId, "evidence_archive", "completed", {
+          metadata: { cid: ipfsCid, bundleId },
+        });
+      } catch (archiveErr) {
+        console.warn("[complete] Evidence IPFS archive failed (best-effort):", archiveErr instanceof Error ? archiveErr.message : archiveErr);
+      }
+
+      // ── 2c. ZK commitment + Starknet anchor — best effort ───────────
+      let starknetTxHash: string | null = null;
+      try {
+        const starknetService = new StarknetProofAnchoringService({
+          mock: process.env.STARKNET_ACCOUNT_ADDRESS === undefined,
+        });
+        // Create a commitment from the evidence hash
+        const commitment = await commitmentService.createCommitment(bundleHash as any);
+        // Generate tier compliance proof
+        const proof = await zkProofService.generateProof("tier_compliance", commitment as any, {
+          requiredTier: 0,
+          bundleHash,
+        });
+        // Anchor on Starknet
+        const anchor = await starknetService.anchorProof(proof);
+        starknetTxHash = anchor.txHash;
+        pipelineTelemetry.emit(jobId, "verification_request", "completed", {
+          metadata: { txHash: starknetTxHash, proofId: proof.id, mode: starknetService.isMock() ? "mock" : "real" },
+        });
+      } catch (zkErr) {
+        console.warn("[complete] ZK/Starknet anchor failed (best-effort):", zkErr instanceof Error ? zkErr.message : zkErr);
+      }
+
       // ── 3. Revoke execution scopes ─────────────────────────────────
       for (const scope of scopes) {
         if (scope.status === "active") {
@@ -607,7 +710,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         kernelId: job.kernelId,
         evidenceHash: bundleHash,
         assuranceTier: 0,
-        chainId: 84532, // Base Sepolia
+        chainId: resolveChainId(),
       });
 
       if (!oracleResponse.result.verified) {
@@ -665,6 +768,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         escrowAddress,
         escrowId,
         settledAt,
+        ipfsCid,
+        starknetAnchorTxHash: starknetTxHash,
         scopesRevoked: scopes.filter((s) => s.status === "active").length,
         toolCallsRecorded: auditTrail.length,
         oracleVerified: oracleResponse.result.verified,

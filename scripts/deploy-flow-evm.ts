@@ -97,6 +97,9 @@ async function main() {
   const mockUsdcArtifact = JSON.parse(
     readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"),
   );
+  const protocolArtifact = JSON.parse(
+    readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"),
+  );
   const escrowArtifact = JSON.parse(
     readFileSync(resolve(contractsDir, "out/MilestoneEscrow.sol/MilestoneEscrow.json"), "utf8"),
   );
@@ -131,8 +134,28 @@ async function main() {
   console.log(`   Minted. TX: ${mintHash}`);
   console.log("");
 
-  // ── Deploy MilestoneEscrow ────────────────────────────────────────
-  console.log("3. Deploying MilestoneEscrow (demo workflow)...");
+  // ── Deploy PCCProtocol (fee factory) ──────────────────────────────
+  console.log("3. Deploying PCCProtocol (fee factory, 2.35%)...");
+  console.log(`   feeRecipient: ${account.address}`);
+  console.log(`   feeBps: 235 (2.35%)`);
+  console.log(`   governor: ${account.address}`);
+
+  const protocolHash = await walletClient.deployContract({
+    abi: protocolArtifact.abi,
+    bytecode: protocolArtifact.bytecode.object as `0x${string}`,
+    args: [account.address, 235n, account.address],
+  });
+  console.log(`   TX: ${protocolHash}`);
+  console.log(`   Explorer: https://evm-testnet.flowscan.io/tx/${protocolHash}`);
+
+  const protocolReceipt = await publicClient.waitForTransactionReceipt({ hash: protocolHash });
+  const protocolAddress = protocolReceipt.contractAddress!;
+  console.log(`   PCCProtocol deployed at: ${protocolAddress}`);
+  console.log(`   Gas used: ${protocolReceipt.gasUsed}`);
+  console.log("");
+
+  // ── Create Escrow via PCCProtocol factory ───────────────────────
+  console.log("4. Creating MilestoneEscrow via PCCProtocol.createEscrow()...");
 
   // SHA-256("demo-workflow-001") — same as other deploy scripts
   const cwmId = "0x" + Buffer.from(
@@ -143,34 +166,41 @@ async function main() {
     ),
   ).toString("hex") as `0x${string}`;
 
-  const escrowHash = await walletClient.deployContract({
-    abi: escrowArtifact.abi,
-    bytecode: escrowArtifact.bytecode.object as `0x${string}`,
-    args: [account.address, account.address, mockUsdcAddress, cwmId, "0x0000000000000000000000000000000000000000"],
+  const createEscrowHash = await walletClient.writeContract({
+    address: protocolAddress,
+    abi: protocolArtifact.abi,
+    functionName: "createEscrow",
+    args: [account.address, account.address, mockUsdcAddress, cwmId],
   });
-  console.log(`   TX: ${escrowHash}`);
-  console.log(`   Explorer: https://evm-testnet.flowscan.io/tx/${escrowHash}`);
+  console.log(`   TX: ${createEscrowHash}`);
+  console.log(`   Explorer: https://evm-testnet.flowscan.io/tx/${createEscrowHash}`);
 
-  const escrowReceipt = await publicClient.waitForTransactionReceipt({ hash: escrowHash });
-  const escrowAddress = escrowReceipt.contractAddress!;
-  console.log(`   MilestoneEscrow deployed at: ${escrowAddress}`);
-  console.log(`   Gas used: ${escrowReceipt.gasUsed}`);
+  const createEscrowReceipt = await publicClient.waitForTransactionReceipt({ hash: createEscrowHash });
+  // Extract escrow address from event log (topic[1] is the escrow address, padded to 32 bytes)
+  const escrowLog = createEscrowReceipt.logs.find((l: any) => l.topics.length >= 2);
+  const escrowAddress = ("0x" + (escrowLog?.topics[1]?.slice(26) ?? "")) as `0x${string}`;
+  console.log(`   MilestoneEscrow created at: ${escrowAddress}`);
+  console.log(`   Gas used: ${createEscrowReceipt.gasUsed}`);
   console.log("");
 
   // ── Update chain-config.ts ────────────────────────────────────────
-  console.log("4. Updating chain-config.ts...");
+  console.log("5. Updating chain-config.ts...");
 
   const chainConfigPath = resolve(contractsDir, "ts/chain-config.ts");
   let chainConfig = readFileSync(chainConfigPath, "utf8");
 
-  // Replace the flow-evm-testnet section's undefined addresses
+  // Replace the flow-evm-testnet section addresses (handles both undefined and quoted strings)
   chainConfig = chainConfig.replace(
-    /("flow-evm-testnet"[\s\S]*?milestoneEscrowFactory:\s*)undefined/,
+    /("flow-evm-testnet"[\s\S]*?milestoneEscrowFactory:\s*)"[^"]*"/,
     `$1"${escrowAddress}"`,
   );
   chainConfig = chainConfig.replace(
-    /("flow-evm-testnet"[\s\S]*?mockUSDC:\s*)undefined/,
+    /("flow-evm-testnet"[\s\S]*?mockUSDC:\s*)"[^"]*"/,
     `$1"${mockUsdcAddress}"`,
+  );
+  chainConfig = chainConfig.replace(
+    /("flow-evm-testnet"[\s\S]*?pccProtocol:\s*)undefined/,
+    `$1"${protocolAddress}"`,
   );
 
   writeFileSync(chainConfigPath, chainConfig);
@@ -183,8 +213,10 @@ async function main() {
   console.log(`${DIVIDER}`);
   console.log(`  Network:          Flow EVM Testnet (chain 545)`);
   console.log(`  MockUSDC:         ${mockUsdcAddress}`);
-  console.log(`  MilestoneEscrow:  ${escrowAddress}`);
+  console.log(`  PCCProtocol:      ${protocolAddress}`);
+  console.log(`  MilestoneEscrow:  ${escrowAddress} (created via factory)`);
   console.log(`  MockUSDC Exp:     https://evm-testnet.flowscan.io/address/${mockUsdcAddress}`);
+  console.log(`  Protocol Exp:     https://evm-testnet.flowscan.io/address/${protocolAddress}`);
   console.log(`  Escrow Exp:       https://evm-testnet.flowscan.io/address/${escrowAddress}`);
   console.log(`${DIVIDER}\n`);
   console.log("Next steps:");
