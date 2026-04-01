@@ -1,0 +1,103 @@
+{
+  "deviceType": "ipp",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "printer_status",
+      "qualifiedName": "ipp.printer_status",
+      "description": "Get printer status (online/offline, paper, toner)",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "printer_queue",
+      "qualifiedName": "ipp.printer_queue",
+      "description": "List current print queue jobs",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "printer_options",
+      "qualifiedName": "ipp.printer_options",
+      "description": "List available printer options (paper size, duplex, quality)",
+      "category": "read",
+      "inputSchema": {}
+    },
+    {
+      "name": "printer_print_text",
+      "qualifiedName": "ipp.printer_print_text",
+      "description": "Print plain text content",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "text": { "type": "string", "description": "Text content to print" },
+          "copies": { "type": "integer", "default": 1, "description": "Number of copies" },
+          "options": { "type": "string", "description": "Space-separated lp options (e.g. 'sides=two-sided-long-edge media=letter')" }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "printer_print_url",
+      "qualifiedName": "ipp.printer_print_url",
+      "description": "Download and print a file from a URL (PDF, image, text, etc.)",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "url": { "type": "string", "description": "URL of the document to download and print" },
+          "copies": { "type": "integer", "default": 1, "description": "Number of copies" },
+          "options": { "type": "string", "description": "Space-separated lp options" }
+        },
+        "required": ["url"]
+      }
+    },
+    {
+      "name": "printer_print_file",
+      "qualifiedName": "ipp.printer_print_file",
+      "description": "Print a base64-encoded file (PDF, image, etc.)",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "content": { "type": "string", "description": "Base64-encoded file content" },
+          "filename": { "type": "string", "default": "document.pdf", "description": "Filename with extension for format detection" },
+          "copies": { "type": "integer", "default": 1, "description": "Number of copies" },
+          "options": { "type": "string", "description": "Space-separated lp options" }
+        },
+        "required": ["content"]
+      }
+    },
+    {
+      "name": "print",
+      "qualifiedName": "ipp.print",
+      "description": "Generic print command -- routes to printer_print_text, printer_print_url, or printer_print_file based on args",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "text": { "type": "string", "description": "Plain text content to print (use for text)" },
+          "url": { "type": "string", "description": "URL to download and print (use for URLs)" },
+          "content": { "type": "string", "description": "Base64-encoded file content (use for files)" },
+          "filename": { "type": "string", "description": "Filename for base64 content" },
+          "copies": { "type": "integer", "default": 1 },
+          "options": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "printer_cancel",
+      "qualifiedName": "ipp.printer_cancel",
+      "description": "Cancel a print job by job ID",
+      "category": "scoped_write",
+      "inputSchema": {
+        "properties": {
+          "jobId": { "type": "string", "description": "CUPS job ID to cancel" }
+        },
+        "required": ["jobId"]
+      }
+    }
+  ],
+  "safeTools": [
+    "printer_status",
+    "printer_queue",
+    "printer_options"
+  ]
+}

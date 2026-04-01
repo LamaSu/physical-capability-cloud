@@ -755,6 +755,48 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
   });
 });
 
+describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout", () => {
+  it("reclaims stale claimed calls after timeout", async () => {
+    // Create a tool call
+    const createRes = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      payload: { toolName: "health" },
+    });
+    const callId = createRes.json().id;
+
+    // First poll claims it
+    const poll1 = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+    });
+    expect(poll1.json().count).toBe(1);
+
+    // Second poll returns empty (claimed)
+    const poll2 = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+    });
+    expect(poll2.json().count).toBe(0);
+
+    // Manually backdate the claimedAt to simulate timeout (>120s ago)
+    const { db } = getStore();
+    const staleTime = new Date(Date.now() - 130_000).toISOString();
+    db.update(toolCallRelay)
+      .set({ claimedAt: staleTime })
+      .where(eq(toolCallRelay.id, callId))
+      .run();
+
+    // Third poll should reclaim the stale call
+    const poll3 = await app.inject({
+      method: "GET",
+      url: "/api/relay/kernel-test-1/tool-call/pending",
+    });
+    expect(poll3.json().count).toBe(1);
+    expect(poll3.json().calls[0].id).toBe(callId);
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL MANIFEST SERVICE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -786,5 +828,34 @@ describe("tool-manifest-service", () => {
     const manifest = await getManifest("unknown_device");
     expect(manifest).toBeDefined();
     expect(manifest!.deviceType).toBe("generic");
+  });
+
+  it("resolves IPP printer manifest with printer tools", async () => {
+    const { getManifest, clearManifestCache } = await import("../services/tool-manifest-service.js");
+    clearManifestCache();
+    const manifest = await getManifest("ipp");
+    expect(manifest).toBeDefined();
+    expect(manifest!.deviceType).toBe("ipp");
+    const toolNames = manifest!.tools.map((t: any) => t.name);
+    expect(toolNames).toContain("printer_print_text");
+    expect(toolNames).toContain("printer_print_url");
+    expect(toolNames).toContain("printer_print_file");
+    expect(toolNames).toContain("print");
+    expect(toolNames).toContain("printer_status");
+    expect(manifest!.safeTools).toContain("printer_status");
+    expect(manifest!.safeTools).toContain("printer_queue");
+    expect(manifest!.safeTools).not.toContain("printer_print_text");
+  });
+
+  it("isToolSafe returns true for safe IPP tools and false for print tools", async () => {
+    const { isToolSafe, clearManifestCache } = await import("../services/tool-manifest-service.js");
+    clearManifestCache();
+    // Load IPP manifest first
+    const { getManifest } = await import("../services/tool-manifest-service.js");
+    await getManifest("ipp");
+    expect(isToolSafe("ipp", "printer_status")).toBe(true);
+    expect(isToolSafe("ipp", "printer_queue")).toBe(true);
+    expect(isToolSafe("ipp", "printer_print_text")).toBe(false);
+    expect(isToolSafe("ipp", "print")).toBe(false);
   });
 });

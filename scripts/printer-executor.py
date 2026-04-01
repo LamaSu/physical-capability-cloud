@@ -98,8 +98,26 @@ def run_cmd(args, timeout=30):
 
 
 def execute_tool(name, args):
-    """Execute a printer tool call. Returns result string."""
+    """Execute a printer tool call. Returns result string.
+
+    Accepts both qualified names (printer_print_text) and short names (print).
+    The generic 'print' tool auto-routes based on which args are present.
+    """
     try:
+        # Route the generic "print" tool to the appropriate specific tool
+        if name == "print":
+            if args.get("url"):
+                name = "printer_print_url"
+            elif args.get("content") or args.get("data"):
+                name = "printer_print_file"
+            elif args.get("text"):
+                name = "printer_print_text"
+            else:
+                return json.dumps({
+                    "error": "No printable content: provide 'text', 'url', or 'content' (base64)",
+                    "received_args": list(args.keys()),
+                })
+
         if name == "printer_status":
             rc, out, err = run_cmd(["lpstat", "-p", PRINTER_NAME])
             return json.dumps({

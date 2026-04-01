@@ -10,12 +10,14 @@ import type { DeviceToolManifest } from "../types/device-tools.js";
 
 import opentrons from "./opentrons.tools.json" with { type: "json" };
 import octoprint from "./octoprint.tools.json" with { type: "json" };
+import ipp from "./ipp.tools.json" with { type: "json" };
 import generic from "./generic.tools.json" with { type: "json" };
 
 /** All bundled tool manifests, keyed by device type */
 export const BUNDLED_MANIFESTS: Record<string, DeviceToolManifest> = {
   opentrons: opentrons as DeviceToolManifest,
   octoprint: octoprint as DeviceToolManifest,
+  ipp: ipp as DeviceToolManifest,
   generic: generic as DeviceToolManifest,
 };
 
