@@ -33,6 +33,14 @@ PCC's sovereign evidence chain is a complete digital rights infrastructure stack
 
 ---
 
+### Crypto Track
+
+**Status**: Submitting
+
+PCC is a crypto-native coordination protocol for the physical economy. The `PCCProtocol` root smart contract (Solidity, deployed on Base Sepolia + Flow EVM) enforces an immutable 2.35% clearing fee on every settlement — the fee recipient is hardcoded at deployment and can never be changed, the percentage is governance-adjustable within bounds (0.1%–5%) but can never be zero. `MilestoneEscrow` contracts are deployed exclusively through the protocol factory, making it structurally impossible to bypass the fee without leaving the network. Settlement is multi-chain: Base Sepolia (primary), Flow EVM Testnet (sub-cent gas), Starknet Sepolia (ZK proof anchoring), and NEAR (cross-chain payment intents via 1Click solver network). The protocol processes real on-chain escrow with operator bonds, challenge windows, and automatic fund release upon verified evidence. 66 Forge tests verify the contract invariants including fee immutability, factory enforcement, and governance bounds.
+
+---
+
 ## Sponsor Bounties
 
 ### Storacha — Storage Bounty ($300 + credits)
