@@ -109,6 +109,68 @@ pnpm dev
 
 ---
 
+## Documentation
+
+| Doc | What's in it |
+|-----|-------------|
+| [Sponsor Integrations](docs/SPONSOR_INTEGRATIONS.md) | Deep technical docs for every integration — code paths, file tables, verification commands |
+| [Hackathon Submission](HACKATHON_SUBMISSION.md) | 390-word project summary for PL Genesis |
+| [Bounty Submissions](BOUNTY_SUBMISSIONS.md) | Every bounty we're claiming and why we qualify |
+| [Whitepaper](apps/dashboard/public/whitepaper.md) | Full protocol spec — architecture, assurance tiers, evidence chain, settlement |
+| [CLAUDE.md](CLAUDE.md) | Complete developer reference — all 25 packages, env vars, commands, invariants |
+
+## Deployed contracts
+
+| Chain | Contract | Address |
+|-------|----------|---------|
+| Base Sepolia | MilestoneEscrow | `0x10059efeeab1ddf013489e9597a3aec4480d95e1` |
+| Base Sepolia | MockUSDC | `0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9` |
+| Flow EVM Testnet | MilestoneEscrow | [`0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15`](https://evm-testnet.flowscan.io/address/0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15) |
+| Flow EVM Testnet | MockUSDC | [`0x7e51fbd7c1051847ca3705f382387ef16849f2fd`](https://evm-testnet.flowscan.io/address/0x7e51fbd7c1051847ca3705f382387ef16849f2fd) |
+| Starknet Sepolia | ProofRegistry | `0x43643ebf182210af4e22eb3b2f5e4dbab50c00471743521b4e80d1328debcd` |
+
+## Package map
+
+```
+packages/
+  spec/              # Types, schemas, Zod validation — single source of truth
+  contracts/         # Solidity (PCCProtocol, MilestoneEscrow, IdentityRegistry, VerifierRegistry)
+  gateway/           # Fastify HTTP gateway — 60+ route files, 497+ tests
+  kernel/            # Shop Kernel runtime — device adapters, evidence emitter, Storacha, Lit
+  verifier/          # Hybrid verifier market, ZK proofs, Starknet anchoring
+  a2a/               # Agent-to-agent typed intent bus (38 intents)
+  agent-runtime/     # Base agent framework — wallets, tools, smart accounts
+  agent-user/        # User Agent — discovers, negotiates, submits
+  agent-broker/      # Broker Agent — routes capabilities, compiles workflows
+  agent-kernel/      # Kernel Agent — accepts jobs, emits evidence
+  agent-evaluator/   # Evaluator Agent — quality assessment, attestation
+  payments/          # x402 micropayments, Meteora DLMM, fiat ramps
+  pcc-node/          # Python CLI — hardware discovery, daemon, operator onboarding
+  dht/               # WebSocket gossip DHT for decentralized capability discovery
+  db/                # SQLite shared database layer
+  mcp-server/        # 49 MCP tools over stdio
+  contract-builder/  # Interactive capability contract builder
+  identity-8004/     # ERC-8004 identity + reputation registries
+  ui/                # Shared React components
+apps/
+  dashboard/         # Vite + React 19 dashboard — operator console, telemetry, setup wizard
+```
+
+## Environment variables
+
+| Variable | What it does |
+|----------|-------------|
+| `EVIDENCE_STORAGE=storacha` | Use Storacha w3up for evidence (default: Helia) |
+| `LIT_PROTOCOL_REAL=true` | Use real Lit Protocol encryption (default: local AES-256-GCM) |
+| `STARKNET_ACCOUNT_ADDRESS` | Enable real Starknet ZK proof anchoring |
+| `PCC_NETWORK=base-sepolia` | Settlement chain (base-sepolia, flow-evm-testnet) |
+| `ESCROW_CONTRACT_ADDRESS` | Deployed MilestoneEscrow address |
+| `PCC_GATEWAY_PRIVATE_KEY` | Gateway signer for on-chain writes |
+
+Full env var reference in [CLAUDE.md](CLAUDE.md).
+
+---
+
 ## License
 
 Apache 2.0
