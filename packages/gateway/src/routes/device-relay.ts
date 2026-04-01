@@ -60,6 +60,7 @@ function resolveDeviceType(kernelId: string): string {
   for (const device of devices) {
     if (device.adapterType === "opentrons") return "opentrons";
     if (device.adapterType === "octoprint") return "octoprint";
+    if (device.adapterType === "ipp") return "ipp";
   }
 
   return "generic";
@@ -344,6 +345,30 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { kernelId } = req.params;
 
     const { db } = getStore();
+
+    // Reclaim stale claimed calls (claimed >120s ago without completion).
+    // This prevents calls from being stuck forever if the executor crashes.
+    const CLAIM_TIMEOUT_MS = 120_000;
+    const staleThreshold = new Date(Date.now() - CLAIM_TIMEOUT_MS).toISOString();
+    const staleClaimed = db
+      .select()
+      .from(toolCallRelay)
+      .where(
+        and(
+          eq(toolCallRelay.kernelId, kernelId),
+          eq(toolCallRelay.status, "claimed"),
+        ),
+      )
+      .all()
+      .filter((c) => c.claimedAt && c.claimedAt < staleThreshold);
+
+    for (const stale of staleClaimed) {
+      db.update(toolCallRelay)
+        .set({ status: "pending", claimedAt: null })
+        .where(eq(toolCallRelay.id, stale.id))
+        .run();
+    }
+
     const pending = db
       .select()
       .from(toolCallRelay)
