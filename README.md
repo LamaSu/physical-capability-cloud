@@ -17,6 +17,8 @@ Your AI agent can now control real physical hardware — anywhere, on demand.
 - A robotics team needs **PCB fabrication + laser-cut enclosures + assembly**. PCC decomposes the request into a capability DAG and orchestrates the entire supply chain autonomously.
 - A woman-owned lab in Kenya offers **bioreactor capacity** to pharmaceutical buyers globally — paid in local currency via mobile money.
 
+- Your 3D-printed part is done. PCC dispatches a **courier to pick it up and deliver it to your door** — same protocol, same escrow, same evidence chain. The driver is just another operator on the network. No platform taking 30-40% of their earnings.
+
 **What will you plug into the network?**
 
 ---

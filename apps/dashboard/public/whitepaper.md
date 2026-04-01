@@ -1,6 +1,16 @@
 # Physical Capability Cloud: A Credibly Neutral Coordination Layer for Physical Manufacturing
 
-**Version**: 2.0 | **Date**: March 29, 2026
+**Version**: 2.1 | **Date**: March 31, 2026
+
+---
+
+> *The internet made information programmable. Cloud computing made compute programmable. We never did the same for the physical world.*
+>
+> *A CNC mill in Detroit and a bioreactor in Nairobi have more in common than either has with the software that runs them — they are both idle most of the day, both capable of extraordinary precision, and both invisible to the global economy unless someone happens to know they exist.*
+>
+> *What happens when every machine on Earth can be discovered, verified, and orchestrated by an AI agent as easily as calling an API? When a factory in Shenzhen and a makerspace in Medellín can form a trustless supply chain in minutes, not months? When the person operating the equipment keeps 97% of what they earn instead of surrendering a third of it to a platform that did nothing but sit in the middle?*
+>
+> *PCC is the answer to a question the physical world hasn't been allowed to ask: what if manufacturing was as composable as software?*
 
 ---
 
@@ -955,6 +965,24 @@ The result is a network where a machinist in Detroit and a biologist in Boston c
 The Story Protocol integration is not an afterthought — it is the mechanism that makes the network self-sustaining. When designers earn from every use of their CSDs, they are incentivized to publish better definitions. When operators earn not just from execution but from the IP equity in their device profiles, they are incentivized to maintain and improve their capabilities. When the network treasury accumulates from protocol fees, it can fund the verification infrastructure that makes evidence credible. The economic flywheel is fully specified in the protocol.
 
 This is not a marketplace. It is a protocol — and protocols are how the internet got built.
+
+### What This Means
+
+The implications extend far beyond manufacturing efficiency.
+
+**The end of geographic monopoly on physical work.** Today, if you need something fabricated, you call whoever is nearby — or whoever your procurement team has a relationship with. PCC makes geography irrelevant to discovery. An operator in Lagos competes on the same network as one in Los Angeles. The best price and the best quality win, regardless of where the machine sits. The Yellowcard fiat ramp means the operator in Lagos gets paid in naira. The escrow means neither party needs to trust the other.
+
+**AI agents as economic actors in the physical world.** We are building toward a world where AI agents don't just write code and answer questions — they commission physical work. An agent managing a supply chain doesn't email a vendor and wait three days for a quote. It discovers capabilities on the network, negotiates autonomously, locks escrow, monitors execution via evidence streams, and settles payment — all in the time it takes a human to open their inbox. PCC is the API that connects artificial intelligence to physical reality.
+
+**The operator-owned economy.** Every platform economy follows the same arc: aggregate supply, subsidize demand, extract rent. PCC inverts this. The protocol fee is minimal and transparent. There is no algorithm deciding which operators get surfaced. There is no platform that can deactivate your account because you also work for a competitor. Operators own their identity (W3C DIDs), their reputation (on-chain, portable), their evidence history (content-addressed on IPFS, encrypted under their control), and their intellectual property (Story Protocol, with royalties flowing forever). The network works for its participants, not the other way around.
+
+**Physical work as programmable IP.** When a machinist develops a novel fixturing technique that produces better tolerances, that technique — encoded as a Capability StructureDefinition — becomes an IP Asset. Every time another operator uses that CSD, royalties flow back to the original designer. Physical expertise stops being tacit knowledge trapped in one person's head and becomes composable, tradeable, and perpetually compensated intellectual property.
+
+**Verification as infrastructure, not overhead.** In the current system, quality verification is a cost center — inspectors, paperwork, disputes resolved by lawyers. In PCC, verification is built into the protocol. Evidence is cryptographic. Proofs are on-chain. Disputes are arbitrated by staked verifiers with economic skin in the game. This doesn't eliminate the need for quality — it makes quality provable, portable, and automatic.
+
+**The implications for emerging markets are not hypothetical.** A woman in Kenya with a bioreactor and an internet connection can serve pharmaceutical companies anywhere on Earth. She doesn't need a corporate account, a bank that services her region, or a relationship with a procurement department. She installs `pcc-node`, her equipment is discovered, her capabilities are announced, and her first job arrives when an agent somewhere in the world needs what she can do. She gets paid in her local currency. Her reputation builds on-chain. Her evidence history is permanent and verifiable. She is, for the first time, a full participant in the global manufacturing economy.
+
+This is what it looks like when physical capability becomes as fluid as information.
 
 ---
 
