@@ -94,6 +94,9 @@ export class StorachaStorageService {
       );
     }
 
+    const spaceDid =
+      this.options.spaceDid ?? process.env["STORACHA_SPACE_DID"] ?? "";
+
     try {
       const { create } = await import("@storacha/client");
       const { parse: parseProof } = await import("@storacha/client/proof");
@@ -101,10 +104,47 @@ export class StorachaStorageService {
 
       this.client = await create({ store: new StoreMemory() });
 
-      // Parse and add the delegation proof
+      // Parse the delegation proof from base64
       const proof = await parseProof(proofBase64);
-      const space = await this.client.addSpace(proof);
-      await this.client.setCurrentSpace(space.did());
+
+      // Try addSpace first — works when the delegation's capabilities[0].with
+      // is a did:key: (the space DID).  Newer Storacha CLI versions may issue
+      // proofs where capabilities[0].with is did:web:up.storacha.network,
+      // which older @storacha/access versions reject.  In that case, fall back
+      // to manual registration.
+      try {
+        const space = await this.client.addSpace(proof);
+        await this.client.setCurrentSpace(space.did());
+      } catch (addSpaceErr) {
+        const msg = (addSpaceErr as Error).message ?? "";
+        if (!msg.includes("did:key") && !msg.includes("did:web")) {
+          // Not the known DID-method mismatch — re-throw
+          throw addSpaceErr;
+        }
+
+        // Fallback: manually register the space and add the proof.
+        // This requires a known space DID (from STORACHA_SPACE_DID env or options).
+        if (!spaceDid) {
+          throw new Error(
+            "Storacha delegation uses a non did:key: resource (likely did:web). " +
+              "Set STORACHA_SPACE_DID to the did:key: of your space so the " +
+              "client can register the space manually."
+          );
+        }
+
+        // Register the space in the agent's spaces Map.  The Agent class
+        // exposes `get spaces()` which returns the same Map reference held by
+        // the underlying AgentData.  setCurrentSpace checks this map, so we
+        // must populate it before calling setCurrentSpace.
+        const agent = this.client.agent;
+        agent.spaces.set(spaceDid, { name: "storacha-space" });
+
+        // Add the delegation as a proof so capability invocations carry it
+        await this.client.addProof(proof);
+
+        // Set the space as current
+        await this.client.setCurrentSpace(spaceDid);
+      }
 
       this.ready = true;
     } catch (err) {
