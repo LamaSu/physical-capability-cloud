@@ -475,8 +475,8 @@ function Nav() {
           {[
             { text: "For Operators", href: "#operators" },
             { text: "For Agents", href: "#agents" },
-            { text: "Docs", href: "https://docs.capability.network" },
-            { text: "GitHub", href: "https://github.com/wingdingspenpal/poop" },
+            { text: "Docs", href: "https://capability.network/docs" },
+            { text: "GitHub", href: "https://github.com/global-mysterysnailrevolution/physical-capability-cloud" },
           ].map((link) => (
             <a
               key={link.text}
@@ -638,7 +638,7 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             }}
           >
             <TerminalCTA text="pip install pcc-node" href="https://pypi.org/project/pcc-node/" />
-            <GhostLink text="Read the docs" href="https://docs.capability.network" />
+            <GhostLink text="Read the docs" href="https://capability.network/docs" />
           </div>
         </div>
 
@@ -1563,7 +1563,7 @@ function ForOperatorsSection() {
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
                 <TerminalCTA text="pip install pcc-node && pcc-node start" />
-                <GhostLink text="Operator guide" href="https://docs.capability.network/operators" />
+                <GhostLink text="Operator guide" href="https://capability.network/docs" />
               </div>
               <p
                 style={{
@@ -2498,7 +2498,7 @@ function StatsSection() {
               LIVE at capability.network
             </a>
             <a
-              href="https://github.com/wingdingspenpal/poop"
+              href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud"
               target="_blank"
               rel="noopener noreferrer"
               style={{
@@ -2515,7 +2515,7 @@ function StatsSection() {
                 ((e.currentTarget as HTMLAnchorElement).style.color = TEXT_MUTED)
               }
             >
-              github.com/wingdingspenpal/poop
+              github.com/global-mysterysnailrevolution/physical-capability-cloud
             </a>
           </div>
         </Reveal>
@@ -2597,7 +2597,7 @@ function Footer() {
                 text="pip install pcc-node"
                 href="https://pypi.org/project/pcc-node/"
               />
-              <GhostLink text="View on GitHub" href="https://github.com/wingdingspenpal/poop" />
+              <GhostLink text="View on GitHub" href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud" />
             </div>
           </Reveal>
         </div>
@@ -2648,8 +2648,8 @@ function Footer() {
           <div style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
             {[
               { text: "capability.network", href: "https://capability.network" },
-              { text: "GitHub", href: "https://github.com/wingdingspenpal/poop" },
-              { text: "Docs", href: "https://docs.capability.network" },
+              { text: "GitHub", href: "https://github.com/global-mysterysnailrevolution/physical-capability-cloud" },
+              { text: "Docs", href: "https://capability.network/docs" },
               { text: "PyPI", href: "https://pypi.org/project/pcc-node/" },
             ].map((link, i, arr) => (
               <React.Fragment key={link.text}>

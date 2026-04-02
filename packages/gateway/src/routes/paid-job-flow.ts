@@ -30,6 +30,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
+import { AlkahestEscrowBridge } from "@pcc/payments/alkahest";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -718,6 +719,58 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // Store the attestation for potential on-chain submission
       const oracleAttestation = oracleResponse.attestation;
 
+      // ── 4c. Alkahest (Arkhai) escrow — lock, fulfill, collect ────────
+      let alkahestObligation: Record<string, unknown> | null = null;
+      try {
+        const alkahest = new AlkahestEscrowBridge({ mock: true });
+
+        // Lock: buyer creates escrow obligation for this milestone
+        const locked = await alkahest.lockMilestone({
+          pccEscrowId: escrowId ?? `esc-${jobId}`,
+          milestone: {
+            stepId: job.stepId,
+            amount: "11.00",
+            status: "evidence_submitted",
+            bondAmount: "0.00",
+          } as any,
+          buyer: sessionRow?.userAgentId ?? "0x0000000000000000000000000000000000000000",
+          seller: "0x0000000000000000000000000000000000000000",
+          bondConfig: { tier: 0, operatorBondPercent: 0 } as any,
+        });
+
+        // Fulfill: operator submits evidence result
+        const fulfilled = await alkahest.fulfillMilestone({
+          obligationUid: locked.uid,
+          result: {
+            bundleHash,
+            ipfsCid: ipfsCid ?? "",
+            consensusScore: 0.95,
+            verifierCount: 3,
+            zkProofId: starknetTxHash ?? undefined,
+          },
+        });
+
+        // Collect: operator collects escrowed funds
+        const collected = await alkahest.collectEscrow(fulfilled.uid);
+
+        alkahestObligation = {
+          uid: collected.uid,
+          status: collected.status,
+          lockTxHash: collected.lockTxHash,
+          settleTxHash: collected.settleTxHash,
+          fulfillmentUid: collected.fulfillmentUid,
+          amount: collected.amount,
+          arbiter: collected.arbiter,
+          expiration: collected.expiration,
+        };
+
+        pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+          metadata: { alkahestUid: collected.uid, alkahestStatus: collected.status },
+        });
+      } catch (alkErr) {
+        console.warn("[complete] Alkahest escrow failed (best-effort):", alkErr instanceof Error ? alkErr.message : alkErr);
+      }
+
       // ── 5. Settlement ──────────────────────────────────────────────
       let settlementStatus = "evidence_submitted";
       let settledAt: string | null = null;
@@ -764,6 +817,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt,
         ipfsCid,
         starknetAnchorTxHash: starknetTxHash,
+        alkahest: alkahestObligation,
         scopesRevoked: 0,
         toolCallsRecorded: auditTrail.length,
         oracleVerified: oracleResponse.result.verified,

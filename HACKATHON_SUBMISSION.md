@@ -1,7 +1,7 @@
 # PCC — Physical Capability Cloud
 
 **Track**: Fresh Code | **Themes**: AI & Robotics, Infrastructure & Digital Rights, Crypto
-**Live**: https://capability.network | **Repo**: https://github.com/wingdingspenpal/poop
+**Live**: https://capability.network | **Repo**: https://github.com/global-mysterysnailrevolution/physical-capability-cloud
 
 ---
 
