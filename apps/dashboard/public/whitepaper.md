@@ -202,7 +202,7 @@ Physical work is orchestrated by a three-agent system communicating over a typed
 
 ### 4.2 Typed Intents
 
-The message bus carries typed intents rather than free-form messages. PCC defines 34 intent types across seven categories:
+The message bus carries typed intents rather than free-form messages. PCC defines 41+ intent types across nine categories:
 
 | Category | Count | Example Intents |
 |----------|-------|-----------------|
@@ -213,6 +213,8 @@ The message bus carries typed intents rather than free-form messages. PCC define
 | Verification | 2 | `evidence_submit`, `evidence_verified` |
 | Funding/Setup | 9 | `funding_request`, `funding_provided`, `setup_detect`, `setup_configure`, `setup_validate`, and variants |
 | IP (Story Protocol) | 8 | `ip_register`, `ip_revenue_query`, `ip_propose_split`, `ip_claim_revenue`, and variants |
+| Cross-Chain (NEAR) | 4 | `near_payment_intent`, `near_payment_quote`, `near_payment_submit`, `near_payment_settled` |
+| Capability Requests | 3 | `capability_request_submitted`, `capability_request_decomposed`, `capability_node_assigned` |
 
 Every intent carries a sender DID, a conversation ID, a timestamp, and a cryptographic signature. The message bus routes by intent type, with each agent declaring which intents it handles.
 
@@ -281,7 +283,7 @@ Three gateway routes expose this: `POST /api/zk/anchor-starknet`, `GET /api/zk/v
 
 Tier-2 and Tier-3 evidence is scored by a Bittensor subnet. MockMiner nodes evaluate evidence quality against the tier's requirements (Did the sensor readings arrive? Are they in the plausible range? Does the QC photo match the job description?). A MockValidator applies Yuma Consensus to aggregate miner scores into a network-level quality verdict.
 
-The subnet design is testnet-ready: the `BittensorSubnetBridge` connects PCC's evidence verification to a real Bittensor subnet, where economic incentives keep miners honest. Miners that consistently score incorrectly lose stake; miners that score correctly earn from the network.
+The subnet design demonstrates the verification pattern with mock miners and validators. The `BittensorSubnetBridge` defines the interface for connecting PCC's evidence verification to a real Bittensor subnet in a future integration, where economic incentives would keep miners honest.
 
 ### 5.5 W3C DIDs and Verifiable Credentials
 
@@ -551,11 +553,12 @@ On startup, `pcc-node` executes a deterministic pipeline:
 
 6. **Daemon loop**: Enters a long-running event loop that polls for pending jobs, executes them through device adapters, pushes camera frames, and sends heartbeats to maintain online status.
 
-The node supports four CLI commands:
+The node supports five CLI commands:
 - `pcc-node start` — full pipeline: detect, register, run daemon
+- `pcc-node start --discover` — scan network first, then start with all found devices
+- `pcc-node discover` — scan local network for devices (subnet sweep + protocol fingerprinting)
 - `pcc-node detect` — hardware scan only (no network interaction)
 - `pcc-node status` — check if the daemon is running, show uptime and job count
-- `pcc-node config` — interactive configuration wizard
 
 ### 9.3 Device Adapters
 
@@ -717,17 +720,17 @@ Operators and agents can communicate in real-time through the chat relay (`/api/
 
 PCC is an open protocol, not a SaaS platform. All code is open source. All specifications are public. Any operator can run a node, and any agent can interact with the network. The protocol monetizes through a transparent, on-chain fee applied at the settlement layer.
 
-### 12.2 PCCProtocol Root Contract Fee
+### 12.2 PCCProtocol Root Contract
 
-The `PCCProtocol` root contract (`packages/contracts/src/PCCProtocol.sol`) is the clearinghouse for all settlements. It enforces a 1.5% protocol fee (150 bps) on every escrow settlement. Design invariants:
+The `PCCProtocol` root contract is the clearinghouse for all settlements. Design invariants:
 
-- **Automatic**: Deducted at escrow release, not invoiced separately
-- **Transparent**: Fee rate visible on-chain via `getProtocolState()`; queryable at `GET /api/protocol/state`
-- **On-chain**: Fee flows to an immutable fee recipient (`0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`), auditable by anyone
-- **Bounded**: Governance can adjust the rate between 0.1% and 5% — but can never set it to zero
-- **Factory-gated**: Only escrows deployed through the protocol factory can call `settleEscrow()` through the root — preventing fee bypass via direct escrow deployment
+- **Automatic**: Protocol fee deducted at escrow release, not invoiced separately
+- **Transparent**: Fee rate visible on-chain, queryable by anyone
+- **Bounded**: Governance can adjust the rate within defined bounds — but can never set it to zero
+- **Factory-gated**: Only escrows deployed through the protocol factory can settle through the root — preventing fee bypass via direct escrow deployment
+- **Immutable recipient**: The fee recipient address is set at deployment and cannot be changed
 
-This is a step beyond the legacy `MilestoneEscrow` standalone contract. The root contract adds network-level accounting: total fees collected per token, per-escrow fee attribution, and a live factory registry. 66 Forge tests verify the fee mechanics, factory gate, and boundary conditions.
+The root contract adds network-level accounting: total fees collected per token, per-escrow fee attribution, and a live factory registry.
 
 ### 12.3 Fee Distribution
 
@@ -848,7 +851,7 @@ PCC's CSD format was directly inspired by BabelFHIR-TS, a FHIR StructureDefiniti
 
 ## 15. Technical Implementation
 
-PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), one dashboard application, and over 3,300 tests. It is implemented in TypeScript (ES2022, NodeNext module resolution, strict mode) with Turbo for build orchestration, plus Python for the operator node package.
+PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), one dashboard application, and over 3,600 tests. It is implemented in TypeScript (ES2022, NodeNext module resolution, strict mode) with Turbo for build orchestration, plus Python for the operator node package.
 
 ### 15.1 Package Architecture
 
@@ -862,7 +865,7 @@ PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), 
 | `@pcc/payments` | x402 middleware + client; Meteora DLMM capability pricing pools |
 | `@pcc/contract-builder` | Schema-driven contract builder: templates, profiles, resolver, pricing, validator |
 | `@pcc/orchestrator` | TransferGraph, ResourcePool, SampleTracker, ProtocolEngine, ProtocolRunner |
-| `@pcc/a2a` | 34 typed intents, MessageBus, Conversations |
+| `@pcc/a2a` | 41+ typed intents, MessageBus, Conversations |
 | `@pcc/agent-runtime` | BaseAgent, AgentWallet (viem), SolanaAgentWallet, SpendingPolicy, ERC-4337 session keys |
 | `@pcc/agent-user` | UserAgent: discover, negotiate, submit, build contracts |
 | `@pcc/agent-broker` | BrokerAgent: routing, escrow, NLP, FundingHandler |
@@ -874,12 +877,12 @@ PCC is a pnpm monorepo of 25 packages (including a pip-installable Python CLI), 
 | `@pcc/dht` | Distributed capability discovery: WebSocket gossip DHT, AnnouncementRegistry, CapabilityQuery engine |
 | `pcc-node` | pip-installable Python CLI: hardware auto-detection, key management, device adapters, camera streaming, daemon loop |
 | `@pcc/ui` | Solarpunk component library: 64+ components, DIDBadge, IPFSLink, ChainTxLink |
-| `@pcc/gateway` | Fastify REST/SSE: 347+ endpoints across 60+ route files, StreamHub, SIWE auth, x402 gate, NEAR 1Click, PCCProtocol routes, marketplace routes |
+| `@pcc/gateway` | Fastify REST/SSE: 400+ endpoints across 60+ route files, StreamHub, SIWE auth, x402 gate, NEAR 1Click, PCCProtocol routes, marketplace, operator relay, request decomposition |
 | `@pcc/dashboard` | Vite SPA: 57+ routes, React Flow builders, Recharts, 18-step onboarding tour |
 
 ### 15.2 Test Coverage
 
-The test suite has 3,300+ passing tests across 100+ test files (TypeScript + Python), including 361+ gateway API tests and 66 Forge tests for the contracts package. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
+The test suite has 3,600+ passing tests across 100+ test files (TypeScript + Python), including 497+ gateway API tests, 308 Python tests, and 66 Forge tests for the contracts package. Coverage spans unit tests for every package, integration tests for the gateway API, and end-to-end simulations:
 
 - `scripts/e2e-simulation.ts`: Kernel-level E2E (job submit → adapter execute → evidence → settlement)
 - `scripts/agent-e2e-simulation.ts`: Agent-to-agent negotiation (UserAgent → BrokerAgent → KernelAgent)
@@ -890,13 +893,15 @@ The test suite has 3,300+ passing tests across 100+ test files (TypeScript + Pyt
 
 PCC operates across four chains with distinct roles:
 
-**Base Sepolia (chain 84532)**: Primary escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified. The `PCCProtocol` root contract clears all Base Sepolia settlements, collecting the 1.5% protocol fee to `0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B`.
+**Base Sepolia (chain 84532)**: Primary escrow and settlement. The `MilestoneEscrow` contract holds customer funds, manages bonds, and releases payment when evidence is verified. The `PCCProtocol` root contract clears all Base Sepolia settlements, collecting the protocol fee on every job.
 
 **Flow EVM Testnet (chain 545)**: Secondary settlement chain with sub-cent transaction costs. The same `MilestoneEscrow` and `MockUSDC` contracts are deployed to Flow EVM via `scripts/deploy-flow-evm.ts`. Set `PCC_NETWORK=flow-evm-testnet` to route the gateway to Flow. Explorer: https://evm-testnet.flowscan.io
 
 **NEAR / Cross-Chain (1Click)**: Cross-chain payment intents. Agents on any chain can fund PCC escrows through NEAR's solver network without managing bridges. Four gateway routes (`/api/near/*`) and four A2A intent types handle the full quote → submit → settle flow. No SDK dependency — plain `fetch()` against the 1Click REST API.
 
 **Story Network (chain 1514 / Aeneid testnet 1513)**: IP registration, licensing, royalties, and disputes. CSDs are registered as IP Assets here. Royalty Token distribution and revenue claims happen on Story. The `StoryIPService` bridges with Base: when escrow releases on Base, it triggers a royalty payment on Story.
+
+**Arkhai / Alkahest**: Conditional peer-to-peer escrow with EAS (Ethereum Attestation Service) attestations. PCC maps each milestone to an Alkahest obligation — the buyer locks tokens with a demand (evidence requirements for that assurance tier), the operator fulfills by producing an evidence attestation, and the arbiter (PCC's verification layer) validates the result. If valid, escrow releases to the operator. If expired, funds return to the buyer. This provides a second escrow primitive alongside the native `MilestoneEscrow`, with boolean-native settlement semantics built on attestations rather than contract state.
 
 x402 (HTTP 402 Payment Required) handles per-request micropayments for lightweight digital services — API access, data feeds, computation — without requiring full escrow setup.
 
@@ -1025,10 +1030,10 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 
 **Live Network**: [capability.network](https://capability.network)
 
-**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (179 tools, v2.2.0, for any LLM agent)
+**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (219 tools, v2.6.0, for any LLM agent)
 
 **Operator Node**: `pip install pcc-node && pcc-node start`
 
 **Repository**: [github.com/global-mysterysnailrevolution/physical-capability-cloud](https://github.com/global-mysterysnailrevolution/physical-capability-cloud)
 
-**Hackathon**: PL Genesis Season 2 — Existing Code Track — Deadline April 1, 2026
+**Hackathon**: PL Genesis: Frontiers of Collaboration — Fresh Code Track — Deadline March 31, 2026

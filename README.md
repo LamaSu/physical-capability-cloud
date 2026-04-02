@@ -86,6 +86,7 @@ Every job that settles pays a protocol fee. More operators, more volume, more fe
 | **Lit Protocol** | Evidence encrypted with on-chain access conditions — only the buyer or verified auditors can decrypt |
 | **Flow EVM** | Settlement contracts deployed on Flow — sub-cent transaction costs |
 | **NEAR** | Cross-chain payment intents — fund escrows from any chain via 1Click solver network |
+| **Arkhai (Alkahest)** | Conditional peer-to-peer escrow with EAS attestations — boolean-native settlement |
 | **Base / Ethereum** | Primary settlement chain — MilestoneEscrow + PCCProtocol root contract |
 
 ---
