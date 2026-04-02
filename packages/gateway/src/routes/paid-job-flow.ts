@@ -30,7 +30,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
-import { AlkahestEscrowBridge } from "@pcc/payments/alkahest";
+import { AlkahestEscrowBridge } from "@pcc/payments";
 import type {
   OperatorPolicy,
   NegotiationSession,
