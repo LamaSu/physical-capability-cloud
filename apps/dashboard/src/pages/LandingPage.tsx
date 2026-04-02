@@ -959,7 +959,7 @@ function ProblemSection() {
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   {[
                     ["Winning bid", "$300"],
-                    ["Clearing fee", "1.5%"],
+                    ["Oracle fee", "2.35%"],
                     ["Time to job", "20 minutes"],
                     ["Proof", "cryptographic"],
                   ].map(([label, val]) => (
@@ -1051,8 +1051,8 @@ const PHASES = [
     phase: "SETTLE",
     title: "Auto-release. No invoices.",
     description:
-      "Escrow releases automatically when evidence meets the contract's assurance tier requirements. Soulbound capability certificates mint on Solana. Operators earn directly. 1.5% clearing fee. Hardcoded.",
-    tech: "Auto-release escrow. Soulbound NFT certificates on Solana. DePIN reward epochs. 1.5% immutable clearing fee.",
+      "Escrow releases automatically when evidence meets the contract's assurance tier requirements. Soulbound capability certificates mint on Solana. Operators earn directly.",
+    tech: "Auto-release escrow. Soulbound NFT certificates on Solana. DePIN reward epochs. Oracle-based settlement.",
   },
 ];
 
