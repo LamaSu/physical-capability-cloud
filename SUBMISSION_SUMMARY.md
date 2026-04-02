@@ -1,54 +1,65 @@
 # Physical Capability Cloud — PL Genesis Submission Summary
 
-**Track**: Existing Code | **Deadline**: April 1, 2026
+**Track**: Existing Code | **Submitted**: April 1, 2026
 
 ---
 
 ## What It Is
 
-Physical Capability Cloud (PCC) is a credibly neutral coordination layer for physical manufacturing — "AWS for the physical world." The core insight: cloud infrastructure abstracts compute into billable units (CPU/RAM/storage), not physical servers. PCC does the same for the physical world. A CNC router in Detroit and a sequencing lab in Boston can form a trustless, multi-hop workflow without any prior relationship — because AI agents discover and negotiate, milestone escrow holds funds accountable, cryptographic evidence proves execution, and settlement is automatic. No broker, no platform rent, no single point of trust.
+Physical Capability Cloud (PCC) is a coordination protocol for physical manufacturing — every physical capability, composable and verifiable through one protocol. A CNC router in Detroit and a sequencing lab in Boston form a trustless, multi-hop workflow without any prior relationship — because AI agents discover and negotiate, milestone escrow holds funds accountable, cryptographic evidence proves execution, and settlement is automatic.
 
 ---
 
 ## What Was Built
 
-PCC is a pnpm monorepo of 22 packages and one application, with 1,174 tests passing across 69 test files and a live gateway deployed on Railway.
+PCC is a pnpm monorepo of 25 packages and one application, with 3,000+ tests passing across 100+ test files, 207 agent tools, 421 API endpoints, 49 MCP tools, 34 A2A intents, and a live gateway deployed on Railway at capability.network.
 
-**Core infrastructure**: `@pcc/spec` defines canonical types and Zod schemas for the entire system. `@pcc/kernel` is the Shop Kernel runtime — the edge agent that connects real devices (OctoPrint 3D printers, Modbus industrial controllers, OPC-UA PLCs, SiLA lab instruments) to the network via typed adapters, an evidence emitter, and a sensor pipeline. `@pcc/scheduler` compiles multi-step workflows into dependency DAGs and routes them through a competitive capability auction. `@pcc/contracts` contains the `MilestoneEscrow` Solidity contract with slashable bonds deployed on Base Sepolia.
+**Core infrastructure**: `@pcc/spec` defines canonical types and Zod schemas. `@pcc/kernel` is the Shop Kernel runtime — connecting real devices (OctoPrint, Modbus, OPC-UA, SiLA, Opentrons OT-2) via typed adapters, evidence emitter, and sensor pipeline. `@pcc/scheduler` compiles multi-step workflows into dependency DAGs. `@pcc/contracts` contains MilestoneEscrow with slashable bonds deployed on Base Sepolia and Flow EVM.
 
-**Agent-to-agent protocol**: Three cooperating agents — `UserAgent`, `BrokerAgent`, `KernelAgent` — communicate over a typed A2A message bus with 27+ defined intents covering discovery, quoting, job lifecycle, payment, verification, and funding. Agents carry their own wallets (EVM via viem, Solana via `@solana/web3.js`) with configurable spending policies and rolling-window budget enforcement.
+**Agent-to-agent protocol**: UserAgent, BrokerAgent, KernelAgent, EvaluatorAgent, and SupportAgent communicate over a typed A2A message bus with 34 defined intents covering discovery, quoting, job lifecycle, payment, verification, and funding. Agents carry their own wallets (EVM via viem, Solana via @solana/web3.js) with configurable spending policies.
 
-**Dashboard**: A 45-route Vite/React 19 SPA covering contract building (React Flow DAG editor), live sensor streams, batch tracking, evidence explorer, escrow management, operator dashboards, a space/equipment marketplace, protocol library, and a Bioluminescent Solarpunk design system built from 64+ custom components.
+**Distributed infrastructure**: `@pcc/pcc-node` — pip-installable Python CLI for operators. `@pcc/dht` — WebSocket gossip DHT for decentralized capability discovery. Ed25519-signed capability announcements, NaCl-box encrypted P2P messages.
+
+**Dashboard**: 57+ route Vite/React 19 SPA with contract building, live sensor streams, batch tracking, evidence explorer, escrow management, operator onboarding wizard, and setup agent.
+
+---
+
+## Sponsor Integrations (5/5 Live)
+
+| Sponsor | Integration | Status |
+|---------|------------|--------|
+| **Storacha** | Evidence archived to IPFS via w3up, UCAN delegation, pcc-evidence space | LIVE — CIDs resolve on w3s.link |
+| **Flow EVM** | MilestoneEscrow + PCCProtocol (2.35% oracle fee factory) deployed | LIVE — verified on FlowScan |
+| **NEAR** | 1Click cross-chain solver via chaindefuser, intent-based settlement | LIVE — real solver responses |
+| **Lit Protocol** | Evidence encryption via Chipotle v3 REST API, AES-256-GCM | LIVE — API key in production |
+| **Starknet** | ProofRegistry Cairo contract, anchor_proof + get_proof entrypoints | LIVE — deployed on Sepolia, tested end-to-end |
+
+All five integrations are independently verifiable by their respective sponsor judges.
 
 ---
 
 ## Technical Highlights
 
-**Sovereign infrastructure stack**: Evidence is never stored in a centralized database. Every completed job produces an encrypted, content-addressed evidence bundle: AES-256-GCM encrypted via Lit Protocol (access conditions tied to job parties), pinned to IPFS via Helia with durable archival through Storacha w3up (`EVIDENCE_STORAGE=storacha`), quality-scored by a Bittensor verification subnet using Yuma Consensus, and integrity-anchored with ZK Merkle proofs bridged to Starknet via `StarknetProofAnchoringService`. A 9-phase sovereign e2e simulation (`scripts/sovereign-e2e-simulation.ts`) exercises every layer end-to-end.
+**Sovereign evidence pipeline**: Every completed job produces an encrypted, content-addressed evidence bundle. Encrypted via Lit Protocol → archived to IPFS via Storacha → ZK proof anchored on Starknet → quality-scored by Bittensor consensus. Real IPFS CIDs and real Starknet transaction hashes on every job completion.
 
-**Identity and DePIN economics**: Every device and agent has a W3C DID (`did:key` Ed25519 or `did:pcc`). Completing verified work earns soulbound capability cNFTs (Metaplex Core on Solana) — non-transferable attestations of demonstrated competence. A `RewardEngine` runs DePIN epochs with weighted scoring across uptime, quality, and throughput, distributing on-chain rewards to operators who prove consistent execution.
+**On-chain settlement**: MilestoneEscrow deployed on Base Sepolia and Flow EVM. PCCProtocol factory with oracle-based fee structure. Settlement service calls on-chain when write mode is enabled.
 
-**MCP server**: `@pcc/mcp-server` exposes 21 tools — `pcc_list_capabilities`, `pcc_build_contract`, `pcc_subnet_status`, `pcc_depin_stats`, and more — so any Claude Code or Cursor agent can discover, price, and book physical capabilities without leaving their IDE.
+**Execution Scope Protocol**: 4-class security model (READ / SAFE CONTROL / SCOPED WRITE / PRIVILEGED) for remote equipment control. Brain/Executor split — LLM reasoning on cloud, tool execution on device, PCC as relay.
 
----
+**207-tool agent package**: Available at capability.network/agent-package.json. Any LLM agent (Claude, GPT-4, etc.) can discover, price, and book physical capabilities.
 
-## The Setup Agent
-
-Onboarding a physical device to PCC requires configuring adapters, wallet keys, evidence storage, and identity registration — historically 40+ environment variables across 6 categories. The `@pcc/onboard-kit` package and a new `SetupAgent` eliminate this.
-
-An operator tells their AI agent: "I have an Ender 3 printer at 192.168.1.50." The agent calls `pcc_setup_detect` to read current config state, `pcc_setup_generate_config` to produce the `KERNEL_CONFIG` JSON, `pcc_setup_register_device` to create the DB record and run a health check, then `pcc_setup_test_job` to submit a test print and verify the full evidence pipeline. Three manual steps: tell it the device, confirm the config, fund the wallet if settlement is needed. The agent scaffolders (`pcc-onboard scaffold`) can generate a complete TypeScript kernel project from a single JSON config file. A 12-step `AGENT_INSTRUCTIONS.md` is machine-readable, designed to be handed directly to any LLM agent without human translation.
+**49 MCP tools**: stdio-based MCP server for Claude Code and Cursor integration.
 
 ---
 
 ## What Makes It Different
 
-PCC is not a marketplace — it is a control plane. Marketplaces list machines. PCC abstracts capabilities: not "CNC router" but "5-axis milling, ±0.01mm, aluminum, tier-2 assurance." Operators define what their equipment can do; the network matches demand to capability profiles with auction pricing under operator-set ceilings. Every claim is backed by cryptographic evidence, not reputation scores.
+PCC is not a marketplace — it is a protocol. Marketplaces extract 35-65% (Uber 40%, Xometry 34.5%). PCC enables operators to keep the value they generate. Evidence is cryptographic, not reputation-based. Settlement is programmable, not manual. Access is permissionless — a student in Lagos can connect to a biolab in Singapore with no broker and no institutional affiliation.
 
-Settlement is not payment processing — it is programmable escrow with skin in the game. Operators post slashable bonds. Challenge windows give counterparties time to dispute. Evidence bundles give verifiers something real to evaluate. A Bittensor subnet provides decentralized quality consensus without a trusted arbiter.
-
-The result is physical infrastructure that composes like cloud services: any capability, from any verified shop, discoverable and bookable by any agent, with automatic settlement and no intermediary taking a cut.
+Every physical supply chain becomes semi-digital. Open science becomes economically viable when IP is protected by math, not lawyers. $467B in counterfeit goods exist because supply chains are opaque — transparent evidence chains change that equation.
 
 ---
 
-**Live gateway**: [pcc-gateway-production.up.railway.app](https://pcc-gateway-production.up.railway.app)
+**Live**: [capability.network](https://capability.network)
 **Repo**: [github.com/global-mysterysnailrevolution/physical-capability-cloud](https://github.com/global-mysterysnailrevolution/physical-capability-cloud)
+**License**: Apache 2.0
