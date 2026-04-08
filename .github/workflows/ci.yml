@@ -58,4 +58,4 @@ jobs:
 
       - name: Run Solidity tests
         working-directory: packages/contracts
-        run: forge test -vvv --profile ci
+        run: forge test -vvv

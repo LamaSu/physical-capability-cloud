@@ -29,14 +29,15 @@ import {
   attestationToRATSResult,
   buildRATSTopology,
 } from "../types/rats.js";
-import type { EvidenceBundle, VerificationAttestation } from "../types/evidence.js";
+import type { EvidenceBundle } from "../types/evidence.js";
+import type { VerificationAttestation } from "../types/verifier.js";
 import type { SHA256, Signature } from "../types/common.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const mockHash =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as SHA256;
-const mockSig = "sig:aabbccdd" as Signature;
+const mockSig = "sig:aabbccdd" as unknown as Signature;
 
 function makeBundle(): EvidenceBundle {
   return {
