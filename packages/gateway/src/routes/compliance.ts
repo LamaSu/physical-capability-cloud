@@ -74,12 +74,11 @@ export async function complianceRoutes(app: FastifyInstance) {
     },
   );
 
-  // ── SECONDARY: Single evidence bundle ────────────────────────────────────
-  // GET /api/evidence/:bundleId → EvidenceSummaryDTO
-  // Safe: evidence-encrypted.ts owns /archive, /ipfs, /lit-conditions, /lit-decrypt
-  // but not the bare bundle path.
+  // ── SECONDARY: Single evidence bundle (via compliance facade) ─────────────
+  // Moved to /api/compliance/evidence/ to avoid collision with evidence-encrypted.ts
+  // which owns GET /api/evidence/:bundleId
   app.get<{ Params: { bundleId: string } }>(
-    "/api/evidence/:bundleId",
+    "/api/compliance/evidence/:bundleId",
     async (req, reply) => {
       const result = await facade.getBundle(req.params.bundleId);
       return sendResult(reply, result);
@@ -87,10 +86,8 @@ export async function complianceRoutes(app: FastifyInstance) {
   );
 
   // ── SECONDARY: Tier compliance check for a bundle ────────────────────────
-  // GET /api/evidence/:bundleId/tier-compliance → TierComplianceResult
-  // Distinct sub-path — not claimed by evidence-encrypted.ts.
   app.get<{ Params: { bundleId: string } }>(
-    "/api/evidence/:bundleId/tier-compliance",
+    "/api/compliance/evidence/:bundleId/tier-compliance",
     async (req, reply) => {
       const result = await facade.checkTierCompliance(req.params.bundleId);
       return sendResult(reply, result);
