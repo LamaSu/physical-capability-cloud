@@ -81,6 +81,7 @@ const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage
 const AgentPackagePage = lazy(() => import("./pages/AgentPackagePage.js").then(m => ({ default: m.AgentPackagePage })));
 const SponsorTelemetryPage = lazy(() => import("./pages/SponsorTelemetryPage.js").then(m => ({ default: m.SponsorTelemetryPage })));
 const SystemDashboardPage = lazy(() => import("./pages/SystemDashboardPage.js").then(m => ({ default: m.SystemDashboardPage })));
+const AnalyticsDashboardPage = lazy(() => import("./pages/AnalyticsDashboardPage.js").then(m => ({ default: m.AnalyticsDashboardPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -258,6 +259,7 @@ function DashboardShell() {
               <Route path="/ip" element={<IPRevenuePage />} />
               <Route path="/sponsors" element={<SponsorTelemetryPage />} />
               <Route path="/system" element={<SystemDashboardPage />} />
+              <Route path="/analytics" element={<AnalyticsDashboardPage />} />
             </Routes>
           </Suspense>
         </PageTransition>
