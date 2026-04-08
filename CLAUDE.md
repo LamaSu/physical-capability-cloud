@@ -1,413 +1,921 @@
-## MANDATORY: DGX Spark Offload
+# Physical Capability Cloud (PCC) — Agent Integration Guide
 
-**ALWAYS check Spark availability (`spark-check`) at session start and offload ALL builds, tests, and heavy work to the DGX Spark (192.168.108.72, 119GB RAM).** The local machine has only 16GB RAM and WILL OOM on builds, parallel tests, and multi-agent workloads. Use `spark-run` for everything. No exceptions.
+## 1. What Is PCC
 
-- `spark-run "cd ~/projects/physical-capability-cloud && pnpm build --concurrency=1"` — build
-- `spark-run "cd ~/projects/physical-capability-cloud && pnpm --workspace-concurrency=1 -r test"` — test
-- `spark-run "cd ~/projects/physical-capability-cloud && pnpm install"` — install
-- If Spark is down, use `--concurrency=1` locally and warn the user about OOM risk.
+PCC is AWS for the physical world. It is a cloud control plane for physical manufacturing capabilities.
 
-## MANDATORY: Security — Gate A Vetting Pipeline
+- **Shop Kernels** = Availability Zones. Each kernel is a physical site (lab, workshop, factory) with equipment.
+- **Capabilities** = billable units. Not machines — what machines can DO (3D printing, CNC milling, HPLC analysis).
+- **Assurance Tiers** = SLAs. Evidence depth + liability + dispute rules, graded 0-3.
+- **Settlement** = milestone escrow on-chain (Base Sepolia). Funds release only when evidence meets tier requirements.
+- **Agents** = first-class citizens. Every operation is an API call. Human dashboards and AI agents use the same endpoints.
 
-All new tools, MCP servers, npm packages, and external dependencies MUST pass through Gate A vetting before being approved for use in this project.
+**Live gateway**: `https://capability.network`
 
-### How to Vet
-- Run `/vet <package-path>` on any new tool/package before integration
-- Runs up to 7 scanners: Trivy (vulns+SBOM), Gitleaks (secrets), ClamAV (malware), npm audit, pip-audit, Semgrep (SAST), prompt injection detection
-- Scanners degrade gracefully if not installed. Prompt injection scanner always runs.
+---
 
-### Policy Thresholds (from `~/.claude/plugins/vetting-policy.json`)
-- Critical vulnerabilities: 0 allowed (auto-reject)
-- High vulnerabilities: max 2 (warn on any)
-- Medium vulnerabilities: max 10
-- Secrets in source: 0 allowed (auto-reject)
-- Malware: auto-reject, no override
-- Prompt injection signals: max 1 (warn on any)
+## 2. Quick Start: Get Your Agent Running
 
-### Verdicts
-- **PASS**: Clean, auto-approved
-- **WARN**: Suspicious findings, human reviews before use
-- **FAIL**: Critical vulns, secrets, or malware — auto-rejected
-
-### When to Vet
-- Before adding any new npm dependency to any package
-- Before integrating any MCP server
-- Before running any third-party script
-- After forging a new MCP server with `/forge`
-- Reports saved to `ai/supervisor/forge_approvals/`
-
-## MANDATORY: Action Classification
-
-Every tool call is classified by the tool-broker into one of 5 action classes:
-
-| Class | Tools | Gate |
-|-------|-------|------|
-| read | Read, Glob, Grep, WebSearch, WebFetch | Open |
-| write | Write, Edit, NotebookEdit | Role-checked |
-| exec | Bash, Agent/Task | Role-checked + keyword scan |
-| network | WebFetch, WebSearch, mcp__* | Role-checked |
-| credential | Detected via keyword scoring in args | Always flagged |
-
-Dangerous keywords (rm -rf, git reset --hard, git push --force, drop table, curl | sh) are scored 0.0-1.0. Actions scoring >0.5 are dual-logged and may be denied per agent allowlist.
-
-### Per-Agent Allowlists (from `~/.claude/plugins/action-policy.json`)
-
-| Agent | Allowed Tools | Action Classes |
-|-------|--------------|----------------|
-| supervisor | all | all |
-| implementer | Bash, Read, Edit, Write, Glob, Grep | read, write, exec |
-| researcher | Read, Glob, Grep, WebFetch, WebSearch | read, network |
-| wheel-scout | Read, Glob, Grep, WebFetch, WebSearch | read, network |
-| forger | Bash, Read, Edit, Write, Glob, Grep, WebFetch | read, write, exec, network |
-| vet-scanner | Bash, Read, Write, Glob, Grep | read, write, exec |
-| test-writer | Read, Write, Bash, Glob, Grep | read, write, exec |
-| memory-scribe | Read, Write | read, write |
-| context-hydrator | Read, Glob, Grep | read |
-| skill-router | Read | read |
-| browser | mcp__chrome-devtools__* | network |
-
-# Physical Capability Cloud (PCC)
-
-## What This Is
-
-AWS for the physical world. A cloud control plane for physical manufacturing capabilities.
-
-- **Shop Kernels** = Availability Zones (physical sites with equipment)
-- **Capabilities** = billable units (not machines — what machines can DO)
-- **Assurance Tiers** = SLAs (evidence depth + liability + dispute rules, 0-3)
-- **Settlement** = milestone escrow on-chain; x402 for digital microservices
-- **DePIN** = soulbound NFT certificates + reward epochs for infrastructure operators
-- **IP Layer** = Story Protocol integration for CSD royalties and revenue splits
-
-**Scale**: 25 packages + 1 dashboard app, 3300+ tests across 100+ test files, 154 agent tools, 347 REST endpoints across 54 route files, 34 A2A intents, 6 SSE streams
-
-**Live**: https://pcc-gateway-production.up.railway.app (Railway, healthcheck passing)
-
-**Hackathon**: PL Genesis, deadline April 1, 2026 (Existing Code track). Push to `wingdingspenpal/poop` (SSH for `global-mysterysnailrevolution` not registered).
-
-## Architecture
-
-### Package Inventory
-
-**Foundation**
-| Package | Role |
-|---------|------|
-| `packages/spec` | Single source of truth for ALL types, schemas, Zod validation, P2P types (PeerIdentity, CapabilityAnnouncement, EncryptedEnvelope) |
-| `packages/contracts` | Solidity: MilestoneEscrow with bonds/slashing; Solana: soulbound NFTs, reward engine |
-| `packages/db` | SQLite via better-sqlite3, shared database layer |
-
-**Core Runtime**
-| Package | Role |
-|---------|------|
-| `packages/kernel` | Shop Kernel runtime — device adapters (OctoPrint, Modbus, OPC-UA, SiLA), evidence emitter, Capability API |
-| `packages/gateway` | Fastify HTTP gateway — 40+ route files, all REST endpoints, SSE streams |
-| `packages/scheduler` | Workflow compiler + capability router |
-| `packages/verifier` | Hybrid verifier market + evidence verification + Bittensor subnet |
-| `packages/payments` | x402 middleware (server) + x402 client (auto-pay) + Meteora DLMM (capability pricing pools) |
-| `packages/identity-8004` | ERC-8004 Trustless Agents — Identity/Reputation/Validation registry clients (viem), Agent Registration File generator, ABIs |
-
-**Agent Layer (A2A)**
-| Package | Role |
-|---------|------|
-| `packages/a2a` | Agent-to-Agent protocol — typed intents, message bus, conversations |
-| `packages/agent-runtime` | Base agent framework — wallet (viem), tools, intent handlers, SmartAccountManager (ERC-4337) |
-| `packages/agent-user` | User Agent — holds wallet, discovers, negotiates, submits workflows |
-| `packages/agent-broker` | Broker Agent — routes capabilities, quotes, compiles workflows |
-| `packages/agent-kernel` | Kernel Agent — wraps shop kernel, accepts jobs, emits evidence |
-| `packages/agent-evaluator` | Evaluator Agent — third-party quality assessment, attestation VCs, ACP↔A2A bridge, reputation bridge |
-| `packages/agent-support` | Support Agent — diagnostic engine, escalation manager, setup guidance |
-
-**Distributed Infrastructure**
-| Package | Role |
-|---------|------|
-| `packages/pcc-node` | pip-installable Python CLI (`pcc-node start`): hardware auto-detection, Ed25519 key management, device adapters (OT-2, OctoPrint, generic HTTP), camera streaming, daemon loop |
-| `packages/dht` | WebSocket gossip DHT for decentralized capability discovery: AnnouncementRegistry, CapabilityQuery engine, bootstrap node management |
-
-**Tooling**
-| Package | Role |
-|---------|------|
-| `packages/mcp-server` | 49 MCP tools over stdio; also CLI entry (`packages/mcp-server/dist/cli.js`) |
-| `packages/contract-builder` | Interactive capability contract builder |
-| `packages/onboard-kit` | Operator scaffolding CLI — generates kernel configs from templates |
-| `packages/orchestrator` | Multi-instrument workflow orchestration |
-| `packages/bundler` | Asset bundling utilities |
-
-**Frontend**
-| Package | Role |
-|---------|------|
-| `apps/ui` | Vite + React 19 dashboard — 57+ routes, setup wizard, onboarding wizard, auth gate |
-
-### Sovereign Infrastructure
-
-- `packages/spec/src/identity/` — W3C DIDs (did:key + did:pcc) + Verifiable Credentials
-- `packages/spec/src/types/p2p.ts` — P2P types: PeerIdentity, CapabilityAnnouncement, EncryptedEnvelope, ConnectionState
-- `packages/kernel/src/evidence-storage.ts` — IPFS evidence via Helia (ESM-only — import from dist path)
-- `packages/kernel/src/lit-encryption-service.ts` — Lit Protocol mock with real AES-256-GCM
-- `packages/kernel/src/lit-encryption-real.ts` — Real Lit Protocol via Chipotle v3 REST API (api.dev.litprotocol.com)
-- `packages/agent-runtime/src/solana-wallet.ts` — Solana agent wallets + SPL token transfers
-- `packages/agent-runtime/src/spending-policy.ts` — Budget-aware spending policies
-- `packages/verifier/src/bittensor/` — Bittensor verification subnet (MockMiner, MockValidator, Yuma Consensus)
-- `packages/contracts/ts/capability-certificates.ts` — Soulbound capability NFTs via Metaplex Core + PermanentFreezeDelegate
-- `packages/contracts/ts/reward-engine.ts` — DePIN reward epoch scoring + distribution
-- `packages/payments/src/meteora/` — Meteora DLMM pools for dynamic capability pricing
-- `packages/pcc-node/pcc_node/crypto.py` — Ed25519 key generation and signing (PyNaCl), HMAC-SHA256 fallback
-- `packages/dht/src/registry.ts` — AnnouncementRegistry with TTL-based expiry and capability query engine
-
-## Invariants
-
-1. All schemas live in `packages/spec` — no other package defines wire types
-2. Every Evidence Bundle is content-addressed (SHA-256 of canonical JSON)
-3. On-chain state only stores hashes/commitments, never raw data
-4. Shop Kernel is the only external interface to a physical site
-5. Every capability has an assurance tier; every tier has defined evidence requirements
-6. Escrow only settles when evidence meets the contract's tier requirements
-7. SCOPED WRITE tool calls require an active execution scope — fail-safe, not fail-open
-8. Capability announcements are Ed25519-signed and independently verifiable
-9. P2P messages are NaCl-box encrypted — the relay cannot read contents
-
-## Execution Scope Protocol
-
-See `docs/EXECUTION_SCOPE_PROTOCOL.md` for full specification.
-
-- **4 operation classes**: READ (always), SAFE CONTROL (during active job), SCOPED WRITE (requires scope), PRIVILEGED (requires operator)
-- **Scope lifecycle**: PROPOSED -> ACTIVE -> COMPLETED / EXPIRED / REVOKED
-- **Validation**: Every Class 3 tool call checked against scope's allowedTools, commandCount, expiry, and protocolHash
-- **Troubleshooting ladder**: Auto-retry -> Brain recovery -> Operator escalation -> Emergency stop
-- **Gateway routes**: `POST /api/ot2/scope`, `GET /api/ot2/scope/:id`, `POST /api/ot2/scope/:id/revoke`, `GET /api/ot2/scope/:id/audit`
-- **Tool relay**: `POST /api/ot2/tool-call`, `GET /api/ot2/tool-call/pending`, `POST /api/ot2/tool-result`, `GET /api/ot2/tool-result/:id`
-- **Chat relay**: `POST /api/ot2/chat`, `GET /api/ot2/chat/messages`, `GET /api/ot2/chat/pending`, `POST /api/ot2/chat/respond`
-- **Camera relay**: `POST /api/ot2/camera/frame`, `GET /api/ot2/camera/latest`, `GET /api/ot2/camera/stream`, `GET /api/ot2/camera/snapshot`
-
-## Protocols
-
-- **ERC-8004**: Identity Registry + Reputation Registry + Validation Registry for machines/agents
-- **x402**: HTTP 402 Payment Required protocol (Coinbase) for per-request micropayments
-- **CSD**: Capability StructureDefinition — FHIR-inspired schema for defining capabilities with versioning and lifecycle (base/profile/extension/workflow)
-- **A2A**: Agent-to-Agent typed intent bus — 34 intents across User/Broker/Kernel/Verifier/Settlement agents
-- **P2P**: NaCl-box encrypted messages, Ed25519-signed capability announcements, WebSocket gossip DHT
-- **Execution Scope**: 4-class security model (READ/SAFE/SCOPED/PRIVILEGED) for remote equipment control
-- **Brain/Executor**: LLM reasoning on Spark, tool execution on device, PCC as relay
-- **Fiat Ramp**: Coinbase Onramp + testnet faucet + Yellowcard (34 emerging market countries) + Wise (enterprise bank payouts)
-
-## Deployed Infrastructure
-
-- **Railway**: https://pcc-gateway-production.up.railway.app
-- **Custom domain**: https://capability.network (Cloudflare CNAME -> Railway)
-- **Ethereum Sepolia contracts**:
-  - MockUSDC: `0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb`
-  - MilestoneEscrow: `0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454`
-- **Deployer**: `0x61B4e2a7347a529b8B19A2a3444Bd3500E693890`
-- **Agent Registration**: `/.well-known/agent-registration.json` (ERC-8004)
-- **Agent Package**: `/agent-package.json` (154 tools for any LLM agent)
-- **DHT Bootstrap**: `wss://capability.network/ws/dht`
-
-## MCP Server (49 Tools) + Agent Package (154 Tools)
-
-**MCP entry points**:
-- MCP stdio: `node packages/mcp-server/dist/index.js` (set `PCC_URL` env var)
-- Claude Code settings: `"pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"] }`
-- Gateway default: `https://pcc-gateway-production.up.railway.app`
-
-**Agent Package**: `apps/dashboard/public/agent-package.json` — 154 tools for any LLM agent (Claude, GPT-4, etc.)
-
-**MCP tool groups** (49 tools):
-
-| # | Tool | What It Does |
-|---|------|--------------|
-| 1 | `pcc_list_capabilities` | List all registered capability types |
-| 2 | `pcc_search_capabilities` | Search capability templates with full details |
-| 3 | `pcc_list_kernels` | List Shop Kernels, filter by status |
-| 4 | `pcc_get_kernel` | Get kernel details + devices |
-| 5 | `pcc_list_jobs` | List jobs, filter by kernel/status |
-| 6 | `pcc_get_job` | Get job details + evidence bundles |
-| 7 | `pcc_build_options` | Get config options for a capability type |
-| 8 | `pcc_calculate_price` | Calculate price for a capability contract |
-| 9 | `pcc_build_contract` | Build complete contract ready for escrow |
-| 10 | `pcc_list_escrows` | List escrow contracts, filter by status |
-| 11 | `pcc_list_evidence` | List all evidence bundles |
-| 12 | `pcc_list_protocols` | List multi-step workflow templates |
-| 13 | `pcc_depin_stats` | DePIN reward epochs, certificates, treasury |
-| 14 | `pcc_subnet_status` | Agent network status + conversations |
-| 15 | `pcc_get_agent_identity` | ERC-8004 identity for kernel or agent |
-| 16 | `pcc_get_reputation` | Reputation scores by agent/tag |
-| 17 | `pcc_list_sensors` | List sensor channels for a kernel |
-| 18 | `pcc_get_sensor_data` | Get recent sensor readings for a channel |
-| 19 | `pcc_get_evidence` | Get evidence bundle: IPFS CID, ZK proof, Bittensor scores |
-| 20 | `pcc_compile_workflow` | Compile DAG from steps with dependencies |
-| 21 | `pcc_agent_registration` | Get ERC-8004 Agent Registration File |
-| 22 | `pcc_setup_detect` | Auto-detect configuration state (START HERE for setup) |
-| 23 | `pcc_setup_generate_config` | Generate KERNEL_CONFIG from device descriptions |
-| 24 | `pcc_setup_validate_config` | Validate kernel configuration + adapter connectivity |
-| 25 | `pcc_setup_register_device` | Register a physical device on the PCC network |
-| 26 | `pcc_setup_health_check` | Run health checks on devices |
-| 27 | `pcc_setup_test_job` | Submit a test job to verify full pipeline |
-| 28 | `pcc_setup_generate_env` | Generate .env file for dev/testnet/mainnet |
-| 29 | `pcc_setup_status` | Comprehensive setup status across all categories |
-| 30 | `pcc_csd_list` | List CSD documents, filter by kind/status |
-| 31 | `pcc_csd_get` | Get CSD by canonical URI |
-| 32 | `pcc_csd_register` | Register a new CSD document |
-| 33 | `pcc_discover_scan` | Scan local network for devices (mDNS/IPP) |
-| 34 | `pcc_discover_onboard` | One-command: discover → generate CSD → register |
-| 35 | `pcc_ip_register_capability` | Register CSD as Story Protocol IP Asset |
-| 36 | `pcc_ip_revenue_snapshot` | Get IP Royalty Vault balance + unclaimed revenue |
-| 37 | `pcc_ip_claim` | Claim accumulated IP royalty revenue |
-| 38 | `pcc_ip_lineage` | Get IP provenance graph (ancestors + descendants) |
-| 39 | `pcc_ip_set_splits` | Configure revenue splits (must sum to 100) |
-| 40 | `pcc_swf_summary` | Sovereign Wealth Fund balance + strategy + proposals |
-| 41 | `pcc_swf_participant_dashboard` | SWF participant earnings + dividends + voting |
-| 42 | `pcc_swf_list_proposals` | List SWF governance proposals, filter by status |
-| 43 | `pcc_get_wallet_balance` | USDC balance + pending deposits + API credits |
-| 44 | `pcc_get_funding_options` | Fiat-to-crypto funding options (Stripe/Yellowcard) |
-| 45 | `pcc_create_onramp_session` | Create fiat funding session (card/ACH/bank/mobile money) |
-| 46 | `pcc_get_provider_rates` | Live Yellowcard exchange rates for emerging markets |
-| 47 | `pcc_submit_withdrawal` | Withdraw USDC to local fiat (34 countries) |
-| 48 | `pcc_get_ramp_activity` | Recent on/off ramp activity across providers |
-| 49 | `pcc_send_enterprise_payout` | Wise enterprise bank payout (40+ currencies) |
-
-## Gateway API Endpoints
-
-The gateway (`packages/gateway`) exposes these REST route groups:
-
-| Route File | Path Prefix | Domain |
-|-----------|-------------|--------|
-| capabilities.ts | /api/capabilities | Capability types + templates |
-| kernels.ts | /api/kernels | Shop Kernels (list, get, create) |
-| jobs.ts | /api/jobs | Job list, get, submit |
-| build.ts | /api/build | Contract builder (options, price, contract) |
-| escrow.ts | /api/escrow | Escrow contracts + milestones |
-| evidence-encrypted.ts | /api/evidence | Encrypted evidence bundles |
-| sensors.ts | /api/sensors | Sensor channels + readings + anomalies |
-| protocols.ts | /api/protocols | Protocol templates (DAG workflows) |
-| rewards.ts | /api/rewards | DePIN epochs, certificates, claims, treasury |
-| registry.ts | /api/registry | ERC-8004 entity registry |
-| csd.ts | /api/csd | Capability StructureDefinitions |
-| discover.ts | /api/discover | Device discovery + auto-onboarding |
-| ip.ts | /api/ip | Story Protocol IP registration + royalties |
-| swf.ts | /api/swf | Sovereign Wealth Fund governance |
-| fiat-ramp.ts | /api/fiat-ramp | Stripe, Yellowcard, Wise payment rails |
-| setup.ts | /api/setup | Operator setup wizard endpoints |
-| agents.ts | /api/agents | Agent subnet status |
-| workflows.ts | /api/workflows | Workflow compile (DAG) |
-| onboard.ts | /api/onboard | Onboarding wizard flow |
-| marketplace.ts | /api/marketplace | Capability marketplace listings |
-| batches.ts | /api/batches | Batch manifests (HPLC, multi-sample) |
-| zk-proofs.ts | /api/zk | ZK proof creation + verification |
-| spaces.ts | /api/spaces | Equipment hosting spaces |
-| logistics.ts | /api/logistics | Shipments, bookings, installations |
-| orchestrator.ts | /api/orchestrator | Multi-instrument transfer graphs |
-| ot2-relay.ts | /api/ot2/tool-call, /api/ot2/tool-result | Brain/executor tool call relay |
-| ot2-scope.ts | /api/ot2/scope | Execution scope create, get, revoke, audit |
-| ot2-chat.ts | /api/ot2/chat | Chat relay: send, history, pending, respond |
-| ot2-camera.ts | /api/ot2/camera | Camera frame push, latest, stream, snapshot |
-| negotiation.ts | /api/negotiation | Negotiation session protocol (CREATED->COMMITTED) |
-| agent-chat.ts | /api/agent-chat | Agent-to-agent chat |
-| auth.ts | /api/auth | API key provisioning, SIWE, key management |
-| bounty.ts | /api/bounty | Demand signals, bounties, leaderboard |
-| pool.ts | /api/pool | Investment pools, staking, earnings |
-| provision.ts | /api/auth/provision | API key provisioning endpoint |
-| well-known.ts | /.well-known | agent-registration.json (ERC-8004) |
-| status.ts | /health, /api/status | Healthcheck |
-
-**SSE streams** (`/sse/stream/`): job/:jobId, kernel/:kernelId, device/:deviceId, batch/:batchId, /sse/notifications, /api/ot2/camera/stream
-
-## Dev Commands
+### Step 1: Get an API key
 
 ```bash
-# Install
-spark-run "cd ~/projects/physical-capability-cloud && pnpm install"
-
-# Build (ALL packages, sequential)
-spark-run "cd ~/projects/physical-capability-cloud && pnpm build --concurrency=1"
-
-# Test (ALL packages, sequential to prevent OOM)
-spark-run "cd ~/projects/physical-capability-cloud && pnpm --workspace-concurrency=1 -r test"
-
-# E2E simulations (run from repo root)
-npx tsx scripts/e2e-simulation.ts                       # kernel-level e2e
-npx tsx scripts/agent-e2e-simulation.ts                 # agent-to-agent e2e
-npx tsx scripts/sovereign-e2e-simulation.ts             # sovereign infra e2e (9 phases + IPFS)
-npx tsx scripts/openclaw-print-deliver-e2e.ts           # OpenClaw print-and-deliver
-npx tsx scripts/openclaw-print-deliver-e2e.ts --variation 2
-npx tsx scripts/openclaw-print-deliver-e2e.ts --variation 3
-npx tsx scripts/lit-protocol-demo.ts                    # Lit Protocol encryption demo
-
-# Contract deployment
-npx tsx scripts/generate-wallet.ts                      # generate deployer wallet
-DEPLOYER_PRIVATE_KEY=0x... npx tsx scripts/deploy-base-sepolia.ts  # deploy to Sepolia
-
-# Onboard-kit CLI
-node packages/onboard-kit/dist/cli.js quick-start       # generate kernel config interactively
-
-# pcc-node (Python operator node)
-pip install -e packages/pcc-node                         # install in dev mode
-pip install -e "packages/pcc-node[all]"                  # install with crypto + discovery
-pcc-node start                                           # detect hardware, register, run daemon
-pcc-node detect                                          # hardware scan only
-pcc-node status                                          # check daemon status
-pcc-node config                                          # interactive config wizard
-
-# pcc-node tests
-cd packages/pcc-node && python -m pytest                 # run Python tests
+curl -X POST https://capability.network/api/auth/provision \
+  -H "Content-Type: application/json" \
+  -d '{"email": "operator@example.com", "name": "My Workshop", "capability": "FDM 3D printing"}'
 ```
 
-## Testing
+Response (201):
+```json
+{
+  "api_key": "pcc_live_abc123...",
+  "key_id": "key-uuid",
+  "operator_id": "operator@example.com",
+  "scopes": ["*"],
+  "rate_limit": 100,
+  "expires_at": null,
+  "warning": "Save this API key now — it will not be shown again.",
+  "usage": {
+    "header": "Authorization: Bearer pcc_live_abc123...",
+    "example": "curl -H \"Authorization: Bearer pcc_live_abc123...\" https://capability.network/api/capabilities/types"
+  }
+}
+```
 
-- **Framework**: vitest (TypeScript), pytest (Python/pcc-node)
-- **Command**: `pnpm --workspace-concurrency=1 -r test` (sequential, prevents OOM)
-- **Python tests**: `cd packages/pcc-node && python -m pytest`
-- **Count**: 3300+ tests across 100+ test files (3200+ TypeScript + 99 Python)
-- **ALWAYS use `spark-run`** for tests — local machine will OOM
+You can also provision with a wallet address instead of email:
+```json
+{"walletAddress": "0x1234...abcd", "name": "My Workshop"}
+```
 
-## Environment Variables
+**Alternative**: If you have an invite code, use `POST /api/onboard/redeem` with `{inviteCode, email, password}` to get a key plus wallet, identity, and LLM proxy access in one call.
 
-| Variable | When Required | Description |
-|----------|--------------|-------------|
-| `PCC_URL` | MCP server | Gateway URL (default: production Railway URL) |
-| `LIT_PROTOCOL_REAL=true` | Optional | Activate Lit Protocol Chipotle v3 REST API |
-| `LIT_API_KEY=...` | Chipotle mode | Lit account API key (from dashboard.dev.litprotocol.com) |
-| `LIT_USAGE_KEY=...` | Chipotle mode | Lit usage API key (scoped — preferred for production) |
-| `EVIDENCE_STORAGE=storacha` | Optional | Storacha w3up instead of Helia for evidence storage |
-| `STORACHA_PROOF=...` | storacha mode | Storacha delegation proof (base64) |
-| `STORACHA_SPACE_DID=did:key:...` | storacha mode | Storacha space DID |
-| `STARKNET_ACCOUNT=...` | ZK anchoring | Starknet account address |
-| `STARKNET_PRIVATE_KEY=0x...` | ZK anchoring | Starknet account private key |
-| `STARKNET_NETWORK=goerli\|mainnet` | ZK anchoring | Default: goerli |
-| `DEPLOYER_PRIVATE_KEY=0x...` | Contract deploy | Private key for contract deployment |
-| `PCC_GATEWAY_PRIVATE_KEY=0x...` | On-chain writes | Gateway private key for settlement/rewards |
-| `ESCROW_CONTRACT_ADDRESS=0x...` | Testnet/mainnet | Deployed MilestoneEscrow address |
-| `KERNEL_CONFIG='{...}'` | Kernel runtime | JSON kernel configuration inline |
-| `KERNEL_CONFIG_FILE=./...` | Kernel runtime | Path to kernel config JSON file |
-| `PCC_ORACLE_URL` | Settlement | Oracle service URL (default: http://192.168.108.72:4100) |
-| `PCC_ORACLE_KEY` | Settlement | Oracle API key (provisioned from oracle service) |
-| `PCC_BASE` | pcc-node | Gateway URL (default: https://capability.network) |
-| `PCC_API_KEY` | pcc-node | Bearer token for gateway API |
-| `KERNEL_ID` | pcc-node | Override kernel ID (optional) |
+### Step 2: Authenticate all requests
 
-## Orchestration Patterns
+Set `Authorization: Bearer <key>` on every request. Without it, all endpoints return 401.
 
-**For complex multi-step tasks**: Use `/go` — full autonomous pipeline with wheel-scout gate, context hydration, parallel wave execution, and memory checkpoint.
+### Step 3: Check what capabilities exist
 
-**For domain-specific workflows**: Use the A2A agent layer or the MCP tools directly.
+```bash
+curl -H "Authorization: Bearer $PCC_KEY" \
+  https://capability.network/api/capabilities/types
+```
 
-**Preferred tool priority** (lowest cost first):
-1. REST API directly — cheapest, no schema loading
-2. MCP tools (`pcc_*`) — when in MCP-compatible client, structured tool calls
-3. A2A intents — when agents need to negotiate or coordinate
+Response:
+```json
+{"types": ["3d-printing", "cnc", "laser-cutting", "hplc", "pcb", "injection-molding", ...]}
+```
 
-**Setup workflow** (new operator): `pcc_setup_detect` → `pcc_setup_generate_config` → `pcc_setup_validate_config` → `pcc_setup_register_device` → `pcc_setup_test_job`
+### Step 4: Build a contract (discovery to escrow)
 
-**Capability contract workflow**: `pcc_list_capabilities` → `pcc_build_options` → `pcc_calculate_price` → `pcc_build_contract` → (fund escrow) → `pcc_list_jobs`
+```bash
+# 1. Get build options for a capability type
+curl -X POST https://capability.network/api/build/options \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "3d-printing"}'
 
-**IP registration workflow**: `pcc_csd_register` → `pcc_ip_register_capability` → `pcc_ip_set_splits` → `pcc_ip_revenue_snapshot`
+# 2. Calculate price with your selections
+curl -X POST https://capability.network/api/build/price \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20, "layer_height": 0.2}}'
 
-**pcc-node onboarding** (operators): `pip install pcc-node` → `pcc-node start` (auto: detect hardware → generate keys → provision API key → register kernel → announce capabilities → start daemon)
+# 3. Build the contract
+curl -X POST https://capability.network/api/build/contract \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20}, "assuranceTier": 1}'
+```
 
-**Execution scope workflow** (remote equipment control): `pcc_create_scope` → `pcc_relay_tool_call` (repeat) → `pcc_get_tool_result` (poll) → scope completes or `pcc_revoke_scope`
+---
 
-**DHT discovery workflow**: `pcc_dht_query` (find operators) → `pcc_dht_announce` (advertise capabilities) → `pcc_dht_peers` (check connectivity)
+## 3. Complete API Reference
 
-## Git Notes
+All endpoints are under `https://capability.network`. All require `Authorization: Bearer <key>` except where noted as PUBLIC.
 
-- **Active remote**: `wingdingspenpal/poop` (all current work)
-- **Broken remote**: `global-mysterysnailrevolution/physical-capability-cloud` (SSH key not registered)
-- Always push to the `hackathon` remote: `git push hackathon`
+### Auth & Key Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/provision` | Create API key (PUBLIC). Body: `{email?, walletAddress?, name?, capability?}`. Returns `api_key`. |
+| GET | `/api/auth/validate` | Validate current API key. Returns `{valid, operatorId}`. |
+| GET | `/api/auth/keys` | List your active API keys with usage stats. |
+| DELETE | `/api/auth/keys/:keyId` | Revoke an API key permanently. |
+| GET | `/api/auth/nonce` | Get SIWE nonce for wallet login. |
+| POST | `/api/auth/verify` | Verify SIWE signature, create session. |
+| GET | `/api/auth/me` | Current session info. |
+| POST | `/api/auth/logout` | Destroy session. |
+
+### Discovery & Capabilities
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/capabilities/types` | List all capability type strings (PUBLIC). Returns `{types: string[]}`. |
+| GET | `/api/capabilities/templates` | List all templates with pricing hints and parameter metadata. |
+| GET | `/api/capabilities` | List all capability instances. Supports `?offset=&limit=`. Returns `PaginatedResult<CapabilityDTO>`. |
+| GET | `/api/capabilities/by-kernel/:kernelId` | Capabilities for a specific kernel. Returns `{capabilities: CapabilityDTO[]}`. |
+| GET | `/api/capabilities/by-type/:type` | Filter by capability type. Returns `{capabilities: CapabilityDTO[]}`. |
+| GET | `/api/capabilities/search?q=` | Full-text search across names, types, materials. Returns `CapabilityDTO[]`. |
+| GET | `/api/capabilities/:capId` | Single capability with full enrichment (reputation, availability, queue depth). |
+| POST | `/api/capabilities` | Create/upsert a capability instance. Body: `{kernelId, type, name, ...}`. |
+| GET | `/api/capabilities/:id/button` | Embeddable button (PUBLIC, CORS *). See Section 3.1 below. |
+
+#### 3.1 Embeddable Button Endpoint
+
+`GET /api/capabilities/:id/button?format=json|html|script&label=...&theme=dark|light`
+
+Returns a button config that third-party sites can embed to let users launch PCC jobs directly.
+
+- `?format=json` (default): Returns `{capability, button, html, embedScript}`.
+- `?format=html`: Returns an `<claude-code-button>` HTML snippet.
+- `?format=script`: Returns script tag + button HTML for drop-in embedding.
+
+Example:
+```bash
+curl https://capability.network/api/capabilities/cap-123/button?format=script
+```
+```html
+<script src="https://unpkg.com/claudebuttons/dist/index.js"></script>
+<claude-code-button command="pcc negotiate --capability fdm --kernel kernel-abc" label="Run on Claude Code" context-url="https://capability.network/api/capabilities/cap-123"></claude-code-button>
+```
+
+### Contract Building
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/build/options` | Get config options for a capability type. Body: `{type, selections?, profileId?}`. |
+| POST | `/api/build/price` | Calculate price for selections. Body: `{type, selections, profileId?}`. |
+| POST | `/api/build/contract` | Build a complete contract. Body: `{type, selections, assuranceTier, profileId?}`. |
+
+### Negotiation Sessions
+
+State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Sessions auto-expire after 30 minutes.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/negotiate/session` | Create session. Body: `{userAgentId, kernelId, capabilityType}`. |
+| GET | `/api/negotiate/session/:id` | Get session state with all params and quote. |
+| PATCH | `/api/negotiate/session/:id` | Update session (add selections, advance state). |
+| POST | `/api/negotiate/session/:id/commit` | Commit session (creates escrow + job). |
+
+### Kernels (Physical Sites)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/kernels` | List all kernels. Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. |
+| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
+| GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
+| GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
+| POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. |
+| POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
+| POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |
+
+### Jobs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/jobs` | List jobs. Optional `?kernelId=&status=&offset=&limit=`. Returns `{jobs: JobDTO[]}`. |
+| GET | `/api/jobs/:jobId` | Get job with evidence and timeline. Returns `{job: JobDetailDTO, evidence}`. |
+| PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
+| POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
+
+### Escrow & Settlement
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/escrow` | List escrows. Optional `?status=`. Returns `{escrows: EscrowSummaryDTO[]}`. |
+| GET | `/api/escrow/:escrowId` | Get escrow by ID or on-chain address. |
+| GET | `/api/escrow/chain/:address/events` | On-chain event log. Optional `?fromBlock=`. |
+| GET | `/api/escrow/chain/token/:tokenAddress/balance/:account` | ERC-20 balance check. |
+| POST | `/api/escrow/fund` | Fund an escrow with USDC. |
+| POST | `/api/escrow/:id/release` | Release a milestone. |
+| POST | `/api/escrow/:id/dispute` | File a dispute. |
+
+### Evidence & Compliance
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/evidence` | List all evidence bundles. |
+| GET | `/api/capabilities/:capabilityId/compliance` | Full compliance report. Returns `ComplianceReportDTO`. |
+| GET | `/api/jobs/:jobId/drift-alerts` | Real-time drift alerts. Returns `DriftAlertDTO[]`. |
+| GET | `/api/jobs/:jobId/evidence` | Evidence bundles for a job. Returns `EvidenceSummaryDTO[]`. |
+| GET | `/api/compliance/evidence/:bundleId` | Facade-enriched evidence bundle. |
+| GET | `/api/compliance/evidence/:bundleId/tier-compliance` | Tier compliance check. Returns `TierComplianceResult`. |
+| POST | `/api/jobs/:jobId/attestations/aggregate` | Aggregate verifier attestations. Body: `{attestations}`. Returns `AggregatedAttestationDTO`. |
+
+### Setup & Detection
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/setup/detect` | Auto-detect config state (env vars, DB, adapters, chain, storage, identity). |
+| POST | `/api/setup/generate-config` | Generate `KERNEL_CONFIG` JSON. Body: `{devices, kernelId?, mockMode?}`. |
+| POST | `/api/setup/validate` | Validate a kernel config. Body: `{config?}` (JSON string, or reads env). |
+| POST | `/api/setup/register-device` | Register a device. Body: `{kernelId, deviceId, type, adapterType, ...}`. |
+| POST | `/api/setup/test-job` | Submit test job, polls for completion. Body: `{kernelId?, deviceId?, assuranceTier?}`. |
+| GET | `/api/setup/status` | Comprehensive status across 6 categories: gateway, database, adapters, chain, storage, identity. |
+
+### Onboarding & Registration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/onboard/analyze` | Upload doc, get AI capability analysis. Returns `DocumentAnalysisResult`. |
+| POST | `/api/onboard/register` | Submit machine registration. Body: `MachineRegistration`. |
+| GET | `/api/onboard/registrations` | List all registrations. |
+| GET | `/api/onboard/registrations/:id` | Get registration detail. |
+| POST | `/api/onboard/registrations/:id/approve` | Approve a registration (admin). |
+| POST | `/api/onboard/registrations/:id/reject` | Reject a registration. Body: `{reason?}`. |
+| POST | `/api/onboard/registrations/:id/activate` | Activate an approved registration. |
+| POST | `/api/onboard/registrations/:id/prove` | Submit evidence for auto-approval (fast-track). See Section 4.4. |
+| POST | `/api/onboard/redeem` | One-click agent onboarding with invite code. Body: `{inviteCode, email, password}`. |
+| GET | `/api/onboard/check/:code` | Validate invite code before redeeming. |
+| GET | `/api/onboard/status` | Check what the agent has provisioned (requires Bearer token from redeem). |
+
+### Wizard Sessions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/wizard/sessions` | Create wizard session. Body: `{track}` where track is `platform-setup`, `machine-onboarding`, or `device-builder`. |
+| GET | `/api/wizard/sessions/:id` | Get session state with step data and progress. |
+| PUT | `/api/wizard/sessions/:id/steps/:step` | Save step data. Body: `{data: {...}}`. Step is 0-indexed. |
+| POST | `/api/wizard/sessions/:id/complete` | Complete wizard (orchestrates backend operations). All steps must be completed first. |
+| DELETE | `/api/wizard/sessions/:id` | Abandon a wizard session. |
+
+**Wizard tracks and their steps**:
+
+- `platform-setup` (5 steps): environment-detection, chain-configuration, storage-configuration, identity-configuration, review-and-deploy
+- `machine-onboarding` (7 steps): machine-info, document-upload, capability-definition, space-requirements, pricing-configuration, operator-profile, review-and-submit
+- `device-builder` (5 steps): device-selection, adapter-configuration, capability-mapping, test-connection, register-device
+
+Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
+
+### Payments & Fiat Ramp
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/fiat-ramp/wallet/balance` | USDC balance + pending deposits. |
+| GET | `/api/fiat-ramp/funding-options` | Available fiat-to-crypto options. |
+| POST | `/api/fiat-ramp/onramp/session` | Create Stripe funding session (card/ACH). |
+| POST | `/api/fiat-ramp/onramp/yellowcard` | Mobile money in 34 emerging market countries. |
+| GET | `/api/fiat-ramp/rates` | Live Yellowcard exchange rates. |
+| POST | `/api/fiat-ramp/offramp/withdraw` | Withdraw USDC to local fiat. |
+| POST | `/api/fiat-ramp/payout` | Wise enterprise bank payout (40+ currencies). |
+| GET | `/api/fiat-ramp/activity` | Recent on/off ramp activity. |
+
+### DePIN, IP & Governance
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/rewards/*` | DePIN epochs, certificates, claims, treasury. |
+| GET/POST | `/api/ip/*` | Story Protocol IP registration, royalties, lineage, revenue splits. |
+| GET/POST | `/api/swf/*` | Sovereign Wealth Fund governance, proposals, participant dashboard. |
+| GET/POST | `/api/csd/*` | Capability StructureDefinition CRUD (FHIR-inspired schemas). |
+| GET/POST | `/api/bounty/*` | Demand signals, bounties, leaderboard. |
+| GET/POST | `/api/pool/*` | Investment pools, staking, earnings. |
+
+### Agent Network
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/agents/status` | Agent subnet status + conversations. |
+| POST | `/api/agents/heartbeat` | Agent liveness heartbeat. |
+| GET | `/api/agents/health` | Health status of all monitored agents. |
+
+### Other Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Gateway healthcheck. |
+| GET | `/api/status` | Detailed status. |
+| GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
+| GET | `/agent-package.json` | 219-tool agent package for any LLM (PUBLIC). |
+| GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
+| GET/POST | `/api/zk/*` | ZK proof creation and verification. |
+| GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
+| GET/POST | `/api/spaces/*` | Equipment hosting spaces. |
+| GET/POST | `/api/marketplace/*` | Capability marketplace listings. |
+| GET/POST | `/api/discover/*` | Device discovery (mDNS/IPP) + auto-onboarding. |
+| GET/POST | `/api/protocols/*` | Protocol templates (DAG workflows). |
+| GET/POST | `/api/orchestrator/*` | Multi-instrument transfer graphs. |
+| GET/POST | `/api/batches/*` | Batch manifests (HPLC, multi-sample). |
+
+---
+
+## 4. Operator Onboarding Guide
+
+This section walks through onboarding a real device. Example: "I have a 3D printer running OctoPrint."
+
+### 4.1 Provision an API key
+
+```bash
+curl -X POST https://capability.network/api/auth/provision \
+  -H "Content-Type: application/json" \
+  -d '{"email": "operator@myshop.com", "name": "PrintShop Alpha", "capability": "FDM 3D printing"}'
+```
+
+Save the `api_key` from the response. Set it for all subsequent requests:
+```bash
+export PCC_KEY="pcc_live_..."
+```
+
+### 4.2 Detect current state
+
+```bash
+curl -H "Authorization: Bearer $PCC_KEY" \
+  https://capability.network/api/setup/detect
+```
+
+Returns a report of what is configured: env vars by category, DB state (kernels/devices/jobs), chain connectivity, storage type, identity status.
+
+### 4.3 Generate kernel config and register
+
+```bash
+# Generate config for your printer
+curl -X POST https://capability.network/api/setup/generate-config \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kernelId": "kernel_printshop_alpha",
+    "devices": [{
+      "name": "Prusa MK4",
+      "type": "machine",
+      "adapterType": "octoprint",
+      "url": "http://192.168.1.50",
+      "apiKey": "OCTOPRINT_API_KEY"
+    }]
+  }'
+```
+
+Returns `{config, envLine, configJson}`. The `envLine` is ready to paste into your `.env`.
+
+Validate the config:
+```bash
+curl -X POST https://capability.network/api/setup/validate \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"config": "{\"kernelId\":\"kernel_printshop_alpha\",\"devices\":[...]}"}'
+```
+
+Returns `{valid, checks[], errors[], warnings[]}`. Each check has a name, status (pass/warn/fail), and message.
+
+Register the kernel:
+```bash
+curl -X POST https://capability.network/api/kernels \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "PrintShop Alpha",
+    "operatorAddress": "operator@myshop.com",
+    "location": {"lat": 37.77, "lng": -122.42},
+    "physicalAddress": "123 Maker St, SF CA",
+    "maxAssuranceTier": 2
+  }'
+```
+
+Register the device:
+```bash
+curl -X POST https://capability.network/api/setup/register-device \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kernelId": "kernel_printshop_alpha",
+    "deviceId": "dev-prusa-mk4-001",
+    "type": "machine",
+    "model": "Prusa MK4",
+    "adapterType": "octoprint",
+    "adapterConfig": {"url": "http://192.168.1.50", "apiKey": "OCTOPRINT_API_KEY"},
+    "capabilities": ["3d-printing"]
+  }'
+```
+
+Valid adapter types: `octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`.
+Valid device types: `machine`, `sensor`, `camera`.
+
+### 4.4 Run a test job
+
+```bash
+curl -X POST https://capability.network/api/setup/test-job \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"kernelId": "kernel_printshop_alpha", "deviceId": "dev-prusa-mk4-001", "assuranceTier": 0}'
+```
+
+This submits a test job and polls for up to 10 seconds. Returns:
+```json
+{
+  "jobId": "test-job-uuid",
+  "deviceId": "dev-prusa-mk4-001",
+  "status": "completed",
+  "evidenceBundleId": "bundle-uuid",
+  "duration": 5234
+}
+```
+
+### 4.5 Prove and activate (fast-track)
+
+If you registered via `/api/onboard/register`, you can skip manual approval by proving your device works:
+
+```bash
+curl -X POST https://capability.network/api/onboard/registrations/$REG_ID/prove \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "evidence": {
+      "bundleHash": "sha256:abc123def456...",
+      "events": [
+        {"type": "execution_completed", "timestamp": "2026-04-03T12:00:00Z", "payload": {"jobType": "test", "pagesCount": 1}},
+        {"type": "camera_snapshot", "timestamp": "2026-04-03T12:00:01Z", "payload": {"description": "Photo of test print"}}
+      ],
+      "deviceHealth": {"status": "idle", "model": "Prusa MK4", "firmware": "6.0.0"},
+      "photoBase64": "iVBORw0KGgo..."
+    }
+  }'
+```
+
+Evidence determines assurance tier:
+- **Tier 0**: Device health only (self-attested).
+- **Tier 1**: Bundle hash + events with completion event.
+- **Tier 2**: Photo + device health + events (full proof).
+
+On success, the registration is auto-approved and activated immediately. No manual review.
+
+### 4.6 Check setup status
+
+```bash
+curl -H "Authorization: Bearer $PCC_KEY" \
+  https://capability.network/api/setup/status
+```
+
+Returns per-category status (`ready`, `partial`, `unconfigured`) for: gateway, database, adapters, chain, storage, identity. Plus an `overall` status.
+
+### 4.7 Alternative: Wizard flow
+
+For a guided multi-step experience, use wizard sessions:
+
+```bash
+# Create a device-builder wizard
+curl -X POST https://capability.network/api/wizard/sessions \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"track": "device-builder"}'
+
+# Save step 0 (device-selection)
+curl -X PUT https://capability.network/api/wizard/sessions/$SESSION_ID/steps/0 \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"data": {"deviceName": "Prusa MK4", "deviceType": "machine", "adapterType": "octoprint"}}'
+
+# ... save steps 1-4 ...
+
+# Complete — orchestrates registration
+curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete \
+  -H "Authorization: Bearer $PCC_KEY"
+```
+
+### 4.8 Alternative: pcc-node (one-command onboarding)
+
+For operators who prefer CLI:
+```bash
+pip install pcc-node
+pcc-node start
+```
+
+This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+
+---
+
+## 5. DTOs & Response Shapes
+
+All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or `{success: false, error: {code, message, httpStatus, details?}}`. Routes serialize success as the DTO directly and errors as `{error, message}` with the appropriate HTTP status.
+
+### CapabilityDTO
+
+```typescript
+{
+  id: string;                        // Unique capability ID
+  kernelId: string;                  // Which kernel offers this
+  type: string;                      // "3d-printing", "cnc", "hplc", etc.
+  name: string;                      // Human-readable name
+  description?: string;
+  materials: string[];               // Supported materials
+  tolerances?: ToleranceSpec;        // Dimensional tolerances
+  envelope?: WorkEnvelope;           // Build volume
+  assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
+  pricing: PricingModel;             // {currency, baseCost, minimum, ...}
+  location: {lat, lng};
+  tags?: string[];
+  // Enrichment (populated by facades):
+  reputation?: number;               // 0-1000, from ERC-8004
+  queueDepth: number;                // Jobs currently waiting
+  available: boolean;                // Currently taking jobs?
+  estimatedWaitMinutes?: number;
+  kernelName?: string;
+  kernelStatus?: "online"|"offline"|"maintenance"|"stale";
+}
+```
+
+### JobDTO / JobDetailDTO
+
+```typescript
+{
+  id: string;
+  capabilityId: string;
+  kernelId: string;
+  status: "queued"|"running"|"completed"|"failed"|"cancelled";
+  progress?: number;                 // 0-100
+  assuranceTier: 0|1|2|3;
+  createdAt: string;                 // ISO timestamp
+  updatedAt?: string;
+  // Enrichment:
+  kernelName?: string;
+  capabilityType?: string;
+  evidenceCount?: number;
+  escrowStatus?: string;
+  estimatedCompletion?: string;
+  // JobDetailDTO adds:
+  timeline: JobTimelineEvent[];      // [{type, timestamp, details}]
+  evidenceBundles: EvidenceSummaryDTO[];
+  escrow?: EscrowSummaryDTO;
+}
+```
+
+### KernelDTO / KernelHealthSnapshot
+
+```typescript
+{
+  id: string;
+  name: string;
+  operatorAddress: string;
+  location: {lat, lng};
+  physicalAddress: string;
+  maxAssuranceTier: 0|1|2|3;
+  status: "online"|"offline"|"maintenance"|"suspended";
+  lastHeartbeat: string;
+  version: string;
+  // Enrichment:
+  capabilityCount: number;
+  capabilityTypes: string[];
+  reputation?: number;               // 0-1000
+  totalJobsCompleted: number;
+  isStale: boolean;                  // Heartbeat >5min old while online
+  activeJobCount?: number;
+  // KernelHealthSnapshot adds:
+  devices: DeviceStatusDTO[];
+  recentJobs: JobDTO[];
+  uptimePercent?: number;
+}
+```
+
+### EscrowSummaryDTO
+
+```typescript
+{
+  id: string;
+  jobId: string;
+  status: "created"|"funded"|"active"|"completed"|"disputed"|"refunded";
+  totalAmount: string;               // USDC amount
+  currency: string;
+  milestoneCount: number;
+  releasedCount: number;
+  disputedCount: number;
+  challengeWindowEnd?: string;
+}
+```
+
+### ComplianceReportDTO
+
+```typescript
+{
+  capabilityId: string;
+  kernelId: string;
+  satisfiedStandards: string[];      // ISO standards met
+  alcoaStatus: ALCOAStatus;          // 10 boolean checks (see Section 7)
+  tierCompliance: Record<0|1|2|3, boolean>;
+  recentEvidence: EvidenceSummaryDTO[];
+  driftAlerts: DriftAlertDTO[];
+}
+```
+
+### DriftAlertDTO
+
+```typescript
+{
+  type: "power_anomaly"|"temperature_excursion"|"duration_mismatch"|"sensor_gap";
+  severity: "low"|"medium"|"high"|"critical";
+  message: string;
+  expectedValue?: string;
+  actualValue?: string;
+  timestamp: string;
+}
+```
+
+### DeviceStatusDTO
+
+```typescript
+{
+  id: string;
+  type: string;                      // "machine", "sensor", "camera"
+  model?: string;
+  status: "idle"|"busy"|"error"|"offline"|"maintenance";
+  healthStatus: "healthy"|"degraded"|"offline"|"unknown";
+  adapterType?: string;
+  capabilities: string[];            // Capability IDs this device serves
+}
+```
+
+---
+
+## 6. Facades & How They Work
+
+Facades are a clean DTO layer between routes and the database. They handle enrichment (reputation scores, queue depths, compliance status) and return `Result<T>` — routes never throw.
+
+### The 6 Facades
+
+| Facade | Domain | Key Methods |
+|--------|--------|-------------|
+| CapabilityFacade | Discovery | `list()`, `listByKernel()`, `listByType()`, `search()`, `getById()`, `create()` |
+| JobFacade | Execution | `list()`, `getById()`, `updateStatus()` |
+| KernelFacade | Infrastructure | `list()`, `getById()`, `getDevices()`, `getJobs()`, `register()` |
+| SettlementFacade | Payments | `listEscrows()`, `getEscrow()`, `getChainEvents()`, `getTokenBalance()` |
+| ComplianceFacade | Compliance | `generateComplianceReport()`, `detectDrift()`, `getEvidenceForJob()`, `checkTierCompliance()`, `aggregateAttestations()` |
+| AgentFacade | Identity/RBAC | Agent sessions, role permissions, Separation of Duties enforcement |
+
+### PopulationContext
+
+Control what enrichment facades perform by passing a PopulationContext:
+
+```typescript
+{
+  viewerDid?: string;          // For personalized pricing/trust gates
+  currency?: string;           // Price conversion currency
+  includeReputation?: boolean; // Fetch ERC-8004 reputation scores
+  includeCompliance?: boolean; // Include audit/compliance status
+  includeHealth?: boolean;     // Real-time device health
+  reputationCache?: Map;       // Pre-loaded scores (prevents N+1)
+  queueDepthCache?: Map;       // Pre-loaded queue depths
+  applyColdStartGate?: boolean; // Cap tier by reputation thresholds
+}
+```
+
+---
+
+## 7. Safety & Compliance
+
+### Assurance Tiers
+
+| Tier | Name | Evidence Required | Use Case |
+|------|------|-------------------|----------|
+| 0 | Self-Attested | Device health snapshot | Prototyping, non-critical |
+| 1 | Verified | Bundle hash + completion events | Standard production |
+| 2 | Certified | Photo + device health + event log + sensor data | Regulated manufacturing |
+| 3 | Sovereign | Full evidence chain + ZK proofs + multi-verifier attestation + IPFS storage | Medical, aerospace, pharma |
+
+### ALCOA+ Compliance (10 Principles)
+
+Every evidence bundle is checked against these principles:
+
+| Principle | Check |
+|-----------|-------|
+| **A**ttributable | source.deviceId + source.kernelId present |
+| **L**egible | Data readable and hash-verifiable |
+| **C**ontemporaneous | Timestamps within execution window |
+| **O**riginal | Bundle from kernel (signature present, not test-signed) |
+| **A**ccurate | Tier requirements satisfied, event hashes verified |
+| **+C**onsistent | No high/critical duration_mismatch drift alerts |
+| **+C**omplete | All required event types present, no sensor_gap alerts |
+| **+C**redible | Verifier confidence >= 90% |
+| **+E**nduring | Stored on IPFS/Storacha (durable reference) |
+| **+A**vailable | Accessible via gateway and storage CID |
+
+### Drift Detection
+
+The compliance facade monitors for 4 drift types during job execution:
+- `power_anomaly` — unexpected power consumption patterns
+- `temperature_excursion` — temperature outside operational envelope
+- `duration_mismatch` — job duration differs significantly from expected
+- `sensor_gap` — missing sensor readings during execution
+
+Check drift alerts:
+```bash
+curl -H "Authorization: Bearer $PCC_KEY" \
+  https://capability.network/api/jobs/$JOB_ID/drift-alerts
+```
+
+### Constitutional Constraints
+
+Every agent role has OWASP ASI01-10 hard rules that survive prompt injection. The SafetyGateway is the only path to hardware commands. Operations are classified into 4 classes:
+- **READ** — always allowed
+- **SAFE CONTROL** — allowed during active job (home, lights)
+- **SCOPED WRITE** — requires an active execution scope
+- **PRIVILEGED** — requires explicit operator approval
+
+---
+
+## 8. Settlement & Payments
+
+### Escrow Lifecycle
+
+```
+CREATE -> FUND (deposit USDC) -> ACTIVE (job running) -> MILESTONES (evidence submitted)
+  -> RELEASE (evidence meets tier) or DISPUTE (evidence insufficient)
+```
+
+Escrow contracts are on Base Sepolia (testnet). The protocol charges a 2.35% fee on every settlement, hardcoded in the smart contract.
+
+### Default Payment Protocol (MPP)
+
+MPP is the default payment rail. Milestone escrow with automatic release when evidence passes verification.
+
+### Fiat On/Off Ramps
+
+- **Stripe**: Visa/Mastercard/AMEX/ACH to USDC on Base
+- **Yellowcard**: Mobile money in 34 emerging market countries to USDC
+- **Wise**: Enterprise bank payouts in 40+ currencies (off-ramp)
+
+---
+
+## 9. MCP Server (49 Tools)
+
+Connect the PCC MCP server to Claude Code or any MCP-compatible client.
+
+**Configuration** (add to Claude Code settings or `~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "pcc": {
+      "command": "node",
+      "args": ["packages/mcp-server/dist/index.js"],
+      "env": {"PCC_URL": "https://capability.network"}
+    }
+  }
+}
+```
+
+**All 49 MCP tools**:
+
+| # | Tool | Description |
+|---|------|-------------|
+| 1 | `pcc_list_capabilities` | List registered capability types |
+| 2 | `pcc_search_capabilities` | Search templates with details |
+| 3 | `pcc_list_kernels` | List kernels, filter by status |
+| 4 | `pcc_get_kernel` | Kernel details + devices |
+| 5 | `pcc_list_jobs` | List jobs, filter by kernel/status |
+| 6 | `pcc_get_job` | Job details + evidence bundles |
+| 7 | `pcc_build_options` | Config options for a capability type |
+| 8 | `pcc_calculate_price` | Calculate price for selections |
+| 9 | `pcc_build_contract` | Build contract ready for escrow |
+| 10 | `pcc_list_escrows` | List escrow contracts |
+| 11 | `pcc_list_evidence` | List evidence bundles |
+| 12 | `pcc_list_protocols` | List workflow templates |
+| 13 | `pcc_depin_stats` | DePIN rewards, certificates, treasury |
+| 14 | `pcc_subnet_status` | Agent network status |
+| 15 | `pcc_get_agent_identity` | ERC-8004 identity for kernel/agent |
+| 16 | `pcc_get_reputation` | Reputation scores by agent/tag |
+| 17 | `pcc_list_sensors` | Sensor channels for a kernel |
+| 18 | `pcc_get_sensor_data` | Sensor readings for a channel |
+| 19 | `pcc_get_evidence` | Evidence bundle: IPFS CID, ZK proof, scores |
+| 20 | `pcc_compile_workflow` | Compile DAG from steps |
+| 21 | `pcc_agent_registration` | ERC-8004 Agent Registration File |
+| 22 | `pcc_setup_detect` | Auto-detect configuration state |
+| 23 | `pcc_setup_generate_config` | Generate KERNEL_CONFIG from descriptions |
+| 24 | `pcc_setup_validate_config` | Validate kernel configuration |
+| 25 | `pcc_setup_register_device` | Register a physical device |
+| 26 | `pcc_setup_health_check` | Run device health checks |
+| 27 | `pcc_setup_test_job` | Submit test job to verify pipeline |
+| 28 | `pcc_setup_generate_env` | Generate .env file |
+| 29 | `pcc_setup_status` | Comprehensive setup status |
+| 30 | `pcc_csd_list` | List CSD documents |
+| 31 | `pcc_csd_get` | Get CSD by URI |
+| 32 | `pcc_csd_register` | Register a CSD document |
+| 33 | `pcc_discover_scan` | Scan network for devices (mDNS/IPP) |
+| 34 | `pcc_discover_onboard` | Discover, generate CSD, register in one call |
+| 35 | `pcc_ip_register_capability` | Register CSD as Story Protocol IP |
+| 36 | `pcc_ip_revenue_snapshot` | IP Royalty Vault balance |
+| 37 | `pcc_ip_claim` | Claim accumulated royalties |
+| 38 | `pcc_ip_lineage` | IP provenance graph |
+| 39 | `pcc_ip_set_splits` | Configure revenue splits |
+| 40 | `pcc_swf_summary` | Sovereign Wealth Fund overview |
+| 41 | `pcc_swf_participant_dashboard` | SWF participant earnings |
+| 42 | `pcc_swf_list_proposals` | List governance proposals |
+| 43 | `pcc_get_wallet_balance` | USDC balance + pending + credits |
+| 44 | `pcc_get_funding_options` | Fiat-to-crypto options |
+| 45 | `pcc_create_onramp_session` | Create fiat funding session |
+| 46 | `pcc_get_provider_rates` | Yellowcard exchange rates |
+| 47 | `pcc_submit_withdrawal` | Withdraw USDC to fiat |
+| 48 | `pcc_get_ramp_activity` | Recent ramp activity |
+| 49 | `pcc_send_enterprise_payout` | Wise bank payout (40+ currencies) |
+
+---
+
+## 10. Agent Package (219 Tools)
+
+The agent package is a single JSON file any LLM can consume, containing 219 tools with input schemas and endpoint mappings.
+
+**Fetch it**:
+```bash
+curl https://capability.network/agent-package.json
+```
+
+**Format**: Each tool has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`).
+
+**How to use**: Load the JSON, present tool descriptions to your LLM, and when the LLM selects a tool, make the corresponding HTTP request to `https://capability.network` + the endpoint path, passing the input as the request body (POST/PUT/PATCH) or query params (GET).
+
+The `system_prompt` field in the package contains bootstrap instructions including the 5-step self-onboarding flow.
+
+---
+
+## 11. Environment Variables
+
+These are the operator-facing environment variables for configuring a PCC node or gateway:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PCC_URL` | Gateway URL (for MCP server and clients) | `https://capability.network` |
+| `PCC_BASE` | Gateway URL (for pcc-node Python CLI) | `https://capability.network` |
+| `PCC_API_KEY` | Bearer token for gateway API | none |
+| `KERNEL_ID` | Override kernel ID | auto-generated |
+| `KERNEL_CONFIG` | Inline JSON kernel configuration | mock |
+| `KERNEL_CONFIG_FILE` | Path to kernel config JSON file | none |
+| `PCC_NETWORK` | Blockchain network name | `base-sepolia` |
+| `ESCROW_CONTRACT_ADDRESS` | Deployed MilestoneEscrow address | none |
+| `EVIDENCE_STORAGE` | Evidence backend: `local`, `helia`, `storacha` | `local` |
+| `LIT_PROTOCOL_REAL` | Enable Lit Protocol encryption | `false` |
+| `SSE_AUTH_REQUIRED` | Enforce auth on SSE streams | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for traces | none |
+| `IDEMPOTENCY_TTL_MS` | Idempotency cache TTL in ms | `86400000` (24h) |
+
+---
+
+## 12. SSE Streams (Real-Time Events)
+
+Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource` or `curl`.
+
+| Stream | URL | Events |
+|--------|-----|--------|
+| Job updates | `GET /sse/stream/job/:jobId` | Status changes, progress, evidence received |
+| Kernel updates | `GET /sse/stream/kernel/:kernelId` | Heartbeat, device status, job assignments |
+| Device updates | `GET /sse/stream/device/:deviceId` | Health changes, sensor readings |
+| Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
+| Notifications | `GET /sse/notifications` | Global notification stream |
+| Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+
+Example:
+```bash
+curl -N -H "Authorization: Bearer $PCC_KEY" \
+  https://capability.network/sse/stream/job/job-uuid-123
+```
+
+---
+
+## 13. pcc-node (Python Operator Node)
+
+`pcc-node` is a pip-installable Python CLI that turns any machine into a PCC operator node.
+
+### Install and run
+
+```bash
+pip install pcc-node
+pcc-node start
+```
+
+This single command:
+1. Auto-detects connected hardware (printers, lab equipment, cameras)
+2. Generates Ed25519 signing keys
+3. Provisions an API key from the gateway
+4. Registers a kernel and announces capabilities
+5. Starts a daemon that processes jobs and emits evidence
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `pcc-node start` | Full auto-setup and daemon start |
+| `pcc-node detect` | Hardware scan only (no registration) |
+| `pcc-node status` | Check daemon status |
+| `pcc-node import-job <file>` | Import G-code, STL, Opentrons protocol, or CSV plate layout |
+
+### Configuration
+
+Set these environment variables before running:
+```bash
+export PCC_BASE=https://capability.network
+export PCC_API_KEY=pcc_live_...
+export KERNEL_ID=my-kernel-001  # optional
+```
+
+---
+
+## Agent Workflows (Quick Reference)
+
+**New operator setup**:
+`provision key` -> `setup detect` -> `generate config` -> `validate` -> `register kernel` -> `register device` -> `test job` -> `prove`
+
+**Build a contract**:
+`list capability types` -> `build options` -> `calculate price` -> `build contract` -> `fund escrow` -> `submit job`
+
+**Monitor a job**:
+`get job` (poll) or `SSE /sse/stream/job/:id` (real-time) -> `get drift alerts` -> `get evidence`
+
+**Check compliance**:
+`GET /api/capabilities/:id/compliance` -> review `alcoaStatus` and `driftAlerts`
+
+**Embed a button**:
+`GET /api/capabilities/:id/button?format=script` -> paste HTML into any website

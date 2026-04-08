@@ -405,7 +405,7 @@ chat("${capability || "I have equipment to put on the network. Help me get set u
               onMouseEnter={(e) => (e.currentTarget.style.color = "#B57BDB")}
               onMouseLeave={(e) => (e.currentTarget.style.color = "#7B7B9A")}
             >Whitepaper</a>
-            <a href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud" target="_blank" rel="noopener noreferrer" className="text-xs tracking-wide transition-colors duration-300"
+            <a href="https://capability.network" target="_blank" rel="noopener noreferrer" className="text-xs tracking-wide transition-colors duration-300"
               style={{ color: "#7B7B9A" }}
               onMouseEnter={(e) => (e.currentTarget.style.color = "#00D4D4")}
               onMouseLeave={(e) => (e.currentTarget.style.color = "#7B7B9A")}

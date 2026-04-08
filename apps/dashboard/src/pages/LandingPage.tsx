@@ -476,7 +476,7 @@ function Nav() {
             { text: "For Operators", href: "#operators" },
             { text: "For Agents", href: "#agents" },
             { text: "Docs", href: "https://capability.network/docs" },
-            { text: "GitHub", href: "https://github.com/global-mysterysnailrevolution/physical-capability-cloud" },
+            { text: "GitHub", href: "https://capability.network" },
           ].map((link) => (
             <a
               key={link.text}
@@ -1905,7 +1905,7 @@ function ForAgentsSection() {
             <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
               <GhostLink
                 text="View A2A spec"
-                href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud/tree/master/packages/a2a"
+                href="https://capability.network/docs"
               />
             </div>
           </Reveal>
@@ -2498,7 +2498,7 @@ function StatsSection() {
               LIVE at capability.network
             </a>
             <a
-              href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud"
+              href="https://capability.network"
               target="_blank"
               rel="noopener noreferrer"
               style={{
@@ -2515,7 +2515,7 @@ function StatsSection() {
                 ((e.currentTarget as HTMLAnchorElement).style.color = TEXT_MUTED)
               }
             >
-              github.com/global-mysterysnailrevolution/physical-capability-cloud
+              capability.network
             </a>
           </div>
         </Reveal>
@@ -2597,7 +2597,7 @@ function Footer() {
                 text="pip install pcc-node"
                 href="https://pypi.org/project/pcc-node/"
               />
-              <GhostLink text="View on GitHub" href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud" />
+              <GhostLink text="View on GitHub" href="https://capability.network" />
             </div>
           </Reveal>
         </div>
@@ -2648,7 +2648,7 @@ function Footer() {
           <div style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
             {[
               { text: "capability.network", href: "https://capability.network" },
-              { text: "GitHub", href: "https://github.com/global-mysterysnailrevolution/physical-capability-cloud" },
+              { text: "GitHub", href: "https://capability.network" },
               { text: "Docs", href: "https://capability.network/docs" },
               { text: "PyPI", href: "https://pypi.org/project/pcc-node/" },
             ].map((link, i, arr) => (
