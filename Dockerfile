@@ -33,6 +33,7 @@ COPY packages/onboard-kit/package.json packages/onboard-kit/
 COPY packages/identity-8004/package.json packages/identity-8004/
 COPY packages/bundler/package.json packages/bundler/
 COPY packages/dht/package.json packages/dht/
+COPY packages/evidence-embeddings/package.json packages/evidence-embeddings/
 COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 COPY apps/dashboard/package.json apps/dashboard/
 
