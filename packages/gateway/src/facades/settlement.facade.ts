@@ -531,7 +531,7 @@ export class SettlementFacade extends BaseFacade {
    */
   async getEpochHistory(): Promise<Result<{ epochs: unknown[] }>> {
     return this.execute("getEpochHistory", async () => {
-      return { epochs: getEpochHistory() };
+      return { epochs: getEpochHistory() as unknown as unknown[] };
     });
   }
 
