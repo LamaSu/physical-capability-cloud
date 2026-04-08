@@ -163,9 +163,9 @@ export async function a2aRelayRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── WebSocket: agent connection ─────────────────────────────────
-  app.get(
+  (app as any).get(
     "/ws/a2a",
-    { websocket: true } as any,
+    { websocket: true },
     (socket: import("ws").WebSocket, req: FastifyRequest) => {
       const { agentId, role } = req.query as { agentId?: string; role?: string };
       if (!agentId) {
