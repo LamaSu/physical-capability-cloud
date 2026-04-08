@@ -411,7 +411,7 @@ export function OnboardKitPage() {
         </p>
         <div className="flex items-center justify-center gap-3">
           <a
-            href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud/tree/main/packages/onboard-kit"
+            href="https://capability.network/tree/main/packages/onboard-kit"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-cyan-500/15 border border-cyan-500/25 text-cyan-400 hover:bg-cyan-500/25 transition-colors"
