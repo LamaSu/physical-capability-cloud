@@ -24,7 +24,7 @@ export function populateCapabilityDTO(
     : Infinity;
 
   const isStale = kernel?.status === "online" && heartbeatAge > STALE_HEARTBEAT_MS;
-  const kernelStatus = isStale ? "stale" as const : kernel?.status;
+  const kernelStatus = isStale ? "stale" as const : (kernel?.status as any);
   const available = kernelStatus === "online" && model.queueDepth < 10;
 
   const reputation = ctx.includeReputation

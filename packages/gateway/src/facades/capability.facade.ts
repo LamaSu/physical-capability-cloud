@@ -74,7 +74,7 @@ export class CapabilityFacade extends BaseFacade {
         context.reputationCache = await this.preloadReputations(kernelIds);
       }
 
-      const items = populateCapabilityList(page, kernelMap, context);
+      const items = populateCapabilityList(page as any, kernelMap as any, context);
 
       return {
         items,
@@ -107,7 +107,7 @@ export class CapabilityFacade extends BaseFacade {
         context.reputationCache = new Map([[kernel.id, kernel.reputation ?? 500]]);
       }
 
-      return populateCapabilityDTO(capability, kernel ?? undefined, context);
+      return populateCapabilityDTO(capability as any, kernel as any ?? undefined, context);
     });
   }
 
@@ -181,7 +181,7 @@ export class CapabilityFacade extends BaseFacade {
 
       const total = candidates.length;
       const page = candidates.slice(offset, offset + limit);
-      const items = populateCapabilityList(page, kernelMap, context);
+      const items = populateCapabilityList(page as any, kernelMap as any, context);
 
       return { items, total, offset, limit, hasMore: offset + limit < total };
     });
@@ -199,9 +199,9 @@ export class CapabilityFacade extends BaseFacade {
       const context = this.defaultContext(ctx);
       const capabilities = this.repos.capabilities.findByKernel(kernelId);
       const kernel = this.repos.kernels.findById(kernelId);
-      const kernelMap = new Map<string, ShopKernel>();
+      const kernelMap = new Map<string, any>();
       if (kernel) kernelMap.set(kernelId, kernel);
-      return populateCapabilityList(capabilities, kernelMap, context);
+      return populateCapabilityList(capabilities as any, kernelMap as any, context);
     });
   }
 
@@ -218,7 +218,7 @@ export class CapabilityFacade extends BaseFacade {
       const capabilities = this.repos.capabilities.findByType(type);
       const kernelIds = [...new Set(capabilities.map((c) => c.kernelId))];
       const kernelMap = this.loadKernelMap(kernelIds);
-      return populateCapabilityList(capabilities, kernelMap, context);
+      return populateCapabilityList(capabilities as any, kernelMap as any, context);
     });
   }
 
@@ -240,7 +240,7 @@ export class CapabilityFacade extends BaseFacade {
       const existing = this.repos.capabilities.findById(id);
       if (existing) {
         const kernel = this.repos.kernels.findById(existing.kernelId);
-        const dto = populateCapabilityDTO(existing, kernel ?? undefined, context);
+        const dto = populateCapabilityDTO(existing as any, kernel as any ?? undefined, context);
         return { capability: dto, created: false };
       }
 
@@ -257,15 +257,15 @@ export class CapabilityFacade extends BaseFacade {
         availability: {},
       });
       const kernel = this.repos.kernels.findById(kernelId);
-      const dto = populateCapabilityDTO(cap, kernel ?? undefined, context);
+      const dto = populateCapabilityDTO(cap as any, kernel as any ?? undefined, context);
       return { capability: dto, created: true };
     });
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────
 
-  private loadKernelMap(kernelIds: string[]): Map<string, ShopKernel> {
-    const map = new Map<string, ShopKernel>();
+  private loadKernelMap(kernelIds: string[]): Map<string, any> {
+    const map = new Map<string, any>();
     for (const id of kernelIds) {
       try {
         const kernel = this.repos.kernels.findById(id);

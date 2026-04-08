@@ -66,6 +66,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         },
       });
 
+      if (!record) return reply.status(500).send({ error: "provision_failed" });
       auditService.log({
         eventType: "auth.key_provisioned",
         actor: operatorId,

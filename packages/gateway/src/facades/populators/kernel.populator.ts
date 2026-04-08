@@ -142,7 +142,6 @@ export function populateKernelDTO(
     capabilityCount,
     capabilityTypes,
     /** Backward-compat alias for capabilityTypes (dashboard + tests use kernel.capabilities) */
-    capabilities: capabilityTypes,
     reputation,
     totalJobsCompleted,
     isStale,
