@@ -283,16 +283,16 @@ describe("complianceRoutes", () => {
     });
   });
 
-  // ── GET /api/evidence/:bundleId ───────────────────────────────────────────
+  // ── GET /api/compliance/evidence/:bundleId ───────────────────────────────────────────
 
-  describe("GET /api/evidence/:bundleId", () => {
+  describe("GET /api/compliance/evidence/:bundleId", () => {
     it("returns EvidenceSummaryDTO for a single bundle", async () => {
       mockFacade.getBundle.mockResolvedValue(ok(mockBundle));
       const app = await buildApp();
 
       const res = await app.inject({
         method: "GET",
-        url: `/api/evidence/${BUNDLE_ID}`,
+        url: `/api/compliance/evidence/${BUNDLE_ID}`,
       });
 
       expect(res.statusCode).toBe(200);
@@ -308,7 +308,7 @@ describe("complianceRoutes", () => {
 
       await app.inject({
         method: "GET",
-        url: `/api/evidence/${BUNDLE_ID}`,
+        url: `/api/compliance/evidence/${BUNDLE_ID}`,
       });
 
       expect(mockFacade.getBundle).toHaveBeenCalledOnce();
@@ -321,7 +321,7 @@ describe("complianceRoutes", () => {
 
       const res = await app.inject({
         method: "GET",
-        url: "/api/evidence/bundle_unknown",
+        url: "/api/compliance/evidence/bundle_unknown",
       });
 
       expect(res.statusCode).toBe(404);
@@ -329,16 +329,16 @@ describe("complianceRoutes", () => {
     });
   });
 
-  // ── GET /api/evidence/:bundleId/tier-compliance ───────────────────────────
+  // ── GET /api/compliance/evidence/:bundleId/tier-compliance ───────────────────────────
 
-  describe("GET /api/evidence/:bundleId/tier-compliance", () => {
+  describe("GET /api/compliance/evidence/:bundleId/tier-compliance", () => {
     it("returns TierComplianceResult for a bundle", async () => {
       mockFacade.checkTierCompliance.mockResolvedValue(ok(mockTierCompliance));
       const app = await buildApp();
 
       const res = await app.inject({
         method: "GET",
-        url: `/api/evidence/${BUNDLE_ID}/tier-compliance`,
+        url: `/api/compliance/evidence/${BUNDLE_ID}/tier-compliance`,
       });
 
       expect(res.statusCode).toBe(200);
@@ -357,7 +357,7 @@ describe("complianceRoutes", () => {
 
       await app.inject({
         method: "GET",
-        url: `/api/evidence/${BUNDLE_ID}/tier-compliance`,
+        url: `/api/compliance/evidence/${BUNDLE_ID}/tier-compliance`,
       });
 
       expect(mockFacade.checkTierCompliance).toHaveBeenCalledOnce();
@@ -372,7 +372,7 @@ describe("complianceRoutes", () => {
 
       const res = await app.inject({
         method: "GET",
-        url: "/api/evidence/bundle_unknown/tier-compliance",
+        url: "/api/compliance/evidence/bundle_unknown/tier-compliance",
       });
 
       expect(res.statusCode).toBe(404);
