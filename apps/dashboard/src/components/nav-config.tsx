@@ -86,6 +86,7 @@ export const navGroups: NavGroup[] = [
   {
     title: "Monitoring",
     items: [
+      { label: "Analytics", path: "/analytics", icon: <TelemetryIcon /> },
       { label: "Telemetry", path: "/telemetry", icon: <TelemetryIcon /> },
       { label: "Traces", path: "/traces", icon: <TracesIcon /> },
       { label: "Sensors", path: "/sensors", icon: <SensorIcon /> },
