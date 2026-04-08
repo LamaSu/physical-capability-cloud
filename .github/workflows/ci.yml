@@ -49,7 +49,12 @@ jobs:
 
       - name: Install forge-std
         working-directory: packages/contracts
-        run: forge install foundry-rs/forge-std --no-git
+        run: |
+          if [ -d "lib/forge-std" ] && [ -f "lib/forge-std/src/Test.sol" ]; then
+            echo "forge-std already present from submodule checkout"
+          else
+            forge install foundry-rs/forge-std --no-git
+          fi
 
       - name: Run Solidity tests
         working-directory: packages/contracts
