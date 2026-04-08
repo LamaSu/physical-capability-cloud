@@ -45,7 +45,7 @@ RUN cd packages/gateway && node -e "const v = require('@fastify/static/package.j
 
 # Copy all source and build
 COPY . .
-ARG BUILD_BUST=5
+ARG BUILD_BUST=7
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Build all packages except dashboard and mcp-server (tsc only — turbo handles deps)
 RUN rm -rf .turbo node_modules/.cache && npx turbo build --force --filter='!@pcc/dashboard' --filter='!@pcc/mcp-server' --filter='!@pcc/onboard-kit' --concurrency=1
