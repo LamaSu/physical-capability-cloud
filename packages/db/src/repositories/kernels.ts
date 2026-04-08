@@ -1,8 +1,9 @@
 import { eq, and } from "drizzle-orm";
 import { shopKernels, kernelDevices } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IKernelRepository } from "../interfaces/IKernelRepository.js";
 
-export class KernelRepository {
+export class KernelRepository implements IKernelRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

@@ -11,9 +11,20 @@
  *   POST /api/operator/job-status     — update job status from operator node
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
+import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { v4 as uuidv4 } from "uuid";
+
+function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
+  if (result.success) return result.data;
+  return reply.code(result.error.httpStatus).send({
+    error: result.error.code,
+    message: result.error.message,
+    ...(result.error.details ? { details: result.error.details } : {}),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Request body types
@@ -46,6 +57,8 @@ interface JobStatusBody {
 // ---------------------------------------------------------------------------
 
 export async function operatorRelayRoutes(app: FastifyInstance) {
+  const jobFacade = getJobFacade();
+  const kernelFacade = getKernelFacade();
   /**
    * GET /api/operator/jobs
    *
@@ -64,13 +77,9 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "kernelId query param required" });
     }
 
-    try {
-      const repos = getRepos();
-      const jobs = repos.jobs.findByKernelAndStatus(kernelId, status);
-      return { jobs: jobs ?? [] };
-    } catch {
-      return { jobs: [] };
-    }
+    const result = await jobFacade.list({ kernelId, status });
+    if (!result.success) return { jobs: [] };
+    return { jobs: result.data.items ?? [] };
   });
 
   /**
@@ -167,77 +176,8 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "kernelId required" });
     }
 
-    const now = new Date().toISOString();
-
-    try {
-      const repos = getRepos();
-
-      // Update kernel heartbeat if the kernel exists
-      const kernel = repos.kernels.findById(kernelId);
-      if (kernel) {
-        try {
-          // Map pcc-node status strings to DB kernel status values
-          const kernelStatus = status === "offline" ? "offline" : "online";
-          repos.kernels.update(kernelId, {
-            status: kernelStatus,
-            lastHeartbeat: now,
-          });
-        } catch {
-          // Kernel update failed — soft failure, heartbeat still acknowledged
-        }
-      } else {
-        app.log.debug(`operator-relay: heartbeat from unknown kernel ${kernelId}`);
-      }
-
-      // Upsert capability announcements if provided
-      if (capabilities && capabilities.length > 0) {
-        app.log.info(
-          `operator-relay: kernel ${kernelId} announced ${capabilities.length} capabilities — upserting to DB`
-        );
-        let upsertCount = 0;
-        for (const cap of capabilities) {
-          const capType = (cap.type as string) ?? (cap.capability_type as string);
-          if (!capType) continue;
-
-          const capId = `cap-${kernelId}-${capType}`;
-          try {
-            const existing = repos.capabilities.findById(capId);
-            if (!existing) {
-              repos.capabilities.insert({
-                id: capId,
-                kernelId,
-                type: capType,
-                name: (cap.name as string) ?? `${capType} — ${kernelId}`,
-                description: (cap.description as string) ?? `Auto-registered from heartbeat for kernel ${kernelId}`,
-                materials: (cap.materials as string[]) ?? [],
-                assuranceTiers: (cap.assuranceTiers as number[]) ?? [0, 1],
-                pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
-                availability: (cap.availability as any) ?? {},
-                location: (cap.location as any) ?? { lat: 0, lng: 0 },
-              } as any);
-              upsertCount++;
-            }
-          } catch (capErr) {
-            // Non-fatal — log and continue
-            app.log.warn(`operator-relay: capability upsert failed for ${capId}: ${capErr}`);
-          }
-        }
-        app.log.info(`operator-relay: upserted ${upsertCount} new capabilities for kernel ${kernelId}`);
-      }
-
-      return {
-        acknowledged: true,
-        kernelId,
-        status,
-        capabilitiesReceived: capabilities?.length ?? 0,
-        timestamp: now,
-      };
-    } catch (err) {
-      return reply.code(500).send({
-        error: "heartbeat_failed",
-        message: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
+    const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
+    return sendResult(reply, result);
   });
 
   /**

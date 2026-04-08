@@ -145,3 +145,67 @@ export interface PricingConfig {
   minimum: Amount;
   currency: Currency;
 }
+
+// ── Wizard Session Types ──
+
+/** Wizard flow tracks: platform setup, machine onboarding, device builder */
+export type WizardTrack = "platform-setup" | "machine-onboarding" | "device-builder";
+
+/** Wizard session status */
+export type WizardSessionStatus = "in_progress" | "completed" | "abandoned";
+
+/** Data saved for a single wizard step */
+export interface WizardStepData {
+  /** Step index (0-based) */
+  stepIndex: number;
+  /** Step name/label */
+  stepName: string;
+  /** Whether the step has been completed */
+  completed: boolean;
+  /** Arbitrary data collected during this step */
+  data: Record<string, unknown>;
+  /** When the step was last updated */
+  updatedAt: Timestamp;
+}
+
+/** A wizard session tracking multi-step onboarding progress */
+export interface WizardSession {
+  id: Id;
+  /** Which wizard flow this session belongs to */
+  track: WizardTrack;
+  /** Current status of the wizard */
+  status: WizardSessionStatus;
+  /** Index of the current step (0-based) */
+  currentStep: number;
+  /** Total number of steps in this wizard */
+  totalSteps: number;
+  /** Data collected at each step */
+  steps: WizardStepData[];
+  /** When the session was created */
+  createdAt: Timestamp;
+  /** When the session was last updated */
+  updatedAt: Timestamp;
+  /** When the session expires (24h TTL) */
+  expiresAt: Timestamp;
+  /** Result of the completion orchestration (if completed) */
+  completionResult?: WizardCompletionResult;
+}
+
+/** Result of wizard completion orchestration */
+export interface WizardCompletionResult {
+  /** Whether the orchestration succeeded */
+  success: boolean;
+  /** Steps that were executed during completion */
+  executedSteps: Array<{
+    name: string;
+    status: "success" | "failed" | "skipped";
+    message?: string;
+    data?: Record<string, unknown>;
+  }>;
+  /** Generated kernel config (if applicable) */
+  kernelConfig?: Record<string, unknown>;
+  /** Registered device IDs */
+  registeredDevices?: string[];
+  /** Error message if the orchestration failed */
+  error?: string;
+}

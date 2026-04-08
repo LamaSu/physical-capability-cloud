@@ -2,9 +2,10 @@
  * Topic-based SSE endpoints — per-job, per-kernel, per-device, per-batch streaming.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
+import { resolveSSEAuth } from "./sse-auth.js";
 
 export async function topicSSE(app: FastifyInstance) {
   /** Helper to set up an SSE connection for given topics */
@@ -13,12 +14,19 @@ export async function topicSSE(app: FastifyInstance) {
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
     lastEventId?: string,
+    origin?: string,
   ) {
+    // Reflect the request origin to allow credentialed cross-origin requests.
+    // When credentials (cookies) are involved, Access-Control-Allow-Origin must
+    // be the exact origin — not the wildcard "*".
+    const allowOrigin = origin ?? "*";
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": allowOrigin,
+      "Access-Control-Allow-Credentials": "true",
     });
 
     reply.raw.write(`data: ${JSON.stringify({ type: "connected", topics })}\n\n`);
@@ -53,33 +61,53 @@ export async function topicSSE(app: FastifyInstance) {
 
   // Per-job streaming
   app.get("/sse/stream/job/:jobId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { jobId } = req.params as { jobId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-kernel streaming
   app.get("/sse/stream/kernel/:kernelId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { kernelId } = req.params as { kernelId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-device streaming
   app.get("/sse/stream/device/:deviceId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { deviceId } = req.params as { deviceId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-batch streaming
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { batchId } = req.params as { batchId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
     await new Promise(() => {});
   });
 }

@@ -1,8 +1,9 @@
 import { eq, and } from "drizzle-orm";
 import { batchManifests, sampleSlots, batchEvents } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IBatchRepository } from "../interfaces/IBatchRepository.js";
 
-export class BatchRepository {
+export class BatchRepository implements IBatchRepository {
   constructor(private db: StoreDB) {}
 
   // ── Manifests ─────────────────────────────────────────────────

@@ -9,8 +9,9 @@ import {
   swfVotes,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { ISWFRepository } from "../interfaces/ISWFRepository.js";
 
-export class SWFRepository {
+export class SWFRepository implements ISWFRepository {
   constructor(private db: StoreDB) {}
 
   // ── Participants ────────────────────────────────────────────────

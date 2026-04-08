@@ -29,10 +29,15 @@ const PUBLIC_EXACT = [
   "/api/agents/status",        // Network status is public
 ];
 
+// Capability detail routes are public — discovery, widget embedding, etc.
+// Covers: /api/capabilities/:id  AND  /api/capabilities/:id/button
+const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button)?$/;
+
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
+  if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   return false;
 }
 

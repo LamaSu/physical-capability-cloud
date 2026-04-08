@@ -5,8 +5,9 @@ import {
   sensorAnomalies,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { ISensorRepository } from "../interfaces/ISensorRepository.js";
 
-export class SensorRepository {
+export class SensorRepository implements ISensorRepository {
   constructor(private db: StoreDB) {}
 
   // ── Channels ──────────────────────────────────────────────────

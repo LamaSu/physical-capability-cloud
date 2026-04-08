@@ -1,95 +1,105 @@
 /**
- * Fastify payment gate — supports both x402 (legacy) and MPP (mppx).
+ * Fastify payment gate — supports both MPP (mppx/Tempo, default) and x402 (legacy).
  *
  * Registers as a Fastify plugin. Protected routes return 402
  * with payment requirements unless the request carries valid payment.
  *
  * Protocol selection via environment variable:
- *   MPP_ENABLED=true   -> Use mppx/Tempo (new, recommended)
- *   MPP_ENABLED=false   -> Use x402 (legacy fallback, default)
+ *   (default)           -> MPP (mppx/Tempo) — requires MPP_SECRET_KEY
+ *   PCC_X402_LEGACY=true -> x402 (legacy, deprecated)
+ *   MPP_ENABLED=true    -> backwards-compat alias for MPP (same as default now)
  *
  * x402 mode: mock (always verifies). Set PCC_X402_FACILITATOR_URL for real.
  * MPP mode: uses mppx with Tempo charge method + WWW-Authenticate headers.
+ *
+ * @deprecated x402 path — activate with PCC_X402_LEGACY=true
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Shared route pricing — single source of truth for both protocols
 // ---------------------------------------------------------------------------
 
-const PCC_TREASURY = (process.env.PCC_TREASURY_ADDRESS ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
+interface RoutePricing {
+  /** Human-readable dollar price e.g. "$0.01" */
+  price: string;
+  description: string;
+}
 
-const x402Config: X402Config = {
-  facilitatorUrl: process.env.PCC_X402_FACILITATOR_URL ?? "http://localhost:4020",
-  network: "eip155:84532", // Base Sepolia
-  usdcAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia USDC
-  treasuryAddress: PCC_TREASURY,
-};
-
-/**
- * Routes that require x402 payment.
- * key = "METHOD /path"
- * value = route payment config
- */
-const protectedRoutes: RoutePaymentMap = {
+/** Canonical payment route map — both protocols are derived from this. */
+export const PAYMENT_ROUTES: Record<string, RoutePricing> = {
   "POST /api/capabilities/quote": {
     price: "$0.01",
-    scheme: "exact",
-    network: "eip155:84532",
-    payTo: PCC_TREASURY,
     description: "Quote a workflow — returns pricing breakdown",
   },
   "POST /api/capabilities/simulate": {
     price: "$0.05",
-    scheme: "exact",
-    network: "eip155:84532",
-    payTo: PCC_TREASURY,
     description: "Dry-run simulation — estimate time, cost, and resource usage",
   },
   "POST /api/capabilities/route": {
     price: "$0.02",
-    scheme: "exact",
-    network: "eip155:84532",
-    payTo: PCC_TREASURY,
     description: "Optimization routing — find best kernel assignment",
   },
   "GET /api/capabilities/search": {
     price: "$0.001",
-    scheme: "exact",
-    network: "eip155:84532",
-    payTo: PCC_TREASURY,
     description: "Search capabilities across all kernels",
   },
 };
 
 // ---------------------------------------------------------------------------
-// MPP Configuration (new — mppx/Tempo)
+// Configuration
 // ---------------------------------------------------------------------------
+
+const PCC_TREASURY = (process.env.PCC_TREASURY_ADDRESS ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
+const NETWORK = "eip155:84532"; // Base Sepolia
+const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
+
+const x402Config: X402Config = {
+  facilitatorUrl: process.env.PCC_X402_FACILITATOR_URL ?? "http://localhost:4020",
+  network: NETWORK,
+  usdcAddress: USDC_ADDRESS,
+  treasuryAddress: PCC_TREASURY,
+};
+
+/** Build the x402 RoutePaymentMap from the shared PAYMENT_ROUTES constant. */
+function buildX402Routes(): RoutePaymentMap {
+  const result: RoutePaymentMap = {};
+  for (const [routeKey, { price, description }] of Object.entries(PAYMENT_ROUTES)) {
+    const [, ...pathParts] = routeKey.split(" ");
+    result[routeKey] = {
+      price,
+      scheme: "exact",
+      network: NETWORK,
+      payTo: PCC_TREASURY,
+      description,
+    };
+  }
+  return result;
+}
 
 const TEMPO_RECIPIENT = (process.env.TEMPO_RECIPIENT ?? PCC_TREASURY) as `0x${string}`;
-const TEMPO_CURRENCY = (process.env.TEMPO_CURRENCY ?? "0x036CbD53842c5426634e7929541eC2318f3dCF7e") as `0x${string}`;
+const TEMPO_CURRENCY = (process.env.TEMPO_CURRENCY ?? USDC_ADDRESS) as `0x${string}`;
 
-/** MPP route map — same routes, expressed in mppx format (amount in atomic units) */
-const mppRoutes: import("@pcc/spec").MppRouteMap = {
-  "POST /api/capabilities/quote": {
-    amount: MppMiddleware.parsePrice("$0.01"),
-    description: "Quote a workflow — returns pricing breakdown",
-  },
-  "POST /api/capabilities/simulate": {
-    amount: MppMiddleware.parsePrice("$0.05"),
-    description: "Dry-run simulation — estimate time, cost, and resource usage",
-  },
-  "POST /api/capabilities/route": {
-    amount: MppMiddleware.parsePrice("$0.02"),
-    description: "Optimization routing — find best kernel assignment",
-  },
-  "GET /api/capabilities/search": {
-    amount: MppMiddleware.parsePrice("$0.001"),
-    description: "Search capabilities across all kernels",
-  },
-};
+/** Build the MPP route map from the shared PAYMENT_ROUTES constant. */
+function buildMppRoutes(): import("@pcc/spec").MppRouteMap {
+  const result: import("@pcc/spec").MppRouteMap = {};
+  for (const [routeKey, { price, description }] of Object.entries(PAYMENT_ROUTES)) {
+    result[routeKey] = {
+      amount: MppMiddleware.parsePrice(price),
+      description,
+    };
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Derived route maps (built from PAYMENT_ROUTES)
+// ---------------------------------------------------------------------------
+
+const protectedRoutes: RoutePaymentMap = buildX402Routes();
+const mppRoutes = buildMppRoutes();
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -119,20 +129,30 @@ const stats: PaymentStats = {
   recentPayments: [],
 };
 
-export async function x402Gate(app: FastifyInstance) {
+export async function paymentGate(app: FastifyInstance) {
   // Payment gate is controlled by env var — disabled by default for dev
-  const enabled = process.env.PCC_X402_ENABLED === "true";
+  // Support both old (PCC_X402_ENABLED) and new (PCC_PAYMENT_ENABLED) names
+  const enabled =
+    process.env.PCC_PAYMENT_ENABLED === "true" ||
+    process.env.PCC_X402_ENABLED === "true";
 
-  // MPP feature flag — when true, use mppx/Tempo instead of x402
-  const mppEnabled = process.env.MPP_ENABLED === "true";
-  const protocol = mppEnabled ? "mpp" : "x402";
+  // MPP is the default. x402 is legacy — opt-in with PCC_X402_LEGACY=true.
+  // MPP_ENABLED=true is a backwards-compat alias (was the opt-in flag before the inversion).
+  const x402Legacy =
+    process.env.PCC_X402_LEGACY === "true" ||
+    (process.env.MPP_ENABLED === undefined && process.env.PCC_X402_LEGACY === undefined
+      ? false // new default: MPP
+      : process.env.MPP_ENABLED === "false"); // explicit opt-out of MPP = x402 legacy
 
-  // Lazily create MPP middleware only when MPP_ENABLED=true
+  const useMpp = !x402Legacy;
+  const protocol = useMpp ? "mpp" : "x402";
+
+  // Lazily create MPP middleware only when MPP is requested
   let mppMiddleware: MppMiddleware | null = null;
-  if (mppEnabled && enabled) {
+  if (useMpp && enabled) {
     const secretKey = process.env.MPP_SECRET_KEY;
     if (!secretKey) {
-      app.log.warn("[payment-gate] MPP_ENABLED=true but MPP_SECRET_KEY not set — falling back to x402");
+      app.log.warn("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning.");
     } else {
       mppMiddleware = new MppMiddleware({
         secretKey,
@@ -208,10 +228,17 @@ export async function x402Gate(app: FastifyInstance) {
     });
   }
 
-  // --- x402 path (legacy fallback) ---
+  // --- x402 path (legacy, deprecated) ---
+  // @deprecated Use MPP (default) instead. Activate with PCC_X402_LEGACY=true.
   if (!mppMiddleware) {
+    if (x402Legacy && enabled) {
+      app.log.warn(
+        "[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP.",
+      );
+    }
+
     app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-      if (!enabled) return; // x402 disabled — all routes free
+      if (!enabled) return; // payment disabled — all routes free
 
       stats.totalRequests++;
 
@@ -247,21 +274,27 @@ export async function x402Gate(app: FastifyInstance) {
       reply.status(402).headers({
         "PAYMENT-REQUIRED": encoded,
         "Content-Type": "application/json",
+        // Deprecation signal to clients
+        "X-PCC-Deprecated": "x402",
       }).send({
         error: "payment_required",
         message: result.payload.resource.description,
         x402Version: 2,
+        deprecated: true,
+        upgrade: "Set MPP_SECRET_KEY on the server and use WWW-Authenticate/Authorization headers (MPP/Tempo protocol).",
       });
     });
   }
 
   // Payment stats endpoint (admin/debug)
+  // Note: URL kept as /api/x402/stats for backwards compat — deprecated when MPP is active
   app.get("/api/x402/stats", async () => {
     return {
       enabled,
       protocol,
+      deprecated: protocol === "x402",
       ...stats,
-      protectedRoutes: Object.entries(protectedRoutes).map(([key, rc]) => ({
+      protectedRoutes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         route: key,
         price: rc.price,
         description: rc.description,
@@ -270,24 +303,34 @@ export async function x402Gate(app: FastifyInstance) {
   });
 
   // List all protected routes (public — helps clients know what needs payment)
+  // Note: URL kept as /api/x402/routes for backwards compat — deprecated when MPP is active
   app.get("/api/x402/routes", async () => {
     if (mppMiddleware) {
       return {
         protocol: "mpp",
+        deprecated: false,
         routes: mppMiddleware.getProtectedRoutes(),
       };
     }
     return {
+      protocol: "x402",
+      deprecated: true,
       x402Version: 2,
       network: x402Config.network,
       payTo: x402Config.treasuryAddress,
-      routes: Object.entries(protectedRoutes).map(([key, rc]) => ({
+      routes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         method: key.split(" ")[0],
         path: key.split(" ")[1],
         price: rc.price,
-        scheme: rc.scheme,
+        scheme: "exact",
         description: rc.description,
       })),
     };
   });
 }
+
+/**
+ * @deprecated Use `paymentGate` instead. This alias exists for backwards compatibility
+ * with any code that imports `x402Gate` directly. Will be removed in a future release.
+ */
+export const x402Gate = paymentGate;

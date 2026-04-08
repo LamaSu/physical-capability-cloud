@@ -18,3 +18,4 @@ export { BorderBeam, type BorderBeamProps } from "./BorderBeam.js";
 export { AnimatedNumber, type AnimatedNumberProps } from "./AnimatedNumber.js";
 export { EmptyState } from "./EmptyState.js";
 export { LoadingShell } from "./LoadingShell.js";
+export { PCCRunButton, type PCCRunButtonProps } from "./PCCRunButton.js";

@@ -65,6 +65,15 @@ export interface A2AMessage {
   signature?: string;
   /** End-to-end encrypted envelope (when present, intent payload is encrypted) */
   encrypted?: EncryptedEnvelope;
+  /**
+   * W3C Trace Context for end-to-end distributed tracing across agent boundaries.
+   * Injected by the message bus at send time; extracted at handler invocation.
+   * Old messages without this field are handled gracefully (no-op extraction).
+   */
+  traceContext?: {
+    traceparent?: string;
+    tracestate?: string;
+  };
 }
 
 /** A conversation between agents */

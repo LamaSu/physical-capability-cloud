@@ -44,7 +44,7 @@ export function WhitepaperPage() {
           font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
         }
         .prose-pcc h2 {
-          color: #10b981;
+          color: #3b82f6;
           font-size: 1.4rem;
           font-weight: 600;
           margin-top: 2rem;
@@ -106,7 +106,7 @@ export function WhitepaperPage() {
           font-size: 0.85em;
         }
         .prose-pcc blockquote {
-          border-left: 3px solid #10b981;
+          border-left: 3px solid #3b82f6;
           padding-left: 1rem;
           color: rgba(255,255,255,0.55);
           margin: 1rem 0;

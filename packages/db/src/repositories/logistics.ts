@@ -11,8 +11,9 @@ import {
   logisticsTimelineEvents,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { ILogisticsRepository } from "../interfaces/ILogisticsRepository.js";
 
-export class LogisticsRepository {
+export class LogisticsRepository implements ILogisticsRepository {
   constructor(private db: StoreDB) {}
 
   // ── Providers ───────────────────────────────────────────────────

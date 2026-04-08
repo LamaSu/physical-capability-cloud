@@ -9,6 +9,7 @@
 import { JobRunner } from "@pcc/kernel";
 import { EvidenceEmitter } from "@pcc/kernel";
 import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
+import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
@@ -28,6 +29,10 @@ export interface SubmitJobParams {
   deviceId?: string;
   gcodeHash?: string;
   assuranceTier?: number;
+  /** DID of the requesting agent (for safety audit trail) */
+  agentDid?: string;
+  /** Execution scope ID (required for class-3 / scoped commands) */
+  scopeId?: string;
 }
 
 export interface JobStatusResult {
@@ -70,6 +75,9 @@ export class KernelService {
   constructor(config?: KernelConfig) {
     this.config = config ?? loadKernelConfig();
     this.emitter = new EvidenceEmitter(this.config.kernelId);
+    // Initialize the safety gateway before any adapters or runners are created.
+    // This guarantees the singleton exists before submitJob can be called.
+    initSafetyGateway();
     this.initAdapters();
     // Cache finalized bundles so we can pass them to the settlement service
     this.emitter.onBundle((bundle) => {
@@ -107,6 +115,10 @@ export class KernelService {
   /**
    * Submit a job to a device. The actual execution is fire-and-forget;
    * this method returns immediately with { jobId, deviceId, status }.
+   *
+   * The job is routed through SafetyGateway.validateAndRelay() before
+   * runner.run() is invoked. If the governor or circuit breaker denies
+   * the command, an error is thrown immediately (before fire-and-forget).
    */
   async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
@@ -117,6 +129,36 @@ export class KernelService {
     }
 
     const runner = this.runners.get(deviceId)!;
+
+    // ── Safety gateway pre-flight ──────────────────────────────────────────
+    // Build a PhysicalCommand descriptor for this job. Jobs submitted without
+    // an explicit scopeId use class "safe" (operator-initiated or system jobs).
+    // Jobs with a scopeId use class "scoped" (agent-initiated, requires scope).
+    const gateway = getSafetyGateway();
+    const cmdClass = params.scopeId ? "scoped" : "safe";
+
+    // We validate synchronously before accepting the job (not fire-and-forget).
+    // Only the governor check is done here — the circuit breaker wraps the full
+    // runner.run() below in the async execution path so per-run failures are tracked.
+    const preflightCmd = {
+      commandId: `preflight:${jobId}`,
+      deviceId,
+      class: cmdClass as "safe" | "scoped",
+      type: "submit_job",
+      params: { jobId, stepId, gcodeHash: gcodeHash ?? `sha256:${jobId}`, assuranceTier },
+      agentDid: params.agentDid ?? "kernel-service",
+      scopeId: params.scopeId,
+    };
+
+    // Run a gateway pre-flight using a no-op execute so the governor + circuit
+    // breaker can reject before we accept the job. The actual runner.run() is
+    // gated separately below inside the fire-and-forget block.
+    const preflight = await gateway.validateAndRelay(preflightCmd, async () => undefined);
+    if (!preflight.allowed) {
+      throw new Error(
+        `[safety-gateway] Job ${jobId} denied: ${preflight.verdict?.reason ?? preflight.reason ?? "unknown"}`,
+      );
+    }
 
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
