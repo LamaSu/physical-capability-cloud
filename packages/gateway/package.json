@@ -41,6 +41,7 @@
     "@pcc/contract-builder": "workspace:*",
     "@pcc/contracts": "workspace:*",
     "@pcc/dht": "workspace:*",
+    "@pcc/evidence-embeddings": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/orchestrator": "workspace:*",
     "@pcc/payments": "workspace:*",
