@@ -27,9 +27,9 @@ const sg = "'Space Grotesk', sans-serif";
 const inter = "'Inter', sans-serif";
 const mono = "'Space Mono', monospace";
 
-const GREEN = "#00ff88";
+const GREEN = "#60a5fa";
 const BG_DARK = "#050a0e";
-const BG_MID = "#0d1a14";
+const BG_MID = "#0a1628";
 const TEXT_PRIMARY = "#f0f4f0";
 const TEXT_MUTED = "#8a9a8a";
 const TEXT_DIM = "#4a5a4a";
@@ -197,17 +197,17 @@ function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
         padding: "1.25rem 3rem",
         cursor: state === "loading" ? "wait" : "pointer",
         transition: "transform 0.2s, box-shadow 0.2s, background 0.3s, color 0.3s",
-        boxShadow: `0 0 30px rgba(0, 255, 136, 0.3)`,
+        boxShadow: `0 0 30px rgba(59, 130, 246, 0.3)`,
       }}
       onMouseEnter={(e) => {
         if (!isActive) {
           (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
-          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(0, 255, 136, 0.5)`;
+          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(59, 130, 246, 0.5)`;
         }
       }}
       onMouseLeave={(e) => {
         (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
-        (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(0, 255, 136, 0.3)`;
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(59, 130, 246, 0.3)`;
       }}
     >
       {state === "ripple" && (
@@ -397,7 +397,7 @@ function TerminalCTA({
         fontSize: "0.9rem",
         color: copied ? TEXT_PRIMARY : GREEN,
         background: BG_MID,
-        border: `1px solid ${copied ? "rgba(0,255,136,0.8)" : "rgba(0,255,136,0.4)"}`,
+        border: `1px solid ${copied ? "rgba(59,130,246,0.8)" : "rgba(59,130,246,0.4)"}`,
         borderRadius: "4px",
         padding: "0.875rem 1.5rem",
         cursor: "pointer",
@@ -405,12 +405,12 @@ function TerminalCTA({
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = GREEN;
-        (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(0,255,136,0.2)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(59,130,246,0.2)";
       }}
       onMouseLeave={(e) => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = copied
-          ? "rgba(0,255,136,0.8)"
-          : "rgba(0,255,136,0.4)";
+          ? "rgba(59,130,246,0.8)"
+          : "rgba(59,130,246,0.4)";
         (e.currentTarget as HTMLButtonElement).style.boxShadow = "none";
       }}
     >
@@ -548,9 +548,9 @@ function CapabilityGrid({ mousePos }: { mousePos: { x: number; y: number } }) {
   }, []);
 
   const getBorderColor = (state: TileState) => {
-    if (state === "available") return "rgba(0,255,136,0.3)";
+    if (state === "available") return "rgba(59,130,246,0.3)";
     if (state === "busy") return "rgba(245,166,35,0.3)";
-    return "rgba(0,255,136,0.06)";
+    return "rgba(59,130,246,0.06)";
   };
 
   const getIndicatorColor = (state: TileState) => {
@@ -667,7 +667,7 @@ function Nav() {
         zIndex: 50,
         background: "rgba(5,10,14,0.88)",
         backdropFilter: "blur(12px)",
-        borderBottom: "1px solid rgba(0,255,136,0.12)",
+        borderBottom: "1px solid rgba(59,130,246,0.12)",
       }}
     >
       <div
@@ -733,7 +733,7 @@ function Nav() {
               fontFamily: mono,
               fontSize: "0.75rem",
               color: GREEN,
-              border: `1px solid rgba(0,255,136,0.4)`,
+              border: `1px solid rgba(59,130,246,0.4)`,
               borderRadius: "4px",
               padding: "0.35rem 0.85rem",
               textDecoration: "none",
@@ -741,10 +741,10 @@ function Nav() {
             }}
             onMouseEnter={(e) => {
               (e.currentTarget as HTMLAnchorElement).style.borderColor = GREEN;
-              (e.currentTarget as HTMLAnchorElement).style.boxShadow = "0 0 12px rgba(0,255,136,0.3)";
+              (e.currentTarget as HTMLAnchorElement).style.boxShadow = "0 0 12px rgba(59,130,246,0.3)";
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(0,255,136,0.4)";
+              (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(59,130,246,0.4)";
               (e.currentTarget as HTMLAnchorElement).style.boxShadow = "none";
             }}
           >
@@ -773,7 +773,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
         position: "relative",
         background: BG_DARK,
         backgroundImage:
-          "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,136,0.008) 2px, rgba(0,255,136,0.008) 4px)",
+          "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(59,130,246,0.008) 2px, rgba(59,130,246,0.008) 4px)",
         paddingTop: "clamp(6rem, 12vw, 10rem)",
         paddingBottom: "clamp(6rem, 10vw, 8rem)",
         overflow: "hidden",
@@ -1031,7 +1031,7 @@ function ProblemSection() {
               <div
                 style={{
                   background: BG_DARK,
-                  border: "1px solid rgba(0,255,136,0.06)",
+                  border: "1px solid rgba(59,130,246,0.06)",
                   borderLeft: `3px solid ${AMBER}`,
                   borderRadius: "4px",
                   padding: "2rem",
@@ -1082,7 +1082,7 @@ function ProblemSection() {
           <div
             style={{
               background: BG_DARK,
-              border: "1px solid rgba(0,255,136,0.06)",
+              border: "1px solid rgba(59,130,246,0.06)",
               borderRadius: "4px",
               padding: "2.5rem",
               marginBottom: "4rem",
@@ -1178,10 +1178,10 @@ function ProblemSection() {
               {/* AFTER */}
               <div
                 style={{
-                  border: `1px solid rgba(0,255,136,0.2)`,
+                  border: `1px solid rgba(59,130,246,0.2)`,
                   borderRadius: "4px",
                   padding: "1.5rem",
-                  background: "rgba(0,255,136,0.03)",
+                  background: "rgba(59,130,246,0.03)",
                 }}
               >
                 <p
@@ -1372,7 +1372,7 @@ function HowItWorksSection() {
               left: 0,
               right: 0,
               height: "1px",
-              background: "rgba(0,255,136,0.15)",
+              background: "rgba(59,130,246,0.15)",
               zIndex: 0,
             }}
           />
@@ -1386,7 +1386,7 @@ function HowItWorksSection() {
               height: "8px",
               borderRadius: "50%",
               background: GREEN,
-              boxShadow: "0 0 16px rgba(0,255,136,0.9)",
+              boxShadow: "0 0 16px rgba(59,130,246,0.9)",
               zIndex: 2,
               transition: "left 0.1s linear",
             }}
@@ -1409,25 +1409,25 @@ function HowItWorksSection() {
                   <div
                     style={{
                       background: BG_DARK,
-                      border: `1px solid ${isActive ? "rgba(0,255,136,0.3)" : "rgba(0,255,136,0.08)"}`,
+                      border: `1px solid ${isActive ? "rgba(59,130,246,0.3)" : "rgba(59,130,246,0.08)"}`,
                       borderRadius: "4px",
                       padding: "2rem",
                       transition: "border-color 0.3s, box-shadow 0.3s",
-                      boxShadow: isActive ? "0 8px 32px rgba(0,255,136,0.06)" : "none",
+                      boxShadow: isActive ? "0 8px 32px rgba(59,130,246,0.06)" : "none",
                       height: "100%",
                     }}
                     onMouseEnter={(e) => {
                       (e.currentTarget as HTMLDivElement).style.borderColor =
-                        "rgba(0,255,136,0.3)";
+                        "rgba(59,130,246,0.3)";
                       (e.currentTarget as HTMLDivElement).style.boxShadow =
-                        "0 8px 32px rgba(0,255,136,0.06)";
+                        "0 8px 32px rgba(59,130,246,0.06)";
                     }}
                     onMouseLeave={(e) => {
                       (e.currentTarget as HTMLDivElement).style.borderColor = isActive
-                        ? "rgba(0,255,136,0.3)"
-                        : "rgba(0,255,136,0.08)";
+                        ? "rgba(59,130,246,0.3)"
+                        : "rgba(59,130,246,0.08)";
                       (e.currentTarget as HTMLDivElement).style.boxShadow = isActive
-                        ? "0 8px 32px rgba(0,255,136,0.06)"
+                        ? "0 8px 32px rgba(59,130,246,0.06)"
                         : "none";
                     }}
                   >
@@ -1482,7 +1482,7 @@ function HowItWorksSection() {
                       style={{
                         fontFamily: mono,
                         fontSize: "0.65rem",
-                        color: "rgba(0,255,136,0.5)",
+                        color: "rgba(59,130,246,0.5)",
                         lineHeight: 1.5,
                       }}
                     >
@@ -1515,7 +1515,7 @@ const TERMINAL_LINES = [
   {
     prefix: "  ",
     text: "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    color: "rgba(0,255,136,0.2)",
+    color: "rgba(59,130,246,0.2)",
     delay: 3100,
   },
   { prefix: "  ", text: "Live. Accepting jobs. Earnings → your wallet.", color: GREEN, delay: 3200 },
@@ -1545,7 +1545,7 @@ function TerminalBlock({ active }: { active: boolean }) {
     <div
       style={{
         background: BG_DARK,
-        border: "1px solid rgba(0,255,136,0.2)",
+        border: "1px solid rgba(59,130,246,0.2)",
         borderRadius: "4px",
         padding: "2rem",
         fontFamily: mono,
@@ -1698,7 +1698,7 @@ function ForOperatorsSection() {
                       fontFamily: mono,
                       fontSize: "2.5rem",
                       fontWeight: 700,
-                      color: "rgba(0,255,136,0.15)",
+                      color: "rgba(59,130,246,0.15)",
                       lineHeight: 1,
                       flexShrink: 0,
                     }}
@@ -1729,8 +1729,8 @@ function ForOperatorsSection() {
                           fontFamily: mono,
                           fontSize: "0.65rem",
                           color: GREEN,
-                          background: "rgba(0,255,136,0.08)",
-                          border: "1px solid rgba(0,255,136,0.2)",
+                          background: "rgba(59,130,246,0.08)",
+                          border: "1px solid rgba(59,130,246,0.2)",
                           borderRadius: "2px",
                           padding: "0.15rem 0.4rem",
                         }}
@@ -1781,7 +1781,7 @@ function ForOperatorsSection() {
                   key={hw.name}
                   style={{
                     background: BG_DARK,
-                    border: "1px solid rgba(0,255,136,0.08)",
+                    border: "1px solid rgba(59,130,246,0.08)",
                     borderRadius: "4px",
                     padding: "0.75rem",
                   }}
@@ -2011,7 +2011,7 @@ function ForAgentsSection() {
                           fontSize: "0.7rem",
                           color: TEXT_MUTED,
                           background: BG_DARK,
-                          border: "1px solid rgba(0,255,136,0.08)",
+                          border: "1px solid rgba(59,130,246,0.08)",
                           borderRadius: "2px",
                           padding: "0.2rem 0.5rem",
                         }}
@@ -2040,7 +2040,7 @@ function ForAgentsSection() {
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.08)",
+                border: "1px solid rgba(59,130,246,0.08)",
                 borderRadius: "4px",
                 padding: "1.5rem",
                 marginBottom: "2rem",
@@ -2078,7 +2078,7 @@ function ForAgentsSection() {
                     alignItems: "center",
                     padding: "0.5rem 0",
                     borderBottom:
-                      i < A2A_INTENTS.length - 1 ? "1px solid rgba(0,255,136,0.05)" : "none",
+                      i < A2A_INTENTS.length - 1 ? "1px solid rgba(59,130,246,0.05)" : "none",
                   }}
                 >
                   <span style={{ fontFamily: mono, fontSize: "0.75rem", color: GREEN }}>
@@ -2099,8 +2099,8 @@ function ForAgentsSection() {
           <Reveal>
             <div
               style={{
-                background: "rgba(0,255,136,0.08)",
-                border: "1px solid rgba(0,255,136,0.25)",
+                background: "rgba(59,130,246,0.08)",
+                border: "1px solid rgba(59,130,246,0.25)",
                 borderRadius: "4px",
                 padding: "1rem 1.25rem",
                 marginBottom: "2rem",
@@ -2121,7 +2121,7 @@ function ForAgentsSection() {
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.15)",
+                border: "1px solid rgba(59,130,246,0.15)",
                 borderRadius: "4px",
                 padding: "1.25rem 1.5rem",
                 marginBottom: "2rem",
@@ -2156,7 +2156,7 @@ function ForAgentsSection() {
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.15)",
+                border: "1px solid rgba(59,130,246,0.15)",
                 borderRadius: "4px",
                 padding: "2rem",
                 overflow: "auto",
@@ -2179,7 +2179,7 @@ function ForAgentsSection() {
                     key={i}
                     style={{
                       background:
-                        line.highlight ? "rgba(0,255,136,0.04)" : "transparent",
+                        line.highlight ? "rgba(59,130,246,0.04)" : "transparent",
                       padding: line.highlight ? "0 0.5rem" : "0",
                       margin: line.highlight ? "0 -0.5rem" : "0",
                     }}
@@ -2266,8 +2266,8 @@ function StatusBadge({ status }: { status: "LIVE" | "WIRED" }) {
         fontSize: "0.65rem",
         letterSpacing: "0.1em",
         color: isLive ? GREEN : AMBER,
-        background: isLive ? "rgba(0,255,136,0.08)" : "rgba(245,166,35,0.08)",
-        border: `1px solid ${isLive ? "rgba(0,255,136,0.25)" : "rgba(245,166,35,0.25)"}`,
+        background: isLive ? "rgba(59,130,246,0.08)" : "rgba(245,166,35,0.08)",
+        border: `1px solid ${isLive ? "rgba(59,130,246,0.25)" : "rgba(245,166,35,0.25)"}`,
         borderRadius: "4px",
         padding: "0.2rem 0.5rem",
       }}
@@ -2384,11 +2384,11 @@ function IntegrationCard({
       onMouseLeave={() => setHover(false)}
       style={{
         background: BG_MID,
-        border: `1px solid ${hover ? "rgba(0,255,136,0.3)" : "rgba(0,255,136,0.08)"}`,
+        border: `1px solid ${hover ? "rgba(59,130,246,0.3)" : "rgba(59,130,246,0.08)"}`,
         borderRadius: "4px",
         padding: "1.75rem",
         transition: "border-color 0.2s, box-shadow 0.2s",
-        boxShadow: hover ? "0 8px 32px rgba(0,255,136,0.06)" : "none",
+        boxShadow: hover ? "0 8px 32px rgba(59,130,246,0.06)" : "none",
         height: "100%",
       }}
     >
@@ -2453,7 +2453,7 @@ function IntegrationCard({
         style={{
           fontFamily: mono,
           fontSize: "0.7rem",
-          color: "rgba(0,255,136,0.5)",
+          color: "rgba(59,130,246,0.5)",
           margin: 0,
         }}
       >
@@ -2463,13 +2463,13 @@ function IntegrationCard({
             target="_blank"
             rel="noopener noreferrer"
             style={{
-              color: "rgba(0,255,136,0.5)",
+              color: "rgba(59,130,246,0.5)",
               textDecoration: "none",
               transition: "color 0.2s",
             }}
             onMouseEnter={(e) => ((e.currentTarget as HTMLAnchorElement).style.color = GREEN)}
             onMouseLeave={(e) =>
-              ((e.currentTarget as HTMLAnchorElement).style.color = "rgba(0,255,136,0.5)")
+              ((e.currentTarget as HTMLAnchorElement).style.color = "rgba(59,130,246,0.5)")
             }
           >
             {integ.proof}
@@ -2618,7 +2618,7 @@ function StatsSection() {
             gridTemplateColumns: "repeat(3, 1fr)",
             gap: "0",
             marginBottom: "5rem",
-            border: "1px solid rgba(0,255,136,0.08)",
+            border: "1px solid rgba(59,130,246,0.08)",
             borderRadius: "4px",
             overflow: "hidden",
           }}
@@ -2628,8 +2628,8 @@ function StatsSection() {
               key={stat.label}
               style={{
                 padding: "2rem",
-                borderBottom: i < 3 ? "1px solid rgba(0,255,136,0.08)" : "none",
-                borderRight: (i + 1) % 3 !== 0 ? "1px solid rgba(0,255,136,0.08)" : "none",
+                borderBottom: i < 3 ? "1px solid rgba(59,130,246,0.08)" : "none",
+                borderRight: (i + 1) % 3 !== 0 ? "1px solid rgba(59,130,246,0.08)" : "none",
               }}
             >
               {stat.isText ? (
@@ -2673,7 +2673,7 @@ function StatsSection() {
             <Reveal key={d.title} delay={i * 0.1}>
               <div
                 style={{
-                  borderLeft: "2px solid rgba(0,255,136,0.2)",
+                  borderLeft: "2px solid rgba(59,130,246,0.2)",
                   paddingLeft: "1rem",
                 }}
               >
@@ -2715,8 +2715,8 @@ function StatsSection() {
                 fontFamily: mono,
                 fontSize: "0.75rem",
                 color: GREEN,
-                background: "rgba(0,255,136,0.08)",
-                border: "1px solid rgba(0,255,136,0.25)",
+                background: "rgba(59,130,246,0.08)",
+                border: "1px solid rgba(59,130,246,0.25)",
                 borderRadius: "4px",
                 padding: "0.5rem 1rem",
                 textDecoration: "none",
@@ -2727,7 +2727,7 @@ function StatsSection() {
               }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLAnchorElement).style.boxShadow =
-                  "0 0 12px rgba(0,255,136,0.3)";
+                  "0 0 12px rgba(59,130,246,0.3)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLAnchorElement).style.boxShadow = "none";
@@ -2789,8 +2789,8 @@ function Footer() {
       <div
         style={{
           background: BG_MID,
-          borderTop: "1px solid rgba(0,255,136,0.12)",
-          borderBottom: "1px solid rgba(0,255,136,0.08)",
+          borderTop: "1px solid rgba(59,130,246,0.12)",
+          borderBottom: "1px solid rgba(59,130,246,0.08)",
           padding: "clamp(4rem, 8vw, 7rem) 0",
           textAlign: "center",
         }}
@@ -2845,7 +2845,7 @@ function Footer() {
       {/* Footer bar */}
       <div
         style={{
-          borderTop: "1px solid rgba(0,255,136,0.06)",
+          borderTop: "1px solid rgba(59,130,246,0.06)",
           padding: "2.5rem 0",
         }}
       >
