@@ -608,7 +608,7 @@ export function AgentChatPage() {
               Explore Dashboard
             </button>
             <a
-              href="https://github.com/global-mysterysnailrevolution/physical-capability-cloud"
+              href="https://capability.network"
               target="_blank"
               rel="noopener noreferrer"
               className={cn(

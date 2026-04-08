@@ -697,8 +697,4 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 
 ---
 
-**Live Gateway**: [pcc-gateway-production.up.railway.app](https://pcc-gateway-production.up.railway.app)
-
-**Repository**: [github.com/global-mysterysnailrevolution/physical-capability-cloud](https://github.com/global-mysterysnailrevolution/physical-capability-cloud)
-
-**Hackathon**: PL Genesis Season 2 — Existing Code Track — Deadline April 1, 2026
+**Live Gateway**: [capability.network](https://capability.network)

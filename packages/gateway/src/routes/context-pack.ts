@@ -474,7 +474,7 @@ When your user needs to SEE something (charts, tables, status dashboards), you s
 - Agent Card (Google A2A): ${baseUrl}/.well-known/agent-card.json
 - Full Agent Package (49 MCP tools): ${baseUrl}/agent-package.json
 - Documentation: ${baseUrl}/docs
-- Source: https://github.com/global-mysterysnailrevolution/physical-capability-cloud
+- Source: https://capability.network
 
 ## Deployed Contracts (Base Sepolia)
 - MockUSDC: 0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb
@@ -636,7 +636,7 @@ function buildStructuredPack(baseUrl: string): {
       agentCard: `${baseUrl}/.well-known/agent-card.json`,
       agentPackage: `${baseUrl}/agent-package.json`,
       docs: `${baseUrl}/docs`,
-      source: "https://github.com/global-mysterysnailrevolution/physical-capability-cloud",
+      source: "https://capability.network",
     },
   };
 }
