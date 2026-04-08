@@ -58,14 +58,14 @@ function defaultRange(from?: string, to?: string): { from: string; to: string } 
   return { from: fromDate, to: toDate };
 }
 
-/** Convert from/to YYYY-MM-DD into Sentry statsPeriod like "7d". Falls back to "7d". */
+/** Convert from/to YYYY-MM-DD into Sentry statsPeriod. Sentry only accepts "24h" or "14d". */
 function toSentryStatsPeriod(from: string, to: string): string {
   try {
     const diffMs = new Date(to).getTime() - new Date(from).getTime();
     const days = Math.max(1, Math.round(diffMs / (24 * 60 * 60 * 1000)));
-    return `${days}d`;
+    return days <= 1 ? "24h" : "14d";
   } catch {
-    return "7d";
+    return "14d";
   }
 }
 
@@ -133,7 +133,8 @@ async function sentryGet<T = unknown>(path: string): Promise<T> {
     throw new Error("Sentry not configured");
   }
 
-  const resp = await fetch(`https://sentry.io${path}`, {
+  const base = authToken.startsWith("sntrys_") ? "https://us.sentry.io" : "https://sentry.io";
+  const resp = await fetch(`${base}${path}`, {
     headers: { Authorization: `Bearer ${authToken}` },
   });
 
