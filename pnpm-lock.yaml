@@ -516,6 +516,9 @@ importers:
       '@pcc/dht':
         specifier: workspace:*
         version: link:../dht
+      '@pcc/evidence-embeddings':
+        specifier: workspace:*
+        version: link:../evidence-embeddings
       '@pcc/kernel':
         specifier: workspace:*
         version: link:../kernel
