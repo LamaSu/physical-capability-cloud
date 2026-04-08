@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
 import { escrows, escrowMilestones, disputes } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IEscrowRepository } from "../interfaces/IEscrowRepository.js";
 
-export class EscrowRepository {
+export class EscrowRepository implements IEscrowRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

@@ -14,11 +14,22 @@
  */
 
 import crypto from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import type { Result } from "@pcc/spec";
 import { createWalletClient, createPublicClient, http, keccak256, toBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, getDeployment, getContractAddress } from "@pcc/contracts";
 import { getStore, getRepos } from "../db.js";
+import { getSettlementFacade } from "../facades/index.js";
+
+function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
+  if (result.success) return result.data;
+  return reply.code(result.error.httpStatus).send({
+    error: result.error.code,
+    message: result.error.message,
+    ...(result.error.details ? { details: result.error.details } : {}),
+  });
+}
 import { schema, eq } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
@@ -298,6 +309,7 @@ export async function createJobFromSession(
 // ---------------------------------------------------------------------------
 
 export async function paidJobFlowRoutes(app: FastifyInstance) {
+  const settlementFacade = getSettlementFacade();
   // ═════════════════════════════════════════════════════════════════════
   // POST /api/jobs/submit-from-discovery — Fast-track from discovery to job
   // ═════════════════════════════════════════════════════════════════════

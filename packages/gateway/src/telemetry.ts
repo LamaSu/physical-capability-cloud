@@ -10,6 +10,7 @@
 import { randomBytes } from "node:crypto";
 import { streamHub } from "./sse/stream-hub.js";
 import { Sentry } from "./sentry.js";
+import { trace } from "@opentelemetry/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -189,6 +190,18 @@ export class PipelineTelemetryService {
       },
       timestamp: new Date(event.timestamp).getTime() / 1000,
     });
+
+    // Attach this pipeline event to whatever OTel span is currently active.
+    // Zero new spans — this just adds a named event to the enclosing facade or A2A span.
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan) {
+      activeSpan.addEvent(`pipeline.${phase}`, {
+        "pipeline.status": status,
+        "pipeline.job_id": jobId,
+        "pipeline.duration_ms": event.duration_ms ?? 0,
+        "pipeline.source": event.source,
+      });
+    }
 
     return event;
   }

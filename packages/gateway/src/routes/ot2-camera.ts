@@ -10,9 +10,10 @@
  * GET  /api/ot2/camera/snapshot  — Get latest frame as JSON
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq, sql } from "@pcc/store";
+import { resolveSSEAuth } from "../sse/sse-auth.js";
 
 const { ot2CameraFrames } = schema;
 
@@ -133,12 +134,20 @@ export async function ot2CameraRoutes(app: FastifyInstance) {
     Querystring: {
       kernelId?: string;
     };
-  }>("/api/ot2/camera/stream", async (req, reply) => {
+  }>("/api/ot2/camera/stream", async (req: FastifyRequest, reply) => {
+    // Auth check MUST happen before reply.raw.writeHead(200, ...).
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
+
+    const origin = (req.headers.origin as string | undefined) ?? "*";
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Credentials": "true",
     });
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected" })}\n\n`);

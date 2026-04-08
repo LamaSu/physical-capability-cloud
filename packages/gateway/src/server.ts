@@ -79,6 +79,8 @@ import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { analyticsRoutes } from "./routes/analytics.js";
+import { wizardRoutes } from "./routes/wizard.js";
+import { complianceRoutes } from "./routes/compliance.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -312,6 +314,10 @@ export async function createGateway(port = 3200) {
 
   // Generic device relay -- works for any device type, namespaced by kernelId
   await app.register(deviceRelayRoutes);
+
+  // Wizard sessions + compliance
+  await app.register(wizardRoutes);
+  await app.register(complianceRoutes);
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);

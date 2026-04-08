@@ -1,11 +1,12 @@
 import { eq, and, gte, sql } from "drizzle-orm";
 import { auditLog } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IAuditLogRepository } from "../interfaces/IAuditLogRepository.js";
 
 export type AuditLogInsert = typeof auditLog.$inferInsert;
 export type AuditLogRow = typeof auditLog.$inferSelect;
 
-export class AuditLogRepository {
+export class AuditLogRepository implements IAuditLogRepository {
   constructor(private db: StoreDB) {}
 
   insert(entry: Omit<AuditLogInsert, "id">): AuditLogRow {

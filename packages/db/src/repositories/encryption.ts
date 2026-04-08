@@ -8,8 +8,9 @@ import {
   commitmentTrees,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IEncryptionRepository } from "../interfaces/IEncryptionRepository.js";
 
-export class EncryptionRepository {
+export class EncryptionRepository implements IEncryptionRepository {
   constructor(private db: StoreDB) {}
 
   // ── Encrypted Bundles ───────────────────────────────────────────

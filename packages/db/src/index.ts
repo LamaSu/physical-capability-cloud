@@ -3,6 +3,7 @@ import { migrateDatabase } from "./migrate.js";
 import { buildRepositories, type Repositories } from "./repositories/index.js";
 import { seedAll } from "./seed/index.js";
 import * as schema from "./schema/index.js";
+import type { IRepositories } from "./interfaces/index.js";
 
 export interface StoreOptions {
   /** Path to SQLite file. Defaults to ":memory:" for in-memory database. */
@@ -16,10 +17,14 @@ export interface StoreOptions {
  * repositories, and optionally seeded mock data.
  */
 export interface Store {
-  /** Drizzle ORM database instance */
+  /** Drizzle ORM database instance — internal use only (migration scripts, seeding) */
   db: StoreDB;
-  /** Pre-built repository instances for each domain */
-  repos: Repositories;
+  /**
+   * Pre-built repository instances for each domain.
+   * Typed as IRepositories so callers depend on the interface contract,
+   * not the concrete Drizzle/SQLite implementation.
+   */
+  repos: IRepositories;
   /** Close the underlying SQLite connection */
   close: () => void;
 }
@@ -46,6 +51,30 @@ export type { StoreDB, Repositories };
 export { schema, buildRepositories, createDatabase, migrateDatabase, seedAll };
 // Re-export drizzle-orm operators for gateway routes that need direct table queries
 export { eq, and, or, sql, count } from "drizzle-orm";
+// Repository interfaces — the public contract for the data access layer
+export type { IRepositories } from "./interfaces/index.js";
+export type {
+  IJobRepository,
+  IKernelRepository,
+  ICapabilityRepository,
+  IEvidenceBundleRepository,
+  IEscrowRepository,
+  IProtocolTemplateRepository,
+  IProtocolRunRepository,
+  IAutomationStatusRepository,
+  IOrchestratorRepository,
+  ILogisticsRepository,
+  ISessionRepository,
+  IEncryptionRepository,
+  ISensorRepository,
+  IBatchRepository,
+  IStoryRepository,
+  ISWFRepository,
+  IApiKeyRepository,
+  IAuditLogRepository,
+  IRegistrationRepository,
+  IA2AMessageRepository,
+} from "./interfaces/index.js";
 
 // Re-export repository classes for direct use
 export {
@@ -67,4 +96,6 @@ export {
   SWFRepository,
   ApiKeyRepository,
   AuditLogRepository,
+  A2AMessageRepository,
 } from "./repositories/index.js";
+export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

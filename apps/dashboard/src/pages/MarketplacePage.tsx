@@ -1,7 +1,7 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  GlassPanel, GlowBadge,
+  GlassPanel, GlowBadge, PCCRunButton,
   DemandSupplyChart, GeoDemandMap, CapabilityTrendBars, PriceHistoryChart,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
@@ -112,6 +112,13 @@ export function MarketplacePage() {
                     </div>
                   </div>
                 )}
+                <div className="pt-2 border-t border-white/[0.06]">
+                  <PCCRunButton
+                    command={`pcc negotiate --capability ${ec.category}`}
+                    size="sm"
+                    variant="outline"
+                  />
+                </div>
               </GlassPanel>
             );
           })}

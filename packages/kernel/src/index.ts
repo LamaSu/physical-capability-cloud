@@ -1,3 +1,26 @@
+// Safety — governor, circuit breaker, and gateway (mandatory choke point)
+// In production, always use getSafetyGateway(). Direct class construction is for unit tests only.
+export {
+  SafetyGovernor,
+  CircuitBreaker,
+  SafetyGateway,
+  getSafetyGateway,
+  initSafetyGateway,
+  resetSafetyGateway,
+} from "./safety/index.js";
+export type {
+  PhysicalCommand,
+  CommandClass,
+  OperationalEnvelope,
+  GovernorVerdict,
+  SafetyCheck,
+  HardwareState,
+  CircuitState,
+  CircuitBreakerConfig,
+  SafetyGatewayResult,
+  SafetyGatewayConfig,
+} from "./safety/index.js";
+
 export { EvidenceEmitter } from "./evidence-emitter.js";
 export { AnomalyDetector, type AnomalyReport, type AnomalyDetectorConfig } from "./anomaly-detector.js";
 export { loadKernelConfig } from "./kernel-config.js";

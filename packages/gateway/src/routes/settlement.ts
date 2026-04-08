@@ -10,11 +10,12 @@
  * GET  /api/evidence/:jobId          — Evidence bundle details for a job
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
-import { getRepos } from "../db.js";
+import type { Result } from "@pcc/spec";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
 import {
   isBatchEnabled,
@@ -25,7 +26,17 @@ import {
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
 
+function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
+  if (result.success) return result.data;
+  return reply.code(result.error.httpStatus).send({
+    error: result.error.code,
+    message: result.error.message,
+    ...(result.error.details ? { details: result.error.details } : {}),
+  });
+}
+
 export async function settlementRoutes(app: FastifyInstance) {
+  const settlementFacade = getSettlementFacade();
   // ── Status ────────────────────────────────────────────────────────
 
   app.get("/api/settlement/status", async () => {
@@ -187,72 +198,15 @@ export async function settlementRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "not_found" });
     }
 
-    try {
-      const repos = getRepos();
-      const job = repos.jobs.findById(jobId);
-      if (!job) {
-        return reply.status(404).send({ error: "not_found" });
-      }
-
-      const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-
-      const settled = job.status === "settled" || job.status === "completed";
-
-      return {
-        jobId: job.id,
-        status: job.status,
-        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
-        evidenceHash: latestBundle?.bundleHash ?? null,
-        assuranceTier: latestBundle?.assuranceTier ?? null,
-        settled,
-        settledAt: job.completedAt ?? null,
-      };
-    } catch (err) {
-      return reply.status(500).send({
-        error: "query_failed",
-        message: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
+    const result = await settlementFacade.getJobSettlementStatus(jobId);
+    return sendResult(reply, result);
   });
 
   // ── Evidence bundle details for a job ─────────────────────────────
 
   app.get<{ Params: { jobId: string } }>("/api/evidence/:jobId", async (req, reply) => {
-    try {
-      const repos = getRepos();
-      const bundles = repos.evidence.findByJob(req.params.jobId);
-
-      if (bundles.length === 0) {
-        return reply.status(404).send({ error: "not_found" });
-      }
-
-      const enriched = bundles.map((bundle) => {
-        const events = repos.evidence.findEventsByBundle(bundle.id);
-        return {
-          bundleId: bundle.id,
-          jobId: bundle.jobId,
-          stepId: bundle.stepId,
-          kernelId: bundle.kernelId,
-          hash: bundle.bundleHash,
-          assuranceTier: bundle.assuranceTier,
-          eventCount: events.length,
-          events,
-          storedAt: bundle.createdAt,
-        };
-      });
-
-      return {
-        jobId: req.params.jobId,
-        bundles: enriched,
-        count: enriched.length,
-      };
-    } catch (err) {
-      return reply.status(500).send({
-        error: "query_failed",
-        message: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
+    const result = await settlementFacade.getJobEvidence(req.params.jobId);
+    return sendResult(reply, result);
   });
 
   // ── Flush (manual epoch settlement) ───────────────────────────────

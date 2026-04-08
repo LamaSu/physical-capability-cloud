@@ -10,12 +10,12 @@
   --color-forest-700: #0d1520;
   --color-forest-600: #121c2a;
 
-  /* Electric emerald — neon primary accent */
-  --color-green-700: #005c30;
-  --color-green-600: #007a42;
-  --color-green-500: #10b981;
-  --color-green-400: #00ff88;
-  --color-green-300: #6effc0;
+  /* Electric blue — neon primary accent */
+  --color-green-700: #1a3a6c;
+  --color-green-600: #2255a4;
+  --color-green-500: #3b82f6;
+  --color-green-400: #60a5fa;
+  --color-green-300: #93c5fd;
 
   /* Ice cyan — data displays and charts */
   --color-teal-500: #00a8cc;
@@ -39,15 +39,15 @@
   --color-glass-hover: rgba(255, 255, 255, 0.08);
 
   /* Status — neon vibrancy */
-  --color-status-online: #00ff88;
+  --color-status-online: #60a5fa;
   --color-status-executing: #ffaa00;
-  --color-status-completed: #10b981;
+  --color-status-completed: #3b82f6;
   --color-status-failed: #ff4444;
   --color-status-offline: #4a5568;
 
   /* Gradients */
-  --gradient-hero: linear-gradient(135deg, #00ff88 0%, #00d4ff 50%, #7c3aed 100%);
-  --gradient-beam: linear-gradient(90deg, transparent, #00d4ff, transparent);
+  --gradient-hero: linear-gradient(135deg, #3b82f6 0%, #00d4ff 50%, #7c3aed 100%);
+  --gradient-beam: linear-gradient(90deg, transparent, #60a5fa, transparent);
 
   /* Fonts */
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
@@ -85,12 +85,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 255, 136, 0.2);
+  background: rgba(59, 130, 246, 0.2);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 255, 136, 0.4);
+  background: rgba(59, 130, 246, 0.4);
 }
 
 /* ── Utility Classes ────────────────────────────────────────────── */
@@ -104,11 +104,11 @@ body {
 
 .glass-panel-hover:hover {
   background: var(--color-glass-hover);
-  border-color: rgba(0, 255, 136, 0.2);
+  border-color: rgba(59, 130, 246, 0.2);
 }
 
 .glow-green {
-  box-shadow: 0 0 20px rgba(0, 255, 136, 0.25), 0 0 60px rgba(0, 255, 136, 0.08);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.25), 0 0 60px rgba(59, 130, 246, 0.08);
 }
 
 .glow-gold {
@@ -116,7 +116,7 @@ body {
 }
 
 .glow-text-green {
-  text-shadow: 0 0 12px rgba(0, 255, 136, 0.6);
+  text-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
 }
 
 .glow-text-gold {
@@ -135,18 +135,18 @@ body {
 
 /* Glowing line separator — emerald top border glow effect */
 .glow-line {
-  box-shadow: 0 0 15px rgba(0, 255, 136, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: 0 0 15px rgba(59, 130, 246, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 /* Scan-line texture — subtle horizontal scan overlay */
 .scan-line {
-  background: linear-gradient(transparent 50%, rgba(0, 255, 136, 0.03) 50%);
+  background: linear-gradient(transparent 50%, rgba(59, 130, 246, 0.03) 50%);
   background-size: 100% 4px;
 }
 
 /* Grid background — space radar / control room dot grid */
 .grid-bg {
-  background-image: radial-gradient(rgba(0, 255, 136, 0.07) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(59, 130, 246, 0.07) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 
@@ -154,10 +154,10 @@ body {
 
 @keyframes neon-pulse-green {
   0%, 100% {
-    box-shadow: 0 0 4px rgba(0, 255, 136, 0.8), 0 0 10px rgba(0, 255, 136, 0.4);
+    box-shadow: 0 0 4px rgba(59, 130, 246, 0.8), 0 0 10px rgba(59, 130, 246, 0.4);
   }
   50% {
-    box-shadow: 0 0 8px rgba(0, 255, 136, 1), 0 0 20px rgba(0, 255, 136, 0.6), 0 0 40px rgba(0, 255, 136, 0.2);
+    box-shadow: 0 0 8px rgba(59, 130, 246, 1), 0 0 20px rgba(59, 130, 246, 0.6), 0 0 40px rgba(59, 130, 246, 0.2);
   }
 }
 

@@ -12,6 +12,7 @@
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
+import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
@@ -228,6 +229,8 @@ function validateAdapterConfig(
 // ---------------------------------------------------------------------------
 
 export async function setupRoutes(app: FastifyInstance) {
+  const kernelFacade = getKernelFacade();
+  const jobFacade = getJobFacade();
   // ── GET /api/setup/detect ────────────────────────────────────────────────
 
   app.get("/api/setup/detect", async (_req, _reply) => {
@@ -243,24 +246,22 @@ export async function setupRoutes(app: FastifyInstance) {
       };
     });
 
-    // Check DB state
+    // Check DB state — kernels + jobs via facades, devices stay inline (no facade method)
     let dbState = { kernels: 0, devices: 0, jobs: 0, initialized: false };
-    try {
-      const repos = getRepos();
-      const kernels = repos.kernels.findAll();
-      const jobs = repos.jobs.findAll();
-      // Count devices by summing across all kernels
-      const deviceCount = kernels.reduce((acc, k) => {
-        return acc + repos.kernels.findDevicesByKernel(k.id).length;
-      }, 0);
+    const kernelResult = await kernelFacade.list();
+    const jobResult = await jobFacade.list();
+    if (kernelResult.success && jobResult.success) {
+      const kernelList = kernelResult.data;
+      const deviceCount = kernelList.reduce(
+        (acc, k) => acc + (Array.isArray((k as any).devices) ? (k as any).devices.length : 0),
+        0,
+      );
       dbState = {
-        kernels: kernels.length,
+        kernels: kernelList.length,
         devices: deviceCount,
-        jobs: jobs.length,
+        jobs: jobResult.data.total,
         initialized: true,
       };
-    } catch {
-      // DB not initialized yet
     }
 
     // Check KernelService
@@ -725,19 +726,16 @@ export async function setupRoutes(app: FastifyInstance) {
     // Database category
     let dbStatus: "ready" | "partial" | "unconfigured" = "unconfigured";
     let dbDetails = "Database not initialized";
-    try {
-      const repos = getRepos();
-      const kernels = repos.kernels.findAll();
-      if (kernels.length > 0) {
+    const dbKernelResult = await kernelFacade.list();
+    if (dbKernelResult.success) {
+      const kernelCount = dbKernelResult.data.length;
+      if (kernelCount > 0) {
         dbStatus = "ready";
-        dbDetails = `${kernels.length} kernel(s) registered`;
+        dbDetails = `${kernelCount} kernel(s) registered`;
       } else {
         dbStatus = "partial";
         dbDetails = "Database initialized but no kernels registered";
       }
-    } catch {
-      dbStatus = "unconfigured";
-      dbDetails = "Database not initialized";
     }
     categories.push({ name: "database", status: dbStatus, details: dbDetails });
 
