@@ -83,6 +83,15 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
       });
     }
 
+    // Validate BigInt-destined values before conversion
+    const isBigIntSafe = (v: unknown) => /^(?:0x[0-9a-fA-F]+|[0-9]+)$/.test(String(v));
+    if (!isBigIntSafe(amount)) {
+      return reply.status(400).send({ error: "invalid_amount", message: "amount must be a numeric or hex string" });
+    }
+    if (!isBigIntSafe(expiry)) {
+      return reply.status(400).send({ error: "invalid_expiry", message: "expiry must be a numeric or hex string" });
+    }
+
     if (!isAddress(payer)) {
       return reply
         .status(400)
@@ -144,9 +153,9 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
           payer as Address,
           target as Address,
           callData as Hex,
-          BigInt(amount),
+          (() => { try { return BigInt(amount); } catch { throw Object.assign(new Error("Invalid amount"), { statusCode: 400 }); } })(),
           nonce as Hex,
-          BigInt(expiry),
+          (() => { try { return BigInt(expiry); } catch { throw Object.assign(new Error("Invalid expiry"), { statusCode: 400 }); } })(),
           v,
           r as Hex,
           s as Hex,

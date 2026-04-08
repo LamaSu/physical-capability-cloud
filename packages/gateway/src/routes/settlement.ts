@@ -88,6 +88,14 @@ export async function settlementRoutes(app: FastifyInstance) {
     }
 
     try {
+      // Validate usdcValue before BigInt conversion
+      if (usdcValue !== undefined && usdcValue !== null) {
+        const raw = String(usdcValue);
+        if (!/^(?:0x[0-9a-fA-F]+|[0-9]+)$/.test(raw)) {
+          return reply.status(400).send({ error: "Invalid usdcValue — must be a numeric or hex string" });
+        }
+      }
+
       // Parse the operation into the correct typed shape
       const parsedOp = parseOperation(operation);
 
@@ -96,7 +104,7 @@ export async function settlementRoutes(app: FastifyInstance) {
         agentId,
         escrowAddress: escrowAddress as Address,
         operation: parsedOp,
-        usdcValue: usdcValue ? BigInt(usdcValue) : undefined,
+        usdcValue: usdcValue ? (() => { try { return BigInt(usdcValue); } catch { return undefined; } })() : undefined,
       });
 
       const status = getQueueStatus();
@@ -320,13 +328,19 @@ function parseOperation(op: Record<string, unknown>) {
     case "fileDispute":
       if (op.milestoneIndex == null || !op.bond || !op.evidenceHash || !op.reason)
         throw new Error("milestoneIndex, bond, evidenceHash, reason required for fileDispute");
-      return {
-        type: "fileDispute" as const,
-        milestoneIndex: Number(op.milestoneIndex),
-        bond: BigInt(op.bond as string),
-        evidenceHash: op.evidenceHash as Hex,
-        reason: op.reason as string,
-      };
+      {
+        const bondStr = String(op.bond);
+        if (!/^(?:0x[0-9a-fA-F]+|[0-9]+)$/.test(bondStr)) {
+          throw new Error("bond must be a numeric or hex string");
+        }
+        return {
+          type: "fileDispute" as const,
+          milestoneIndex: Number(op.milestoneIndex),
+          bond: BigInt(bondStr),
+          evidenceHash: op.evidenceHash as Hex,
+          reason: op.reason as string,
+        };
+      }
 
     default:
       throw new Error(`Unknown operation type: ${op.type}`);

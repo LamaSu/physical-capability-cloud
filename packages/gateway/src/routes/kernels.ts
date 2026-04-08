@@ -126,7 +126,17 @@ export async function kernelRoutes(app: FastifyInstance) {
       const updated = repos.kernels.update(id, updates);
       return { kernel: updated ?? existing, created: false };
     }
-    const inserted = repos.kernels.insert(kernel);
+    let inserted;
+    try {
+      inserted = repos.kernels.insert(kernel);
+    } catch (err: any) {
+      // Race condition: another request inserted the same ID between our findById and insert
+      if (err?.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || err?.message?.includes("UNIQUE constraint")) {
+        const existing = repos.kernels.findById(id);
+        return { kernel: existing, created: false };
+      }
+      throw err;
+    }
     trackServerEvent("kernel_registered", {
       kernelId: kernel.id,
       name: kernel.name,

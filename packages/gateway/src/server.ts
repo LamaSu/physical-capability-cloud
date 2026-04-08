@@ -28,6 +28,7 @@ import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
 import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
+import { evidenceSearchRoutes } from "./routes/evidence-search.js";
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
 import { orchestratorRoutes } from "./routes/orchestrator.js";
@@ -104,6 +105,40 @@ export async function createGateway(port = 3200) {
   } catch {
     // Sentry not initialised (no DSN) — safe to ignore
   }
+
+  // Global error handler — intercepts known client errors (malformed bodies, etc.)
+  // and returns a clean 400 instead of letting them bubble as 500s to Sentry.
+  // Registered after Sentry so Sentry's onError hook still fires for 500s.
+  app.setErrorHandler((error, request, reply) => {
+    // FST_ERR_CTP_BODY_TOO_LARGE or body size mismatch
+    if (
+      error.code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
+      error.code === "FST_ERR_CTP_INVALID_CONTENT_LENGTH" ||
+      error.code === "FST_ERR_CTP_BODY_SIZE_MISMATCH" ||
+      (error.message && (error.message.includes("Content-Length") || error.message.includes("body size")))
+    ) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        message: "Request body size did not match Content-Length header",
+      });
+    }
+    // FST_ERR_CTP_INVALID_MEDIA_TYPE
+    if (error.code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
+      return reply.status(415).send({
+        error: "unsupported_media_type",
+        message: error.message,
+      });
+    }
+    // For 5xx errors, report to Sentry before responding
+    const statusCode = error.statusCode ?? 500;
+    if (statusCode >= 500) {
+      Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+    }
+    return reply.status(statusCode).send({
+      error: statusCode >= 500 ? "internal_error" : "request_error",
+      message: statusCode >= 500 ? "Internal Server Error" : error.message,
+    });
+  });
 
   // Close the DB, IPFS node, and batch settlement when the server shuts down
   app.addHook("onClose", async () => {
@@ -234,6 +269,7 @@ export async function createGateway(port = 3200) {
   await app.register(sensorRoutes);
   await app.register(batchRoutes);
   await app.register(evidenceEncryptedRoutes);
+  await app.register(evidenceSearchRoutes);
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
   await app.register(orchestratorRoutes);
@@ -335,15 +371,25 @@ export async function createGateway(port = 3200) {
     await app.register(fastifyStatic, {
       root: dashboardPath,
       prefix: "/",
-      decorateReply: false,
-      wildcard: true,
+      decorateReply: true,
+      wildcard: false,
     });
 
     // SPA fallback — serve index.html for all non-API/SSE routes
     // Only if the requested path isn't a real file in dist/
-    const { readFileSync, existsSync } = await import("node:fs");
-    const { join } = await import("node:path");
+    const { readFileSync, existsSync, createReadStream, statSync } = await import("node:fs");
+    const { join, extname } = await import("node:path");
     const indexHtml = readFileSync(join(dashboardPath, "index.html"), "utf-8");
+
+    // Minimal extension → MIME type map for static file serving
+    const MIME_TYPES: Record<string, string> = {
+      ".html": "text/html", ".js": "application/javascript", ".mjs": "application/javascript",
+      ".css": "text/css", ".json": "application/json", ".png": "image/png",
+      ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+      ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff": "font/woff",
+      ".woff2": "font/woff2", ".ttf": "font/ttf", ".map": "application/json",
+      ".txt": "text/plain", ".webp": "image/webp", ".avif": "image/avif",
+    };
 
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
@@ -352,8 +398,9 @@ export async function createGateway(port = 3200) {
       // Check if a real static file exists (strip query string)
       const cleanPath = req.url.split("?")[0];
       const filePath = join(dashboardPath, cleanPath);
-      if (existsSync(filePath) && !filePath.endsWith("/")) {
-        return reply.sendFile(cleanPath);
+      if (existsSync(filePath) && !filePath.endsWith("/") && statSync(filePath).isFile()) {
+        const mime = MIME_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+        return reply.type(mime).send(createReadStream(filePath));
       }
       // Check for index.html in subdirectories (e.g. /docs/ → /docs/index.html)
       const indexPath = join(dashboardPath, cleanPath, "index.html");
