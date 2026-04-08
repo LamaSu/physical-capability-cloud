@@ -163,10 +163,8 @@ export async function a2aRelayRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── WebSocket: agent connection ─────────────────────────────────
-  (app as any).get(
-    "/ws/a2a",
-    { websocket: true },
-    (socket: import("ws").WebSocket, req: FastifyRequest) => {
+  // @ts-ignore — @fastify/websocket handler signature differs from standard route handler
+  app.get("/ws/a2a", { websocket: true } as any, function wsHandler(socket: any, req: any) {
       const { agentId, role } = req.query as { agentId?: string; role?: string };
       if (!agentId) {
         socket.close(4000, "agentId query param required");
