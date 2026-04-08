@@ -596,7 +596,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         bundleHash,
         kernelSignature: {
           signer: "0x0000000000000000000000000000000000000000",
-          algorithm: "sha256",
+          algorithm: "ed25519" as const,
           value: "gateway-auto-sign",
         },
         createdAt: now,
@@ -634,7 +634,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           assuranceTier: 0,
           bundleHash,
           events,
-          kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "sha256", value: "gateway-auto-sign" },
+          kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
           createdAt: now,
         });
         ipfsCid = archiveResult.cid;
@@ -650,8 +650,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           await mockStorage.init();
           const mockResult = await mockStorage.archiveBundle({
             id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
-            assuranceTier: 0, bundleHash, events,
-            kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "sha256", value: "gateway-auto-sign" },
+            assuranceTier: 0, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
+            kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
             createdAt: now,
           });
           ipfsCid = mockResult.cid;
