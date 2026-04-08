@@ -40,7 +40,9 @@
  *     - Used by Verifier to appraise Evidence
  */
 
-import type { EvidenceBundle, EvidenceEvent, VerificationAttestation, AssuranceTier } from "./evidence.js";
+import type { EvidenceBundle, EvidenceEvent } from "./evidence.js";
+import type { VerificationAttestation } from "./verifier.js";
+import type { AssuranceTier } from "./common.js";
 
 // ── RATS Core Concepts ────────────────────────────────────────────────────────
 
