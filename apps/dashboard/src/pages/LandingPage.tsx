@@ -137,6 +137,234 @@ function SectionLabel({ text }: { text: string }) {
 // Terminal CTA button
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Agent Context Button — ripple + dissolve into explanation
+// ---------------------------------------------------------------------------
+
+function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
+  const [state, setState] = useState<"idle" | "loading" | "ripple" | "copied">("idle");
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [ripplePos, setRipplePos] = useState({ x: 0, y: 0 });
+
+  const handle = useCallback(async (e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setRipplePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setState("loading");
+    try {
+      const base = import.meta.env.PROD ? "" : "http://localhost:3200";
+      const [packRes, toolsRes] = await Promise.all([
+        fetch(`${base}/agent-context-pack`),
+        fetch(`${base}/agent-package.json`),
+      ]);
+      const contextPack = await packRes.text();
+      const toolsJson = await toolsRes.text();
+      const combined = contextPack +
+        "\n\n---\n\n## Agent Tool Definitions (JSON)\n\n```json\n" +
+        toolsJson + "\n```\n";
+      await navigator.clipboard.writeText(combined);
+      setState("ripple");
+      setTimeout(() => {
+        setState("copied");
+        onCopied?.();
+      }, 800);
+      setTimeout(() => setState("idle"), 4000);
+    } catch {
+      setState("idle");
+    }
+  }, [onCopied]);
+
+  const label = state === "loading" ? "Loading..." : state === "copied" ? "Copied — paste into your agent" : state === "ripple" ? "Copied!" : "Copy Agent Context";
+  const isActive = state === "ripple" || state === "copied";
+
+  return (
+    <button
+      ref={btnRef}
+      onClick={handle}
+      disabled={state === "loading"}
+      style={{
+        position: "relative",
+        overflow: "hidden",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "0.75rem",
+        fontFamily: sg,
+        fontWeight: 700,
+        fontSize: "clamp(1.2rem, 2.5vw, 1.5rem)",
+        color: isActive ? BG_DARK : "#fff",
+        background: isActive ? GREEN : `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
+        border: "none",
+        borderRadius: "12px",
+        padding: "1.25rem 3rem",
+        cursor: state === "loading" ? "wait" : "pointer",
+        transition: "transform 0.2s, box-shadow 0.2s, background 0.3s, color 0.3s",
+        boxShadow: `0 0 30px rgba(0, 255, 136, 0.3)`,
+      }}
+      onMouseEnter={(e) => {
+        if (!isActive) {
+          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(0, 255, 136, 0.5)`;
+        }
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(0, 255, 136, 0.3)`;
+      }}
+    >
+      {state === "ripple" && (
+        <span
+          style={{
+            position: "absolute",
+            left: ripplePos.x,
+            top: ripplePos.y,
+            width: "10px",
+            height: "10px",
+            borderRadius: "50%",
+            background: "rgba(255,255,255,0.6)",
+            transform: "translate(-50%, -50%) scale(0)",
+            animation: "agent-ripple 0.8s ease-out forwards",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+      {state === "copied" ? "\u2713 " : state === "loading" ? "" : "\u2B07 "}{label}
+      <style>{`
+        @keyframes agent-ripple {
+          0% { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+          100% { transform: translate(-50%, -50%) scale(60); opacity: 0; }
+        }
+      `}</style>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding Overlay — dissolves in after copy
+// ---------------------------------------------------------------------------
+
+function OnboardingOverlay({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  if (!visible) return null;
+
+  const steps = [
+    { num: "1", title: "Paste into your agent", desc: "Open Claude, GPT, Cursor, or any AI agent. Paste the copied context. Your agent now knows the entire PCC API." },
+    { num: "2", title: "Get an API key", desc: "Ask your agent: \"Provision me a PCC API key with my email.\" It will call the API and return your key." },
+    { num: "3", title: "Describe your machine", desc: "Tell your agent what equipment you have. \"I have a Prusa MK4 at 192.168.1.50 running OctoPrint.\" It handles the rest." },
+    { num: "4", title: "Go live", desc: "Your agent registers your device, runs a test job, and proves your capability. You're on the network earning from jobs." },
+  ];
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 9999,
+        background: "rgba(5, 10, 14, 0.95)",
+        backdropFilter: "blur(20px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "overlay-fade-in 0.6s ease-out",
+        cursor: "pointer",
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: "720px",
+          width: "90%",
+          padding: "3rem",
+          cursor: "default",
+          animation: "overlay-slide-up 0.6s ease-out",
+        }}
+      >
+        <h2 style={{
+          fontFamily: sg,
+          fontWeight: 800,
+          fontSize: "clamp(1.8rem, 4vw, 2.5rem)",
+          color: TEXT_PRIMARY,
+          marginBottom: "0.5rem",
+        }}>
+          Context copied. Here's what to do next.
+        </h2>
+        <p style={{ fontFamily: inter, color: TEXT_MUTED, fontSize: "1.1rem", marginBottom: "2.5rem" }}>
+          Four steps to put your machine on the network.
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          {steps.map((s) => (
+            <div key={s.num} style={{
+              display: "flex",
+              gap: "1.25rem",
+              alignItems: "flex-start",
+              padding: "1.25rem",
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: "12px",
+            }}>
+              <div style={{
+                flexShrink: 0,
+                width: "40px",
+                height: "40px",
+                borderRadius: "50%",
+                background: `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontFamily: sg,
+                fontWeight: 800,
+                fontSize: "1.1rem",
+                color: BG_DARK,
+              }}>
+                {s.num}
+              </div>
+              <div>
+                <div style={{ fontFamily: sg, fontWeight: 700, fontSize: "1.1rem", color: TEXT_PRIMARY, marginBottom: "0.25rem" }}>
+                  {s.title}
+                </div>
+                <div style={{ fontFamily: inter, fontSize: "0.95rem", color: TEXT_MUTED, lineHeight: 1.6 }}>
+                  {s.desc}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: "2rem", textAlign: "center" }}>
+          <button
+            onClick={onClose}
+            style={{
+              fontFamily: sg,
+              fontWeight: 600,
+              fontSize: "1rem",
+              color: TEXT_MUTED,
+              background: "none",
+              border: `1px solid rgba(255,255,255,0.15)`,
+              borderRadius: "8px",
+              padding: "0.75rem 2rem",
+              cursor: "pointer",
+              transition: "border-color 0.2s, color 0.2s",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = GREEN;
+              (e.currentTarget as HTMLButtonElement).style.color = TEXT_PRIMARY;
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.15)";
+              (e.currentTarget as HTMLButtonElement).style.color = TEXT_MUTED;
+            }}
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+      <style>{`
+        @keyframes overlay-fade-in { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes overlay-slide-up { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+    </div>
+  );
+}
+
 function TerminalCTA({
   text,
   href,
@@ -532,7 +760,7 @@ function Nav() {
 // Hero section
 // ---------------------------------------------------------------------------
 
-function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
+function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: number }; onContextCopied?: () => void }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setMounted(true), 100);
@@ -625,12 +853,24 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             </p>
           </div>
 
-          {/* CTAs */}
+          {/* Primary CTA */}
           <div
             style={{
               opacity: mounted ? 1 : 0,
               transform: mounted ? "translateY(0)" : "translateY(10px)",
-              transition: "opacity 0.7s ease 0.6s, transform 0.7s ease 0.6s",
+              transition: "opacity 0.7s ease 0.55s, transform 0.7s ease 0.55s",
+              marginBottom: "1.5rem",
+            }}
+          >
+            <AgentContextButton onCopied={onContextCopied} />
+          </div>
+
+          {/* Secondary CTAs */}
+          <div
+            style={{
+              opacity: mounted ? 1 : 0,
+              transform: mounted ? "translateY(0)" : "translateY(10px)",
+              transition: "opacity 0.7s ease 0.7s, transform 0.7s ease 0.7s",
               display: "flex",
               alignItems: "center",
               gap: "2rem",
@@ -638,7 +878,6 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             }}
           >
             <TerminalCTA text="pip install pcc-node" href="https://pypi.org/project/pcc-node/" />
-            <GhostLink text="Read the docs" href="https://capability.network/docs" />
           </div>
         </div>
 
@@ -2734,6 +2973,7 @@ function injectStyles() {
 
 export function LandingPage() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [showOverlay, setShowOverlay] = useState(false);
 
   useEffect(() => {
     injectStyles();
@@ -2758,7 +2998,8 @@ export function LandingPage() {
       }}
     >
       <Nav />
-      <HeroSection mousePos={mousePos} />
+      <OnboardingOverlay visible={showOverlay} onClose={() => setShowOverlay(false)} />
+      <HeroSection mousePos={mousePos} onContextCopied={() => setShowOverlay(true)} />
       <ProblemSection />
       <HowItWorksSection />
       <ForOperatorsSection />
