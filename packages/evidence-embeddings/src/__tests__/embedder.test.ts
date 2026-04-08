@@ -73,7 +73,8 @@ describe("MockBackend", () => {
 
 describe("CLIPBackend", () => {
   const originalFetch = globalThis.fetch;
-  let warnSpy: ReturnType<typeof vi.spyOn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let warnSpy: any;
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
