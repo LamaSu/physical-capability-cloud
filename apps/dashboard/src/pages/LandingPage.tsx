@@ -144,11 +144,13 @@ function SectionLabel({ text }: { text: string }) {
 function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
   const [state, setState] = useState<"idle" | "loading" | "ripple" | "copied">("idle");
   const btnRef = useRef<HTMLButtonElement>(null);
-  const [ripplePos, setRipplePos] = useState({ x: 0, y: 0 });
+  const [rippleOrigin, setRippleOrigin] = useState({ x: 0, y: 0 });
+  const [showFullscreenRipple, setShowFullscreenRipple] = useState(false);
+  const [contentFading, setContentFading] = useState(false);
 
   const handle = useCallback(async (e: React.MouseEvent) => {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setRipplePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    // Capture the click position in viewport coordinates for full-screen ripple origin
+    setRippleOrigin({ x: e.clientX, y: e.clientY });
     setState("loading");
     try {
       const base = import.meta.env.PROD ? "" : "http://localhost:3200";
@@ -162,12 +164,18 @@ function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
         "\n\n---\n\n## Agent Tool Definitions (JSON)\n\n```json\n" +
         toolsJson + "\n```\n";
       await navigator.clipboard.writeText(combined);
+      // Trigger the full-screen ripple
       setState("ripple");
+      setShowFullscreenRipple(true);
+      setContentFading(true);
+      // After the ripple expands and dissolves (1.5s), show the overlay
       setTimeout(() => {
         setState("copied");
+        setShowFullscreenRipple(false);
+        setContentFading(false);
         onCopied?.();
-      }, 800);
-      setTimeout(() => setState("idle"), 4000);
+      }, 1500);
+      setTimeout(() => setState("idle"), 5000);
     } catch {
       setState("idle");
     }
@@ -177,63 +185,125 @@ function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
   const isActive = state === "ripple" || state === "copied";
 
   return (
-    <button
-      ref={btnRef}
-      onClick={handle}
-      disabled={state === "loading"}
-      style={{
-        position: "relative",
-        overflow: "hidden",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "0.75rem",
-        fontFamily: sg,
-        fontWeight: 700,
-        fontSize: "clamp(1.2rem, 2.5vw, 1.5rem)",
-        color: isActive ? BG_DARK : "#fff",
-        background: isActive ? GREEN : `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
-        border: "none",
-        borderRadius: "12px",
-        padding: "1.25rem 3rem",
-        cursor: state === "loading" ? "wait" : "pointer",
-        transition: "transform 0.2s, box-shadow 0.2s, background 0.3s, color 0.3s",
-        boxShadow: `0 0 30px rgba(59, 130, 246, 0.3)`,
-      }}
-      onMouseEnter={(e) => {
-        if (!isActive) {
-          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
-          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(59, 130, 246, 0.5)`;
-        }
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
-        (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(59, 130, 246, 0.3)`;
-      }}
-    >
-      {state === "ripple" && (
-        <span
+    <>
+      <button
+        ref={btnRef}
+        onClick={handle}
+        disabled={state === "loading"}
+        className="pcc-agent-btn"
+        style={{
+          position: "relative",
+          overflow: "hidden",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "0.75rem",
+          fontFamily: sg,
+          fontWeight: 700,
+          fontSize: "clamp(1rem, 2.5vw, 1.5rem)",
+          color: isActive ? BG_DARK : "#fff",
+          background: isActive ? GREEN : `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
+          border: "none",
+          borderRadius: "12px",
+          padding: "1.25rem 2rem",
+          cursor: state === "loading" ? "wait" : "pointer",
+          transition: "transform 0.2s, box-shadow 0.2s, background 0.3s, color 0.3s",
+          boxShadow: `0 0 30px rgba(59, 130, 246, 0.3)`,
+        }}
+        onMouseEnter={(e) => {
+          if (!isActive) {
+            (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+            (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(59, 130, 246, 0.5)`;
+          }
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(59, 130, 246, 0.3)`;
+        }}
+      >
+        {state === "copied" ? "\u2713 " : state === "loading" ? "" : "\u2B07 "}{label}
+      </button>
+
+      {/* Full-screen MASSIVE ripple overlay */}
+      {showFullscreenRipple && (
+        <div
           style={{
-            position: "absolute",
-            left: ripplePos.x,
-            top: ripplePos.y,
-            width: "10px",
-            height: "10px",
-            borderRadius: "50%",
-            background: "rgba(255,255,255,0.6)",
-            transform: "translate(-50%, -50%) scale(0)",
-            animation: "agent-ripple 0.8s ease-out forwards",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
             pointerEvents: "none",
+            zIndex: 9998,
+            overflow: "hidden",
+          }}
+        >
+          {/* Primary ripple — bold blue wave */}
+          <div
+            style={{
+              position: "absolute",
+              left: rippleOrigin.x,
+              top: rippleOrigin.y,
+              width: "300vmax",
+              height: "300vmax",
+              borderRadius: "50%",
+              background: `radial-gradient(circle, rgba(96,165,250,0.7) 0%, rgba(59,130,246,0.45) 30%, rgba(0,212,255,0.2) 55%, transparent 75%)`,
+              transform: "translate(-50%, -50%) scale(0)",
+              animation: "pcc-ripple-expand 1.5s cubic-bezier(0.16, 1, 0.3, 1) forwards",
+              pointerEvents: "none",
+            }}
+          />
+          {/* Secondary ripple ring — delayed, thinner, creates depth */}
+          <div
+            style={{
+              position: "absolute",
+              left: rippleOrigin.x,
+              top: rippleOrigin.y,
+              width: "300vmax",
+              height: "300vmax",
+              borderRadius: "50%",
+              background: `radial-gradient(circle, transparent 0%, transparent 25%, rgba(96,165,250,0.3) 35%, rgba(59,130,246,0.15) 50%, transparent 65%)`,
+              transform: "translate(-50%, -50%) scale(0)",
+              animation: "pcc-ripple-ring 1.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards",
+              pointerEvents: "none",
+            }}
+          />
+        </div>
+      )}
+
+      {/* Content fade-out overlay that appears during ripple */}
+      {contentFading && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: BG_DARK,
+            opacity: 0,
+            animation: "pcc-content-fadeout 1.5s ease-in forwards",
+            pointerEvents: "none",
+            zIndex: 9997,
           }}
         />
       )}
-      {state === "copied" ? "\u2713 " : state === "loading" ? "" : "\u2B07 "}{label}
+
       <style>{`
-        @keyframes agent-ripple {
+        @keyframes pcc-ripple-expand {
           0% { transform: translate(-50%, -50%) scale(0); opacity: 1; }
-          100% { transform: translate(-50%, -50%) scale(60); opacity: 0; }
+          40% { opacity: 0.85; }
+          70% { opacity: 0.5; }
+          100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+        }
+        @keyframes pcc-ripple-ring {
+          0% { transform: translate(-50%, -50%) scale(0); opacity: 0.8; }
+          50% { opacity: 0.6; }
+          100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+        }
+        @keyframes pcc-content-fadeout {
+          0% { opacity: 0; }
+          40% { opacity: 0.4; }
+          100% { opacity: 0.9; }
         }
       `}</style>
-    </button>
+    </>
   );
 }
 
@@ -268,6 +338,7 @@ function OnboardingOverlay({ visible, onClose }: { visible: boolean; onClose: ()
       onClick={onClose}
     >
       <div
+        className="pcc-onboard-panel"
         onClick={(e) => e.stopPropagation()}
         style={{
           maxWidth: "720px",
@@ -388,6 +459,7 @@ function TerminalCTA({
 
   const el = (
     <button
+      className="pcc-terminal-cta"
       onClick={handle}
       style={{
         display: "inline-flex",
@@ -402,6 +474,9 @@ function TerminalCTA({
         padding: "0.875rem 1.5rem",
         cursor: "pointer",
         transition: "border-color 0.2s, box-shadow 0.2s, color 0.2s",
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = GREEN;
@@ -588,6 +663,7 @@ function CapabilityGrid({ mousePos }: { mousePos: { x: number; y: number } }) {
   return (
     <div
       ref={gridRef}
+      className="pcc-cap-grid"
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(4, 1fr)",
@@ -699,7 +775,7 @@ function Nav() {
         </button>
 
         {/* Links */}
-        <div style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
+        <div className="pcc-nav-links" style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
           {[
             { text: "For Operators", href: "#operators" },
             { text: "For Agents", href: "#agents" },
@@ -780,6 +856,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
       }}
     >
       <div
+        className="pcc-hero-grid"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -814,6 +891,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
             }}
           >
             <h1
+              className="pcc-hero-h1"
               style={{
                 fontFamily: sg,
                 fontWeight: 800,
@@ -1019,6 +1097,7 @@ function ProblemSection() {
 
         {/* Problem cards */}
         <div
+          className="pcc-three-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
@@ -1112,6 +1191,7 @@ function ProblemSection() {
               for custom lab fixtures.
             </p>
             <div
+              className="pcc-before-after"
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr auto 1fr",
@@ -1163,6 +1243,7 @@ function ProblemSection() {
 
               {/* Arrow */}
               <div
+                className="pcc-before-after-arrow"
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -1394,6 +1475,7 @@ function HowItWorksSection() {
 
           {/* Phase cards */}
           <div
+            className="pcc-six-col"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(6, 1fr)",
@@ -1646,6 +1728,7 @@ function ForOperatorsSection() {
       }}
     >
       <div
+        className="pcc-two-col"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -1769,6 +1852,7 @@ function ForOperatorsSection() {
               SUPPORTED HARDWARE
             </p>
             <div
+              className="pcc-hw-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(3, 1fr)",
@@ -1823,7 +1907,7 @@ function ForOperatorsSection() {
         </div>
 
         {/* Right — terminal */}
-        <div ref={ref} style={{ position: "sticky", top: "6rem" }}>
+        <div ref={ref} className="pcc-sticky-side" style={{ position: "sticky", top: "6rem" }}>
           <TerminalBlock active={inView} />
         </div>
       </div>
@@ -1945,6 +2029,7 @@ function ForAgentsSection() {
       }}
     >
       <div
+        className="pcc-two-col"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -2071,6 +2156,7 @@ function ForAgentsSection() {
               {A2A_INTENTS.map((row, i) => (
                 <div
                   key={row.intent}
+                  className="pcc-a2a-row"
                   style={{
                     display: "grid",
                     gridTemplateColumns: "1fr 1fr auto",
@@ -2151,7 +2237,7 @@ function ForAgentsSection() {
         </div>
 
         {/* Right — code block */}
-        <div style={{ position: "sticky", top: "6rem" }}>
+        <div className="pcc-sticky-side" style={{ position: "sticky", top: "6rem" }}>
           <Reveal>
             <div
               style={{
@@ -2322,7 +2408,7 @@ function SponsorsSection() {
           </p>
 
           {/* Legend */}
-          <div style={{ display: "flex", gap: "2rem", marginBottom: "3rem" }}>
+          <div className="pcc-legend" style={{ display: "flex", gap: "2rem", marginBottom: "3rem" }}>
             {[
               { status: "LIVE", color: GREEN, meaning: "Verifiable on-chain or live network call today" },
               { status: "WIRED", color: AMBER, meaning: "Code complete, architecture proven" },
@@ -2339,6 +2425,7 @@ function SponsorsSection() {
 
         {/* Grid: 3 top, 2 bottom centered */}
         <div
+          className="pcc-three-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
@@ -2353,6 +2440,7 @@ function SponsorsSection() {
           ))}
         </div>
         <div
+          className="pcc-sponsor-bottom"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(2, 1fr)",
@@ -2613,6 +2701,7 @@ function StatsSection() {
 
         {/* Stats grid */}
         <div
+          className="pcc-stat-grid"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
@@ -2662,6 +2751,7 @@ function StatsSection() {
 
         {/* Differentiators */}
         <div
+          className="pcc-four-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
@@ -2850,6 +2940,7 @@ function Footer() {
         }}
       >
         <div
+          className="pcc-footer-bar"
           style={{
             maxWidth: "1200px",
             margin: "0 auto",
@@ -2884,7 +2975,7 @@ function Footer() {
             </span>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
+          <div className="pcc-footer-links" style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
             {[
               { text: "capability.network", href: "https://capability.network" },
               { text: "GitHub", href: "https://capability.network" },
@@ -2949,13 +3040,187 @@ const GLOBAL_STYLES = `
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.8); }
   }
+
+  /* ── Global: prevent horizontal overflow ────────────── */
+  html, body {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* ── Touch target minimum: 44px for interactive elements ── */
+  .pcc-agent-btn,
+  .pcc-terminal-cta,
+  nav button,
+  nav a {
+    min-height: 44px;
+  }
+
+  /* ── Responsive images/media ────────────────────────── */
+  img, video, iframe, svg {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* ── Terminal CTA: prevent horizontal overflow ──────── */
+  .pcc-terminal-cta {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Mobile responsive ─────────────────────────────── */
   @media (max-width: 768px) {
-    .pcc-hero-grid { grid-template-columns: 1fr !important; }
-    .pcc-two-col { grid-template-columns: 1fr !important; }
-    .pcc-six-col { grid-template-columns: 1fr !important; }
-    .pcc-three-col { grid-template-columns: 1fr !important; }
-    .pcc-four-col { grid-template-columns: repeat(2, 1fr) !important; }
-    .pcc-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    /* Hero: stack text + grid vertically */
+    .pcc-hero-grid {
+      grid-template-columns: 1fr !important;
+      gap: 2rem !important;
+    }
+
+    /* All 2-column layouts: stack */
+    .pcc-two-col {
+      grid-template-columns: 1fr !important;
+      gap: 2.5rem !important;
+    }
+
+    /* 6-column "How It Works" timeline: stack */
+    .pcc-six-col {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+
+    /* Problem cards (3-col) + sponsors top row: stack */
+    .pcc-three-col {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+
+    /* Differentiators (4-col): single column on mobile */
+    .pcc-four-col {
+      grid-template-columns: 1fr !important;
+      gap: 1.5rem !important;
+    }
+
+    /* Stats grid: 2 columns */
+    .pcc-stat-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Capability grid: 2 columns */
+    .pcc-cap-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Before/After comparison: stack vertically */
+    .pcc-before-after {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+    .pcc-before-after-arrow {
+      display: none !important;
+    }
+
+    /* Nav: hide links, keep logo + live link */
+    .pcc-nav-links {
+      display: none !important;
+    }
+
+    /* Sponsors bottom 2-col row: stack */
+    .pcc-sponsor-bottom {
+      grid-template-columns: 1fr !important;
+      max-width: 100% !important;
+    }
+
+    /* A2A intents table: stack columns */
+    .pcc-a2a-row {
+      grid-template-columns: 1fr !important;
+      gap: 0.25rem !important;
+    }
+
+    /* Supported hardware grid: 2 columns */
+    .pcc-hw-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Sticky sidebars: un-stick on mobile */
+    .pcc-sticky-side {
+      position: static !important;
+    }
+
+    /* Agent button: full width on mobile, proper touch target */
+    .pcc-agent-btn {
+      width: 100% !important;
+      justify-content: center !important;
+      padding: 1.25rem 1.5rem !important;
+      min-height: 56px !important;
+      font-size: clamp(0.95rem, 2.5vw, 1.25rem) !important;
+    }
+
+    /* Legend: stack on mobile */
+    .pcc-legend {
+      flex-direction: column !important;
+      gap: 0.75rem !important;
+    }
+
+    /* Hero h1: prevent overflow on narrow screens */
+    .pcc-hero-h1 {
+      font-size: clamp(2.25rem, 8vw, 3.5rem) !important;
+      word-break: break-word !important;
+    }
+
+    /* Onboarding overlay: tighter padding on mobile */
+    .pcc-onboard-panel {
+      padding: 1.5rem !important;
+    }
+
+    /* Footer bar: stack on mobile */
+    .pcc-footer-bar {
+      flex-direction: column !important;
+      text-align: center !important;
+      gap: 1rem !important;
+    }
+    .pcc-footer-links {
+      flex-wrap: wrap !important;
+      justify-content: center !important;
+    }
+
+    /* Terminal CTA buttons: scale down, prevent overflow */
+    .pcc-terminal-cta {
+      font-size: 0.75rem !important;
+      padding: 0.75rem 1rem !important;
+      max-width: 100% !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+
+    /* Code blocks: horizontal scroll on mobile */
+    pre, code {
+      max-width: 100% !important;
+      overflow-x: auto !important;
+      -webkit-overflow-scrolling: touch !important;
+    }
+  }
+
+  /* ── Small phones (< 480px) ───────────────────────── */
+  @media (max-width: 480px) {
+    .pcc-stat-grid {
+      grid-template-columns: 1fr !important;
+    }
+    .pcc-cap-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+    .pcc-hw-grid {
+      grid-template-columns: 1fr !important;
+    }
+    .pcc-hero-h1 {
+      font-size: clamp(1.75rem, 7vw, 2.5rem) !important;
+    }
+    /* Onboarding overlay steps: tighter */
+    .pcc-onboard-panel {
+      padding: 1rem !important;
+    }
+    .pcc-onboard-panel h2 {
+      font-size: 1.5rem !important;
+    }
   }
 `;
 
