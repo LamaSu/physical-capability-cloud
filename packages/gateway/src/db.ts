@@ -57,7 +57,7 @@ export function initStore(options?: { seed?: boolean }): Store {
  */
 export function getRepos(): Repositories {
   if (!_store) throw new Error("[db] Store not initialised — call initStore() first");
-  return _store.repos;
+  return _store.repos as unknown as Repositories;
 }
 
 /**
