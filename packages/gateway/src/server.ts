@@ -79,6 +79,7 @@ import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { analyticsRoutes } from "./routes/analytics.js";
+import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -224,6 +225,10 @@ export async function createGateway(port = 3200) {
 
   // Service status (public — shows which services are mock vs real)
   await app.register(statusRoutes);
+
+  // Security monitor — attack detection, honeypots, rate tracking, fingerprinting
+  // Must be registered early so the onRequest hook fires before route handlers
+  await app.register(securityMonitorPlugin);
 
   // Analytics proxy (PostHog, Sentry, GA4 — server-side API aggregation)
   await app.register(analyticsRoutes);
