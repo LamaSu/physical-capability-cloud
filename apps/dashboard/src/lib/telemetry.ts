@@ -25,6 +25,22 @@ export function initTelemetry(): void {
       capture_pageview: false, // We handle SPA page views via usePageTracking
       capture_pageleave: true,
       autocapture: true,
+      // Event night: 100% session recording, heatmaps, dead click detection
+      disable_session_recording: false,
+      enable_recording_console_log: true,
+      enable_heatmaps: true,
+      capture_dead_clicks: true,
+      capture_performance: true,
+      session_recording: {
+        recordCrossOriginIframes: true,
+        networkPayloadCapture: { recordBody: true, recordHeaders: true },
+      },
+      loaded: (ph) => {
+        ph.register({
+          app: "pcc-dashboard",
+          environment: IS_PROD ? "production" : "development",
+        });
+      },
     });
   }
 
@@ -37,8 +53,8 @@ export function initTelemetry(): void {
         Sentry.browserTracingIntegration(),
         Sentry.replayIntegration(),
       ],
-      tracesSampleRate: IS_PROD ? 0.2 : 1.0,
-      replaysSessionSampleRate: 0.1,
+      tracesSampleRate: 1.0, // 100% — event night, capture everything
+      replaysSessionSampleRate: 1.0, // 100% — record every session
       replaysOnErrorSampleRate: 1.0,
     });
   }
