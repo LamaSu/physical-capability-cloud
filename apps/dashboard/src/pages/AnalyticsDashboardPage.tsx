@@ -71,6 +71,16 @@ interface ErrorsData {
   error?: string;
 }
 
+interface SecurityData {
+  attacks: { type: string; ip: string; path: string; payload: string; ua: string; timestamp: string; count: number }[];
+  honeypots: { path: string; ip: string; ua: string; count: number }[];
+  bots: { type: string; confidence: number; ip: string; reason: string; ua: string; count: number }[];
+  rateLimits: { ip: string; requestCount: number; ua: string }[];
+  totalSecurityEvents: number;
+  breakdown: Record<string, number>;
+  error?: string;
+}
+
 interface DevicesData {
   browsers: { name: string; count: number }[];
   os: { name: string; count: number }[];
@@ -547,6 +557,135 @@ function SentryErrors({ data, loading }: { data: ErrorsData | undefined; loading
 // Devices & Geography — pie charts + country list
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Security Events — attacks, honeypots, bots, rate limits
+// ---------------------------------------------------------------------------
+
+const SEVERITY_COLORS: Record<string, string> = {
+  sqli: "text-red-400",
+  xss: "text-red-400",
+  path_traversal: "text-amber-400",
+  cmd_injection: "text-red-500",
+  headless: "text-violet-400",
+  automation: "text-violet-400",
+  stealth_browser: "text-cyan-400",
+  scraper: "text-amber-400",
+  ai_agent: "text-teal-400",
+  known_scanner: "text-red-400",
+};
+
+function SecurityEvents({ data, loading }: { data: SecurityData | undefined; loading: boolean }) {
+  if (loading) {
+    return (
+      <GlassPanel padding="lg">
+        <Skeleton className="h-4 w-32 mb-4" />
+        <Skeleton className="h-48 w-full" />
+      </GlassPanel>
+    );
+  }
+
+  const total = data?.totalSecurityEvents ?? 0;
+  const attacks = data?.attacks ?? [];
+  const honeypots = data?.honeypots ?? [];
+  const bots = data?.bots ?? [];
+  const rateLimits = data?.rateLimits ?? [];
+  const breakdown = data?.breakdown ?? {};
+
+  const hasEvents = total > 0;
+
+  return (
+    <GlassPanel padding="lg" glow={attacks.length > 0 ? "gold" : hasEvents ? "green" : undefined}>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Security Events</h2>
+        <div className="flex gap-2">
+          {Object.entries(breakdown).map(([name, count]) => (
+            <span key={name} className="px-2 py-0.5 rounded bg-white/[0.04] text-[10px] text-white/40">
+              {name.replace(/_/g, " ")} <span className="text-white/60 font-mono">{count}</span>
+            </span>
+          ))}
+          {total > 0 && <GlowBadge color="gold">{total} events</GlowBadge>}
+        </div>
+      </div>
+
+      {!hasEvents ? (
+        <div className="py-8 text-center text-white/20 text-sm">
+          {data?.error ? `Error: ${data.error}` : "No security events detected — monitoring active"}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* Attacks */}
+          {attacks.length > 0 && (
+            <div>
+              <div className="text-[10px] text-red-400/70 uppercase tracking-wider mb-2 font-medium">Attack Attempts</div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {attacks.map((a, i) => (
+                  <div key={i} className="flex items-start gap-2 px-2 py-1.5 rounded bg-red-500/[0.04] border border-red-500/[0.08] text-xs">
+                    <span className={`flex-shrink-0 font-mono font-medium ${SEVERITY_COLORS[a.type] ?? "text-red-400"}`}>{a.type}</span>
+                    <span className="text-white/30 font-mono flex-shrink-0">{a.ip}</span>
+                    <span className="text-white/50 truncate flex-1">{a.path}</span>
+                    <span className="text-white/20 text-[10px] flex-shrink-0">{a.count}x</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Honeypots */}
+          {honeypots.length > 0 && (
+            <div>
+              <div className="text-[10px] text-amber-400/70 uppercase tracking-wider mb-2 font-medium">Honeypot Triggers</div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {honeypots.map((h, i) => (
+                  <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded bg-amber-500/[0.04] border border-amber-500/[0.08] text-xs">
+                    <span className="text-amber-400 font-mono flex-shrink-0">{h.path}</span>
+                    <span className="text-white/30 font-mono flex-shrink-0">{h.ip}</span>
+                    <span className="text-white/20 truncate flex-1">{h.ua.slice(0, 60)}</span>
+                    <span className="text-white/20 text-[10px] flex-shrink-0">{h.count}x</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Bots */}
+          {bots.length > 0 && (
+            <div>
+              <div className="text-[10px] text-violet-400/70 uppercase tracking-wider mb-2 font-medium">Bot / Agent Detection</div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {bots.map((b, i) => (
+                  <div key={i} className="flex items-start gap-2 px-2 py-1.5 rounded bg-violet-500/[0.04] border border-violet-500/[0.08] text-xs">
+                    <span className={`flex-shrink-0 font-mono font-medium ${SEVERITY_COLORS[b.type] ?? "text-violet-400"}`}>{b.type}</span>
+                    <span className="text-white/30 font-mono flex-shrink-0">{b.ip}</span>
+                    <span className="text-white/40 truncate flex-1">{b.reason}</span>
+                    <span className="text-white/20 text-[10px] flex-shrink-0">{Math.round(b.confidence * 100)}%</span>
+                    <span className="text-white/20 text-[10px] flex-shrink-0">{b.count}x</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Rate Limits */}
+          {rateLimits.length > 0 && (
+            <div>
+              <div className="text-[10px] text-cyan-400/70 uppercase tracking-wider mb-2 font-medium">Rate Limit Exceeded</div>
+              <div className="space-y-1">
+                {rateLimits.map((r, i) => (
+                  <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded bg-cyan-500/[0.04] border border-cyan-500/[0.08] text-xs">
+                    <span className="text-cyan-400 font-mono flex-shrink-0">{r.ip}</span>
+                    <span className="text-white/50 font-mono">{r.requestCount} req/min</span>
+                    <span className="text-white/20 truncate flex-1">{r.ua.slice(0, 60)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </GlassPanel>
+  );
+}
+
 function DevicesAndGeo({
   devices,
   geo,
@@ -774,6 +913,13 @@ export function AnalyticsDashboardPage() {
     staleTime: 30_000,
   });
 
+  const securityQ = useQuery({
+    queryKey: ["analytics", "security", from, to],
+    queryFn: () => fetchJson<SecurityData>(`/api/analytics/security?from=${from}&to=${to}`),
+    staleTime: 10_000, // Fast refresh for security events
+    refetchInterval: 30_000, // Auto-refresh every 30s
+  });
+
   // -- Render ----------------------------------------------------------------
 
   return (
@@ -812,6 +958,10 @@ export function AnalyticsDashboardPage() {
         <TopPages data={pagesQ.data} loading={pagesQ.isLoading} />
         <TopEventsSection overview={overviewQ.data} events={eventsQ.data} loading={eventsQ.isLoading} />
       </div>
+
+      {/* Sentry Errors */}
+      {/* Security Events — attacks, bots, honeypots, rate limits */}
+      <SecurityEvents data={securityQ.data} loading={securityQ.isLoading} />
 
       {/* Sentry Errors */}
       <SentryErrors data={errorsQ.data} loading={errorsQ.isLoading} />
