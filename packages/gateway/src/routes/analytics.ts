@@ -619,4 +619,84 @@ export async function analyticsRoutes(app: FastifyInstance) {
       };
     }
   });
+
+  // -------------------------------------------------------------------------
+  // GET /api/analytics/security — security events from PostHog
+  // -------------------------------------------------------------------------
+
+  app.get("/api/analytics/security", async (request) => {
+    const qs = request.query as { from?: string; to?: string };
+    const range = defaultRange(qs.from, qs.to);
+    const ph = getPostHogConfig();
+
+    if (!ph.canQuery) {
+      return { attacks: [], honeypots: [], bots: [], rateLimits: [], totalSecurityEvents: 0 };
+    }
+
+    try {
+      return await cached(`security:${range.from}:${range.to}`, async () => {
+        const where = `timestamp >= '${range.from}' AND timestamp <= '${range.to} 23:59:59'`;
+
+        const [attacks, honeypots, bots, rateLimits, summary] = await Promise.all([
+          posthogQuery(
+            `SELECT properties.attackType as type, properties.ip as ip, properties.path as path, ` +
+              `properties.attackPayload as payload, properties.userAgent as ua, properties.timestamp as ts, count() as cnt ` +
+              `FROM events WHERE event = 'attack_detected' AND ${where} ` +
+              `GROUP BY type, ip, path, payload, ua, ts ORDER BY ts DESC LIMIT 50`,
+          ),
+          posthogQuery(
+            `SELECT properties.honeypotPath as path, properties.ip as ip, properties.userAgent as ua, count() as cnt ` +
+              `FROM events WHERE event = 'honeypot_triggered' AND ${where} ` +
+              `GROUP BY path, ip, ua ORDER BY cnt DESC LIMIT 30`,
+          ),
+          posthogQuery(
+            `SELECT properties.botType as type, properties.confidence as confidence, properties.ip as ip, ` +
+              `properties.reason as reason, properties.userAgent as ua, count() as cnt ` +
+              `FROM events WHERE event = 'bot_detected' AND ${where} ` +
+              `GROUP BY type, confidence, ip, reason, ua ORDER BY cnt DESC LIMIT 50`,
+          ),
+          posthogQuery(
+            `SELECT properties.ip as ip, properties.requestCount as count, properties.userAgent as ua ` +
+              `FROM events WHERE event = 'rate_limit_exceeded' AND ${where} ` +
+              `ORDER BY count DESC LIMIT 20`,
+          ),
+          posthogQuery(
+            `SELECT event as name, count() as cnt FROM events ` +
+              `WHERE event IN ('attack_detected', 'honeypot_triggered', 'bot_detected', 'rate_limit_exceeded') ` +
+              `AND ${where} GROUP BY name`,
+          ),
+        ]);
+
+        const summaryMap: Record<string, number> = {};
+        for (const r of summary.results) {
+          summaryMap[String(r[0])] = Number(r[1]);
+        }
+
+        return {
+          attacks: attacks.results.map((r) => ({
+            type: String(r[0] ?? ""), ip: String(r[1] ?? ""), path: String(r[2] ?? ""),
+            payload: String(r[3] ?? "").slice(0, 200), ua: String(r[4] ?? ""), timestamp: String(r[5] ?? ""), count: Number(r[6] ?? 0),
+          })),
+          honeypots: honeypots.results.map((r) => ({
+            path: String(r[0] ?? ""), ip: String(r[1] ?? ""), ua: String(r[2] ?? ""), count: Number(r[3] ?? 0),
+          })),
+          bots: bots.results.map((r) => ({
+            type: String(r[0] ?? ""), confidence: Number(r[1] ?? 0), ip: String(r[2] ?? ""),
+            reason: String(r[3] ?? ""), ua: String(r[4] ?? ""), count: Number(r[5] ?? 0),
+          })),
+          rateLimits: rateLimits.results.map((r) => ({
+            ip: String(r[0] ?? ""), requestCount: Number(r[1] ?? 0), ua: String(r[2] ?? ""),
+          })),
+          totalSecurityEvents: Object.values(summaryMap).reduce((a, b) => a + b, 0),
+          breakdown: summaryMap,
+        };
+      });
+    } catch (err) {
+      return {
+        attacks: [], honeypots: [], bots: [], rateLimits: [],
+        totalSecurityEvents: 0, breakdown: {},
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 }
