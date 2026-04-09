@@ -14,7 +14,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 // ---------------------------------------------------------------------------
 
 const SQLI_PATTERNS = [
-  /(\b(union|select|insert|update|delete|drop|alter|create|exec)\b.*\b(from|into|table|database|where)\b)/i,
+  /(\b(union|select|insert|update|delete|drop|alter|create|exec)\b.*?\b(from|into|table|database|where)\b)/i,
   /(['"];\s*(drop|delete|update|insert|alter)\b)/i,
   /(\bor\b\s+\d+\s*=\s*\d+)/i,
   /(--\s*$|;\s*--)/,
@@ -142,13 +142,12 @@ function scanRequest(req: FastifyRequest): { type: AttackType; source: string; v
     }
   }
 
-  // Scan body (string or object)
+  // Scan body (string or object) — scan first 10KB, don't skip large payloads
   if (req.body) {
     const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-    if (bodyStr.length < 10_000) { // Don't scan huge payloads
-      const attack = detectAttack(bodyStr);
-      if (attack) return { type: attack, source: "body", value: bodyStr.slice(0, 500) };
-    }
+    const scanSlice = bodyStr.slice(0, 10_000);
+    const attack = detectAttack(scanSlice);
+    if (attack) return { type: attack, source: "body", value: bodyStr.slice(0, 500) };
   }
 
   // Scan select headers
@@ -253,13 +252,26 @@ function buildFingerprint(req: FastifyRequest) {
 
 let _trackServerEvent: ((name: string, props: Record<string, unknown>, distinctId?: string) => void) | null = null;
 
+/** Strip HTML tags and escape special chars to prevent XSS when viewed in PostHog dashboards */
+function sanitize(val: unknown): unknown {
+  if (typeof val === "string") return val.replace(/[<>'"&]/g, (c) => `&#${c.charCodeAt(0)};`).slice(0, 500);
+  if (typeof val === "object" && val !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val)) out[k] = sanitize(v);
+    return out;
+  }
+  return val;
+}
+
 async function emitSecurityEvent(name: string, props: Record<string, unknown>) {
   try {
     if (!_trackServerEvent) {
       const mod = await import("../services/posthog-service.js");
       _trackServerEvent = mod.trackServerEvent;
     }
-    _trackServerEvent(name, props, `security:${props.ip ?? "unknown"}`);
+    // Sanitize all props to prevent XSS when attacker-controlled data is viewed in dashboards
+    const safeProps = sanitize(props) as Record<string, unknown>;
+    _trackServerEvent(name, safeProps, `security:${safeProps.ip ?? "unknown"}`);
   } catch {
     // PostHog not initialized — non-fatal
   }
@@ -280,7 +292,8 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         severity: "high",
       });
       app.log.warn({ msg: "HONEYPOT", ip: req.ip, path, ua: req.headers["user-agent"] });
-      // Return realistic-looking 404 to not tip off the attacker
+      // Add random delay (50-200ms) to match real 404 timing — prevents timing side-channel
+      await new Promise((r) => setTimeout(r, 50 + Math.random() * 150));
       return reply.status(404).send({ error: "not_found" });
     };
 
@@ -289,29 +302,49 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
     try { app.post(path, handler); } catch { /* route may conflict */ }
   }
 
-  // ── Request Scanning Hook (onRequest — fires before route handler) ──────
-  app.addHook("onRequest", async (req, _reply) => {
+  // ── Request Scanning Hook (onRequest — URL + headers only, body not yet parsed) ──
+  app.addHook("onRequest", async (req, reply) => {
     const fp = buildFingerprint(req);
 
-    // 1. Attack pattern detection
-    const attack = scanRequest(req);
-    if (attack) {
+    // 1. Attack pattern detection (URL + query + headers only — body is not available yet)
+    const urlAttack = detectAttack(req.url);
+    if (urlAttack) {
       emitSecurityEvent("attack_detected", {
         ...fp,
-        attackType: attack.type,
-        attackSource: attack.source,
-        attackPayload: attack.value.slice(0, 500),
+        attackType: urlAttack,
+        attackSource: "url",
+        attackPayload: req.url.slice(0, 500),
         severity: "critical",
       });
-      app.log.warn({
-        msg: "ATTACK_DETECTED",
-        type: attack.type,
-        ip: req.ip,
-        source: attack.source,
-        url: req.url,
-      });
-      // Don't block — let the request proceed so we capture more behavior
-      // The response will fail naturally on invalid input
+      app.log.warn({ msg: "ATTACK_DETECTED", type: urlAttack, ip: req.ip, source: "url", url: req.url });
+      // BLOCK known attacks — detection-only is insufficient for tonight
+      return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
+    }
+
+    // Scan query params
+    if (req.query && typeof req.query === "object") {
+      for (const [k, v] of Object.entries(req.query as Record<string, unknown>)) {
+        const str = `${k}=${v}`;
+        const attack = detectAttack(str);
+        if (attack) {
+          emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: "query", attackPayload: str.slice(0, 500), severity: "critical" });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "query", url: req.url });
+          return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
+        }
+      }
+    }
+
+    // Scan headers
+    for (const h of ["referer", "user-agent", "x-forwarded-for", "cookie"]) {
+      const val = req.headers[h];
+      if (val && typeof val === "string") {
+        const attack = detectAttack(val);
+        if (attack) {
+          emitSecurityEvent("attack_detected", { ...fp, attackType: attack, attackSource: `header:${h}`, attackPayload: val.slice(0, 300), severity: "critical" });
+          app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: `header:${h}` });
+          return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
+        }
+      }
     }
 
     // 2. Bot / stealth browser detection
@@ -332,7 +365,6 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
     // 3. Rate tracking
     const rate = trackRate(req.ip);
     if (rate.overLimit && rate.count === RATE_LIMIT + 1) {
-      // Only emit once when threshold is crossed
       emitSecurityEvent("rate_limit_exceeded", {
         ...fp,
         requestCount: rate.count,
@@ -340,6 +372,32 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
         severity: "medium",
       });
       app.log.warn({ msg: "RATE_LIMIT", ip: req.ip, count: rate.count });
+    }
+  });
+
+  // ── Body Scanning Hook (preHandler — body IS parsed here) ─────────────
+  // IMPORTANT: This must be in preHandler, NOT onRequest. Fastify parses the
+  // body between onRequest and preHandler. Scanning in onRequest misses all
+  // body-based attacks (the most common attack vector).
+  app.addHook("preHandler", async (req, reply) => {
+    if (!req.body || req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
+
+    const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    // Scan first 10KB (don't skip large bodies — scan the beginning)
+    const scanTarget = bodyStr.slice(0, 10_000);
+    const attack = detectAttack(scanTarget);
+
+    if (attack) {
+      const fp = buildFingerprint(req);
+      emitSecurityEvent("attack_detected", {
+        ...fp,
+        attackType: attack,
+        attackSource: "body",
+        attackPayload: scanTarget.slice(0, 500),
+        severity: "critical",
+      });
+      app.log.warn({ msg: "ATTACK_DETECTED", type: attack, ip: req.ip, source: "body", url: req.url });
+      return reply.status(403).send({ error: "forbidden", message: "Request blocked by security policy" });
     }
   });
 
