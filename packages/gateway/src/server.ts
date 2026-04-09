@@ -28,7 +28,7 @@ import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
 import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
-import { evidenceSearchRoutes } from "./routes/evidence-search.js";
+// import { evidenceSearchRoutes } from "./routes/evidence-search.js"; // TODO: Agent B — file not created yet
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
 import { orchestratorRoutes } from "./routes/orchestrator.js";
@@ -80,6 +80,7 @@ import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
+import { corsOriginValidator, securityHeaders, canProvision, canOpenSSE, trackSSEOpen, trackSSEClose, isTelemetryEmitAllowed } from "./middleware/security-hardening.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -97,7 +98,11 @@ export async function createGateway(port = 3200) {
   const { initKernelService } = await import("./services/kernel-service.js");
   initKernelService();
 
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
+    trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
+  });
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -158,7 +163,17 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  await app.register(cors, { origin: true, credentials: true });
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
+  await app.register(cors, {
+    origin: corsOriginValidator,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
+    maxAge: 86400, // Cache preflight for 24h
+  });
+
+  // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
+  await securityHeaders(app);
   await app.register(cookie);
   await app.register(websocket);
 
@@ -274,7 +289,7 @@ export async function createGateway(port = 3200) {
   await app.register(sensorRoutes);
   await app.register(batchRoutes);
   await app.register(evidenceEncryptedRoutes);
-  await app.register(evidenceSearchRoutes);
+  // await app.register(evidenceSearchRoutes); // TODO: Agent B — file not created yet
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
   await app.register(orchestratorRoutes);
