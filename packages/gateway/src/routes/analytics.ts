@@ -73,7 +73,7 @@ function toSentryStatsPeriod(from: string, to: string): string {
 // Simple in-memory cache (1 minute TTL)
 // ---------------------------------------------------------------------------
 
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 10_000; // 10s — event-night fast refresh
 const cache = new Map<string, { data: unknown; ts: number }>();
 
 function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
