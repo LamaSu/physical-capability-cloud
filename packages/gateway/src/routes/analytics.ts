@@ -12,8 +12,6 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { readdirSync, readFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Environment helpers
@@ -702,50 +700,4 @@ export async function analyticsRoutes(app: FastifyInstance) {
     }
   });
 
-  // -------------------------------------------------------------------------
-  // GET /api/analytics/reports — list saved daily report snapshots
-  // -------------------------------------------------------------------------
-
-  const REPORTS_DIR = resolve(process.cwd(), "ai", "reports");
-
-  app.get("/api/analytics/reports", async () => {
-    try {
-      if (!existsSync(REPORTS_DIR)) return { reports: [] };
-      const files = readdirSync(REPORTS_DIR)
-        .filter((f) => f.startsWith("analytics-") && f.endsWith(".json"))
-        .sort()
-        .reverse();
-      const reports = files.map((f) => {
-        const date = f.replace("analytics-", "").replace(".json", "");
-        return { date, filename: f };
-      });
-      return { reports };
-    } catch (err) {
-      return { reports: [], error: err instanceof Error ? err.message : String(err) };
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // GET /api/analytics/reports/:date — get a specific saved report
-  // -------------------------------------------------------------------------
-
-  app.get<{ Params: { date: string } }>("/api/analytics/reports/:date", async (request, reply) => {
-    try {
-      const date = request.params.date.replace(/[^0-9-]/g, ""); // sanitize
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        return reply.status(400).send({ error: "invalid_date_format" });
-      }
-      const filePath = join(REPORTS_DIR, `analytics-${date}.json`);
-      if (!existsSync(filePath)) {
-        return reply.status(404).send({ error: "report_not_found" });
-      }
-      const content = readFileSync(filePath, "utf-8");
-      return JSON.parse(content);
-    } catch (err) {
-      return reply.status(500).send({
-        error: "read_failed",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  });
 }

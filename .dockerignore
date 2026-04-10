@@ -8,3 +8,5 @@ node_modules
 packages/contracts/out
 packages/contracts/cache
 packages/contracts/lib
+ai
+scripts/.daily-report-state.json
