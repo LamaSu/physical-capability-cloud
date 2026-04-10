@@ -54,26 +54,28 @@ export interface SSEAuthResult {
  */
 export async function resolveSSEAuth(req: FastifyRequest): Promise<SSEAuthResult> {
   // --- 1. ?token= query param (primary path for browser EventSource) ---
+  // SECURITY: Query strings are logged by proxies/CDNs/access logs.
+  // This path is intentionally LIMITED to short-lived SIWE session tokens.
+  // Long-lived API keys (pcc_live_*) are REJECTED here — they must use
+  // the Authorization header instead to avoid leaking into logs.
   const tokenParam = (req.query as Record<string, string>).token;
   if (tokenParam) {
+    // Reject long-lived API keys in query string (logged leak risk)
+    if (tokenParam.startsWith("pcc_live_") || tokenParam.startsWith("pcc_test_")) {
+      return {
+        authenticated: false,
+        reason:
+          "API keys must be passed via Authorization: Bearer header, not ?token= query string (logged leak risk). Use a SIWE session token instead for browser EventSource.",
+      };
+    }
+
     // Build a synthetic request with the token injected as Authorization header.
-    // We never mutate req itself here — we pass a shallow overlay to the resolvers.
     const syntheticReq = {
       ...req,
       headers: { ...req.headers, authorization: `Bearer ${tokenParam}` },
-      // Keep cookies unchanged so cookie-path below isn't affected if called later
     } as FastifyRequest;
 
-    // Try as API key first (pcc_live_ / pcc_test_ prefix)
-    const apiKey = resolveApiKey(syntheticReq);
-    if (apiKey) {
-      req.apiKeyId = apiKey.id;
-      req.operatorId = apiKey.operatorId ?? null;
-      req.userId = (apiKey.operatorId as `0x${string}`) ?? null;
-      return { authenticated: true, userId: apiKey.operatorId ?? undefined };
-    }
-
-    // Then try as SIWE session token (dashboard reconnect after cookie clears)
+    // Treat as SIWE session token (dashboard reconnect after cookie clears)
     const session = resolveSession(syntheticReq);
     if (session) {
       req.userId = session.address;

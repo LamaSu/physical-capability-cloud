@@ -19,6 +19,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import type { VerificationAttestation } from "@pcc/spec";
 import { getComplianceFacade } from "../facades/index.js";
+import { getRepos } from "../db.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 //
@@ -98,12 +99,39 @@ export async function complianceRoutes(app: FastifyInstance) {
   // POST /api/jobs/:jobId/attestations/aggregate
   // Body: { attestations: VerificationAttestation[] }
   // Returns: AggregatedAttestationDTO
+  //
+  // Security: requires auth + ownership (kernel operator or job submitter only).
+  // Previously unauthenticated — allowed fabricated attestations against any job.
   app.post<{
     Params: { jobId: string };
     Body: { attestations: VerificationAttestation[] };
   }>(
     "/api/jobs/:jobId/attestations/aggregate",
     async (req, reply) => {
+      // Require authentication (apiGate runs before this route)
+      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      if (!operatorId) {
+        return reply.code(401).send({ error: "Authentication required" });
+      }
+
+      // Verify caller is the kernel operator or job submitter
+      const repos = getRepos();
+      const job = repos.jobs.findById(req.params.jobId);
+      if (!job) return reply.code(404).send({ error: "not_found" });
+
+      let isAuthorized = false;
+      if ((job as any).submittedBy === operatorId) isAuthorized = true;
+      if (!isAuthorized && (job as any).kernelId) {
+        const kernel = repos.kernels.findById((job as any).kernelId);
+        if (kernel && (kernel as any).operatorId === operatorId) isAuthorized = true;
+      }
+      if (!isAuthorized) {
+        return reply.code(403).send({
+          error: "forbidden",
+          message: "You can only aggregate attestations for your own jobs",
+        });
+      }
+
       const attestations = req.body?.attestations ?? [];
       const result = await facade.aggregateAttestations(req.params.jobId, attestations);
       return sendResult(reply, result);
