@@ -33,8 +33,7 @@ export function initTelemetry(): void {
       capture_performance: true,
       session_recording: {
         recordCrossOriginIframes: true,
-        networkPayloadCapture: { recordBody: true, recordHeaders: true },
-      },
+      } as any,
       loaded: (ph) => {
         ph.register({
           app: "pcc-dashboard",
