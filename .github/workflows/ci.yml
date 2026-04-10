@@ -47,9 +47,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Install forge-std
-        working-directory: packages/contracts
-        run: forge install foundry-rs/forge-std --no-git
+      # forge-std is checked out via submodules: recursive above
 
       - name: Run Solidity tests
         working-directory: packages/contracts
