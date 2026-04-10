@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -36,6 +37,7 @@ const DAYS = (() => {
 })();
 const SAVE = args.includes("--save");
 const COMPARE = args.includes("--compare");
+const OPEN = args.includes("--open");
 
 // ---------------------------------------------------------------------------
 // Colors (ANSI)
@@ -283,13 +285,243 @@ async function main() {
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(snapshot, null, 2));
 
-  if (SAVE) {
+  // Always save when --save OR --open (can't open without something to view)
+  if (SAVE || OPEN) {
     if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
     const reportFile = path.join(REPORTS_DIR, `analytics-${TO}.json`);
     fs.writeFileSync(reportFile, JSON.stringify(snapshot, null, 2));
     console.log(c.dim + `  Saved to ${reportFile}` + c.reset);
+
+    // Generate self-contained HTML viewer
+    const allReports = fs.readdirSync(REPORTS_DIR)
+      .filter((f) => f.startsWith("analytics-") && f.endsWith(".json"))
+      .sort()
+      .reverse()
+      .map((f) => {
+        try {
+          const date = f.replace("analytics-", "").replace(".json", "");
+          const data = JSON.parse(fs.readFileSync(path.join(REPORTS_DIR, f), "utf8"));
+          return { date, data };
+        } catch { return null; }
+      })
+      .filter(Boolean);
+
+    const htmlFile = path.join(REPORTS_DIR, "index.html");
+    fs.writeFileSync(htmlFile, buildHTML(allReports));
+    console.log(c.dim + `  Viewer: ${htmlFile}` + c.reset);
     console.log();
+
+    if (OPEN) {
+      const cmd = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
+      const args = process.platform === "win32" ? ["/c", "start", "", htmlFile] : [htmlFile];
+      spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// HTML Viewer Template (self-contained, no network dependencies)
+// ---------------------------------------------------------------------------
+
+function buildHTML(reports) {
+  const data = JSON.stringify(reports);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PCC Analytics — Local Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: #0a0e14; color: #e6e1dc; padding: 32px;
+    max-width: 1200px; margin: 0 auto;
+  }
+  h1 { font-size: 22px; letter-spacing: 0.5px; margin-bottom: 4px; background: linear-gradient(90deg,#14b8a6,#06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin: 20px 0 8px; font-weight: 600; }
+  .subtitle { color: rgba(255,255,255,0.4); font-size: 12px; margin-bottom: 24px; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; padding: 12px 16px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; }
+  select { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #e6e1dc; padding: 6px 10px; border-radius: 6px; font: inherit; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge.green { background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+  .badge.yellow { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+  .badge.red { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 14px 18px; }
+  .card .label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.4); margin-bottom: 4px; }
+  .card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card.alert .value { color: #f59e0b; }
+  .card.danger .value { color: #ef4444; }
+  .panel { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+  .panel.danger { background: rgba(239,68,68,0.03); border-color: rgba(239,68,68,0.15); }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 13px; }
+  .row:last-child { border-bottom: none; }
+  .row .name { color: rgba(255,255,255,0.65); font-family: "SF Mono", "Consolas", monospace; font-size: 12px; }
+  .row .count { color: rgba(255,255,255,0.85); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .bar { display: inline-block; height: 6px; background: linear-gradient(90deg,#14b8a6,#06b6d4); border-radius: 3px; margin-right: 10px; vertical-align: middle; }
+  .error-row .name { color: #ef4444; }
+  .empty { text-align: center; padding: 40px 20px; color: rgba(255,255,255,0.3); font-style: italic; }
+  .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 11px; color: rgba(255,255,255,0.3); }
+</style>
+</head>
+<body>
+<h1>PCC Analytics — Local Report</h1>
+<p class="subtitle">Saved locally. Not published anywhere.</p>
+
+<div class="controls">
+  <label>Date: <select id="dateSel"></select></label>
+  <span id="verdict" class="badge"></span>
+  <span id="generated" style="color: rgba(255,255,255,0.3); font-size: 11px; margin-left: auto;"></span>
+</div>
+
+<div id="content"></div>
+
+<div class="footer">
+  Viewer generated by <code>scripts/daily-report.mjs</code> — runs locally, reads <code>ai/reports/*.json</code>.
+  Nothing leaves your machine.
+</div>
+
+<script>
+const REPORTS = ${data};
+
+const sel = document.getElementById('dateSel');
+const content = document.getElementById('content');
+const verdictEl = document.getElementById('verdict');
+const genEl = document.getElementById('generated');
+
+REPORTS.forEach((r, i) => {
+  const opt = document.createElement('option');
+  opt.value = i;
+  opt.textContent = r.date;
+  sel.appendChild(opt);
+});
+
+function num(n) { return (n ?? 0).toLocaleString(); }
+function esc(s) { return String(s ?? '').replace(/[<>&"']/g, c => '&#' + c.charCodeAt(0) + ';'); }
+
+function render(i) {
+  const r = REPORTS[i];
+  if (!r) { content.innerHTML = '<div class="empty">No reports saved yet.</div>'; return; }
+  const d = r.data;
+  const ph = d.overview?.posthog || {};
+  const sn = d.overview?.sentry || {};
+  const sec = d.security || {};
+  const attacks = (sec.attacks || []).length;
+  const honeypots = (sec.honeypots || []).length;
+  const bots = (sec.bots || []).length;
+  const rates = (sec.rateLimits || []).length;
+
+  // Verdict
+  if (attacks > 0) { verdictEl.textContent = '● RED'; verdictEl.className = 'badge red'; }
+  else if (honeypots > 0 || rates > 0 || bots > 0) { verdictEl.textContent = '● YELLOW'; verdictEl.className = 'badge yellow'; }
+  else { verdictEl.textContent = '● GREEN'; verdictEl.className = 'badge green'; }
+
+  genEl.textContent = 'Generated: ' + new Date(d.generatedAt).toLocaleString();
+
+  let html = '';
+
+  // Overview cards
+  html += '<h2>Overview</h2><div class="grid">';
+  html += '<div class="card"><div class="label">Total Events</div><div class="value">' + num(ph.totalEvents) + '</div></div>';
+  html += '<div class="card"><div class="label">Unique Visitors</div><div class="value">' + num(ph.uniquePersons) + '</div></div>';
+  html += '<div class="card"><div class="label">Pageviews</div><div class="value">' + num(ph.pageviews) + '</div></div>';
+  html += '<div class="card' + (sn.unresolvedIssues > 0 ? ' alert' : '') + '"><div class="label">Unresolved Errors</div><div class="value">' + num(sn.unresolvedIssues) + '</div></div>';
+  html += '</div>';
+
+  // Security
+  if ((sec.totalSecurityEvents ?? 0) > 0 || attacks || honeypots || bots || rates) {
+    html += '<h2>Security Events</h2><div class="grid">';
+    html += '<div class="card' + (attacks > 0 ? ' danger' : '') + '"><div class="label">Attacks Blocked</div><div class="value">' + attacks + '</div></div>';
+    html += '<div class="card' + (honeypots > 0 ? ' alert' : '') + '"><div class="label">Honeypot Triggers</div><div class="value">' + honeypots + '</div></div>';
+    html += '<div class="card' + (bots > 0 ? ' alert' : '') + '"><div class="label">Bot Detections</div><div class="value">' + bots + '</div></div>';
+    html += '<div class="card' + (rates > 0 ? ' alert' : '') + '"><div class="label">Rate Limit Hits</div><div class="value">' + rates + '</div></div>';
+    html += '</div>';
+
+    if (attacks > 0) {
+      html += '<div class="panel danger"><h2 style="margin-top:0;color:#ef4444;">⚠ Attack Attempts</h2>';
+      sec.attacks.slice(0, 10).forEach(a => {
+        html += '<div class="row"><span class="name" style="color:#ef4444;">' + esc(a.type) + ' · ' + esc(a.ip) + ' → ' + esc(a.path) + '</span><span class="count">' + a.count + 'x</span></div>';
+      });
+      html += '</div>';
+    }
+    if (honeypots > 0) {
+      html += '<div class="panel"><h2 style="margin-top:0;">🪤 Honeypot Triggers</h2>';
+      sec.honeypots.slice(0, 10).forEach(h => {
+        html += '<div class="row"><span class="name">' + esc(h.path) + ' · ' + esc(h.ip) + '</span><span class="count">' + h.count + 'x</span></div>';
+      });
+      html += '</div>';
+    }
+    if (bots > 0) {
+      html += '<div class="panel"><h2 style="margin-top:0;">🤖 Bot Detections</h2>';
+      sec.bots.slice(0, 10).forEach(b => {
+        html += '<div class="row"><span class="name">' + esc(b.type) + ' · ' + esc(b.ip) + ' · ' + esc(b.reason) + '</span><span class="count">' + Math.round((b.confidence||0)*100) + '%</span></div>';
+      });
+      html += '</div>';
+    }
+  }
+
+  // Top events
+  if ((d.events?.events || []).length > 0) {
+    const maxE = d.events.events[0].count || 1;
+    html += '<h2>Top Custom Events</h2><div class="panel">';
+    d.events.events.slice(0, 10).forEach(e => {
+      const pct = Math.round((e.count / maxE) * 100);
+      html += '<div class="row"><span class="name"><span class="bar" style="width:' + pct + 'px;"></span>' + esc(e.name) + '</span><span class="count">' + num(e.count) + '</span></div>';
+    });
+    html += '</div>';
+  }
+
+  // Top pages
+  if ((d.pages?.pages || []).length > 0) {
+    const maxP = d.pages.pages[0].views || 1;
+    html += '<h2>Top Pages</h2><div class="panel">';
+    d.pages.pages.slice(0, 10).forEach(p => {
+      const pct = Math.round((p.views / maxP) * 100);
+      html += '<div class="row"><span class="name"><span class="bar" style="width:' + pct + 'px;"></span>' + esc(p.path) + '</span><span class="count">' + num(p.views) + ' · ' + num(p.uniqueVisitors) + ' unique</span></div>';
+    });
+    html += '</div>';
+  }
+
+  // Sentry errors
+  if ((d.errors?.issues || []).length > 0) {
+    html += '<h2>Sentry Errors — Top Unresolved</h2><div class="panel">';
+    d.errors.issues.slice(0, 10).forEach(issue => {
+      html += '<div class="row error-row"><span class="name">● ' + esc(issue.title) + '</span><span class="count">' + num(issue.count) + 'x</span></div>';
+    });
+    html += '</div>';
+  }
+
+  // Devices + geo
+  const browsers = d.devices?.browsers || [];
+  const countries = d.geo?.countries || [];
+  if (browsers.length > 0 || countries.length > 0) {
+    html += '<h2>Audience</h2><div class="grid">';
+    if (browsers.length > 0) {
+      html += '<div class="panel"><div class="label" style="font-size:10px;color:rgba(255,255,255,0.4);margin-bottom:8px;">BROWSERS</div>';
+      browsers.slice(0, 5).forEach(b => {
+        html += '<div class="row"><span class="name">' + esc(b.name) + '</span><span class="count">' + num(b.count) + '</span></div>';
+      });
+      html += '</div>';
+    }
+    if (countries.length > 0) {
+      html += '<div class="panel"><div class="label" style="font-size:10px;color:rgba(255,255,255,0.4);margin-bottom:8px;">COUNTRIES</div>';
+      countries.slice(0, 5).forEach(c => {
+        html += '<div class="row"><span class="name">' + esc(c.code + '  ' + c.name) + '</span><span class="count">' + num(c.visitors) + '</span></div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  content.innerHTML = html || '<div class="empty">Report has no data.</div>';
+}
+
+sel.addEventListener('change', e => render(parseInt(e.target.value, 10)));
+render(0);
+</script>
+</body>
+</html>`;
 }
 
 main().catch((err) => {
