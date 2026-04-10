@@ -201,6 +201,13 @@ export async function a2aRelayRoutes(app: FastifyInstance): Promise<void> {
         try {
           const data = typeof raw === "string" ? raw : raw.toString("utf-8");
           const message: A2AMessage = JSON.parse(data);
+          // Enforce message.from matches authenticated agentId (prevent spoofing)
+          if (message.from && message.from !== agentId) {
+            socket.send(JSON.stringify({ error: "from_mismatch", message: "message.from must match your authenticated agentId" }));
+            return;
+          }
+          // Stamp the from field with the authenticated agentId
+          message.from = agentId;
           state.routeMessage(message);
         } catch {
           // Ignore malformed messages

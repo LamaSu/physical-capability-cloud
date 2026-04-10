@@ -209,7 +209,11 @@ export async function onboardRoutes(app: FastifyInstance) {
 
         // Verify the caller owns this registration (prevents self-approval by other operators)
         const callerId = (req as any).operatorId ?? (req as any).userId;
-        const regOperator = (reg as any).walletAddress ?? (reg as any).email ?? (reg as any).operatorId;
+        const regOperator = (reg as any).operator?.walletAddress
+          ?? (reg as any).operator?.email
+          ?? (reg as any).walletAddress
+          ?? (reg as any).email
+          ?? (reg as any).operatorId;
         if (callerId && regOperator && callerId !== regOperator) {
           return reply.status(403).send({ error: "forbidden", message: "You can only prove your own registration" });
         }

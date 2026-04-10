@@ -32,10 +32,24 @@ export function getSession(id: string): GatewaySession | undefined {
   return session;
 }
 
+const MAX_SESSIONS = 10_000; // Cap to prevent memory exhaustion via X-PCC-Session header forging
+
 export function getOrCreateSession(id?: string): GatewaySession {
   if (id) {
     const existing = getSession(id);
     if (existing) return existing;
+    // Don't auto-create sessions from unknown X-PCC-Session headers —
+    // only look up existing ones. Prevents DoS via unlimited session creation.
+  }
+  // Cap total sessions to prevent memory exhaustion
+  if (sessions.size >= MAX_SESSIONS) {
+    // Evict oldest session
+    let oldest: string | null = null;
+    let oldestTime = Infinity;
+    for (const [sid, s] of sessions) {
+      if (s.lastActive < oldestTime) { oldestTime = s.lastActive; oldest = sid; }
+    }
+    if (oldest) sessions.delete(oldest);
   }
   return createSession();
 }

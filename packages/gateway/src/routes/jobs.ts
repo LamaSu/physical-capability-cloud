@@ -65,11 +65,19 @@ export async function jobRoutes(app: FastifyInstance) {
         if (!job) return reply.code(404).send({ error: "not_found" });
 
         // Only the assigned kernel operator or the job submitter can update status
-        if (operatorId && (job as any).kernelId) {
-          const kernel = repos.kernels.findById((job as any).kernelId);
-          const isKernelOperator = kernel && (kernel as any).operatorId === operatorId;
-          const isJobSubmitter = (job as any).submittedBy === operatorId;
-          if (!isKernelOperator && !isJobSubmitter) {
+        if (operatorId) {
+          let isAuthorized = false;
+
+          // Check if caller is the job submitter
+          if ((job as any).submittedBy === operatorId) isAuthorized = true;
+
+          // Check if caller is the kernel operator (when kernel exists)
+          if (!isAuthorized && (job as any).kernelId) {
+            const kernel = repos.kernels.findById((job as any).kernelId);
+            if (kernel && (kernel as any).operatorId === operatorId) isAuthorized = true;
+          }
+
+          if (!isAuthorized) {
             return reply.code(403).send({ error: "forbidden", message: "You can only update status for your own jobs" });
           }
         }
