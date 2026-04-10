@@ -902,9 +902,9 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
               }}
             >
               <span style={{ color: TEXT_PRIMARY, display: "block" }}>
-                Physical infrastructure,
+                Agentically compose
               </span>
-              <span style={{ color: GREEN, display: "block" }}>composable.</span>
+              <span style={{ color: GREEN, display: "block" }}>reality.</span>
             </h1>
           </div>
 
