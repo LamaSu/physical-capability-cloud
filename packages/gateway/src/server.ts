@@ -411,20 +411,29 @@ export async function createGateway(port = 3200) {
       ".txt": "text/plain", ".webp": "image/webp", ".avif": "image/avif",
     };
 
+    const { resolve: resolvePath } = await import("node:path");
+    const resolvedDashboardRoot = resolvePath(dashboardPath);
+
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith("/api/") || req.url.startsWith("/sse/")) {
         return reply.status(404).send({ error: "not_found" });
       }
       // Check if a real static file exists (strip query string)
       const cleanPath = req.url.split("?")[0];
-      const filePath = join(dashboardPath, cleanPath);
+      const filePath = resolvePath(join(dashboardPath, cleanPath));
+
+      // Path traversal guard — resolved path must stay within dashboard root
+      if (!filePath.startsWith(resolvedDashboardRoot)) {
+        return reply.status(400).send({ error: "invalid_path" });
+      }
+
       if (existsSync(filePath) && !filePath.endsWith("/") && statSync(filePath).isFile()) {
         const mime = MIME_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
         return reply.type(mime).send(createReadStream(filePath));
       }
       // Check for index.html in subdirectories (e.g. /docs/ → /docs/index.html)
-      const indexPath = join(dashboardPath, cleanPath, "index.html");
-      if (existsSync(indexPath)) {
+      const indexPath = resolvePath(join(dashboardPath, cleanPath, "index.html"));
+      if (indexPath.startsWith(resolvedDashboardRoot) && existsSync(indexPath)) {
         return reply.type("text/html").send(readFileSync(indexPath, "utf-8"));
       }
       return reply.type("text/html").send(indexHtml);

@@ -131,7 +131,6 @@ export async function negotiationRoutes(app: FastifyInstance) {
     } catch (err) {
       return reply.status(500).send({
         error: "Failed to create session",
-        details: err instanceof Error ? err.message : String(err),
       });
     }
   });
