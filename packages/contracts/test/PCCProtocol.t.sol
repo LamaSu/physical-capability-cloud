@@ -32,6 +32,12 @@ contract PCCProtocolTest is Test {
         usdc.mint(challenger, 10_000e6);
     }
 
+    /** Authorize the test contract as a verifier on a newly created escrow */
+    function _authorizeTestAsVerifier(MilestoneEscrow escrow_) internal {
+        vm.prank(arbiter);
+        escrow_.addVerifier(address(this));
+    }
+
     // ── Constructor / Immutability ───────────────────────────────────
 
     function test_constructor_setsFeeRecipientImmutable() public view {
@@ -189,6 +195,7 @@ contract PCCProtocolTest is Test {
         // Create escrow via factory
         address escrowAddr = protocol.createEscrow(payer, arbiter, address(usdc), cwmId);
         MilestoneEscrow escrow = MilestoneEscrow(escrowAddr);
+        _authorizeTestAsVerifier(escrow);
 
         uint256 milestoneAmount = 1000e6; // 1000 USDC
         uint256 expectedFee = (milestoneAmount * INITIAL_FEE_BPS) / 10000; // 15 USDC
@@ -237,6 +244,7 @@ contract PCCProtocolTest is Test {
         // Fee should only be deducted from the payment, NOT the bond
         address escrowAddr = protocol.createEscrow(payer, arbiter, address(usdc), cwmId);
         MilestoneEscrow escrow = MilestoneEscrow(escrowAddr);
+        _authorizeTestAsVerifier(escrow);
 
         uint256 milestoneAmount = 1000e6;
         uint256 bondAmount = 100e6;
@@ -277,6 +285,7 @@ contract PCCProtocolTest is Test {
 
         address escrowAddr = protocol.createEscrow(payer, arbiter, address(usdc), cwmId);
         MilestoneEscrow escrow = MilestoneEscrow(escrowAddr);
+        _authorizeTestAsVerifier(escrow);
 
         uint256 milestoneAmount = 1000e6;
         uint256 expectedFee = (milestoneAmount * 300) / 10000; // 30 USDC
@@ -301,6 +310,8 @@ contract PCCProtocolTest is Test {
     function test_multipleEscrows_feesAccumulate() public {
         address escrowAddr1 = protocol.createEscrow(payer, arbiter, address(usdc), keccak256("cwm-1"));
         address escrowAddr2 = protocol.createEscrow(payer, arbiter, address(usdc), keccak256("cwm-2"));
+        _authorizeTestAsVerifier(MilestoneEscrow(escrowAddr1));
+        _authorizeTestAsVerifier(MilestoneEscrow(escrowAddr2));
 
         uint256 amount = 1000e6;
         uint256 fee = (amount * INITIAL_FEE_BPS) / 10000;
