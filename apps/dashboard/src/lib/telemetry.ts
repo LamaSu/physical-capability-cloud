@@ -33,8 +33,9 @@ export function initTelemetry(): void {
       capture_performance: true,
       session_recording: {
         recordCrossOriginIframes: true,
+        // networkPayloadCapture is a runtime-supported feature not yet in the PostHog TS types
         networkPayloadCapture: { recordBody: true, recordHeaders: true },
-      },
+      } as any,
       loaded: (ph) => {
         ph.register({
           app: "pcc-dashboard",
