@@ -61,8 +61,14 @@ const VALID_TRACKS = Object.keys(TRACK_STEPS) as WizardTrack[];
 
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const PRUNE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_SESSIONS = 10_000; // Cap to prevent memory exhaustion
 
-const sessions = new Map<string, WizardSession>();
+// WizardSession extended with owner for access control
+interface OwnedWizardSession extends WizardSession {
+  ownerId?: string;
+}
+
+const sessions = new Map<string, OwnedWizardSession>();
 
 function pruneExpiredSessions(): void {
   const now = new Date().toISOString();
@@ -71,6 +77,25 @@ function pruneExpiredSessions(): void {
       sessions.delete(id);
     }
   }
+}
+
+/** Enforce memory cap via LRU-style eviction on the oldest session */
+function enforceSessionCap(): void {
+  if (sessions.size < MAX_SESSIONS) return;
+  let oldest: string | null = null;
+  let oldestTime = Infinity;
+  for (const [id, s] of sessions) {
+    const t = Date.parse(s.updatedAt);
+    if (t < oldestTime) { oldestTime = t; oldest = id; }
+  }
+  if (oldest) sessions.delete(oldest);
+}
+
+/** Check if the request's caller owns the session (or if session has no owner = legacy) */
+function isOwnerOrUnbound(session: OwnedWizardSession, callerId: string | undefined): boolean {
+  if (!session.ownerId) return true; // Legacy unbound session — allow
+  if (!callerId) return false;       // Unauthenticated caller on owned session
+  return session.ownerId === callerId;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,11 +145,17 @@ export async function wizardRoutes(app: FastifyInstance) {
         });
       }
 
+      // Enforce session cap before inserting
+      enforceSessionCap();
+
       const stepNames = TRACK_STEPS[track];
       const now = new Date().toISOString();
       const expiresAt = new Date(Date.now() + TTL_MS).toISOString();
 
-      const session: WizardSession = {
+      // Bind the session to the authenticated caller (prevents hijacking)
+      const ownerId = (req as any).operatorId ?? (req as any).userId;
+
+      const session: OwnedWizardSession = {
         id: uuidv4(),
         track,
         status: "in_progress",
@@ -140,6 +171,7 @@ export async function wizardRoutes(app: FastifyInstance) {
         createdAt: now,
         updatedAt: now,
         expiresAt,
+        ownerId,
       };
 
       sessions.set(session.id, session);
@@ -165,6 +197,12 @@ export async function wizardRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "session_expired" });
       }
 
+      // Ownership check — return 404 (not 403) to prevent enumeration
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!isOwnerOrUnbound(session, callerId)) {
+        return reply.code(404).send({ error: "session_not_found" });
+      }
+
       return { session };
     },
   );
@@ -183,6 +221,12 @@ export async function wizardRoutes(app: FastifyInstance) {
       if (session.expiresAt < new Date().toISOString()) {
         sessions.delete(req.params.id);
         return reply.code(404).send({ error: "session_expired" });
+      }
+
+      // Ownership check
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!isOwnerOrUnbound(session, callerId)) {
+        return reply.code(404).send({ error: "session_not_found" });
       }
 
       if (session.status !== "in_progress") {
@@ -243,6 +287,12 @@ export async function wizardRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "session_expired" });
       }
 
+      // Ownership check
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!isOwnerOrUnbound(session, callerId)) {
+        return reply.code(404).send({ error: "session_not_found" });
+      }
+
       if (session.status === "completed") {
         return reply.code(400).send({
           error: "already_completed",
@@ -293,6 +343,12 @@ export async function wizardRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "session_not_found" });
       }
 
+      // Ownership check
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!isOwnerOrUnbound(session, callerId)) {
+        return reply.code(404).send({ error: "session_not_found" });
+      }
+
       if (session.status === "completed") {
         return reply.code(400).send({
           error: "cannot_abandon_completed",
@@ -334,11 +390,13 @@ async function orchestrateCompletion(
         };
     }
   } catch (err) {
+    // Log the raw error server-side but don't leak internal details to client
     const message = err instanceof Error ? err.message : String(err);
+    console.error("[wizard] orchestrateCompletion error:", message);
     return {
       success: false,
       executedSteps,
-      error: message,
+      error: "orchestration_failed",
     };
   }
 }
