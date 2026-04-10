@@ -1,8 +1,9 @@
 import { eq, and } from "drizzle-orm";
 import { jobs } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IJobRepository } from "../interfaces/IJobRepository.js";
 
-export class JobRepository {
+export class JobRepository implements IJobRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

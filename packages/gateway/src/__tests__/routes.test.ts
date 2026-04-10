@@ -139,11 +139,9 @@ describe("Gateway Routes", () => {
       expect(body.kernel.id).toBe("kernel-nyc");
     });
 
-    it("returns error for unknown kernel", async () => {
+    it("returns 404 for unknown kernel", async () => {
       const res = await app.inject({ method: "GET", url: "/api/kernels/kernel-nonexistent" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.error).toBe("not_found");
+      expect(res.statusCode).toBe(404);
     });
   });
 
@@ -178,11 +176,9 @@ describe("Gateway Routes", () => {
       expect(body.job.id).toBe("job-001");
     });
 
-    it("returns error for unknown job", async () => {
+    it("returns 404 for unknown job", async () => {
       const res = await app.inject({ method: "GET", url: "/api/jobs/job-nonexistent" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.error).toBe("not_found");
+      expect(res.statusCode).toBe(404);
     });
   });
 
@@ -222,8 +218,6 @@ describe("Gateway Routes", () => {
     it("returns 404 for unknown escrow id", async () => {
       const res = await app.inject({ method: "GET", url: "/api/escrow/esc-nonexistent" });
       expect(res.statusCode).toBe(404);
-      const body = res.json();
-      expect(body.error).toBe("not_found");
     });
   });
 

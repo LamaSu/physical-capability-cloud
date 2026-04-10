@@ -8,6 +8,11 @@ import { NetworkTransport } from "../network-transport.js";
 import { NetworkedBus } from "../networked-bus.js";
 import { a2aRelayRoutes, RelayState } from "../relay-routes.js";
 
+// Polyfill WebSocket for Node.js (not available globally like in browsers)
+if (typeof globalThis.WebSocket === "undefined") {
+  (globalThis as any).WebSocket = WsWebSocket;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 function makeCard(overrides: Partial<AgentCard> = {}): AgentCard {

@@ -16,6 +16,7 @@ import { SWFRepository } from "./swf.js";
 import { ApiKeyRepository } from "./api-keys.js";
 import { AuditLogRepository } from "./audit-log.js";
 import { RegistrationRepository } from "./registrations.js";
+import { A2AMessageRepository } from "./a2a-messages.js";
 
 export {
   KernelRepository,
@@ -37,6 +38,7 @@ export {
   ApiKeyRepository,
   AuditLogRepository,
   RegistrationRepository,
+  A2AMessageRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -60,6 +62,7 @@ export function buildRepositories(db: StoreDB) {
     apiKeys: new ApiKeyRepository(db),
     auditLog: new AuditLogRepository(db),
     registrations: new RegistrationRepository(db),
+    a2aMessages: new A2AMessageRepository(db),
   };
 }
 

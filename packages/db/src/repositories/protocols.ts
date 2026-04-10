@@ -12,8 +12,11 @@ import {
   protocolEvents,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IProtocolTemplateRepository } from "../interfaces/IProtocolTemplateRepository.js";
+import type { IProtocolRunRepository } from "../interfaces/IProtocolRunRepository.js";
+import type { IAutomationStatusRepository } from "../interfaces/IAutomationStatusRepository.js";
 
-export class ProtocolTemplateRepository {
+export class ProtocolTemplateRepository implements IProtocolTemplateRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {
@@ -95,7 +98,7 @@ export class ProtocolTemplateRepository {
   }
 }
 
-export class ProtocolRunRepository {
+export class ProtocolRunRepository implements IProtocolRunRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {
@@ -170,7 +173,7 @@ export class ProtocolRunRepository {
   }
 }
 
-export class AutomationStatusRepository {
+export class AutomationStatusRepository implements IAutomationStatusRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

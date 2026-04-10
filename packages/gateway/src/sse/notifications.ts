@@ -1,10 +1,19 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { streamHub, type StreamEvent } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
-import { resolveApiKey } from "../auth/api-key-auth.js";
-import { resolveSession } from "../auth/siwe-auth.js";
+import { resolveSSEAuth } from "./sse-auth.js";
 
 const clients = new Set<FastifyReply>();
+
+// Strict origin allowlist — prevents subdomain spoofing attacks
+// (e.g., evil-capability.network would pass an .includes() check)
+const ALLOWED_SSE_ORIGINS = new Set([
+  "https://capability.network",
+  "http://localhost:5173",
+  "http://localhost:3200",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:3200",
+]);
 
 export function broadcastNotification(event: string, data: unknown) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -28,30 +37,22 @@ export function broadcastNotification(event: string, data: unknown) {
 }
 
 export async function notificationSSE(app: FastifyInstance) {
-  app.get("/sse/notifications", async (req, reply) => {
-    // Require authentication for SSE streams (prevents anonymous data access)
-    const apiKey = resolveApiKey(req);
-    const session = resolveSession(req);
-    if (!apiKey && !session) {
-      return reply.status(401).send({ error: "Authentication required for SSE streams" });
+  app.get("/sse/notifications", async (req: FastifyRequest, reply) => {
+    // Auth check MUST happen before reply.raw.writeHead(200, ...).
+    // Once 200 is written, headers are flushed and a 401 cannot be sent.
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
 
-    // SSE connection limit
+    // SSE connection limit per IP (prevents DoS via connection flooding)
     if (!canOpenSSE(req.ip)) {
       return reply.status(429).send({ error: "too_many_connections" });
     }
     trackSSEOpen(req.ip);
 
-    // Strict origin check — .includes() is vulnerable to subdomain spoofing
-    // (e.g., evil-capability.network passes .includes("capability.network"))
-    const ALLOWED_SSE_ORIGINS = new Set([
-      "https://capability.network",
-      "http://localhost:5173",
-      "http://localhost:3200",
-      "http://127.0.0.1:5173",
-      "http://127.0.0.1:3200",
-    ]);
-    const origin = req.headers.origin;
+    // Strict origin validation (prevents subdomain spoofing)
+    const origin = req.headers.origin as string | undefined;
     const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
       ? origin : "https://capability.network";
 

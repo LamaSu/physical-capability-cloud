@@ -1,6 +1,5 @@
 import type { FastifyInstance } from "fastify";
 import { sensorPipeline } from "../services.js";
-import { getRepos } from "../db.js";
 import type { SensorAnomaly } from "@pcc/spec";
 
 // Collected anomalies (pipeline emits these; we store for REST queries AND persist to DB)
@@ -60,18 +59,7 @@ export async function sensorRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { kernelId?: string; severity?: string; source?: string } }>(
     "/api/sensors/anomalies",
     async (req) => {
-      // If caller specifically wants DB history
-      if (req.query.source === "db") {
-        try {
-          const repos = getRepos();
-          // Use raw DB query for anomalies — the repos don't have a dedicated method yet
-          // so we fall through to in-memory
-        } catch {
-          // fall through
-        }
-      }
-
-      // Default: in-memory anomalies from pipeline
+      // In-memory anomalies from pipeline (DB history deferred to Wave 2)
       let anomalies = [...recentAnomalies];
       if (req.query.kernelId) {
         anomalies = anomalies.filter((a) => a.kernelId === req.query.kernelId);

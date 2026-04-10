@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createStore, type Store } from "../index.js";
-import { AuditLogRepository } from "../repositories/audit-log.js";
+import { createStore, type Store, type IAuditLogRepository } from "../index.js";
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("AuditLogRepository", () => {
   let store: Store;
-  let repo: AuditLogRepository;
+  let repo: IAuditLogRepository;
 
   beforeEach(() => {
     // Fresh in-memory DB per test, no seed data needed

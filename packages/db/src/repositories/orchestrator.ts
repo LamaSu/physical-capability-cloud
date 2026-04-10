@@ -10,8 +10,9 @@ import {
   resourceClaims,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IOrchestratorRepository } from "../interfaces/IOrchestratorRepository.js";
 
-export class OrchestratorRepository {
+export class OrchestratorRepository implements IOrchestratorRepository {
   constructor(private db: StoreDB) {}
 
   // ── Transfer Graphs ─────────────────────────────────────────────

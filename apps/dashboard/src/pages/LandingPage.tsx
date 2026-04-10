@@ -27,9 +27,9 @@ const sg = "'Space Grotesk', sans-serif";
 const inter = "'Inter', sans-serif";
 const mono = "'Space Mono', monospace";
 
-const GREEN = "#00ff88";
+const GREEN = "#60a5fa";
 const BG_DARK = "#050a0e";
-const BG_MID = "#0d1a14";
+const BG_MID = "#0a1628";
 const TEXT_PRIMARY = "#f0f4f0";
 const TEXT_MUTED = "#8a9a8a";
 const TEXT_DIM = "#4a5a4a";
@@ -137,6 +137,305 @@ function SectionLabel({ text }: { text: string }) {
 // Terminal CTA button
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Agent Context Button — ripple + dissolve into explanation
+// ---------------------------------------------------------------------------
+
+function AgentContextButton({ onCopied }: { onCopied?: () => void }) {
+  const [state, setState] = useState<"idle" | "loading" | "ripple" | "copied">("idle");
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [rippleOrigin, setRippleOrigin] = useState({ x: 0, y: 0 });
+  const [showFullscreenRipple, setShowFullscreenRipple] = useState(false);
+  const [contentFading, setContentFading] = useState(false);
+
+  const handle = useCallback(async (e: React.MouseEvent) => {
+    // Capture the click position in viewport coordinates for full-screen ripple origin
+    setRippleOrigin({ x: e.clientX, y: e.clientY });
+    setState("loading");
+    try {
+      const base = import.meta.env.PROD ? "" : "http://localhost:3200";
+      const [packRes, toolsRes] = await Promise.all([
+        fetch(`${base}/agent-context-pack`),
+        fetch(`${base}/agent-package.json`),
+      ]);
+      const contextPack = await packRes.text();
+      const toolsJson = await toolsRes.text();
+      const combined = contextPack +
+        "\n\n---\n\n## Agent Tool Definitions (JSON)\n\n```json\n" +
+        toolsJson + "\n```\n";
+      await navigator.clipboard.writeText(combined);
+      // Trigger the full-screen ripple
+      setState("ripple");
+      setShowFullscreenRipple(true);
+      setContentFading(true);
+      // After the ripple expands and dissolves (1.5s), show the overlay
+      setTimeout(() => {
+        setState("copied");
+        setShowFullscreenRipple(false);
+        setContentFading(false);
+        onCopied?.();
+      }, 1500);
+      setTimeout(() => setState("idle"), 5000);
+    } catch {
+      setState("idle");
+    }
+  }, [onCopied]);
+
+  const label = state === "loading" ? "Loading..." : state === "copied" ? "Copied — paste into your agent" : state === "ripple" ? "Copied!" : "Copy Agent Context";
+  const isActive = state === "ripple" || state === "copied";
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={handle}
+        disabled={state === "loading"}
+        className="pcc-agent-btn"
+        style={{
+          position: "relative",
+          overflow: "hidden",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "0.75rem",
+          fontFamily: sg,
+          fontWeight: 700,
+          fontSize: "clamp(1rem, 2.5vw, 1.5rem)",
+          color: isActive ? BG_DARK : "#fff",
+          background: isActive ? GREEN : `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
+          border: "none",
+          borderRadius: "12px",
+          padding: "1.25rem 2rem",
+          cursor: state === "loading" ? "wait" : "pointer",
+          transition: "transform 0.2s, box-shadow 0.2s, background 0.3s, color 0.3s",
+          boxShadow: `0 0 30px rgba(59, 130, 246, 0.3)`,
+        }}
+        onMouseEnter={(e) => {
+          if (!isActive) {
+            (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+            (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 50px rgba(59, 130, 246, 0.5)`;
+          }
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+          (e.currentTarget as HTMLButtonElement).style.boxShadow = `0 0 30px rgba(59, 130, 246, 0.3)`;
+        }}
+      >
+        {state === "copied" ? "\u2713 " : state === "loading" ? "" : "\u2B07 "}{label}
+      </button>
+
+      {/* Full-screen MASSIVE ripple overlay */}
+      {showFullscreenRipple && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            pointerEvents: "none",
+            zIndex: 9998,
+            overflow: "hidden",
+          }}
+        >
+          {/* Primary ripple — bold blue wave */}
+          <div
+            style={{
+              position: "absolute",
+              left: rippleOrigin.x,
+              top: rippleOrigin.y,
+              width: "300vmax",
+              height: "300vmax",
+              borderRadius: "50%",
+              background: `radial-gradient(circle, rgba(96,165,250,0.7) 0%, rgba(59,130,246,0.45) 30%, rgba(0,212,255,0.2) 55%, transparent 75%)`,
+              transform: "translate(-50%, -50%) scale(0)",
+              animation: "pcc-ripple-expand 1.5s cubic-bezier(0.16, 1, 0.3, 1) forwards",
+              pointerEvents: "none",
+            }}
+          />
+          {/* Secondary ripple ring — delayed, thinner, creates depth */}
+          <div
+            style={{
+              position: "absolute",
+              left: rippleOrigin.x,
+              top: rippleOrigin.y,
+              width: "300vmax",
+              height: "300vmax",
+              borderRadius: "50%",
+              background: `radial-gradient(circle, transparent 0%, transparent 25%, rgba(96,165,250,0.3) 35%, rgba(59,130,246,0.15) 50%, transparent 65%)`,
+              transform: "translate(-50%, -50%) scale(0)",
+              animation: "pcc-ripple-ring 1.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards",
+              pointerEvents: "none",
+            }}
+          />
+        </div>
+      )}
+
+      {/* Content fade-out overlay that appears during ripple */}
+      {contentFading && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: BG_DARK,
+            opacity: 0,
+            animation: "pcc-content-fadeout 1.5s ease-in forwards",
+            pointerEvents: "none",
+            zIndex: 9997,
+          }}
+        />
+      )}
+
+      <style>{`
+        @keyframes pcc-ripple-expand {
+          0% { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+          40% { opacity: 0.85; }
+          70% { opacity: 0.5; }
+          100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+        }
+        @keyframes pcc-ripple-ring {
+          0% { transform: translate(-50%, -50%) scale(0); opacity: 0.8; }
+          50% { opacity: 0.6; }
+          100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+        }
+        @keyframes pcc-content-fadeout {
+          0% { opacity: 0; }
+          40% { opacity: 0.4; }
+          100% { opacity: 0.9; }
+        }
+      `}</style>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding Overlay — dissolves in after copy
+// ---------------------------------------------------------------------------
+
+function OnboardingOverlay({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  if (!visible) return null;
+
+  const steps = [
+    { num: "1", title: "Paste into your agent", desc: "Open Claude, GPT, Cursor, or any AI agent. Paste the copied context. Your agent now knows the entire PCC API." },
+    { num: "2", title: "Get an API key", desc: "Ask your agent: \"Provision me a PCC API key with my email.\" It will call the API and return your key." },
+    { num: "3", title: "Describe your machine", desc: "Tell your agent what equipment you have. \"I have a Prusa MK4 at 192.168.1.50 running OctoPrint.\" It handles the rest." },
+    { num: "4", title: "Go live", desc: "Your agent registers your device, runs a test job, and proves your capability. You're on the network earning from jobs." },
+  ];
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 9999,
+        background: "rgba(5, 10, 14, 0.95)",
+        backdropFilter: "blur(20px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "overlay-fade-in 0.6s ease-out",
+        cursor: "pointer",
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="pcc-onboard-panel"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: "720px",
+          width: "90%",
+          padding: "3rem",
+          cursor: "default",
+          animation: "overlay-slide-up 0.6s ease-out",
+        }}
+      >
+        <h2 style={{
+          fontFamily: sg,
+          fontWeight: 800,
+          fontSize: "clamp(1.8rem, 4vw, 2.5rem)",
+          color: TEXT_PRIMARY,
+          marginBottom: "0.5rem",
+        }}>
+          Context copied. Here's what to do next.
+        </h2>
+        <p style={{ fontFamily: inter, color: TEXT_MUTED, fontSize: "1.1rem", marginBottom: "2.5rem" }}>
+          Four steps to put your machine on the network.
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          {steps.map((s) => (
+            <div key={s.num} style={{
+              display: "flex",
+              gap: "1.25rem",
+              alignItems: "flex-start",
+              padding: "1.25rem",
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: "12px",
+            }}>
+              <div style={{
+                flexShrink: 0,
+                width: "40px",
+                height: "40px",
+                borderRadius: "50%",
+                background: `linear-gradient(135deg, ${GREEN}, #00d4ff)`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontFamily: sg,
+                fontWeight: 800,
+                fontSize: "1.1rem",
+                color: BG_DARK,
+              }}>
+                {s.num}
+              </div>
+              <div>
+                <div style={{ fontFamily: sg, fontWeight: 700, fontSize: "1.1rem", color: TEXT_PRIMARY, marginBottom: "0.25rem" }}>
+                  {s.title}
+                </div>
+                <div style={{ fontFamily: inter, fontSize: "0.95rem", color: TEXT_MUTED, lineHeight: 1.6 }}>
+                  {s.desc}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: "2rem", textAlign: "center" }}>
+          <button
+            onClick={onClose}
+            style={{
+              fontFamily: sg,
+              fontWeight: 600,
+              fontSize: "1rem",
+              color: TEXT_MUTED,
+              background: "none",
+              border: `1px solid rgba(255,255,255,0.15)`,
+              borderRadius: "8px",
+              padding: "0.75rem 2rem",
+              cursor: "pointer",
+              transition: "border-color 0.2s, color 0.2s",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = GREEN;
+              (e.currentTarget as HTMLButtonElement).style.color = TEXT_PRIMARY;
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.15)";
+              (e.currentTarget as HTMLButtonElement).style.color = TEXT_MUTED;
+            }}
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+      <style>{`
+        @keyframes overlay-fade-in { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes overlay-slide-up { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+    </div>
+  );
+}
+
 function TerminalCTA({
   text,
   href,
@@ -160,6 +459,7 @@ function TerminalCTA({
 
   const el = (
     <button
+      className="pcc-terminal-cta"
       onClick={handle}
       style={{
         display: "inline-flex",
@@ -169,20 +469,23 @@ function TerminalCTA({
         fontSize: "0.9rem",
         color: copied ? TEXT_PRIMARY : GREEN,
         background: BG_MID,
-        border: `1px solid ${copied ? "rgba(0,255,136,0.8)" : "rgba(0,255,136,0.4)"}`,
+        border: `1px solid ${copied ? "rgba(59,130,246,0.8)" : "rgba(59,130,246,0.4)"}`,
         borderRadius: "4px",
         padding: "0.875rem 1.5rem",
         cursor: "pointer",
         transition: "border-color 0.2s, box-shadow 0.2s, color 0.2s",
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = GREEN;
-        (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(0,255,136,0.2)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(59,130,246,0.2)";
       }}
       onMouseLeave={(e) => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = copied
-          ? "rgba(0,255,136,0.8)"
-          : "rgba(0,255,136,0.4)";
+          ? "rgba(59,130,246,0.8)"
+          : "rgba(59,130,246,0.4)";
         (e.currentTarget as HTMLButtonElement).style.boxShadow = "none";
       }}
     >
@@ -320,9 +623,9 @@ function CapabilityGrid({ mousePos }: { mousePos: { x: number; y: number } }) {
   }, []);
 
   const getBorderColor = (state: TileState) => {
-    if (state === "available") return "rgba(0,255,136,0.3)";
+    if (state === "available") return "rgba(59,130,246,0.3)";
     if (state === "busy") return "rgba(245,166,35,0.3)";
-    return "rgba(0,255,136,0.06)";
+    return "rgba(59,130,246,0.06)";
   };
 
   const getIndicatorColor = (state: TileState) => {
@@ -360,6 +663,7 @@ function CapabilityGrid({ mousePos }: { mousePos: { x: number; y: number } }) {
   return (
     <div
       ref={gridRef}
+      className="pcc-cap-grid"
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(4, 1fr)",
@@ -439,7 +743,7 @@ function Nav() {
         zIndex: 50,
         background: "rgba(5,10,14,0.88)",
         backdropFilter: "blur(12px)",
-        borderBottom: "1px solid rgba(0,255,136,0.12)",
+        borderBottom: "1px solid rgba(59,130,246,0.12)",
       }}
     >
       <div
@@ -471,7 +775,7 @@ function Nav() {
         </button>
 
         {/* Links */}
-        <div style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
+        <div className="pcc-nav-links" style={{ display: "flex", alignItems: "center", gap: "2rem" }}>
           {[
             { text: "For Operators", href: "#operators" },
             { text: "For Agents", href: "#agents" },
@@ -505,7 +809,7 @@ function Nav() {
               fontFamily: mono,
               fontSize: "0.75rem",
               color: GREEN,
-              border: `1px solid rgba(0,255,136,0.4)`,
+              border: `1px solid rgba(59,130,246,0.4)`,
               borderRadius: "4px",
               padding: "0.35rem 0.85rem",
               textDecoration: "none",
@@ -513,10 +817,10 @@ function Nav() {
             }}
             onMouseEnter={(e) => {
               (e.currentTarget as HTMLAnchorElement).style.borderColor = GREEN;
-              (e.currentTarget as HTMLAnchorElement).style.boxShadow = "0 0 12px rgba(0,255,136,0.3)";
+              (e.currentTarget as HTMLAnchorElement).style.boxShadow = "0 0 12px rgba(59,130,246,0.3)";
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(0,255,136,0.4)";
+              (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(59,130,246,0.4)";
               (e.currentTarget as HTMLAnchorElement).style.boxShadow = "none";
             }}
           >
@@ -532,7 +836,7 @@ function Nav() {
 // Hero section
 // ---------------------------------------------------------------------------
 
-function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
+function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: number }; onContextCopied?: () => void }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setMounted(true), 100);
@@ -545,13 +849,14 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
         position: "relative",
         background: BG_DARK,
         backgroundImage:
-          "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,136,0.008) 2px, rgba(0,255,136,0.008) 4px)",
+          "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(59,130,246,0.008) 2px, rgba(59,130,246,0.008) 4px)",
         paddingTop: "clamp(6rem, 12vw, 10rem)",
         paddingBottom: "clamp(6rem, 10vw, 8rem)",
         overflow: "hidden",
       }}
     >
       <div
+        className="pcc-hero-grid"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -586,6 +891,7 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             }}
           >
             <h1
+              className="pcc-hero-h1"
               style={{
                 fontFamily: sg,
                 fontWeight: 800,
@@ -625,12 +931,24 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             </p>
           </div>
 
-          {/* CTAs */}
+          {/* Primary CTA */}
           <div
             style={{
               opacity: mounted ? 1 : 0,
               transform: mounted ? "translateY(0)" : "translateY(10px)",
-              transition: "opacity 0.7s ease 0.6s, transform 0.7s ease 0.6s",
+              transition: "opacity 0.7s ease 0.55s, transform 0.7s ease 0.55s",
+              marginBottom: "1.5rem",
+            }}
+          >
+            <AgentContextButton onCopied={onContextCopied} />
+          </div>
+
+          {/* Secondary CTAs */}
+          <div
+            style={{
+              opacity: mounted ? 1 : 0,
+              transform: mounted ? "translateY(0)" : "translateY(10px)",
+              transition: "opacity 0.7s ease 0.7s, transform 0.7s ease 0.7s",
               display: "flex",
               alignItems: "center",
               gap: "2rem",
@@ -638,7 +956,6 @@ function HeroSection({ mousePos }: { mousePos: { x: number; y: number } }) {
             }}
           >
             <TerminalCTA text="pip install pcc-node" href="https://pypi.org/project/pcc-node/" />
-            <GhostLink text="Read the docs" href="https://capability.network/docs" />
           </div>
         </div>
 
@@ -780,6 +1097,7 @@ function ProblemSection() {
 
         {/* Problem cards */}
         <div
+          className="pcc-three-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
@@ -792,7 +1110,7 @@ function ProblemSection() {
               <div
                 style={{
                   background: BG_DARK,
-                  border: "1px solid rgba(0,255,136,0.06)",
+                  border: "1px solid rgba(59,130,246,0.06)",
                   borderLeft: `3px solid ${AMBER}`,
                   borderRadius: "4px",
                   padding: "2rem",
@@ -843,7 +1161,7 @@ function ProblemSection() {
           <div
             style={{
               background: BG_DARK,
-              border: "1px solid rgba(0,255,136,0.06)",
+              border: "1px solid rgba(59,130,246,0.06)",
               borderRadius: "4px",
               padding: "2.5rem",
               marginBottom: "4rem",
@@ -873,6 +1191,7 @@ function ProblemSection() {
               for custom lab fixtures.
             </p>
             <div
+              className="pcc-before-after"
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr auto 1fr",
@@ -924,6 +1243,7 @@ function ProblemSection() {
 
               {/* Arrow */}
               <div
+                className="pcc-before-after-arrow"
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -939,10 +1259,10 @@ function ProblemSection() {
               {/* AFTER */}
               <div
                 style={{
-                  border: `1px solid rgba(0,255,136,0.2)`,
+                  border: `1px solid rgba(59,130,246,0.2)`,
                   borderRadius: "4px",
                   padding: "1.5rem",
-                  background: "rgba(0,255,136,0.03)",
+                  background: "rgba(59,130,246,0.03)",
                 }}
               >
                 <p
@@ -1133,7 +1453,7 @@ function HowItWorksSection() {
               left: 0,
               right: 0,
               height: "1px",
-              background: "rgba(0,255,136,0.15)",
+              background: "rgba(59,130,246,0.15)",
               zIndex: 0,
             }}
           />
@@ -1147,7 +1467,7 @@ function HowItWorksSection() {
               height: "8px",
               borderRadius: "50%",
               background: GREEN,
-              boxShadow: "0 0 16px rgba(0,255,136,0.9)",
+              boxShadow: "0 0 16px rgba(59,130,246,0.9)",
               zIndex: 2,
               transition: "left 0.1s linear",
             }}
@@ -1155,6 +1475,7 @@ function HowItWorksSection() {
 
           {/* Phase cards */}
           <div
+            className="pcc-six-col"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(6, 1fr)",
@@ -1170,25 +1491,25 @@ function HowItWorksSection() {
                   <div
                     style={{
                       background: BG_DARK,
-                      border: `1px solid ${isActive ? "rgba(0,255,136,0.3)" : "rgba(0,255,136,0.08)"}`,
+                      border: `1px solid ${isActive ? "rgba(59,130,246,0.3)" : "rgba(59,130,246,0.08)"}`,
                       borderRadius: "4px",
                       padding: "2rem",
                       transition: "border-color 0.3s, box-shadow 0.3s",
-                      boxShadow: isActive ? "0 8px 32px rgba(0,255,136,0.06)" : "none",
+                      boxShadow: isActive ? "0 8px 32px rgba(59,130,246,0.06)" : "none",
                       height: "100%",
                     }}
                     onMouseEnter={(e) => {
                       (e.currentTarget as HTMLDivElement).style.borderColor =
-                        "rgba(0,255,136,0.3)";
+                        "rgba(59,130,246,0.3)";
                       (e.currentTarget as HTMLDivElement).style.boxShadow =
-                        "0 8px 32px rgba(0,255,136,0.06)";
+                        "0 8px 32px rgba(59,130,246,0.06)";
                     }}
                     onMouseLeave={(e) => {
                       (e.currentTarget as HTMLDivElement).style.borderColor = isActive
-                        ? "rgba(0,255,136,0.3)"
-                        : "rgba(0,255,136,0.08)";
+                        ? "rgba(59,130,246,0.3)"
+                        : "rgba(59,130,246,0.08)";
                       (e.currentTarget as HTMLDivElement).style.boxShadow = isActive
-                        ? "0 8px 32px rgba(0,255,136,0.06)"
+                        ? "0 8px 32px rgba(59,130,246,0.06)"
                         : "none";
                     }}
                   >
@@ -1243,7 +1564,7 @@ function HowItWorksSection() {
                       style={{
                         fontFamily: mono,
                         fontSize: "0.65rem",
-                        color: "rgba(0,255,136,0.5)",
+                        color: "rgba(59,130,246,0.5)",
                         lineHeight: 1.5,
                       }}
                     >
@@ -1276,7 +1597,7 @@ const TERMINAL_LINES = [
   {
     prefix: "  ",
     text: "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    color: "rgba(0,255,136,0.2)",
+    color: "rgba(59,130,246,0.2)",
     delay: 3100,
   },
   { prefix: "  ", text: "Live. Accepting jobs. Earnings → your wallet.", color: GREEN, delay: 3200 },
@@ -1306,7 +1627,7 @@ function TerminalBlock({ active }: { active: boolean }) {
     <div
       style={{
         background: BG_DARK,
-        border: "1px solid rgba(0,255,136,0.2)",
+        border: "1px solid rgba(59,130,246,0.2)",
         borderRadius: "4px",
         padding: "2rem",
         fontFamily: mono,
@@ -1407,6 +1728,7 @@ function ForOperatorsSection() {
       }}
     >
       <div
+        className="pcc-two-col"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -1459,7 +1781,7 @@ function ForOperatorsSection() {
                       fontFamily: mono,
                       fontSize: "2.5rem",
                       fontWeight: 700,
-                      color: "rgba(0,255,136,0.15)",
+                      color: "rgba(59,130,246,0.15)",
                       lineHeight: 1,
                       flexShrink: 0,
                     }}
@@ -1490,8 +1812,8 @@ function ForOperatorsSection() {
                           fontFamily: mono,
                           fontSize: "0.65rem",
                           color: GREEN,
-                          background: "rgba(0,255,136,0.08)",
-                          border: "1px solid rgba(0,255,136,0.2)",
+                          background: "rgba(59,130,246,0.08)",
+                          border: "1px solid rgba(59,130,246,0.2)",
                           borderRadius: "2px",
                           padding: "0.15rem 0.4rem",
                         }}
@@ -1530,6 +1852,7 @@ function ForOperatorsSection() {
               SUPPORTED HARDWARE
             </p>
             <div
+              className="pcc-hw-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(3, 1fr)",
@@ -1542,7 +1865,7 @@ function ForOperatorsSection() {
                   key={hw.name}
                   style={{
                     background: BG_DARK,
-                    border: "1px solid rgba(0,255,136,0.08)",
+                    border: "1px solid rgba(59,130,246,0.08)",
                     borderRadius: "4px",
                     padding: "0.75rem",
                   }}
@@ -1584,7 +1907,7 @@ function ForOperatorsSection() {
         </div>
 
         {/* Right — terminal */}
-        <div ref={ref} style={{ position: "sticky", top: "6rem" }}>
+        <div ref={ref} className="pcc-sticky-side" style={{ position: "sticky", top: "6rem" }}>
           <TerminalBlock active={inView} />
         </div>
       </div>
@@ -1741,6 +2064,7 @@ function ForAgentsSection() {
       }}
     >
       <div
+        className="pcc-two-col"
         style={{
           maxWidth: "1200px",
           margin: "0 auto",
@@ -1807,7 +2131,7 @@ function ForAgentsSection() {
                           fontSize: "0.7rem",
                           color: TEXT_MUTED,
                           background: BG_DARK,
-                          border: "1px solid rgba(0,255,136,0.08)",
+                          border: "1px solid rgba(59,130,246,0.08)",
                           borderRadius: "2px",
                           padding: "0.2rem 0.5rem",
                         }}
@@ -1836,7 +2160,7 @@ function ForAgentsSection() {
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.08)",
+                border: "1px solid rgba(59,130,246,0.08)",
                 borderRadius: "4px",
                 padding: "1.5rem",
                 marginBottom: "2rem",
@@ -1867,6 +2191,7 @@ function ForAgentsSection() {
               {A2A_INTENTS.map((row, i) => (
                 <div
                   key={row.intent}
+                  className="pcc-a2a-row"
                   style={{
                     display: "grid",
                     gridTemplateColumns: "1fr 1fr auto",
@@ -1874,7 +2199,7 @@ function ForAgentsSection() {
                     alignItems: "center",
                     padding: "0.5rem 0",
                     borderBottom:
-                      i < A2A_INTENTS.length - 1 ? "1px solid rgba(0,255,136,0.05)" : "none",
+                      i < A2A_INTENTS.length - 1 ? "1px solid rgba(59,130,246,0.05)" : "none",
                   }}
                 >
                   <span style={{ fontFamily: mono, fontSize: "0.75rem", color: GREEN }}>
@@ -1895,8 +2220,8 @@ function ForAgentsSection() {
           <Reveal>
             <div
               style={{
-                background: "rgba(0,255,136,0.08)",
-                border: "1px solid rgba(0,255,136,0.25)",
+                background: "rgba(59,130,246,0.08)",
+                border: "1px solid rgba(59,130,246,0.25)",
                 borderRadius: "4px",
                 padding: "1rem 1.25rem",
                 marginBottom: "2rem",
@@ -1917,7 +2242,7 @@ function ForAgentsSection() {
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.15)",
+                border: "1px solid rgba(59,130,246,0.15)",
                 borderRadius: "4px",
                 padding: "1.25rem 1.5rem",
                 marginBottom: "2rem",
@@ -1947,12 +2272,12 @@ function ForAgentsSection() {
         </div>
 
         {/* Right — code block */}
-        <div style={{ position: "sticky", top: "6rem" }}>
+        <div className="pcc-sticky-side" style={{ position: "sticky", top: "6rem" }}>
           <Reveal>
             <div
               style={{
                 background: BG_DARK,
-                border: "1px solid rgba(0,255,136,0.15)",
+                border: "1px solid rgba(59,130,246,0.15)",
                 borderRadius: "4px",
                 padding: "2rem",
                 overflow: "auto",
@@ -1975,7 +2300,7 @@ function ForAgentsSection() {
                     key={i}
                     style={{
                       background:
-                        line.highlight ? "rgba(0,255,136,0.04)" : "transparent",
+                        line.highlight ? "rgba(59,130,246,0.04)" : "transparent",
                       padding: line.highlight ? "0 0.5rem" : "0",
                       margin: line.highlight ? "0 -0.5rem" : "0",
                     }}
@@ -2062,8 +2387,8 @@ function StatusBadge({ status }: { status: "LIVE" | "WIRED" }) {
         fontSize: "0.65rem",
         letterSpacing: "0.1em",
         color: isLive ? GREEN : AMBER,
-        background: isLive ? "rgba(0,255,136,0.08)" : "rgba(245,166,35,0.08)",
-        border: `1px solid ${isLive ? "rgba(0,255,136,0.25)" : "rgba(245,166,35,0.25)"}`,
+        background: isLive ? "rgba(59,130,246,0.08)" : "rgba(245,166,35,0.08)",
+        border: `1px solid ${isLive ? "rgba(59,130,246,0.25)" : "rgba(245,166,35,0.25)"}`,
         borderRadius: "4px",
         padding: "0.2rem 0.5rem",
       }}
@@ -2118,7 +2443,7 @@ function SponsorsSection() {
           </p>
 
           {/* Legend */}
-          <div style={{ display: "flex", gap: "2rem", marginBottom: "3rem" }}>
+          <div className="pcc-legend" style={{ display: "flex", gap: "2rem", marginBottom: "3rem" }}>
             {[
               { status: "LIVE", color: GREEN, meaning: "Verifiable on-chain or live network call today" },
               { status: "WIRED", color: AMBER, meaning: "Code complete, architecture proven" },
@@ -2135,6 +2460,7 @@ function SponsorsSection() {
 
         {/* Grid: 3 top, 2 bottom centered */}
         <div
+          className="pcc-three-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
@@ -2149,6 +2475,7 @@ function SponsorsSection() {
           ))}
         </div>
         <div
+          className="pcc-sponsor-bottom"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(2, 1fr)",
@@ -2180,11 +2507,11 @@ function IntegrationCard({
       onMouseLeave={() => setHover(false)}
       style={{
         background: BG_MID,
-        border: `1px solid ${hover ? "rgba(0,255,136,0.3)" : "rgba(0,255,136,0.08)"}`,
+        border: `1px solid ${hover ? "rgba(59,130,246,0.3)" : "rgba(59,130,246,0.08)"}`,
         borderRadius: "4px",
         padding: "1.75rem",
         transition: "border-color 0.2s, box-shadow 0.2s",
-        boxShadow: hover ? "0 8px 32px rgba(0,255,136,0.06)" : "none",
+        boxShadow: hover ? "0 8px 32px rgba(59,130,246,0.06)" : "none",
         height: "100%",
       }}
     >
@@ -2249,7 +2576,7 @@ function IntegrationCard({
         style={{
           fontFamily: mono,
           fontSize: "0.7rem",
-          color: "rgba(0,255,136,0.5)",
+          color: "rgba(59,130,246,0.5)",
           margin: 0,
         }}
       >
@@ -2259,13 +2586,13 @@ function IntegrationCard({
             target="_blank"
             rel="noopener noreferrer"
             style={{
-              color: "rgba(0,255,136,0.5)",
+              color: "rgba(59,130,246,0.5)",
               textDecoration: "none",
               transition: "color 0.2s",
             }}
             onMouseEnter={(e) => ((e.currentTarget as HTMLAnchorElement).style.color = GREEN)}
             onMouseLeave={(e) =>
-              ((e.currentTarget as HTMLAnchorElement).style.color = "rgba(0,255,136,0.5)")
+              ((e.currentTarget as HTMLAnchorElement).style.color = "rgba(59,130,246,0.5)")
             }
           >
             {integ.proof}
@@ -2409,12 +2736,13 @@ function StatsSection() {
 
         {/* Stats grid */}
         <div
+          className="pcc-stat-grid"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
             gap: "0",
             marginBottom: "5rem",
-            border: "1px solid rgba(0,255,136,0.08)",
+            border: "1px solid rgba(59,130,246,0.08)",
             borderRadius: "4px",
             overflow: "hidden",
           }}
@@ -2424,8 +2752,8 @@ function StatsSection() {
               key={stat.label}
               style={{
                 padding: "2rem",
-                borderBottom: i < 3 ? "1px solid rgba(0,255,136,0.08)" : "none",
-                borderRight: (i + 1) % 3 !== 0 ? "1px solid rgba(0,255,136,0.08)" : "none",
+                borderBottom: i < 3 ? "1px solid rgba(59,130,246,0.08)" : "none",
+                borderRight: (i + 1) % 3 !== 0 ? "1px solid rgba(59,130,246,0.08)" : "none",
               }}
             >
               {stat.isText ? (
@@ -2458,6 +2786,7 @@ function StatsSection() {
 
         {/* Differentiators */}
         <div
+          className="pcc-four-col"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
@@ -2469,7 +2798,7 @@ function StatsSection() {
             <Reveal key={d.title} delay={i * 0.1}>
               <div
                 style={{
-                  borderLeft: "2px solid rgba(0,255,136,0.2)",
+                  borderLeft: "2px solid rgba(59,130,246,0.2)",
                   paddingLeft: "1rem",
                 }}
               >
@@ -2511,8 +2840,8 @@ function StatsSection() {
                 fontFamily: mono,
                 fontSize: "0.75rem",
                 color: GREEN,
-                background: "rgba(0,255,136,0.08)",
-                border: "1px solid rgba(0,255,136,0.25)",
+                background: "rgba(59,130,246,0.08)",
+                border: "1px solid rgba(59,130,246,0.25)",
                 borderRadius: "4px",
                 padding: "0.5rem 1rem",
                 textDecoration: "none",
@@ -2523,7 +2852,7 @@ function StatsSection() {
               }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLAnchorElement).style.boxShadow =
-                  "0 0 12px rgba(0,255,136,0.3)";
+                  "0 0 12px rgba(59,130,246,0.3)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLAnchorElement).style.boxShadow = "none";
@@ -2585,8 +2914,8 @@ function Footer() {
       <div
         style={{
           background: BG_MID,
-          borderTop: "1px solid rgba(0,255,136,0.12)",
-          borderBottom: "1px solid rgba(0,255,136,0.08)",
+          borderTop: "1px solid rgba(59,130,246,0.12)",
+          borderBottom: "1px solid rgba(59,130,246,0.08)",
           padding: "clamp(4rem, 8vw, 7rem) 0",
           textAlign: "center",
         }}
@@ -2641,11 +2970,12 @@ function Footer() {
       {/* Footer bar */}
       <div
         style={{
-          borderTop: "1px solid rgba(0,255,136,0.06)",
+          borderTop: "1px solid rgba(59,130,246,0.06)",
           padding: "2.5rem 0",
         }}
       >
         <div
+          className="pcc-footer-bar"
           style={{
             maxWidth: "1200px",
             margin: "0 auto",
@@ -2680,7 +3010,7 @@ function Footer() {
             </span>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
+          <div className="pcc-footer-links" style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
             {[
               { text: "capability.network", href: "https://capability.network" },
               { text: "GitHub", href: "https://capability.network" },
@@ -2745,13 +3075,187 @@ const GLOBAL_STYLES = `
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.8); }
   }
+
+  /* ── Global: prevent horizontal overflow ────────────── */
+  html, body {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* ── Touch target minimum: 44px for interactive elements ── */
+  .pcc-agent-btn,
+  .pcc-terminal-cta,
+  nav button,
+  nav a {
+    min-height: 44px;
+  }
+
+  /* ── Responsive images/media ────────────────────────── */
+  img, video, iframe, svg {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* ── Terminal CTA: prevent horizontal overflow ──────── */
+  .pcc-terminal-cta {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Mobile responsive ─────────────────────────────── */
   @media (max-width: 768px) {
-    .pcc-hero-grid { grid-template-columns: 1fr !important; }
-    .pcc-two-col { grid-template-columns: 1fr !important; }
-    .pcc-six-col { grid-template-columns: 1fr !important; }
-    .pcc-three-col { grid-template-columns: 1fr !important; }
-    .pcc-four-col { grid-template-columns: repeat(2, 1fr) !important; }
-    .pcc-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    /* Hero: stack text + grid vertically */
+    .pcc-hero-grid {
+      grid-template-columns: 1fr !important;
+      gap: 2rem !important;
+    }
+
+    /* All 2-column layouts: stack */
+    .pcc-two-col {
+      grid-template-columns: 1fr !important;
+      gap: 2.5rem !important;
+    }
+
+    /* 6-column "How It Works" timeline: stack */
+    .pcc-six-col {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+
+    /* Problem cards (3-col) + sponsors top row: stack */
+    .pcc-three-col {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+
+    /* Differentiators (4-col): single column on mobile */
+    .pcc-four-col {
+      grid-template-columns: 1fr !important;
+      gap: 1.5rem !important;
+    }
+
+    /* Stats grid: 2 columns */
+    .pcc-stat-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Capability grid: 2 columns */
+    .pcc-cap-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Before/After comparison: stack vertically */
+    .pcc-before-after {
+      grid-template-columns: 1fr !important;
+      gap: 1rem !important;
+    }
+    .pcc-before-after-arrow {
+      display: none !important;
+    }
+
+    /* Nav: hide links, keep logo + live link */
+    .pcc-nav-links {
+      display: none !important;
+    }
+
+    /* Sponsors bottom 2-col row: stack */
+    .pcc-sponsor-bottom {
+      grid-template-columns: 1fr !important;
+      max-width: 100% !important;
+    }
+
+    /* A2A intents table: stack columns */
+    .pcc-a2a-row {
+      grid-template-columns: 1fr !important;
+      gap: 0.25rem !important;
+    }
+
+    /* Supported hardware grid: 2 columns */
+    .pcc-hw-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+
+    /* Sticky sidebars: un-stick on mobile */
+    .pcc-sticky-side {
+      position: static !important;
+    }
+
+    /* Agent button: full width on mobile, proper touch target */
+    .pcc-agent-btn {
+      width: 100% !important;
+      justify-content: center !important;
+      padding: 1.25rem 1.5rem !important;
+      min-height: 56px !important;
+      font-size: clamp(0.95rem, 2.5vw, 1.25rem) !important;
+    }
+
+    /* Legend: stack on mobile */
+    .pcc-legend {
+      flex-direction: column !important;
+      gap: 0.75rem !important;
+    }
+
+    /* Hero h1: prevent overflow on narrow screens */
+    .pcc-hero-h1 {
+      font-size: clamp(2.25rem, 8vw, 3.5rem) !important;
+      word-break: break-word !important;
+    }
+
+    /* Onboarding overlay: tighter padding on mobile */
+    .pcc-onboard-panel {
+      padding: 1.5rem !important;
+    }
+
+    /* Footer bar: stack on mobile */
+    .pcc-footer-bar {
+      flex-direction: column !important;
+      text-align: center !important;
+      gap: 1rem !important;
+    }
+    .pcc-footer-links {
+      flex-wrap: wrap !important;
+      justify-content: center !important;
+    }
+
+    /* Terminal CTA buttons: scale down, prevent overflow */
+    .pcc-terminal-cta {
+      font-size: 0.75rem !important;
+      padding: 0.75rem 1rem !important;
+      max-width: 100% !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+
+    /* Code blocks: horizontal scroll on mobile */
+    pre, code {
+      max-width: 100% !important;
+      overflow-x: auto !important;
+      -webkit-overflow-scrolling: touch !important;
+    }
+  }
+
+  /* ── Small phones (< 480px) ───────────────────────── */
+  @media (max-width: 480px) {
+    .pcc-stat-grid {
+      grid-template-columns: 1fr !important;
+    }
+    .pcc-cap-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+    }
+    .pcc-hw-grid {
+      grid-template-columns: 1fr !important;
+    }
+    .pcc-hero-h1 {
+      font-size: clamp(1.75rem, 7vw, 2.5rem) !important;
+    }
+    /* Onboarding overlay steps: tighter */
+    .pcc-onboard-panel {
+      padding: 1rem !important;
+    }
+    .pcc-onboard-panel h2 {
+      font-size: 1.5rem !important;
+    }
   }
 `;
 
@@ -2769,6 +3273,7 @@ function injectStyles() {
 
 export function LandingPage() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [showOverlay, setShowOverlay] = useState(false);
 
   useEffect(() => {
     injectStyles();
@@ -2793,7 +3298,8 @@ export function LandingPage() {
       }}
     >
       <Nav />
-      <HeroSection mousePos={mousePos} />
+      <OnboardingOverlay visible={showOverlay} onClose={() => setShowOverlay(false)} />
+      <HeroSection mousePos={mousePos} onContextCopied={() => setShowOverlay(true)} />
       <ProblemSection />
       <HowItWorksSection />
       <ForOperatorsSection />

@@ -1,8 +1,9 @@
 import { eq, and, isNull } from "drizzle-orm";
 import { apiKeys } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IApiKeyRepository } from "../interfaces/IApiKeyRepository.js";
 
-export class ApiKeyRepository {
+export class ApiKeyRepository implements IApiKeyRepository {
   constructor(private db: StoreDB) {}
 
   findByHash(keyHash: string) {

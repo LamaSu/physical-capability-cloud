@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
 import { evidenceBundles, evidenceEvents } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IEvidenceBundleRepository } from "../interfaces/IEvidenceBundleRepository.js";
 
-export class EvidenceBundleRepository {
+export class EvidenceBundleRepository implements IEvidenceBundleRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

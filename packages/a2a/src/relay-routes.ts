@@ -12,6 +12,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type {} from "@fastify/websocket"; // augments FastifyInstance with websocket types
 import type { A2AMessage, Conversation } from "./types.js";
 
 interface AgentConnection {
@@ -163,10 +164,7 @@ export async function a2aRelayRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── WebSocket: agent connection ─────────────────────────────────
-  app.get(
-    "/ws/a2a",
-    { websocket: true },
-    (socket: import("ws").WebSocket, req: FastifyRequest) => {
+  app.get("/ws/a2a", { websocket: true }, (socket: any, req: FastifyRequest) => {
       const { agentId, role, apiKey } = req.query as { agentId?: string; role?: string; apiKey?: string };
       if (!agentId) {
         socket.close(4000, "agentId query param required");
