@@ -36,6 +36,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
+import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const { toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages, shopKernels } = schema;
 
@@ -146,6 +147,12 @@ function getStreamClients(kernelId: string): Set<FastifyReply> {
 // ── Route Registration ──────────────────────────────────────────────────────
 
 export async function deviceRelayRoutes(app: FastifyInstance) {
+  // Ensure the safety gateway singleton is initialized. In production this is
+  // a no-op (KernelService constructor calls initSafetyGateway first). In
+  // test environments where KernelService is not running, this creates a
+  // default gateway instance so relay validation can proceed.
+  initSafetyGateway();
+
   // Pre-warm manifest cache so sync lookups work
   await warmManifestCache();
 
@@ -314,6 +321,52 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           .run();
       }
     }
+
+    // ── Safety gateway check ─────────────────────────────────────────────────
+    // Scope validation above handles *authorization* (which tools are allowed).
+    // The safety governor handles *physical safety* (envelope, rate, e-stop, class).
+    // Both must pass in order: scope first, then governor.
+    try {
+      const gateway = getSafetyGateway();
+      const agentDid =
+        (req as any).operatorId ??
+        (req.headers["x-agent-did"] as string | undefined) ??
+        callerId;
+
+      const safetyVerdict = await gateway.validateAndRelay(
+        {
+          commandId: generateId("cmd"),
+          deviceId: kernelId,
+          class: scopeId ? "scoped" : "safe",
+          type: toolName,
+          params: (args ?? {}) as Record<string, unknown>,
+          agentDid,
+          scopeId: scopeId ?? undefined,
+        },
+        // No-op execute — for relay calls the actual execution happens on-device
+        // (executor polls tool_call_relay). The gateway only needs to validate;
+        // the DB insert is the relay mechanism, not a direct hardware call.
+        async () => undefined,
+      );
+
+      if (!safetyVerdict.allowed) {
+        return reply.status(403).send({
+          error: "Tool call denied by safety governor",
+          reason: safetyVerdict.verdict?.reason ?? safetyVerdict.reason ?? "governor_denied",
+          checks: safetyVerdict.verdict?.checks ?? [],
+          toolName,
+          kernelId,
+          scopeId: scopeId ?? null,
+        });
+      }
+    } catch (err) {
+      // getSafetyGateway() throws if not initialized — treat as a safety failure
+      return reply.status(503).send({
+        error: "Safety gateway not available",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     const id = generateId("tc");
     const now = new Date().toISOString();

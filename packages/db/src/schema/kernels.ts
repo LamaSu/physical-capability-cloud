@@ -11,6 +11,8 @@ export const shopKernels = sqliteTable("shop_kernels", {
   publicKey: text("public_key").notNull(),
   reputation: integer("reputation").notNull().default(0),
   totalJobsCompleted: integer("total_jobs_completed").notNull().default(0),
+  /** ISO timestamp of the last reputation write (job completion/failure). Used for decay computation. */
+  reputationUpdatedAt: text("reputation_updated_at"),
   status: text("status").notNull(), // "online" | "offline" | "maintenance" | "suspended"
   registeredAt: text("registered_at").notNull(),
   lastHeartbeat: text("last_heartbeat").notNull(),

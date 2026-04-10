@@ -17,7 +17,7 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { createStore, type Store, type Repositories } from "@pcc/store";
+import { createStore, type Store, type IRepositories } from "@pcc/store";
 
 let _store: Store | undefined;
 
@@ -55,7 +55,7 @@ export function initStore(options?: { seed?: boolean }): Store {
 /**
  * Returns the repository collection. Throws if initStore() hasn't been called.
  */
-export function getRepos(): Repositories {
+export function getRepos(): IRepositories {
   if (!_store) throw new Error("[db] Store not initialised — call initStore() first");
   return _store.repos as unknown as Repositories;
 }

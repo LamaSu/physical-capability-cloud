@@ -6,8 +6,9 @@ import {
   storyRevenueClaims,
 } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IStoryRepository } from "../interfaces/IStoryRepository.js";
 
-export class StoryRepository {
+export class StoryRepository implements IStoryRepository {
   constructor(private db: StoreDB) {}
 
   // ── IP Registrations ──────────────────────────────────────────────────────

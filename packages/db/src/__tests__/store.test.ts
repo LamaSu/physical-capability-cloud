@@ -70,7 +70,7 @@ describe("@pcc/store", () => {
         lastHeartbeat: new Date().toISOString(),
         version: "1.0.0",
       });
-      expect(inserted.id).toBe("kernel-test");
+      expect(inserted!.id).toBe("kernel-test");
       expect(store.repos.kernels.findById("kernel-test")).toBeDefined();
     });
   });

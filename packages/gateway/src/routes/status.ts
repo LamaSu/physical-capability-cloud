@@ -10,11 +10,14 @@
 import type { FastifyInstance } from "fastify";
 import { configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
+import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
 
 export async function statusRoutes(app: FastifyInstance) {
+  const kernelFacade = getKernelFacade();
+  const jobFacade = getJobFacade();
   // ---------------------------------------------------------------------------
   // GET /api/status/integrations — real configuration state of each integration
   // ---------------------------------------------------------------------------
@@ -72,16 +75,25 @@ export async function statusRoutes(app: FastifyInstance) {
     let registrations: unknown[] = [];
     let capabilities: unknown[] = [];
 
+    // kernels + jobs via facades (standardized Result<T> — never throws)
+    const kernelResult = await kernelFacade.list();
+    if (kernelResult.success) {
+      kernels = kernelResult.data;
+      // Devices are embedded in KernelDTO — flatten them
+      for (const k of kernelResult.data as Array<{ id: string; devices?: unknown[] }>) {
+        if (Array.isArray(k.devices)) devices.push(...k.devices);
+      }
+    }
+
+    const jobResult = await jobFacade.list();
+    if (jobResult.success) {
+      jobs = jobResult.data.items;
+    }
+
+    // evidence, registrations, capabilities have no facade getter — stay inline
     try {
       const repos = getRepos();
-      kernels = repos.kernels.findAll();
-      jobs = repos.jobs.findAll();
       evidence = repos.evidence.findAll();
-      // Devices per kernel
-      for (const k of kernels as Array<{ id: string }>) {
-        const devs = repos.kernels.findDevicesByKernel(k.id);
-        devices.push(...devs);
-      }
       registrations = repos.registrations?.findAll?.() ?? [];
       capabilities = repos.capabilities?.findAll?.() ?? [];
     } catch {

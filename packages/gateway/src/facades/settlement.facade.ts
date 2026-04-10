@@ -1,0 +1,798 @@
+/**
+ * Settlement Facade — escrow management, milestone release, and batch settlement.
+ *
+ * Maps to L1.5 (Settlement & Escrow) in the standards taxonomy.
+ * Wraps the on-chain escrow-client and settlement-service pipeline behind
+ * standardized Result<T> methods.
+ *
+ * Covers:
+ *   - DB-backed escrow CRUD (listEscrows, getEscrow)
+ *   - On-chain reads (getChainState, getChainEvents, token balance/allowance, dispute state)
+ *   - On-chain writes (fundEscrow, approveToken, releaseMilestone, fileDispute, depositBond,
+ *     submitEvidenceHash, submitAttestation)
+ *   - Batch settlement (getBatchStatus, getEpochHistory, submitBatchIntent, flushBatch)
+ *   - Job settlement (releaseMilestoneForJob, getJobSettlementStatus, getJobEvidence)
+ */
+
+import { type Result, ok, err, Errors } from "@pcc/spec";
+import { isAddress, type Address, type Hex } from "viem";
+import { BaseFacade } from "./base.facade.js";
+import type {
+  EscrowSummaryDTO,
+  SettlementResultDTO,
+  PopulationContext,
+  AgentRole,
+} from "./types.js";
+import {
+  populateEscrowDTO,
+  populateEscrowList,
+} from "./populators/settlement.populator.js";
+import { getSettlementService } from "../services/settlement-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "../services/audit-service.js";
+import { trackServerEvent } from "../services/posthog-service.js";
+import {
+  readEscrow,
+  getEscrowEvents,
+  readTokenBalance,
+  readTokenAllowance,
+  getActiveNetwork,
+} from "../chain-client.js";
+import {
+  getEscrowState,
+  getDispute,
+  getEvents,
+  fundEscrow as chainFundEscrow,
+  approveToken as chainApproveToken,
+  releaseMilestone as chainReleaseMilestone,
+  fileDispute as chainFileDispute,
+  depositBond as chainDepositBond,
+  submitEvidence as chainSubmitEvidence,
+  submitAttestation as chainSubmitAttestation,
+  isWriteEnabled,
+  getSignerAddress,
+} from "../contracts/escrow-client.js";
+import {
+  isBatchEnabled,
+  getSmartAccountAddress,
+  submitSettlement,
+  flushSettlements,
+  getQueueStatus,
+  getEpochHistory,
+} from "../contracts/batch-settlement.js";
+import { swfAccrue } from "../routes/swf.js";
+
+// ── Input interfaces ────────────────────────────────────────────────────────
+
+export interface EscrowFilters {
+  status?: string;
+}
+
+export interface DisputeInput {
+  challengerBond: string;
+  challengerEvidenceHash: string;
+  reason: string;
+}
+
+export interface BatchIntentInput {
+  intentId: string;
+  agentId: string;
+  escrowAddress: string;
+  operation: {
+    type: string;
+    milestoneIndex?: number;
+    evidenceHash?: string;
+    attestationHash?: string;
+    bond?: string;
+    reason?: string;
+  };
+  usdcValue?: string;
+}
+
+// ── Facade ─────────────────────────────────────────────────────────────────
+
+export class SettlementFacade extends BaseFacade {
+  protected readonly allowedRoles: readonly AgentRole[] = [
+    "escrow",
+    "settlement",
+    "operator",
+    "admin",
+  ];
+
+  constructor() {
+    super("settlement");
+  }
+
+  // ── DB-backed escrow reads ──────────────────────────────────────────────
+
+  /**
+   * List escrows from DB with milestone counts.
+   * Replaces: GET /api/escrow
+   */
+  async listEscrows(
+    filters?: EscrowFilters,
+    ctx?: Partial<PopulationContext>,
+  ): Promise<Result<EscrowSummaryDTO[]>> {
+    return this.execute("listEscrows", async () => {
+      const context = this.defaultContext(ctx);
+      const escrows = filters?.status
+        ? this.repos.escrows.findByStatus(filters.status)
+        : this.repos.escrows.findAll();
+
+      // Batch-load milestones (prevents N+1)
+      const milestoneMap = new Map<string, any[]>();
+      for (const escrow of escrows) {
+        try {
+          milestoneMap.set(escrow.id, this.repos.escrows.findMilestonesByEscrow(escrow.id));
+        } catch {
+          milestoneMap.set(escrow.id, []);
+        }
+      }
+
+      return populateEscrowList(escrows, milestoneMap, context);
+    });
+  }
+
+  /**
+   * Get a single escrow by ID — dual path: on-chain (if isAddress) or DB.
+   * Replaces: GET /api/escrow/:escrowId
+   */
+  async getEscrow(
+    escrowId: string,
+    ctx?: Partial<PopulationContext>,
+  ): Promise<Result<{ escrow: unknown; source: "on-chain" | "db" }>> {
+    return this.execute("getEscrow", async () => {
+      // On-chain path: if escrowId looks like an Ethereum address
+      if (isAddress(escrowId)) {
+        const escrow = await readEscrow(escrowId as Address);
+        return { escrow, source: "on-chain" as const };
+      }
+
+      // DB path
+      const escrow = this.repos.escrows.findById(escrowId);
+      if (!escrow) {
+        throw new NotFoundError("escrow", escrowId);
+      }
+      const milestones = this.repos.escrows.findMilestonesByEscrow(escrowId);
+      const disputes = this.repos.escrows.findDisputesByEscrow(escrowId);
+      return {
+        escrow: { ...escrow, milestones, disputes },
+        source: "db" as const,
+      };
+    });
+  }
+
+  // ── On-chain reads ──────────────────────────────────────────────────────
+
+  /**
+   * Get on-chain event log for an escrow contract.
+   * Replaces: GET /api/escrow/chain/:address/events
+   */
+  async getChainEvents(
+    address: Address,
+    fromBlock?: bigint,
+  ): Promise<Result<unknown[]>> {
+    return this.execute("getChainEvents", async () => {
+      this.validateAddress(address);
+      return getEscrowEvents(address, fromBlock);
+    });
+  }
+
+  /**
+   * Read ERC-20 token balance for an account.
+   * Replaces: GET /api/escrow/chain/token/:tokenAddress/balance/:account
+   */
+  async getTokenBalance(
+    tokenAddress: Address,
+    account: Address,
+  ): Promise<Result<{ balance: string; token: string; account: string }>> {
+    return this.execute("getTokenBalance", async () => {
+      this.validateAddress(tokenAddress);
+      this.validateAddress(account);
+      const balance = await readTokenBalance(tokenAddress, account);
+      return { balance, token: tokenAddress, account };
+    });
+  }
+
+  /**
+   * Read ERC-20 token allowance.
+   * Replaces: GET /api/escrow/chain/token/:tokenAddress/allowance/:owner/:spender
+   */
+  async getTokenAllowance(
+    tokenAddress: Address,
+    owner: Address,
+    spender: Address,
+  ): Promise<Result<{ allowance: string; token: string; owner: string; spender: string }>> {
+    return this.execute("getTokenAllowance", async () => {
+      this.validateAddress(tokenAddress);
+      this.validateAddress(owner);
+      this.validateAddress(spender);
+      const allowance = await readTokenAllowance(tokenAddress, owner, spender);
+      return { allowance, token: tokenAddress, owner, spender };
+    });
+  }
+
+  /**
+   * Read dispute state for a specific milestone.
+   * Replaces: GET /api/escrow/chain/:address/dispute/:milestoneIndex
+   */
+  async getDispute(
+    address: Address,
+    milestoneIndex: number,
+  ): Promise<Result<{ dispute: unknown; milestoneIndex: number; source: "on-chain" }>> {
+    return this.execute("getDispute", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      const dispute = await getDispute(milestoneIndex, address);
+      return { dispute, milestoneIndex, source: "on-chain" as const };
+    });
+  }
+
+  /**
+   * Get full on-chain escrow state with parallel milestone reads.
+   * Replaces: GET /api/escrow/chain/:address/state
+   */
+  async getChainState(
+    address: Address,
+  ): Promise<Result<{ escrow: unknown; source: "on-chain" }>> {
+    return this.execute("getChainState", async () => {
+      this.validateAddress(address);
+      const state = await getEscrowState(address);
+      return { escrow: state, source: "on-chain" as const };
+    });
+  }
+
+  /**
+   * Check whether write operations are available.
+   * Replaces: GET /api/escrow/chain/write-status
+   */
+  async getWriteStatus(): Promise<Result<{
+    writeEnabled: boolean;
+    signerAddress: string | null;
+    network: string;
+  }>> {
+    return this.execute("getWriteStatus", async () => ({
+      writeEnabled: isWriteEnabled(),
+      signerAddress: getSignerAddress() ?? null,
+      network: getActiveNetwork(),
+    }));
+  }
+
+  // ── On-chain writes ─────────────────────────────────────────────────────
+
+  /**
+   * Fund an escrow contract (payer must have approved token transfer).
+   * Replaces: POST /api/escrow/chain/:address/fund
+   */
+  async fundEscrow(
+    address: Address,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("fundEscrow", async () => {
+      this.validateAddress(address);
+      this.requireWriteEnabled();
+      const result = await chainFundEscrow(address);
+      pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
+      trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
+      auditService.log({
+        eventType: "escrow.funded",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "fund",
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "fund", escrow: address };
+    });
+  }
+
+  /**
+   * Approve token spending for an escrow contract.
+   * Replaces: POST /api/escrow/chain/:address/approve
+   */
+  async approveToken(
+    address: Address,
+    amount: string,
+    tokenAddress?: Address,
+  ): Promise<Result<unknown>> {
+    return this.execute("approveToken", async () => {
+      this.validateAddress(address);
+      this.requireWriteEnabled();
+      if (!amount) {
+        throw Object.assign(new Error("amount is required"), { name: "BadRequestError" });
+      }
+      const result = await chainApproveToken(address, amount, tokenAddress);
+      return { ...result, action: "approve", spender: address, amount };
+    });
+  }
+
+  /**
+   * Release a milestone (challenge window must have expired).
+   * Replaces: POST /api/escrow/chain/:address/release/:milestoneIndex
+   */
+  async releaseMilestone(
+    address: Address,
+    milestoneIndex: number,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("releaseMilestone", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      this.requireWriteEnabled();
+      const result = await chainReleaseMilestone(milestoneIndex, address);
+      pipelineTelemetry.emit(address, "settlement_complete", "completed", {
+        metadata: { escrow: address, milestoneIndex, released: true },
+      });
+      auditService.log({
+        eventType: "escrow.released",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "release",
+        metadata: { milestoneIndex },
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "release", escrow: address, milestoneIndex };
+    });
+  }
+
+  /**
+   * File a dispute against a milestone.
+   * Replaces: POST /api/escrow/chain/:address/dispute/:milestoneIndex
+   */
+  async fileDispute(
+    address: Address,
+    milestoneIndex: number,
+    body: DisputeInput,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("fileDispute", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      this.requireWriteEnabled();
+      if (!body.challengerBond || !body.challengerEvidenceHash || !body.reason) {
+        throw Object.assign(
+          new Error("Missing required fields: challengerBond, challengerEvidenceHash, reason"),
+          { name: "BadRequestError" },
+        );
+      }
+      const result = await chainFileDispute(
+        milestoneIndex,
+        body.challengerBond,
+        body.challengerEvidenceHash as `0x${string}`,
+        body.reason,
+        address,
+      );
+      pipelineTelemetry.emit(address, "verification_result", "completed", {
+        metadata: { escrow: address, milestoneIndex, dispute: true, reason: body.reason },
+      });
+      auditService.log({
+        eventType: "escrow.disputed",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "dispute",
+        metadata: { milestoneIndex, reason: body.reason },
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "dispute", escrow: address, milestoneIndex };
+    });
+  }
+
+  /**
+   * Deposit operator bond for a milestone.
+   * Replaces: POST /api/escrow/chain/:address/deposit-bond/:milestoneIndex
+   */
+  async depositBond(
+    address: Address,
+    milestoneIndex: number,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("depositBond", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      this.requireWriteEnabled();
+      const result = await chainDepositBond(milestoneIndex, address);
+      pipelineTelemetry.emit(address, "escrow_fund", "completed", {
+        metadata: { escrow: address, milestoneIndex, action: "depositBond" },
+      });
+      auditService.log({
+        eventType: "escrow.bond_deposited",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "deposit_bond",
+        metadata: { milestoneIndex },
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "depositBond", escrow: address, milestoneIndex };
+    });
+  }
+
+  /**
+   * Submit evidence bundle hash for a milestone.
+   * Replaces: POST /api/escrow/chain/:address/evidence/:milestoneIndex
+   */
+  async submitEvidenceHash(
+    address: Address,
+    milestoneIndex: number,
+    evidenceBundleHash: string,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("submitEvidenceHash", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      this.requireWriteEnabled();
+      if (!evidenceBundleHash) {
+        throw Object.assign(new Error("evidenceBundleHash is required"), { name: "BadRequestError" });
+      }
+      const result = await chainSubmitEvidence(
+        milestoneIndex,
+        evidenceBundleHash as `0x${string}`,
+        address,
+      );
+      pipelineTelemetry.emit(address, "verification_request", "completed", {
+        metadata: { escrow: address, milestoneIndex, evidenceBundleHash },
+      });
+      auditService.log({
+        eventType: "escrow.evidence_submitted",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "submit_evidence",
+        metadata: { milestoneIndex, evidenceBundleHash },
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "submitEvidence", escrow: address, milestoneIndex };
+    });
+  }
+
+  /**
+   * Submit verifier attestation for a milestone.
+   * Replaces: POST /api/escrow/chain/:address/attestation/:milestoneIndex
+   */
+  async submitAttestation(
+    address: Address,
+    milestoneIndex: number,
+    attestationHash: string,
+    actorId?: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<Result<unknown>> {
+    return this.execute("submitAttestation", async () => {
+      this.validateAddress(address);
+      this.validateMilestoneIndex(milestoneIndex);
+      this.requireWriteEnabled();
+      if (!attestationHash) {
+        throw Object.assign(new Error("attestationHash is required"), { name: "BadRequestError" });
+      }
+      const result = await chainSubmitAttestation(
+        milestoneIndex,
+        attestationHash as `0x${string}`,
+        address,
+      );
+      pipelineTelemetry.emit(address, "verification_result", "completed", {
+        metadata: { escrow: address, milestoneIndex, attestationHash },
+      });
+      auditService.log({
+        eventType: "escrow.attestation_submitted",
+        actor: actorId,
+        resourceType: "escrow",
+        resourceId: address,
+        action: "submit_attestation",
+        metadata: { milestoneIndex, attestationHash },
+        ip,
+        userAgent,
+      });
+      return { ...result, action: "submitAttestation", escrow: address, milestoneIndex };
+    });
+  }
+
+  // ── Batch settlement ────────────────────────────────────────────────────
+
+  /**
+   * Get ERC-4337 batch queue status.
+   * Replaces: GET /api/settlement/status
+   */
+  async getBatchStatus(): Promise<Result<{
+    pending: number;
+    totalValue: string;
+    smartAccountAddress: string | null;
+    [key: string]: unknown;
+  }>> {
+    return this.execute("getBatchStatus", async () => {
+      const status = getQueueStatus();
+      return {
+        ...status,
+        totalValue: status.totalValue.toString(),
+        smartAccountAddress: getSmartAccountAddress() ?? null,
+      };
+    });
+  }
+
+  /**
+   * Get epoch history.
+   * Replaces: GET /api/settlement/epochs
+   */
+  async getEpochHistory(): Promise<Result<{ epochs: unknown[] }>> {
+    return this.execute("getEpochHistory", async () => {
+      return { epochs: getEpochHistory() as unknown as unknown[] };
+    });
+  }
+
+  /**
+   * Submit a settlement intent to the batch queue.
+   * Replaces: POST /api/settlement/submit
+   */
+  async submitBatchIntent(intent: BatchIntentInput): Promise<Result<unknown>> {
+    return this.execute("submitBatchIntent", async () => {
+      if (!isBatchEnabled()) {
+        throw Object.assign(
+          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
+          { name: "BatchDisabledError" },
+        );
+      }
+
+      const { intentId, agentId, escrowAddress, operation, usdcValue } = intent;
+
+      if (!intentId || !agentId || !escrowAddress || !operation?.type) {
+        throw Object.assign(
+          new Error("Missing required fields: intentId, agentId, escrowAddress, operation.type"),
+          { name: "BadRequestError" },
+        );
+      }
+
+      if (!isAddress(escrowAddress)) {
+        throw Object.assign(new Error("Invalid escrowAddress"), { name: "BadRequestError" });
+      }
+
+      const parsedOp = parseOperation(operation);
+      const opId = submitSettlement({
+        intentId,
+        agentId,
+        escrowAddress: escrowAddress as Address,
+        operation: parsedOp,
+        usdcValue: usdcValue ? BigInt(usdcValue) : undefined,
+      });
+
+      const status = getQueueStatus();
+      return {
+        operationId: opId,
+        intentId,
+        queued: true,
+        queueStatus: {
+          pending: status.pending,
+          totalValue: status.totalValue.toString(),
+        },
+      };
+    });
+  }
+
+  /**
+   * Manually release a milestone for a job via the SettlementService.
+   * Replaces: POST /api/settlement/release
+   */
+  async releaseMilestoneForJob(
+    jobId: string,
+    milestoneIndex?: number,
+    contractAddress?: string,
+  ): Promise<Result<SettlementResultDTO>> {
+    return this.execute("releaseMilestoneForJob", async () => {
+      if (!jobId) {
+        throw Object.assign(new Error("jobId is required"), { name: "BadRequestError" });
+      }
+
+      const idx = milestoneIndex ?? 0;
+      const service = getSettlementService();
+      const result = await service.releaseMilestone(jobId, idx, contractAddress);
+
+      if (result.status === "failed") {
+        throw new Error(result.error ?? "Release failed");
+      }
+
+      // SWF accrual: 2% of released milestone value
+      if (result.status === "released") {
+        swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
+      }
+
+      return {
+        jobId: result.jobId,
+        escrowId: contractAddress ?? "",
+        status: result.status as SettlementResultDTO["status"],
+        releasedAmount: "0",
+        protocolFee: "0",
+        txHash: result.txHash,
+        chain: "base",
+      };
+    });
+  }
+
+  /**
+   * Get settlement status for a completed job.
+   * Replaces: GET /api/settlement/:jobId
+   */
+  async getJobSettlementStatus(jobId: string): Promise<Result<unknown>> {
+    return this.execute("getJobSettlementStatus", async () => {
+      const job = this.repos.jobs.findById(jobId);
+      if (!job) {
+        throw new NotFoundError("job", jobId);
+      }
+
+      const bundles = this.repos.evidence.findByJob(jobId);
+      const latestBundle = bundles[bundles.length - 1] ?? null;
+      const settled = job.status === "settled" || job.status === "completed";
+
+      return {
+        jobId: job.id,
+        status: job.status,
+        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
+        evidenceHash: latestBundle?.bundleHash ?? null,
+        assuranceTier: latestBundle?.assuranceTier ?? null,
+        settled,
+        settledAt: job.completedAt ?? null,
+      };
+    });
+  }
+
+  /**
+   * Get evidence bundle details for a job.
+   * Replaces: GET /api/evidence/:jobId
+   */
+  async getJobEvidence(jobId: string): Promise<Result<unknown>> {
+    return this.execute("getJobEvidence", async () => {
+      const bundles = this.repos.evidence.findByJob(jobId);
+      if (bundles.length === 0) {
+        throw new NotFoundError("evidence", jobId);
+      }
+
+      const enriched = bundles.map((bundle: any) => {
+        const events = this.repos.evidence.findEventsByBundle(bundle.id);
+        return {
+          bundleId: bundle.id,
+          jobId: bundle.jobId,
+          stepId: bundle.stepId,
+          kernelId: bundle.kernelId,
+          hash: bundle.bundleHash,
+          assuranceTier: bundle.assuranceTier,
+          eventCount: events.length,
+          events,
+          storedAt: bundle.createdAt,
+        };
+      });
+
+      return { jobId, bundles: enriched, count: enriched.length };
+    });
+  }
+
+  /**
+   * Manually flush all pending batch settlement intents (epoch settlement).
+   * Replaces: POST /api/settlement/flush
+   */
+  async flushBatch(): Promise<Result<unknown>> {
+    return this.execute("flushBatch", async () => {
+      if (!isBatchEnabled()) {
+        throw Object.assign(
+          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
+          { name: "BatchDisabledError" },
+        );
+      }
+
+      const summary = await flushSettlements();
+      pipelineTelemetry.emit(
+        `epoch-${summary.epochId}`,
+        "settlement_claim",
+        "completed",
+        { metadata: { epochId: summary.epochId, totalIntents: summary.totalIntents } },
+      );
+
+      return {
+        epoch: summary.epochId,
+        totalIntents: summary.totalIntents,
+        batches: summary.batches.length,
+        batchDetails: summary.batches.map((b: any) => ({
+          userOpHash: b.userOpHash,
+          operationCount: b.operationCount,
+          trigger: b.trigger,
+        })),
+        byAgent: summary.byAgent,
+        byOperation: summary.byOperation,
+        duration: summary.completedAt - summary.startedAt,
+      };
+    });
+  }
+
+  // ── Private Helpers ────────────────────────────────────────────────────────
+
+  private validateAddress(address: string): void {
+    if (!isAddress(address)) {
+      throw Object.assign(new Error("Invalid Ethereum address"), { name: "BadRequestError" });
+    }
+  }
+
+  private validateMilestoneIndex(index: number): void {
+    if (isNaN(index) || index < 0) {
+      throw Object.assign(new Error("Invalid milestone index"), { name: "BadRequestError" });
+    }
+  }
+
+  private requireWriteEnabled(): void {
+    if (!isWriteEnabled()) {
+      throw Object.assign(
+        new Error("Write operations are not available — PCC_GATEWAY_PRIVATE_KEY is not configured."),
+        { name: "WriteDisabledError" },
+      );
+    }
+  }
+}
+
+/** Internal error for flow control — caught by BaseFacade.execute() */
+class NotFoundError extends Error {
+  constructor(entity: string, id: string) {
+    super(`${entity} '${id}' not found`);
+    this.name = "NotFoundError";
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function parseOperation(op: Record<string, unknown>) {
+  switch (op.type) {
+    case "release":
+      if (op.milestoneIndex == null) throw new Error("milestoneIndex required for release");
+      return { type: "release" as const, milestoneIndex: Number(op.milestoneIndex) };
+
+    case "submitEvidence":
+      if (op.milestoneIndex == null || !op.evidenceHash)
+        throw new Error("milestoneIndex and evidenceHash required for submitEvidence");
+      return {
+        type: "submitEvidence" as const,
+        milestoneIndex: Number(op.milestoneIndex),
+        evidenceHash: op.evidenceHash as Hex,
+      };
+
+    case "submitAttestation":
+      if (op.milestoneIndex == null || !op.attestationHash)
+        throw new Error("milestoneIndex and attestationHash required for submitAttestation");
+      return {
+        type: "submitAttestation" as const,
+        milestoneIndex: Number(op.milestoneIndex),
+        attestationHash: op.attestationHash as Hex,
+      };
+
+    case "depositBond":
+      if (op.milestoneIndex == null) throw new Error("milestoneIndex required for depositBond");
+      return { type: "depositBond" as const, milestoneIndex: Number(op.milestoneIndex) };
+
+    case "fund":
+      return { type: "fund" as const };
+
+    case "fileDispute":
+      if (op.milestoneIndex == null || !op.bond || !op.evidenceHash || !op.reason)
+        throw new Error("milestoneIndex, bond, evidenceHash, reason required for fileDispute");
+      return {
+        type: "fileDispute" as const,
+        milestoneIndex: Number(op.milestoneIndex),
+        bond: BigInt(op.bond as string),
+        evidenceHash: op.evidenceHash as Hex,
+        reason: op.reason as string,
+      };
+
+    default:
+      throw new Error(`Unknown operation type: ${op.type}`);
+  }
+}

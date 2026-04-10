@@ -1074,6 +1074,44 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS audit_log_actor ON audit_log(actor);
     CREATE INDEX IF NOT EXISTS audit_log_resource_type ON audit_log(resource_type);
     CREATE INDEX IF NOT EXISTS audit_log_timestamp ON audit_log(timestamp);
+
+    -- ── A2A Message Persistence ──────────────────────────────────────
+    -- Append-only event log for all A2A messages that pass through the bus.
+    -- Never updated after insert; prune only via pruneMessagesBefore().
+    CREATE TABLE IF NOT EXISTS a2a_messages (
+      id TEXT PRIMARY KEY,                      -- A2AMessage.id (nanoid)
+      conversation_id TEXT NOT NULL,            -- A2AMessage.conversationId
+      from_agent_id TEXT NOT NULL,              -- A2AMessage.from
+      to_agent_id TEXT NOT NULL,                -- A2AMessage.to
+      in_reply_to TEXT,                         -- A2AMessage.inReplyTo (nullable)
+      intent_type TEXT NOT NULL,                -- A2AMessage.intent.type (indexed for filtering)
+      intent_payload TEXT NOT NULL,             -- JSON of full A2AMessage.intent
+      is_encrypted INTEGER NOT NULL DEFAULT 0,  -- 1 if A2AMessage.encrypted is set
+      encrypted_envelope TEXT,                  -- JSON of A2AMessage.encrypted (nullable)
+      signature TEXT,                           -- A2AMessage.signature (nullable)
+      timestamp TEXT NOT NULL,                  -- A2AMessage.timestamp (ISO-8601)
+      persisted_at TEXT NOT NULL                -- Wall-clock time of insert
+    );
+
+    CREATE INDEX IF NOT EXISTS a2a_messages_conversation ON a2a_messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS a2a_messages_to_agent ON a2a_messages(to_agent_id);
+    CREATE INDEX IF NOT EXISTS a2a_messages_from_agent ON a2a_messages(from_agent_id);
+    CREATE INDEX IF NOT EXISTS a2a_messages_timestamp ON a2a_messages(timestamp);
+    CREATE INDEX IF NOT EXISTS a2a_messages_intent_type ON a2a_messages(intent_type);
+
+    -- Conversation aggregate — upserted on every new message.
+    -- Allows O(1) conversation lookup without scanning the message log.
+    CREATE TABLE IF NOT EXISTS a2a_conversations (
+      id TEXT PRIMARY KEY,                      -- Conversation.id
+      participants TEXT NOT NULL,               -- JSON string[] of agent IDs
+      status TEXT NOT NULL DEFAULT 'active',    -- "active" | "completed" | "failed" | "expired"
+      topic TEXT NOT NULL,                      -- First message's intent.type
+      message_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS a2a_conversations_updated ON a2a_conversations(updated_at);
   `);
 
   // ── Safe column additions for existing databases ──────────────────
@@ -1082,4 +1120,5 @@ export function migrateDatabase(sqlite: Database.Database): void {
     try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`); } catch { /* already exists */ }
   };
   safeAddColumn("jobs", "parameters", "TEXT");
+  safeAddColumn("shop_kernels", "reputation_updated_at", "TEXT");
 }

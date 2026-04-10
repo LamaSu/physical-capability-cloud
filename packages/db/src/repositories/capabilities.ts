@@ -1,8 +1,9 @@
 import { eq, like, and } from "drizzle-orm";
 import { capabilities } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { ICapabilityRepository } from "../interfaces/ICapabilityRepository.js";
 
-export class CapabilityRepository {
+export class CapabilityRepository implements ICapabilityRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

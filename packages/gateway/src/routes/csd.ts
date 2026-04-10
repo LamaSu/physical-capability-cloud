@@ -11,7 +11,6 @@
 
 import type { FastifyInstance } from "fastify";
 import { loadBuiltinCsds, CsdRegistry, CsdSchema } from "@pcc/spec";
-import { getRepos } from "../db.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -139,22 +138,7 @@ export async function csdRoutes(app: FastifyInstance) {
 
       storyIpId = registration.ipId;
 
-      // Persist to DB (best-effort — DB may not be initialized in all contexts)
-      try {
-        const repos = getRepos();
-        repos.story.insertIpRegistration({
-          ipId: registration.ipId,
-          nftTokenId: registration.nftTokenId,
-          licenseTermsId: registration.licenseTermsId,
-          txHash: registration.txHash,
-          capabilityId,
-          csdUrl: registration.csdUrl,
-          chain: registration.chain,
-          registeredAt: registration.registeredAt,
-        });
-      } catch (dbErr) {
-        console.warn("[csd] Story IP DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
-      }
+      // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
     } catch (storyErr) {
       console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
     }

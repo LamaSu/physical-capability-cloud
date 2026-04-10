@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
 import { machineRegistrations } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { IRegistrationRepository } from "../interfaces/IRegistrationRepository.js";
 
-export class RegistrationRepository {
+export class RegistrationRepository implements IRegistrationRepository {
   constructor(private db: StoreDB) {}
 
   findAll() {

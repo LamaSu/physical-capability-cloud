@@ -1,8 +1,9 @@
 import { eq, lt } from "drizzle-orm";
 import { sessions } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
+import type { ISessionRepository } from "../interfaces/ISessionRepository.js";
 
-export class SessionRepository {
+export class SessionRepository implements ISessionRepository {
   constructor(private db: StoreDB) {}
 
   findByToken(token: string) {

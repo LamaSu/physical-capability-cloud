@@ -6,22 +6,21 @@ import type { FastifyInstance } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
-import { resolveApiKey } from "../auth/api-key-auth.js";
-import { resolveSession } from "../auth/siwe-auth.js";
+import { resolveSSEAuth } from "./sse-auth.js";
+
+// Strict origin allowlist — prevents subdomain spoofing attacks
+const ALLOWED_SSE_ORIGINS = new Set([
+  "https://capability.network",
+  "http://localhost:5173",
+  "http://localhost:3200",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:3200",
+]);
 
 export async function topicSSE(app: FastifyInstance) {
-  // Auth + connection limit gate for all SSE topic streams
+  // Connection limit gate for all SSE topic streams (auth is checked per-route)
   app.addHook("onRequest", async (req, reply) => {
     if (!req.url.startsWith("/sse/stream/")) return;
-
-    // Require authentication
-    const apiKey = resolveApiKey(req);
-    const session = resolveSession(req);
-    if (!apiKey && !session) {
-      return reply.status(401).send({ error: "Authentication required for SSE streams" });
-    }
-
-    // Connection limit per IP
     if (!canOpenSSE(req.ip)) {
       return reply.status(429).send({ error: "too_many_connections" });
     }
@@ -30,16 +29,22 @@ export async function topicSSE(app: FastifyInstance) {
 
   /** Helper to set up an SSE connection for given topics */
   function setupSSE(
-    req: { raw: { on: (event: string, cb: () => void) => void } },
+    req: { raw: { on: (event: string, cb: () => void) => void }; ip?: string },
     reply: { raw: { writeHead: (status: number, headers: Record<string, string>) => void; write: (data: string) => void } },
     topics: StreamTopic[],
     lastEventId?: string,
+    origin?: string,
   ) {
+    // Strict origin validation — reject unknown origins with default
+    const allowOrigin = origin && ALLOWED_SSE_ORIGINS.has(origin)
+      ? origin : "https://capability.network";
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": allowOrigin,
+      "Access-Control-Allow-Credentials": "true",
     });
 
     reply.raw.write(`data: ${JSON.stringify({ type: "connected", topics })}\n\n`);
@@ -69,40 +74,59 @@ export async function topicSSE(app: FastifyInstance) {
     req.raw.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
-      // Track SSE close for connection limiting
-      if ((req as any).ip) trackSSEClose((req as any).ip);
+      if (req.ip) trackSSEClose(req.ip);
     });
   }
 
   // Per-job streaming
   app.get("/sse/stream/job/:jobId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { jobId } = req.params as { jobId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-kernel streaming
   app.get("/sse/stream/kernel/:kernelId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { kernelId } = req.params as { kernelId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-device streaming
   app.get("/sse/stream/device/:deviceId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { deviceId } = req.params as { deviceId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId, origin);
     await new Promise(() => {});
   });
 
   // Per-batch streaming
   app.get("/sse/stream/batch/:batchId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
     const { batchId } = req.params as { batchId: string };
     const lastEventId = req.headers["last-event-id"] as string | undefined;
-    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId);
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
     await new Promise(() => {});
   });
 }

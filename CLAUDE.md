@@ -1,3 +1,71 @@
+## MANDATORY: DGX Spark Offload
+
+**ALWAYS check Spark availability (`spark-check`) at session start and offload ALL builds, tests, and heavy work to the DGX Spark (192.168.108.72, 119GB RAM).** The local machine has only 16GB RAM and WILL OOM on builds, parallel tests, and multi-agent workloads. Use `spark-run` for everything. No exceptions.
+
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm build --concurrency=1"` — build
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm --workspace-concurrency=1 -r test"` — test
+- `spark-run "cd ~/projects/physical-capability-cloud && pnpm install"` — install
+- If Spark is down, use `--concurrency=1` locally and warn the user about OOM risk.
+
+## MANDATORY: Security — Gate A Vetting Pipeline
+
+All new tools, MCP servers, npm packages, and external dependencies MUST pass through Gate A vetting before being approved for use in this project.
+
+### How to Vet
+- Run `/vet <package-path>` on any new tool/package before integration
+- Runs up to 7 scanners: Trivy (vulns+SBOM), Gitleaks (secrets), ClamAV (malware), npm audit, pip-audit, Semgrep (SAST), prompt injection detection
+- Scanners degrade gracefully if not installed. Prompt injection scanner always runs.
+
+### Policy Thresholds (from `~/.claude/plugins/vetting-policy.json`)
+- Critical vulnerabilities: 0 allowed (auto-reject)
+- High vulnerabilities: max 2 (warn on any)
+- Medium vulnerabilities: max 10
+- Secrets in source: 0 allowed (auto-reject)
+- Malware: auto-reject, no override
+- Prompt injection signals: max 1 (warn on any)
+
+### Verdicts
+- **PASS**: Clean, auto-approved
+- **WARN**: Suspicious findings, human reviews before use
+- **FAIL**: Critical vulns, secrets, or malware — auto-rejected
+
+### When to Vet
+- Before adding any new npm dependency to any package
+- Before integrating any MCP server
+- Before running any third-party script
+- After forging a new MCP server with `/forge`
+- Reports saved to `ai/supervisor/forge_approvals/`
+
+## MANDATORY: Action Classification
+
+Every tool call is classified by the tool-broker into one of 5 action classes:
+
+| Class | Tools | Gate |
+|-------|-------|------|
+| read | Read, Glob, Grep, WebSearch, WebFetch | Open |
+| write | Write, Edit, NotebookEdit | Role-checked |
+| exec | Bash, Agent/Task | Role-checked + keyword scan |
+| network | WebFetch, WebSearch, mcp__* | Role-checked |
+| credential | Detected via keyword scoring in args | Always flagged |
+
+Dangerous keywords (rm -rf, git reset --hard, git push --force, drop table, curl | sh) are scored 0.0-1.0. Actions scoring >0.5 are dual-logged and may be denied per agent allowlist.
+
+### Per-Agent Allowlists (from `~/.claude/plugins/action-policy.json`)
+
+| Agent | Allowed Tools | Action Classes |
+|-------|--------------|----------------|
+| supervisor | all | all |
+| implementer | Bash, Read, Edit, Write, Glob, Grep | read, write, exec |
+| researcher | Read, Glob, Grep, WebFetch, WebSearch | read, network |
+| wheel-scout | Read, Glob, Grep, WebFetch, WebSearch | read, network |
+| forger | Bash, Read, Edit, Write, Glob, Grep, WebFetch | read, write, exec, network |
+| vet-scanner | Bash, Read, Write, Glob, Grep | read, write, exec |
+| test-writer | Read, Write, Bash, Glob, Grep | read, write, exec |
+| memory-scribe | Read, Write | read, write |
+| context-hydrator | Read, Glob, Grep | read |
+| skill-router | Read | read |
+| browser | mcp__chrome-devtools__* | network |
+
 # Physical Capability Cloud (PCC) — Agent Integration Guide
 
 ## 1. What Is PCC

@@ -1,7 +1,7 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { GlassPanel, GlowBadge, DataCell } from "@pcc/ui";
+import { GlassPanel, GlowBadge, DataCell, PCCRunButton } from "@pcc/ui";
 import type { ProtocolTemplate, ProtocolRun, AutomationStatus, AutomationLevel } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useProtocolLibraryStore } from "../stores/protocol-library-store.js";
@@ -246,6 +246,15 @@ export function ProtocolLibraryPage() {
                 <span>Runs: {template.runCount}</span>
                 <span className="text-amber-400/60">{renderStars(template.rating)}</span>
                 <span className="ml-auto text-white/20">{template.authorName}</span>
+              </div>
+
+              {/* Run on Claude Code */}
+              <div className="pt-2">
+                <PCCRunButton
+                  command={`pcc run-protocol --template ${template.id}`}
+                  size="sm"
+                  variant="outline"
+                />
               </div>
             </button>
           </GlassPanel>
