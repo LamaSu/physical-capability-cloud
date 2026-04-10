@@ -948,11 +948,23 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   }>("/api/relay/:kernelId/camera/stream", async (req, reply) => {
     const { kernelId } = req.params;
 
+    // Strict origin check — prevent subdomain spoofing (red team #47)
+    const SSE_ALLOWED = new Set([
+      "https://capability.network",
+      "http://localhost:5173",
+      "http://localhost:3200",
+      "http://127.0.0.1:5173",
+      "http://127.0.0.1:3200",
+    ]);
+    const origin = req.headers.origin as string | undefined;
+    const allowOrigin = origin && SSE_ALLOWED.has(origin) ? origin : "https://capability.network";
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-cache, no-store, must-revalidate, private",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": allowOrigin,
+      "Access-Control-Allow-Credentials": "true",
     });
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected", kernelId })}\n\n`);

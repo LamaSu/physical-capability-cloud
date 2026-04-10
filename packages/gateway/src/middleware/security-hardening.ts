@@ -94,6 +94,36 @@ export function canProvision(ip: string): boolean {
   return true;
 }
 
+// ── SIWE Verify Rate Limiter ────────────────────────────────────────────────
+// Prevents unthrottled SIWE signature replay / brute force on /api/auth/verify.
+// 30 attempts per IP per minute is generous for legit users, tight for attackers.
+
+const siweVerifyAttempts = new Map<string, { count: number; windowStart: number }>();
+const SIWE_VERIFY_LIMIT = 30;
+const SIWE_VERIFY_WINDOW_MS = 60_000; // 1 minute
+
+export function canSiweVerify(ip: string): boolean {
+  const now = Date.now();
+  const entry = siweVerifyAttempts.get(ip);
+  if (!entry || now - entry.windowStart > SIWE_VERIFY_WINDOW_MS) {
+    siweVerifyAttempts.set(ip, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= SIWE_VERIFY_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+// Cleanup stale SIWE entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of siweVerifyAttempts) {
+    if (now - entry.windowStart > SIWE_VERIFY_WINDOW_MS) {
+      siweVerifyAttempts.delete(ip);
+    }
+  }
+}, 120_000);
+
 // Cleanup stale entries every 10 minutes
 setInterval(() => {
   const now = Date.now();

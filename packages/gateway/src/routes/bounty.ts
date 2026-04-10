@@ -86,18 +86,23 @@ export async function bountyRoutes(app: FastifyInstance) {
   app.post("/api/bounty/claim", async (req, reply) => {
     const body = (req.body ?? {}) as {
       bountyId?: string;
-      operatorId?: string;
     };
 
-    if (!body.bountyId || !body.operatorId) {
+    // IDOR fix: derive operatorId from authenticated session, not body (red team #10)
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
+
+    if (!body.bountyId) {
       return reply.code(400).send({
         error: "bad_request",
-        message: "bountyId and operatorId are required",
+        message: "bountyId is required",
       });
     }
 
     try {
-      const bounty = bountyService.claimBounty(body.bountyId, body.operatorId);
+      const bounty = bountyService.claimBounty(body.bountyId, operatorId);
       return { bounty };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

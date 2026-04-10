@@ -176,7 +176,17 @@ export async function createGateway(port = 3200) {
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
-  await app.register(cookie);
+  // HMAC-sign session cookies to detect tampering (red team #52)
+  // COOKIE_SECRET must be set in production; falls back to a randomized value in dev.
+  const cookieSecret =
+    process.env.COOKIE_SECRET ||
+    (process.env.NODE_ENV === "production"
+      ? (() => {
+          app.log.error("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed.");
+          return "insecure-default-do-not-use";
+        })()
+      : require("node:crypto").randomBytes(32).toString("hex"));
+  await app.register(cookie, { secret: cookieSecret });
   await app.register(websocket);
 
   // Decorate request with userId (set by requireAuth / optionalAuth hooks)

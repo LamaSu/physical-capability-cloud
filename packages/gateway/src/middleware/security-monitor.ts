@@ -24,9 +24,13 @@ const SQLI_PATTERNS = [
 const XSS_PATTERNS = [
   /<script[\s>]/i,
   /javascript\s*:/i,
-  /on(error|load|click|mouse|focus|blur)\s*=/i,
+  /on(error|load|click|mouse|focus|blur|toggle)\s*=/i,
   /<iframe[\s>]/i,
   /<img[^>]+onerror/i,
+  /<svg[^>]+onload/i,
+  /<style[\s>]/i,                 // CSS injection (red team Phase 5)
+  /<details[^>]+ontoggle/i,       // details ontoggle XSS
+  /<meta[^>]+http-equiv/i,        // meta refresh attacks
   /eval\s*\(/i,
   /document\.(cookie|domain|write)/i,
 ];

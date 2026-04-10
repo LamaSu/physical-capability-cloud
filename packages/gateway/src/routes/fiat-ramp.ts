@@ -263,24 +263,29 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   // ── Stripe: Prepaid Credits ───────────────────────────────────────
 
   app.post<{
-    Body: { userId: string; amountUsd: number };
+    Body: { amountUsd: number };
   }>("/api/fiat-ramp/stripe/credits/deposit", async (req, reply) => {
+    // IDOR fix: derive userId from session, not body (red team #10).
+    // Previously anyone could fund any other user's credit balance on their behalf
+    // (or more dangerously, trigger a deposit session with stolen userId).
+    const userId = (req as any).operatorId ?? (req as any).userId;
+    if (!userId) {
+      return reply.status(401).send({ error: "authentication_required" });
+    }
+
     const body = req.body as Record<string, unknown> | undefined;
-    if (!body?.userId || !body?.amountUsd) {
-      return reply.status(400).send({ error: "userId and amountUsd are required" });
+    if (typeof body?.amountUsd !== "number" || body.amountUsd <= 0) {
+      return reply.status(400).send({ error: "amountUsd (positive number) is required" });
     }
 
     try {
       const credits = getStripeCredits();
-      const result = await credits.createDepositSession(
-        body.userId as string,
-        body.amountUsd as number,
-      );
+      const result = await credits.createDepositSession(userId, body.amountUsd);
       return { ...result, provider: "stripe" };
     } catch (err) {
       return reply.status(502).send({
         error: "stripe_credits_failed",
-        message: err instanceof Error ? err.message : "Failed to create credit deposit",
+        message: "Failed to create credit deposit",
       });
     }
   });
