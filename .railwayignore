@@ -5,6 +5,7 @@ node_modules
 ai/research
 ai/memory
 ai/supervisor
+ai/reports
 packages/contracts/out
 packages/contracts/cache
 packages/contracts/lib
