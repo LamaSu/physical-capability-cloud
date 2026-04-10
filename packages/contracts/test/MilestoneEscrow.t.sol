@@ -17,6 +17,8 @@ contract MilestoneEscrowTest is Test {
     bytes32 stepId1 = keccak256("step-001");
     bytes32 stepId2 = keccak256("step-002");
 
+    address verifier = address(0x5);
+
     function setUp() public {
         usdc = new MockUSDC(1_000_000e6); // 1M USDC
         // address(0) for protocolRoot = standalone mode, no fee deducted
@@ -26,6 +28,12 @@ contract MilestoneEscrowTest is Test {
         usdc.mint(payer, 100_000e6);
         usdc.mint(operator, 10_000e6);
         usdc.mint(challenger, 10_000e6);
+
+        // Authorize the verifier and the test contract itself for attestation
+        vm.startPrank(arbiter);
+        escrow.addVerifier(verifier);
+        escrow.addVerifier(address(this));
+        vm.stopPrank();
     }
 
     // ── Setup Tests ─────────────────────────────────────────────────
