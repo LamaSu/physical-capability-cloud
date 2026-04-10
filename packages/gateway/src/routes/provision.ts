@@ -36,8 +36,22 @@ export async function provisionRoutes(app: FastifyInstance) {
 
     let operatorId: string;
 
+    // Type guards — prevent object/array/number injection (red team #14, #15)
+    if (body.walletAddress !== undefined && typeof body.walletAddress !== "string") {
+      return reply.status(400).send({ error: "invalid_type", message: "walletAddress must be a string" });
+    }
+    if (body.email !== undefined && typeof body.email !== "string") {
+      return reply.status(400).send({ error: "invalid_type", message: "email must be a string" });
+    }
+    if (body.name !== undefined && typeof body.name !== "string") {
+      return reply.status(400).send({ error: "invalid_type", message: "name must be a string" });
+    }
+    if (body.capability !== undefined && typeof body.capability !== "string") {
+      return reply.status(400).send({ error: "invalid_type", message: "capability must be a string" });
+    }
+
     if (body.walletAddress) {
-      // Wallet address path
+      // Wallet address path — format check also implicitly caps length at 42
       if (!/^0x[0-9a-fA-F]{40}$/.test(body.walletAddress)) {
         return reply.status(400).send({
           error: "invalid_wallet_address",
@@ -46,7 +60,13 @@ export async function provisionRoutes(app: FastifyInstance) {
       }
       operatorId = body.walletAddress;
     } else if (body.email) {
-      // Email path
+      // Email path — RFC 5321 max total length is 254
+      if (body.email.length > 254) {
+        return reply.status(400).send({
+          error: "invalid_email",
+          message: "Email exceeds 254 character limit",
+        });
+      }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
         return reply.status(400).send({
           error: "invalid_email",
@@ -168,12 +188,10 @@ export async function provisionRoutes(app: FastifyInstance) {
     const repo = getRepos().apiKeys;
     const key = repo.findById(keyId);
 
-    if (!key) {
+    // Unify 404 and 403 into a single "not found" to prevent key ID enumeration
+    // (red team #11/#54: different status codes leak resource existence).
+    if (!key || key.operatorId !== operatorId) {
       return reply.status(404).send({ error: "Key not found" });
-    }
-
-    if (key.operatorId !== operatorId) {
-      return reply.status(403).send({ error: "Not your key" });
     }
 
     if (key.revokedAt) {

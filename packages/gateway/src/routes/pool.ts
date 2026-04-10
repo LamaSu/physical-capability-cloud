@@ -89,20 +89,14 @@ export async function poolRoutes(app: FastifyInstance) {
   app.post<{ Params: { poolId: string } }>(
     "/api/pool/claim/:poolId",
     async (req, reply) => {
-      const body = (req.body ?? {}) as { operatorId?: string };
-
-      if (!body.operatorId) {
-        return reply.code(400).send({
-          error: "bad_request",
-          message: "operatorId is required",
-        });
+      // IDOR fix: derive operatorId from session, not body (red team #10)
+      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      if (!operatorId) {
+        return reply.code(401).send({ error: "authentication_required" });
       }
 
       try {
-        const pool = poolService.claimPool(
-          req.params.poolId,
-          body.operatorId,
-        );
+        const pool = poolService.claimPool(req.params.poolId, operatorId);
         return { pool };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);

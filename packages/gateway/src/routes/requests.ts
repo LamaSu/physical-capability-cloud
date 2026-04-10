@@ -336,12 +336,13 @@ export async function requestRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
-      const body = (req.body ?? {}) as { operatorId?: string };
-      if (!body.operatorId) {
-        return reply.status(400).send({ error: "bad_request", message: "operatorId is required" });
+      // IDOR fix: derive operatorId from session, not body (red team #10)
+      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      if (!operatorId) {
+        return reply.status(401).send({ error: "authentication_required" });
       }
 
-      node.assignedOperator = body.operatorId;
+      node.assignedOperator = operatorId;
       node.status = "assigned";
       request.updatedAt = new Date().toISOString();
       requestsStore.set(request.id, request);

@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
 import { getRepos } from "../db.js";
+import { canSiweVerify } from "../middleware/security-hardening.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -222,6 +223,14 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // ----- POST /api/auth/verify -----
   app.post("/api/auth/verify", async (req, reply) => {
+    // Rate limit SIWE verify to prevent signature replay flooding (red team #27)
+    if (!canSiweVerify(req.ip)) {
+      return reply.status(429).send({
+        error: "rate_limited",
+        message: "Too many verification attempts. Try again in a minute.",
+      });
+    }
+
     const body = (req.body ?? {}) as {
       message?: string;
       signature?: string;

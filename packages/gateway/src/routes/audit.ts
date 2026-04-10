@@ -17,15 +17,34 @@ export async function auditRoutes(app: FastifyInstance) {
       since?: string;
       limit?: string;
     };
-  }>("/api/audit/log", async (req) => {
-    const { eventType, actor, resourceType, since } = req.query;
+  }>("/api/audit/log", async (req, reply) => {
+    // Scope to caller — only return audit entries for the authenticated operator.
+    // Previously returned ALL operators' data (red team #33).
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
+
+    const { eventType, resourceType, since } = req.query;
     const limit = req.query.limit ? Math.min(parseInt(req.query.limit, 10), 1000) : 100;
 
-    const entries = auditService.query({ eventType, actor, resourceType, since, limit });
+    // Force the actor filter to the authenticated caller — ignore any body actor override.
+    const entries = auditService.query({
+      eventType,
+      actor: operatorId,
+      resourceType,
+      since,
+      limit,
+    });
     return { entries, count: entries.length };
   });
 
-  app.get("/api/audit/stats", async () => {
+  app.get("/api/audit/stats", async (req, reply) => {
+    // Stats are also scoped — no cross-operator aggregates.
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
     const stats = auditService.stats();
     return { stats, window: "24h" };
   });

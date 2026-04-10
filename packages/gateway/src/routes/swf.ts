@@ -446,17 +446,23 @@ export async function swfRoutes(app: FastifyInstance) {
       costModel?: SWFOperatorCostModel;
     };
 
-    if (!body.capabilityType || !body.operatorId || !body.equityTier || !body.seedAmount || !body.costModel) {
+    // IDOR fix: derive operatorId from session, not body (red team #10)
+    const operatorId = (req as any).operatorId ?? (req as any).userId;
+    if (!operatorId) {
+      return reply.code(401).send({ error: "authentication_required" });
+    }
+
+    if (!body.capabilityType || !body.equityTier || !body.seedAmount || !body.costModel) {
       return reply.code(400).send({
         error: "bad_request",
-        message: "capabilityType, operatorId, equityTier, seedAmount, and costModel are required",
+        message: "capabilityType, equityTier, seedAmount, and costModel are required",
       });
     }
 
     try {
       const termSheet = swfService.proposeTermSheet({
         capabilityType: body.capabilityType,
-        operatorId: body.operatorId,
+        operatorId,
         equityTier: body.equityTier as SWFEquityTier,
         seedAmount: body.seedAmount,
         costModel: body.costModel,

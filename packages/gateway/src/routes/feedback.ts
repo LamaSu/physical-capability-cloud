@@ -91,8 +91,13 @@ export async function feedbackRoutes(app: FastifyInstance) {
     return reply.status(201).send({ id: entry.id, submitted: true });
   });
 
-  // Read feedback (for the operator — no auth for now, add later)
-  app.get("/api/feedback", async (_request, reply) => {
+  // Read feedback — requires auth. Previously unauthenticated (red team: all
+  // submitted bug reports were world-readable, including wallet addresses).
+  app.get("/api/feedback", async (request, reply) => {
+    const operatorId = (request as any).operatorId ?? (request as any).userId;
+    if (!operatorId) {
+      return reply.status(401).send({ error: "authentication_required" });
+    }
     const entries = loadFeedback();
     return reply.send({
       count: entries.length,
