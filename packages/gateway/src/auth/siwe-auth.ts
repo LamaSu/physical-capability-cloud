@@ -241,6 +241,23 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         .send({ error: "Invalid SIWE message format" });
     }
 
+    // Validate domain matches this server (prevents cross-site SIWE replay attacks)
+    const expectedHost = req.hostname;
+    if (parsed.domain !== expectedHost) {
+      return reply.status(401).send({
+        error: "Domain mismatch",
+        message: `SIWE message domain '${parsed.domain}' does not match server '${expectedHost}'`,
+      });
+    }
+
+    // Validate issuedAt freshness (must be within last 5 minutes)
+    if (parsed.issuedAt) {
+      const issuedMs = new Date(parsed.issuedAt).getTime();
+      if (!isNaN(issuedMs) && Date.now() - issuedMs > 5 * 60 * 1000) {
+        return reply.status(401).send({ error: "SIWE message too old (>5 minutes)" });
+      }
+    }
+
     // Validate nonce
     const nonceExpiry = nonces.get(parsed.nonce);
     if (!nonceExpiry || nonceExpiry < Date.now()) {
@@ -333,11 +350,26 @@ export async function siweAuthPlugin(app: FastifyInstance) {
     return reply.clearCookie("pcc_session", { path: "/" }).send({ ok: true });
   });
 
-  // ----- GET /api/auth/sessions (debug) -----
-  app.get("/api/auth/sessions", async () => {
-    return {
-      count: getSessionCount(),
-      sessions: listSessions(),
-    };
+  // ----- GET /api/auth/sessions (scoped to caller only) -----
+  // Only returns the caller's own sessions, not all sessions globally.
+  app.get("/api/auth/sessions", async (req, reply) => {
+    const { resolveApiKey } = await import("./api-key-auth.js");
+    const keyRecord = resolveApiKey(req);
+    const session = resolveSession(req);
+    if (!keyRecord && !session) {
+      return reply.status(401).send({ error: "Authentication required" });
+    }
+
+    // Only show the caller's own session (not global list)
+    const callerAddress = session?.address ?? keyRecord?.operatorId;
+    if (callerAddress) {
+      const allSessions = listSessions();
+      const mySessions = allSessions.filter(
+        (s: any) => s.walletAddress === callerAddress || s.address === callerAddress,
+      );
+      return { count: mySessions.length, sessions: mySessions };
+    }
+
+    return { count: 0, sessions: [] };
   });
 }

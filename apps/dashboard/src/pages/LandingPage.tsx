@@ -1656,6 +1656,46 @@ const TOOL_GROUPS = [
   },
 ];
 
+/** Safe syntax highlighting without dangerouslySetInnerHTML */
+function highlightCode(text: string): React.ReactNode[] {
+  const KEYWORDS = /\b(await|async|for|in|print|return)\b/;
+  const STRING_RE = /(['"])([^'"]*)\1/;
+  const parts: React.ReactNode[] = [];
+  let remaining = text;
+  let key = 0;
+
+  while (remaining.length > 0) {
+    const kwMatch = KEYWORDS.exec(remaining);
+    const strMatch = STRING_RE.exec(remaining);
+
+    // Find the earliest match
+    const matches = [
+      kwMatch ? { idx: kwMatch.index, len: kwMatch[0].length, type: "kw" as const, match: kwMatch } : null,
+      strMatch ? { idx: strMatch.index, len: strMatch[0].length, type: "str" as const, match: strMatch } : null,
+    ].filter(Boolean).sort((a, b) => a!.idx - b!.idx);
+
+    if (matches.length === 0) {
+      parts.push(<React.Fragment key={key++}>{remaining}</React.Fragment>);
+      break;
+    }
+
+    const first = matches[0]!;
+    if (first.idx > 0) {
+      parts.push(<React.Fragment key={key++}>{remaining.slice(0, first.idx)}</React.Fragment>);
+    }
+
+    if (first.type === "kw") {
+      parts.push(<span key={key++} style={{ color: GREEN }}>{first.match![0]}</span>);
+    } else {
+      parts.push(<span key={key++} style={{ color: AMBER }}>{first.match![0]}</span>);
+    }
+
+    remaining = remaining.slice(first.idx + first.len);
+  }
+
+  return parts;
+}
+
 function renderCodeLine(line: { text: string; type: string; highlight?: boolean }) {
   if (line.type === "blank") return <br />;
   if (line.type === "comment") {
@@ -1683,16 +1723,11 @@ function renderCodeLine(line: { text: string; type: string; highlight?: boolean 
       </span>
     );
   }
-  // Generic code — highlight strings
+  // Generic code — highlight strings and keywords safely (no dangerouslySetInnerHTML)
   return (
-    <span
-      style={{ color: TEXT_PRIMARY }}
-      dangerouslySetInnerHTML={{
-        __html: line.text
-          .replace(/(['"])([^'"]*)\1/g, `<span style="color:${AMBER}">$1$2$1</span>`)
-          .replace(/\b(await|async|for|in|print|return)\b/g, `<span style="color:${GREEN}">$1</span>`),
-      }}
-    />
+    <span style={{ color: TEXT_PRIMARY }}>
+      {highlightCode(line.text)}
+    </span>
   );
 }
 

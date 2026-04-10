@@ -238,15 +238,11 @@ export async function createGateway(port = 3200) {
     version: "0.1.0",
   }));
 
-  // Service status (public — shows which services are mock vs real)
-  await app.register(statusRoutes);
-
   // Security monitor — attack detection, honeypots, rate tracking, fingerprinting
   // Must be registered early so the onRequest hook fires before route handlers
   await app.register(securityMonitorPlugin);
 
-  // Analytics proxy (PostHog, Sentry, GA4 — server-side API aggregation)
-  await app.register(analyticsRoutes);
+  // NOTE: statusRoutes and analyticsRoutes moved AFTER apiGate (they expose sensitive data)
 
   // Auth routes (before other routes so session is available)
   await app.register(authRoutes);
@@ -265,6 +261,10 @@ export async function createGateway(port = 3200) {
 
   // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
+
+  // Service status + analytics — AFTER apiGate (they expose DB data, audit logs, security events)
+  await app.register(statusRoutes);
+  await app.register(analyticsRoutes);
 
   // Audit log routes
   await app.register(auditRoutes);

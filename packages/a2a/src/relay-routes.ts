@@ -167,9 +167,20 @@ export async function a2aRelayRoutes(app: FastifyInstance): Promise<void> {
     "/ws/a2a",
     { websocket: true },
     (socket: import("ws").WebSocket, req: FastifyRequest) => {
-      const { agentId, role } = req.query as { agentId?: string; role?: string };
+      const { agentId, role, apiKey } = req.query as { agentId?: string; role?: string; apiKey?: string };
       if (!agentId) {
         socket.close(4000, "agentId query param required");
+        return;
+      }
+
+      // Authentication check — require API key or existing session
+      // Check Authorization header first (WebSocket handshake passes headers)
+      const authHeader = req.headers.authorization;
+      const hasApiKey = authHeader?.startsWith("Bearer pcc_") || apiKey?.startsWith("pcc_");
+      const hasSession = !!(req as any).userId;
+
+      if (!hasApiKey && !hasSession) {
+        socket.close(4001, "Authentication required — provide API key via apiKey query param or Authorization header");
         return;
       }
 

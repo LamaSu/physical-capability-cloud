@@ -5,8 +5,29 @@
 import type { FastifyInstance } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
+import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { resolveApiKey } from "../auth/api-key-auth.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 
 export async function topicSSE(app: FastifyInstance) {
+  // Auth + connection limit gate for all SSE topic streams
+  app.addHook("onRequest", async (req, reply) => {
+    if (!req.url.startsWith("/sse/stream/")) return;
+
+    // Require authentication
+    const apiKey = resolveApiKey(req);
+    const session = resolveSession(req);
+    if (!apiKey && !session) {
+      return reply.status(401).send({ error: "Authentication required for SSE streams" });
+    }
+
+    // Connection limit per IP
+    if (!canOpenSSE(req.ip)) {
+      return reply.status(429).send({ error: "too_many_connections" });
+    }
+    trackSSEOpen(req.ip);
+  });
+
   /** Helper to set up an SSE connection for given topics */
   function setupSSE(
     req: { raw: { on: (event: string, cb: () => void) => void } },
@@ -48,6 +69,8 @@ export async function topicSSE(app: FastifyInstance) {
     req.raw.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
+      // Track SSE close for connection limiting
+      if ((req as any).ip) trackSSEClose((req as any).ip);
     });
   }
 

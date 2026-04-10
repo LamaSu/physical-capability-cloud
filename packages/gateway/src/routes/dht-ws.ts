@@ -8,9 +8,10 @@
  * - GET /api/dht/events/stream — SSE stream of live DHT metric events
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DHTNode, dhtTelemetry } from "@pcc/dht";
 import { pipelineTelemetry } from "../telemetry.js";
+import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 
 let gatewayDHTNode: DHTNode | null = null;
 
@@ -44,8 +45,18 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
   // Start the node (pruning timer, etc.)
   await dhtNode.start();
 
-  // ── WebSocket endpoint ─────────────────────────────────────────────
-  app.get("/ws/dht", { websocket: true }, (socket) => {
+  // ── WebSocket endpoint (auth required to prevent unauthorized DHT peers) ──
+  app.get("/ws/dht", { websocket: true }, (socket: any, req: FastifyRequest) => {
+    // Require API key in query string or Authorization header
+    const { apiKey } = req.query as { apiKey?: string };
+    const authHeader = req.headers.authorization;
+    const hasAuth = authHeader?.startsWith("Bearer pcc_") || apiKey?.startsWith("pcc_") || !!(req as any).userId;
+
+    if (!hasAuth) {
+      socket.close(4001, "Authentication required for DHT peer connections");
+      return;
+    }
+
     dhtNode.handleConnection(socket);
   });
 
@@ -66,6 +77,14 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
 
   // ── REST: announce capabilities ─────────────────────────────────────
   app.post("/api/dht/announce", async (req, reply) => {
+    // Require authentication — prevents DHT registry poisoning with fake kernels
+    const apiKeyId = (req as any).apiKeyId;
+    const operatorId = (req as any).operatorId;
+    const userId = (req as any).userId;
+    if (!apiKeyId && !userId) {
+      return reply.status(401).send({ error: "Authentication required for DHT announcements" });
+    }
+
     const announcement = req.body as any;
     if (!announcement || !announcement.kernelId || !announcement.capabilities) {
       return reply.status(400).send({ error: "kernelId and capabilities required" });
@@ -111,13 +130,25 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     };
   });
 
-  // ── SSE: live DHT event stream ─────────────────────────────────────
+  // ── SSE: live DHT event stream (auth + connection limit) ────────────
   app.get("/api/dht/events/stream", async (req, reply: FastifyReply) => {
+    // Require auth (this endpoint was missed in SEC-17/SEC-18)
+    const apiKeyId = (req as any).apiKeyId;
+    const userId = (req as any).userId;
+    if (!apiKeyId && !userId) {
+      return reply.status(401).send({ error: "Authentication required for DHT event stream" });
+    }
+
+    // SSE connection limit
+    if (!canOpenSSE(req.ip)) {
+      return reply.status(429).send({ error: "too_many_connections" });
+    }
+    trackSSEOpen(req.ip);
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
     });
 
     // Send the current metrics snapshot on connect
@@ -149,6 +180,7 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     req.raw.on("close", () => {
       clearInterval(heartbeat);
       dhtTelemetry.removeListener("metric", onMetric as (...args: unknown[]) => void);
+      trackSSEClose(req.ip);
     });
 
     // Keep the Fastify handler alive until the client disconnects

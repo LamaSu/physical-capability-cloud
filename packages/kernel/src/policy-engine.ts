@@ -484,6 +484,11 @@ export function scanGcode(gcode: string, maxTemp: number): PolicyViolation[] {
     { pattern: /M112/gi, message: "Emergency stop command (M112) found in G-code" },
     { pattern: /M999/gi, message: "Restart command (M999) found in G-code" },
     { pattern: /M502/gi, message: "Factory reset command (M502) found in G-code" },
+    { pattern: /M220\s+S(\d+)/gi, message: "Speed override (M220) — can cause motor damage at extreme values" },
+    { pattern: /M221\s+S(\d+)/gi, message: "Extrusion override (M221) — can cause filament jams or nozzle damage" },
+    { pattern: /M141\s+S(\d+)/gi, message: "Chamber temperature (M141) — can overheat enclosed printers" },
+    { pattern: /M303/gi, message: "PID autotune (M303) — can drive temperatures to extremes during tuning" },
+    { pattern: /G28(?!\.\d)/gi, message: "Homing command (G28) — can crash into bed if position is unknown" },
   ];
 
   for (const { pattern, message } of dangerousPatterns) {
@@ -494,8 +499,10 @@ export function scanGcode(gcode: string, maxTemp: number): PolicyViolation[] {
 
   // Temperature checks
   if (maxTemp > 0) {
-    const hotendTemps = [...gcode.matchAll(/M104\s+S(\d+)/gi)];
-    const bedTemps = [...gcode.matchAll(/M140\s+S(\d+)/gi)];
+    // Match M104/M109 with optional tool offset (e.g., M104 T0 S280)
+    const hotendTemps = [...gcode.matchAll(/M10[49](?:\s+T\d+)?\s+S(\d+)/gi)];
+    // Match M140/M190 (bed temps, with wait variant)
+    const bedTemps = [...gcode.matchAll(/M1[49]0\s+S(\d+)/gi)];
 
     for (const match of [...hotendTemps, ...bedTemps]) {
       const temp = parseInt(match[1], 10);

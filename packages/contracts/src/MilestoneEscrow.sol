@@ -72,6 +72,15 @@ contract MilestoneEscrow {
     bool public funded;
     uint256 public totalAmount;
 
+    // ── Reentrancy Guard ─────────────────────────────────────────────────
+
+    uint256 private _locked = 1;
+
+    // ── Access Control ───────────────────────────────────────────────────
+
+    /// @notice Addresses authorized to submit verifier attestations.
+    mapping(address => bool) public authorizedVerifiers;
+
     // ── PGTR Trusted Forwarders ─────────────────────────────────────────
 
     /// @notice Trusted PGTR forwarder contracts that can relay calls on behalf of users.
@@ -93,6 +102,13 @@ contract MilestoneEscrow {
     event BondSlashed(uint256 indexed milestoneIndex, address slashedParty, uint256 amount);
 
     // ── Modifiers ────────────────────────────────────────────────────────
+
+    modifier nonReentrant() {
+        require(_locked == 1, "Reentrant call");
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
 
     modifier onlyPayer() {
         require(msg.sender == payer, "Only payer");
@@ -167,6 +183,25 @@ contract MilestoneEscrow {
             return sender;
         }
         return msg.sender;
+    }
+
+    // ── Verifier Management ──────────────────────────────────────────────
+
+    /**
+     * @notice Authorize an address to submit attestations. Only the arbiter can manage verifiers.
+     * @param verifier Address to authorize as a verifier.
+     */
+    function addVerifier(address verifier) external onlyArbiter {
+        require(verifier != address(0), "Zero address");
+        authorizedVerifiers[verifier] = true;
+    }
+
+    /**
+     * @notice Remove an authorized verifier. Only the arbiter can manage verifiers.
+     * @param verifier Address to deauthorize.
+     */
+    function removeVerifier(address verifier) external onlyArbiter {
+        authorizedVerifiers[verifier] = false;
     }
 
     // ── Setup ────────────────────────────────────────────────────────────
@@ -252,12 +287,16 @@ contract MilestoneEscrow {
 
     /**
      * @notice Verifier submits attestation hash. Opens challenge window.
+     * @dev Only authorized verifiers may call this. The milestone's operator is
+     *      explicitly blocked from self-attesting their own evidence.
      */
     function submitAttestation(uint256 milestoneIndex, bytes32 _attestationHash)
         external
         milestoneExists(milestoneIndex)
     {
         Milestone storage m = milestones[milestoneIndex];
+        require(authorizedVerifiers[msg.sender], "Not an authorized verifier");
+        require(msg.sender != m.operator, "Operator cannot self-attest");
         require(m.status == MilestoneStatus.Evidenced, "Evidence not submitted");
 
         m.verifierAttestationHash = _attestationHash;
@@ -279,33 +318,40 @@ contract MilestoneEscrow {
      *   token.transfer(operator, milestone.amount - fee + operatorBond)
      *   protocolRoot.collectFee(token, fee)  // accounting
      */
-    function release(uint256 milestoneIndex) external milestoneExists(milestoneIndex) {
+    function release(uint256 milestoneIndex) external nonReentrant milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
         require(m.status == MilestoneStatus.Attested, "Not attested");
         require(block.timestamp >= m.challengeWindowEnd, "Challenge window open");
 
+        // ── Checks-Effects-Interactions: update state before any external calls ──
+        m.status = MilestoneStatus.Released;
+
+        // Cache values needed for transfers before any external calls
+        address operator = m.operator;
+        uint256 amount = m.amount;
+        uint256 operatorBond = m.operatorBond;
+
+        emit MilestoneReleased(milestoneIndex, operator, amount);
+
         if (protocolRoot != address(0)) {
             IPCCProtocol root = IPCCProtocol(protocolRoot);
             uint256 feeBps = root.protocolFeeBps();
-            uint256 fee = (m.amount * feeBps) / 10000;
+            uint256 fee = (amount * feeBps) / 10000;
             address recipient = root.feeRecipient();
 
             // Transfer fee to recipient
             require(token.transfer(recipient, fee), "Fee transfer failed");
 
             // Transfer net payment + bond to operator
-            uint256 operatorPayout = m.amount - fee + m.operatorBond;
-            require(token.transfer(m.operator, operatorPayout), "Transfer failed");
+            uint256 operatorPayout = amount - fee + operatorBond;
+            require(token.transfer(operator, operatorPayout), "Transfer failed");
 
             // Accounting callback
             root.collectFee(address(token), fee);
         } else {
-            uint256 payout = m.amount + m.operatorBond; // Return bond + payment
-            require(token.transfer(m.operator, payout), "Transfer failed");
+            uint256 payout = amount + operatorBond; // Return bond + payment
+            require(token.transfer(operator, payout), "Transfer failed");
         }
-
-        m.status = MilestoneStatus.Released;
-        emit MilestoneReleased(milestoneIndex, m.operator, m.amount);
     }
 
     // ── Disputes ─────────────────────────────────────────────────────────
@@ -345,6 +391,7 @@ contract MilestoneEscrow {
      */
     function resolveDispute(uint256 milestoneIndex, bool _challengerWon)
         external
+        nonReentrant
         onlyArbiter
         milestoneExists(milestoneIndex)
     {
@@ -354,25 +401,32 @@ contract MilestoneEscrow {
         Dispute storage d = disputes[milestoneIndex];
         require(!d.resolved, "Already resolved");
 
+        // ── Checks-Effects-Interactions: update state before any external calls ──
         d.resolved = true;
         d.challengerWon = _challengerWon;
 
-        if (_challengerWon) {
-            // Refund payer + return challenger bond + slash operator bond
-            uint256 refund = m.amount;
-            require(token.transfer(payer, refund), "Refund failed");
-            require(token.transfer(d.challenger, d.challengerBond + m.operatorBond), "Challenger payout failed");
-            m.status = MilestoneStatus.Slashed;
-            emit BondSlashed(milestoneIndex, m.operator, m.operatorBond);
-        } else {
-            // Release to operator + slash challenger bond
-            uint256 payout = m.amount + m.operatorBond + d.challengerBond;
-            require(token.transfer(m.operator, payout), "Operator payout failed");
-            m.status = MilestoneStatus.Released;
-            emit BondSlashed(milestoneIndex, d.challenger, d.challengerBond);
-        }
+        // Cache values needed for transfers before any external calls
+        address challenger = d.challenger;
+        uint256 challengerBond = d.challengerBond;
+        address operator = m.operator;
+        uint256 operatorBond = m.operatorBond;
+        uint256 milestoneAmount = m.amount;
 
-        emit DisputeResolved(milestoneIndex, _challengerWon);
+        if (_challengerWon) {
+            m.status = MilestoneStatus.Slashed;
+            emit BondSlashed(milestoneIndex, operator, operatorBond);
+            emit DisputeResolved(milestoneIndex, _challengerWon);
+            // Refund payer + return challenger bond + slash operator bond
+            require(token.transfer(payer, milestoneAmount), "Refund failed");
+            require(token.transfer(challenger, challengerBond + operatorBond), "Challenger payout failed");
+        } else {
+            m.status = MilestoneStatus.Released;
+            emit BondSlashed(milestoneIndex, challenger, challengerBond);
+            emit DisputeResolved(milestoneIndex, _challengerWon);
+            // Release to operator + slash challenger bond
+            uint256 payout = milestoneAmount + operatorBond + challengerBond;
+            require(token.transfer(operator, payout), "Operator payout failed");
+        }
     }
 
     // ── Views ────────────────────────────────────────────────────────────

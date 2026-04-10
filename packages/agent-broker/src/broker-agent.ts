@@ -555,8 +555,11 @@ export class BrokerAgent extends BaseAgent {
     for (const plan of this.activePlans.values()) {
       const quote = plan.quotes.find((q) => q.kernelId === msg.from || q.kernelAgentId === msg.from);
       if (quote) {
-        // Check if all steps complete
-        const allDone = plan.quotes.every(() => true); // simplified
+        // Mark this specific quote as completed
+        (quote as any).status = "completed";
+
+        // Check if all steps are actually complete (not just a placeholder)
+        const allDone = plan.quotes.every((q: any) => q.status === "completed");
         if (allDone) {
           plan.status = "completed";
 

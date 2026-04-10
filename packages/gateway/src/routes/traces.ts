@@ -9,6 +9,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { traceCollector } from "../trace-collector.js";
 import type { Trace } from "../trace-collector.js";
+import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 
 // Active SSE clients for the live trace stream
 const traceStreamClients = new Set<FastifyReply>();
@@ -40,11 +41,16 @@ export async function traceRoutes(app: FastifyInstance) {
   // the literal "stream" segment before treating it as a traceId param.
 
   app.get("/api/traces/stream", async (req, reply) => {
+    // SSE connection limit (HIGH-06 fix)
+    if (!canOpenSSE(req.ip)) {
+      return reply.status(429).send({ error: "too_many_connections", message: "SSE connection limit exceeded" });
+    }
+    trackSSEOpen(req.ip);
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
     });
 
     // Send recent traces on connect
@@ -70,6 +76,7 @@ export async function traceRoutes(app: FastifyInstance) {
     req.raw.on("close", () => {
       clearInterval(heartbeat);
       traceStreamClients.delete(reply);
+      trackSSEClose(req.ip);
     });
 
     // Keep alive
