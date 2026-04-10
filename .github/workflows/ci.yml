@@ -17,8 +17,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -51,7 +49,7 @@ jobs:
 
       - name: Install forge-std
         working-directory: packages/contracts
-        run: forge install foundry-rs/forge-std --no-commit
+        run: forge install foundry-rs/forge-std --no-git
 
       - name: Run Solidity tests
         working-directory: packages/contracts
