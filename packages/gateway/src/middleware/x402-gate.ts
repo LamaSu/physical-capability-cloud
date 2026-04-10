@@ -202,8 +202,14 @@ export async function x402Gate(app: FastifyInstance) {
         });
         if (stats.recentPayments.length > 50) stats.recentPayments.pop();
       } catch (err) {
-        // mppx error — log and let request through (fail open for MVP)
-        app.log.error({ err }, "[payment-gate] MPP payment check error");
+        // Fail CLOSED — payment verification errors block the request (HIGH-05 fix)
+        app.log.error({ err }, "[payment-gate] MPP payment check error — blocking request");
+        stats.gatedRequests++;
+        reply.status(402).headers({ "Content-Type": "application/json" }).send({
+          error: "payment_verification_failed",
+          message: "Payment verification encountered an error. Please try again.",
+        });
+        return;
       }
     });
   }

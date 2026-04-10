@@ -60,6 +60,9 @@ export function resolveApiKey(req: FastifyRequest) {
  * Provision a new API key for an operator.
  * Returns the raw key (shown once) + key record.
  */
+// Per-operator provisioning lock to prevent TOCTOU race on concurrent requests
+const provisioningLocks = new Set<string>();
+
 export function provisionApiKey(opts: {
   operatorId: string;
   name?: string;
@@ -69,13 +72,20 @@ export function provisionApiKey(opts: {
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
 }) {
-  const repo = getRepos().apiKeys;
-
-  // Limit keys per operator (max 5 active)
-  const activeCount = repo.countByOperator(opts.operatorId);
-  if (activeCount >= 5) {
-    throw new Error("Maximum 5 active API keys per operator");
+  // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
+  if (provisioningLocks.has(opts.operatorId)) {
+    throw new Error("Key provisioning in progress — try again in a moment");
   }
+  provisioningLocks.add(opts.operatorId);
+
+  try {
+    const repo = getRepos().apiKeys;
+
+    // Limit keys per operator (max 5 active)
+    const activeCount = repo.countByOperator(opts.operatorId);
+    if (activeCount >= 5) {
+      throw new Error("Maximum 5 active API keys per operator");
+    }
 
   const { rawKey, keyHash, keyPrefix } = generateApiKey();
   const now = new Date();
@@ -97,5 +107,8 @@ export function provisionApiKey(opts: {
     metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
   });
 
-  return { rawKey, record };
+    return { rawKey, record };
+  } finally {
+    provisioningLocks.delete(opts.operatorId);
+  }
 }

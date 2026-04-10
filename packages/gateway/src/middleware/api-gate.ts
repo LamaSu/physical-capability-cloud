@@ -16,7 +16,8 @@ const PUBLIC_PREFIXES = [
   "/api/auth/validate",         // Key validation is public (checks key itself)
   "/api/feedback",
   "/api/onboard/check/",        // Invite code validation is public
-  "/api/onboard/registrations", // Registration browsing is public (operators can check status)
+  // REMOVED: "/api/onboard/registrations" — prefix match was too broad, exposed admin
+  // endpoints (approve/reject/activate) without auth. Now uses exact match below.
   "/api/dht/",                  // DHT discovery is public (distributed capability queries)
   "/api/marketplace/",          // Marketplace browsing is public (see what's available)
   "/.well-known/",
@@ -27,12 +28,19 @@ const PUBLIC_EXACT = [
   "/api/capabilities",         // Capability listing is public
   "/api/kernels",              // Kernel listing is public (find operators)
   "/api/agents/status",        // Network status is public
+  "/api/onboard/registrations", // EXACT match only — GET listing is public, but
+                                // sub-paths like /approve, /reject, /activate require auth
 ];
+
+// Capability detail routes are public — discovery, widget embedding, etc.
+// Covers: /api/capabilities/:id  AND  /api/capabilities/:id/button
+const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button)?$/;
 
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
+  if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   return false;
 }
 

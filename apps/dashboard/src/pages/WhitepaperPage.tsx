@@ -161,53 +161,56 @@ function markdownToHtml(md: string): string {
 
   // Code blocks (``` ... ```)
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-    return `<pre><code class="language-${lang}">${esc(code.trimEnd())}</code></pre>`;
+    return `<pre><code class="language-${esc(lang)}">${esc(code.trimEnd())}</code></pre>`;
   });
 
   // Inline code
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/`([^`]+)`/g, (_m, code) => `<code>${esc(code)}</code>`);
 
-  // Tables
+  // Tables — escape cell content
   html = html.replace(
     /^(\|.+\|)\n(\|[\s:|-]+\|)\n((?:\|.+\|\n?)*)/gm,
     (_m, header: string, _sep: string, body: string) => {
-      const hCells = header.split("|").filter(Boolean).map((c: string) => c.trim());
+      const hCells = header.split("|").filter(Boolean).map((c: string) => esc(c.trim()));
       const rows = body.trim().split("\n").filter(Boolean);
       let t = "<table><thead><tr>" + hCells.map((c: string) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
       for (const row of rows) {
-        const cells = row.split("|").filter(Boolean).map((c: string) => c.trim());
+        const cells = row.split("|").filter(Boolean).map((c: string) => esc(c.trim()));
         t += "<tr>" + cells.map((c: string) => `<td>${c}</td>`).join("") + "</tr>";
       }
       return t + "</tbody></table>";
     },
   );
 
-  // Headers
-  html = html.replace(/^#### (.+)$/gm, "<h4>$1</h4>");
-  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
-  html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
-  html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+  // Headers — escape content
+  html = html.replace(/^#### (.+)$/gm, (_m, c) => `<h4>${esc(c)}</h4>`);
+  html = html.replace(/^### (.+)$/gm, (_m, c) => `<h3>${esc(c)}</h3>`);
+  html = html.replace(/^## (.+)$/gm, (_m, c) => `<h2>${esc(c)}</h2>`);
+  html = html.replace(/^# (.+)$/gm, (_m, c) => `<h1>${esc(c)}</h1>`);
 
   // HR
   html = html.replace(/^---+$/gm, "<hr>");
 
-  // Bold + italic
-  html = html.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  // Bold + italic — escape content
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, (_m, c) => `<strong><em>${esc(c)}</em></strong>`);
+  html = html.replace(/\*\*(.+?)\*\*/g, (_m, c) => `<strong>${esc(c)}</strong>`);
+  html = html.replace(/\*(.+?)\*/g, (_m, c) => `<em>${esc(c)}</em>`);
 
-  // Links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Links — sanitize href (block javascript: URIs)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, href) => {
+    const safeHref = /^(https?:\/\/|\/|#|mailto:)/i.test(href.trim()) ? href : "#";
+    return `<a href="${esc(safeHref)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
+  });
 
-  // Unordered lists
-  html = html.replace(/^(\s*)-\s+(.+)$/gm, "$1<li>$2</li>");
+  // Unordered lists — escape content
+  html = html.replace(/^(\s*)-\s+(.+)$/gm, (_m, indent, c) => `${indent}<li>${esc(c)}</li>`);
   html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>");
 
   // Ordered lists
-  html = html.replace(/^\d+\.\s+(.+)$/gm, "<li>$1</li>");
+  html = html.replace(/^\d+\.\s+(.+)$/gm, (_m, c) => `<li>${esc(c)}</li>`);
 
   // Blockquotes
-  html = html.replace(/^>\s*(.+)$/gm, "<blockquote>$1</blockquote>");
+  html = html.replace(/^>\s*(.+)$/gm, (_m, c) => `<blockquote>${esc(c)}</blockquote>`);
 
   // Paragraphs: wrap remaining text blocks
   html = html.replace(/^(?!<[a-z])((?!<).+)$/gm, "<p>$1</p>");
@@ -215,9 +218,21 @@ function markdownToHtml(md: string): string {
   // Clean up empty paragraphs
   html = html.replace(/<p>\s*<\/p>/g, "");
 
+  // Final sanitization pass — strip any raw HTML tags that survived markdown parsing
+  html = html.replace(/<script[\s>][\s\S]*?<\/script>/gi, "");
+  html = html.replace(/<iframe[\s>][\s\S]*?<\/iframe>/gi, "");
+  html = html.replace(/<object[\s>][\s\S]*?<\/object>/gi, "");
+  html = html.replace(/<embed[\s>][\s\S]*?<\/embed>/gi, "");
+  html = html.replace(/on\w+\s*=/gi, "data-blocked=");
+
   return html;
 }
 
 function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;");
 }

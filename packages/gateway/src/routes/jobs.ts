@@ -38,16 +38,43 @@ export async function jobRoutes(app: FastifyInstance) {
     }
   });
 
+  // Valid job status transitions (prevent arbitrary status injection)
+  const VALID_STATUSES = new Set([
+    "pending", "queued", "in_progress", "paused",
+    "completed", "failed", "cancelled",
+  ]);
+
   app.patch<{ Params: { jobId: string }; Body: { status: string; progress?: number } }>(
     "/api/jobs/:jobId/status",
     async (req, reply) => {
       try {
+        const { status, progress } = req.body;
+
+        // Validate status against allowlist (prevents status injection attacks)
+        if (!VALID_STATUSES.has(status)) {
+          return reply.code(400).send({
+            error: "invalid_status",
+            message: `Status must be one of: ${[...VALID_STATUSES].join(", ")}`,
+          });
+        }
+
+        // Verify the caller is the kernel/operator assigned to this job
+        const operatorId = (req as any).operatorId ?? (req as any).userId;
         const repos = getRepos();
-        const updated = repos.jobs.updateStatus(
-          req.params.jobId,
-          req.body.status,
-          req.body.progress,
-        );
+        const job = repos.jobs.findById(req.params.jobId);
+        if (!job) return reply.code(404).send({ error: "not_found" });
+
+        // Only the assigned kernel operator or the job submitter can update status
+        if (operatorId && (job as any).kernelId) {
+          const kernel = repos.kernels.findById((job as any).kernelId);
+          const isKernelOperator = kernel && (kernel as any).operatorId === operatorId;
+          const isJobSubmitter = (job as any).submittedBy === operatorId;
+          if (!isKernelOperator && !isJobSubmitter) {
+            return reply.code(403).send({ error: "forbidden", message: "You can only update status for your own jobs" });
+          }
+        }
+
+        const updated = repos.jobs.updateStatus(req.params.jobId, status, progress);
         if (!updated) return reply.code(404).send({ error: "not_found" });
         return { job: updated };
       } catch (err: unknown) {

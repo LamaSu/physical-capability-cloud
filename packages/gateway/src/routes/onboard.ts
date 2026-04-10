@@ -115,7 +115,15 @@ export async function onboardRoutes(app: FastifyInstance) {
     try {
       const repos = getRepos();
       const registrations = repos.registrations.findAll();
-      return { registrations };
+      // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
+      const sanitized = registrations.map((r: any) => ({
+        id: r.id,
+        status: r.status,
+        name: r.name,
+        capability: r.capability,
+        createdAt: r.createdAt,
+      }));
+      return { registrations: sanitized };
     } catch { return { registrations: [] }; }
   });
 
@@ -198,6 +206,14 @@ export async function onboardRoutes(app: FastifyInstance) {
         const repos = getRepos();
         const reg = repos.registrations.findById(req.params.id);
         if (!reg) return reply.status(404).send({ error: "not_found" });
+
+        // Verify the caller owns this registration (prevents self-approval by other operators)
+        const callerId = (req as any).operatorId ?? (req as any).userId;
+        const regOperator = (reg as any).walletAddress ?? (reg as any).email ?? (reg as any).operatorId;
+        if (callerId && regOperator && callerId !== regOperator) {
+          return reply.status(403).send({ error: "forbidden", message: "You can only prove your own registration" });
+        }
+
         if (reg.status === "active") {
           return reply.status(400).send({ error: "already_active", message: "Registration is already active" });
         }

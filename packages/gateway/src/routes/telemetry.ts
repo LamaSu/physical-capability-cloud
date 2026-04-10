@@ -15,6 +15,7 @@ import { logger, type LogLevel } from "../structured-logger.js";
 import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
+import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 
 // Active SSE clients for the live log stream
 const logStreamClients = new Set<FastifyReply>();
@@ -34,6 +35,28 @@ streamHub.subscribe(
     }
   },
 );
+
+/** Strip prompt injection patterns from telemetry metadata values */
+function sanitizeTelemetryMetadata(obj: Record<string, unknown>, depth = 0): Record<string, unknown> {
+  if (depth > 3) return {};
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === "string") {
+      // Strip common prompt injection patterns
+      result[key] = value
+        .replace(/\[SYSTEM\]|\[INST\]|<\|im_start\|/gi, "[FILTERED]")
+        .replace(/ignore\s+(all\s+)?previous\s+instructions/gi, "[FILTERED]")
+        .replace(/<script[\s>]/gi, "[FILTERED]")
+        .replace(/javascript\s*:/gi, "[FILTERED]")
+        .slice(0, 2000); // Cap string length
+    } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      result[key] = sanitizeTelemetryMetadata(value as Record<string, unknown>, depth + 1);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
 
 export async function telemetryRoutes(app: FastifyInstance) {
   // ── GET /api/telemetry/pipeline/:jobId ──────────────────────────────────
@@ -103,11 +126,16 @@ export async function telemetryRoutes(app: FastifyInstance) {
   // ── GET /api/telemetry/logs/stream  (SSE) ─────────────────────────────
 
   app.get("/api/telemetry/logs/stream", async (req, reply) => {
+    // SSE connection limit (HIGH-06 fix — prevent DoS via connection flood)
+    if (!canOpenSSE(req.ip)) {
+      return reply.status(429).send({ error: "too_many_connections", message: "SSE connection limit exceeded" });
+    }
+    trackSSEOpen(req.ip);
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
     });
 
     // Send recent history on connect
@@ -141,6 +169,7 @@ export async function telemetryRoutes(app: FastifyInstance) {
     req.raw.on("close", () => {
       clearInterval(heartbeat);
       logStreamClients.delete(reply);
+      trackSSEClose(req.ip);
     });
 
     // Keep alive
@@ -216,15 +245,25 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source?: string;
     };
   }>("/api/telemetry/emit", async (req, reply) => {
+    // Restrict to operators with API keys (HIGH-04 fix — prevents arbitrary telemetry injection)
+    const apiKeyId = (req as any).apiKeyId;
+    const operatorId = (req as any).operatorId;
+    if (!apiKeyId || !operatorId) {
+      return reply.code(403).send({ error: "forbidden", message: "Telemetry emit requires operator API key authentication" });
+    }
+
     const { jobId, phase, status, duration_ms, metadata, level, source } = req.body;
 
     if (!jobId || !phase || !status) {
       return reply.code(400).send({ error: "jobId, phase, status are required" });
     }
 
+    // Sanitize metadata to prevent prompt injection in telemetry (AI-02 fix)
+    const sanitizedMetadata = metadata ? sanitizeTelemetryMetadata(metadata) : undefined;
+
     const event = pipelineTelemetry.emit(jobId, phase, status, {
       duration_ms,
-      metadata,
+      metadata: sanitizedMetadata,
       level,
       source,
     });

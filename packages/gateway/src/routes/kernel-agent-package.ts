@@ -217,6 +217,17 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const { kernelId } = req.params;
 
+        // Verify the caller owns this kernel (prevents unauthorized policy injection)
+        const operatorId = (req as any).operatorId ?? (req as any).userId;
+        if (operatorId) {
+          const kernel = db.select().from(schema.shopKernels)
+            .where(eq(schema.shopKernels.id, kernelId))
+            .get();
+          if (kernel && (kernel as any).operatorId && (kernel as any).operatorId !== operatorId) {
+            return reply.status(403).send({ error: "You can only configure your own kernel's agent package" });
+          }
+        }
+
         // Load current policy
         const row = db.select().from(operatorPolicies)
           .where(eq(operatorPolicies.kernelId, kernelId))

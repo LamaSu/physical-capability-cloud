@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const FEEDBACK_FILE = process.env.PCC_FEEDBACK_PATH ?? "./data/feedback.json";
@@ -30,8 +30,33 @@ function saveFeedback(entries: FeedbackEntry[]): void {
 }
 
 export async function feedbackRoutes(app: FastifyInstance) {
-  // Submit feedback (public — no auth required)
+  // Per-IP rate limiter for feedback (max 10 per hour)
+  const feedbackRateMap = new Map<string, { count: number; windowStart: number }>();
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, e] of feedbackRateMap) if (now - e.windowStart > 3600_000) feedbackRateMap.delete(ip);
+  }, 600_000);
+
+  // Submit feedback (public — no auth required, but rate limited + file size capped)
   app.post("/api/feedback", async (request, reply) => {
+    // Rate limit: 10 feedback per IP per hour
+    const now = Date.now();
+    const ipEntry = feedbackRateMap.get(request.ip);
+    if (ipEntry && now - ipEntry.windowStart < 3600_000 && ipEntry.count >= 10) {
+      return reply.status(429).send({ error: "Too many feedback submissions" });
+    }
+    if (!ipEntry || now - ipEntry.windowStart > 3600_000) {
+      feedbackRateMap.set(request.ip, { count: 1, windowStart: now });
+    } else {
+      ipEntry.count++;
+    }
+
+    // Cap feedback file size at 5MB to prevent disk exhaustion
+    try {
+      if (existsSync(FEEDBACK_FILE) && statSync(FEEDBACK_FILE).size > 5 * 1024 * 1024) {
+        return reply.status(507).send({ error: "Feedback storage full" });
+      }
+    } catch { /* ignore */ }
     const body = request.body as {
       type?: string;
       message?: string;

@@ -11,12 +11,22 @@ import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { canProvision } from "../middleware/security-hardening.js";
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
   // Public endpoint — this is how new operators get their API key.
   // They provide email + capability description, we issue a key.
   app.post("/api/auth/provision", async (req, reply) => {
+    // Rate limit: max 5 provisions per IP per hour (CRIT-02 fix)
+    if (!canProvision(req.ip)) {
+      return reply.status(429).send({
+        error: "rate_limited",
+        message: "Too many API key requests. Try again in an hour.",
+        retry_after_seconds: 3600,
+      });
+    }
+
     const body = (req.body ?? {}) as {
       email?: string;
       walletAddress?: string;
