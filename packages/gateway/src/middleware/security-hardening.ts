@@ -124,6 +124,60 @@ setInterval(() => {
   }
 }, 120_000);
 
+// ── Broker / dispatcher role check ──────────────────────────────────────────
+//
+// BROKER_OPERATORS env var (comma-separated wallet addresses or operator IDs)
+// lists callers that are allowed to assign work to OTHER operators (e.g. assign
+// a request node to a specific kernel operator). Everyone else can only act on
+// their own behalf.
+//
+// Set in Railway: BROKER_OPERATORS=0xabc...,broker@example.com
+
+export function isBrokerOperator(operatorId: string | undefined | null): boolean {
+  if (!operatorId) return false;
+  const raw = process.env.BROKER_OPERATORS ?? "";
+  const set = new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return set.has(operatorId.toLowerCase());
+}
+
+// ── Generic per-caller rate limiter ─────────────────────────────────────────
+//
+// Used for any endpoint that needs throttling beyond the SIWE/provision specific
+// limiters. Tracks per (operatorId, endpointKey) tuple.
+
+const callerRateMap = new Map<string, { count: number; windowStart: number }>();
+
+export function checkCallerRate(
+  operatorId: string,
+  endpointKey: string,
+  limit: number,
+  windowMs: number,
+): boolean {
+  const key = `${operatorId}::${endpointKey}`;
+  const now = Date.now();
+  const entry = callerRateMap.get(key);
+  if (!entry || now - entry.windowStart > windowMs) {
+    callerRateMap.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= limit) return false;
+  entry.count++;
+  return true;
+}
+
+// Cleanup stale rate-limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of callerRateMap) {
+    if (now - entry.windowStart > 3_600_000) callerRateMap.delete(key);
+  }
+}, 300_000);
+
 // Cleanup stale entries every 10 minutes
 setInterval(() => {
   const now = Date.now();

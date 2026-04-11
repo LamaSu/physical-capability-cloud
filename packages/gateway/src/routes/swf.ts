@@ -446,27 +446,71 @@ export async function swfRoutes(app: FastifyInstance) {
       costModel?: SWFOperatorCostModel;
     };
 
-    // IDOR fix: derive operatorId from session, not body (red team #10)
-    const operatorId = (req as any).operatorId ?? (req as any).userId;
-    if (!operatorId) {
+    // The PROPOSER (caller) and the OPERATOR (target) are distinct.
+    // Term sheets are proposed BY a sponsor/investor TO an operator.
+    // We require auth, validate types, rate limit, and audit-log both parties.
+    const proposerId = (req as any).operatorId ?? (req as any).userId;
+    if (!proposerId) {
       return reply.code(401).send({ error: "authentication_required" });
     }
 
-    if (!body.capabilityType || !body.equityTier || !body.seedAmount || !body.costModel) {
+    // Rate limit: 5 term sheets per proposer per 10 minutes (anti-spam)
+    const { checkCallerRate } = await import("../middleware/security-hardening.js");
+    if (!checkCallerRate(proposerId, "swf_propose", 5, 600_000)) {
+      return reply.code(429).send({
+        error: "rate_limited",
+        message: "Too many term sheet proposals. Try again in 10 minutes.",
+      });
+    }
+
+    // Type guards on all body fields (prevents NoSQL-style object injection)
+    if (typeof body.capabilityType !== "string") {
+      return reply.code(400).send({ error: "invalid_type", message: "capabilityType must be a string" });
+    }
+    if (typeof body.operatorId !== "string") {
+      return reply.code(400).send({ error: "invalid_type", message: "operatorId must be a string" });
+    }
+    if (typeof body.seedAmount !== "number" || body.seedAmount <= 0 || body.seedAmount > 10_000_000) {
+      return reply.code(400).send({
+        error: "invalid_seed_amount",
+        message: "seedAmount must be a positive number under 10,000,000",
+      });
+    }
+
+    if (!body.equityTier || !body.costModel) {
       return reply.code(400).send({
         error: "bad_request",
-        message: "capabilityType, equityTier, seedAmount, and costModel are required",
+        message: "capabilityType, operatorId, equityTier, seedAmount, and costModel are required",
       });
     }
 
     try {
       const termSheet = swfService.proposeTermSheet({
         capabilityType: body.capabilityType,
-        operatorId,
+        operatorId: body.operatorId,
         equityTier: body.equityTier as SWFEquityTier,
         seedAmount: body.seedAmount,
         costModel: body.costModel,
       });
+
+      // Audit log records both parties for forensics
+      try {
+        const { auditService } = await import("../services/audit-service.js");
+        auditService.log({
+          eventType: "swf.term_sheet.proposed",
+          actor: proposerId,
+          resourceType: "swf_term_sheet",
+          resourceId: termSheet.id,
+          action: "propose",
+          metadata: {
+            targetOperator: body.operatorId,
+            capabilityType: body.capabilityType,
+            seedAmount: body.seedAmount,
+            equityTier: body.equityTier,
+          },
+          ip: req.ip,
+        });
+      } catch { /* non-fatal */ }
       return reply.code(201).send({ termSheet });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

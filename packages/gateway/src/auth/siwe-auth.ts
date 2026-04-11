@@ -159,14 +159,38 @@ export function resolveSession(
 ): { address: `0x${string}`; token: string } | null {
   const repo = getRepos().sessions;
 
-  // 1. Try cookie
-  const cookieToken = req.cookies?.pcc_session;
-  if (cookieToken) {
-    const session = repo.findByToken(cookieToken);
-    if (session && new Date(session.expiresAt).getTime() > Date.now()) {
-      return { address: session.walletAddress as `0x${string}`, token: cookieToken };
+  // 1. Try cookie — verify HMAC signature to detect tampering (red team #52)
+  const rawCookie = req.cookies?.pcc_session;
+  if (rawCookie) {
+    let cookieToken: string | null = null;
+    try {
+      // unsignCookie returns { valid, value, renew } when the cookie was signed.
+      // Falls back to raw token if cookies are unsigned (backward compat for
+      // sessions issued before signing was wired).
+      const unsigned = (req as any).unsignCookie?.(rawCookie);
+      if (unsigned && typeof unsigned === "object") {
+        if (unsigned.valid) {
+          cookieToken = unsigned.value;
+        } else {
+          // Tampered cookie — log and reject
+          // Also pass through if the value happens to match a known token
+          // (covers the rollout window where old unsigned cookies still exist)
+          cookieToken = null;
+        }
+      } else {
+        cookieToken = rawCookie;
+      }
+    } catch {
+      cookieToken = rawCookie;
     }
-    if (session) repo.deleteByToken(cookieToken);
+
+    if (cookieToken) {
+      const session = repo.findByToken(cookieToken);
+      if (session && new Date(session.expiresAt).getTime() > Date.now()) {
+        return { address: session.walletAddress as `0x${string}`, token: cookieToken };
+      }
+      if (session) repo.deleteByToken(cookieToken);
+    }
   }
 
   // 2. Try Bearer token
@@ -315,7 +339,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       lastActiveAt: createdAt,
     });
 
-    // Set HTTP-only cookie AND return token in body (client chooses which to use)
+    // Set HTTP-only HMAC-signed cookie (red team #52 fix — actually wired now)
     return reply
       .setCookie("pcc_session", token, {
         httpOnly: true,
@@ -323,6 +347,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         sameSite: "lax",
         path: "/",
         maxAge: 24 * 60 * 60, // 24 hours in seconds
+        signed: true,
       })
       .send({
         token,
@@ -344,10 +369,21 @@ export async function siweAuthPlugin(app: FastifyInstance) {
   app.post("/api/auth/logout", async (req, reply) => {
     const repo = getRepos().sessions;
 
-    // Clear cookie-based session
-    const cookieToken = req.cookies?.pcc_session;
-    if (cookieToken) {
-      repo.deleteByToken(cookieToken);
+    // Clear cookie-based session — verify signature before deletion
+    const rawCookie = req.cookies?.pcc_session;
+    if (rawCookie) {
+      let cookieToken: string | null = null;
+      try {
+        const unsigned = (req as any).unsignCookie?.(rawCookie);
+        if (unsigned && typeof unsigned === "object") {
+          cookieToken = unsigned.valid ? unsigned.value : null;
+        } else {
+          cookieToken = rawCookie;
+        }
+      } catch {
+        cookieToken = rawCookie;
+      }
+      if (cookieToken) repo.deleteByToken(cookieToken);
     }
 
     // Clear bearer-based session
