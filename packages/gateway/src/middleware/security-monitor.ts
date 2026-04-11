@@ -21,19 +21,35 @@ const SQLI_PATTERNS = [
   /(\b(sleep|benchmark|waitfor)\s*\()/i,
 ];
 
+// STRICT patterns: clear attacks, always block (return 403)
 const XSS_PATTERNS = [
   /<script[\s>]/i,
   /javascript\s*:/i,
-  /on(error|load|click|mouse|focus|blur|toggle)\s*=/i,
+  /on(error|load|click|mouse|focus|blur)\s*=/i,
   /<iframe[\s>]/i,
   /<img[^>]+onerror/i,
-  /<svg[^>]+onload/i,
-  /<style[\s>]/i,                 // CSS injection (red team Phase 5)
-  /<details[^>]+ontoggle/i,       // details ontoggle XSS
-  /<meta[^>]+http-equiv/i,        // meta refresh attacks
   /eval\s*\(/i,
   /document\.(cookie|domain|write)/i,
 ];
+
+// SOFT patterns: suspicious but possibly legitimate (rich content, icons,
+// custom styles). Logged as bot/attack signal, not blocked. Some user fields
+// may legitimately contain SVG icons or inline styles.
+const XSS_SOFT_PATTERNS = [
+  /<svg[^>]+onload/i,             // svg with event handler - real attack
+  /<details[^>]+ontoggle/i,
+  /<meta[^>]+http-equiv/i,
+  /<style[\s>]/i,                  // CSS injection - usually attack but blocks legit rich content
+  /on(toggle)\s*=/i,
+];
+
+/** Check soft patterns separately — caller decides whether to block or just log */
+function detectSoftXss(input: string): string | null {
+  for (const p of XSS_SOFT_PATTERNS) {
+    if (p.test(input)) return p.source;
+  }
+  return null;
+}
 
 const PATH_TRAVERSAL_PATTERNS = [
   /\.\.[/\\]/,

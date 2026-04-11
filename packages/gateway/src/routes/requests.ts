@@ -336,14 +336,57 @@ export async function requestRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
-      // IDOR fix: derive operatorId from session, not body (red team #10)
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
-      if (!operatorId) {
+      // Caller must be authenticated. By default they can only assign nodes
+      // to themselves; brokers/dispatchers (BROKER_OPERATORS env allowlist)
+      // can assign to any operator.
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!callerId) {
         return reply.status(401).send({ error: "authentication_required" });
       }
 
-      node.assignedOperator = operatorId;
+      // Rate limit: 30 assignments per caller per minute
+      const { checkCallerRate, isBrokerOperator } = await import("../middleware/security-hardening.js");
+      if (!checkCallerRate(callerId, "request_assign", 30, 60_000)) {
+        return reply.status(429).send({ error: "rate_limited", message: "Too many node assignments" });
+      }
+
+      const body = (req.body ?? {}) as { operatorId?: string };
+      let targetOperator: string;
+
+      if (body.operatorId && body.operatorId !== callerId) {
+        // Cross-operator assignment requires broker role
+        if (!isBrokerOperator(callerId)) {
+          return reply.status(403).send({
+            error: "forbidden",
+            message: "Only broker operators can assign nodes to other operators. " +
+                     "Set BROKER_OPERATORS env var to allowlist callers.",
+          });
+        }
+        if (typeof body.operatorId !== "string") {
+          return reply.status(400).send({ error: "invalid_type", message: "operatorId must be a string" });
+        }
+        targetOperator = body.operatorId;
+      } else {
+        // Self-assign
+        targetOperator = callerId;
+      }
+
+      node.assignedOperator = targetOperator;
       node.status = "assigned";
+
+      // Audit trail records both the caller (broker) and the target operator
+      try {
+        const { auditService } = await import("../services/audit-service.js");
+        auditService.log({
+          eventType: "request.node.assigned",
+          actor: callerId,
+          resourceType: "request_node",
+          resourceId: node.id,
+          action: "assign",
+          metadata: { requestId: request.id, targetOperator, broker: callerId !== targetOperator },
+          ip: req.ip,
+        });
+      } catch { /* non-fatal */ }
       request.updatedAt = new Date().toISOString();
       requestsStore.set(request.id, request);
 
