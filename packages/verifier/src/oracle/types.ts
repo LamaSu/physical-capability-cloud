@@ -33,6 +33,8 @@ export interface OracleVerificationResult {
   bondAmount?: string; // bond amount in token units
   // Chainlink-specific
   requestId?: string; // Chainlink Functions request ID
+  /** Assurance score from the digital-verifier rollup (0.0-1.0) */
+  assuranceScore?: number;
 }
 
 export interface OracleDetail {

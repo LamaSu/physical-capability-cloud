@@ -43,3 +43,6 @@ export {
 
 // ERC-8004 types (browser-safe)
 export * from "./erc8004.js";
+
+// Ephemeral identity types (browser-safe — sessionKey / principalKey)
+export * from "./ephemeral.js";

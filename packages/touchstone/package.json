@@ -1,0 +1,21 @@
+{
+  "name": "@pcc/touchstone",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Statistical enforcement via injected known-answer tasks for digital-kernel verification",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

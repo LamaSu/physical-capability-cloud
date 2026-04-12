@@ -65,7 +65,13 @@ export type EvidenceEventType =
   // Machine log events (WS3)
   | "printer_log_captured"
   | "printer_job_verified"
-  | "log_hash_chain_entry";
+  | "log_hash_chain_entry"
+  // Digital workflow events
+  | "workflow_step_completed"
+  | "digital_task_started"
+  | "digital_task_completed"
+  | "touchstone_dispatched"
+  | "touchstone_verified";
 
 /** Source device that produced an evidence event */
 export interface EvidenceSource {
@@ -75,7 +81,8 @@ export interface EvidenceSource {
               "instrument" | "chromatograph" | "bioreactor" | "autosampler" |
               "spectrometer" | "thermal_camera" | "force_sensor" | "flow_sensor" |
               "ph_sensor" | "gas_analyzer" | "plc" | "robot_arm" |
-              "pcb_placer" | "gateway_bridge";
+              "pcb_placer" | "gateway_bridge" |
+              "digital_agent" | "workflow_engine";
   kernelId: Id;
   firmwareVersion?: string;
 }
@@ -120,6 +127,31 @@ export interface TierEvidenceRequirements {
   requiredEventTypes: EvidenceEventType[][];  // outer = AND groups, inner = OR within group
   minimumEvents: number;
   description: string;
+}
+
+/** Block anchor for anti-replay freshness binding */
+export interface BlockAnchor {
+  chainId: number;
+  blockNumber: bigint;
+  blockHash: string; // 0x-prefixed hex
+  timestamp: bigint; // block timestamp in seconds
+}
+
+/** A challenge issued by a parent agent or gateway to bind execution to a point in time */
+export interface WorkflowChallenge {
+  challengeId: string; // UUID
+  issuedBy: string; // ERC-8004 AgentRegistryId or kernel ID
+  anchor: BlockAnchor; // The block at challenge issue time
+  maxAgeSeconds: number; // Default 600 (10 min)
+  scope: string; // Contract ID or job ID this binds to
+}
+
+/** Proof that execution happened after a challenge was issued */
+export interface ExecutionProof {
+  challengeId: string;
+  proofHash: string; // SHA256(challengeId + blockHash + workOutputRoot)
+  workOutputRoot: string; // Hash of work outputs
+  computedAtBlock: bigint; // Block number when proof was computed
 }
 
 /** Default tier requirements */
