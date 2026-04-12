@@ -79,6 +79,7 @@ import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
 import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
+import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
@@ -297,6 +298,7 @@ export async function createGateway(port = 3200) {
   await app.register(operatorRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(diagnosticLogRoutes);
+  await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
   await app.register(kernelAgentPackageRoutes);
   await app.register(sdkRoutes);

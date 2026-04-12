@@ -734,27 +734,39 @@ def feedback_cmd(config_file, mode, interval):
     help="Save diagnostic bundle locally instead of uploading",
 )
 @click.option(
+    "--send",
+    is_flag=True,
+    default=False,
+    help="Upload logs AND open a support thread automatically",
+)
+@click.option(
+    "--message", "-m",
+    default="",
+    help="Description of the issue (used with --send)",
+)
+@click.option(
     "--output", "-o",
     default=None,
     help="Output file path for --local-only (default: pcc-diagnostics-<timestamp>.json)",
 )
 @click.pass_context
-def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, local_only, output):
+def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, local_only, send, message, output):
     """Collect and securely send diagnostic logs for troubleshooting.
 
     Gathers system info, node state, recent logs, device health, and
     network diagnostics. Encrypts everything and uploads to the PCC
     gateway. You receive a short retrieval code to share with support.
 
-    The retrieval code is the ONLY way to decrypt the logs — share it
-    only with the person helping you troubleshoot.
+    Use --send to automatically open a support thread with your logs
+    attached — no need to copy the retrieval code anywhere.
 
     Examples:
 
-      pcc-node logs                    # Collect, encrypt, upload
-      pcc-node logs --local-only       # Save locally (no upload)
-      pcc-node logs -n 1000            # Include more log lines
-      pcc-node logs --no-device-health # Skip slow device probing
+      pcc-node logs                              # Collect, encrypt, upload
+      pcc-node logs --send                       # Upload + open support thread
+      pcc-node logs --send -m "printer offline"  # With description
+      pcc-node logs --local-only                 # Save locally (no upload)
+      pcc-node logs -n 1000                      # Include more log lines
     """
     from .diagnostics import collect_diagnostic_bundle, upload_diagnostic_bundle
 
@@ -849,11 +861,224 @@ def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, l
     click.echo(f"  Upload ID:       {result['upload_id']}")
     click.echo(f"  Bundle size:     {result['bundle_size']:,} bytes")
     click.echo(f"  Expires:         {result['expires_at']}")
+    if send:
+        # Auto-create a support thread with the retrieval code attached
+        from .http_util import pcc_request as _pr
+
+        desc = message or "Diagnostic logs submitted (auto-send)"
+        payload = {
+            "kernelId": kernel_id or "unknown",
+            "kernelName": bundle_data.get("config", {}).get("kernel_name", ""),
+            "message": desc,
+            "retrievalCode": result["retrieval_code"],
+            "systemInfo": {
+                "platform": bundle_data.get("system", {}).get("platform", ""),
+                "nodeVersion": "0.1.0",
+                "daemonRunning": bundle_data.get("node_state", {}).get("daemon_running", False),
+                "gatewayReachable": bundle_data.get("network", {}).get("gateway_reachable", False),
+            },
+        }
+        s_status, s_body = _pr(
+            "POST", "/api/operator/support",
+            body=payload, base_url=pcc_base, api_key=api_key,
+        )
+        if s_status in (200, 201):
+            click.echo(f"  Support thread opened: {s_body.get('threadId', '?')}")
+            click.echo("  Logs are attached — support can see them immediately.")
+            click.echo("")
+            click.echo("  Check for replies: pcc-node support --check")
+        else:
+            click.echo("  (Could not auto-create support thread, share the code manually)")
+    else:
+        click.echo("")
+        click.echo("  Share the RETRIEVAL CODE with your support contact.")
+        click.echo("  They will use it to decrypt and view your logs.")
+        click.echo("  The code is the ONLY way to read the logs.")
     click.echo("")
-    click.echo("  Share the RETRIEVAL CODE with your support contact.")
-    click.echo("  They will use it to decrypt and view your logs.")
-    click.echo("  The code is the ONLY way to read the logs.")
-    click.echo("")
+
+
+@main.command("support")
+@click.argument("message", required=False)
+@click.option(
+    "--config-file", "-c",
+    default="./pcc-node.json",
+    help="Path to config file (default: ./pcc-node.json)",
+)
+@click.option(
+    "--pcc-base",
+    envvar="PCC_BASE",
+    default="https://capability.network",
+    help="PCC gateway URL",
+)
+@click.option(
+    "--api-key",
+    envvar="PCC_API_KEY",
+    default="",
+    help="PCC API key",
+)
+@click.option(
+    "--attach-logs",
+    is_flag=True,
+    default=False,
+    help="Automatically collect and attach diagnostic logs",
+)
+@click.option(
+    "--check",
+    is_flag=True,
+    default=False,
+    help="Check for replies to your support messages",
+)
+def support_cmd(message, config_file, pcc_base, api_key, attach_logs, check):
+    """Send a support message or check for replies.
+
+    Messages go directly to the PCC support team through the gateway.
+    You can optionally attach diagnostic logs (encrypted) in one step.
+
+    Examples:
+
+      pcc-node support "my printer won't connect"
+      pcc-node support "jobs keep failing" --attach-logs
+      pcc-node support --check
+    """
+    from .http_util import pcc_request
+
+    config_path = os.path.abspath(config_file)
+    kernel_id = ""
+    kernel_name = ""
+
+    # Load config for kernel info and API key
+    try:
+        cfg = load_config(config_path)
+        kernel_id = cfg.kernel_id
+        kernel_name = cfg.kernel_name
+        if not api_key:
+            api_key = cfg.pcc_api_key or ""
+        if not pcc_base or pcc_base == "https://capability.network":
+            pcc_base = cfg.pcc_base or pcc_base
+    except Exception:
+        pass
+
+    if check:
+        if not kernel_id:
+            click.echo("No config found. Run 'pcc-node start' first.")
+            return
+
+        click.echo("Checking for replies...")
+        status, body = pcc_request(
+            "GET",
+            f"/api/operator/support/mine?kernelId={kernel_id}",
+            base_url=pcc_base,
+            api_key=api_key,
+        )
+
+        if status != 200:
+            click.echo(f"Error: {body}")
+            return
+
+        threads_list = body.get("threads", [])
+        if not threads_list:
+            click.echo("No support threads found.")
+            return
+
+        for t in threads_list:
+            status_icon = {
+                "open": "[OPEN]",
+                "in-progress": "[IN PROGRESS]",
+                "resolved": "[RESOLVED]",
+                "closed": "[CLOSED]",
+            }.get(t.get("status", ""), "[?]")
+
+            click.echo(f"\n{status_icon} {t.get('subject', '?')}")
+            click.echo(f"  Thread: {t.get('id')}  Created: {t.get('createdAt', '?')[:10]}")
+
+            for msg in t.get("messages", []):
+                sender = "YOU" if msg.get("from") == "operator" else "SUPPORT"
+                ts = msg.get("timestamp", "")[:16].replace("T", " ")
+                click.echo(f"  [{ts}] {sender}: {msg.get('text', '')}")
+                if msg.get("retrievalCode"):
+                    click.echo(f"           (logs attached: {msg['retrievalCode']})")
+
+        has_unread = body.get("hasUnreadReplies", False)
+        if has_unread:
+            click.echo("\n  ** You have unread replies from support **")
+        return
+
+    # Sending a message
+    if not message:
+        click.echo("Usage: pcc-node support \"your message here\"")
+        click.echo("       pcc-node support --check")
+        return
+
+    retrieval_code = None
+
+    # Auto-attach logs if requested
+    if attach_logs:
+        from .diagnostics import collect_diagnostic_bundle, upload_diagnostic_bundle
+
+        click.echo("Collecting diagnostic logs...")
+        bundle_data = collect_diagnostic_bundle(
+            config_path=config_path,
+            pcc_base=pcc_base,
+            max_log_lines=300,
+            include_device_health=True,
+        )
+        click.echo("Encrypting and uploading logs...")
+        result = upload_diagnostic_bundle(
+            bundle=bundle_data,
+            pcc_base=pcc_base,
+            api_key=api_key,
+            kernel_id=kernel_id,
+        )
+        if "error" not in result:
+            retrieval_code = result.get("retrieval_code")
+            click.echo(f"  Logs uploaded (code: {retrieval_code})")
+        else:
+            click.echo(f"  Log upload failed: {result['error']} (sending message without logs)")
+
+    # Collect basic system info for the thread
+    import platform as plat
+    from .daemon import is_running as _is_running
+
+    running, _ = _is_running()
+    sys_info = {
+        "platform": plat.platform(),
+        "nodeVersion": "0.1.0",
+        "daemonRunning": running,
+    }
+
+    # Send support message
+    payload = {
+        "kernelId": kernel_id or "unknown",
+        "kernelName": kernel_name or "unknown",
+        "message": message,
+        "systemInfo": sys_info,
+    }
+    if retrieval_code:
+        payload["retrievalCode"] = retrieval_code
+
+    click.echo("Sending message...")
+    status, body = pcc_request(
+        "POST",
+        "/api/operator/support",
+        body=payload,
+        base_url=pcc_base,
+        api_key=api_key,
+    )
+
+    if status in (200, 201):
+        click.echo("")
+        click.echo("Message sent!")
+        click.echo(f"  Thread: {body.get('threadId', '?')}")
+        if body.get("isNewThread"):
+            click.echo("  (New support thread created)")
+        if retrieval_code:
+            click.echo(f"  Logs attached: {retrieval_code}")
+        click.echo("")
+        click.echo("Check for replies with: pcc-node support --check")
+    else:
+        click.echo(f"Failed to send message (HTTP {status})")
+        if isinstance(body, dict):
+            click.echo(f"  {body.get('error', body)}")
 
 
 if __name__ == "__main__":
