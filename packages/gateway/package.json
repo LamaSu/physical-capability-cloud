@@ -48,10 +48,12 @@
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/store": "workspace:*",
+    "@pcc/touchstone": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "@sentry/node": "^10.45.0",
     "fastify": "^4.26.0",
     "posthog-node": "^4.2.0",
+    "tweetnacl": "^1.0.3",
     "uuid": "^9.0.0",
     "viem": "^2"
   },

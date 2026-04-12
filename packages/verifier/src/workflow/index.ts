@@ -11,3 +11,4 @@ export {
   type StepTrace,
   type CompletenessCheckResult,
 } from "./completeness-checker.js";
+export { SessionKeyService } from "./ephemeral-identity.js";

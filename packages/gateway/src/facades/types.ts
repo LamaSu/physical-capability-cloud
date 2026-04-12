@@ -94,6 +94,8 @@ export interface CapabilityDTO {
   kernelName?: string;
   /** Kernel online status */
   kernelStatus?: "online" | "offline" | "maintenance" | "stale";
+  /** Average assurance score for this kernel's jobs (0.0-1.0) */
+  assuranceScore?: number;
 }
 
 export interface CapabilitySearchCriteria {
@@ -239,6 +241,8 @@ export interface ComplianceReportDTO {
   recentEvidence: EvidenceSummaryDTO[];
   /** Drift detection results (telemetry vs CWM expected) */
   driftAlerts: DriftAlertDTO[];
+  /** Assurance score rollup in [0.0, 1.0] — compressed compliance scalar */
+  assuranceScore?: number;
 }
 
 /** Result of checking a bundle against tier requirements */

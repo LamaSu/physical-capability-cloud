@@ -9,3 +9,6 @@ export {
   accountingReconcileTemplate,
   accountingReconcileWorkflowSteps,
 } from "./accounting-reconcile.js";
+export { procurementRfqTemplate } from "./procurement-rfq.js";
+export { legalReviewTemplate } from "./legal-review.js";
+export { dataExtractionTemplate } from "./data-extraction.js";
