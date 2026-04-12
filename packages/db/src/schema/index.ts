@@ -17,3 +17,6 @@ export * from "./swf.js";
 export * from "./operator-policy.js";
 export * from "./audit-log.js";
 export * from "./a2a-messages.js";
+export * from "./governance.js";
+export * from "./templates.js";
+export * from "./analytics.js";
