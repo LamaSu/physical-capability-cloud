@@ -34,6 +34,7 @@ COPY packages/identity-8004/package.json packages/identity-8004/
 COPY packages/bundler/package.json packages/bundler/
 COPY packages/dht/package.json packages/dht/
 COPY packages/evidence-embeddings/package.json packages/evidence-embeddings/
+COPY packages/touchstone/package.json packages/touchstone/
 COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 COPY apps/dashboard/package.json apps/dashboard/
 
