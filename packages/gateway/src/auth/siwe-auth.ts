@@ -181,7 +181,9 @@ export function resolveSession(
         cookieToken = rawCookie;
       }
     } catch {
-      cookieToken = rawCookie;
+      // If unsignCookie throws (malformed), reject rather than falling through
+      // to the raw value (R5 NEW-07 cookie HMAC bypass fix)
+      cookieToken = null;
     }
 
     if (cookieToken) {

@@ -157,11 +157,20 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
    * List recent diagnostic uploads (metadata only, no encrypted payloads).
    * Intended for admin/support use.
    */
-  app.get("/api/operator/diagnostics", async (_req, _reply) => {
+  app.get("/api/operator/diagnostics", async (req, _reply) => {
     pruneExpired();
 
+    // Scope to caller's kernels — prevent cross-operator log enumeration (R5 NEW-02)
+    const callerId = (req as any).operatorId ?? (req as any).userId;
+    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
+    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+
+    const filtered = isAdmin
+      ? uploads
+      : uploads.filter((u) => !callerId || u.kernelId === callerId || (u as any).operatorId === callerId);
+
     return {
-      uploads: uploads.map((u) => ({
+      uploads: filtered.map((u) => ({
         id: u.id,
         kernelId: u.kernelId,
         bundleHash: u.bundleHash,
@@ -171,9 +180,11 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
         collectedAt: u.collectedAt,
         uploadedAt: u.uploadedAt,
         expiresAt: u.expiresAt,
-        ip: u.ip,
+        // Strip IP for non-admin callers
+        ...(isAdmin ? { ip: u.ip } : {}),
       })),
-      total: uploads.length,
+      total: filtered.length,
+      scoped: !isAdmin,
     };
   });
 
