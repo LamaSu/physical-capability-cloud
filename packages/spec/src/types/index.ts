@@ -31,3 +31,7 @@ export * from "./device-tools.js";
 export * from "./requests.js";
 export * from "./packml.js";
 export * from "./dpp.js";
+export * from "./governance.js";
+export * from "./query-templates.js";
+export * from "./analytics.js";
+export * from "./compliance-templates.js";

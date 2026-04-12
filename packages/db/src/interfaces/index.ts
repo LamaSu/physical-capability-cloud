@@ -158,6 +158,39 @@ export type {
   A2AConversationRow,
   A2AConversationInsert,
 } from "./IA2AMessageRepository.js";
+export type {
+  IGovernanceRepository,
+  RateLimitPolicyRow,
+  RateLimitPolicyInsert,
+  DlpRuleRow,
+  DlpRuleInsert,
+  EndpointScopeRow,
+  EndpointScopeInsert,
+} from "./IGovernanceRepository.js";
+export type {
+  ITemplateStoreRepository,
+  CapabilityTemplateStoreRow,
+  CapabilityTemplateStoreInsert,
+  MachineProfileStoreRow,
+  MachineProfileStoreInsert,
+  VerificationTemplateRow,
+  VerificationTemplateInsert,
+  QueryTemplateRow,
+  QueryTemplateInsert,
+  TemplateRatingRow,
+  TemplateRatingInsert,
+} from "./ITemplateStoreRepository.js";
+export type {
+  IAnalyticsRepository,
+  AnalyticsEventRow,
+  AnalyticsEventInsert,
+  MaterializedViewRow,
+  MaterializedViewInsert,
+  ComplianceTemplateRow,
+  ComplianceTemplateInsert,
+  ComplianceProfileRow,
+  ComplianceProfileInsert,
+} from "./IAnalyticsRepository.js";
 
 import type { IJobRepository } from "./IJobRepository.js";
 import type { IKernelRepository } from "./IKernelRepository.js";
@@ -179,6 +212,9 @@ import type { IApiKeyRepository } from "./IApiKeyRepository.js";
 import type { IAuditLogRepository } from "./IAuditLogRepository.js";
 import type { IRegistrationRepository } from "./IRegistrationRepository.js";
 import type { IA2AMessageRepository } from "./IA2AMessageRepository.js";
+import type { IGovernanceRepository } from "./IGovernanceRepository.js";
+import type { ITemplateStoreRepository } from "./ITemplateStoreRepository.js";
+import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -207,4 +243,7 @@ export interface IRepositories {
   auditLog: IAuditLogRepository;
   registrations: IRegistrationRepository;
   a2aMessages: IA2AMessageRepository;
+  governance: IGovernanceRepository;
+  templateStore: ITemplateStoreRepository;
+  analytics: IAnalyticsRepository;
 }

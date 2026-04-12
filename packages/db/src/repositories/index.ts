@@ -17,6 +17,9 @@ import { ApiKeyRepository } from "./api-keys.js";
 import { AuditLogRepository } from "./audit-log.js";
 import { RegistrationRepository } from "./registrations.js";
 import { A2AMessageRepository } from "./a2a-messages.js";
+import { GovernanceRepository } from "./governance.js";
+import { TemplateStoreRepository } from "./template-store.js";
+import { AnalyticsRepository } from "./analytics.js";
 
 export {
   KernelRepository,
@@ -39,6 +42,9 @@ export {
   AuditLogRepository,
   RegistrationRepository,
   A2AMessageRepository,
+  GovernanceRepository,
+  TemplateStoreRepository,
+  AnalyticsRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -63,6 +69,9 @@ export function buildRepositories(db: StoreDB) {
     auditLog: new AuditLogRepository(db),
     registrations: new RegistrationRepository(db),
     a2aMessages: new A2AMessageRepository(db),
+    governance: new GovernanceRepository(db),
+    templateStore: new TemplateStoreRepository(db),
+    analytics: new AnalyticsRepository(db),
   };
 }
 
