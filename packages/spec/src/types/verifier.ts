@@ -81,6 +81,10 @@ export interface VerificationAttestation {
   /** Verifier's signature */
   signature: Signature;
   createdAt: Timestamp;
+  /** Assurance score from the digital-verifier rollup (0.0 - 1.0).
+   *  Complements `confidence` (which is 0-100): assuranceScore incorporates
+   *  ALCOA+ principles, drift alerts, touchstone, and consensus. */
+  assuranceScore?: number;
   /** POAW-style audit receipt proving verification work was performed */
   auditReceipt?: {
     /** SHA-256 hash of the verification computation */

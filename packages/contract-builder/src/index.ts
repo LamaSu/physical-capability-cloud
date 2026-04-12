@@ -48,6 +48,12 @@ export { slaTemplate } from "./templates/sla.js";
 export { cnc3AxisTemplate } from "./templates/cnc-3axis.js";
 export { laserCutTemplate } from "./templates/laser-cut.js";
 
+// Digital workflow templates
+export {
+  accountingReconcileTemplate,
+  accountingReconcileWorkflowSteps,
+} from "./templates/digital/index.js";
+
 // Built-in profiles
 export { prusaMk4Profile } from "./profiles/prusa-mk4.js";
 export { haasVf2Profile } from "./profiles/haas-vf2.js";

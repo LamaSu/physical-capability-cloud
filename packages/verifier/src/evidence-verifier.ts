@@ -1,5 +1,5 @@
 /**
- * Evidence Verifier — checks that an evidence bundle meets tier requirements.
+ * Evidence Verifier -- checks that an evidence bundle meets tier requirements.
  *
  * This is what a verifier node runs when assigned a verification request.
  * It checks:
@@ -7,7 +7,10 @@
  *   2. Event hash integrity
  *   3. Tier evidence requirements met
  *   4. Consistency checks between events (e.g., power profile matches execution duration)
- *   5. Produces a VerificationAttestation
+ *   5. (Optional) Challenge freshness -- anti-replay proof
+ *   6. (Optional) Step completeness -- workflow step coverage
+ *   7. Assurance score rollup
+ *   8. Produces a VerificationAttestation
  */
 
 import type {
@@ -18,9 +21,28 @@ import type {
   AssuranceTier,
   Signature,
   Address,
+  DigitalWorkflowStep,
+  WorkflowChallenge,
+  ExecutionProof,
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS, verifyBundleHash, verifyEventHash, ids } from "@pcc/spec";
 import { canonicalize, sha256 } from "@pcc/spec";
+import { computeAssuranceScore } from "./workflow/assurance-score.js";
+import { checkStepCompleteness, type StepTrace } from "./workflow/completeness-checker.js";
+import { ChallengeService } from "./workflow/challenge-service.js";
+
+/** Options for digital-workflow-aware verification. All fields are optional --
+ *  callers that pass nothing get the existing behavior. */
+export interface DigitalVerifyOptions {
+  /** Declared workflow steps from the contract. Enables step-completeness checking. */
+  workflowSteps?: DigitalWorkflowStep[];
+  /** Challenge issued before execution. Together with executionProof, enables anti-replay freshness. */
+  challenge?: WorkflowChallenge;
+  /** Proof that execution happened after the challenge was issued. */
+  executionProof?: ExecutionProof;
+  /** Block timestamp to use for challenge age check. Defaults to Date.now()/1000. */
+  currentBlockTimestamp?: bigint;
+}
 
 export class EvidenceVerifier {
   private verifierId: string;
@@ -34,7 +56,7 @@ export class EvidenceVerifier {
   ) {
     this.verifierId = verifierId;
     this.verifierAddress = verifierAddress;
-    // TEST-ONLY default — replace with a real wallet signFn in production
+    // TEST-ONLY default -- replace with a real wallet signFn in production
     this.signFn = signFn ?? (async (data: string) => ({
       signer: verifierAddress as Address,
       algorithm: "secp256k1" as const,
@@ -44,8 +66,15 @@ export class EvidenceVerifier {
 
   /**
    * Verify an evidence bundle and produce an attestation.
+   *
+   * @param bundle   The evidence bundle to verify.
+   * @param options  Optional digital-workflow data. When omitted, existing
+   *                 behavior is preserved exactly (backward compatible).
    */
-  async verify(bundle: EvidenceBundle): Promise<VerificationAttestation> {
+  async verify(
+    bundle: EvidenceBundle,
+    options?: DigitalVerifyOptions,
+  ): Promise<VerificationAttestation> {
     const findings: VerificationFinding[] = [];
 
     // 1. Verify bundle hash
@@ -121,7 +150,66 @@ export class EvidenceVerifier {
       }
     }
 
-    // Compute result
+    // ── Digital-verifier primitives (pre-oracle checks) ──────────────
+
+    // 5. Challenge freshness check (anti-replay)
+    if (options?.challenge && options?.executionProof) {
+      const challengeService = new ChallengeService();
+      const proofResult = challengeService.verifyExecutionProof({
+        challenge: options.challenge,
+        proof: options.executionProof,
+        currentBlockTimestamp: options.currentBlockTimestamp ?? BigInt(Math.floor(Date.now() / 1000)),
+      });
+      findings.push({
+        evidenceEventId: "",
+        check: "challenge_freshness",
+        passed: proofResult.valid,
+        details: proofResult.valid
+          ? "Execution proof is fresh and matches challenge"
+          : proofResult.failures.join("; "),
+        severity: proofResult.valid ? undefined : "critical",
+      });
+    }
+
+    // 6. Step completeness check (workflow coverage)
+    if (options?.workflowSteps && options.workflowSteps.length > 0) {
+      const traces: StepTrace[] = bundle.events
+        .filter(
+          (e) =>
+            e.type === "workflow_step_completed" ||
+            e.type === "execution_completed",
+        )
+        .map((e) => ({
+          stepId: (e.payload as any).stepId ?? e.id,
+          outputHash: (e.payload as any).outputHash ?? e.hash,
+          outputSummary: (e.payload as any).outputSummary ?? "",
+          durationMs: (e.payload as any).durationMs,
+          inputHash: (e.payload as any).inputHash,
+        }));
+
+      const completeness = checkStepCompleteness(
+        { workflowSteps: options.workflowSteps },
+        traces,
+        { level: 1 },
+      );
+      findings.push(...completeness.findings);
+    }
+
+    // ── Assurance score rollup ───────────────────────────────────────
+
+    const assuranceScore = computeAssuranceScore({
+      findings: findings.map((f) => ({
+        check: f.check,
+        passed: f.passed,
+        details: f.details,
+        severity: f.severity === "info" ? undefined : f.severity,
+      })),
+      driftAlerts: [],
+      consensusAgreement: undefined,
+    });
+
+    // ── Compute result ───────────────────────────────────────────────
+
     const criticalFailures = findings.filter((f) => !f.passed && f.severity === "critical");
     const passed = criticalFailures.length === 0;
     const confidence = passed
@@ -136,6 +224,7 @@ export class EvidenceVerifier {
       confidence,
       findingsCount: findings.length,
       criticalFailures: criticalFailures.length,
+      assuranceScore,
     };
     const attestationHash = await sha256(canonicalize(attestationData));
     const now = new Date().toISOString();
@@ -162,6 +251,7 @@ export class EvidenceVerifier {
       attestationHash,
       signature,
       createdAt: now,
+      assuranceScore,
       auditReceipt: {
         scanHash,
         chainPosition: 0,

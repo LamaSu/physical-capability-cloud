@@ -13,6 +13,7 @@ import type {
   ResolvedBuildOptions,
   BuilderContract,
   MachineProfile,
+  DigitalWorkflowStep,
 } from "@pcc/spec";
 import { getTemplate } from "./templates/index.js";
 import { getProfile, registerProfile as regProfile, getProfilesForKernel } from "./profiles/index.js";
@@ -57,27 +58,60 @@ export class ContractBuilder {
 
   /**
    * Build a complete, validated contract from selections.
+   * Optionally includes digital workflow steps and challenge for digital contracts.
    */
   buildContract(
     capabilityType: CapabilityType,
     selections: Record<string, unknown>,
     assuranceTier: number = 1,
     profileId?: string,
+    options?: {
+      workflowSteps?: DigitalWorkflowStep[];
+      digitalTaskType?: string;
+      challenge?: {
+        challengeId: string;
+        blockHash: string;
+        blockNumber: bigint;
+        maxAgeSeconds: number;
+      };
+    },
   ): BuilderContract {
-    const options = this.getBuildOptions(capabilityType, selections, profileId);
-    const pricingResult = this.pricing.calculate(options, selections);
-    const validationResult = this.validator.validate(options, selections, assuranceTier);
+    const buildOptions = this.getBuildOptions(capabilityType, selections, profileId);
+    const pricingResult = this.pricing.calculate(buildOptions, selections);
+    const validationResult = this.validator.validate(buildOptions, selections, assuranceTier);
 
-    return {
+    // Collect all validation errors including workflow step errors
+    const allErrors = [...validationResult.errors];
+
+    // Validate digital workflow steps if provided
+    if (options?.workflowSteps && options.workflowSteps.length > 0) {
+      const workflowErrors = this.validator.validateWorkflowSteps(options.workflowSteps);
+      allErrors.push(...workflowErrors);
+    }
+
+    const contract: BuilderContract = {
       selections: selections as Record<string, string | number | boolean | string[]>,
       totalPrice: pricingResult.totalPrice.toFixed(2),
       priceBreakdown: pricingResult.breakdown,
       cwmStep: validationResult.cwmStep,
-      validationErrors: validationResult.errors,
-      isValid: validationResult.isValid,
-      templateName: options.templateName,
-      machineInfo: options.machineInfo,
+      validationErrors: allErrors,
+      isValid: allErrors.length === 0,
+      templateName: buildOptions.templateName,
+      machineInfo: buildOptions.machineInfo,
     };
+
+    // Attach digital workflow extensions if provided
+    if (options?.workflowSteps) {
+      contract.workflowSteps = options.workflowSteps;
+    }
+    if (options?.digitalTaskType) {
+      contract.digitalTaskType = options.digitalTaskType;
+    }
+    if (options?.challenge) {
+      contract.challenge = options.challenge;
+    }
+
+    return contract;
   }
 
   /**

@@ -97,20 +97,9 @@ export {
   type EvaluationResult,
 } from "./oracle/index.js";
 export {
-  POABridge,
-  type CreateCPCParams,
-  type SubmitEvidenceParams,
-  type CPCTask,
-  type CPCTaskType,
-  type CPCWorkflowStep,
-  type CPCTaskConstraints,
-  type POAEvidenceBundle,
-  type TraceEntry,
-  type ExecutionTimestamps,
-  type AssuranceScore,
-  type ScoreDimension,
-  type POABridgeConfig,
-  type POAVerificationResult,
-  DEFAULT_POA_BRIDGE_CONFIG,
-  DEFAULT_SCORING_WEIGHTS,
-} from "./poa/index.js";
+  ChallengeService,
+  computeAssuranceScore,
+  type VerificationFinding,
+  type DriftAlert,
+  type AssuranceScoreInput,
+} from "./workflow/index.js";

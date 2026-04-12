@@ -6,5 +6,7 @@ export { ids, generateId } from "./util/ids.js";
 export * from "./identity/types.js";
 // ERC-8004 types (browser-safe)
 export * from "./identity/erc8004.js";
+// Ephemeral identity types (browser-safe — sessionKey / principalKey)
+export * from "./identity/ephemeral.js";
 // CSD (Capability StructureDefinition) — schema, types, and registry
 export * from "./csd/index.js";

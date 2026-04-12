@@ -9,6 +9,7 @@ import { cnc3AxisTemplate } from "./cnc-3axis.js";
 import { laserCutTemplate } from "./laser-cut.js";
 import { liquidHandlerTemplate } from "./liquid-handler.js";
 import { documentPrintingTemplate } from "./document-printing.js";
+import { accountingReconcileTemplate } from "./digital/accounting-reconcile.js";
 
 const registry = new Map<CapabilityType, CapabilityTemplate>();
 
@@ -39,3 +40,4 @@ registerTemplate(cnc3AxisTemplate);
 registerTemplate(laserCutTemplate);
 registerTemplate(liquidHandlerTemplate);
 registerTemplate(documentPrintingTemplate);
+registerTemplate(accountingReconcileTemplate);

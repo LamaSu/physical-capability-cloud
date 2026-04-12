@@ -23,6 +23,41 @@
 import type { Amount, Id } from "./common.js";
 import type { CapabilityType } from "./capability.js";
 
+// ── Digital Workflow Step ────────────────────────────────────────
+
+/** A single step in a digital workflow DAG */
+export interface DigitalWorkflowStep {
+  /** Unique identifier within this contract */
+  stepId: string;
+  /**
+   * Type of digital operation. Open string union — custom kernels can
+   * register new stepTypes without modifying core.
+   * Common built-in values: 'llm_call', 'api_call', 'transform', 'validate', 'aggregate'.
+   */
+  stepType: 'llm_call' | 'api_call' | 'transform' | 'validate' | 'aggregate' | (string & {});
+  /** Human-readable description for auditors and disputes */
+  description: string;
+  /** JSON Schema the step's input must validate against */
+  inputSchema?: Record<string, unknown>;
+  /** JSON Schema the step's output must validate against */
+  outputSchema?: Record<string, unknown>;
+  /**
+   * IDs of steps that must complete before this one.
+   * Matches CWMStep.dependsOn convention so mixed (digital + physical)
+   * workflows compose in a single DAG.
+   */
+  dependsOn: string[];
+  /** Step-specific execution constraints */
+  constraints?: {
+    /** Maximum wall-clock time for this step in milliseconds */
+    maxDurationMs?: number;
+    /** Maximum retry attempts before permanent failure */
+    maxRetries?: number;
+    /** Evidence types the step must produce (e.g., 'execution_trace', 'output_hash') */
+    requiredEvidence?: string[];
+  };
+}
+
 // ── Pricing Impact ────────────────────────────────────────────────
 
 /** How a parameter selection affects the price */
@@ -274,5 +309,19 @@ export interface BuilderContract {
     profileId: Id;
     machineName: string;
     kernelId: Id;
+  };
+
+  // ── Digital workflow extensions (all optional, backward compatible) ──
+
+  /** Digital workflow steps — typed DAG of digital operations */
+  workflowSteps?: DigitalWorkflowStep[];
+  /** Type of digital task (e.g., 'accounting-reconcile', 'procurement-rfq') */
+  digitalTaskType?: string;
+  /** Freshness challenge for anti-replay (populated by ChallengeService) */
+  challenge?: {
+    challengeId: string;
+    blockHash: string;
+    blockNumber: bigint;
+    maxAgeSeconds: number;
   };
 }
