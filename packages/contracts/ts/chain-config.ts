@@ -116,7 +116,7 @@ export const deployments: Record<string, ChainDeployment> = {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       milestoneEscrowFactory: "0x10059efeeab1ddf013489e9597a3aec4480d95e1",
-      mockUSDC: "0x3882f1437ec084D8BD5606eD6549De77C42eb4ba",
+      mockUSDC: "0x18bef3dee9f4f97f7cec16db0c4a0a930f478470",
       // PCCProtocol v2 — 2.35% fee, oracle-gated settlement (deployed 2026-03-31)
       pccProtocol: "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23",
       identityRegistry: "0xA35972487B8148601E74a92250289b264376c955",
