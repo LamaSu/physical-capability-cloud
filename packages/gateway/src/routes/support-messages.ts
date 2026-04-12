@@ -16,6 +16,48 @@
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 
+// Discord webhook for #bug-reports notifications
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
+
+async function notifyDiscord(thread: SupportThread, msg: Message): Promise<void> {
+  if (!DISCORD_WEBHOOK_URL) return;
+
+  const priorityEmoji: Record<string, string> = {
+    urgent: "🔴",
+    high: "🟠",
+    normal: "🟡",
+    low: "⚪",
+  };
+
+  const emoji = priorityEmoji[thread.priority] ?? "⚪";
+  const logsNote = msg.retrievalCode
+    ? `\n📎 Logs attached: \`${msg.retrievalCode}\``
+    : "";
+
+  const content = [
+    `${emoji} **New support message** from \`${thread.kernelName || thread.kernelId}\``,
+    `> ${msg.text.slice(0, 300)}${msg.text.length > 300 ? "..." : ""}`,
+    logsNote,
+    `Thread: \`${thread.id}\` | Priority: **${thread.priority}** | Platform: ${thread.systemInfo?.platform ?? "unknown"}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const res = await fetch(DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, username: "PCC Support" }),
+    });
+    if (!res.ok) {
+      console.error(`Discord webhook failed: ${res.status}`);
+    }
+  } catch (err) {
+    // Non-fatal — don't break support flow if Discord is down
+    console.error(`Discord webhook error: ${err}`);
+  }
+}
+
 interface Message {
   id: string;
   from: "operator" | "admin";
@@ -137,6 +179,8 @@ export async function supportMessageRoutes(app: FastifyInstance) {
         // Bump priority if they're attaching logs — they put in effort
         if (thread.priority === "low") thread.priority = "normal";
       }
+      // Fire-and-forget Discord notification
+      notifyDiscord(thread, msg).catch(() => {});
       return {
         threadId: thread.id,
         messageId: msg.id,
@@ -171,6 +215,9 @@ export async function supportMessageRoutes(app: FastifyInstance) {
     };
 
     threads.push(thread);
+
+    // Fire-and-forget Discord notification
+    notifyDiscord(thread, msg).catch(() => {});
 
     return {
       threadId: thread.id,
