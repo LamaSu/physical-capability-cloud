@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 
 import click
 
@@ -32,11 +33,24 @@ from .register import provision_api_key, register_kernel, announce_capabilities
 
 def _setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    fmt = "%(asctime)s [%(levelname)s] %(message)s"
+    datefmt = "%H:%M:%S"
+
+    # Always log to console
+    logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
+
+    # Also log to file for diagnostic collection
+    log_dir = os.path.expanduser("~/.pcc-node/logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "pcc-node.log")
+    try:
+        from logging.handlers import RotatingFileHandler
+        fh = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3)
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        logging.getLogger().addHandler(fh)
+    except Exception:
+        pass  # file logging is best-effort
 
 
 def _format_device(dev):
@@ -584,6 +598,262 @@ def ui_submissions():
     for i, sub in enumerate(subs):
         click.echo(f"[{i}] source={sub.get('path', '?')} ts={sub.get('timestamp', '?')}")
         click.echo(f"    {json.dumps(sub.get('data', {}), indent=2)}")
+
+
+@main.command("feedback")
+@click.option(
+    "--config-file", "-c",
+    default="./pcc-node.json",
+    help="Path to config file (default: ./pcc-node.json)",
+)
+@click.argument("mode", type=click.Choice(["on", "off", "errors", "periodic", "status"]))
+@click.option(
+    "--interval",
+    default=24,
+    help="Hours between periodic reports (default: 24)",
+)
+def feedback_cmd(config_file, mode, interval):
+    """Opt in or out of automatic diagnostic feedback.
+
+    Modes:
+
+      on       — alias for 'errors' (send diagnostics when things break)
+      off      — disable auto-diagnostics (default)
+      errors   — send diagnostics after 5+ consecutive errors
+      periodic — send diagnostics every N hours (default: 24)
+      status   — show current feedback setting
+
+    Data sent (all encrypted, secrets redacted):
+
+      - System info (OS, Python version, CPU, memory)
+      - Node state (uptime, jobs completed, daemon status)
+      - Config (with API keys redacted)
+      - Recent log lines (last 200)
+      - Gateway connectivity test
+
+    Nothing is readable without the retrieval code.
+
+    Examples:
+
+      pcc-node feedback on              # Enable (error-triggered)
+      pcc-node feedback periodic --interval 12  # Every 12 hours
+      pcc-node feedback off             # Disable
+      pcc-node feedback status          # Check current setting
+    """
+    config_path = os.path.abspath(config_file)
+
+    if mode == "status":
+        try:
+            cfg = load_config(config_path)
+            click.echo(f"Diagnostic feedback: {cfg.diagnostics_mode}")
+            if cfg.diagnostics_mode == "periodic":
+                click.echo(f"  Interval: every {cfg.diagnostics_interval_hours} hours")
+            elif cfg.diagnostics_mode == "errors":
+                click.echo("  Trigger: after 5+ consecutive errors")
+        except FileNotFoundError:
+            click.echo("No config file found. Run 'pcc-node start' first.")
+        return
+
+    try:
+        cfg = load_config(config_path)
+    except FileNotFoundError:
+        click.echo(f"Config not found: {config_path}")
+        click.echo("Run 'pcc-node start' first to generate a config.")
+        return
+
+    if mode == "on":
+        mode = "errors"
+
+    cfg.diagnostics_mode = mode
+    if mode == "periodic":
+        cfg.diagnostics_interval_hours = interval
+
+    from .config import save_config as _sc
+    _sc(cfg, config_path)
+
+    if mode == "off":
+        click.echo("Diagnostic feedback: DISABLED")
+        click.echo("No diagnostics will be sent automatically.")
+    elif mode == "errors":
+        click.echo("Diagnostic feedback: ENABLED (error-triggered)")
+        click.echo("Diagnostics will be sent after 5+ consecutive errors.")
+        click.echo("")
+        click.echo("What is sent (encrypted, secrets redacted):")
+        click.echo("  - OS, Python version, CPU count, memory")
+        click.echo("  - Node uptime, jobs completed, daemon status")
+        click.echo("  - Config (API keys replaced with ***)")
+        click.echo("  - Last 200 log lines")
+        click.echo("  - Gateway connectivity check")
+    elif mode == "periodic":
+        click.echo(f"Diagnostic feedback: ENABLED (every {interval} hours)")
+        click.echo("")
+        click.echo("What is sent (encrypted, secrets redacted):")
+        click.echo("  - OS, Python version, CPU count, memory")
+        click.echo("  - Node uptime, jobs completed, daemon status")
+        click.echo("  - Config (API keys replaced with ***)")
+        click.echo("  - Last 200 log lines")
+        click.echo("  - Gateway connectivity check")
+
+    click.echo("")
+    click.echo("Restart pcc-node for changes to take effect.")
+
+
+@main.command("logs")
+@click.option(
+    "--config-file", "-c",
+    default="./pcc-node.json",
+    help="Path to config file (default: ./pcc-node.json)",
+)
+@click.option(
+    "--pcc-base",
+    envvar="PCC_BASE",
+    default="https://capability.network",
+    help="PCC gateway URL",
+)
+@click.option(
+    "--api-key",
+    envvar="PCC_API_KEY",
+    default="",
+    help="PCC API key",
+)
+@click.option(
+    "--max-lines", "-n",
+    default=500,
+    help="Max log lines to include (default: 500)",
+)
+@click.option(
+    "--no-device-health",
+    is_flag=True,
+    default=False,
+    help="Skip device health probing (faster)",
+)
+@click.option(
+    "--local-only",
+    is_flag=True,
+    default=False,
+    help="Save diagnostic bundle locally instead of uploading",
+)
+@click.option(
+    "--output", "-o",
+    default=None,
+    help="Output file path for --local-only (default: pcc-diagnostics-<timestamp>.json)",
+)
+@click.pass_context
+def logs_cmd(ctx, config_file, pcc_base, api_key, max_lines, no_device_health, local_only, output):
+    """Collect and securely send diagnostic logs for troubleshooting.
+
+    Gathers system info, node state, recent logs, device health, and
+    network diagnostics. Encrypts everything and uploads to the PCC
+    gateway. You receive a short retrieval code to share with support.
+
+    The retrieval code is the ONLY way to decrypt the logs — share it
+    only with the person helping you troubleshoot.
+
+    Examples:
+
+      pcc-node logs                    # Collect, encrypt, upload
+      pcc-node logs --local-only       # Save locally (no upload)
+      pcc-node logs -n 1000            # Include more log lines
+      pcc-node logs --no-device-health # Skip slow device probing
+    """
+    from .diagnostics import collect_diagnostic_bundle, upload_diagnostic_bundle
+
+    click.echo("Collecting diagnostic information...")
+    click.echo("")
+
+    # Collect
+    with click.progressbar(length=4, label="  Gathering data") as bar:
+        bundle = {}
+
+        # System info
+        bar.update(1)
+        bundle_data = collect_diagnostic_bundle(
+            config_path=os.path.abspath(config_file),
+            pcc_base=pcc_base,
+            max_log_lines=max_lines,
+            include_device_health=not no_device_health,
+        )
+        bar.update(3)
+
+    click.echo("")
+    click.echo(f"  System: {bundle_data.get('system', {}).get('platform', '?')}")
+    click.echo(f"  Log lines: {len(bundle_data.get('logs', []))}")
+    click.echo(f"  Devices: {len(bundle_data.get('devices', []))}")
+
+    node_state = bundle_data.get("node_state", {})
+    if node_state.get("daemon_running"):
+        click.echo(f"  Daemon: running (PID {node_state.get('daemon_pid')})")
+    else:
+        click.echo("  Daemon: not running")
+
+    net = bundle_data.get("network", {})
+    if net.get("gateway_reachable"):
+        click.echo(f"  Gateway: reachable ({net.get('gateway_latency_ms')}ms)")
+    else:
+        click.echo(f"  Gateway: unreachable ({net.get('gateway_error', '?')})")
+
+    click.echo("")
+
+    if local_only:
+        # Save locally
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = output or f"pcc-diagnostics-{ts}.json"
+        with open(out_path, "w") as f:
+            json.dump(bundle_data, f, indent=2, default=str)
+        click.echo(f"Diagnostics saved to: {os.path.abspath(out_path)}")
+        click.echo("Share this file with your support contact.")
+        return
+
+    # Upload
+    click.echo("Encrypting and uploading...")
+
+    # Try to get kernel_id and api_key from config if not provided
+    if not api_key:
+        try:
+            from .config import load_config as _lc
+            cfg = _lc(os.path.abspath(config_file))
+            api_key = cfg.pcc_api_key or ""
+        except Exception:
+            pass
+
+    kernel_id = bundle_data.get("config", {}).get("kernel_id", "")
+
+    result = upload_diagnostic_bundle(
+        bundle=bundle_data,
+        pcc_base=pcc_base,
+        api_key=api_key,
+        kernel_id=kernel_id,
+    )
+
+    if "error" in result:
+        click.echo("")
+        click.echo(f"Upload failed: {result['error']}")
+        if result.get("details"):
+            click.echo(f"  Details: {json.dumps(result['details'])}")
+        click.echo("")
+        click.echo("Falling back to local save...")
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = output or f"pcc-diagnostics-{ts}.json"
+        with open(out_path, "w") as f:
+            json.dump(bundle_data, f, indent=2, default=str)
+        click.echo(f"Diagnostics saved to: {os.path.abspath(out_path)}")
+        click.echo("Share this file with your support contact.")
+        return
+
+    click.echo("")
+    click.echo("=" * 50)
+    click.echo("  DIAGNOSTIC LOGS UPLOADED SUCCESSFULLY")
+    click.echo("=" * 50)
+    click.echo("")
+    click.echo(f"  Retrieval code:  {result['retrieval_code']}")
+    click.echo(f"  Upload ID:       {result['upload_id']}")
+    click.echo(f"  Bundle size:     {result['bundle_size']:,} bytes")
+    click.echo(f"  Expires:         {result['expires_at']}")
+    click.echo("")
+    click.echo("  Share the RETRIEVAL CODE with your support contact.")
+    click.echo("  They will use it to decrypt and view your logs.")
+    click.echo("  The code is the ONLY way to read the logs.")
+    click.echo("")
 
 
 if __name__ == "__main__":

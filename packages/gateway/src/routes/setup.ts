@@ -27,6 +27,7 @@ const VALID_ADAPTER_TYPES: AdapterType[] = [
   "modbus",
   "opcua",
   "sila",
+  "ipp",
   "generic-http",
   "mock",
 ];
@@ -142,6 +143,12 @@ function buildDeviceConfig(desc: DeviceDescription, kernelId: string, index: num
     case "sila":
       if (desc.url) cfg.url = desc.url;
       break;
+    case "ipp":
+      if (desc.url) cfg.uri = desc.url;
+      else if (desc.host) cfg.uri = `ipp://${desc.host}:${desc.port ?? 631}/ipp/print`;
+      if (desc.name) cfg.name = desc.name;
+      cfg.mockMode = false;
+      break;
     case "generic-http":
       if (desc.url) cfg.url = desc.url;
       break;
@@ -211,6 +218,29 @@ function validateAdapterConfig(
           ? `SiLA URL: ${String(cfg.url)}`
           : `SiLA adapter "${device.id}" has no url set (mock mode)`,
       });
+      break;
+    }
+    case "ipp": {
+      const uri = cfg.uri as string | undefined;
+      if (!uri) {
+        checks.push({
+          name: `device:${device.id}:uri`,
+          status: "fail",
+          message: `IPP adapter "${device.id}" requires a uri (e.g. ipp://host:631/ipp/print)`,
+        });
+      } else if (!/^ipps?:\/\//.test(uri)) {
+        checks.push({
+          name: `device:${device.id}:uri`,
+          status: "fail",
+          message: `IPP adapter "${device.id}" uri must start with ipp:// or ipps://: ${uri}`,
+        });
+      } else {
+        checks.push({
+          name: `device:${device.id}:uri`,
+          status: "pass",
+          message: `IPP URI: ${uri}`,
+        });
+      }
       break;
     }
     default:

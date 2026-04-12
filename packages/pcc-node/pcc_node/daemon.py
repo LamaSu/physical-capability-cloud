@@ -260,7 +260,21 @@ def run_daemon(config: NodeConfig):
         log.warning(f"UI server failed to start: {e}")
 
     # ------------------------------------------------------------------
-    # 7. Main polling loop
+    # 7. Auto-diagnostics setup (opt-in)
+    # ------------------------------------------------------------------
+    last_diag_upload = 0.0
+    diag_interval = config.diagnostics_interval_hours * 3600
+    consecutive_errors = 0
+    ERROR_THRESHOLD = 5  # send diagnostics after this many consecutive errors
+
+    if config.diagnostics_mode != "off":
+        log.info(
+            f"Auto-diagnostics: mode={config.diagnostics_mode}, "
+            f"interval={config.diagnostics_interval_hours}h"
+        )
+
+    # ------------------------------------------------------------------
+    # 8. Main polling loop
     # ------------------------------------------------------------------
     last_announce = time.time()
     announce_interval = 60  # re-announce capabilities every 60s
@@ -315,8 +329,58 @@ def run_daemon(config: NodeConfig):
             # Update state file
             _write_state(config, start_time, jobs_completed)
 
+            # Reset error counter on successful loop iteration
+            consecutive_errors = 0
+
         except Exception as e:
             log.error(f"Loop error: {e}")
+            consecutive_errors += 1
+
+        # Auto-diagnostics (opt-in only)
+        if config.diagnostics_mode != "off":
+            should_send = False
+            reason = ""
+
+            if config.diagnostics_mode == "periodic":
+                if time.time() - last_diag_upload > diag_interval:
+                    should_send = True
+                    reason = "periodic"
+
+            if config.diagnostics_mode in ("errors", "periodic"):
+                if consecutive_errors >= ERROR_THRESHOLD:
+                    should_send = True
+                    reason = f"{consecutive_errors} consecutive errors"
+
+            if should_send:
+                try:
+                    from .diagnostics import (
+                        collect_diagnostic_bundle,
+                        upload_diagnostic_bundle,
+                    )
+                    log.info(f"Auto-diagnostics: sending bundle (reason: {reason})")
+                    bundle = collect_diagnostic_bundle(
+                        pcc_base=config.pcc_base,
+                        max_log_lines=200,
+                        include_device_health=False,
+                    )
+                    bundle["auto_reason"] = reason
+                    result = upload_diagnostic_bundle(
+                        bundle=bundle,
+                        pcc_base=config.pcc_base,
+                        api_key=config.pcc_api_key,
+                        kernel_id=config.kernel_id,
+                    )
+                    if "error" not in result:
+                        log.info(
+                            f"Auto-diagnostics: uploaded {result.get('upload_id')} "
+                            f"(code: {result.get('retrieval_code')})"
+                        )
+                    else:
+                        log.warning(f"Auto-diagnostics: upload failed: {result['error']}")
+                    last_diag_upload = time.time()
+                    consecutive_errors = 0  # reset after sending
+                except Exception as diag_err:
+                    log.warning(f"Auto-diagnostics: collection failed: {diag_err}")
 
         # Interruptible sleep
         sleep_end = time.time() + config.poll_interval

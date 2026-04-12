@@ -31,7 +31,7 @@ const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_
 if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
 
 const GATEWAY = "https://capability.network";
-const ORACLE_URL = "https://right-himself-lotus-patterns.trycloudflare.com";
+const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
 const ORACLE_ADDRESS = "0x3850F24ACd88F6729692e2d05F75d499F0a661f5" as Address;
 const ORACLE_KEY = "pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa";
 const KERNEL = "kernel-nanoclaw";
