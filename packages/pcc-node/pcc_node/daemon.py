@@ -375,6 +375,23 @@ def run_daemon(config: NodeConfig):
                             f"Auto-diagnostics: uploaded {result.get('upload_id')} "
                             f"(code: {result.get('retrieval_code')})"
                         )
+                        # Auto-create support thread with logs attached
+                        from .http_util import pcc_request as _pr
+                        _pr(
+                            "POST", "/api/operator/support",
+                            body={
+                                "kernelId": config.kernel_id,
+                                "kernelName": config.kernel_name,
+                                "message": f"[auto] Diagnostic report: {reason}",
+                                "retrievalCode": result.get("retrieval_code", ""),
+                                "systemInfo": {
+                                    "platform": bundle.get("system", {}).get("platform", ""),
+                                    "daemonRunning": True,
+                                },
+                            },
+                            base_url=config.pcc_base,
+                            api_key=config.pcc_api_key,
+                        )
                     else:
                         log.warning(f"Auto-diagnostics: upload failed: {result['error']}")
                     last_diag_upload = time.time()
