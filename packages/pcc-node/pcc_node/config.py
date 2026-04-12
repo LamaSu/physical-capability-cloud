@@ -30,6 +30,11 @@ class NodeConfig:
     camera_push_interval: int = 50  # seconds
     poll_interval: int = 5  # seconds
     public_key: str = ""
+    # Opt-in diagnostic feedback: automatically send diagnostic bundles
+    # when errors occur or on a periodic schedule.
+    # "off" = never (default), "errors" = on repeated errors, "periodic" = every N hours
+    diagnostics_mode: str = "off"
+    diagnostics_interval_hours: int = 24  # for "periodic" mode
 
     def to_dict(self) -> dict:
         """Serialize to a plain dict (JSON-safe)."""
