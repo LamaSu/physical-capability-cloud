@@ -1,3 +1,14 @@
+// Digital kernels
+export { AccountingReconcileKernel } from "./digital/accounting-kernel.js";
+export type {
+  LedgerEntry,
+  InvoiceEntry,
+  MatchedPair,
+  Adjustment,
+  ReconciliationReport,
+  StepTrace as AccountingStepTrace,
+} from "./digital/accounting-kernel.js";
+
 // Safety — governor, circuit breaker, and gateway (mandatory choke point)
 // In production, always use getSafetyGateway(). Direct class construction is for unit tests only.
 export {

@@ -85,6 +85,8 @@ import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
+import { touchstoneRoutes } from "./routes/touchstone.js";
+import { identitySessionRoutes } from "./routes/identity-session.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -353,6 +355,10 @@ export async function createGateway(port = 3200) {
   // Wizard sessions + compliance
   await app.register(wizardRoutes);
   await app.register(complianceRoutes);
+
+  // Touchstone statistical enforcement + ephemeral session keys
+  await app.register(touchstoneRoutes);
+  await app.register(identitySessionRoutes);
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);

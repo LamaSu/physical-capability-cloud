@@ -98,6 +98,7 @@ export {
 } from "./oracle/index.js";
 export {
   ChallengeService,
+  SessionKeyService,
   computeAssuranceScore,
   type VerificationFinding,
   type DriftAlert,

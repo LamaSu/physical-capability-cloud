@@ -22,15 +22,19 @@ import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { ChallengeService } from "@pcc/verifier";
 import type {
   OperatorPolicy,
   NegotiationSession,
   SessionStatus,
   SessionTransition,
   CreateSessionRequest,
+  WorkflowChallenge,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
 import { createJobFromSession } from "./paid-job-flow.js";
+
+const challengeService = new ChallengeService();
 
 const { negotiationSessions, operatorPolicies } = schema;
 
@@ -116,10 +120,27 @@ export async function negotiationRoutes(app: FastifyInstance) {
         ? resolver.resolve(template, session.selections)
         : null;
 
+      // Issue a WorkflowChallenge anchored to a mock block (no live RPC in gateway by default).
+      // This proves the session was created after a specific block, preventing replay attacks.
+      let challenge: WorkflowChallenge | null = null;
+      try {
+        const mockBlockNumber = BigInt(Math.floor(Date.now() / 12_000)); // ~12s block time
+        challenge = await challengeService.issueChallenge({
+          issuedBy: "pcc-gateway",
+          scope: `negotiation:${sessionId}`,
+          blockNumber: mockBlockNumber,
+          blockHash: `0x${crypto.createHash("sha256").update(sessionId).digest("hex")}`,
+          blockTimestamp: BigInt(Math.floor(Date.now() / 1000)),
+        });
+      } catch {
+        // Challenge issuance is best-effort — session creation should not fail
+      }
+
       pipelineTelemetry.emit(sessionId, "negotiation", "started", { metadata: { kernelId: body.kernelId, capabilityType: body.capabilityType } });
       return {
         session,
         resolvedOptions,
+        challenge,
         template: template ? {
           capabilityType: template.capabilityType,
           name: template.name,

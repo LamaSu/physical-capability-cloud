@@ -10,6 +10,9 @@ import { laserCutTemplate } from "./laser-cut.js";
 import { liquidHandlerTemplate } from "./liquid-handler.js";
 import { documentPrintingTemplate } from "./document-printing.js";
 import { accountingReconcileTemplate } from "./digital/accounting-reconcile.js";
+import { procurementRfqTemplate } from "./digital/procurement-rfq.js";
+import { legalReviewTemplate } from "./digital/legal-review.js";
+import { dataExtractionTemplate } from "./digital/data-extraction.js";
 
 const registry = new Map<CapabilityType, CapabilityTemplate>();
 
@@ -41,3 +44,6 @@ registerTemplate(laserCutTemplate);
 registerTemplate(liquidHandlerTemplate);
 registerTemplate(documentPrintingTemplate);
 registerTemplate(accountingReconcileTemplate);
+registerTemplate(procurementRfqTemplate);
+registerTemplate(legalReviewTemplate);
+registerTemplate(dataExtractionTemplate);

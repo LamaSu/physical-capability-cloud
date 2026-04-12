@@ -52,6 +52,7 @@
     "helia": "^6.0.21",
     "multiformats": "^13.4.2",
     "nanoid": "^5.0.0",
+    "tweetnacl": "^1.0.3",
     "viem": "^2.21.0"
   },
   "devDependencies": {

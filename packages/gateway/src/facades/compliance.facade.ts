@@ -20,6 +20,7 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS, DEFAULT_VERIFIER_CRITERIA } from "@pcc/spec";
 import type { CWMStep } from "@pcc/spec";
+import { computeAssuranceScore } from "@pcc/verifier";
 import { BaseFacade } from "./base.facade.js";
 import type {
   EvidenceSummaryDTO,
@@ -218,6 +219,24 @@ export class ComplianceFacade extends BaseFacade {
       // Recent evidence as DTOs (up to 10)
       const recentEvidence = populateEvidenceList(recentBundles.slice(0, 10));
 
+      // Compute assurance score from structured compliance data
+      // Builds findings from ALCOA checks and drift alerts for the rollup
+      const alcoaFindings = Object.entries(alcoaStatus).map(([principle, passed]) => ({
+        check: `alcoa_${principle}`,
+        passed: passed as boolean,
+        severity: "warning" as const,
+        details: `ALCOA+ ${principle}: ${passed ? "satisfied" : "not satisfied"}`,
+      }));
+
+      const assuranceScore = computeAssuranceScore({
+        findings: alcoaFindings,
+        alcoaPrinciples: alcoaStatus as unknown as Record<string, boolean>,
+        driftAlerts: driftAlerts.map((a) => ({
+          severity: a.severity,
+          type: a.type,
+        })),
+      });
+
       return {
         capabilityId,
         kernelId,
@@ -226,6 +245,7 @@ export class ComplianceFacade extends BaseFacade {
         tierCompliance,
         recentEvidence,
         driftAlerts,
+        assuranceScore,
       };
     });
   }
