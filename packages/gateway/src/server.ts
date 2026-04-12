@@ -83,6 +83,7 @@ import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { rateLimiter } from "./middleware/rate-limiter.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
@@ -180,6 +181,9 @@ export async function createGateway(port = 3200) {
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
+
+  // Rate limiter — token bucket per API key with weighted endpoint costs
+  await app.register(rateLimiter);
   // HMAC-sign session cookies to detect tampering (red team #52)
   // COOKIE_SECRET must be set in production; falls back to a randomized value in dev.
   const cookieSecret =
@@ -517,3 +521,4 @@ process.on("uncaughtException", (err) => {
   console.error("[gateway] Uncaught exception:", err);
   process.exit(1);
 });
+
