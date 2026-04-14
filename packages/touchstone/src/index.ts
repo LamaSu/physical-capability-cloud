@@ -23,6 +23,22 @@ export type { SamplerStats } from "./sampler.js";
 export { verifyExactMatch } from "./verifier-exact.js";
 export { verifySchemaMatch } from "./verifier-schema.js";
 export type { SchemaValidationOutcome, SchemaValidator } from "./verifier-schema.js";
+export {
+  verifyLLMJudge,
+  MockJudgeClient,
+  ClaudeJudgeClient,
+  buildJudgePrompt,
+  parseJudgeVerdict,
+} from "./verifier-judge.js";
+export type {
+  JudgeClient,
+  JudgeRequest,
+  JudgeVerdict,
+  VerifyLLMJudgeOptions,
+  MockJudgeScript,
+  MockJudgeClientOptions,
+  ClaudeJudgeClientOptions,
+} from "./verifier-judge.js";
 
 // Reputation hook
 export { emitTouchstoneFeedback } from "./reputation-hook.js";

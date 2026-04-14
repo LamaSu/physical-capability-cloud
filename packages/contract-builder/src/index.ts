@@ -52,6 +52,8 @@ export { laserCutTemplate } from "./templates/laser-cut.js";
 export {
   accountingReconcileTemplate,
   accountingReconcileWorkflowSteps,
+  procurementRfqTemplate,
+  procurementRfqWorkflowSteps,
 } from "./templates/digital/index.js";
 
 // Built-in profiles

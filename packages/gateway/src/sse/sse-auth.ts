@@ -24,11 +24,13 @@ import { resolveApiKey } from "../auth/api-key-auth.js";
 // ---------------------------------------------------------------------------
 
 function isAuthRequired(): boolean {
-  // Secure-by-default: auth is required unless explicitly disabled.
-  // Set SSE_AUTH_REQUIRED=false to opt out (backward compat for local dev).
+  // Opt-in auth: unauthenticated connections pass unless SSE_AUTH_REQUIRED is
+  // set to a truthy value. This matches the module-level docstring, the
+  // documented default in CLAUDE.md (SSE_AUTH_REQUIRED default: false), and
+  // the R3-04 security commit (which only tightened the ?token= query path).
   const val = process.env.SSE_AUTH_REQUIRED;
-  if (val === "false" || val === "0" || val === "no") return false;
-  return true;
+  if (!val) return false;
+  return val === "true" || val === "1" || val === "yes";
 }
 
 // ---------------------------------------------------------------------------

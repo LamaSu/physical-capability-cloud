@@ -9,6 +9,23 @@ export type {
   StepTrace as AccountingStepTrace,
 } from "./digital/accounting-kernel.js";
 
+export {
+  ProcurementRFQKernel,
+  ProcurementRFQValidationError,
+  ProcurementRFQSessionError,
+} from "./digital/procurement-rfq-kernel.js";
+export type {
+  RFQSpec,
+  VendorCandidate,
+  VendorQuote,
+  ScoredQuote,
+  RFQRanking,
+  PurchaseOrderDraft,
+  RFQStatus,
+  RFQReport,
+  StepTrace as ProcurementStepTrace,
+} from "./digital/procurement-rfq-kernel.js";
+
 // Safety — governor, circuit breaker, and gateway (mandatory choke point)
 // In production, always use getSafetyGateway(). Direct class construction is for unit tests only.
 export {

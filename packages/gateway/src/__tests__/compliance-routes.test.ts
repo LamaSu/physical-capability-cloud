@@ -107,6 +107,26 @@ vi.mock("../facades/index.js", () => ({
   getComplianceFacade: () => mockFacade,
 }));
 
+// ── Mock getRepos ──────────────────────────────────────────────────────────────
+//
+// POST /api/jobs/:jobId/attestations/aggregate checks job + kernel ownership
+// before delegating to the facade (R3-03 security hardening).
+// We mock repos so the auth check finds the job and matches the caller.
+
+const mockJobsRepo = {
+  findById: vi.fn(),
+};
+const mockKernelsRepo = {
+  findById: vi.fn(),
+};
+
+vi.mock("../db.js", () => ({
+  getRepos: () => ({
+    jobs: mockJobsRepo,
+    kernels: mockKernelsRepo,
+  }),
+}));
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function ok<T>(data: T) {
@@ -124,8 +144,28 @@ function notFound(entity: string, id: string) {
   };
 }
 
+/**
+ * Build an app without injected auth — used by the public read routes.
+ */
 async function buildApp() {
   const app = Fastify({ logger: false });
+  await app.register(complianceRoutes);
+  return app;
+}
+
+/**
+ * Build an app with an injected authenticated operator — used by the
+ * POST /api/jobs/:jobId/attestations/aggregate tests because that route
+ * now requires auth + job ownership.
+ */
+async function buildAuthedApp(operatorId = "op-submitter") {
+  const app = Fastify({ logger: false });
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    (req as unknown as { operatorId: string }).operatorId = operatorId;
+  });
   await app.register(complianceRoutes);
   return app;
 }
@@ -380,11 +420,28 @@ describe("complianceRoutes", () => {
   });
 
   // ── POST /api/jobs/:jobId/attestations/aggregate ──────────────────────────
-
+  //
+  // Note: this route was hardened by security commit R3-03 (April 10, 2026):
+  //   - Requires an authenticated operator on req.operatorId / req.userId
+  //   - Operator must be the job submitter OR the kernel operator
+  // Tests therefore build an app with an injected operatorId and wire up
+  // mockJobsRepo.findById() to return a job the operator owns.
   describe("POST /api/jobs/:jobId/attestations/aggregate", () => {
+    const OPERATOR_ID = "op-submitter";
+
+    beforeEach(() => {
+      // Default: job exists and is owned by OPERATOR_ID (submitter path).
+      mockJobsRepo.findById.mockReturnValue({
+        id: JOB_ID,
+        submittedBy: OPERATOR_ID,
+        kernelId: "kernel_test_001",
+      });
+      mockKernelsRepo.findById.mockReturnValue(null);
+    });
+
     it("returns AggregatedAttestationDTO on success", async () => {
       mockFacade.aggregateAttestations.mockResolvedValue(ok(mockAggregatedAttestation));
-      const app = await buildApp();
+      const app = await buildAuthedApp(OPERATOR_ID);
 
       const res = await app.inject({
         method: "POST",
@@ -419,7 +476,7 @@ describe("complianceRoutes", () => {
 
     it("delegates to facade.aggregateAttestations with the correct jobId and attestation array", async () => {
       mockFacade.aggregateAttestations.mockResolvedValue(ok(mockAggregatedAttestation));
-      const app = await buildApp();
+      const app = await buildAuthedApp(OPERATOR_ID);
 
       const attestations = [
         {
@@ -457,7 +514,7 @@ describe("complianceRoutes", () => {
         aggregatedConfidence: 0,
       };
       mockFacade.aggregateAttestations.mockResolvedValue(ok(noQuorumResult));
-      const app = await buildApp();
+      const app = await buildAuthedApp(OPERATOR_ID);
 
       const res = await app.inject({
         method: "POST",
@@ -480,7 +537,7 @@ describe("complianceRoutes", () => {
         aggregatedConfidence: 0,
       };
       mockFacade.aggregateAttestations.mockResolvedValue(ok(noQuorumResult));
-      const app = await buildApp();
+      const app = await buildAuthedApp(OPERATOR_ID);
 
       // Send body without the attestations key
       const res = await app.inject({
