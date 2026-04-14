@@ -71,6 +71,7 @@ interface SupportThread {
   kernelId: string;
   kernelName: string;
   operatorIp: string;
+  operatorId?: string;     // Authenticated caller's operator ID (for ownership checks)
   subject: string;
   status: "open" | "in-progress" | "resolved" | "closed";
   priority: "low" | "normal" | "high" | "urgent";
@@ -210,11 +211,14 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       }
     }
 
+    const creatorOperatorId = (req as any).operatorId ?? (req as any).userId;
+
     thread = {
       id: `thread-${uuidv4().slice(0, 8)}`,
       kernelId,
       kernelName: kernelName ?? kernelId,
       operatorIp: req.ip,
+      operatorId: creatorOperatorId,
       subject: subject ?? message.slice(0, 80),
       status: "open",
       priority: inferPriority(message),
