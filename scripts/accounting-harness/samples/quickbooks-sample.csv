@@ -1,0 +1,26 @@
+Date,Num,Name,Memo,Account,Debit,Credit
+01/03/2026,INV-1001,Staples,Office supplies purchase,5100-OFFICE,250.00,
+01/05/2026,INV-1002,AWS,Monthly cloud hosting,5200-IT,1200.00,
+01/07/2026,DEP-5001,"ACME, Inc.",Client deposit received,1000-CASH,,3000.00
+01/09/2026,CHK-2001,Payroll,Weekly payroll,2000-PAYROLL,3200.00,
+01/12/2026,INV-1003,Dell Financial,Equipment lease,5400-LEASING,800.00,
+01/14/2026,DEP-5002,"Client B",Client payment received,1000-CASH,,2500.00
+01/16/2026,INV-1004,Staples,Office paper restock,5100-OFFICE,125.50,
+01/18/2026,CHK-2002,Payroll,Weekly payroll,2000-PAYROLL,3200.00,
+01/20/2026,INV-1005,AWS,Additional compute capacity,5200-IT,450.00,
+01/21/2026,DEP-5003,Client C,Retainer payment,1000-CASH,,3500.00
+01/22/2026,INV-1006,Dell Financial,"Printer, toner","5400-LEASING",175.25,
+01/23/2026,CHK-2003,Payroll,Bonus payout,2000-PAYROLL,500.00,
+01/24/2026,INV-1007,Staples,"Binders, clips",5100-OFFICE,68.75,
+01/25/2026,DEP-5004,Client A,Invoice settlement,1000-CASH,,1850.00
+01/26/2026,INV-1008,AWS,Data transfer overage,5200-IT,120.00,
+01/27/2026,CHK-2004,Payroll,Contractor payout,2000-PAYROLL,1800.00,
+01/28/2026,INV-1009,Dell Financial,Laptop lease renewal,5400-LEASING,620.00,
+01/28/2026,DEP-5005,Client D,Partial settlement,1000-CASH,,1500.00
+01/29/2026,INV-1010,Staples,"Envelopes, labels",5100-OFFICE,42.50,
+01/29/2026,CHK-2005,Payroll,Final weekly payroll,2000-PAYROLL,3300.00,
+01/30/2026,INV-1011,AWS,Domain renewals,5200-IT,95.00,
+01/30/2026,DEP-5006,Client E,Escrow release,1000-CASH,,1500.00
+01/31/2026,INV-1012,Dell Financial,Monitor lease,5400-LEASING,110.00,
+01/31/2026,INV-1013,Staples,Ink cartridges,5100-OFFICE,138.00,
+01/31/2026,DEP-5007,Client F,Year-end payment,1000-CASH,,2345.00

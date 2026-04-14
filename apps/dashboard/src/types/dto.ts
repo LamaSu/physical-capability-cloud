@@ -84,6 +84,8 @@ export interface CapabilityDTO {
   kernelName?: string;
   /** Kernel online status */
   kernelStatus?: "online" | "offline" | "maintenance" | "stale";
+  /** Average assurance score for this kernel's jobs (0.0-1.0) — ALCOA+ rollup */
+  assuranceScore?: number;
 }
 
 // ── Job DTOs ──────────────────────────────────────────────────────────────────
@@ -207,6 +209,8 @@ export interface ComplianceReportDTO {
   tierCompliance: Record<AssuranceTier, boolean>;
   recentEvidence: EvidenceSummaryDTO[];
   driftAlerts: DriftAlertDTO[];
+  /** Assurance score rollup in [0.0, 1.0] — weighted ALCOA+ compliance scalar */
+  assuranceScore?: number;
 }
 
 // ── Settlement DTOs ───────────────────────────────────────────────────────────

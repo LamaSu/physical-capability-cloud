@@ -1,0 +1,26 @@
+*Date,*Description,*Account Code,Reference,*Tax Rate,Amount
+2026-02-02,Monthly software subscription,5200-IT,SUB-0201,GST on Expenses,850.00
+2026-02-03,Client invoice A,1000-CASH,INV-A-101,Tax on Sales,-4200.00
+2026-02-05,Office supplies,5100-OFFICE,REC-0205,GST on Expenses,315.75
+2026-02-07,Contractor fees,5300-SERVICES,CON-0207,GST Free,2400.00
+2026-02-08,Equipment rental,5400-LEASING,LEA-0208,GST on Expenses,725.00
+2026-02-10,Client invoice B,1000-CASH,INV-B-102,Tax on Sales,-3150.00
+2026-02-12,"SaaS subscription, enterprise plan",5200-IT,SUB-0212,GST on Expenses,1100.00
+2026-02-14,Consultant payment,5300-SERVICES,CON-0214,GST Free,1850.00
+2026-02-15,Stationery and postage,5100-OFFICE,REC-0215,GST on Expenses,89.50
+2026-02-16,Furniture lease,5400-LEASING,LEA-0216,GST on Expenses,540.00
+2026-02-17,Client invoice C,1000-CASH,INV-C-103,Tax on Sales,-2800.00
+2026-02-19,Cloud analytics tool,5200-IT,SUB-0219,GST on Expenses,325.00
+2026-02-20,Freelance designer,5300-SERVICES,CON-0220,GST Free,950.00
+2026-02-21,Printer supplies,5100-OFFICE,REC-0221,GST on Expenses,140.25
+2026-02-22,Copier lease,5400-LEASING,LEA-0222,GST on Expenses,285.00
+2026-02-23,Client invoice D,1000-CASH,INV-D-104,Tax on Sales,-1950.00
+2026-02-24,DevOps tooling,5200-IT,SUB-0224,GST on Expenses,410.00
+2026-02-25,"Accountant, Q1 review",5300-SERVICES,CON-0225,GST Free,1200.00
+2026-02-26,Break room supplies,5100-OFFICE,REC-0226,GST on Expenses,68.00
+2026-02-27,Vehicle lease,5400-LEASING,LEA-0227,GST on Expenses,650.00
+2026-02-28,Client invoice E,1000-CASH,INV-E-105,Tax on Sales,-1500.00
+2026-02-28,Monitoring service,5200-IT,SUB-0228,GST on Expenses,225.00
+2026-02-28,"Legal counsel, contract review",5300-SERVICES,CON-0228,GST Free,780.00
+2026-02-28,Office cleaning,5100-OFFICE,REC-0228B,GST on Expenses,150.00
+2026-02-28,Client invoice F,1000-CASH,INV-F-106,Tax on Sales,-1352.50
