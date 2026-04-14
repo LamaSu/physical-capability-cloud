@@ -53,6 +53,66 @@ def _setup_logging(verbose):
         pass  # file logging is best-effort
 
 
+DIAG_ACK_PATH = os.path.expanduser("~/.pcc-node/diagnostics-acknowledged")
+
+
+def _maybe_prompt_diagnostics(config):
+    """First-run banner: explain auto-diagnostics and let operator opt in/out.
+
+    Shown once per machine (sentinel at ~/.pcc-node/diagnostics-acknowledged).
+    Default is "errors" so the PCC team gets a crash report when things break;
+    operators can say no here or run `pcc-node feedback off` later.
+    """
+    if os.path.exists(DIAG_ACK_PATH):
+        return  # already acknowledged, don't nag
+
+    click.echo("")
+    click.echo("─" * 64)
+    click.echo("  Auto-diagnostics (first-run setup)")
+    click.echo("─" * 64)
+    click.echo("")
+    click.echo("  When your node hits 5+ errors in a row, pcc-node can")
+    click.echo("  automatically send an encrypted diagnostic bundle to the PCC")
+    click.echo("  team so we can investigate without bothering you.")
+    click.echo("")
+    click.echo("  What's in the bundle (encrypted, secrets redacted):")
+    click.echo("    • OS, Python version, CPU, memory")
+    click.echo("    • Node uptime, jobs completed, daemon status")
+    click.echo("    • Config with API keys replaced by ***")
+    click.echo("    • Last 200 log lines")
+    click.echo("    • Gateway connectivity result")
+    click.echo("")
+    click.echo("  The bundle is encrypted client-side. The retrieval code is")
+    click.echo("  attached to an auto-created support thread so our team can")
+    click.echo("  decrypt and help.  Change any time with `pcc-node feedback off`.")
+    click.echo("")
+
+    choice = click.prompt(
+        "  Enable auto-diagnostics?  [Y]es errors-only / [p]eriodic / [n]o",
+        default="y",
+        show_default=False,
+    ).strip().lower()
+
+    if choice in ("n", "no", "off"):
+        config.diagnostics_mode = "off"
+        click.echo("  → Disabled. Run `pcc-node feedback on` later to enable.")
+    elif choice in ("p", "periodic"):
+        config.diagnostics_mode = "periodic"
+        click.echo(f"  → Periodic mode: every {config.diagnostics_interval_hours}h.")
+    else:
+        config.diagnostics_mode = "errors"
+        click.echo("  → Errors-only mode: auto-send on 5+ consecutive errors.")
+
+    click.echo("")
+
+    try:
+        os.makedirs(os.path.dirname(DIAG_ACK_PATH), exist_ok=True)
+        with open(DIAG_ACK_PATH, "w") as f:
+            f.write(f"mode={config.diagnostics_mode}\n")
+    except OSError:
+        pass
+
+
 def _format_device(dev):
     """Format a device dict for display."""
     dtype = dev.get("type", "unknown")
@@ -227,6 +287,9 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
             devices,
             secret_key=secret_key,
         )
+
+    # First-run diagnostics banner (no-op if already acknowledged)
+    _maybe_prompt_diagnostics(config)
 
     # Save config
     saved_path = save_config(config, config_file)

@@ -30,10 +30,13 @@ class NodeConfig:
     camera_push_interval: int = 50  # seconds
     poll_interval: int = 5  # seconds
     public_key: str = ""
-    # Opt-in diagnostic feedback: automatically send diagnostic bundles
-    # when errors occur or on a periodic schedule.
-    # "off" = never (default), "errors" = on repeated errors, "periodic" = every N hours
-    diagnostics_mode: str = "off"
+    # Auto-diagnostic feedback: send encrypted bundles when the daemon hits
+    # repeated errors or on a periodic schedule. Default is "errors" so the
+    # PCC team automatically gets a crash report when something goes wrong —
+    # the first-run banner in `pcc-node start` explains this and lets the
+    # operator opt out via `pcc-node feedback off`.
+    # "off" = never, "errors" = on repeated errors (default), "periodic" = every N hours
+    diagnostics_mode: str = "errors"
     diagnostics_interval_hours: int = 24  # for "periodic" mode
 
     def to_dict(self) -> dict:
