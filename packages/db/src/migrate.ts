@@ -1114,6 +1114,200 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS a2a_conversations_updated ON a2a_conversations(updated_at);
   `);
 
+  // ══════════════════════════════════════════════════════════════════
+  // ERP Patterns Foundation — 12 tables across 3 domains
+  // (governance, templates, analytics) for Venkiteela-inspired patterns
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    -- ── Governance ────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS rate_limit_policies (
+      id TEXT PRIMARY KEY,
+      route_pattern TEXT NOT NULL,
+      cost_weight REAL NOT NULL DEFAULT 1,
+      free_tier_limit INTEGER NOT NULL DEFAULT 100,
+      paid_tier_limit INTEGER NOT NULL DEFAULT 10000,
+      enterprise_tier_limit INTEGER NOT NULL DEFAULT 100000,
+      window_ms INTEGER NOT NULL DEFAULT 3600000,
+      burst_allowance INTEGER NOT NULL DEFAULT 10,
+      description TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS dlp_rules (
+      id TEXT PRIMARY KEY,
+      field_path TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      sensitivity TEXT NOT NULL,
+      visible_to_roles TEXT NOT NULL,
+      redaction_strategy TEXT NOT NULL,
+      mask_pattern TEXT,
+      region_precision TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS endpoint_scopes (
+      id TEXT PRIMARY KEY,
+      method TEXT NOT NULL,
+      route_pattern TEXT NOT NULL,
+      required_scopes TEXT NOT NULL,
+      description TEXT
+    );
+
+    -- ── Templates ─────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS capability_template_store (
+      id TEXT PRIMARY KEY,
+      capability_type TEXT NOT NULL,
+      version TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      template_data TEXT NOT NULL,
+      author_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      tags TEXT,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      fork_count INTEGER NOT NULL DEFAULT 0,
+      rating REAL,
+      rating_count INTEGER NOT NULL DEFAULT 0,
+      forked_from TEXT,
+      is_verified INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS cap_tmpl_type ON capability_template_store(capability_type);
+    CREATE INDEX IF NOT EXISTS cap_tmpl_status ON capability_template_store(status);
+
+    CREATE TABLE IF NOT EXISTS machine_profile_store (
+      id TEXT PRIMARY KEY,
+      capability_type TEXT NOT NULL,
+      machine_name TEXT NOT NULL,
+      kernel_id TEXT,
+      profile_data TEXT NOT NULL,
+      author_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      tags TEXT,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      rating REAL,
+      rating_count INTEGER NOT NULL DEFAULT 0,
+      is_verified INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS machine_profile_type ON machine_profile_store(capability_type);
+    CREATE INDEX IF NOT EXISTS machine_profile_kernel ON machine_profile_store(kernel_id);
+
+    CREATE TABLE IF NOT EXISTS verification_templates (
+      id TEXT PRIMARY KEY,
+      capability_type TEXT NOT NULL,
+      version TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      requirements TEXT NOT NULL,
+      author_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ver_tmpl_type ON verification_templates(capability_type);
+
+    CREATE TABLE IF NOT EXISTS query_templates (
+      id TEXT PRIMARY KEY,
+      intent TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      version TEXT NOT NULL,
+      sql_template TEXT NOT NULL,
+      data_sources TEXT NOT NULL,
+      params TEXT NOT NULL,
+      response_template TEXT NOT NULL,
+      example_queries TEXT NOT NULL,
+      author_id TEXT,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'draft',
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS query_tmpl_intent ON query_templates(intent);
+
+    CREATE TABLE IF NOT EXISTS template_ratings (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL,
+      template_type TEXT NOT NULL,
+      rater_id TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      comment TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS tmpl_ratings_template ON template_ratings(template_id, template_type);
+
+    -- ── Analytics ─────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS analytics_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      actor_type TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id TEXT NOT NULL,
+      payload TEXT,
+      hash TEXT NOT NULL,
+      previous_hash TEXT
+    );
+    CREATE INDEX IF NOT EXISTS analytics_events_type ON analytics_events(event_type);
+    CREATE INDEX IF NOT EXISTS analytics_events_category ON analytics_events(category);
+    CREATE INDEX IF NOT EXISTS analytics_events_actor ON analytics_events(actor_id);
+    CREATE INDEX IF NOT EXISTS analytics_events_resource ON analytics_events(resource_type, resource_id);
+    CREATE INDEX IF NOT EXISTS analytics_events_timestamp ON analytics_events(timestamp);
+
+    CREATE TABLE IF NOT EXISTS materialized_views (
+      id TEXT PRIMARY KEY,
+      view_type TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      data TEXT NOT NULL,
+      computed_at TEXT NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mat_views_type_scope ON materialized_views(view_type, scope_key);
+
+    CREATE TABLE IF NOT EXISTS compliance_templates (
+      id TEXT PRIMARY KEY,
+      regulation_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      version TEXT NOT NULL,
+      industries TEXT NOT NULL,
+      jurisdictions TEXT NOT NULL,
+      applicable_capability_types TEXT NOT NULL,
+      rules TEXT NOT NULL,
+      minimum_assurance_tier INTEGER NOT NULL DEFAULT 0,
+      retention_period_days INTEGER NOT NULL DEFAULT 365,
+      author_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      superseded_by TEXT,
+      effective_date TEXT NOT NULL,
+      sunset_date TEXT,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      rating INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS comp_tmpl_regulation ON compliance_templates(regulation_id);
+    CREATE INDEX IF NOT EXISTS comp_tmpl_status ON compliance_templates(status);
+
+    CREATE TABLE IF NOT EXISTS compliance_profiles (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      template_ids TEXT NOT NULL,
+      industry TEXT NOT NULL,
+      jurisdictions TEXT NOT NULL,
+      overrides TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS comp_prof_kernel ON compliance_profiles(kernel_id);
+  `);
+
   // ── Safe column additions for existing databases ──────────────────
   // SQLite ALTER TABLE ADD COLUMN is idempotent-safe when wrapped in try/catch.
   const safeAddColumn = (table: string, col: string, type: string) => {

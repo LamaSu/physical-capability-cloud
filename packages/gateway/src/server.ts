@@ -84,6 +84,12 @@ import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
+import { dlpRedactor } from "./middleware/dlp-redactor.js";
+import { scopeChecker } from "./middleware/scope-checker.js";
+import { templateRoutes } from "./routes/templates.js";
+import { nlQueryRoutes } from "./routes/nl-query.js";
+import { complianceTemplateRoutes } from "./routes/compliance-templates.js";
+import { getAnalyticsService } from "./services/analytics-service.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
@@ -280,6 +286,15 @@ export async function createGateway(port = 3200) {
   // API key gate — requires API key or session on all /api/* routes
   await app.register(apiGate);
 
+  // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
+  await app.register(scopeChecker);
+
+  // DLP redaction — role-aware field-level response filtering (onSend hook)
+  await app.register(dlpRedactor);
+
+  // Analytics service — subscribes to event bus, persists events + updates views
+  getAnalyticsService();
+
   // x402 payment gate (before REST routes — gates protected endpoints)
   await app.register(x402Gate);
 
@@ -359,6 +374,11 @@ export async function createGateway(port = 3200) {
   // Wizard sessions + compliance
   await app.register(wizardRoutes);
   await app.register(complianceRoutes);
+
+  // ERP patterns foundation — templates, NL query, compliance templates
+  await app.register(templateRoutes);
+  await app.register(nlQueryRoutes);
+  await app.register(complianceTemplateRoutes);
 
   // Touchstone statistical enforcement + ephemeral session keys
   await app.register(touchstoneRoutes);
