@@ -113,6 +113,23 @@ export interface SessionKey {
    * 64 bytes.
    */
   parentSignature: Uint8Array;
+  /**
+   * Optional SLIP-0010 derivation path (hardened-only, e.g. "m/8004'/84532'/42'/0'").
+   *
+   * Present when the sessionKey was generated via SLIP-0010 hardened Ed25519
+   * derivation from a parent seed rather than as a fresh random keypair.
+   *
+   * IMPORTANT: The derivation path alone does NOT constitute authorization —
+   * Ed25519 has no public-child derivation, so a verifier cannot independently
+   * confirm the parent-child relationship from just the parent pubkey + path.
+   * `parentSignature` is still the authoritative authorization mechanism.
+   *
+   * The derivation path provides:
+   *   - Reproducibility (same parent seed + same path → same child key)
+   *   - A canonical audit trail of the parent's intended key tree
+   *   - Offline derivation so child keys never traverse a network boundary
+   */
+  derivationPath?: string;
 }
 
 // ---------------------------------------------------------------------------

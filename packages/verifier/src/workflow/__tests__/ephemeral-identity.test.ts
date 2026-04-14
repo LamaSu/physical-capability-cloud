@@ -943,6 +943,241 @@ describe("SessionKeyService", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // SLIP-0010 derived sessionKeys (new in this iteration)
+  // ---------------------------------------------------------------------------
+
+  describe("deriveSessionKey (SLIP-0010)", () => {
+    /** Generate a deterministic 32-byte parent seed for derivation tests. */
+    function makeSeed(): Uint8Array {
+      // Fixed bytes for reproducibility inside a test run. Real users generate
+      // this from a CSPRNG at principalKey creation time.
+      const seed = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) seed[i] = i + 1;
+      return seed;
+    }
+
+    it("26. deriveSessionKey produces a SessionKey with derivationPath set", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const result = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      expect(result.sessionKey.derivationPath).toBe("m/8004'/84532'/1'/0'");
+      expect(result.derivationPath).toBe("m/8004'/84532'/1'/0'");
+      expect(result.sessionKey.publicKey.length).toBe(32);
+      expect(result.sessionPrivateKey.length).toBe(64);
+      expect(result.sessionKey.parentSignature.length).toBe(64);
+    });
+
+    it("27. Derived sessionKey signs events that verify correctly", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const { sessionKey, sessionPrivateKey } = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      const event = service.signEvent({
+        eventData: makeEventData("derived-sessionKey event"),
+        sessionKey,
+        sessionPrivateKey,
+        parentPublicKey: principal.publicKey,
+        derivationPath: sessionKey.derivationPath,
+      });
+
+      const result = service.verifySessionSignedEvent({
+        event,
+        action: "evidence_submit",
+      });
+
+      expect(result.valid).toBe(true);
+      expect(result.failures).toEqual([]);
+      expect(result.principalAgentId).toBe(principal.agentId);
+    });
+
+    it("28. Two derivations with same parent seed + path produce same publicKey", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const a = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/42'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+      const b = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/42'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      // Same pubkey
+      expect(Array.from(a.sessionKey.publicKey)).toEqual(
+        Array.from(b.sessionKey.publicKey),
+      );
+      // Same private key (same seed → same keypair)
+      expect(Array.from(a.sessionPrivateKey)).toEqual(
+        Array.from(b.sessionPrivateKey),
+      );
+      // But sessionId is fresh each time — that's expected, it's UUID-random.
+      expect(a.sessionKey.sessionId).not.toBe(b.sessionKey.sessionId);
+    });
+
+    it("29. Parent signature over derived SessionKey verifies", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const { sessionKey, sessionPrivateKey } = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/7'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      // Manually canonicalize what the verifier would produce and confirm
+      // the parentSignature verifies. (The full verification path already
+      // exercises this in test #27; this is a focused double-check that
+      // the derivationPath gets included in the canonical bytes.)
+      const event = service.signEvent({
+        eventData: makeEventData("direct parent-sig check"),
+        sessionKey,
+        sessionPrivateKey,
+        parentPublicKey: principal.publicKey,
+      });
+
+      const result = service.verifySessionSignedEvent({
+        event,
+        action: "evidence_submit",
+      });
+      // If derivationPath were dropped from canonical form, parent_signature_invalid
+      // would show up here. It must not.
+      expect(result.failures).not.toContain("parent_signature_invalid");
+      expect(result.valid).toBe(true);
+    });
+
+    it("30. Backward compat: issueSessionKey still works, no derivationPath", () => {
+      const { principal, privateKey } = makePrincipal();
+
+      const { sessionKey, sessionPrivateKey } = service.issueSessionKey({
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      // Old path produces NO derivationPath on the struct
+      expect(sessionKey.derivationPath).toBeUndefined();
+
+      // And it still verifies cleanly — the canonical form excludes the
+      // field when absent, so the parent signature is byte-identical to
+      // pre-SLIP-0010 behavior.
+      const event = service.signEvent({
+        eventData: makeEventData("legacy sessionKey"),
+        sessionKey,
+        sessionPrivateKey,
+        parentPublicKey: principal.publicKey,
+      });
+
+      const result = service.verifySessionSignedEvent({
+        event,
+        action: "evidence_submit",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("31. Different derivation paths produce different sessionKey pubkeys", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const a = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+      const b = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/2'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      expect(Array.from(a.sessionKey.publicKey)).not.toEqual(
+        Array.from(b.sessionKey.publicKey),
+      );
+    });
+
+    it("32. Non-hardened path throws a clear error", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      expect(() =>
+        service.deriveSessionKey({
+          parentSeed,
+          path: "m/8004'/84532'/1/0", // NOT hardened
+          principal,
+          principalPrivateKey: privateKey,
+        }),
+      ).toThrow(/hardened/);
+    });
+
+    it("33. Tampered derivationPath on a derived sessionKey causes parent_signature_invalid", () => {
+      const { principal, privateKey } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      const { sessionKey, sessionPrivateKey } = service.deriveSessionKey({
+        parentSeed,
+        path: "m/8004'/84532'/1'/0'",
+        principal,
+        principalPrivateKey: privateKey,
+      });
+
+      // Mutate the path after the parent signed — the signature now covers
+      // a different canonical form, so verification must fail.
+      const tamperedSessionKey = {
+        ...sessionKey,
+        derivationPath: "m/8004'/84532'/999'/0'",
+      };
+
+      const event = service.signEvent({
+        eventData: makeEventData("tamper test"),
+        sessionKey: tamperedSessionKey,
+        sessionPrivateKey,
+        parentPublicKey: principal.publicKey,
+      });
+
+      const result = service.verifySessionSignedEvent({
+        event,
+        action: "evidence_submit",
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.failures).toContain("parent_signature_invalid");
+    });
+
+    it("34. Derived sessionKey rejects wrong principalPrivateKey length", () => {
+      const { principal } = makePrincipal();
+      const parentSeed = makeSeed();
+
+      expect(() =>
+        service.deriveSessionKey({
+          parentSeed,
+          path: "m/8004'/84532'/1'/0'",
+          principal,
+          principalPrivateKey: new Uint8Array(32), // wrong length
+        }),
+      ).toThrow(/principalPrivateKey must be 64 bytes/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Deterministic JSON serialization
   // ---------------------------------------------------------------------------
 

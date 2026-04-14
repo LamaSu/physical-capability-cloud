@@ -12,3 +12,12 @@ export {
   type CompletenessCheckResult,
 } from "./completeness-checker.js";
 export { SessionKeyService } from "./ephemeral-identity.js";
+export {
+  masterKeyFromSeed,
+  deriveChild,
+  derivePath,
+  parsePath,
+  validateHardenedPath,
+  HARDENED,
+  type DerivedKey,
+} from "./slip10-ed25519.js";

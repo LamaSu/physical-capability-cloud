@@ -33,6 +33,24 @@ async function buildApp(): Promise<FastifyInstance> {
   return app;
 }
 
+/**
+ * Build an app with an injected authenticated operator. The node-assign
+ * route requires auth (401 without) — this helper lets the per-test caller
+ * simulate a signed-in operator without running the full apiGate middleware.
+ */
+async function buildAuthedApp(operatorId: string): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    (req as unknown as { operatorId: string }).operatorId = operatorId;
+  });
+  await app.register(requestRoutes);
+  await app.ready();
+  return app;
+}
+
 // ---------------------------------------------------------------------------
 // Shared fixtures
 // ---------------------------------------------------------------------------
@@ -564,54 +582,69 @@ describe("GET /api/requests/:id/critical-path", () => {
 // ---------------------------------------------------------------------------
 
 describe("POST /api/requests/:id/nodes/:nodeId/assign", () => {
+  // The node-assign route now enforces caller auth (401 without) and
+  // restricts cross-operator assignment to BROKER_OPERATORS. Each test builds
+  // an app authed as the operator whose point-of-view it needs to simulate.
+  const OPERATOR_ID = "op-biopunk-lab";
   let app: FastifyInstance;
   let requestId: string;
   let firstNodeId: string;
 
   beforeEach(async () => {
     resetRequestsStore();
-    app = await buildApp();
-
-    const create = await app.inject({
+    // Use an unauthenticated app for POST /api/requests (public) to seed the
+    // store. The requestsStore is module-global, so any subsequent app sees
+    // the same data.
+    const bootstrap = await buildApp();
+    const create = await bootstrap.inject({
       method: "POST",
       url: "/api/requests",
       payload: ROBOT_REQUEST,
     });
-    const req = create.json().request;
-    requestId = req.id;
-    firstNodeId = req.capabilityDag[0].id;
+    const reqJson = create.json().request;
+    requestId = reqJson.id;
+    firstNodeId = reqJson.capabilityDag[0].id;
+    await bootstrap.close();
+
+    app = await buildAuthedApp(OPERATOR_ID);
   });
 
   afterEach(async () => {
     await app.close();
   });
 
-  it("assigns an operator to a node", async () => {
+  it("assigns an operator to a node (self-assign)", async () => {
     const res = await app.inject({
       method: "POST",
       url: `/api/requests/${requestId}/nodes/${firstNodeId}/assign`,
-      payload: { operatorId: "op-biopunk-lab" },
+      payload: { operatorId: OPERATOR_ID },
     });
     expect(res.statusCode).toBe(200);
     const { node } = res.json();
-    expect(node.assignedOperator).toBe("op-biopunk-lab");
+    expect(node.assignedOperator).toBe(OPERATOR_ID);
     expect(node.status).toBe("assigned");
   });
 
-  it("returns 400 when operatorId is missing", async () => {
+  it("self-assigns to the caller when operatorId is missing", async () => {
+    // R3 security hardening: an empty body no longer returns 400 — the route
+    // now self-assigns the node to the authenticated caller. Non-broker
+    // callers can only act on their own behalf anyway.
     const res = await app.inject({
       method: "POST",
       url: `/api/requests/${requestId}/nodes/${firstNodeId}/assign`,
       payload: {},
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    const { node } = res.json();
+    expect(node.assignedOperator).toBe(OPERATOR_ID);
+    expect(node.status).toBe("assigned");
   });
 
   it("returns 404 for unknown node", async () => {
     const res = await app.inject({
       method: "POST",
       url: `/api/requests/${requestId}/nodes/node-fake/assign`,
-      payload: { operatorId: "op-test" },
+      payload: { operatorId: OPERATOR_ID },
     });
     expect(res.statusCode).toBe(404);
   });

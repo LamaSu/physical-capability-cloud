@@ -29,6 +29,7 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_SESSION_KEY_CONFIG } from "@pcc/spec";
 import type { AgentRegistryId, ReputationFeedback } from "@pcc/spec";
+import { derivePath, type DerivedKey } from "./slip10-ed25519.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -53,9 +54,16 @@ function toHex(bytes: Uint8Array): string {
  *
  * Deterministic JSON: sorted keys, no whitespace, binary fields as hex.
  * This format is stable across JS engines because we control key order explicitly.
+ *
+ * `derivationPath` is INCLUDED in the canonical form ONLY when present.
+ * This keeps backward compatibility: a legacy sessionKey (no derivationPath)
+ * produces the same canonical bytes it did before the field was added, so
+ * its parentSignature still verifies. A derived sessionKey has derivationPath
+ * set, which means the parent signs over the path as well — committing to
+ * the canonical derivation location in the tree.
  */
 function canonicalSessionKeyBytes(sk: Omit<SessionKey, "parentSignature">): Uint8Array {
-  const canonical = JSON.stringify({
+  const body: Record<string, unknown> = {
     sessionId: sk.sessionId,
     parentAgentId: sk.parentAgentId,
     publicKey: toHex(sk.publicKey),
@@ -66,7 +74,13 @@ function canonicalSessionKeyBytes(sk: Omit<SessionKey, "parentSignature">): Uint
       contractIds: [...sk.scope.contractIds].sort(),
       maxSignatures: sk.scope.maxSignatures,
     },
-  });
+  };
+  // Only include derivationPath when present so legacy (fresh-keypair)
+  // sessionKeys produce byte-identical canonical output.
+  if (sk.derivationPath !== undefined) {
+    body.derivationPath = sk.derivationPath;
+  }
+  const canonical = JSON.stringify(body);
   return new TextEncoder().encode(canonical);
 }
 
@@ -173,6 +187,134 @@ export class SessionKeyService {
   }
 
   /**
+   * Issue a session key via SLIP-0010 hardened Ed25519 derivation.
+   *
+   * Deterministic counterpart to `issueSessionKey`. Instead of generating a
+   * fresh random keypair, the child key is derived from the parent seed via
+   * HMAC-SHA512 down a hardened path.
+   *
+   * What derivation gives us:
+   *   - Reproducibility: same parent seed + same path → same child keypair
+   *   - Canonical audit trail: the path is the child's coordinates in a tree
+   *   - Offline issuance: child keys never traverse a network
+   *
+   * What derivation does NOT give us:
+   *   - Independent verifiability. Ed25519 has no public-child derivation,
+   *     so a verifier cannot confirm the derivation relationship from just
+   *     the parent pubkey + path. AUTHORIZATION still comes from the
+   *     parent's signature over the SessionKey struct (parentSignature).
+   *     The derivation is reproducibility-grade; the signature is authority-grade.
+   *     Both are required.
+   *
+   * @param params.parentSeed - 16..64 bytes of entropy the parent derives from.
+   *   This is the parent's CHAIN ROOT seed, NOT their Ed25519 private key —
+   *   they must be kept separate. Typically generated once at principalKey
+   *   creation and stored alongside (not inside) the principalKey.
+   * @param params.path - SLIP-0010 hardened path, e.g. "m/8004'/84532'/42'/0'".
+   *   Every segment must be hardened (suffix ' or h).
+   * @param params.principal - The principalKey (registered agent identity).
+   *   Used to populate parentAgentId on the SessionKey struct.
+   * @param params.principalPrivateKey - The principalKey's 64-byte tweetnacl
+   *   secretKey. Used to sign the SessionKey struct (authorization).
+   * @param params.scope - Optional scope overrides (merged with defaults)
+   * @param params.ttlSeconds - Optional TTL override
+   * @param params.config - Optional config override
+   *
+   * @returns sessionKey (with parentSignature + derivationPath),
+   *   sessionPrivateKey (64-byte tweetnacl secretKey for the child),
+   *   and derivationPath (echoed for caller convenience).
+   *
+   * @throws If the path is non-hardened or malformed (via derivePath)
+   * @throws If TTL exceeds maxTTLSeconds, TTL <= 0, or principalPrivateKey length is wrong
+   */
+  deriveSessionKey(params: {
+    parentSeed: Uint8Array;
+    path: string;
+    principal: PrincipalKey;
+    principalPrivateKey: Uint8Array;
+    scope?: Partial<SessionScope>;
+    ttlSeconds?: number;
+    config?: SessionKeyConfig;
+  }): {
+    sessionKey: SessionKey;
+    sessionPrivateKey: Uint8Array;
+    derivationPath: string;
+  } {
+    const config = params.config ?? DEFAULT_SESSION_KEY_CONFIG;
+
+    // Validate principal private key length (tweetnacl uses 64-byte secret keys)
+    if (params.principalPrivateKey.length !== 64) {
+      throw new Error(
+        `principalPrivateKey must be 64 bytes (tweetnacl format), got ${params.principalPrivateKey.length}`,
+      );
+    }
+
+    // Resolve TTL (same rules as issueSessionKey for consistency)
+    const ttl = params.ttlSeconds ?? config.defaultTTLSeconds;
+    if (ttl > config.maxTTLSeconds) {
+      throw new Error(
+        `TTL ${ttl}s exceeds maximum ${config.maxTTLSeconds}s`,
+      );
+    }
+    if (ttl <= 0) {
+      throw new Error("TTL must be positive");
+    }
+
+    // Derive the child keypair deterministically. This throws on non-hardened
+    // or malformed paths — we let that propagate so callers see the precise
+    // error message from the SLIP-0010 module.
+    const derived: DerivedKey = derivePath(params.parentSeed, params.path);
+
+    // Expand the 32-byte Ed25519 seed into a tweetnacl 64-byte secretKey
+    // so the returned sessionPrivateKey is the same shape issueSessionKey
+    // returns (keeps the signEvent/verify API identical for both modes).
+    const sessionKeypair = nacl.sign.keyPair.fromSeed(derived.privateKey);
+
+    // Build scope with defaults (identical logic to issueSessionKey)
+    const scope: SessionScope = {
+      allowedActions: (params.scope?.allowedActions ??
+        config.defaultAllowedActions) as SessionAction[],
+      contractIds: params.scope?.contractIds ?? [],
+      maxSignatures:
+        params.scope?.maxSignatures ?? config.defaultMaxSignatures,
+    };
+
+    const now = Math.floor(Date.now() / 1000);
+
+    // Build the SessionKey body INCLUDING derivationPath so the parent's
+    // signature commits to the derivation location.
+    const sessionKeyBody: Omit<SessionKey, "parentSignature"> = {
+      sessionId: randomUUID(),
+      parentAgentId: params.principal.agentId,
+      publicKey: new Uint8Array(sessionKeypair.publicKey),
+      issuedAt: now,
+      expiresAt: now + ttl,
+      scope,
+      derivationPath: params.path,
+    };
+
+    // Parent signs over the canonical form (which now includes derivationPath).
+    // This is the AUTHORIZATION step — derivation alone is not authorization
+    // (see R06 section 5 "implicit delegation" for the rationale).
+    const canonical = canonicalSessionKeyBytes(sessionKeyBody);
+    const parentSignature = nacl.sign.detached(
+      canonical,
+      params.principalPrivateKey,
+    );
+
+    const sessionKey: SessionKey = {
+      ...sessionKeyBody,
+      parentSignature,
+    };
+
+    return {
+      sessionKey,
+      sessionPrivateKey: sessionKeypair.secretKey,
+      derivationPath: params.path,
+    };
+  }
+
+  /**
    * Sign an event using a session key.
    *
    * Convenience method that produces a complete SessionSignedEvent
@@ -251,14 +393,19 @@ export class SessionKeyService {
       failures.push("session_signature_invalid");
     }
 
-    // Check 2: Verify parent signature over canonical SessionKey struct
-    const sessionKeyBody = {
+    // Check 2: Verify parent signature over canonical SessionKey struct.
+    // Include derivationPath when present so the canonical bytes match what
+    // the parent originally signed for derived sessionKeys.
+    const sessionKeyBody: Omit<SessionKey, "parentSignature"> = {
       sessionId: sessionKey.sessionId,
       parentAgentId: sessionKey.parentAgentId,
       publicKey: sessionKey.publicKey,
       issuedAt: sessionKey.issuedAt,
       expiresAt: sessionKey.expiresAt,
       scope: sessionKey.scope,
+      ...(sessionKey.derivationPath !== undefined
+        ? { derivationPath: sessionKey.derivationPath }
+        : {}),
     };
     const canonical = canonicalSessionKeyBytes(sessionKeyBody);
 

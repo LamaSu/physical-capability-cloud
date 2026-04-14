@@ -129,15 +129,20 @@ describe("resolveSSEAuth — SSE_AUTH_REQUIRED=true", () => {
     expect(result.userId).toBe("op-1");
   });
 
-  it("authenticates via ?token= query param as API key", async () => {
+  it("rejects ?token= query param containing a long-lived API key (logged leak risk)", async () => {
+    // R3-04 security: pcc_live_* / pcc_test_* API keys are refused in the
+    // query string because proxies/CDNs/access logs can record query strings.
+    // Callers must use Authorization: Bearer header instead.
     const req = makeReq({ query: { token: "pcc_live_querytoken" } });
-    // The first call (with synthetic Bearer header) should match the API key
     mockApiKey.mockReturnValue({ id: "key-2", operatorId: "op-2" });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await resolveSSEAuth(req as any);
-    expect(result.authenticated).toBe(true);
-    expect(result.userId).toBe("op-2");
+    expect(result.authenticated).toBe(false);
+    expect(result.reason).toMatch(/API keys must be passed via Authorization/i);
+    // Sanity: the API-key resolver must not even be consulted because the
+    // prefix check short-circuits before the synthetic Bearer is built.
+    expect(mockApiKey).not.toHaveBeenCalled();
   });
 
   it("authenticates via ?token= query param as SIWE session token", async () => {

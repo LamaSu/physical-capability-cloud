@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { onboardRoutes } from "../routes/onboard.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -453,11 +453,12 @@ describe("Prove Endpoint", () => {
     it("returns 400 for a registration in 'rejected' status", async () => {
       const regId = await registerMachine(app);
 
-      // Reject it first
-      await app.inject({
-        method: "POST",
-        url: `/api/onboard/registrations/${regId}/reject`,
-        payload: { reason: "Policy violation" },
+      // Force the registration into 'rejected' status. The /reject route
+      // requires admin auth (requireAdmin middleware), which this isolated
+      // test deliberately does not configure — we go straight through the
+      // repo so the test stays decoupled from the admin key wiring.
+      getRepos().registrations.updateStatus(regId, "rejected", {
+        description: "REJECTED: Policy violation",
       });
 
       // Now try to prove it
