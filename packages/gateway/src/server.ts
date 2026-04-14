@@ -94,6 +94,7 @@ import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
+import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -383,6 +384,9 @@ export async function createGateway(port = 3200) {
   // Touchstone statistical enforcement + ephemeral session keys
   await app.register(touchstoneRoutes);
   await app.register(identitySessionRoutes);
+
+  // Third-party digital kernel marketplace
+  await app.register(kernelMarketplaceRoutes);
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);

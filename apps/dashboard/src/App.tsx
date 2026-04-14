@@ -82,6 +82,7 @@ const AgentPackagePage = lazy(() => import("./pages/AgentPackagePage.js").then(m
 const SponsorTelemetryPage = lazy(() => import("./pages/SponsorTelemetryPage.js").then(m => ({ default: m.SponsorTelemetryPage })));
 const SystemDashboardPage = lazy(() => import("./pages/SystemDashboardPage.js").then(m => ({ default: m.SystemDashboardPage })));
 const AnalyticsDashboardPage = lazy(() => import("./pages/AnalyticsDashboardPage.js").then(m => ({ default: m.AnalyticsDashboardPage })));
+const KernelLeaderboardPage = lazy(() => import("./pages/KernelLeaderboardPage.js").then(m => ({ default: m.KernelLeaderboardPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -205,6 +206,7 @@ function DashboardShell() {
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/jobs/:jobId" element={<JobDetailPage />} />
               <Route path="/kernels" element={<KernelsPage />} />
+              <Route path="/kernels/leaderboard" element={<KernelLeaderboardPage />} />
               <Route path="/kernels/:kernelId" element={<KernelDetailPage />} />
               <Route path="/escrow" element={<EscrowPage />} />
               <Route path="/settlement" element={<SettlementPage />} />
