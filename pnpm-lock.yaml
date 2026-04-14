@@ -537,6 +537,9 @@ importers:
       '@pcc/store':
         specifier: workspace:*
         version: link:../db
+      '@pcc/touchstone':
+        specifier: workspace:*
+        version: link:../touchstone
       '@pcc/verifier':
         specifier: workspace:*
         version: link:../verifier
@@ -549,6 +552,9 @@ importers:
       posthog-node:
         specifier: ^4.2.0
         version: 4.18.0
+      tweetnacl:
+        specifier: ^1.0.3
+        version: 1.0.3
       uuid:
         specifier: ^9.0.0
         version: 9.0.1
@@ -635,6 +641,9 @@ importers:
       nanoid:
         specifier: ^5.0.0
         version: 5.1.6
+      tweetnacl:
+        specifier: ^1.0.3
+        version: 1.0.3
       viem:
         specifier: ^2.21.0
         version: 2.46.3(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@3.25.76)
@@ -749,6 +758,16 @@ importers:
       zod:
         specifier: ^3.23.0
         version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
+
+  packages/touchstone:
+    dependencies:
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
     devDependencies:
       vitest:
         specifier: ^1.6.0

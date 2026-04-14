@@ -71,6 +71,7 @@ interface SupportThread {
   kernelId: string;
   kernelName: string;
   operatorIp: string;
+  operatorId?: string;     // Authenticated caller's operator ID (for ownership checks)
   subject: string;
   status: "open" | "in-progress" | "resolved" | "closed";
   priority: "low" | "normal" | "high" | "urgent";
@@ -150,6 +151,16 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       systemInfo?: Record<string, unknown>;
     };
   }>("/api/operator/support", async (req, reply) => {
+    // Rate limit: 5 support messages per operator per 10 minutes (Discord webhook flood prevention, R5 NEW-04)
+    const callerId = (req as any).operatorId ?? (req as any).userId ?? req.ip;
+    const { checkCallerRate } = await import("../middleware/security-hardening.js");
+    if (!checkCallerRate(callerId, "support_create", 5, 600_000)) {
+      return reply.code(429).send({
+        error: "rate_limited",
+        message: "Too many support messages. Try again in 10 minutes.",
+      });
+    }
+
     const { kernelId, kernelName, message, subject, retrievalCode, systemInfo } =
       req.body ?? {};
 
@@ -200,11 +211,14 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       }
     }
 
+    const creatorOperatorId = (req as any).operatorId ?? (req as any).userId;
+
     thread = {
       id: `thread-${uuidv4().slice(0, 8)}`,
       kernelId,
       kernelName: kernelName ?? kernelId,
       operatorIp: req.ip,
+      operatorId: creatorOperatorId,
       subject: subject ?? message.slice(0, 80),
       status: "open",
       priority: inferPriority(message),
@@ -328,15 +342,26 @@ export async function supportMessageRoutes(app: FastifyInstance) {
       retrievalCode?: string;
     };
   }>("/api/operator/support/:threadId/reply", async (req, reply) => {
-    const { message, from = "admin", retrievalCode } = req.body ?? {};
+    const { message, retrievalCode } = req.body ?? {};
 
     if (!message) {
       return reply.code(400).send({ error: "message required" });
     }
 
+    // Derive `from` from caller identity — never trust body.from (admin impersonation fix, R5 NEW-03)
+    const callerId = (req as any).operatorId ?? (req as any).userId;
+    const { isBrokerOperator } = await import("../middleware/security-hardening.js");
+    const isAdmin = callerId ? isBrokerOperator(callerId) : false;
+    const from: "admin" | "operator" = isAdmin ? "admin" : "operator";
+
     const thread = findThread(req.params.threadId);
     if (!thread) {
       return reply.code(404).send({ error: "thread not found" });
+    }
+
+    // Ownership check: operators can only reply to their own threads
+    if (!isAdmin && callerId && thread.operatorId && thread.operatorId !== callerId) {
+      return reply.code(403).send({ error: "forbidden", message: "You can only reply to your own threads" });
     }
 
     const now = new Date().toISOString();

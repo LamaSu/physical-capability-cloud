@@ -398,6 +398,14 @@ export async function requestRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string; nodeId: string } }>(
     "/api/requests/:id/nodes/:nodeId/status",
     async (req, reply) => {
+      // Ownership check: only the assigned operator can update their node's status.
+      // Without this, any authenticated user can mark any node "completed" and
+      // trigger request settlement. (Red team round 5 NEW-01 CRITICAL)
+      const callerId = (req as any).operatorId ?? (req as any).userId;
+      if (!callerId) {
+        return reply.status(401).send({ error: "authentication_required" });
+      }
+
       const request = requestsStore.get(req.params.id);
       if (!request) {
         return reply.status(404).send({ error: "request_not_found" });
@@ -406,6 +414,15 @@ export async function requestRoutes(app: FastifyInstance) {
       const node = request.capabilityDag.find((n) => n.id === req.params.nodeId);
       if (!node) {
         return reply.status(404).send({ error: "node_not_found" });
+      }
+
+      // Only the assigned operator (or a broker) can update status
+      const { isBrokerOperator } = await import("../middleware/security-hardening.js");
+      if (node.assignedOperator && node.assignedOperator !== callerId && !isBrokerOperator(callerId)) {
+        return reply.status(403).send({
+          error: "forbidden",
+          message: "Only the assigned operator can update this node's status",
+        });
       }
 
       const body = (req.body ?? {}) as { status?: CapabilityNodeStatus };
