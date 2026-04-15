@@ -94,6 +94,20 @@ Both envs currently still use the Dockerfile builder — they will be switched t
 7. **Dockerfile is transitional.** The long-term path is GHCR-only on Railway. If you edit the Dockerfile, verify the resulting image still boots under the `:staging` tag before anyone promotes it to `:prod`.
 8. **Staging secrets are duplicated from prod.** When the staging env was created, Railway cloned prod variables (DEPLOYER_PRIVATE_KEY, LIT_API_KEY, etc.). Treat staging with the same secret-handling care as prod until secrets are rotated.
 
+## RECOMMENDED: Workflow Runtime (`@pcc/workflow`)
+
+PCC ships a library-only durable execution package at `packages/workflow/` — embeddable in any TS Fastify monolith, no separate workflow server. RECOMMENDED (not MANDATORY) for new code that does on-chain calls, evidence uploads, or multi-step protocol orchestration. Opt-in — existing routes keep working unchanged until their migration PR lands.
+
+- **What it is**: 5 primitives — `Activity` (idempotent wrapper for side effects with retry + 3-tier idempotency keys + semantic on-chain key helper), `Workflow` + `WorkflowEngine` (Inngest-style step memoization with crash recovery), `DataPort` (CID handoff), `getVersion` (Temporal-style versioning marker), `cwlExport` (CWL v1.2 YAML for external interop). Backed by one SQLite file. ~1,400 LOC, 146 tests, depends only on `better-sqlite3`, `yaml`, `zod`, `@pcc/spec`.
+- **When to use it (vs raw async)**: any side effect that's expensive or dangerous to repeat (on-chain tx, payment, evidence upload, external API write); any place you want exactly-once-on-chain semantics across crashes; any multi-step flow where "lost on restart" is unacceptable. Don't bother for read-only HTTP, pure functions, or sub-ms operations — the SQLite INSERT overhead isn't worth it.
+- **Docs**: `docs/WORKFLOW_RUNTIME.md` is the deep dive (architecture, adoption guide with worked migration sketch, FAQ). `packages/workflow/README.md` is the public-API quick-start. `ai/research/pcc-workflow-runtime-design.md` is the 1,800-line design spec.
+- **Migration roadmap (3 phases, follow-up PRs after the Wave 3 PR merges)**:
+  1. **Phase 1** — wrap `escrow.ts` `/fund`/`/release`/`/dispute` routes as Activities (~300 LOC + ~200 LOC route changes; LOW breaking risk; HTTP shape unchanged).
+  2. **Phase 2** — replace `protocol-runner.ts` `runs: Map` with an EventStore-backed `Workflow` subclass (~500 LOC; MEDIUM breaking risk; in-flight runs need drain-before-deploy).
+  3. **Phase 3** — add `GET /api/protocols/:id/cwl` endpoint via `cwlExport` (~80 LOC route + ~50 LOC adapter; ZERO breaking risk; new endpoint).
+- **v0.1 limitations** (warn before adopting): `ctx.sleep(id, ms)` throws `NotImplementedError` (durable timers land in v0.2 — use `setTimeout` inside `ctx.step` for non-durable delays); no child workflows (`ctx.startChild` lands in v0.2); single-process signal delivery only (no horizontal scaling of the gateway against one SQLite file); no per-activity `timeoutMs` yet. Full list in `packages/workflow/CHANGELOG.md`.
+- **Operational note**: `@pcc/workflow` reads NO env vars itself — consumers must pass `path` to `openSqliteStore({ path })`. Recommended convention: `process.env.WORKFLOW_DB_PATH ?? '/data/workflow.sqlite'` (gateway). Railway requires a mounted volume — see `docs/DEPLOY.md` for the deploy-side note.
+
 # Physical Capability Cloud (PCC) — Agent Integration Guide
 
 ## 1. What Is PCC
