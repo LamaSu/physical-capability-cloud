@@ -36,14 +36,15 @@ jobs:
 
       - name: Verify source image exists
         run: |
-          docker buildx imagetools inspect \
-            ghcr.io/${{ github.repository }}:${{ inputs.sha }} > /dev/null
+          IMG=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker buildx imagetools inspect "${IMG}:${{ inputs.sha }}" > /dev/null
 
       - name: Retag ${sha} -> prod
         run: |
+          IMG=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository }}:prod \
-            ghcr.io/${{ github.repository }}:${{ inputs.sha }}
+            --tag "${IMG}:prod" \
+            "${IMG}:${{ inputs.sha }}"
 
       - name: Smoke test prod health endpoint
         run: |

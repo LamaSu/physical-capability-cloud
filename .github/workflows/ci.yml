@@ -137,9 +137,10 @@ jobs:
 
       - name: Retag ${sha} -> staging
         run: |
+          IMG=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository }}:staging \
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            --tag "${IMG}:staging" \
+            "${IMG}:${{ github.sha }}"
 
       - name: Smoke test staging health endpoint
         if: vars.STAGING_URL != ''
