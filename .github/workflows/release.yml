@@ -45,6 +45,7 @@ jobs:
 
       - name: Retag SHA image -> semver tag
         run: |
+          IMG=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository }}:${{ needs.release-please.outputs.tag_name }} \
-            ghcr.io/${{ github.repository }}:${{ needs.release-please.outputs.sha }}
+            --tag "${IMG}:${{ needs.release-please.outputs.tag_name }}" \
+            "${IMG}:${{ needs.release-please.outputs.sha }}"
