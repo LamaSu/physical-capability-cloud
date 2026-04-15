@@ -17,3 +17,9 @@ export * from './store/index.js';
 // Activity
 export * from './activity/index.js';
 
+// Workflow
+export * from './workflow/index.js';
+
+// Version
+export * from './version/index.js';
+
