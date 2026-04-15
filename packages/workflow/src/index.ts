@@ -26,3 +26,6 @@ export * from './version/index.js';
 // Data port
 export * from './data-port/index.js';
 
+// CWL export
+export * from './cwl/index.js';
+
