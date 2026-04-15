@@ -35,6 +35,7 @@ COPY packages/bundler/package.json packages/bundler/
 COPY packages/dht/package.json packages/dht/
 COPY packages/evidence-embeddings/package.json packages/evidence-embeddings/
 COPY packages/touchstone/package.json packages/touchstone/
+COPY packages/kernel-sdk/package.json packages/kernel-sdk/
 COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 COPY apps/dashboard/package.json apps/dashboard/
 
