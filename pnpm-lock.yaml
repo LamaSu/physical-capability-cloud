@@ -860,6 +860,34 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
 
+  packages/workflow:
+    dependencies:
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
+      better-sqlite3:
+        specifier: ^11.8.1
+        version: 11.10.0
+      yaml:
+        specifier: ^2.6.0
+        version: 2.8.2
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.1
+        version: 1.6.1(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0)
+
 packages:
 
   '@achingbrain/http-parser-js@0.5.9':
@@ -3402,6 +3430,9 @@ packages:
 
   '@types/node@20.19.35':
     resolution: {integrity: sha512-Uarfe6J91b9HAUXxjvSOdiO2UPOKLm07Q1oh0JHxoZ1y8HoqxDAu3gVrsrOHeiio0kSsoVBt4wFrKOm0dKxVPQ==}
+
+  '@types/node@22.19.17':
+    resolution: {integrity: sha512-wGdMcf+vPYM6jikpS/qhg6WiqSV/OhG+jeeHT/KlVqxYfD40iYJf9/AE1uQxVWFvU7MipKRkRv8NSHiCGgPr8Q==}
 
   '@types/pg-pool@2.0.7':
     resolution: {integrity: sha512-U4CwmGVQcbEuqpyju8/ptOKg6gEC+Tqsvj2xS9o1g71bUh8twxnC6ZL5rZKCsGN0iyH0CwgUyc9VR5owNQF9Ng==}
@@ -11470,6 +11501,10 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/node@22.19.17':
+    dependencies:
+      undici-types: 6.21.0
+
   '@types/pg-pool@2.0.7':
     dependencies:
       '@types/pg': 8.15.6
@@ -16247,6 +16282,24 @@ snapshots:
       - supports-color
       - terser
 
+  vite-node@1.6.1(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      cac: 6.7.14
+      debug: 4.4.3
+      pathe: 1.1.2
+      picocolors: 1.1.1
+      vite: 5.4.21(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0)
+    transitivePeerDependencies:
+      - '@types/node'
+      - less
+      - lightningcss
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - supports-color
+      - terser
+
   vite-node@3.2.4(@types/node@20.19.35)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2):
     dependencies:
       cac: 6.7.14
@@ -16275,6 +16328,17 @@ snapshots:
       rollup: 4.59.0
     optionalDependencies:
       '@types/node': 20.19.35
+      fsevents: 2.3.3
+      lightningcss: 1.31.1
+      terser: 5.46.0
+
+  vite@5.4.21(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      esbuild: 0.27.3
+      postcss: 8.5.8
+      rollup: 4.59.0
+    optionalDependencies:
+      '@types/node': 22.19.17
       fsevents: 2.3.3
       lightningcss: 1.31.1
       terser: 5.46.0
@@ -16320,6 +16384,40 @@ snapshots:
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 20.19.35
+    transitivePeerDependencies:
+      - less
+      - lightningcss
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - supports-color
+      - terser
+
+  vitest@1.6.1(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      '@vitest/expect': 1.6.1
+      '@vitest/runner': 1.6.1
+      '@vitest/snapshot': 1.6.1
+      '@vitest/spy': 1.6.1
+      '@vitest/utils': 1.6.1
+      acorn-walk: 8.3.5
+      chai: 4.5.0
+      debug: 4.4.3
+      execa: 8.0.1
+      local-pkg: 0.5.1
+      magic-string: 0.30.21
+      pathe: 1.1.2
+      picocolors: 1.1.1
+      std-env: 3.10.0
+      strip-literal: 2.1.1
+      tinybench: 2.9.0
+      tinypool: 0.8.4
+      vite: 5.4.21(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0)
+      vite-node: 1.6.1(@types/node@22.19.17)(lightningcss@1.31.1)(terser@5.46.0)
+      why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@types/node': 22.19.17
     transitivePeerDependencies:
       - less
       - lightningcss
