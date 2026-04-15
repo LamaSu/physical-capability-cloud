@@ -1,10 +1,13 @@
 // @pcc/workflow — durable execution primitives for PCC.
-// Re-exports public API. Implementation lives in subdirectories:
-//   - ./activity       — idempotent activity wrapper
-//   - ./workflow       — event-sourced workflow base
-//   - ./data-port      — federated I/O abstraction (CID handoff)
-//   - ./cwl            — CWL YAML export
-//   - ./store          — pluggable persistence (sqlite default, swap for postgres etc.)
-//   - ./version        — getVersion() helper for long-running workflow code evolution
+// Public API re-exports. Implementation lives in subdirectories:
+//   - ./shared        — types, canonical-JSON, hashing primitives
+//   - ./store         — pluggable persistence (sqlite default)
+//   - ./activity      — idempotent activity wrapper
+//   - ./workflow      — event-sourced workflow base
+//   - ./data-port     — federated I/O abstraction (CID handoff)
+//   - ./cwl           — CWL YAML export
+//   - ./version       — getVersion() helper for long-running workflow code evolution
 
-export {}; // placeholder until primitives land
+// Shared types + utils
+export * from './shared/index.js';
+
