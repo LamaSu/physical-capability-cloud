@@ -19,14 +19,15 @@ merge to master
 │  smoke /health   │        curl loop up to 3 min
 └────────┬─────────┘
          │
-         ▼  ┌─── Manual approval gate (reel 2: "continuous delivery") ───┐
-         │  │  GitHub env `production` requires a reviewer to click OK. │
-         │  └───────────────────────────────────────────────────────────┘
+         ▼  ┌─── Manual gate (reel 2: "continuous delivery") ───┐
+         │  │  Run the "Deploy to Prod" workflow from Actions  │
+         │  │  and pass the SHA. Clicking "Run" IS the gate.    │
+         │  └────────────────────────────────────────────────────┘
          ▼
 ┌──────────────────┐   buildx imagetools create
 │  deploy-prod     │   ───► retag <sha> → :prod
-│  [env:production]│        Railway(prod) pulls :prod, redeploys
-│  smoke /health   │        https://capability.network/api/health
+│  [workflow_      │        Railway(prod) pulls :prod, redeploys
+│   dispatch]      │        https://capability.network/api/health
 └──────────────────┘
 ```
 
@@ -45,13 +46,18 @@ Your commits should follow Conventional Commits (`feat:`, `fix:`, `feat(scope)!:
 
 ## One-time setup (required before this pipeline works)
 
-### 1. GitHub environments
+### 1. GitHub environments & manual prod trigger
 
-Create two environments in repo Settings → Environments:
+`staging` environment: already created (no protection rules needed). Add a repo variable `STAGING_URL` (e.g. `https://pcc-gateway-staging.up.railway.app`) if you want the staging smoke test to run; omit it to skip the smoke check.
 
-**`staging`** — no protection rules. Add a repo variable `STAGING_URL` (e.g. `https://pcc-gateway-staging.up.railway.app`) if you want the staging smoke test to run; omit it to skip the smoke check.
+`production` environment: exists for audit/activity logging only. **GitHub Free on private repos cannot enforce required-reviewer rules**, so prod promotion runs as a separate manual-dispatch workflow (`Deploy to Prod`) instead. The "Run workflow" click IS the gate.
 
-**`production`** — add yourself as a **required reviewer**. Any deploy to prod will pause and wait for your click. This is the reel-2 "continuous delivery" manual gate.
+To promote a build to prod:
+1. Find the SHA you want to promote in the staging deploy run (it's the commit SHA of the master push).
+2. GitHub → Actions → **Deploy to Prod** → **Run workflow** → paste the SHA → **Run**.
+3. The workflow verifies the image exists, retags it as `:prod`, and smoke-tests `https://capability.network/api/health`.
+
+If you upgrade to GitHub Pro ($4/mo) later, you can add a required-reviewer rule to the `production` environment and move the deploy-prod job back into `ci.yml` as an automatic push-to-master job — the Dockerfile/YAML is ready for that switch.
 
 ### 2. Railway services
 
