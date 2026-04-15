@@ -11,3 +11,6 @@
 // Shared types + utils
 export * from './shared/index.js';
 
+// Store
+export * from './store/index.js';
+
