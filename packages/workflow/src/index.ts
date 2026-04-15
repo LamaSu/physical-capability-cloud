@@ -14,3 +14,6 @@ export * from './shared/index.js';
 // Store
 export * from './store/index.js';
 
+// Activity
+export * from './activity/index.js';
+
