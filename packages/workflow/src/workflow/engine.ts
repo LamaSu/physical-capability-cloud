@@ -263,24 +263,39 @@ export class WorkflowEngine {
       cancelled: false,
     };
 
-    // Mark run as running now
+    // Mark run as running now. Tail writes (updateStatus after workflow body
+    // completes) are guarded — if the store has been closed by the consuming
+    // app before the run settles, we still return the in-memory Result to the
+    // caller; only logical failures propagate.
+    const tryUpdateStatus = async (
+      status: WorkflowRunRow['status'],
+      extra?: Parameters<Store['runs']['updateStatus']>[2],
+    ): Promise<void> => {
+      try {
+        await this.store.runs.updateStatus(runId, status, extra);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/database connection is not open|database is closed/i.test(msg)) {
+          return; // store was closed before tail write; benign
+        }
+        throw e;
+      }
+    };
+
     const settled: Promise<Result<R, Error>> = (async () => {
-      await this.store.runs.updateStatus(runId, 'running');
+      await tryUpdateStatus('running');
       try {
         const ctx = this.makeContext(runId, workflow, opts);
         const result = await workflow.run(ctx, args);
 
-        // Memoize final result on run
-        await this.store.runs.updateStatus(runId, 'completed', {
-          result: safeStringify(result),
-        });
+        await tryUpdateStatus('completed', { result: safeStringify(result) });
         return ok(result);
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
         if (runtimeState.cancelled) {
-          await this.store.runs.updateStatus(runId, 'cancelled', { error: error.message });
+          await tryUpdateStatus('cancelled', { error: error.message });
         } else {
-          await this.store.runs.updateStatus(runId, 'failed', { error: error.message });
+          await tryUpdateStatus('failed', { error: error.message });
         }
         return err(error) as Result<R, Error>;
       } finally {
