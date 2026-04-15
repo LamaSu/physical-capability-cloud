@@ -9,11 +9,14 @@ The pipeline is **wired but not yet running end-to-end**. Remaining steps, in or
 - [x] PR #1 merged (2026-04-15) — workflow files + release-please config + docs + CLAUDE.md rules on master.
 - [x] GitHub environments `staging` + `production` created (no protection rules; manual workflow_dispatch is the prod gate).
 - [x] Railway `staging` environment duplicated from `production` (still Dockerfile source; secrets cloned from prod).
-- [ ] **BLOCKER**: `pnpm-lock.yaml` is out of sync with `packages/kernel-sdk/package.json` → CI run `24444139182` failed at `pnpm install --frozen-lockfile` → `build-image` skipped → **no GHCR image exists yet**. Fix: `pnpm install --lockfile-only` + commit `pnpm-lock.yaml` to master as `fix(deps): sync pnpm-lock.yaml with kernel-sdk`. Re-run CI. (Unrelated to the deploy pipeline; was already red on master before PR #1.)
-- [ ] First successful CI run on master → confirms `ghcr.io/lamasu/physical-capability-cloud:<sha>`, `:latest`, `:staging` all exist. Verify with `docker buildx imagetools inspect ghcr.io/lamasu/physical-capability-cloud:staging`.
-- [ ] Swap Railway `staging` service source from Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:staging`. CLI: `railway environment edit -e staging --service-config pcc-gateway source.image ghcr.io/lamasu/physical-capability-cloud:staging`. Confirm staging boots via its `*.up.railway.app` URL.
-- [ ] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200.
-- [ ] Swap Railway `production` service source from Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod`. This is the "live" cutover; verify `capability.network` stays green.
+- [x] Lockfile sync (`fix(deps):` commit `e8c664a`) — unblocked `pnpm install --frozen-lockfile`.
+- [x] Dockerfile: COPY kernel-sdk/package.json (commit `2d9b4b6`) — unblocked `turbo build` of kernel-sdk inside the image.
+- [x] GHCR lowercase image refs in retag steps (commit `97c489f`) — Docker image names must be lowercase; `${{ github.repository }}` returns `LamaSu/...`.
+- [x] Full-SHA tag format via `format=long` (commit `0e59f16`) — aligned `docker/metadata-action` (was short SHA) with `${{ github.sha }}` (full SHA) so the retag source is findable.
+- [x] **First green CI run** on master (`0e59f16`, run `24445868832`) — all 4 jobs success. `ghcr.io/lamasu/physical-capability-cloud:<full-sha>`, `:latest`, and `:staging` tags now exist on GHCR.
+- [ ] **Swap Railway `staging` source** from Dockerfile → Docker Image. **CLI does NOT work on existing envs** — `railway environment edit --service-config pcc-gateway source.image ...` silently no-ops when `source.repo`/`source.branch` are already set (tried dot-path, JSON-object, empty-string-then-set — all ignored). Do it in the Railway UI: project `diplomatic-compassion` → environment `staging` → service `pcc-gateway` → Settings → Source → switch to "Docker Image" → `ghcr.io/lamasu/physical-capability-cloud:staging` → enable "Redeploy on image change" → Save. Confirm staging boots via its `*.up.railway.app` URL.
+- [ ] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA — **full 40-char SHA**, not short). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200.
+- [ ] Swap Railway `production` service source Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod` via the Railway UI (same path as staging — CLI doesn't work here either). This is the "live" cutover; verify `capability.network` stays green.
 - [ ] Delete stale Dockerfile builder config from Railway once GHCR-pull is proven stable (leave `railway.toml` as-is — Railway ignores it when service source is Image).
 
 ### Nice-to-haves (not blocking)
