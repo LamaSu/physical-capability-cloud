@@ -2,6 +2,28 @@
 
 PCC uses an artifact-promotion model: every merge to `master` produces **one** Docker image that is then retagged through `staging` → `prod` without rebuilding. Deploy time drops from ~10 min (rebuild-per-env) to seconds (manifest retag).
 
+## Rollout Progress (as of 2026-04-15)
+
+The pipeline is **wired but not yet running end-to-end**. Remaining steps, in order:
+
+- [x] PR #1 merged (2026-04-15) — workflow files + release-please config + docs + CLAUDE.md rules on master.
+- [x] GitHub environments `staging` + `production` created (no protection rules; manual workflow_dispatch is the prod gate).
+- [x] Railway `staging` environment duplicated from `production` (still Dockerfile source; secrets cloned from prod).
+- [ ] **BLOCKER**: `pnpm-lock.yaml` is out of sync with `packages/kernel-sdk/package.json` → CI run `24444139182` failed at `pnpm install --frozen-lockfile` → `build-image` skipped → **no GHCR image exists yet**. Fix: `pnpm install --lockfile-only` + commit `pnpm-lock.yaml` to master as `fix(deps): sync pnpm-lock.yaml with kernel-sdk`. Re-run CI. (Unrelated to the deploy pipeline; was already red on master before PR #1.)
+- [ ] First successful CI run on master → confirms `ghcr.io/lamasu/physical-capability-cloud:<sha>`, `:latest`, `:staging` all exist. Verify with `docker buildx imagetools inspect ghcr.io/lamasu/physical-capability-cloud:staging`.
+- [ ] Swap Railway `staging` service source from Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:staging`. CLI: `railway environment edit -e staging --service-config pcc-gateway source.image ghcr.io/lamasu/physical-capability-cloud:staging`. Confirm staging boots via its `*.up.railway.app` URL.
+- [ ] Run the **Deploy to Prod** workflow manually (GitHub → Actions → Deploy to Prod → Run workflow → paste master SHA). Confirms `:prod` tag is produced and `capability.network/api/health` still returns 200.
+- [ ] Swap Railway `production` service source from Dockerfile → Docker Image `ghcr.io/lamasu/physical-capability-cloud:prod`. This is the "live" cutover; verify `capability.network` stays green.
+- [ ] Delete stale Dockerfile builder config from Railway once GHCR-pull is proven stable (leave `railway.toml` as-is — Railway ignores it when service source is Image).
+
+### Nice-to-haves (not blocking)
+
+- [ ] Rotate `staging` secrets so the env has its own DEPLOYER_PRIVATE_KEY, LIT_API_KEY, Storacha token, etc. — the Railway duplicate cloned prod secrets. Low urgency on Sepolia testnet, but do this before staging hits a public URL anyone else consumes.
+- [ ] Set repo variable `STAGING_URL=<staging-railway-url>` → enables the `deploy-staging` smoke check step that's currently skipped.
+- [ ] Bump `actions/checkout@v4` / `actions/setup-node@v4` / `pnpm/action-setup@v4` to v5 once those exist (GitHub Actions annotation warned Node 20 runners are deprecated June 2026).
+- [ ] If a reviewer-gated environment becomes worth $4/mo: upgrade to GH Pro, add required-reviewer rule to `production`, move `deploy-prod` job back into `ci.yml` with `environment: production`.
+- [ ] First merged feature/fix commit on master after lockfile is green → verify release-please opens a "chore: release 0.1.0" PR with auto-generated CHANGELOG.
+
 ## Pipeline at a glance
 
 ```
