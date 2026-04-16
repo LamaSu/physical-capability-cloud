@@ -4,6 +4,7 @@ import type { Address } from "viem";
 import { getWorkflowStore } from "../workflow-store.js";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
+import { getSettlementService } from "../services/settlement-service.js";
 
 export class FacadeError extends Error {
   readonly httpStatus: number;
@@ -135,5 +136,99 @@ export const fileDisputeActivity = defineActivity<
     const result = await facade.fileDispute(address, milestoneIndex, body, actorId, ip, userAgent);
     if (!result.success) throwFacadeError(result.error);
     return result.data;
+  },
+});
+
+export const depositBondActivity = defineActivity<
+  readonly [Address, number, string | undefined, string | undefined, string | undefined],
+  unknown
+>({
+  name: "escrow.depositBond",
+  get store() { return getWorkflowStore(); },
+  retryPolicy: {
+    initialIntervalMs: 2_000,
+    maximumAttempts: 5,
+    backoffCoefficient: 2,
+    nonRetryableErrorPatterns: ["FacadeError", "BadRequestError"],
+  },
+  deriveKey: (ctx) => {
+    const [address, milestoneIdx] = ctx.args;
+    return deriveOnchainOpKey({
+      jobId: address as `0x${string}`,
+      milestoneIdx: Number(milestoneIdx),
+      action: "depositBond",
+    });
+  },
+  async handler(input) {
+    const [address, milestoneIndex, actorId, ip, userAgent] = input;
+    const facade = getSettlementFacade();
+    const result = await facade.depositBond(address, milestoneIndex, actorId, ip, userAgent);
+    if (!result.success) throwFacadeError(result.error);
+    return result.data;
+  },
+});
+
+export const submitEvidenceActivity = defineActivity<
+  readonly [Address, number, string, string | undefined, string | undefined, string | undefined],
+  unknown
+>({
+  name: "escrow.submitEvidence",
+  get store() { return getWorkflowStore(); },
+  retryPolicy: {
+    initialIntervalMs: 2_000,
+    maximumAttempts: 5,
+    backoffCoefficient: 2,
+    nonRetryableErrorPatterns: ["FacadeError", "BadRequestError"],
+  },
+  deriveKey: (ctx) => {
+    const [address, milestoneIdx] = ctx.args;
+    return deriveOnchainOpKey({
+      jobId: address as `0x${string}`,
+      milestoneIdx: Number(milestoneIdx),
+      action: "submitEvidence",
+    });
+  },
+  async handler(input) {
+    const [address, milestoneIndex, evidenceBundleHash, actorId, ip, userAgent] = input;
+    const facade = getSettlementFacade();
+    const result = await facade.submitEvidenceHash(address, milestoneIndex, evidenceBundleHash, actorId, ip, userAgent);
+    if (!result.success) throwFacadeError(result.error);
+    return result.data;
+  },
+});
+
+export const releaseMilestoneByJobActivity = defineActivity<
+  readonly [string, number, OracleAttestation, string | undefined],
+  { jobId: string; txHash: string; status: string; error?: string }
+>({
+  name: "escrow.releaseByJob",
+  get store() { return getWorkflowStore(); },
+  retryPolicy: {
+    initialIntervalMs: 2_000,
+    maximumAttempts: 5,
+    backoffCoefficient: 2,
+    nonRetryableErrorPatterns: ["write_disabled", "BadRequestError"],
+  },
+  deriveKey: (ctx) => {
+    const [jobId, milestoneIdx] = ctx.args;
+    return deriveOnchainOpKey({
+      jobId: jobId as `0x${string}`,
+      milestoneIdx: Number(milestoneIdx),
+      action: "release",
+    });
+  },
+  async handler(input) {
+    const [jobId, milestoneIndex, attestation, contractAddress] = input;
+    const service = getSettlementService();
+    const result = await service.releaseMilestone(
+      jobId,
+      milestoneIndex,
+      attestation,
+      contractAddress,
+    );
+    if (result.status === "failed") {
+      throw new Error(result.error ?? "release_failed");
+    }
+    return result;
   },
 });
