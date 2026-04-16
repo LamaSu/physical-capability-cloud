@@ -7,6 +7,8 @@ import {
   fundEscrowActivity,
   releaseMilestoneActivity,
   fileDisputeActivity,
+  depositBondActivity,
+  submitEvidenceActivity,
   FacadeError,
 } from "../activities/escrow.js";
 
@@ -303,15 +305,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.depositBond(
-        address as Address,
-        idx,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await depositBondActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `depositBond:${address}:${idx}`,
+        input: [address as Address, idx, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/deposit-bond/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -337,16 +344,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.submitEvidenceHash(
-        address as Address,
-        idx,
-        body.evidenceBundleHash,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await submitEvidenceActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `submitEvidence:${address}:${idx}`,
+        input: [address as Address, idx, body.evidenceBundleHash, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/evidence/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
