@@ -4,6 +4,24 @@ import { getWorkflowStore } from "../workflow-store.js";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
 
+export class FacadeError extends Error {
+  readonly httpStatus: number;
+  readonly code: string;
+  readonly details?: unknown;
+
+  constructor(err: { message: string; httpStatus: number; code: string; details?: unknown }) {
+    super(err.message);
+    this.name = "FacadeError";
+    this.httpStatus = err.httpStatus;
+    this.code = err.code;
+    this.details = err.details;
+  }
+}
+
+function throwFacadeError(err: { message: string; httpStatus: number; code: string; details?: unknown }): never {
+  throw new FacadeError(err);
+}
+
 export const fundEscrowActivity = defineActivity<
   readonly [Address, string | undefined, string | undefined, string | undefined],
   unknown
@@ -15,6 +33,7 @@ export const fundEscrowActivity = defineActivity<
     maximumAttempts: 5,
     backoffCoefficient: 2,
     nonRetryableErrorPatterns: [
+      "FacadeError",
       "EscrowAlreadyFundedError",
       "InsufficientBalanceError",
       "BadRequestError",
@@ -32,7 +51,7 @@ export const fundEscrowActivity = defineActivity<
     const [address, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.fundEscrow(address, actorId, ip, userAgent);
-    if (!result.success) throw new Error(result.error.message);
+    if (!result.success) throwFacadeError(result.error);
     return result.data;
   },
 });
@@ -48,6 +67,7 @@ export const releaseMilestoneActivity = defineActivity<
     maximumAttempts: 5,
     backoffCoefficient: 2,
     nonRetryableErrorPatterns: [
+      "FacadeError",
       "ChallengeWindowActiveError",
       "MilestoneNotEvidencedError",
       "BadRequestError",
@@ -65,7 +85,7 @@ export const releaseMilestoneActivity = defineActivity<
     const [address, milestoneIndex, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.releaseMilestone(address, milestoneIndex, actorId, ip, userAgent);
-    if (!result.success) throw new Error(result.error.message);
+    if (!result.success) throwFacadeError(result.error);
     return result.data;
   },
 });
@@ -81,6 +101,7 @@ export const fileDisputeActivity = defineActivity<
     maximumAttempts: 3,
     backoffCoefficient: 2,
     nonRetryableErrorPatterns: [
+      "FacadeError",
       "DisputeAlreadyFiledError",
       "BadRequestError",
     ],
@@ -97,7 +118,7 @@ export const fileDisputeActivity = defineActivity<
     const [address, milestoneIndex, body, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.fileDispute(address, milestoneIndex, body, actorId, ip, userAgent);
-    if (!result.success) throw new Error(result.error.message);
+    if (!result.success) throwFacadeError(result.error);
     return result.data;
   },
 });

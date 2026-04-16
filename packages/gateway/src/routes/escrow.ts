@@ -7,9 +7,21 @@ import {
   fundEscrowActivity,
   releaseMilestoneActivity,
   fileDisputeActivity,
+  FacadeError,
 } from "../activities/escrow.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
+
+function sendActivityError(reply: FastifyReply, error: Error): unknown {
+  if (error instanceof FacadeError) {
+    return reply.status(error.httpStatus).send({
+      error: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    });
+  }
+  return reply.status(502).send({ error: error.message });
+}
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -176,7 +188,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         httpPath: `/api/escrow/chain/${address}/fund`,
       });
       if (!activityResult.ok) {
-        return reply.status(502).send({ error: activityResult.error.message });
+        return sendActivityError(reply, activityResult.error);
       }
       return activityResult.value;
     },
@@ -235,7 +247,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         httpPath: `/api/escrow/chain/${address}/release/${idx}`,
       });
       if (!activityResult.ok) {
-        return reply.status(502).send({ error: activityResult.error.message });
+        return sendActivityError(reply, activityResult.error);
       }
       return activityResult.value;
     },
@@ -270,7 +282,7 @@ export async function escrowRoutes(app: FastifyInstance) {
         httpPath: `/api/escrow/chain/${address}/dispute/${idx}`,
       });
       if (!activityResult.ok) {
-        return reply.status(502).send({ error: activityResult.error.message });
+        return sendActivityError(reply, activityResult.error);
       }
       return activityResult.value;
     },
