@@ -45,6 +45,7 @@
     "@pcc/kernel": "workspace:*",
     "@pcc/orchestrator": "workspace:*",
     "@pcc/payments": "workspace:*",
+    "@pcc/workflow": "workspace:*",
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/store": "workspace:*",
