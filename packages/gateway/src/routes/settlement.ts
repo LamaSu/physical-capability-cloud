@@ -17,6 +17,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
+import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -153,40 +154,43 @@ export async function settlementRoutes(app: FastifyInstance) {
     }
 
     const milestoneIndex = body.milestoneIndex ?? 0;
-    const service = getSettlementService();
 
-    try {
-      const result = await service.releaseMilestone(
-        body.jobId,
-        milestoneIndex,
-        body.contractAddress,
-      );
+    const activityResult = await releaseMilestoneByJobActivity.invoke({
+      workflowRunId: `settlement:${body.jobId}`,
+      activityId: `release:${body.jobId}:${milestoneIndex}`,
+      input: [body.jobId, milestoneIndex, body.contractAddress] as const,
+      actorId: "system",
+    });
 
-      if (result.status === "failed") {
-        return reply.status(502).send({
-          error: "release_failed",
-          message: result.error,
-          jobId: result.jobId,
-        });
-      }
-
-      // SWF accrual: 2% of released milestone value flows into the fund
-      if (result.status === "released") {
-        swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
-      }
-
-      return {
-        txHash: result.txHash,
-        status: result.status,
-        jobId: result.jobId,
-        milestoneIndex,
-      };
-    } catch (err) {
-      return reply.status(500).send({
+    if (!activityResult.ok) {
+      return reply.status(502).send({
         error: "release_failed",
-        message: err instanceof Error ? err.message : "Unknown error",
+        message: activityResult.error.message,
+        jobId: body.jobId,
       });
     }
+
+    const result = activityResult.value;
+
+    if (result.status === "failed") {
+      return reply.status(502).send({
+        error: "release_failed",
+        message: result.error,
+        jobId: result.jobId,
+      });
+    }
+
+    // SWF accrual: 2% of released milestone value flows into the fund
+    if (result.status === "released") {
+      swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
+    }
+
+    return {
+      txHash: result.txHash,
+      status: result.status,
+      jobId: result.jobId,
+      milestoneIndex,
+    };
   });
 
   // ── Settlement status for a job ───────────────────────────────────
