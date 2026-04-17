@@ -19,13 +19,15 @@
  */
 
 import { randomBytes } from "crypto";
+import type { Hex } from "viem";
 import type {
   VerificationOracle,
   OracleVerificationResult,
   OracleMetrics,
   OracleConfig,
+  AttestationBinding,
 } from "./types.js";
-import { DEFAULT_ORACLE_CONFIG } from "./types.js";
+import { DEFAULT_ORACLE_CONFIG, buildOnChainAttestation } from "./types.js";
 import { evaluateEvidence } from "./evidence-evaluator.js";
 
 // ── UMA OOv3 ABI (minimal — only functions we call) ───────────────────────────
@@ -133,6 +135,23 @@ const ERC20_ABI = [
 const DEFAULT_OOV3_ADDRESS_BASE_SEPOLIA =
   "0xFd9e2642a170aDD10F53Ee14a93FcF2F31924944";
 
+/**
+ * Normalize bundle hash (which may be "sha256:..." or "0x..." or raw hex)
+ * to a 0x-prefixed 32-byte Hex string suitable for the on-chain
+ * attestation.evidenceHash (bytes32) field.
+ */
+function normalizeEvidenceHash(bundleHash: string): Hex {
+  if (bundleHash.startsWith("0x") && bundleHash.length === 66) {
+    return bundleHash as Hex;
+  }
+  const stripped = bundleHash.replace(/^sha256:/, "").replace(/^0x/, "");
+  // Pad/truncate to 64 hex chars (32 bytes)
+  if (stripped.length >= 64) {
+    return (`0x${stripped.slice(0, 64)}`) as Hex;
+  }
+  return (`0x${stripped.padStart(64, "0")}`) as Hex;
+}
+
 export class UMAOracleAdapter implements VerificationOracle {
   readonly name = "uma";
 
@@ -174,14 +193,15 @@ export class UMAOracleAdapter implements VerificationOracle {
     bundleHash: string,
     bundleData: string,
     requiredTier: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     const startTime = Date.now();
 
     if (this.config.mock) {
-      return this.submitMock(bundleHash, bundleData, requiredTier, startTime);
+      return this.submitMock(bundleHash, bundleData, requiredTier, startTime, binding);
     }
 
-    return this.submitLive(bundleHash, bundleData, requiredTier, startTime);
+    return this.submitLive(bundleHash, bundleData, requiredTier, startTime, binding);
   }
 
   /**
@@ -285,6 +305,7 @@ export class UMAOracleAdapter implements VerificationOracle {
     bundleData: string,
     requiredTier: number,
     startTime: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     // Evaluate evidence locally using shared evaluator
     const evaluation = evaluateEvidence(bundleHash, bundleData, requiredTier);
@@ -317,6 +338,15 @@ export class UMAOracleAdapter implements VerificationOracle {
       assertionId,
       disputeWindow: this.config.livenessSeconds,
       bondAmount: this.config.bondAmount?.toString(),
+      attestation: binding
+        ? buildOnChainAttestation({
+            binding,
+            evidenceHash: normalizeEvidenceHash(bundleHash),
+            tier: requiredTier,
+            verified: passed,
+            nonce: (`0x${randomBytes(32).toString("hex")}`) as Hex,
+          })
+        : undefined,
     };
 
     this.recordResult(result);
@@ -328,6 +358,7 @@ export class UMAOracleAdapter implements VerificationOracle {
     bundleData: string,
     requiredTier: number,
     startTime: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     // Dynamic import viem so mock mode never loads chain deps
     const { createPublicClient, createWalletClient, http, toHex } = await import("viem");
@@ -445,6 +476,20 @@ export class UMAOracleAdapter implements VerificationOracle {
       assertionId,
       disputeWindow: Number(liveness),
       bondAmount: bondAmount.toString(),
+      attestation: binding
+        ? buildOnChainAttestation({
+            binding,
+            evidenceHash: normalizeEvidenceHash(bundleHash),
+            tier: requiredTier,
+            verified: passed,
+            // UMA live: off-chain adapter does NOT produce the oracle
+            // verifier signature — that's the job of the PCC oracle
+            // verifier contract / signer. Left as 0x here; callers using
+            // the live path must swap in a real signature before
+            // submitting on-chain.
+            signature: "0x",
+          })
+        : undefined,
     };
 
     this.recordResult(result);
