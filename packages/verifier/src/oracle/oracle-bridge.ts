@@ -24,6 +24,7 @@ import type {
   OracleMetrics,
   OracleConfig,
   VerificationResult,
+  AttestationBinding,
 } from "./types.js";
 import { DEFAULT_ORACLE_CONFIG } from "./types.js";
 
@@ -59,11 +60,16 @@ export class OracleVerificationBridge {
    * Submit evidence for verification through the oracle cascade.
    * Tries UMA first, falls back to Chainlink, then EigenLayer.
    * Returns an OracleVerificationResult describing which oracle was used.
+   *
+   * When `binding` is supplied, the returned result's `.attestation` field
+   * contains a fully-formed OnChainOracleAttestation suitable for
+   * MilestoneEscrow.submitAttestation + MilestoneEscrow.release.
    */
   async submitForVerification(
     bundleHash: string,
     bundleData: string,
     requiredTier: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     const errors: Array<{ oracle: string; error: string }> = [];
 
@@ -74,7 +80,7 @@ export class OracleVerificationBridge {
       }
 
       try {
-        const result = await oracle.submitForVerification(bundleHash, bundleData, requiredTier);
+        const result = await oracle.submitForVerification(bundleHash, bundleData, requiredTier, binding);
         this.recordCascadeResult(result);
         return result;
       } catch (err) {

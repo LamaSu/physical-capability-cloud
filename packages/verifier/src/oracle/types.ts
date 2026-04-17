@@ -7,6 +7,48 @@
  *   → EigenLayer AVS (future stub)
  */
 
+import type { Hex, Address } from "viem";
+
+/**
+ * On-chain attestation struct — mirrors IPCCOracle.Attestation (Solidity).
+ *
+ * This is the shape that goes to MilestoneEscrow.submitAttestation(uint256,
+ * Attestation) and MilestoneEscrow.release(uint256, Attestation). It must
+ * be built atomically alongside the off-chain OracleVerificationResult
+ * because the escrow binds the milestone to keccak256(abi.encode(attestation))
+ * and re-verifies the signature on-chain at settlement.
+ */
+export interface OnChainOracleAttestation {
+  /** Address of the MilestoneEscrow this attestation is bound to */
+  escrowAddress: Address;
+  /** Job ID this attestation covers (matches evidence.jobId) */
+  jobId: string;
+  /** keccak256 of the evidence bundle this attestation covers */
+  evidenceHash: Hex;
+  /** Assurance tier (0..3) */
+  tier: number;
+  /** Oracle's pass/fail verdict — must be true for settlement */
+  verified: boolean;
+  /** Unix timestamp (seconds) when the oracle signed */
+  timestamp: bigint;
+  /** Per-attestation nonce to prevent replay */
+  nonce: Hex;
+  /** Oracle signature over the struct (empty bytes for mocks) */
+  signature: Hex;
+}
+
+/**
+ * Binding context for on-chain attestation production.
+ *
+ * When supplied, the adapter populates OracleVerificationResult.attestation
+ * with a fully-formed OnChainOracleAttestation that can be passed directly
+ * to MilestoneEscrow.submitAttestation.
+ */
+export interface AttestationBinding {
+  escrowAddress: Address;
+  jobId: string;
+}
+
 /** Common interface all oracle adapters implement */
 export interface VerificationOracle {
   readonly name: string;
@@ -14,6 +56,7 @@ export interface VerificationOracle {
     bundleHash: string,
     bundleData: string,
     requiredTier: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult>;
   getMetrics(): OracleMetrics;
   isAvailable(): boolean;
@@ -35,6 +78,13 @@ export interface OracleVerificationResult {
   requestId?: string; // Chainlink Functions request ID
   /** Assurance score from the digital-verifier rollup (0.0-1.0) */
   assuranceScore?: number;
+  /**
+   * On-chain attestation struct derived from this verification. Populated
+   * by adapters when the caller supplies an escrowAddress + jobId in the
+   * submit call. MilestoneEscrow requires this struct verbatim for both
+   * submitAttestation and release.
+   */
+  attestation?: OnChainOracleAttestation;
 }
 
 export interface OracleDetail {
@@ -91,6 +141,48 @@ export const DEFAULT_ORACLE_CONFIG: OracleConfig = {
   minScoreThreshold: 0.6,
   mock: true, // default to mock for dev
 };
+
+/**
+ * Build an OnChainOracleAttestation from a verification outcome + binding
+ * context. Used by adapters to populate OracleVerificationResult.attestation
+ * when the caller supplies an escrow to bind against.
+ *
+ * For mock adapters, `signature` is `0x` (empty bytes). The on-chain MockPCCOracle
+ * accepts empty signatures when its `verified` flag matches; a production
+ * oracle verifier must produce a real secp256k1 signature over
+ * keccak256(abi.encode(escrow, jobId, evidenceHash, tier, verified, timestamp, nonce)).
+ */
+export function buildOnChainAttestation(params: {
+  binding: AttestationBinding;
+  evidenceHash: Hex;
+  tier: number;
+  verified: boolean;
+  signature?: Hex;
+  nonce?: Hex;
+  timestamp?: bigint;
+}): OnChainOracleAttestation {
+  const now = params.timestamp ?? BigInt(Math.floor(Date.now() / 1000));
+  // Default nonce: deterministic from evidenceHash + escrow + timestamp.
+  // In production, the oracle must produce a server-side random nonce.
+  const defaultNonce: Hex =
+    params.nonce ??
+    (`0x${Buffer.from(
+      `${params.binding.escrowAddress}-${params.binding.jobId}-${params.evidenceHash}-${now.toString()}`,
+    )
+      .toString("hex")
+      .padStart(64, "0")
+      .slice(0, 64)}` as Hex);
+  return {
+    escrowAddress: params.binding.escrowAddress,
+    jobId: params.binding.jobId,
+    evidenceHash: params.evidenceHash,
+    tier: params.tier,
+    verified: params.verified,
+    timestamp: now,
+    nonce: defaultNonce,
+    signature: params.signature ?? "0x",
+  };
+}
 
 /**
  * Create OracleConfig from environment variables.
