@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IPGTRForwarder} from "./interfaces/IPGTRForwarder.sol";
 import {IPCCProtocol} from "./interfaces/IPCCProtocol.sol";
+import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
 
 /**
  * @title MilestoneEscrow
@@ -286,11 +287,26 @@ contract MilestoneEscrow {
     }
 
     /**
-     * @notice Verifier submits attestation hash. Opens challenge window.
+     * @notice Verifier submits an oracle-signed attestation. Opens challenge window.
      * @dev Only authorized verifiers may call this. The milestone's operator is
      *      explicitly blocked from self-attesting their own evidence.
+     *
+     *      When a protocol root is configured, the attestation is verified on-chain
+     *      against the oracle verifier before the challenge window opens. This
+     *      fails closed on invalid signatures so bad attestations never enter the
+     *      challenge window in the first place.
+     *
+     *      The stored attestationHash is keccak256(abi.encode(attestation)), which
+     *      binds the milestone to the exact struct that release() must later pass
+     *      back in for on-chain re-verification at settlement time.
+     *
+     * @param milestoneIndex The milestone being attested.
+     * @param attestation The oracle-signed attestation for this milestone.
      */
-    function submitAttestation(uint256 milestoneIndex, bytes32 _attestationHash)
+    function submitAttestation(
+        uint256 milestoneIndex,
+        IPCCOracle.Attestation calldata attestation
+    )
         external
         milestoneExists(milestoneIndex)
     {
@@ -298,30 +314,63 @@ contract MilestoneEscrow {
         require(authorizedVerifiers[msg.sender], "Not an authorized verifier");
         require(msg.sender != m.operator, "Operator cannot self-attest");
         require(m.status == MilestoneStatus.Evidenced, "Evidence not submitted");
+        require(attestation.escrowAddress == address(this), "Attestation for wrong escrow");
 
-        m.verifierAttestationHash = _attestationHash;
+        // Early oracle gate: if a protocol root is configured, fail closed on
+        // invalid oracle signatures so a bad attestation never opens the window.
+        if (protocolRoot != address(0)) {
+            address oracle = IPCCProtocol(protocolRoot).oracleVerifier();
+            require(oracle != address(0), "Oracle verifier not set");
+            require(
+                IPCCOracle(oracle).verifyAttestation(attestation),
+                "Invalid oracle attestation"
+            );
+        }
+
+        bytes32 attestationHash = keccak256(abi.encode(attestation));
+        m.verifierAttestationHash = attestationHash;
         m.challengeWindowEnd = block.timestamp + m.challengeWindowSeconds;
         m.status = MilestoneStatus.Attested;
-        emit AttestationSubmitted(milestoneIndex, _attestationHash, m.challengeWindowEnd);
+        emit AttestationSubmitted(milestoneIndex, attestationHash, m.challengeWindowEnd);
     }
 
     /**
      * @notice Release funds to operator after challenge window expires.
      *
-     * If a protocolRoot is set, deducts the protocol fee from the milestone
-     * payment (not the bond) and transfers it to the fee recipient before
-     * paying the operator. The bond is always returned to the operator in full.
+     * The caller must supply the full oracle-signed Attestation struct that
+     * was used to open the challenge window. It is re-verified on-chain
+     * (double-checked at settlement time via PCCProtocol.collectFeeWithAttestation)
+     * so a bad attestation fails the release even if the challenge window
+     * trivially expires.
      *
      * Fee flow (when protocolRoot is set):
      *   fee = milestone.amount * protocolRoot.protocolFeeBps() / 10000
      *   token.transfer(protocolRoot.feeRecipient(), fee)
      *   token.transfer(operator, milestone.amount - fee + operatorBond)
-     *   protocolRoot.collectFee(token, fee)  // accounting
+     *   protocolRoot.collectFeeWithAttestation(token, fee, attestation)
+     *     which re-runs IPCCOracle.verifyAttestation(attestation).
+     *
+     * Standalone escrows (protocolRoot == address(0)) ignore the attestation
+     * argument and pay out the full amount + bond.
+     *
+     * @param milestoneIndex The milestone being released.
+     * @param attestation The same oracle attestation struct submitted via
+     *        submitAttestation. keccak256(abi.encode(attestation)) must equal
+     *        the stored verifierAttestationHash.
      */
-    function release(uint256 milestoneIndex) external nonReentrant milestoneExists(milestoneIndex) {
+    function release(
+        uint256 milestoneIndex,
+        IPCCOracle.Attestation calldata attestation
+    ) external nonReentrant milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
         require(m.status == MilestoneStatus.Attested, "Not attested");
         require(block.timestamp >= m.challengeWindowEnd, "Challenge window open");
+
+        // Bind release to the exact attestation that opened the challenge window.
+        require(
+            keccak256(abi.encode(attestation)) == m.verifierAttestationHash,
+            "Attestation mismatch"
+        );
 
         // ── Checks-Effects-Interactions: update state before any external calls ──
         m.status = MilestoneStatus.Released;
@@ -346,8 +395,10 @@ contract MilestoneEscrow {
             uint256 operatorPayout = amount - fee + operatorBond;
             require(token.transfer(operator, operatorPayout), "Transfer failed");
 
-            // Accounting callback
-            root.collectFee(address(token), fee);
+            // Oracle-gated accounting callback. Re-verifies the attestation
+            // on-chain via PCCProtocol.requiresOracle modifier. No fee is
+            // recorded without a valid oracle signature.
+            root.collectFeeWithAttestation(address(token), fee, attestation);
         } else {
             uint256 payout = amount + operatorBond; // Return bond + payment
             require(token.transfer(operator, payout), "Transfer failed");
