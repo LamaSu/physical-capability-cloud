@@ -29,6 +29,13 @@ export {
 } from "./chain-config.js";
 export type { ChainDeployment } from "./chain-config.js";
 
+// Oracle attestation (IPCCOracle.Attestation mirror)
+export {
+  buildOracleAttestation,
+  attestationToTuple,
+} from "./oracle-attestation.js";
+export type { OracleAttestation } from "./oracle-attestation.js";
+
 // Capability Certificates (Bubblegum cNFT mock)
 export { CapabilityCertificateService } from "./capability-certificates.js";
 export type { MintCertificateParams } from "./capability-certificates.js";

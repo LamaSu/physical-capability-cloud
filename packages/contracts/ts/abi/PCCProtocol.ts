@@ -173,16 +173,6 @@ export const PCCProtocolABI = [
     outputs: [{ name: "escrow", type: "address" }],
   },
   {
-    name: "collectFee",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "token", type: "address" },
-      { name: "fee", type: "uint256" },
-    ],
-    outputs: [],
-  },
-  {
     name: "setProtocolFeeBps",
     type: "function",
     stateMutability: "nonpayable",
