@@ -11,14 +11,28 @@
  * AVS operator network is ready for evidence verification tasks.
  */
 
+import type { Hex } from "viem";
 import type {
   VerificationOracle,
   OracleVerificationResult,
   OracleMetrics,
   OracleConfig,
+  AttestationBinding,
 } from "./types.js";
-import { DEFAULT_ORACLE_CONFIG } from "./types.js";
+import { DEFAULT_ORACLE_CONFIG, buildOnChainAttestation } from "./types.js";
 import { evaluateEvidence } from "./evidence-evaluator.js";
+
+/** Mirror of uma-adapter.normalizeEvidenceHash */
+function normalizeEvidenceHash(bundleHash: string): Hex {
+  if (bundleHash.startsWith("0x") && bundleHash.length === 66) {
+    return bundleHash as Hex;
+  }
+  const stripped = bundleHash.replace(/^sha256:/, "").replace(/^0x/, "");
+  if (stripped.length >= 64) {
+    return (`0x${stripped.slice(0, 64)}`) as Hex;
+  }
+  return (`0x${stripped.padStart(64, "0")}`) as Hex;
+}
 
 export class EigenLayerOracleAdapter implements VerificationOracle {
   readonly name = "eigenlayer";
@@ -49,6 +63,7 @@ export class EigenLayerOracleAdapter implements VerificationOracle {
     bundleHash: string,
     bundleData: string,
     requiredTier: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     if (!this.enabled) {
       throw new Error(
@@ -84,6 +99,14 @@ export class EigenLayerOracleAdapter implements VerificationOracle {
         },
       ],
       totalTimeMs: Date.now() - startTime,
+      attestation: binding
+        ? buildOnChainAttestation({
+            binding,
+            evidenceHash: normalizeEvidenceHash(bundleHash),
+            tier: requiredTier,
+            verified: passed,
+          })
+        : undefined,
     };
 
     this.recordResult(result);
