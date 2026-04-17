@@ -166,22 +166,6 @@ contract PCCProtocol {
         emit EscrowCreated(escrow, payer, arbiter, token, cwmId);
     }
 
-    // ── Fee Collection ───────────────────────────────────────────────
-
-    /**
-     * @notice Called by child escrows during settlement to record fee accounting.
-     * @dev The escrow transfers the fee directly to feeRecipient. This function
-     *      is called after the transfer for accounting purposes. Only callable
-     *      by factory-deployed escrows.
-     * @param token The ERC-20 token in which the fee was collected.
-     * @param fee The fee amount collected.
-     */
-    function collectFee(address token, uint256 fee) external onlyProtocolEscrow {
-        feesFromEscrow[msg.sender] += fee;
-        totalFeesCollectedByToken[token] += fee;
-        emit FeeCollected(msg.sender, token, fee);
-    }
-
     // ── Governance ───────────────────────────────────────────────────
 
     /**
