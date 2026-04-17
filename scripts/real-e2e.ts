@@ -58,11 +58,28 @@ const ERC20 = [
   { name: "balanceOf", type: "function" as const, inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
 ] as const;
 
+// IPCCOracle.Attestation tuple shape — must match Solidity struct exactly.
+const ATTESTATION_TUPLE = {
+  name: "attestation",
+  type: "tuple" as const,
+  components: [
+    { name: "escrowAddress", type: "address" as const },
+    { name: "jobId", type: "string" as const },
+    { name: "evidenceHash", type: "bytes32" as const },
+    { name: "tier", type: "uint8" as const },
+    { name: "verified", type: "bool" as const },
+    { name: "timestamp", type: "uint256" as const },
+    { name: "nonce", type: "bytes32" as const },
+    { name: "signature", type: "bytes" as const },
+  ],
+} as const;
+
 const ESCROW_ABI = [
   { name: "addMilestone", type: "function" as const, inputs: [{ name: "_stepId", type: "bytes32" }, { name: "_operator", type: "address" }, { name: "_amount", type: "uint256" }, { name: "_operatorBond", type: "uint256" }, { name: "_challengeWindowSeconds", type: "uint256" }], outputs: [], stateMutability: "nonpayable" as const },
   { name: "fund", type: "function" as const, inputs: [], outputs: [], stateMutability: "nonpayable" as const },
   { name: "submitEvidence", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }, { name: "_evidenceBundleHash", type: "bytes32" }], outputs: [], stateMutability: "nonpayable" as const },
-  { name: "release", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }], outputs: [], stateMutability: "nonpayable" as const },
+  { name: "submitAttestation", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }, ATTESTATION_TUPLE], outputs: [], stateMutability: "nonpayable" as const },
+  { name: "release", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }, ATTESTATION_TUPLE], outputs: [], stateMutability: "nonpayable" as const },
   { name: "funded", type: "function" as const, inputs: [], outputs: [{ name: "", type: "bool" }], stateMutability: "view" as const },
   { name: "totalAmount", type: "function" as const, inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
   { name: "getMilestoneCount", type: "function" as const, inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
@@ -119,7 +136,12 @@ async function main() {
   log(`    TX:         ${usdcDeployTx}`);
 
   // 1b. Deploy PCCProtocol (fee factory)
-  log("    Deploying PCCProtocol (2.35% fee)...");
+  log("    Deploying PCCProtocol (2.35% fee, oracle-gated)...");
+  // Oracle verifier is immutable on PCCProtocol. Use ORACLE_VERIFIER_ADDRESS
+  // from env (real PCC Verification Oracle) or fall back to the deployer
+  // address so the full E2E can be exercised end-to-end (dev only).
+  const oracleVerifier = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  log(`    Oracle verifier: ${oracleVerifier}`);
   const protocolDeployTx = await deployContract({
     abi: protocolArtifact.abi,
     bytecode: protocolArtifact.bytecode.object as `0x${string}`,
@@ -127,6 +149,7 @@ async function main() {
       account.address,   // feeRecipient (immutable)
       235n,              // 2.35% fee
       account.address,   // governor
+      oracleVerifier,    // oracleVerifier (immutable)
     ],
   });
   const protocolReceipt = await waitTx(protocolDeployTx);
@@ -293,27 +316,31 @@ async function main() {
   log(`    Status:  ${oracleReq.status}`);
   log(`    Result:  ${JSON.stringify(oracleResult)}`);
 
-  // If oracle submitted attestation on-chain, get the tx
+  // Build the on-chain Attestation struct. The escrow stores
+  // keccak256(abi.encode(attestation)) so the SAME struct must be passed
+  // back to release() for settlement. See IPCCOracle.Attestation.
+  const attestationStruct = {
+    escrowAddress: ESCROW,
+    jobId: jobResult.jobId ?? "job-real-e2e",
+    evidenceHash: evidenceHash as Hex,
+    tier: 1,
+    verified: true,
+    timestamp: BigInt(Math.floor(Date.now() / 1000)),
+    nonce: keccak256(toBytes(`nonce-${Date.now()}-${ESCROW}`)),
+    signature: "0x" as Hex,
+  };
+
+  // If oracle pre-submitted its attestation on-chain, acknowledge and move on.
+  // Otherwise we submit the struct ourselves as the authorized verifier.
   if (oracleResult.transactionHash) {
-    log(`    Attest TX: ${oracleResult.transactionHash}`);
+    log(`    Oracle-submitted attest TX: ${oracleResult.transactionHash}`);
     await waitTx(oracleResult.transactionHash);
-  } else if (oracleResult.attestationHash) {
-    // Oracle returned hash but didn't submit — we submit as arbiter fallback
-    log("    Oracle returned hash, submitting attestation as arbiter...");
-    const attTx = await writeContract({
-      address: ESCROW, abi: [...ESCROW_ABI, { name: "submitAttestation", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }, { name: "_attestationHash", type: "bytes32" }], outputs: [], stateMutability: "nonpayable" as const }],
-      functionName: "submitAttestation",
-      args: [0n, oracleResult.attestationHash as Hex],
-    });
-    log(`    TX:      ${attTx}`);
-    await waitTx(attTx);
   } else {
-    log("    Oracle did not attest — submitting self-attestation as arbiter");
-    const attestHash = keccak256(toBytes("attestation:" + evidenceHash));
+    log("    Submitting attestation struct as arbiter");
     const attTx = await writeContract({
-      address: ESCROW, abi: [...ESCROW_ABI, { name: "submitAttestation", type: "function" as const, inputs: [{ name: "milestoneIndex", type: "uint256" }, { name: "_attestationHash", type: "bytes32" }], outputs: [], stateMutability: "nonpayable" as const }],
+      address: ESCROW, abi: ESCROW_ABI,
       functionName: "submitAttestation",
-      args: [0n, attestHash as Hex],
+      args: [0n, attestationStruct],
     });
     log(`    TX:      ${attTx}`);
     await waitTx(attTx);
@@ -321,10 +348,10 @@ async function main() {
   log("");
 
   // ── 9. Release milestone (settlement) ─────────────────────────────
-  log("[9] RELEASING MILESTONE — SETTLING USDC");
+  log("[9] RELEASING MILESTONE — SETTLING USDC (oracle-gated)");
   const relTx = await writeContract({
     address: ESCROW, abi: ESCROW_ABI, functionName: "release",
-    args: [0n],
+    args: [0n, attestationStruct],
   });
   log(`    TX:      ${relTx}`);
   const relReceipt = await waitTx(relTx);
