@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../src/MilestoneEscrow.sol";
 import "../src/MockUSDC.sol";
+import {IPCCOracle} from "../src/interfaces/IPCCOracle.sol";
 
 contract MilestoneEscrowTest is Test {
     MilestoneEscrow escrow;
@@ -19,9 +20,30 @@ contract MilestoneEscrowTest is Test {
 
     address verifier = address(0x5);
 
+    /// @dev Build a stub attestation. In standalone mode (protocolRoot == 0)
+    ///      the oracle is never consulted, so the values are purely cosmetic
+    ///      — only the escrow address is checked by submitAttestation.
+    function _makeAttestation(bytes32 evidenceHash)
+        internal
+        view
+        returns (IPCCOracle.Attestation memory)
+    {
+        return IPCCOracle.Attestation({
+            escrowAddress: address(escrow),
+            jobId: "job-test",
+            evidenceHash: evidenceHash,
+            tier: 1,
+            verified: true,
+            timestamp: block.timestamp,
+            nonce: keccak256(abi.encode(evidenceHash, block.timestamp)),
+            signature: hex""
+        });
+    }
+
     function setUp() public {
         usdc = new MockUSDC(1_000_000e6); // 1M USDC
-        // address(0) for protocolRoot = standalone mode, no fee deducted
+        // address(0) for protocolRoot = standalone mode, no fee deducted,
+        // oracle gate is bypassed (since no protocol root is set).
         escrow = new MilestoneEscrow(payer, arbiter, address(usdc), cwmId, address(0));
 
         // Distribute tokens
@@ -129,7 +151,7 @@ contract MilestoneEscrowTest is Test {
         _setupFundedEscrow(100e6, 0);
 
         bytes32 evidenceHash = keccak256("evidence-bundle-001");
-        bytes32 attestationHash = keccak256("attestation-001");
+        IPCCOracle.Attestation memory att = _makeAttestation(evidenceHash);
 
         // Operator submits evidence (Funded -> Evidenced since no bond)
         vm.prank(operator);
@@ -137,14 +159,14 @@ contract MilestoneEscrowTest is Test {
         assertEq(uint8(escrow.getMilestone(0).status), 3); // Evidenced
 
         // Verifier submits attestation (opens challenge window)
-        escrow.submitAttestation(0, attestationHash);
+        escrow.submitAttestation(0, att);
         assertEq(uint8(escrow.getMilestone(0).status), 4); // Attested
 
         // Warp past challenge window
         vm.warp(block.timestamp + 3601);
 
         // Release
-        escrow.release(0);
+        escrow.release(0, att);
         assertEq(uint8(escrow.getMilestone(0).status), 5); // Released
         assertEq(usdc.balanceOf(operator), 10_100e6); // original 10k + 100
     }
@@ -163,12 +185,12 @@ contract MilestoneEscrowTest is Test {
         vm.stopPrank();
 
         // Attestation
-        bytes32 attestationHash = keccak256("attestation-002");
-        escrow.submitAttestation(0, attestationHash);
+        IPCCOracle.Attestation memory att = _makeAttestation(evidenceHash);
+        escrow.submitAttestation(0, att);
 
         // Warp + release
         vm.warp(block.timestamp + 3601);
-        escrow.release(0);
+        escrow.release(0, att);
 
         // Operator gets payment + bond back
         assertEq(usdc.balanceOf(operator), 10_100e6); // 10k - 10 (bond) + 100 (payment) + 10 (bond back) = 10100
@@ -185,13 +207,48 @@ contract MilestoneEscrowTest is Test {
     function test_release_beforeWindowEnds_reverts() public {
         _setupFundedEscrow(100e6, 0);
 
+        bytes32 evidenceHash = keccak256("evidence");
+        IPCCOracle.Attestation memory att = _makeAttestation(evidenceHash);
+
         vm.prank(operator);
-        escrow.submitEvidence(0, keccak256("evidence"));
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitEvidence(0, evidenceHash);
+        escrow.submitAttestation(0, att);
 
         // Try to release immediately (window not expired)
         vm.expectRevert("Challenge window open");
-        escrow.release(0);
+        escrow.release(0, att);
+    }
+
+    function test_release_attestationMismatch_reverts() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 evidenceHash = keccak256("evidence");
+        IPCCOracle.Attestation memory att = _makeAttestation(evidenceHash);
+
+        vm.prank(operator);
+        escrow.submitEvidence(0, evidenceHash);
+        escrow.submitAttestation(0, att);
+
+        vm.warp(block.timestamp + 3601);
+
+        // Tamper with attestation to trigger hash mismatch
+        IPCCOracle.Attestation memory bad = att;
+        bad.tier = 3;
+        vm.expectRevert("Attestation mismatch");
+        escrow.release(0, bad);
+    }
+
+    function test_submitAttestation_wrongEscrow_reverts() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 evidenceHash = keccak256("evidence");
+        vm.prank(operator);
+        escrow.submitEvidence(0, evidenceHash);
+
+        IPCCOracle.Attestation memory bad = _makeAttestation(evidenceHash);
+        bad.escrowAddress = address(0xBAD);
+        vm.expectRevert("Attestation for wrong escrow");
+        escrow.submitAttestation(0, bad);
     }
 
     // ── Dispute Tests ───────────────────────────────────────────────
@@ -205,7 +262,7 @@ contract MilestoneEscrowTest is Test {
         escrow.depositBond(0);
         escrow.submitEvidence(0, keccak256("evidence"));
         vm.stopPrank();
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(keccak256("evidence")));
 
         // Challenger files dispute during window
         vm.startPrank(challenger);
@@ -236,7 +293,7 @@ contract MilestoneEscrowTest is Test {
         escrow.depositBond(0);
         escrow.submitEvidence(0, keccak256("evidence"));
         vm.stopPrank();
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(keccak256("evidence")));
 
         vm.startPrank(challenger);
         usdc.approve(address(escrow), 5e6);
@@ -258,7 +315,7 @@ contract MilestoneEscrowTest is Test {
 
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("evidence"));
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(keccak256("evidence")));
 
         // Warp past challenge window
         vm.warp(block.timestamp + 3601);
@@ -278,7 +335,7 @@ contract MilestoneEscrowTest is Test {
         escrow.depositBond(0);
         escrow.submitEvidence(0, keccak256("evidence"));
         vm.stopPrank();
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(keccak256("evidence")));
 
         vm.startPrank(challenger);
         usdc.approve(address(escrow), 5e6);
