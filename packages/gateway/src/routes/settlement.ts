@@ -13,6 +13,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
+import type { OracleAttestation } from "@pcc/contracts";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getSettlementFacade } from "../facades/index.js";
@@ -140,16 +141,29 @@ export async function settlementRoutes(app: FastifyInstance) {
   // ── Release milestone (evidence-to-settlement) ────────────────────
 
   app.post<{
-    Body: { jobId: string; milestoneIndex?: number; contractAddress?: string };
+    Body: {
+      jobId: string;
+      milestoneIndex?: number;
+      contractAddress?: string;
+      attestation: OracleAttestation;
+    };
   }>("/api/settlement/release", async (req, reply) => {
     const body = req.body as {
       jobId?: string;
       milestoneIndex?: number;
       contractAddress?: string;
+      attestation?: OracleAttestation;
     } | undefined;
 
     if (!body?.jobId) {
       return reply.status(400).send({ error: "jobId is required" });
+    }
+    if (!body.attestation || !body.attestation.escrowAddress) {
+      return reply.status(400).send({
+        error: "attestation_required",
+        message:
+          "An oracle-signed attestation is required. Submit the same struct that was used for submitAttestation.",
+      });
     }
 
     const milestoneIndex = body.milestoneIndex ?? 0;
@@ -159,6 +173,7 @@ export async function settlementRoutes(app: FastifyInstance) {
       const result = await service.releaseMilestone(
         body.jobId,
         milestoneIndex,
+        body.attestation,
         body.contractAddress,
       );
 
@@ -252,7 +267,12 @@ function parseOperation(op: Record<string, unknown>) {
   switch (op.type) {
     case "release":
       if (op.milestoneIndex == null) throw new Error("milestoneIndex required for release");
-      return { type: "release" as const, milestoneIndex: Number(op.milestoneIndex) };
+      if (!op.attestation) throw new Error("attestation required for release");
+      return {
+        type: "release" as const,
+        milestoneIndex: Number(op.milestoneIndex),
+        attestation: op.attestation as OracleAttestation,
+      };
 
     case "submitEvidence":
       if (op.milestoneIndex == null || !op.evidenceHash)
@@ -264,12 +284,12 @@ function parseOperation(op: Record<string, unknown>) {
       };
 
     case "submitAttestation":
-      if (op.milestoneIndex == null || !op.attestationHash)
-        throw new Error("milestoneIndex and attestationHash required for submitAttestation");
+      if (op.milestoneIndex == null || !op.attestation)
+        throw new Error("milestoneIndex and attestation struct required for submitAttestation");
       return {
         type: "submitAttestation" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestationHash: op.attestationHash as Hex,
+        attestation: op.attestation as OracleAttestation,
       };
 
     case "depositBond":

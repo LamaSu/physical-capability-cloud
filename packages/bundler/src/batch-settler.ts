@@ -19,6 +19,7 @@
  */
 
 import type { Address, Hex } from "viem";
+import { attestationToTuple, type OracleAttestation } from "@pcc/contracts";
 import { UserOpQueue } from "./user-op-queue.js";
 import type { BatchConfig, BatchResult } from "./types.js";
 
@@ -35,9 +36,9 @@ export interface SettlementIntent {
   escrowAddress: Address;
   /** Operation to perform */
   operation:
-    | { type: "release"; milestoneIndex: number }
+    | { type: "release"; milestoneIndex: number; attestation: OracleAttestation }
     | { type: "submitEvidence"; milestoneIndex: number; evidenceHash: Hex }
-    | { type: "submitAttestation"; milestoneIndex: number; attestationHash: Hex }
+    | { type: "submitAttestation"; milestoneIndex: number; attestation: OracleAttestation }
     | { type: "depositBond"; milestoneIndex: number }
     | { type: "fund" }
     | { type: "fileDispute"; milestoneIndex: number; bond: bigint; evidenceHash: Hex; reason: string };
@@ -192,7 +193,10 @@ export class BatchSettler {
     const op = intent.operation;
     switch (op.type) {
       case "release":
-        return { functionName: "release", args: [BigInt(op.milestoneIndex)] };
+        return {
+          functionName: "release",
+          args: [BigInt(op.milestoneIndex), attestationToTuple(op.attestation)],
+        };
       case "submitEvidence":
         return {
           functionName: "submitEvidence",
@@ -201,7 +205,7 @@ export class BatchSettler {
       case "submitAttestation":
         return {
           functionName: "submitAttestation",
-          args: [BigInt(op.milestoneIndex), op.attestationHash],
+          args: [BigInt(op.milestoneIndex), attestationToTuple(op.attestation)],
         };
       case "depositBond":
         return { functionName: "depositBond", args: [BigInt(op.milestoneIndex)] };
