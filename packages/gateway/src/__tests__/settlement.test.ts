@@ -15,6 +15,31 @@ import { settlementRoutes } from "../routes/settlement.js";
 import { initStore, closeStore } from "../db.js";
 import { resetSettlementService, getSettlementService } from "../services/settlement-service.js";
 import type { EvidenceBundle } from "@pcc/spec";
+import type { OracleAttestation } from "@pcc/contracts";
+
+// ---------------------------------------------------------------------------
+// Attestation fixture — releaseMilestone now requires a signed OracleAttestation
+// (post-c7d4001 oracle-gated release). Kept inline here because this file
+// is excluded from vitest.config.ts pending the facade rewrite; once it
+// rejoins the suite, swap to the shared `@pcc/contracts/testing` helper.
+// ---------------------------------------------------------------------------
+
+/** Deterministic test attestation bound to the default test escrow address. */
+function mkAttestation(
+  escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
+): OracleAttestation {
+  return {
+    escrowAddress,
+    jobId: "job-001",
+    evidenceHash:
+      "0x570b1e0000000000000000000000000000000000000000000000000000000001" as `0x${string}`,
+    tier: 0,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "d".repeat(64)) as `0x${string}`,
+    signature: "0x" as `0x${string}`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any imports that use them
@@ -283,7 +308,12 @@ describe("SettlementService", () => {
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(false);
 
       const service = getSettlementService();
-      const result = await service.releaseMilestone("job-001", 0, "0xDeAdBeEf00000000000000000000000000000001");
+      const result = await service.releaseMilestone(
+        "job-001",
+        0,
+        mkAttestation(),
+        "0xDeAdBeEf00000000000000000000000000000001",
+      );
 
       expect(result.status).toBe("failed");
       expect(result.error).toBe("write_disabled");
@@ -296,7 +326,7 @@ describe("SettlementService", () => {
       delete process.env.ESCROW_CONTRACT_ADDRESS;
 
       const service = getSettlementService();
-      const result = await service.releaseMilestone("job-001", 0);
+      const result = await service.releaseMilestone("job-001", 0, mkAttestation());
 
       expect(result.status).toBe("failed");
       expect(result.error).toBe("no_contract_address");
@@ -310,6 +340,7 @@ describe("SettlementService", () => {
       const result = await service.releaseMilestone(
         "job-001",
         0,
+        mkAttestation(),
         "0xDeAdBeEf00000000000000000000000000000001",
       );
 
@@ -326,6 +357,7 @@ describe("SettlementService", () => {
       await service.releaseMilestone(
         "job-001",
         0,
+        mkAttestation(),
         "0xDeAdBeEf00000000000000000000000000000001",
       );
 
