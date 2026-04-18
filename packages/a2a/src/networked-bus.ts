@@ -15,6 +15,13 @@ type MessageHandler = (message: A2AMessage) => void | Promise<void>;
 export interface NetworkedBusConfig {
   /** Gateway relay URL (e.g. "http://localhost:3200") */
   relayUrl: string;
+  /**
+   * API key used to authenticate with the relay's `requireA2AAuth` preHandler
+   * (added in 351433c). Production deployments MUST provide this. Threaded
+   * into NetworkTransport for the WS handshake and into direct REST calls
+   * this class makes (broadcast, getConversationsFromRelay).
+   */
+  apiKey?: string;
   /** Reconnect interval in ms (default: 3000) */
   reconnectInterval?: number;
 }
@@ -102,9 +109,13 @@ export class NetworkedBus {
       try {
         const broadcastMsg = { ...message, to: "*" };
         const url = `${this.relayConfig!.relayUrl.replace(/\/$/, "")}/api/a2a/send${role ? `?role=${encodeURIComponent(role)}` : ""}`;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (this.relayConfig!.apiKey) {
+          headers.Authorization = `Bearer ${this.relayConfig!.apiKey}`;
+        }
         const resp = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(broadcastMsg),
         });
         if (resp.ok) return;
@@ -163,7 +174,11 @@ export class NetworkedBus {
 
     try {
       const url = `${this.relayConfig.relayUrl.replace(/\/$/, "")}/api/a2a/conversations/${encodeURIComponent(agentId)}`;
-      const resp = await fetch(url);
+      const headers: Record<string, string> = {};
+      if (this.relayConfig.apiKey) {
+        headers.Authorization = `Bearer ${this.relayConfig.apiKey}`;
+      }
+      const resp = await fetch(url, { headers });
       if (resp.ok) {
         const data = (await resp.json()) as { conversations: Conversation[] };
         return data.conversations;
@@ -200,6 +215,7 @@ export class NetworkedBus {
     const transport = new NetworkTransport({
       relayUrl: this.relayConfig.relayUrl,
       agentId,
+      apiKey: this.relayConfig.apiKey,
       reconnectInterval: this.relayConfig.reconnectInterval,
     });
 
