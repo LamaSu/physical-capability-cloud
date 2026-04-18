@@ -42,7 +42,6 @@ import {
   milestoneStatusName,
   getDeployment,
   getContractAddress,
-  attestationToTuple,
   type OracleAttestation,
 } from "@pcc/contracts";
 
@@ -395,13 +394,17 @@ export async function releaseMilestone(
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
+  // viem encodes the attestation struct from the OracleAttestation object
+  // (fields map to the tuple components named in the ABI). The contract
+  // binds release to keccak256(abi.encode(attestation)), so the SAME struct
+  // that was submitted via submitAttestation must be passed here.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "release",
-    args: [BigInt(milestoneIndex), attestationToTuple(attestation)],
+    args: [BigInt(milestoneIndex), attestation],
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -505,13 +508,17 @@ export async function submitAttestation(
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
+  // viem encodes the attestation struct from the OracleAttestation object.
+  // The contract stores keccak256(abi.encode(attestation)) and release()
+  // will require the exact same struct, so the struct shape must be
+  // deterministic across submit + release.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "submitAttestation",
-    args: [BigInt(milestoneIndex), attestationToTuple(attestation)],
+    args: [BigInt(milestoneIndex), attestation],
   });
 
   return { transactionHash: hash, status: "submitted" };
