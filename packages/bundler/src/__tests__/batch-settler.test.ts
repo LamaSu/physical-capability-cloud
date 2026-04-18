@@ -72,6 +72,7 @@ describe("BatchSettler", () => {
       [
         0n,
         [
+          attestation.version,
           attestation.escrowAddress,
           attestation.jobId,
           attestation.evidenceHash,
@@ -79,6 +80,7 @@ describe("BatchSettler", () => {
           attestation.verified,
           attestation.timestamp,
           attestation.nonce,
+          attestation.extraData,
           attestation.signature,
         ],
       ],

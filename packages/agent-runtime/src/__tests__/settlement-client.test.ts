@@ -200,8 +200,9 @@ describe("SettlementClient", () => {
 
     expect(result.mode).toBe("direct");
     expect(result.transactionHash).toBe("0xtxhash");
-    // The direct-call path must pass the 8-field tuple verbatim so viem
-    // can encode the full Attestation struct for the MilestoneEscrow ABI.
+    // The direct-call path must pass the 10-field tuple verbatim (v10
+    // schema: version + extraData added) so viem can encode the full
+    // Attestation struct for the MilestoneEscrow ABI.
     expect(mockWallet.callContract).toHaveBeenCalledWith(
       ESCROW,
       mockAbi,
@@ -209,6 +210,7 @@ describe("SettlementClient", () => {
       [
         0n,
         [
+          attestation.version,
           attestation.escrowAddress,
           attestation.jobId,
           attestation.evidenceHash,
@@ -216,6 +218,7 @@ describe("SettlementClient", () => {
           attestation.verified,
           attestation.timestamp,
           attestation.nonce,
+          attestation.extraData,
           attestation.signature,
         ],
       ],
