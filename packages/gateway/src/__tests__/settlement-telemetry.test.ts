@@ -12,6 +12,28 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SettlementService, resetSettlementService } from "../services/settlement-service.js";
 import { initStore, closeStore } from "../db.js";
 import type { EvidenceBundle } from "@pcc/spec";
+import type { OracleAttestation } from "@pcc/contracts";
+
+// ---------------------------------------------------------------------------
+// Attestation fixture — required on every release() / auto-release path
+// ---------------------------------------------------------------------------
+
+/** Deterministic test attestation bound to a given escrow. */
+function mkAttestation(
+  escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
+): OracleAttestation {
+  return {
+    escrowAddress,
+    jobId: "job-settle-telemetry-001",
+    evidenceHash:
+      "0xaabbcc00000000000000000000000000000000000000000000000000000000ee" as `0x${string}`,
+    tier: 0,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "c".repeat(64)) as `0x${string}`,
+    signature: "0x" as `0x${string}`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Mocks — declared before any imports that use them
@@ -213,6 +235,7 @@ describe("Settlement Pipeline Telemetry", () => {
       const result = await service.processEvidence(bundle, "job-settle-telemetry-001", {
         contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
         autoRelease: true,
+        attestation: mkAttestation(),
       });
 
       expect(result.releaseTxHash).toBe("0xtest_release_tx_settle");
@@ -266,11 +289,18 @@ describe("Settlement Pipeline Telemetry", () => {
 
       const service = new SettlementService();
 
-      const result = await service.releaseMilestone("job-settle-telemetry-001", 0);
+      const attestation = mkAttestation("0xEnvAddress0000000000000000000000000001");
+      const result = await service.releaseMilestone(
+        "job-settle-telemetry-001",
+        0,
+        attestation,
+      );
 
-      // Should use the env var address
+      // Should use the env var address; on-chain client receives the
+      // attestation struct as the 2nd arg, address as the 3rd.
       expect(escrowMod.releaseMilestone).toHaveBeenCalledWith(
         0,
+        attestation,
         "0xEnvAddress0000000000000000000000000001",
       );
       expect(result.status).toBe("released");
@@ -282,7 +312,7 @@ describe("Settlement Pipeline Telemetry", () => {
       delete process.env.ESCROW_CONTRACT_ADDRESS;
 
       const service = new SettlementService();
-      const result = await service.releaseMilestone("job-001", 0);
+      const result = await service.releaseMilestone("job-001", 0, mkAttestation());
 
       expect(result.status).toBe("failed");
       expect(result.error).toBe("no_contract_address");
@@ -386,6 +416,7 @@ describe("Settlement Pipeline Telemetry", () => {
       const result = await service.processEvidence(bundle, "job-settle-telemetry-001", {
         contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
         autoRelease: true,
+        attestation: mkAttestation(),
       });
 
       expect(result.settled).toBe(true);
