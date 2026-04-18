@@ -19,9 +19,10 @@ import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
  * Every settlement must pass through the PCC Verification Oracle before
  * funds can be released. The oracle verifier address is IMMUTABLE.
  *
- * Only escrows deployed by this factory can call collectFee(). This makes
- * it structurally impossible for PCC activity to bypass the fee without
- * leaving the protocol entirely.
+ * Only escrows deployed by this factory can call collectFeeWithAttestation().
+ * This makes it structurally impossible for PCC activity to bypass the fee
+ * without leaving the protocol entirely, and the oracle gate makes it
+ * structurally impossible to record a fee without a valid oracle attestation.
  */
 contract PCCProtocol {
     // ── Constants ────────────────────────────────────────────────────
