@@ -8,6 +8,7 @@ import type { OracleAttestation } from "@pcc/contracts";
 /** Deterministic test attestation bound to a given escrow. */
 function mkAttestation(escrowAddress: Address, evidenceHash: Hex = "0xdead" as Hex): OracleAttestation {
   return {
+    version: 1,
     escrowAddress,
     jobId: "job-test",
     evidenceHash: ("0x" + evidenceHash.replace(/^0x/, "").padStart(64, "0")) as Hex,
@@ -15,6 +16,7 @@ function mkAttestation(escrowAddress: Address, evidenceHash: Hex = "0xdead" as H
     verified: true,
     timestamp: 1700000000n,
     nonce: ("0x" + "a".repeat(64)) as Hex,
+    extraData: "0x" as Hex,
     signature: "0x" as Hex,
   };
 }

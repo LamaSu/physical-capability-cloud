@@ -23,6 +23,7 @@ function mkAttestation(
   escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
 ): OracleAttestation {
   return {
+    version: 1,
     escrowAddress,
     jobId: "job-settle-telemetry-001",
     evidenceHash:
@@ -31,6 +32,7 @@ function mkAttestation(
     verified: true,
     timestamp: 1700000000n,
     nonce: ("0x" + "c".repeat(64)) as `0x${string}`,
+    extraData: "0x" as `0x${string}`,
     signature: "0x" as `0x${string}`,
   };
 }
