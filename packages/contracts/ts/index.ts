@@ -18,6 +18,8 @@ export {
   PCC_DEFAULT_FEE_BPS,
   PCC_FEE_BPS_MIN,
   PCC_FEE_BPS_MAX,
+  ATTESTATION_SCHEMA_VERSION,
+  ATTESTATION_V1_EMPTY_EXTRA_DATA,
 } from "./abi/index.js";
 export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
@@ -33,6 +35,7 @@ export type { ChainDeployment } from "./chain-config.js";
 export {
   buildOracleAttestation,
   attestationToTuple,
+  isSupportedAttestationVersion,
 } from "./oracle-attestation.js";
 export type { OracleAttestation } from "./oracle-attestation.js";
 
