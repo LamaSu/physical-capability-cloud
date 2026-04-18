@@ -251,6 +251,63 @@ contract MilestoneEscrowTest is Test {
         escrow.submitAttestation(0, bad);
     }
 
+    /**
+     * @dev DOCUMENTS CURRENT BEHAVIOR — not necessarily the desired behavior.
+     *
+     * `release()` binds to the attestation via
+     *   keccak256(abi.encode(attestation)) == m.verifierAttestationHash
+     * (MilestoneEscrow.sol:370). It does NOT additionally require
+     *   attestation.evidenceHash == m.evidenceBundleHash.
+     *
+     * Consequence: an oracle could sign an attestation whose evidenceHash
+     * differs from the evidence bundle the operator submitted via
+     * submitEvidence(), and release() will still succeed as long as the
+     * caller re-passes the same (mismatched) struct that opened the window.
+     *
+     * Whether this is a real bug depends on the threat model for the oracle.
+     * Off-chain verifiers already check that attestation.evidenceHash matches
+     * the bundle hash they computed. If the oracle itself is trusted to only
+     * sign over the correct evidence, this extra on-chain check is redundant.
+     * If the oracle could be tricked (or the verifier collusion model is
+     * weaker than assumed), the on-chain require would catch it cheaply.
+     *
+     * See `ai/supervisor/evidencehash-binding.md` for the full design
+     * discussion. This test is a regression tripwire: if someone later adds
+     * a stricter require to release(), THIS test will fail and whoever adds
+     * the stricter check will know to delete this test + update the doc.
+     */
+    function test_release_acceptsAttestationWhoseEvidenceHashDiffersFromStoredBundle() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 operatorEvidenceHash = keccak256("operator-evidence-bundle");
+        bytes32 oracleEvidenceHash = keccak256("oracle-different-evidence");
+
+        // Operator submits evidence with hash A.
+        vm.prank(operator);
+        escrow.submitEvidence(0, operatorEvidenceHash);
+
+        // Oracle signs an attestation whose evidenceHash is DIFFERENT (hash B).
+        // In standalone mode (no protocol root) there is no on-chain oracle
+        // check, so the attestation is accepted as-is.
+        IPCCOracle.Attestation memory att = _makeAttestation(oracleEvidenceHash);
+        assertTrue(
+            att.evidenceHash != operatorEvidenceHash,
+            "test precondition: evidenceHash must differ"
+        );
+
+        escrow.submitAttestation(0, att);
+        assertEq(uint8(escrow.getMilestone(0).status), 4); // Attested
+
+        // Warp past challenge window.
+        vm.warp(block.timestamp + 3601);
+
+        // Release succeeds — only the attestation hash is bound to the
+        // milestone, not the evidenceHash field inside the attestation.
+        escrow.release(0, att);
+        assertEq(uint8(escrow.getMilestone(0).status), 5); // Released
+        assertEq(usdc.balanceOf(operator), 10_100e6);
+    }
+
     // ── Dispute Tests ───────────────────────────────────────────────
 
     function test_dispute_challengerWins() public {
