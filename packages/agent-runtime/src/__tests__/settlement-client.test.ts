@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SettlementClient } from "../settlement-client.js";
 import type { OracleAttestation } from "@pcc/contracts";
+import { mkAttestation as mkSharedAttestation } from "@pcc/contracts/testing";
 
 type Address = `0x${string}`;
 type Hex = `0x${string}`;
@@ -8,18 +9,20 @@ type Hex = `0x${string}`;
 const ESCROW = "0x1111111111111111111111111111111111111111" as Address;
 const EVIDENCE_HASH = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890" as Hex;
 
-/** Deterministic test attestation bound to an escrow. */
+/**
+ * Deterministic test attestation bound to an escrow.
+ * Wraps the shared `@pcc/contracts/testing` helper so this test's original
+ * fixture values (jobId "job-test", tier 1, ESCROW address, b×64 nonce)
+ * remain stable for the existing assertions.
+ */
 function mkAttestation(escrowAddress: Address = ESCROW): OracleAttestation {
-  return {
+  return mkSharedAttestation({
     escrowAddress,
     jobId: "job-test",
     evidenceHash: EVIDENCE_HASH,
     tier: 1,
-    verified: true,
-    timestamp: 1700000000n,
     nonce: ("0x" + "b".repeat(64)) as Hex,
-    signature: "0x" as Hex,
-  };
+  });
 }
 
 describe("SettlementClient", () => {

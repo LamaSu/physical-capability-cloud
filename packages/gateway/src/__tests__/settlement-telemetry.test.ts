@@ -13,26 +13,26 @@ import { SettlementService, resetSettlementService } from "../services/settlemen
 import { initStore, closeStore } from "../db.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
+import { mkAttestation as mkSharedAttestation } from "@pcc/contracts/testing";
 
 // ---------------------------------------------------------------------------
-// Attestation fixture — required on every release() / auto-release path
+// Attestation fixture — required on every release() / auto-release path.
+// Wraps the shared `@pcc/contracts/testing` helper to preserve this file's
+// original fixture values (job-settle-telemetry-001, 0xaabbcc...ee hash, c×64
+// nonce) so downstream assertions remain stable.
 // ---------------------------------------------------------------------------
 
 /** Deterministic test attestation bound to a given escrow. */
 function mkAttestation(
   escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
 ): OracleAttestation {
-  return {
+  return mkSharedAttestation({
     escrowAddress,
     jobId: "job-settle-telemetry-001",
     evidenceHash:
       "0xaabbcc00000000000000000000000000000000000000000000000000000000ee" as `0x${string}`,
-    tier: 0,
-    verified: true,
-    timestamp: 1700000000n,
     nonce: ("0x" + "c".repeat(64)) as `0x${string}`,
-    signature: "0x" as `0x${string}`,
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------
