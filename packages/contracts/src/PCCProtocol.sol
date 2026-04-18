@@ -30,6 +30,14 @@ contract PCCProtocol {
     uint256 public constant FEE_BPS_MIN = 10;   // 0.1% floor
     uint256 public constant FEE_BPS_MAX = 500;  // 5% ceiling
 
+    /// @notice The attestation schema version currently supported by this
+    ///         protocol. The oracle verifier also validates this, but we
+    ///         keep defense-in-depth here so a compromised verifier
+    ///         cannot silently accept v2 attestations on a v1 protocol.
+    /// @dev When bumping: add a new constant and migrate the guard, do not
+    ///      edit this value in place. Changing it breaks live attestations.
+    uint8 public constant SUPPORTED_ATTESTATION_VERSION = 1;
+
     // ── Immutable State ──────────────────────────────────────────────
 
     /// @notice The fee recipient address. IMMUTABLE — hardcoded at deployment, cannot change.
@@ -105,6 +113,10 @@ contract PCCProtocol {
         require(
             oracleVerifier != address(0),
             "PCC: oracle verifier not set"
+        );
+        require(
+            attestation.version == SUPPORTED_ATTESTATION_VERSION,
+            "PCC: unsupported attestation version"
         );
         require(
             IPCCOracle(oracleVerifier).verifyAttestation(attestation),
@@ -223,6 +235,9 @@ contract PCCProtocol {
         IPCCOracle.Attestation calldata attestation
     ) external view returns (bool valid) {
         if (oracleVerifier == address(0)) {
+            return false;
+        }
+        if (attestation.version != SUPPORTED_ATTESTATION_VERSION) {
             return false;
         }
         return IPCCOracle(oracleVerifier).verifyAttestation(attestation);
