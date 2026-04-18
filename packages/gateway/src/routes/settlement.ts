@@ -173,7 +173,9 @@ export async function settlementRoutes(app: FastifyInstance) {
       const result = await service.releaseMilestone(
         body.jobId,
         milestoneIndex,
-        body.attestation,
+        // Coerce timestamp (arrives as string after JSON transport; viem
+        // requires bigint for the uint256 ABI field).
+        coerceAttestation(body.attestation as unknown as Record<string, unknown>),
         body.contractAddress,
       );
 
@@ -263,6 +265,20 @@ export async function settlementRoutes(app: FastifyInstance) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * After JSON transport the `timestamp` field comes in as a decimal string
+ * (SettlementClient.submitViaBatch stringifies bigints via a replacer).
+ * viem requires the ABI tuple's `uint256 timestamp` to be a bigint, so we
+ * coerce here before the struct leaves the gateway boundary.
+ */
+function coerceAttestation(a: Record<string, unknown>): OracleAttestation {
+  const ts = a.timestamp;
+  return {
+    ...a,
+    timestamp: typeof ts === "bigint" ? ts : BigInt(ts as string | number),
+  } as OracleAttestation;
+}
+
 function parseOperation(op: Record<string, unknown>) {
   switch (op.type) {
     case "release":
@@ -271,7 +287,7 @@ function parseOperation(op: Record<string, unknown>) {
       return {
         type: "release" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestation: op.attestation as OracleAttestation,
+        attestation: coerceAttestation(op.attestation as Record<string, unknown>),
       };
 
     case "submitEvidence":
@@ -289,7 +305,7 @@ function parseOperation(op: Record<string, unknown>) {
       return {
         type: "submitAttestation" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestation: op.attestation as OracleAttestation,
+        attestation: coerceAttestation(op.attestation as Record<string, unknown>),
       };
 
     case "depositBond":
