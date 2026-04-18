@@ -332,7 +332,10 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
-      const result = await chainReleaseMilestone(milestoneIndex, attestation, address);
+      // Coerce timestamp to bigint — attestation arrived via JSON boundary
+      // where SettlementClient (and UIs) stringify bigints.
+      const coerced = coerceAttestation(attestation as unknown as Record<string, unknown>);
+      const result = await chainReleaseMilestone(milestoneIndex, coerced, address);
       pipelineTelemetry.emit(address, "settlement_complete", "completed", {
         metadata: { escrow: address, milestoneIndex, released: true },
       });
@@ -342,7 +345,7 @@ export class SettlementFacade extends BaseFacade {
         resourceType: "escrow",
         resourceId: address,
         action: "release",
-        metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash },
+        metadata: { milestoneIndex, evidenceHash: coerced.evidenceHash },
         ip,
         userAgent,
       });
@@ -494,9 +497,11 @@ export class SettlementFacade extends BaseFacade {
       if (!attestation || !attestation.escrowAddress) {
         throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
       }
+      // Coerce timestamp to bigint — attestation crossed a JSON boundary.
+      const coerced = coerceAttestation(attestation as unknown as Record<string, unknown>);
       const result = await chainSubmitAttestation(
         milestoneIndex,
-        attestation,
+        coerced,
         address,
       );
       pipelineTelemetry.emit(address, "verification_result", "completed", {
@@ -629,7 +634,10 @@ export class SettlementFacade extends BaseFacade {
 
       const idx = milestoneIndex ?? 0;
       const service = getSettlementService();
-      const result = await service.releaseMilestone(jobId, idx, attestation, contractAddress);
+      // Coerce timestamp to bigint in case the attestation arrived via a
+      // JSON boundary (SettlementClient serialises bigints as strings).
+      const coerced = coerceAttestation(attestation as unknown as Record<string, unknown>);
+      const result = await service.releaseMilestone(jobId, idx, coerced, contractAddress);
 
       if (result.status === "failed") {
         throw new Error(result.error ?? "Release failed");
@@ -780,6 +788,20 @@ class NotFoundError extends Error {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * After JSON transport the `timestamp` field comes in as a decimal string
+ * (SettlementClient.submitViaBatch stringifies bigints via a replacer).
+ * viem requires the ABI tuple's `uint256 timestamp` to be a bigint, so we
+ * coerce here before the struct leaves the gateway boundary.
+ */
+function coerceAttestation(a: Record<string, unknown>): OracleAttestation {
+  const ts = a.timestamp;
+  return {
+    ...a,
+    timestamp: typeof ts === "bigint" ? ts : BigInt(ts as string | number),
+  } as OracleAttestation;
+}
+
 function parseOperation(op: Record<string, unknown>) {
   switch (op.type) {
     case "release":
@@ -788,7 +810,7 @@ function parseOperation(op: Record<string, unknown>) {
       return {
         type: "release" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestation: op.attestation as OracleAttestation,
+        attestation: coerceAttestation(op.attestation as Record<string, unknown>),
       };
 
     case "submitEvidence":
@@ -806,7 +828,7 @@ function parseOperation(op: Record<string, unknown>) {
       return {
         type: "submitAttestation" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestation: op.attestation as OracleAttestation,
+        attestation: coerceAttestation(op.attestation as Record<string, unknown>),
       };
 
     case "depositBond":
