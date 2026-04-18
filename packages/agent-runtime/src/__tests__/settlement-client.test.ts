@@ -11,6 +11,7 @@ const EVIDENCE_HASH = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1
 /** Deterministic test attestation bound to an escrow. */
 function mkAttestation(escrowAddress: Address = ESCROW): OracleAttestation {
   return {
+    version: 1,
     escrowAddress,
     jobId: "job-test",
     evidenceHash: EVIDENCE_HASH,
@@ -18,6 +19,7 @@ function mkAttestation(escrowAddress: Address = ESCROW): OracleAttestation {
     verified: true,
     timestamp: 1700000000n,
     nonce: ("0x" + "b".repeat(64)) as Hex,
+    extraData: "0x" as Hex,
     signature: "0x" as Hex,
   };
 }

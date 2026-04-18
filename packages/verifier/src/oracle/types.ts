@@ -10,15 +10,26 @@
 import type { Hex, Address } from "viem";
 
 /**
- * On-chain attestation struct — mirrors IPCCOracle.Attestation (Solidity).
+ * On-chain attestation struct — mirrors IPCCOracle.Attestation (Solidity) v10.
  *
  * This is the shape that goes to MilestoneEscrow.submitAttestation(uint256,
  * Attestation) and MilestoneEscrow.release(uint256, Attestation). It must
  * be built atomically alongside the off-chain OracleVerificationResult
  * because the escrow binds the milestone to keccak256(abi.encode(attestation))
  * and re-verifies the signature on-chain at settlement.
+ *
+ * v10 schema adds `version` (uint8) and `extraData` (bytes):
+ * - `version`: schema tag, 1 = current. Verifiers reject unsupported
+ *   versions; protocol enforces defense-in-depth at submitAttestation and
+ *   collectFeeWithAttestation.
+ * - `extraData`: versioned extension payload. v1 MUST be "0x" or an
+ *   ABI-encoded blob that v1 code does not interpret. v2+ may define
+ *   structured contents. Field is included in the signing hash, so
+ *   attackers cannot swap it post-signing.
  */
 export interface OnChainOracleAttestation {
+  /** Schema version. Current: 1. */
+  version: number;
   /** Address of the MilestoneEscrow this attestation is bound to */
   escrowAddress: Address;
   /** Job ID this attestation covers (matches evidence.jobId) */
@@ -33,7 +44,9 @@ export interface OnChainOracleAttestation {
   timestamp: bigint;
   /** Per-attestation nonce to prevent replay */
   nonce: Hex;
-  /** Oracle signature over the struct (empty bytes for mocks) */
+  /** Versioned extension payload. v1 default: "0x" (empty). */
+  extraData: Hex;
+  /** Oracle signature over the canonical hash (empty bytes for mocks) */
   signature: Hex;
 }
 
@@ -160,6 +173,10 @@ export function buildOnChainAttestation(params: {
   signature?: Hex;
   nonce?: Hex;
   timestamp?: bigint;
+  /** Schema version. Defaults to 1 (current). */
+  version?: number;
+  /** Extension payload. Defaults to "0x" (empty) for v1. */
+  extraData?: Hex;
 }): OnChainOracleAttestation {
   const now = params.timestamp ?? BigInt(Math.floor(Date.now() / 1000));
   // Default nonce: deterministic from evidenceHash + escrow + timestamp.
@@ -173,6 +190,7 @@ export function buildOnChainAttestation(params: {
       .padStart(64, "0")
       .slice(0, 64)}` as Hex);
   return {
+    version: params.version ?? 1,
     escrowAddress: params.binding.escrowAddress,
     jobId: params.binding.jobId,
     evidenceHash: params.evidenceHash,
@@ -180,6 +198,7 @@ export function buildOnChainAttestation(params: {
     verified: params.verified,
     timestamp: now,
     nonce: defaultNonce,
+    extraData: params.extraData ?? "0x",
     signature: params.signature ?? "0x",
   };
 }
