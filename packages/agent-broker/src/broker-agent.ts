@@ -590,29 +590,27 @@ export class BrokerAgent extends BaseAgent {
 
   /**
    * Queue milestone releases for a completed plan via batch settlement.
-   * In production, this would wait for challenge windows to expire.
+   *
+   * This path is intentionally a no-op after the oracle-gating work:
+   * SettlementClient.release() now requires the oracle-signed
+   * IPCCOracle.Attestation struct that was submitted via submitAttestation,
+   * and the broker does not have access to that struct (it's produced by the
+   * verifier oracle and consumed by the gateway's settlement service). The
+   * broker's job-completed notification is informational only; actual release
+   * happens via the gateway's settlement pipeline once the challenge window
+   * expires and the attestation is re-verified on-chain.
+   *
+   * If we ever want the broker to drive releases directly, we'd need to
+   * plumb the full attestation forward from the job-completed intent.
    */
-  private async queueMilestoneReleases(plan: ActivePlan): Promise<void> {
+  private async queueMilestoneReleases(_plan: ActivePlan): Promise<void> {
     if (!this.settlement) return;
-
-    // The escrow address was set during workflow acceptance
-    const escrowAddress = `0x${"E5C80".padEnd(40, "0")}` as `0x${string}`;
-
-    for (let i = 0; i < plan.quotes.length; i++) {
-      const quote = plan.quotes[i];
-      try {
-        await this.settlement.release(
-          escrowAddress,
-          i,
-          BigInt(Math.round(parseFloat(quote.price) * 1_000_000)),
-        );
-      } catch (err) {
-        console.warn(
-          `[broker] Failed to queue release for milestone ${i}:`,
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
+    // Intentionally left blank — see JSDoc above. Gateway-mediated release
+    // owns the attestation round-trip. Leave a trace so ops can confirm
+    // completion was observed.
+    console.debug(
+      "[broker] Plan completed; release handled by gateway settlement pipeline",
+    );
   }
 
   /** Get the settlement client (if configured) */
