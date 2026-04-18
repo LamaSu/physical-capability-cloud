@@ -251,7 +251,10 @@ export class SettlementClient {
     const response = await this.gatewayFetch("/api/settlement/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      // The attestation struct has a bigint timestamp — encode via a
+      // replacer that emits bigints as decimal strings. The gateway is
+      // expected to coerce them back to uint256 when calling viem.
+      body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
     });
 
     if (!response.ok) {

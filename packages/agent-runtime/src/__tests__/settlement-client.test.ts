@@ -1,11 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SettlementClient } from "../settlement-client.js";
+import type { OracleAttestation } from "@pcc/contracts";
 
 type Address = `0x${string}`;
 type Hex = `0x${string}`;
 
 const ESCROW = "0x1111111111111111111111111111111111111111" as Address;
 const EVIDENCE_HASH = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890" as Hex;
+
+/** Deterministic test attestation bound to an escrow. */
+function mkAttestation(escrowAddress: Address = ESCROW): OracleAttestation {
+  return {
+    escrowAddress,
+    jobId: "job-test",
+    evidenceHash: EVIDENCE_HASH,
+    tier: 1,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "b".repeat(64)) as Hex,
+    signature: "0x" as Hex,
+  };
+}
 
 describe("SettlementClient", () => {
   let client: SettlementClient;
@@ -68,12 +83,18 @@ describe("SettlementClient", () => {
   it("submits attestation via gateway", async () => {
     mockGateway({ operationId: "op-3", queued: true, queueStatus: { pending: 3 } });
 
-    const result = await client.submitAttestation(ESCROW, 1, EVIDENCE_HASH);
+    const attestation = mkAttestation();
+    const result = await client.submitAttestation(ESCROW, 1, attestation);
 
     expect(result.mode).toBe("batched");
     const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(body.operation.type).toBe("submitAttestation");
     expect(body.operation.milestoneIndex).toBe(1);
+    // JSON.stringify converts bigint timestamp via an error; ensure the
+    // shape is present (bigint serialization is the gateway's problem).
+    expect(body.operation.attestation).toBeDefined();
+    expect(body.operation.attestation.escrowAddress).toBe(ESCROW);
+    expect(body.operation.attestation.evidenceHash).toBe(EVIDENCE_HASH);
   });
 
   it("submits depositBond via gateway", async () => {
@@ -90,12 +111,15 @@ describe("SettlementClient", () => {
   it("submits release via gateway", async () => {
     mockGateway({ operationId: "op-5", queued: true, queueStatus: { pending: 1 } });
 
-    const result = await client.release(ESCROW, 0, 500_000_000n);
+    const attestation = mkAttestation();
+    const result = await client.release(ESCROW, 0, attestation, 500_000_000n);
 
     expect(result.mode).toBe("batched");
     const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(body.operation.type).toBe("release");
     expect(body.usdcValue).toBe("500000000");
+    expect(body.operation.attestation).toBeDefined();
+    expect(body.operation.attestation.escrowAddress).toBe(ESCROW);
   });
 
   it("submits fileDispute via gateway", async () => {
@@ -169,15 +193,30 @@ describe("SettlementClient", () => {
 
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
 
-    const result = await clientWithFallback.release(ESCROW, 0);
+    const attestation = mkAttestation();
+    const result = await clientWithFallback.release(ESCROW, 0, attestation);
 
     expect(result.mode).toBe("direct");
     expect(result.transactionHash).toBe("0xtxhash");
+    // The direct-call path must pass the 8-field tuple verbatim so viem
+    // can encode the full Attestation struct for the MilestoneEscrow ABI.
     expect(mockWallet.callContract).toHaveBeenCalledWith(
       ESCROW,
       mockAbi,
       "release",
-      [0n],
+      [
+        0n,
+        [
+          attestation.escrowAddress,
+          attestation.jobId,
+          attestation.evidenceHash,
+          attestation.tier,
+          attestation.verified,
+          attestation.timestamp,
+          attestation.nonce,
+          attestation.signature,
+        ],
+      ],
     );
   });
 
