@@ -443,13 +443,30 @@ describe("scanGcode", () => {
     expect(violations.some((v) => v.rule === "gcode_dangerous_command")).toBe(true);
   });
 
+  it("detects G28 homing as dangerous (added in 351433c — can crash extruder mid-print)", () => {
+    const violations = scanGcode("G1 X10\nG28\nG1 X20", 300);
+    const g28Violation = violations.find(
+      (v) => v.rule === "gcode_dangerous_command" && /G28/.test(v.message),
+    );
+    expect(g28Violation).toBeDefined();
+    expect(g28Violation!.severity).toBe("block");
+  });
+
+  it("does not flag G28.1 / G28.2 variants (not a bare auto-home)", () => {
+    const violations = scanGcode("G28.1\nG1 X10 Y20 Z0.2\nM104 S200", 260);
+    const dangerous = violations.filter((v) => v.rule === "gcode_dangerous_command");
+    expect(dangerous).toHaveLength(0);
+  });
+
   it("detects temperature violations", () => {
     const violations = scanGcode("M104 S300\nG1 X10", 260);
     expect(violations.some((v) => v.rule === "gcode_temperature_exceeded")).toBe(true);
   });
 
-  it("allows safe gcode", () => {
-    const violations = scanGcode("G28\nG1 X10 Y20 Z0.2\nM104 S200", 260);
+  it("allows safe gcode (no homing, no e-stop, temps within cap)", () => {
+    // NOTE: G28 was removed from this fixture after 351433c added it to the
+    // dangerous list. A pure print sequence (move, extrude, heat) is safe.
+    const violations = scanGcode("G1 X10 Y20 Z0.2\nM104 S200\nM109 S200", 260);
     expect(violations).toHaveLength(0);
   });
 
