@@ -1,7 +1,7 @@
 /**
  * KernelKeychain — BIP-32 key derivation for kernel-held signing keys.
  *
- * The HLOS pattern: agents route data but cannot forge kernel signatures.
+ * Agents route data but cannot forge kernel signatures.
  * The kernel has its own signing key at derivation path m/44'/60'/0'/1/0,
  * separate from the agent's operational key at m/44'/60'/0'/0/0.
  *
