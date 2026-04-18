@@ -20,6 +20,28 @@ import {
   getSettlementService,
 } from "../services/settlement-service.js";
 import type { EvidenceBundle } from "@pcc/spec";
+import type { OracleAttestation } from "@pcc/contracts";
+
+// ---------------------------------------------------------------------------
+// Attestation fixture — required on every release() path
+// ---------------------------------------------------------------------------
+
+/** Deterministic test attestation bound to the test escrow address. */
+function mkAttestation(
+  escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
+): OracleAttestation {
+  return {
+    escrowAddress,
+    jobId: "job-001",
+    evidenceHash:
+      "0x570b1e0000000000000000000000000000000000000000000000000000000001" as `0x${string}`,
+    tier: 0,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "d".repeat(64)) as `0x${string}`,
+    signature: "0x" as `0x${string}`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -470,6 +492,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     const result = await service.releaseMilestone(
       "job-001",
       0,
+      mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
@@ -493,6 +516,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     const result = await service.releaseMilestone(
       "job-001",
       0,
+      mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
@@ -538,6 +562,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     const result = await service.releaseMilestone(
       "job-001",
       0,
+      mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
@@ -555,6 +580,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     const result = await service.releaseMilestone(
       "job-001",
       0,
+      mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
@@ -601,6 +627,7 @@ describe("releaseMilestone → Auto Story Royalty Payment", () => {
     await service.releaseMilestone(
       "job-001",
       0,
+      mkAttestation(),
       "0xDeAdBeEf00000000000000000000000000000001",
     );
 
