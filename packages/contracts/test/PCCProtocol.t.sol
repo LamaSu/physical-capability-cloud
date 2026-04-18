@@ -53,6 +53,7 @@ contract PCCProtocolTest is Test {
         returns (IPCCOracle.Attestation memory)
     {
         return IPCCOracle.Attestation({
+            version: 1,
             escrowAddress: escrowAddr,
             jobId: "job-test",
             evidenceHash: evidenceHash,
@@ -60,6 +61,7 @@ contract PCCProtocolTest is Test {
             verified: true,
             timestamp: block.timestamp,
             nonce: keccak256(abi.encode(escrowAddr, evidenceHash, block.timestamp)),
+            extraData: hex"",
             signature: hex""
         });
     }

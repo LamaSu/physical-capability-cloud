@@ -56,6 +56,12 @@ contract MilestoneEscrow {
         bool challengerWon;
     }
 
+    // ── Constants ────────────────────────────────────────────────────────
+
+    /// @notice The attestation schema version this escrow accepts. Kept in
+    ///         lockstep with PCCProtocol.SUPPORTED_ATTESTATION_VERSION.
+    uint8 public constant SUPPORTED_ATTESTATION_VERSION = 1;
+
     // ── State ────────────────────────────────────────────────────────────
 
     address public payer;
@@ -315,6 +321,11 @@ contract MilestoneEscrow {
         require(msg.sender != m.operator, "Operator cannot self-attest");
         require(m.status == MilestoneStatus.Evidenced, "Evidence not submitted");
         require(attestation.escrowAddress == address(this), "Attestation for wrong escrow");
+        // Defense-in-depth: reject unsupported schema versions early, before
+        // the oracle call. Keeps the escrow consistent with PCCProtocol's
+        // SUPPORTED_ATTESTATION_VERSION guard even if a protocol root is
+        // deployed with a mismatched oracle.
+        require(attestation.version == SUPPORTED_ATTESTATION_VERSION, "Unsupported attestation version");
 
         // Early oracle gate: if a protocol root is configured, fail closed on
         // invalid oracle signatures so a bad attestation never opens the window.

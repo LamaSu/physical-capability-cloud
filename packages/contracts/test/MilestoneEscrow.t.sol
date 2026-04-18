@@ -29,6 +29,7 @@ contract MilestoneEscrowTest is Test {
         returns (IPCCOracle.Attestation memory)
     {
         return IPCCOracle.Attestation({
+            version: 1,
             escrowAddress: address(escrow),
             jobId: "job-test",
             evidenceHash: evidenceHash,
@@ -36,6 +37,7 @@ contract MilestoneEscrowTest is Test {
             verified: true,
             timestamp: block.timestamp,
             nonce: keccak256(abi.encode(evidenceHash, block.timestamp)),
+            extraData: hex"",
             signature: hex""
         });
     }
