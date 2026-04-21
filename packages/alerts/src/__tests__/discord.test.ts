@@ -22,7 +22,7 @@ function makeAlert(overrides?: Partial<Alert>): Alert {
 
 describe("createDiscordNotifier", () => {
   it("POSTs an embed to the webhook URL with the correct color for info", async () => {
-    const fetchImpl = vi.fn(async () => new Response("ok", { status: 204 }));
+    const fetchImpl = vi.fn(async () => new Response("ok", { status: 200 }));
     const notifier = createDiscordNotifier({
       webhookUrl: "https://discord.example/webhook",
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -39,7 +39,7 @@ describe("createDiscordNotifier", () => {
   });
 
   it("uses the critical color for critical severity", async () => {
-    const fetchImpl = vi.fn(async () => new Response("ok", { status: 204 }));
+    const fetchImpl = vi.fn(async () => new Response("ok", { status: 200 }));
     const notifier = createDiscordNotifier({
       webhookUrl: "https://discord.example/webhook",
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -50,7 +50,7 @@ describe("createDiscordNotifier", () => {
   });
 
   it("serializes bigints in context", async () => {
-    const fetchImpl = vi.fn(async () => new Response("ok", { status: 204 }));
+    const fetchImpl = vi.fn(async () => new Response("ok", { status: 200 }));
     const notifier = createDiscordNotifier({
       webhookUrl: "https://discord.example/webhook",
       fetchImpl: fetchImpl as unknown as typeof fetch,
