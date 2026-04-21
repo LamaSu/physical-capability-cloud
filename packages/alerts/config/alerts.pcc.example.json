@@ -1,0 +1,198 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "ringBufferSize": 500,
+  "chainWatchers": [
+    {
+      "label": "pcc-protocol-base-sepolia",
+      "chain": "base-sepolia",
+      "rpcUrl": "https://sepolia.base.org",
+      "address": "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23",
+      "abi": [
+        {
+          "name": "EscrowCreated",
+          "type": "event",
+          "inputs": [
+            { "name": "escrow", "type": "address", "indexed": true },
+            { "name": "payer", "type": "address", "indexed": true },
+            { "name": "arbiter", "type": "address", "indexed": true },
+            { "name": "token", "type": "address", "indexed": false },
+            { "name": "cwmId", "type": "bytes32", "indexed": false }
+          ]
+        },
+        {
+          "name": "FeeCollected",
+          "type": "event",
+          "inputs": [
+            { "name": "escrow", "type": "address", "indexed": true },
+            { "name": "token", "type": "address", "indexed": true },
+            { "name": "fee", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "ProtocolFeeBpsUpdated",
+          "type": "event",
+          "inputs": [
+            { "name": "oldBps", "type": "uint256", "indexed": false },
+            { "name": "newBps", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "GovernorTransferred",
+          "type": "event",
+          "inputs": [
+            { "name": "oldGovernor", "type": "address", "indexed": true },
+            { "name": "newGovernor", "type": "address", "indexed": true }
+          ]
+        },
+        {
+          "name": "RegistriesUpdated",
+          "type": "event",
+          "inputs": [
+            { "name": "identityRegistry", "type": "address", "indexed": false },
+            { "name": "reputationRegistry", "type": "address", "indexed": false },
+            { "name": "validationRegistry", "type": "address", "indexed": false },
+            { "name": "verifierRegistry", "type": "address", "indexed": false }
+          ]
+        }
+      ],
+      "events": [
+        { "name": "EscrowCreated", "onFire": "info" },
+        { "name": "FeeCollected", "onFire": "info" },
+        { "name": "ProtocolFeeBpsUpdated", "onFire": "warning" },
+        { "name": "GovernorTransferred", "onFire": "critical" },
+        { "name": "RegistriesUpdated", "onFire": "warning" }
+      ]
+    },
+    {
+      "label": "escrow-hp-printer-base-sepolia",
+      "chain": "base-sepolia",
+      "rpcUrl": "https://sepolia.base.org",
+      "address": "0x4547ec08474c369fe6b02320199e1f4627691cf7",
+      "abi": [
+        {
+          "name": "EscrowFunded",
+          "type": "event",
+          "inputs": [
+            { "name": "cwmId", "type": "bytes32", "indexed": true },
+            { "name": "totalAmount", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "MilestoneLocked",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "stepId", "type": "bytes32", "indexed": false }
+          ]
+        },
+        {
+          "name": "EvidenceSubmitted",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "evidenceBundleHash", "type": "bytes32", "indexed": false }
+          ]
+        },
+        {
+          "name": "AttestationSubmitted",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "attestationHash", "type": "bytes32", "indexed": false },
+            { "name": "challengeWindowEnd", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "MilestoneReleased",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "operator", "type": "address", "indexed": false },
+            { "name": "amount", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "DisputeFiled",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "challenger", "type": "address", "indexed": false },
+            { "name": "bond", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "DisputeResolved",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "challengerWon", "type": "bool", "indexed": false }
+          ]
+        },
+        {
+          "name": "MilestoneRefunded",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "amount", "type": "uint256", "indexed": false }
+          ]
+        },
+        {
+          "name": "BondSlashed",
+          "type": "event",
+          "inputs": [
+            { "name": "milestoneIndex", "type": "uint256", "indexed": true },
+            { "name": "slashedParty", "type": "address", "indexed": false },
+            { "name": "amount", "type": "uint256", "indexed": false }
+          ]
+        }
+      ],
+      "events": [
+        { "name": "EscrowFunded", "onFire": "info" },
+        { "name": "MilestoneLocked", "onFire": "info" },
+        { "name": "EvidenceSubmitted", "onFire": "info" },
+        { "name": "AttestationSubmitted", "onFire": "info" },
+        { "name": "MilestoneReleased", "onFire": "info" },
+        { "name": "DisputeFiled", "onFire": "warning" },
+        { "name": "DisputeResolved", "onFire": "warning" },
+        { "name": "MilestoneRefunded", "onFire": "warning" },
+        { "name": "BondSlashed", "onFire": "critical" }
+      ]
+    }
+  ],
+  "rpcProbes": [
+    {
+      "label": "base-sepolia",
+      "chain": "base-sepolia",
+      "rpcUrl": "https://sepolia.base.org",
+      "intervalMs": 30000,
+      "p95WarnMs": 2000,
+      "consecutiveWindows": 3,
+      "windowSize": 10
+    },
+    {
+      "label": "sepolia-l1",
+      "chain": "sepolia",
+      "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
+      "intervalMs": 30000,
+      "p95WarnMs": 2500,
+      "consecutiveWindows": 3,
+      "windowSize": 10
+    },
+    {
+      "label": "flow-evm-testnet",
+      "chain": "flow-evm-testnet",
+      "rpcUrl": "https://testnet.evm.nodes.onflow.org",
+      "intervalMs": 60000,
+      "p95WarnMs": 3000,
+      "consecutiveWindows": 3,
+      "windowSize": 10
+    }
+  ],
+  "heartbeats": [
+    { "worker": "pcc-gateway", "maxSilenceMs": 300000 },
+    { "worker": "oracle-worker", "maxSilenceMs": 300000 },
+    { "worker": "verifier-worker", "maxSilenceMs": 600000 }
+  ],
+  "notifiers": {}
+}

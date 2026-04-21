@@ -51,6 +51,27 @@ Config is a JSON object in `ALERTS_CONFIG` (inline) or `ALERTS_CONFIG_FILE` (pat
 
 All numeric fields have sensible defaults (see `config.ts` Zod schema).
 
+### Shipped PCC example: `config/alerts.pcc.example.json`
+
+A ready-to-deploy config is at `packages/alerts/config/alerts.pcc.example.json`:
+
+- **PCCProtocol root** (`0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23`, Base Sepolia) — watches `EscrowCreated`, `FeeCollected`, `ProtocolFeeBpsUpdated`, `GovernorTransferred` (critical), `RegistriesUpdated`.
+- **Live MilestoneEscrow** (HP printer job at `0x4547ec08474c369fe6b02320199e1f4627691cf7`) — watches the full milestone lifecycle; `BondSlashed` is critical, disputes are warnings.
+- **RPC probes** for Base Sepolia, Sepolia L1, and Flow EVM Testnet (the three chains PCC settles on).
+- **Heartbeats** for `pcc-gateway` (5 min), `oracle-worker` (5 min), `verifier-worker` (10 min).
+- **Notifiers** left empty — fill in `notifiers.discord.webhookUrl` before deploy.
+
+To deploy:
+```bash
+# Copy, fill in Discord webhook, then point Railway at it
+cp packages/alerts/config/alerts.pcc.example.json /tmp/alerts.json
+# edit /tmp/alerts.json to set notifiers.discord.webhookUrl
+export ALERTS_CONFIG="$(cat /tmp/alerts.json)"
+# Or: set ALERTS_CONFIG as a Railway env var with the full JSON body.
+```
+
+When new MilestoneEscrow instances are deployed per-job, append another entry to `chainWatchers` pointing at each live escrow address (reuse the same event ABI block).
+
 ## Run
 
 ```bash
