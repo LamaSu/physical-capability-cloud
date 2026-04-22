@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ChallengeService } from "../challenge-service.js";
+import { ChallengeService, type CaptureNonceChallenge } from "../challenge-service.js";
 import type { WorkflowChallenge, ExecutionProof } from "@pcc/spec";
 import { createHash } from "node:crypto";
 
@@ -399,6 +399,169 @@ describe("ChallengeService", () => {
       expect(result.valid).toBe(false);
       // Should have at least 3 failures: challengeId, proofHash, block freshness, expiry
       expect(result.failures.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // CVP: capture-nonce challenges
+  // -------------------------------------------------------------------------
+
+  describe("issueCaptureNonce", () => {
+    // Use small numbers: issueCaptureNonce takes `number`, not `bigint`.
+    const BLOCK_NUMBER_N = 100;
+    const BLOCK_TIMESTAMP_N = 1700000000;
+
+    function makeCaptureNonce(
+      overrides: Partial<Parameters<typeof service.issueCaptureNonce>[0]> = {},
+    ): CaptureNonceChallenge {
+      return service.issueCaptureNonce({
+        issuedBy: ISSUER,
+        scope: SCOPE,
+        visualNonceType: "qr",
+        blockNumber: BLOCK_NUMBER_N,
+        blockHash: BLOCK_HASH,
+        blockTimestamp: BLOCK_TIMESTAMP_N,
+        chainId: CHAIN_ID,
+        ...overrides,
+      });
+    }
+
+    it("issues a well-formed challenge with a QR visual nonce", () => {
+      const challenge = makeCaptureNonce();
+      expect(challenge.challengeId).toBeTruthy();
+      expect(challenge.issuedBy).toBe(ISSUER);
+      expect(challenge.scope).toBe(SCOPE);
+      expect(challenge.blockHash).toBe(BLOCK_HASH);
+      expect(challenge.blockNumber).toBe(BLOCK_NUMBER_N);
+      expect(challenge.blockTimestamp).toBe(BLOCK_TIMESTAMP_N);
+      expect(challenge.chainId).toBe(CHAIN_ID);
+      expect(challenge.visualNonce.type).toBe("qr");
+      expect(challenge.visualNonce.payload).toMatch(/^[0-9a-f]{32}$/);
+      expect(challenge.maxAgeSeconds).toBeGreaterThan(0);
+      expect(challenge.issuedAt).toBeTruthy();
+    });
+
+    it("defaults maxAgeSeconds to 120 when caller omits it", () => {
+      const challenge = makeCaptureNonce();
+      expect(challenge.maxAgeSeconds).toBe(120);
+    });
+
+    it("clamps maxAgeSeconds to 120 even when caller asks for more", () => {
+      const challenge = makeCaptureNonce({ maxAgeSeconds: 600 });
+      expect(challenge.maxAgeSeconds).toBe(120);
+    });
+
+    it("honors maxAgeSeconds below the 120s cap", () => {
+      const challenge = makeCaptureNonce({ maxAgeSeconds: 60 });
+      expect(challenge.maxAgeSeconds).toBe(60);
+    });
+
+    it("generates unique challengeIds on repeated calls", () => {
+      const c1 = makeCaptureNonce();
+      const c2 = makeCaptureNonce();
+      expect(c1.challengeId).not.toBe(c2.challengeId);
+    });
+
+    it("emits a color visual nonce with 6 HSL tuples", () => {
+      const challenge = makeCaptureNonce({ visualNonceType: "color" });
+      expect(challenge.visualNonce.type).toBe("color");
+      const hslCount = challenge.visualNonce.payload.match(/hsl\(/g)?.length ?? 0;
+      expect(hslCount).toBe(6);
+    });
+
+    it("emits a gesture visual nonce as 3 dash-joined words", () => {
+      const challenge = makeCaptureNonce({ visualNonceType: "gesture" });
+      expect(challenge.visualNonce.type).toBe("gesture");
+      const parts = challenge.visualNonce.payload.split("-");
+      expect(parts.length).toBe(3);
+      for (const part of parts) {
+        expect(part).toMatch(/^[a-z]+$/);
+      }
+    });
+  });
+
+  describe("verifyCaptureNonce", () => {
+    const BLOCK_NUMBER_N = 100;
+    const BLOCK_TIMESTAMP_N = 1700000000;
+
+    function issueFresh(
+      overrides: Partial<Parameters<typeof service.issueCaptureNonce>[0]> = {},
+    ): CaptureNonceChallenge {
+      return service.issueCaptureNonce({
+        issuedBy: ISSUER,
+        scope: SCOPE,
+        visualNonceType: "qr",
+        blockNumber: BLOCK_NUMBER_N,
+        blockHash: BLOCK_HASH,
+        blockTimestamp: BLOCK_TIMESTAMP_N,
+        chainId: CHAIN_ID,
+        ...overrides,
+      });
+    }
+
+    it("accepts a response with matching id, fresh time, and matching nonce echo", () => {
+      const challenge = issueFresh();
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: challenge.challengeId,
+        submittedAt: BLOCK_TIMESTAMP_N + 30,
+        visualNonceEcho: challenge.visualNonce.payload,
+      });
+      expect(result.valid).toBe(true);
+      expect(result.reason).toBeUndefined();
+    });
+
+    it("rejects a response whose challengeId does not match", () => {
+      const challenge = issueFresh();
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: "wrong-id",
+        submittedAt: BLOCK_TIMESTAMP_N + 10,
+        visualNonceEcho: challenge.visualNonce.payload,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/challengeId/);
+    });
+
+    it("rejects a response submitted after the maxAgeSeconds window (expiry)", () => {
+      const challenge = issueFresh({ maxAgeSeconds: 30 });
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: challenge.challengeId,
+        submittedAt: BLOCK_TIMESTAMP_N + 31, // 1s past window
+        visualNonceEcho: challenge.visualNonce.payload,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/expired/);
+    });
+
+    it("rejects a response whose visualNonce echo differs from the issued payload", () => {
+      const challenge = issueFresh();
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: challenge.challengeId,
+        submittedAt: BLOCK_TIMESTAMP_N + 5,
+        visualNonceEcho: "00".repeat(16), // valid shape, wrong value
+      });
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/visualNonce/);
+    });
+
+    it("rejects a response submitted before the anchor block timestamp", () => {
+      const challenge = issueFresh();
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: challenge.challengeId,
+        submittedAt: BLOCK_TIMESTAMP_N - 1,
+        visualNonceEcho: challenge.visualNonce.payload,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/earlier than anchor/);
+    });
+
+    it("accepts a response exactly at the maxAgeSeconds boundary", () => {
+      const challenge = issueFresh({ maxAgeSeconds: 30 });
+      const result = service.verifyCaptureNonce(challenge, {
+        challengeId: challenge.challengeId,
+        submittedAt: BLOCK_TIMESTAMP_N + 30, // exactly at window end
+        visualNonceEcho: challenge.visualNonce.payload,
+      });
+      expect(result.valid).toBe(true);
     });
   });
 });
