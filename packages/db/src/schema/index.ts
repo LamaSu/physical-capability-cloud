@@ -20,3 +20,4 @@ export * from "./a2a-messages.js";
 export * from "./governance.js";
 export * from "./templates.js";
 export * from "./analytics.js";
+export * from "./capture.js";
