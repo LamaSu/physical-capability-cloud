@@ -98,6 +98,7 @@ export {
 } from "./oracle/index.js";
 export {
   ChallengeService,
+  type CaptureNonceChallenge,
   SessionKeyService,
   computeAssuranceScore,
   masterKeyFromSeed,

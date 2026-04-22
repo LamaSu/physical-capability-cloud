@@ -203,7 +203,7 @@ export interface CaptureChainClient {
       jobId: `0x${string}`;
       challengeId: `0x${string}`;
       blockAnchor: number;
-      capturedAt: number;
+      capturedAt: bigint;
       attestationsRoot: `0x${string}`;
       attesterCount: number;
     };
@@ -754,9 +754,7 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
       // Fall back to 0 if absent (CC0 captures without a challenge).
       const blockAnchor = 0; // challenge.blockNumber not surfaced in the result;
       // wire later once verifier persists it on the result.
-      const capturedAt = parsedResult
-        ? Math.floor(Date.now() / 1000)
-        : Math.floor(Date.now() / 1000);
+      const capturedAt = BigInt(Math.floor(Date.now() / 1000));
 
       const attestationsRoot = (
         "0x" + "0".repeat(64)

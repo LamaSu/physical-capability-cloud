@@ -79,15 +79,14 @@ function buildProductionAdapters(): CaptureVerifierAdapters {
   const playintegrity = new PlayIntegrityAdapter();
   const webauthn = new WebAuthnAdapter({ requireUserVerification: true });
 
-  // Detector needs its own adapter bundle — share the C2PA + platform
-  // adapters so a single cold-start hit covers both paths. Camera + DePIN
-  // + face-landmarker adapters are not wired in Wave 4 (optional; detector
-  // degrades gracefully when absent).
-  const detector = new CaptureDetector({
-    c2pa,
-    appattest,
-    playintegrity,
-  });
+  // Detector uses a different adapter interface (CaptureDetectorAdapters:
+  // faceLandmarker/c2paParser/platformAttestation/cameraAttestation/
+  // depinAttestation) than the verifier (CaptureVerifierAdapters: webauthn/
+  // c2pa/appattest/playintegrity). Camera + DePIN + face-landmarker adapters
+  // are not wired in Wave 4 — detector degrades gracefully when absent,
+  // returning a permissive CC0 ceiling so the verifier's G1..G6 gates do
+  // all the load-bearing classification.
+  const detector = new CaptureDetector({});
 
   return {
     webauthn,
