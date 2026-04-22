@@ -119,7 +119,12 @@ async function frameBlobToBitmap(
   }
 
   try {
-    const blob = new Blob([bytes]);
+    // Copy into a plain ArrayBuffer so the Blob constructor doesn't trip
+    // over TS 5.7's stricter ArrayBufferLike/SharedArrayBuffer split
+    // (bytes.buffer is ArrayBufferLike and not assignable to BlobPart).
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    const blob = new Blob([copy.buffer]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return await (globalThis as any).createImageBitmap(blob);
   } catch {
