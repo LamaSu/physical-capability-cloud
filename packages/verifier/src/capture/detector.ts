@@ -915,7 +915,12 @@ export class CaptureDetector {
           5,
           "pass5_platform_attestation",
           `verification failed: sig=${r.signatureValid} nonce=${r.nonceMatches} ttl=${r.withinTtl} integrity=${r.integrity}`,
-          r,
+          {
+            signatureValid: r.signatureValid,
+            nonceMatches: r.nonceMatches,
+            withinTtl: r.withinTtl,
+            integrity: r.integrity,
+          },
         ),
         raiseCeiling: false,
       };
