@@ -59,7 +59,11 @@ export type SessionAction =
   | "touchstone_response"
   | "attestation_sign"
   | "heartbeat"
-  | "quote_respond";
+  | "quote_respond"
+  // Capture Verification Protocol (CVP) — scope that authorizes a sessionKey
+  // to sign a CaptureManifest. Not included in DEFAULT_SESSION_KEY_CONFIG
+  // (operators must opt in per-session).
+  | "capture_submit";
 
 /**
  * Scope restrictions for a session key.
