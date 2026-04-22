@@ -2,10 +2,10 @@
   "task": "Build Capture Verification Protocol into PCC — airtight, every route, user opt-in + auto-detect + on-chain verification",
   "classification": "build",
   "started_at": "2026-04-21T23:51:25Z",
-  "updated_at": "2026-04-22T20:10:00Z",
-  "status": "running",
-  "current_phase": "Phase 9: Integrate + Checkpoint. CVP build substantially complete — Waves 1-5 committed, Wave 6 ALCOA+ cross-facade wiring documented as deferred.",
-  "progress_pct": 95,
+  "updated_at": "2026-04-22T20:15:00Z",
+  "status": "completed",
+  "current_phase": "COMPLETED. CVP build delivered Waves 1-5; Wave 6 ALCOA+ deferred with documented plan. Memory checkpoint written.",
+  "progress_pct": 100,
   "branch": "capture-verification-protocol",
   "base_branch": "master",
   "phases": [
@@ -20,7 +20,7 @@
     {"id": 6, "name": "Wave 3 — Adapters + On-Chain", "status": "completed", "started_at": "2026-04-22T01:05:00Z", "completed_at": "2026-04-22T19:30:00Z", "notes": "contracts-foxtrot-2: CaptureClassRegistry.sol (136abd8) + tests (5172c78, 27 fns) + Base Sepolia deploy script (3967466). Real adapter integrations landed via verifier-juliet."},
     {"id": 7, "name": "Wave 4 — Gateway Routes", "status": "completed", "started_at": "2026-04-22T19:32:00Z", "completed_at": "2026-04-22T19:55:00Z", "notes": "gateway-golf: 4 /api/capture/* routes (challenge/upload/anchor/status), captureRoutes registered in server.ts, operator policy extended with minCaptureClass+requireAnchor, capture-policy gate in job-submit, 2 drizzle migrations (capture_verdicts + capture_anchors), 35 tests green. Follow-up commit 211f483 fixed detector adapter shape mismatch + bigint conversion + CaptureNonceChallenge export."},
     {"id": 8, "name": "Wave 5 — Tests + Smoke + ALCOA+", "status": "completed", "started_at": "2026-04-22T19:55:00Z", "completed_at": "2026-04-22T20:05:00Z", "notes": "Smoke script committed 946cbef (scripts/smoke-cvp.sh, 174 lines, exercises all 4 capture endpoints end-to-end, tolerates 202 deferred anchor when registry not deployed). ALCOA+ full cross-facade wiring documented as deferred Wave 6 in ai/research/cvp-alcoa-integration.md (4e8c3c1) — AssuranceScore captureClass multiplier from Wave 1 remains live."},
-    {"id": 9, "name": "Integrate + Checkpoint", "status": "running", "started_at": "2026-04-22T20:05:00Z", "notes": "Final integrate phase: commit documentation, update status, memory checkpoint."}
+    {"id": 9, "name": "Integrate + Checkpoint", "status": "completed", "started_at": "2026-04-22T20:05:00Z", "completed_at": "2026-04-22T20:15:00Z", "notes": "Committed ALCOA+ deferral doc (4e8c3c1), status update (6b26031), memory checkpoint at ~/.claude/projects/C--Users-globa/memory/pcc-cvp-completion.md. CVP build shipped — ready for user to push to lamasu + open PR."}
   ],
   "agents": [
     {"name": "scout-alpha", "role": "wheel-scout", "model": "sonnet", "status": "completed", "spawned_at": "2026-04-21T23:57:00Z", "completed_at": "2026-04-22T00:02:30Z", "phase": "Phase 2", "summary": "27 solutions across 8 topics. 3 ADOPT / 5 EXTEND / 3 BUILD.", "iteration": null, "max_iterations": null},
