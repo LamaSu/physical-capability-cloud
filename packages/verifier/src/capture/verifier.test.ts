@@ -263,12 +263,25 @@ function mockDepinPass(): DePINAttestationAdapter {
 }
 
 function mkAdapters(overrides: Partial<CaptureDetectorAdapters & CaptureVerifierAdapters> = {}): CaptureVerifierAdapters {
+  // Resolve the verifier-side adapters first (these are what the
+  // CaptureVerifier actually consults during G2/G5). Tests commonly override
+  // `c2pa`, `appattest`, `playintegrity`, `camera`, `depin` directly.
+  const c2pa = overrides.c2pa ?? overrides.c2paParser ?? mockC2PAPass("com.truepic", false, true);
+  const appattest = overrides.appattest ?? overrides.platformAttestation ?? mockPlatformPass("strong");
+  const playintegrity = overrides.playintegrity ?? mockPlayIntegrityPass("strong");
+  const camera = overrides.camera ?? overrides.cameraAttestation ?? mockCameraPass();
+  const depin = overrides.depin ?? overrides.depinAttestation ?? mockDepinPass();
+
+  // The detector shares the *same* adapter objects so its detection results
+  // are consistent with what the verifier will conclude. Exception: the
+  // detector has no notion of an Android-vs-Apple split, so we give it the
+  // appattest adapter (it treats all platform attestations uniformly).
   const detectorAdapters: CaptureDetectorAdapters = {
     faceLandmarker: overrides.faceLandmarker ?? mockFaceLandmarker(),
-    c2paParser: overrides.c2paParser ?? mockC2PAPass("com.truepic", false, true),
-    platformAttestation: overrides.platformAttestation ?? mockPlatformPass("strong"),
-    cameraAttestation: overrides.cameraAttestation ?? mockCameraPass(),
-    depinAttestation: overrides.depinAttestation ?? mockDepinPass(),
+    c2paParser: c2pa,
+    platformAttestation: appattest,
+    cameraAttestation: camera,
+    depinAttestation: depin,
   };
   return {
     webauthn: overrides.webauthn ?? mockWebAuthnAdapter({
@@ -278,11 +291,11 @@ function mkAdapters(overrides: Partial<CaptureDetectorAdapters & CaptureVerifier
       signCount: 8,
       credentialId: "cred-abc",
     }),
-    c2pa: detectorAdapters.c2paParser!,
-    appattest: detectorAdapters.platformAttestation!,
-    playintegrity: overrides.playintegrity ?? mockPlayIntegrityPass("strong"),
-    camera: detectorAdapters.cameraAttestation,
-    depin: detectorAdapters.depinAttestation,
+    c2pa,
+    appattest,
+    playintegrity,
+    camera,
+    depin,
     detector: overrides.detector ?? new CaptureDetector(detectorAdapters),
     challengeService: overrides.challengeService ?? new ChallengeService(),
   };
