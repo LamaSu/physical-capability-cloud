@@ -13,10 +13,14 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*",
     "@aztec/bb.js": "0.58.0",
-    "@noir-lang/noir_js": "0.36.0",
+    "@contentauth/c2pa-node": "0.5.4",
+    "@googleapis/playintegrity": "23.0.1",
     "@noir-lang/backend_barretenberg": "0.36.0",
+    "@noir-lang/noir_js": "0.36.0",
+    "@pcc/spec": "workspace:*",
+    "@simplewebauthn/server": "13.3.0",
+    "appattest-checker-node": "1.0.3",
     "starknet": "^9.4.2",
     "tweetnacl": "^1.0.3",
     "viem": "^2.21.0"
