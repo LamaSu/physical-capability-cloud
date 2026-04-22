@@ -3,6 +3,7 @@ export * from "./common.js";
 export * from "./rats.js";
 export * from "./capability.js";
 export * from "./evidence.js";
+export * from "./capture.js";
 export * from "./cwm.js";
 export * from "./kernel.js";
 export * from "./kernel-manifest.js";
