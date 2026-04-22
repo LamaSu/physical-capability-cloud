@@ -94,6 +94,14 @@ export const EvidenceEventTypeSchema = z.enum([
   "tee_attestation",
   "custody_sealed", "custody_handoff_initiated", "custody_handoff_confirmed",
   "courier_pickup_confirmed", "courier_delivery_confirmed",
+  // CVP events (paired with packages/spec/src/types/evidence.ts).
+  "capture_class_declared",
+  "capture_nonce_issued",
+  "capture_submitted",
+  "capture_signature_verified",
+  "capture_liveness_result",
+  "capture_multi_sensor_fusion",
+  "capture_anchor_committed",
 ]);
 
 export const EvidenceSourceSchema = z.object({
