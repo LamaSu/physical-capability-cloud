@@ -71,6 +71,8 @@ export interface ChainDeployment {
     oracleVerifier?: Address;
     /** VerifierRegistry — verifier staking */
     verifierRegistry?: Address;
+    /** CaptureClassRegistry — on-chain CVP anchors (deployed 2026-04-22) */
+    captureClassRegistry?: Address;
     /** ERC-8004 registries */
     identityRegistry?: Address;
     reputationRegistry?: Address;
@@ -123,6 +125,8 @@ export const deployments: Record<string, ChainDeployment> = {
       reputationRegistry: "0x354860589bE457b4a4D195F4063659c2CD7899E8",
       validationRegistry: "0xb09ca0eC847e66f67a1288eFF3237E8904C9d395",
       verifierRegistry: "0x5D84285C487B1dc631B55512D5423A12A48cd97A",
+      // CaptureClassRegistry — CVP on-chain anchor (deployed 2026-04-22, block 40562689)
+      captureClassRegistry: "0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66",
     },
     blockExplorer: "https://sepolia.basescan.org",
   },
