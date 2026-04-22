@@ -418,7 +418,7 @@ export interface DetectionResult {
 
 const CaptureClassSchema = z.nativeEnum(CaptureClass);
 
-const SensorFusionSampleSchema: z.ZodType<SensorFusionSample> = z.object({
+const SensorFusionSampleSchema = z.object({
   ts: z.number().nonnegative(),
   accel: z.tuple([z.number(), z.number(), z.number()]),
   gyro: z.tuple([z.number(), z.number(), z.number()]),
@@ -430,7 +430,7 @@ const SensorFusionSampleSchema: z.ZodType<SensorFusionSample> = z.object({
   distance: z.number().optional(),
 });
 
-const SensorFusionTraceSchema: z.ZodType<SensorFusionTrace> = z.object({
+const SensorFusionTraceSchema = z.object({
   deviceId: z.string().min(1),
   startedAt: z.string().datetime(),
   endedAt: z.string().datetime(),
@@ -439,7 +439,7 @@ const SensorFusionTraceSchema: z.ZodType<SensorFusionTrace> = z.object({
   jerkScore: z.number().optional(),
 });
 
-const WebAuthnAssertionSchema: z.ZodType<WebAuthnAssertion> = z.object({
+const WebAuthnAssertionSchema = z.object({
   credentialId: z.string().min(1),
   signature: z.string().min(1),
   authenticatorData: z.string().min(1),
@@ -448,10 +448,13 @@ const WebAuthnAssertionSchema: z.ZodType<WebAuthnAssertion> = z.object({
   signCount: z.number().int().nonnegative(),
 });
 
-const PlatformAttestationSourceSchema: z.ZodType<PlatformAttestationSource> =
-  z.enum(["appattest", "devicecheck", "playintegrity"]);
+const PlatformAttestationSourceSchema = z.enum([
+  "appattest",
+  "devicecheck",
+  "playintegrity",
+]);
 
-const PlatformAttestationSchema: z.ZodType<PlatformAttestation> = z.object({
+const PlatformAttestationSchema = z.object({
   source: PlatformAttestationSourceSchema,
   token: z.string().min(1),
   nonce: z.string().min(1),
@@ -463,12 +466,12 @@ const SHA256Schema = z
   .string()
   .regex(/^sha256:[a-f0-9]{64}$/, "Must be sha256:<64 hex chars>");
 
-const C2PAAssertionSchema: z.ZodType<C2PAAssertion> = z.object({
+const C2PAAssertionSchema = z.object({
   label: z.string().min(1),
   data: z.unknown(),
 });
 
-const C2PAManifestSchema: z.ZodType<C2PAManifest> = z.object({
+const C2PAManifestSchema = z.object({
   version: z.string().min(1),
   claimGenerator: z.string().min(1),
   assertions: z.array(C2PAAssertionSchema),
@@ -477,7 +480,7 @@ const C2PAManifestSchema: z.ZodType<C2PAManifest> = z.object({
   signatureValid: z.boolean().optional(),
 });
 
-const CameraAttestationSchema: z.ZodType<CameraAttestation> = z.object({
+const CameraAttestationSchema = z.object({
   make: z.string().min(1),
   model: z.string().min(1),
   serial: z.string().optional(),
@@ -487,14 +490,14 @@ const CameraAttestationSchema: z.ZodType<CameraAttestation> = z.object({
   c2paManifest: C2PAManifestSchema.optional(),
 });
 
-const DePINSourceSchema: z.ZodType<DePINSource> = z.enum([
+const DePINSourceSchema = z.enum([
   "dimo",
   "hivemapper",
   "iotex",
   "dephy",
 ]);
 
-const DePINAttestationSchema: z.ZodType<DePINAttestation> = z.object({
+const DePINAttestationSchema = z.object({
   source: DePINSourceSchema,
   deviceId: z.string().min(1),
   txHash: z.string().min(1),
@@ -508,6 +511,11 @@ const DePINAttestationSchema: z.ZodType<DePINAttestation> = z.object({
  * Enforces: the discriminant (`class`), the mandatory hashing fields, and
  * the per-class optional sub-manifests. Unknown fields are stripped by
  * default (zod passthrough NOT enabled).
+ *
+ * The schema is annotated as `z.ZodType<CaptureManifest>` via an explicit
+ * cast rather than a strict generic because Zod's inferred SHA256 string
+ * ("string") is not literally assignable to the template-literal alias
+ * `SHA256 = \`sha256:\${string}\``. The regex guarantees runtime safety.
  */
 export const CaptureManifestSchema: z.ZodType<CaptureManifest> = z.object({
   class: CaptureClassSchema,
@@ -520,4 +528,4 @@ export const CaptureManifestSchema: z.ZodType<CaptureManifest> = z.object({
   c2paManifest: C2PAManifestSchema.optional(),
   camera: CameraAttestationSchema.optional(),
   depin: DePINAttestationSchema.optional(),
-});
+}) as unknown as z.ZodType<CaptureManifest>;
