@@ -117,10 +117,16 @@ pnpm dev
 | Doc | What's in it |
 |-----|-------------|
 | [Sponsor Integrations](docs/SPONSOR_INTEGRATIONS.md) | Deep technical docs for every integration — code paths, file tables, verification commands |
+| [Capture Verification](docs/CAPTURE_VERIFICATION.md) | Operator guide for CVP: capture classes CC0-CC5, API endpoints, gates G1-G6, anti-spoof policy, ALCOA+ mapping |
+| [Capture Classes](docs/CAPTURE_CLASSES.md) | Quick reference: CC0-CC5 multiplier table, tier compatibility matrix, decision tree for picking a class |
 | [Hackathon Submission](HACKATHON_SUBMISSION.md) | 390-word project summary for PL Genesis |
 | [Bounty Submissions](BOUNTY_SUBMISSIONS.md) | Every bounty we're claiming and why we qualify |
 | [Whitepaper](apps/dashboard/public/whitepaper.md) | Full protocol spec — architecture, assurance tiers, evidence chain, settlement |
 | [CLAUDE.md](CLAUDE.md) | Complete developer reference — all 25 packages, env vars, commands, invariants |
+
+### Capture Verification Protocol (CVP)
+
+CVP adds per-frame authenticity to evidence. Six capture classes (CC0-CC5) define how strongly the bytes themselves are pinned to a real device at a real moment: CC0 = unattested upload (0.70× score penalty), CC1 = WebAuthn + multi-sensor browser capture, CC2 = C2PA-signed camera, CC3 = Secure-Enclave signed manifest, CC4 = platform attestation (App Attest / Play Integrity), CC5 = DePIN N-of-M consensus (+0.05 bonus). Captures are verified through six gates (structural, signature, freshness, detection, attestation, consensus) and anchored on Base Sepolia via `CaptureClassRegistry` at `0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66`. See the [operator guide](docs/CAPTURE_VERIFICATION.md) and [class reference](docs/CAPTURE_CLASSES.md).
 
 ## Deployed contracts
 
