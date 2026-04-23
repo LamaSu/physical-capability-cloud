@@ -243,6 +243,38 @@ export interface ComplianceReportDTO {
   driftAlerts: DriftAlertDTO[];
   /** Assurance score rollup in [0.0, 1.0] — compressed compliance scalar */
   assuranceScore?: number;
+  /**
+   * Capture Verification Protocol (CVP) aggregate — present only when at
+   * least one captureVerdict row was found for the recent jobs on this
+   * capability. Omitted entirely when no capture verification has occurred
+   * so legacy callers see a zero-width change.
+   *
+   * See ai/research/cvp-alcoa-integration.md for the wiring.
+   */
+  captureVerification?: CaptureVerificationSummaryDTO;
+}
+
+/**
+ * Aggregate capture-verdict summary attached to ComplianceReportDTO when
+ * CVP verdicts exist for the capability's recent jobs. Mirrors the histogram
+ * + pass-rate shape the dashboard expects.
+ */
+export interface CaptureVerificationSummaryDTO {
+  /** Total number of captureVerdict rows feeding this report */
+  verdictCount: number;
+  /** Ratio of PASS verdicts over verdictCount (0.0..1.0) */
+  passRate: number;
+  /** Count of verdict === "PASS" */
+  passCount: number;
+  /** Count of verdict === "FAIL" */
+  failCount: number;
+  /** Count of verdict === "PARTIAL" */
+  partialCount: number;
+  /**
+   * Histogram of verifiedClass over CC0..CC5. Keys are the string form
+   * ("CC0", "CC1", ...). Missing classes map to 0.
+   */
+  classHistogram: Record<string, number>;
 }
 
 /** Result of checking a bundle against tier requirements */
