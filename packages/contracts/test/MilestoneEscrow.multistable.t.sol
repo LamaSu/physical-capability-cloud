@@ -20,6 +20,16 @@ import "./mocks/MockReturnFalseERC20.sol";
  *           - release pays out in the milestone's currency
  */
 contract MilestoneEscrowMultiStableTest is Test {
+    // Re-declared locally so Foundry's vm.expectEmit matches by topic/signature.
+    // Must mirror the events in MilestoneEscrow exactly.
+    event StablecoinAllowed(
+        address indexed token,
+        address indexed attestor,
+        string reportUri,
+        uint16 maxDeviationBps
+    );
+    event StablecoinRevoked(address indexed token);
+
     MilestoneEscrow escrow;
     MockUSDC usdc; // default token
     MockUSDT usdt;
@@ -100,7 +110,7 @@ contract MilestoneEscrowMultiStableTest is Test {
 
     function test_allowStablecoin_emitsEvent() public {
         vm.expectEmit(true, true, false, true);
-        emit IStablecoinEvents.StablecoinAllowed(address(dai), attestor, "ar://dai-report", 25);
+        emit StablecoinAllowed(address(dai), attestor, "ar://dai-report", 25);
         vm.prank(payer);
         escrow.allowStablecoin(address(dai), attestor, "ar://dai-report", 25);
     }
@@ -151,7 +161,7 @@ contract MilestoneEscrowMultiStableTest is Test {
         escrow.allowStablecoin(address(dai), attestor, "", 0);
 
         vm.expectEmit(true, false, false, false);
-        emit IStablecoinEvents.StablecoinRevoked(address(dai));
+        emit StablecoinRevoked(address(dai));
         vm.prank(payer);
         escrow.revokeStablecoin(address(dai));
     }
@@ -480,18 +490,6 @@ contract MilestoneEscrowMultiStableTest is Test {
         assertTrue(rtoken.reentrancyAttempted());
         assertTrue(rtoken.reentrancyReverted());
     }
-}
-
-// ── Interface shim for vm.expectEmit matching ──────────────────────
-
-interface IStablecoinEvents {
-    event StablecoinAllowed(
-        address indexed token,
-        address indexed attestor,
-        string reportUri,
-        uint16 maxDeviationBps
-    );
-    event StablecoinRevoked(address indexed token);
 }
 
 // ── Minimal fake PCCProtocol-compatible root for fee tests ────────
