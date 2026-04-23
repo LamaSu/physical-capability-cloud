@@ -10,8 +10,8 @@ the protocol honors it forever (until contributor ships a v2 under a new NFT).
 
 - [x] 1. Vesting contracts (OZ VestingWallet, Gnosis, Sablier Lockup)
 - [x] 2. Streaming money (Superfluid, Sablier v2, Drips)
-- [ ] 3. Bonding curves (Balancer LBP, Uniswap v3 tick, Bancor)
-- [ ] 4. Rate limits / TWAMM (Uniswap v4 hooks)
+- [x] 3. Bonding curves (Balancer LBP, Uniswap v3 tick, Bancor)
+- [x] 4. Rate limits / TWAMM (Uniswap v4 hooks)
 - [ ] 5. On-chain step functions (arrays, packed uints, LUTs)
 - [ ] 6. Piecewise linear encoding (ABDK, PRB Math, Solmate)
 - [ ] 7. Commit-reveal schemes (IPFS/Arweave + hash commit)
@@ -288,5 +288,178 @@ well-known pattern.
 
 ---
 
-## Checkpoint: Sections 1-2 complete. Committing.
+## 3. Bonding Curves
+
+### 3.1 Uniswap V3 TickMath (reference for cheap curve evaluation)
+
+**Source**: https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/TickMath.sol
+
+This is the most gas-optimized curve library in production DeFi. It computes
+`sqrt(1.0001 ^ tick) * 2^96` as a Q64.96 fixed-point number using a chain
+of bit-level multiplications.
+
+**Constants:**
+- `MIN_TICK = -887272`
+- `MAX_TICK = 887272`
+- `MIN_SQRT_RATIO = 4295128739`
+- `MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342`
+
+**Implementation technique:** Square-and-multiply using precomputed hex
+constants, one per power-of-two tick spacing. The Solidity-assembly
+loop unrolls the bit decomposition of the tick. Gas is roughly constant
+across the tick range — about **4-8k gas** for `getSqrtRatioAtTick` per
+call, based on community benchmarks (Aperture Finance reports 6-30% savings
+over baseline using inline assembly).
+
+**Reverse function `getTickAtSqrtRatio`:** binary search over the MSB of
+the ratio, then bit-by-bit refinement. More expensive than forward (~12k+
+gas) but still cheap enough for routine use.
+
+**Applicability to our rate schedule:**
+- Direct: if we want "rate that exponentially decays with time", we can
+  encode decay rate as a tick-like value and use TickMath-style evaluation.
+- Inspiration: the square-and-multiply pattern with precomputed constants
+  is THE trick for cheap on-chain curves. If we ship a "decay" template,
+  we use this technique.
+
+**Fit score 1-5: 4** for the technique, not for direct use.
+
+### 3.2 Bancor Bonding Curve Formula
+
+**Source**: https://github.com/relevant-community/bonding-curve/blob/master/contracts/BancorFormula.sol
+
+**Core formula for purchase return:**
+```
+Return = supply * ((1 + deposit / reserve) ^ (weight / MAX_WEIGHT) - 1)
+```
+Where `MAX_WEIGHT = 1_000_000` (parts per million).
+
+**Key math primitive:** `power(baseN, baseD, expN, expD)` — computes
+`(baseN / baseD) ^ (expN / expD) * 2^precision` using Taylor-series log/exp
+with precomputed tables.
+
+**Gas cost:** roughly **8-25k gas** per `power()` call depending on how
+many terms the Taylor series requires for the given precision.
+
+**Applicability:** Bancor's `power()` is the most general fractional-exponent
+function available on-chain. Far too expensive for per-job rate lookup
+(we want <3k gas), but possible if we cache results or use it only for
+one-time rate initialization.
+
+**Fit score 1-5: 2.** Too expensive for per-job evaluation.
+
+### 3.3 Balancer LBP (Liquidity Bootstrapping Pool)
+
+**Source**: https://docs.balancer.fi/concepts/explore-available-balancer-pools/liquidity-bootstrapping-pool.html
+
+**Model:** A weighted pool where token weights change linearly over a
+bounded time window. Owner sets `startTime`, `endTime`, `startWeights`,
+`endWeights`. The `_getNormalizedWeight(token)` function interpolates:
+```
+weight(t) = startWeight + (endWeight - startWeight) * (t - startTime) / (endTime - startTime)
+```
+
+**Immutability:** Partial. The LBP is a "smart pool" — the pool controller
+can change parameters mid-flight (within limits). Not fully immutable. LBPs
+are explicitly less trustless than shared pools.
+
+**Fit for our rate schedule:** The **time-interpolated weight formula** is
+directly applicable to our "rate decays linearly from A to B over T seconds"
+template. Gas is trivial: two SLOADs + one division.
+
+But we do NOT want the Balancer mutability model. We want: set the linear
+ramp parameters once, NEVER change them.
+
+**Fit score 1-5: 3.** Use the linear-interpolation formula, skip the
+controller pattern.
+
+---
+
+## 4. TWAMM and Time-Weighted Execution
+
+### 4.1 Uniswap V4 TWAMM Hook
+
+**Source**: https://blog.uniswap.org/v4-twamm-hook
+**Reference impl**: https://github.com/FrankieIsLost/TWAMM (original academic impl)
+
+**Model:** Long-term orders are deposited into a hook. Each order has:
+- `sellRate` (tokens sold per block) — encoded as uint256 with a scaling factor
+- `expiration` (block or timestamp when order ends)
+- `owner` address
+
+At each block, the hook aggregates all active orders with the same
+`expiration bucket` into a single OrderPool. The per-block settlement
+computes the cumulative sale rate `R = sum(sellRate_i)` across all active
+orders and produces an implicit constant-rate swap against the AMM pool.
+
+**Key data structure (from the Frankie reference):**
+```solidity
+struct LongTermOrder {
+    uint256 id;
+    uint256 expirationBlock;
+    uint256 saleRate;       // tokens per block, scaled
+    address owner;
+    uint256 sellTokenId;    // 0 or 1 in the pool
+    uint256 saleRateEndingPerBlock;
+}
+
+struct OrderPool {
+    uint256 currentSalesRate;
+    uint256 rewardFactor;
+    // earning factors at key expirations (sparse array / linked list)
+    mapping(uint256 => uint256) salesRateEndingPerBlock;
+    mapping(uint256 => uint256) rewardFactorAtBlock;
+}
+```
+
+**Immutability:** Orders are immutable once placed. The hook has no "update"
+method — only `withdrawProceeds` and `cancel` (cancel just zeroes the
+sell rate going forward, doesn't edit the historical record).
+
+**Fit for our requirement:** **direct.** TWAMM's "rate per block, immutable
+once placed, sparse storage of rate changes at expiration boundaries" is
+structurally identical to what we want for "contributor rate per job with
+step changes at time boundaries". The step encoding is the same.
+
+**Fit score 1-5: 4** for the step-function storage pattern. 5 for the
+"rate cannot be updated" invariant.
+
+### 4.2 Uniswap V4 Dynamic Fees (via hooks)
+
+**Source**: https://docs.uniswap.org/contracts/v4/concepts/dynamic-fees
+
+V4 pools can have dynamic fees set via a hook on every swap. The hook is
+called before each swap and returns the fee. This is literally the pattern
+"pool fee as a function of time/volume/liquidity". The schedule is encoded
+in whatever logic the hook implements — fully free-form Solidity.
+
+**Gas cost:** the hook call itself is ~2k-5k gas overhead per swap. The
+fee computation cost depends on what the hook does.
+
+**Applicability:** V4 hooks are the closest thing to a "declarative fee
+schedule at protocol level". But hooks are mutable code — if we want
+immutable per-contributor rate, we still need to put the schedule in
+an immutable data structure (mapping + no setter). We don't need to
+implement a V4 hook; we need to implement the pattern.
+
+**Fit score 1-5: 3** for architectural inspiration.
+
+### 4.3 Rate Limits for Governance (Compound Comet, Morpho)
+
+Brief note: governance-controlled rate-limit patterns in Compound Comet
+use `IInterestRateModel` — a separate contract that returns interest as a
+function of utilization. Governance can swap the IRM address. This is the
+**anti-pattern** for us: we want immutable schedule per contributor, no
+swap path.
+
+But one useful idea: **separate the schedule as an interface**. An
+`IRateSchedule.evaluate(job) view returns (uint16 bp)` interface lets the
+protocol consume rate logic from multiple sources. If each contributor's
+schedule lives in its own immutable contract address, the protocol
+queries that address and gets a rate back. The contract is the immutable
+artifact, the interface is the standard.
+
+---
+
+## Checkpoint: Sections 3-4 complete.
 
