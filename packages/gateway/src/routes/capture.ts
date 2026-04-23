@@ -45,7 +45,7 @@ import {
 import { canonicalJSON } from "@pcc/verifier/dist/capture/verifier.js";
 import type { CaptureVerifierResult } from "@pcc/verifier/dist/capture/verifier.js";
 import type { CaptureNonceChallenge } from "@pcc/verifier";
-import { schema, eq } from "@pcc/store";
+import { schema, eq, desc } from "@pcc/store";
 import { getStore } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -891,7 +891,266 @@ export async function captureRoutes(app: FastifyInstance): Promise<void> {
       };
     },
   );
+
+  // ═════════════════════════════════════════════════════════════════
+  // GET /api/capture/verdicts — paginated list (thin query route for MCP)
+  //
+  // Added in Wave 6 to back the `pcc_list_verdicts` MCP tool. Pure read,
+  // no side-effects. `jobId` filter is optional; `limit` defaults to 50
+  // and is clamped to 200 per request.
+  // ═════════════════════════════════════════════════════════════════
+
+  const ListVerdictsQuerySchema = z.object({
+    jobId: z.string().min(1).optional(),
+    limit: z.coerce.number().int().positive().max(200).optional(),
+  });
+
+  app.get(
+    "/api/capture/verdicts",
+    { preHandler: [requireAuth] },
+    async (req, reply) => {
+      const parsed = ListVerdictsQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: "invalid_query",
+          message: "Invalid query params",
+          details: parsed.error.flatten(),
+        });
+      }
+      const { jobId, limit } = parsed.data;
+      const effectiveLimit = Math.min(limit ?? 50, 200);
+
+      const { db } = getStore();
+      const rows = jobId
+        ? db
+            .select()
+            .from(captureVerdicts)
+            .where(eq(captureVerdicts.jobId, jobId))
+            .orderBy(desc(captureVerdicts.createdAt))
+            .limit(effectiveLimit)
+            .all()
+        : db
+            .select()
+            .from(captureVerdicts)
+            .orderBy(desc(captureVerdicts.createdAt))
+            .limit(effectiveLimit)
+            .all();
+
+      pipelineTelemetry.emit(jobId ?? "capture-list", "evidence_capture", "completed", {
+        metadata: {
+          subphase: "list_verdicts",
+          jobId: jobId ?? null,
+          count: rows.length,
+          limit: effectiveLimit,
+        },
+      });
+
+      return {
+        verdicts: rows.map((r) => ({
+          id: r.id,
+          jobId: r.jobId,
+          operatorId: r.operatorId,
+          captureHash: r.captureHash,
+          manifestHash: r.manifestHash,
+          declaredClass: r.declaredClassStr,
+          verifiedClass: r.verifiedClassStr,
+          verdict: r.verdict,
+          gatesPassed: r.gatesPassed ?? [],
+          gatesFailed: r.gatesFailed ?? [],
+          warnings: r.warnings ?? [],
+          anchorCandidate: r.anchorCandidate === 1,
+          createdAt: r.createdAt,
+        })),
+        count: rows.length,
+        limit: effectiveLimit,
+        jobId: jobId ?? null,
+      };
+    },
+  );
+
+  // ═════════════════════════════════════════════════════════════════
+  // GET /api/capture/registry/:captureHash — on-chain lookup (Wave 6)
+  //
+  // Read-only viem `readContract` against CaptureClassRegistry.getAnchor.
+  // Returns null if the capture has not been anchored. Thin query route
+  // backing the `pcc_capture_class_registry` MCP tool.
+  // ═════════════════════════════════════════════════════════════════
+
+  app.get<{ Params: { captureHash: string } }>(
+    "/api/capture/registry/:captureHash",
+    { preHandler: [requireAuth] },
+    async (req, reply) => {
+      const { captureHash } = req.params;
+      const registryAddress = process.env.CAPTURE_REGISTRY_ADDRESS as
+        | `0x${string}`
+        | undefined;
+      if (!registryAddress) {
+        return reply.status(202).send({
+          status: "deferred" as const,
+          reason: "CaptureClassRegistry contract not deployed",
+          onchain: null,
+        });
+      }
+
+      const hashBytes32 = toBytes32(captureHash);
+      try {
+        const { createPublicClient, http } = await import("viem");
+        const { baseSepolia } = await import("viem/chains");
+        const rpcUrl = process.env.PCC_RPC_URL ?? "https://sepolia.base.org";
+        const publicClient = createPublicClient({
+          chain: baseSepolia,
+          transport: http(rpcUrl),
+        });
+
+        const exists = (await publicClient.readContract({
+          address: registryAddress,
+          abi: CAPTURE_CLASS_REGISTRY_READ_ABI,
+          functionName: "getExists",
+          args: [hashBytes32],
+        })) as boolean;
+
+        if (!exists) {
+          return {
+            address: registryAddress,
+            captureHash: hashBytes32,
+            onchain: null,
+          };
+        }
+
+        const anchorTuple = (await publicClient.readContract({
+          address: registryAddress,
+          abi: CAPTURE_CLASS_REGISTRY_READ_ABI,
+          functionName: "getAnchor",
+          args: [hashBytes32],
+        })) as {
+          captureHash: `0x${string}`;
+          manifestHash: `0x${string}`;
+          declaredClass: number;
+          verifiedClass: number;
+          submittedBy: `0x${string}`;
+          jobId: `0x${string}`;
+          challengeId: `0x${string}`;
+          blockAnchor: number;
+          capturedAt: bigint;
+          attestationsRoot: `0x${string}`;
+          attesterCount: number;
+        };
+
+        return {
+          address: registryAddress,
+          captureHash: hashBytes32,
+          onchain: {
+            declaredClass: CAPTURE_CLASS_VALUES[anchorTuple.declaredClass] ?? `CC${anchorTuple.declaredClass}`,
+            verifiedClass: CAPTURE_CLASS_VALUES[anchorTuple.verifiedClass] ?? `CC${anchorTuple.verifiedClass}`,
+            manifestHash: anchorTuple.manifestHash,
+            submittedBy: anchorTuple.submittedBy,
+            jobId: anchorTuple.jobId,
+            challengeId: anchorTuple.challengeId,
+            blockAnchor: anchorTuple.blockAnchor,
+            capturedAt: anchorTuple.capturedAt.toString(),
+            attestationsRoot: anchorTuple.attestationsRoot,
+            attesterCount: anchorTuple.attesterCount,
+          },
+        };
+      } catch (err) {
+        req.log.error({ err }, "capture_registry read failed");
+        return reply.status(500).send({
+          error: "registry_read_failed",
+          message: (err as Error).message,
+        });
+      }
+    },
+  );
+
+  // ═════════════════════════════════════════════════════════════════
+  // GET /api/capture/verifier-health — adapter load + staleness (Wave 6)
+  //
+  // Thin query route for the `pcc_verifier_health` MCP tool. Reports
+  // which CaptureVerifier adapters are loaded and their staleness.
+  // Returns static "ok" unless PCC_VERIFIER_HEALTH is overridden in env.
+  // ═════════════════════════════════════════════════════════════════
+
+  app.get(
+    "/api/capture/verifier-health",
+    { preHandler: [requireAuth] },
+    async (_req, _reply) => {
+      // Static adapter list matches `buildProductionAdapters` in
+      // packages/gateway/src/capture/verifier-factory.ts.
+      const adaptersLoaded = [
+        "c2pa",
+        "webauthn",
+        "appattest",
+        "playintegrity",
+      ] as const;
+
+      const staleness: Record<string, string> = {};
+      for (const a of adaptersLoaded) {
+        staleness[a] = "ok";
+      }
+
+      // Optional env override: PCC_VERIFIER_HEALTH={"c2pa":"stale", ...}
+      const override = process.env.PCC_VERIFIER_HEALTH;
+      if (override) {
+        try {
+          const parsed = JSON.parse(override) as Record<string, string>;
+          for (const [k, v] of Object.entries(parsed)) {
+            staleness[k] = v;
+          }
+        } catch {
+          // Ignore malformed override — leave defaults.
+        }
+      }
+
+      return {
+        adaptersLoaded: [...adaptersLoaded],
+        staleness,
+        challengeCacheSize: challengeCache.size,
+        registryDeployed: Boolean(process.env.CAPTURE_REGISTRY_ADDRESS),
+        network: process.env.PCC_NETWORK ?? "base-sepolia",
+        checkedAt: new Date().toISOString(),
+      };
+    },
+  );
 }
+
+// ---------------------------------------------------------------------------
+// CaptureClassRegistry read ABI (Wave 6 — for `getAnchor` / `getExists`)
+// ---------------------------------------------------------------------------
+
+const CAPTURE_CLASS_REGISTRY_READ_ABI = [
+  {
+    type: "function",
+    name: "getExists",
+    stateMutability: "view",
+    inputs: [{ name: "captureHash", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "getAnchor",
+    stateMutability: "view",
+    inputs: [{ name: "captureHash", type: "bytes32" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "captureHash", type: "bytes32" },
+          { name: "manifestHash", type: "bytes32" },
+          { name: "declaredClass", type: "uint8" },
+          { name: "verifiedClass", type: "uint8" },
+          { name: "submittedBy", type: "address" },
+          { name: "jobId", type: "bytes32" },
+          { name: "challengeId", type: "bytes32" },
+          { name: "blockAnchor", type: "uint32" },
+          { name: "capturedAt", type: "uint64" },
+          { name: "attestationsRoot", type: "bytes32" },
+          { name: "attesterCount", type: "uint16" },
+        ],
+      },
+    ],
+  },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Test-only exports (kept in-module for single-import-surface)
