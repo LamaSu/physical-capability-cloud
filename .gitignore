@@ -16,6 +16,7 @@ packages/gateway/data/
 .playwright-cli/
 ai/*
 !ai/research/
+!ai/architecture/
 docs/TECHNOECONOMIC_PLAN.md
 docs/VENDOR_STACK_AUDIT.md
 docs/BLIND_SPOTS_AND_RISKS.md
