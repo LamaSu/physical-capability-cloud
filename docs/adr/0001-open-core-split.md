@@ -116,6 +116,8 @@ MilestoneEscrow.release(attestation)
 
 ## SWF (Sovereign Wealth Fund) governance scope clarification
 
+See also: `docs/SOVEREIGN_WEALTH_FUND.md` for the full governance model.
+
 The SWF governance module (`/api/swf/*`, `packages/swf`) is Apache 2.0 and stays in the public repo. It governs protocol-level decisions (fee splits for rewards pools, treasury allocations, proposals) — not oracle operation. The 2.35% settlement fee is hardcoded in the MilestoneEscrow contract and not SWF-controlled; SWF participants only vote on how the accumulated fee pool is distributed downstream. This keeps the rent mechanism (oracle attestation) structurally separate from the decentralised governance story.
 
 If SWF ever votes to change settlement economics, it would do so by proposing a new escrow contract deployment and migrating — it cannot reach inside the oracle.
