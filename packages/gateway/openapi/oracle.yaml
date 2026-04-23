@@ -1,0 +1,245 @@
+openapi: 3.1.0
+
+info:
+  title: PCC Oracle — gateway→oracle settlement attestation contract
+  version: 1.0.0
+  description: |
+    HTTP contract between the open-source PCC gateway and the proprietary
+    PCC Oracle (LamaSu/pcc-oracle, private). This spec is the canonical
+    source of truth for the wire format; both repos generate types from it.
+
+    Do not edit the TypeScript interfaces in `oracle-client.ts` or the oracle
+    server without first updating this file and regenerating.
+
+    See: docs/adr/0001-open-core-split.md for the architectural rationale.
+
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: PCC Protocol
+    url: https://capability.network
+
+servers:
+  - url: http://192.168.108.72:4100
+    description: Internal Spark-hosted oracle (dev + production default)
+  - url: http://localhost:4100
+    description: Local development
+  - url: "{protocol}://{host}:{port}"
+    description: Custom deployment
+    variables:
+      protocol: { default: https, enum: [http, https] }
+      host:     { default: oracle.internal.lamasu }
+      port:     { default: "4100" }
+
+tags:
+  - name: verification
+    description: Settlement attestation
+  - name: diagnostics
+    description: Operational introspection
+
+paths:
+  /verify:
+    post:
+      tags: [verification]
+      summary: Issue a settlement attestation for an evidence bundle
+      description: |
+        Called by the gateway before `MilestoneEscrow.release(...)`. The oracle
+        verifies the evidence bundle against tier requirements, applies
+        proprietary policy (replay checks, identity verification, etc.), and —
+        on success — returns a signed attestation that MilestoneEscrow.release
+        accepts on-chain.
+
+        Failure modes:
+          - 401: `x-oracle-key` missing or invalid
+          - 422: evidence does not meet tier requirements (attestation is null)
+          - 429: per-gateway rate limit exceeded
+          - 5xx: oracle internal error (gateway must not settle)
+      operationId: verify
+      parameters:
+        - in: header
+          name: x-oracle-key
+          required: true
+          description: Per-gateway API key issued by LamaSu.
+          schema: { type: string, minLength: 16 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OracleVerifyRequest" }
+            examples:
+              typical:
+                summary: Tier-2 verification of an on-chain escrow
+                value:
+                  escrowAddress: "0x4547ec08c31e0ac7b2b74b71de9c5ca7db7b1f22"
+                  jobId: "job-abc-123"
+                  kernelId: "kernel-printshop-alpha"
+                  evidenceHash: "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                  assuranceTier: 2
+                  chainId: 84532
+                  requestedAt: "2026-04-23T18:45:00.123Z"
+      responses:
+        "200":
+          description: Attestation issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OracleResponse" }
+        "401":
+          description: Missing or invalid oracle key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OracleError" }
+        "422":
+          description: Evidence did not meet tier requirements
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OracleResponse" }
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OracleError" }
+
+  /health:
+    get:
+      tags: [diagnostics]
+      summary: Liveness probe (no auth)
+      operationId: health
+      responses:
+        "200":
+          description: Oracle is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version, chainId]
+                properties:
+                  status:  { type: string, enum: [ok] }
+                  version: { type: string, example: "1.0.0" }
+                  chainId: { type: integer, example: 84532 }
+
+components:
+  schemas:
+
+    OracleVerifyRequest:
+      type: object
+      required:
+        - escrowAddress
+        - jobId
+        - kernelId
+        - evidenceHash
+        - assuranceTier
+        - chainId
+      properties:
+        escrowAddress:
+          type: string
+          pattern: "^0x[a-fA-F0-9]{40}$"
+          description: On-chain MilestoneEscrow address. Must be checksummed EVM address.
+        jobId:
+          type: string
+          minLength: 1
+          description: Gateway-assigned job UUID or slug.
+        kernelId:
+          type: string
+          minLength: 1
+          description: Operator kernel identifier (site + device set).
+        evidenceHash:
+          type: string
+          pattern: "^0x[a-fA-F0-9]{64}$"
+          description: SHA-256 of the canonicalized evidence bundle.
+        assuranceTier:
+          type: integer
+          enum: [0, 1, 2, 3]
+          description: Requested assurance tier. See docs/ARCH.md §Assurance Tiers.
+        chainId:
+          type: integer
+          description: EVM chain ID where the escrow lives (Base Sepolia = 84532).
+        requestedAt:
+          type: string
+          format: date-time
+          description: Client-side timestamp; included in anti-replay check.
+
+    OracleResponse:
+      type: object
+      required: [result, attestation, oracle, chainId]
+      properties:
+        result:
+          $ref: "#/components/schemas/OracleResult"
+        attestation:
+          oneOf:
+            - $ref: "#/components/schemas/OracleAttestation"
+            - type: "null"
+          description: Signed attestation. `null` when `result.verified = false`.
+        oracle:
+          type: string
+          pattern: "^0x[a-fA-F0-9]{40}$"
+          description: Oracle signer address, recoverable from `attestation.signature`.
+        chainId:
+          type: integer
+
+    OracleResult:
+      type: object
+      required: [verified, tier, reason, checks]
+      properties:
+        verified:
+          type: boolean
+        tier:
+          type: integer
+          enum: [0, 1, 2, 3]
+        reason:
+          type: string
+          description: Human-readable explanation. On success = "ok"; on failure = failure mode.
+          examples:
+            - "ok"
+            - "evidence_hash_mismatch"
+            - "tier_not_met:missing_photo"
+            - "replay_detected"
+            - "identity_invalid"
+            - "mock_verification"
+        checks:
+          type: object
+          additionalProperties: { type: boolean }
+          description: Per-check boolean flags. Core keys listed below; oracle may add more.
+          properties:
+            evidenceExists:  { type: boolean }
+            hashMatches:     { type: boolean }
+            tierMet:         { type: boolean }
+            notReplay:       { type: boolean }
+            identityValid:   { type: boolean }
+
+    OracleAttestation:
+      type: object
+      required:
+        - escrowAddress
+        - jobId
+        - evidenceHash
+        - tier
+        - verified
+        - timestamp
+        - nonce
+        - signature
+      properties:
+        escrowAddress: { type: string, pattern: "^0x[a-fA-F0-9]{40}$" }
+        jobId:         { type: string }
+        evidenceHash:  { type: string, pattern: "^0x[a-fA-F0-9]{64}$" }
+        tier:          { type: integer, enum: [0, 1, 2, 3] }
+        verified:      { type: boolean }
+        timestamp:
+          type: integer
+          description: Unix seconds at which the oracle signed. Escrow checks this against its challenge window.
+        nonce:
+          type: string
+          pattern: "^0x[a-fA-F0-9]{64}$"
+          description: Random 32-byte nonce; gateway must echo into escrow call.
+        signature:
+          type: string
+          pattern: "^0x[a-fA-F0-9]{130}$"
+          description: 65-byte ECDSA signature (r||s||v) over EIP-712 typed data.
+
+    OracleError:
+      type: object
+      required: [error]
+      properties:
+        error:   { type: string }
+        message: { type: string }
+        code:    { type: string, nullable: true }
