@@ -23,6 +23,7 @@ docs/LAUNCH_PLAYBOOK.md
 docs/PROTOCOL_ECONOMICS.md
 docs/reports/
 .claude/worktrees/
+CLAUDE.local.md
 
 # Judge research — local only, never commit
 ai/research/judges-*.md
