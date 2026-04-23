@@ -159,6 +159,22 @@ export interface OperatorPolicy {
   /** Operator bond percentage override (0 = use default per assurance tier) */
   bondPercentOverride: number;
 
+  // ── Capture Verification Protocol (CVP — Wave 4) ────────────
+  /**
+   * Minimum CaptureClass required for jobs on this kernel. Any inbound
+   * job whose evidence resolves to a class below this threshold is
+   * rejected at gateway submission time. `"CC0"` = accept everything,
+   * `"CC5"` = only accept sovereign-grade evidence. Undefined means
+   * "not enforced" and falls back to the assurance-tier implication.
+   */
+  minCaptureClass?: "CC0" | "CC1" | "CC2" | "CC3" | "CC4" | "CC5";
+  /**
+   * When true, operators refuse jobs whose capture verdict is not a PASS
+   * with `anchorCandidate:true`. Useful for regulated contexts where the
+   * on-chain audit trail is required.
+   */
+  requireAnchor?: boolean;
+
   // ── Notifications ───────────────────────────────────────────
   notifications: {
     channels: NotificationChannel[];

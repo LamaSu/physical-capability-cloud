@@ -1,0 +1,8 @@
+{
+  "address": "0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66",
+  "blockNumber": 40562689,
+  "chainId": 84532,
+  "contract": "CaptureClassRegistry",
+  "gatewayOracle": "0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B",
+  "verifierRegistry": "0x5D84285C487B1dc631B55512D5423A12A48cd97A"
+}

@@ -5,6 +5,7 @@ import {
   type VerificationFinding,
   type DriftAlert,
 } from '../assurance-score.js';
+import { CaptureClass } from '@pcc/spec';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -317,5 +318,83 @@ describe('computeAssuranceScore', () => {
     expect(missingPrimary).toBeLessThan(missingSecondary);
     expect(missingPrimary).toBe(0.85);
     expect(missingSecondary).toBe(0.93);
+  });
+
+  // ------------------------------------------------------------------
+  // Capture Verification Protocol (CVP) — captureClass multiplier
+  // ------------------------------------------------------------------
+
+  // 19. Back-compat: omitting captureClass behaves exactly as before.
+  it('is back-compat: omitting captureClass yields identical score to pre-CVP callers', () => {
+    const without = computeAssuranceScore({
+      findings: [pass('ok')],
+      alcoaPrinciples: allTrueAlcoa(),
+    });
+    // Sanity: still a perfect score when nothing is wrong.
+    expect(without).toBe(1.0);
+  });
+
+  // 20. CC1 applies a ~0.92 multiplier to the base score.
+  it('applies ~0.92 multiplier when captureClass is CC1', () => {
+    const score = computeAssuranceScore({
+      findings: [pass('ok')],
+      alcoaPrinciples: allTrueAlcoa(),
+      captureClass: CaptureClass.CC1,
+    });
+    // base = 1.0, multiplier = 0.92 -> 0.92
+    expect(score).toBeCloseTo(0.92, 4);
+  });
+
+  // 21. CC3 is neutral (1.0 multiplier).
+  it('applies 1.0 multiplier when captureClass is CC3 (no effect)', () => {
+    const score = computeAssuranceScore({
+      findings: [pass('ok')],
+      alcoaPrinciples: allTrueAlcoa(),
+      captureClass: CaptureClass.CC3,
+    });
+    expect(score).toBe(1.0);
+  });
+
+  // 22. CC0 applies the steepest penalty (0.70).
+  it('applies 0.70 multiplier when captureClass is CC0', () => {
+    const score = computeAssuranceScore({
+      findings: [pass('ok')],
+      alcoaPrinciples: allTrueAlcoa(),
+      captureClass: CaptureClass.CC0,
+    });
+    expect(score).toBeCloseTo(0.70, 4);
+  });
+
+  // 23. Critical-finding gate still zeroes the score regardless of class.
+  it('critical-finding gate still returns 0.0 even with captureClass set', () => {
+    const score = computeAssuranceScore({
+      findings: [fail('bundle_hash_integrity', 'critical')],
+      alcoaPrinciples: allTrueAlcoa(),
+      captureClass: CaptureClass.CC5,
+    });
+    expect(score).toBe(0.0);
+  });
+
+  // 24. Critical-finding gate short-circuits even for CC0 (hard zero wins).
+  it('critical-finding gate zeroes the score regardless of a CC0 penalty', () => {
+    const score = computeAssuranceScore({
+      findings: [fail('bundle_hash_integrity', 'critical')],
+      alcoaPrinciples: allTrueAlcoa(),
+      captureClass: CaptureClass.CC0,
+    });
+    expect(score).toBe(0.0);
+  });
+
+  // 25. captureClass multiplies alongside drift/touchstone.
+  it('composes multiplicatively with drift and touchstone multipliers', () => {
+    const score = computeAssuranceScore({
+      findings: [pass('ok')],
+      alcoaPrinciples: allTrueAlcoa(),
+      driftAlerts: [drift('medium')],
+      captureClass: CaptureClass.CC2,
+    });
+    // base = 1.0, driftMult = 0.8, touchstoneMult = 1.0, classMult = 0.96
+    // raw = 1.0 * 0.8 * 1.0 * 0.96 = 0.768
+    expect(score).toBe(0.768);
   });
 });

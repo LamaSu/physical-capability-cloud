@@ -7,17 +7,55 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "default": "./dist/index.js" },
-    "./primitives": { "types": "./dist/primitives/index.d.ts", "import": "./dist/primitives/index.js" },
-    "./layout": { "types": "./dist/layout/index.d.ts", "import": "./dist/layout/index.js" },
-    "./charts": { "types": "./dist/charts/index.d.ts", "import": "./dist/charts/index.js" },
-    "./builder": { "types": "./dist/builder/index.d.ts", "import": "./dist/builder/index.js" },
-    "./workflow": { "types": "./dist/workflow/index.d.ts", "import": "./dist/workflow/index.js" },
-    "./agent": { "types": "./dist/agent/index.d.ts", "import": "./dist/agent/index.js" },
-    "./evidence": { "types": "./dist/evidence/index.d.ts", "import": "./dist/evidence/index.js" },
-    "./escrow": { "types": "./dist/escrow/index.d.ts", "import": "./dist/escrow/index.js" },
-    "./kernel": { "types": "./dist/kernel/index.d.ts", "import": "./dist/kernel/index.js" },
-    "./onboarding": { "types": "./dist/onboarding/index.d.ts", "import": "./dist/onboarding/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./primitives": {
+      "types": "./dist/primitives/index.d.ts",
+      "import": "./dist/primitives/index.js"
+    },
+    "./layout": {
+      "types": "./dist/layout/index.d.ts",
+      "import": "./dist/layout/index.js"
+    },
+    "./charts": {
+      "types": "./dist/charts/index.d.ts",
+      "import": "./dist/charts/index.js"
+    },
+    "./builder": {
+      "types": "./dist/builder/index.d.ts",
+      "import": "./dist/builder/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "import": "./dist/agent/index.js"
+    },
+    "./evidence": {
+      "types": "./dist/evidence/index.d.ts",
+      "import": "./dist/evidence/index.js"
+    },
+    "./escrow": {
+      "types": "./dist/escrow/index.d.ts",
+      "import": "./dist/escrow/index.js"
+    },
+    "./kernel": {
+      "types": "./dist/kernel/index.d.ts",
+      "import": "./dist/kernel/index.js"
+    },
+    "./onboarding": {
+      "types": "./dist/onboarding/index.d.ts",
+      "import": "./dist/onboarding/index.js"
+    },
+    "./capture": {
+      "types": "./dist/capture/index.d.ts",
+      "import": "./dist/capture/index.js"
+    }
   },
   "scripts": {
     "build": "tsc",
@@ -27,17 +65,22 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@contentauth/c2pa-web": "0.7.1",
+    "@mediapipe/tasks-vision": "0.10.34",
     "@number-flow/react": "^0.6.0",
     "@pcc/spec": "workspace:*",
+    "@simplewebauthn/browser": "13.3.0",
     "claudebuttons": "^1.2.0",
+    "clsx": "^2.1.0",
+    "framer-motion": "^12.0.0",
+    "qrcode": "1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "recharts": "^2.15.0",
-    "framer-motion": "^12.0.0",
-    "clsx": "^2.1.0",
     "tailwind-merge": "^3.0.0"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "typescript": "^5.4.0",

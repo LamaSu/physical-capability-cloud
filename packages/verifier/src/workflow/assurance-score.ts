@@ -19,6 +19,11 @@
  * same output.
  */
 
+import {
+  CAPTURE_CLASS_MULTIPLIERS,
+  type CaptureClass,
+} from "@pcc/spec";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -57,6 +62,12 @@ export interface AssuranceScoreInput {
    *  0 = solo verifier (no bonus), 1.0 = maximum agreement (bonus capped at +0.05).
    *  Maps linearly: bonus = min(0.05, consensusAgreement * 0.05). */
   consensusAgreement?: number;
+
+  /** Capture Verification Protocol (CVP) class. When provided, the base
+   *  score is multiplied by `CAPTURE_CLASS_MULTIPLIERS[captureClass]`:
+   *  CC0=0.70, CC1=0.92, CC2=0.96, CC3=CC4=CC5=1.0. When omitted the
+   *  multiplier is 1.0 (back-compat with pre-CVP callers). */
+  captureClass?: CaptureClass;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +117,13 @@ const DRIFT_PENALTIES: Record<string, number> = {
  *   5. driftMultiplier = product of (1 - penalty) for each drift alert.
  *      Penalties: critical=1.0, high=0.5, medium=0.2, low=0.05.
  *   6. touchstoneMultiplier = 0.1 if touchstoneResult.passed === false, else 1.0.
- *   7. consensusBonus = min(0.05, consensusAgreement * 0.05). Capped at +0.05.
- *   8. final = clamp(0, 1, base * driftMultiplier * touchstoneMultiplier + consensusBonus)
- *   9. Round to 4 decimal places.
+ *   7. captureClassMultiplier = CAPTURE_CLASS_MULTIPLIERS[captureClass]
+ *      when captureClass provided, else 1.0.
+ *   8. consensusBonus = min(0.05, consensusAgreement * 0.05). Capped at +0.05.
+ *   9. final = clamp(0, 1,
+ *        base * driftMultiplier * touchstoneMultiplier * captureClassMultiplier
+ *        + consensusBonus)
+ *  10. Round to 4 decimal places.
  *
  * Empty findings -> 1.0 (nothing to fail = perfect).
  *
@@ -122,6 +137,7 @@ export function computeAssuranceScore(input: AssuranceScoreInput): number {
     driftAlerts,
     touchstoneResult,
     consensusAgreement,
+    captureClass,
   } = input;
 
   // Empty input: no findings = nothing to fail = perfect score
@@ -179,8 +195,17 @@ export function computeAssuranceScore(input: AssuranceScoreInput): number {
     consensusBonus = Math.min(0.05, consensusAgreement * 0.05);
   }
 
+  // Capture-class multiplier (CVP). Omitted class -> neutral 1.0, so
+  // pre-CVP callers are unaffected. Applied multiplicatively alongside
+  // drift and touchstone multipliers.
+  const captureClassMultiplier = captureClass
+    ? CAPTURE_CLASS_MULTIPLIERS[captureClass]
+    : 1.0;
+
   // Final composition
-  const raw = (base * driftMultiplier * touchstoneMultiplier) + consensusBonus;
+  const raw =
+    (base * driftMultiplier * touchstoneMultiplier * captureClassMultiplier) +
+    consensusBonus;
   const clamped = Math.max(0.0, Math.min(1.0, raw));
 
   // Round to 4 decimal places
