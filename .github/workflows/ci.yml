@@ -37,6 +37,33 @@ jobs:
       - name: Type check
         run: pnpm -r exec tsc --noEmit
 
+  # License scan — rejects transitive deps with copyleft SPDX licenses
+  # (GPL-*/AGPL-*/SSPL-*) that would contaminate the Apache 2.0 monorepo.
+  # Enforces the open-core-split boundary at the dependency level.
+  # See docs/adr/0001-open-core-split.md.
+  license-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Scan for copyleft licenses
+        run: node scripts/license-scan.mjs
+
   forge-tests:
     runs-on: ubuntu-latest
 
@@ -66,7 +93,7 @@ jobs:
   # — build once, deploy many.
   build-image:
     runs-on: ubuntu-latest
-    needs: [build-and-test, forge-tests]
+    needs: [build-and-test, forge-tests, license-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     permissions:
       contents: read
