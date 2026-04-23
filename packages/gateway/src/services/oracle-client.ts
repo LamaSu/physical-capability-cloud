@@ -3,12 +3,37 @@
  * before allowing settlement.
  *
  * The oracle runs on Spark at http://192.168.108.72:4100 by default.
- * When PCC_ORACLE_KEY is not set, falls back to mock verification
- * so dev/test environments work without the oracle running.
+ *
+ * Mode selection (PCC_ORACLE_MODE):
+ *   - "real": always call the oracle. Missing key or non-hex escrow => throw.
+ *   - "mock": always return mock. Dev/test only; blocked in production.
+ *   - "auto": real if NODE_ENV=production, otherwise mock-on-missing-key.
+ *            This is the default. In production, "auto" behaves like "real".
+ *
+ * Mock mode is ALWAYS rejected when NODE_ENV=production, regardless of other flags.
+ * There is no silent fallback path in prod — misconfiguration surfaces as a loud error.
  */
 
 const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://192.168.108.72:4100";
 const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
+const ORACLE_MODE = (process.env.PCC_ORACLE_MODE ?? "auto").toLowerCase();
+const IS_PROD = process.env.NODE_ENV === "production";
+
+type OracleMode = "real" | "mock" | "auto";
+
+function resolveMode(): OracleMode {
+  if (ORACLE_MODE !== "real" && ORACLE_MODE !== "mock" && ORACLE_MODE !== "auto") {
+    throw new Error(
+      `[oracle] Invalid PCC_ORACLE_MODE "${ORACLE_MODE}". Must be one of: real, mock, auto.`,
+    );
+  }
+  if (ORACLE_MODE === "mock" && IS_PROD) {
+    throw new Error(
+      "[oracle] PCC_ORACLE_MODE=mock is forbidden in production. Set to 'real' and provide PCC_ORACLE_KEY.",
+    );
+  }
+  return ORACLE_MODE as OracleMode;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,21 +78,64 @@ export interface OracleResponse {
 /**
  * Verify a job's evidence with the PCC Verification Oracle.
  *
- * If PCC_ORACLE_KEY is not set, returns a mock verification response
- * so that dev/test environments work without the oracle running.
+ * Mode semantics:
+ *   real: always call oracle; missing key or mock escrow => throw.
+ *   mock: always return mock response (blocked in production).
+ *   auto: prod => real; non-prod => mock if key absent, else real.
  */
 export async function verifyWithOracle(request: OracleVerifyRequest): Promise<OracleResponse> {
+  const mode = resolveMode();
+
+  if (mode === "mock") {
+    return mockVerification(request);
+  }
+
+  const hasHexEscrow = request.escrowAddress.startsWith("0x") && !request.escrowAddress.startsWith("mock");
+
+  if (mode === "real") {
+    if (!ORACLE_KEY) {
+      throw new Error(
+        "[oracle] PCC_ORACLE_MODE=real requires PCC_ORACLE_KEY. Refusing to settle without verification.",
+      );
+    }
+    if (!hasHexEscrow) {
+      throw new Error(
+        `[oracle] PCC_ORACLE_MODE=real requires a real (0x...) escrow address. Got: ${request.escrowAddress}`,
+      );
+    }
+    return callOracle(request);
+  }
+
+  // mode === "auto"
+  if (IS_PROD) {
+    if (!ORACLE_KEY) {
+      throw new Error(
+        "[oracle] Production requires PCC_ORACLE_KEY (auto mode will not fall back to mock in prod).",
+      );
+    }
+    if (!hasHexEscrow) {
+      throw new Error(
+        `[oracle] Production escrow must be on-chain (0x...). Got: ${request.escrowAddress}`,
+      );
+    }
+    return callOracle(request);
+  }
+
+  // auto + non-prod => graceful mock fallback, but loud
   if (!ORACLE_KEY) {
-    console.warn("[oracle] No PCC_ORACLE_KEY set — using mock verification");
+    console.warn("[oracle] PCC_ORACLE_MODE=auto, no PCC_ORACLE_KEY — using mock (dev only).");
     return mockVerification(request);
   }
-
-  // Mock escrow addresses (non-hex) can't be verified on-chain — use mock
-  if (!request.escrowAddress.startsWith("0x") || request.escrowAddress.startsWith("mock")) {
-    console.warn("[oracle] Non-hex escrow address — using mock verification");
+  if (!hasHexEscrow) {
+    console.warn(
+      `[oracle] PCC_ORACLE_MODE=auto, non-hex escrow (${request.escrowAddress}) — using mock (dev only).`,
+    );
     return mockVerification(request);
   }
+  return callOracle(request);
+}
 
+async function callOracle(request: OracleVerifyRequest): Promise<OracleResponse> {
   const res = await fetch(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: {
@@ -90,14 +158,20 @@ export async function verifyWithOracle(request: OracleVerifyRequest): Promise<Or
 
 /**
  * Check if the oracle client is configured with a real API key.
- * When false, all verifications fall back to mock.
  */
 export function isOracleConfigured(): boolean {
   return ORACLE_KEY.length > 0;
 }
 
+/**
+ * Report the effective oracle mode for /api/status and diagnostics.
+ */
+export function getOracleMode(): { mode: OracleMode; keyPresent: boolean; prod: boolean } {
+  return { mode: resolveMode(), keyPresent: ORACLE_KEY.length > 0, prod: IS_PROD };
+}
+
 // ---------------------------------------------------------------------------
-// Mock (dev/test fallback)
+// Mock (dev/test only — never reached in prod)
 // ---------------------------------------------------------------------------
 
 function mockVerification(request: OracleVerifyRequest): OracleResponse {
