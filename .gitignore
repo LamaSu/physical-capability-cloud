@@ -27,3 +27,4 @@ docs/reports/
 # Judge research — local only, never commit
 ai/research/judges-*.md
 ai/research/judges-complete.md
+ai/supervisor/vetting-staging/

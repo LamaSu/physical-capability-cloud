@@ -71,7 +71,17 @@ export type EvidenceEventType =
   | "digital_task_started"
   | "digital_task_completed"
   | "touchstone_dispatched"
-  | "touchstone_verified";
+  | "touchstone_verified"
+  // Capture Verification Protocol (CVP) events — one per meaningful
+  // transition in the capture-verification lifecycle. Emitted by the
+  // gateway and verifier as a capture flows from declaration to anchor.
+  | "capture_class_declared"
+  | "capture_nonce_issued"
+  | "capture_submitted"
+  | "capture_signature_verified"
+  | "capture_liveness_result"
+  | "capture_multi_sensor_fusion"
+  | "capture_anchor_committed";
 
 /** Source device that produced an evidence event */
 export interface EvidenceSource {

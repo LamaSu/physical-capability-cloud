@@ -98,6 +98,7 @@ export {
 } from "./oracle/index.js";
 export {
   ChallengeService,
+  type CaptureNonceChallenge,
   SessionKeyService,
   computeAssuranceScore,
   masterKeyFromSeed,
@@ -111,3 +112,17 @@ export {
   type AssuranceScoreInput,
   type DerivedKey,
 } from "./workflow/index.js";
+export {
+  CaptureDetector,
+  type CaptureDetectorAdapters,
+  type CaptureDetectionInput,
+  type CaptureDetectionResult,
+  type FaceLandmarkerAdapter,
+  type FaceLandmarkerResult,
+  type C2PAParserAdapter,
+  type ParsedC2PA,
+  type PlatformAttestationAdapter,
+  type PlatformAttestationResult,
+  type CameraAttestationAdapter,
+  type DePINAttestationAdapter,
+} from "./capture/index.js";
