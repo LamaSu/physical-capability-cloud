@@ -7,6 +7,7 @@ export type {
   EvidenceInsert,
   EvidenceEventRow,
   EvidenceEventInsert,
+  CaptureVerdictRow,
 } from "./IEvidenceBundleRepository.js";
 export type {
   IEscrowRepository,
