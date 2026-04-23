@@ -16,7 +16,7 @@ import { EvidenceVerifier } from "./evidence-verifier.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ZKProofService } from "./zk-proof-service.js";
 import { BittensorSubnetBridge } from "./bittensor/subnet-bridge.js";
-import { OracleVerificationBridge } from "./oracle/oracle-bridge.js";
+import { OracleVerificationBridge } from "./consensus-oracle/oracle-bridge.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
