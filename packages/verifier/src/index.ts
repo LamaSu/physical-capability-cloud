@@ -95,7 +95,7 @@ export {
   type OracleConfig,
   type OracleLeaderboardEntry,
   type EvaluationResult,
-} from "./oracle/index.js";
+} from "./consensus-oracle/index.js";
 export {
   ChallengeService,
   SessionKeyService,

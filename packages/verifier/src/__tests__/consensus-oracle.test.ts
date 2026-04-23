@@ -11,11 +11,11 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import type { EvidenceBundle, SHA256, Address, Signature } from "@pcc/spec";
-import { UMAOracleAdapter } from "../oracle/uma-adapter.js";
-import { ChainlinkOracleAdapter } from "../oracle/chainlink-adapter.js";
-import { EigenLayerOracleAdapter } from "../oracle/eigenlayer-adapter.js";
-import { OracleVerificationBridge } from "../oracle/oracle-bridge.js";
-import { evaluateEvidence } from "../oracle/evidence-evaluator.js";
+import { UMAOracleAdapter } from "../consensus-oracle/uma-adapter.js";
+import { ChainlinkOracleAdapter } from "../consensus-oracle/chainlink-adapter.js";
+import { EigenLayerOracleAdapter } from "../consensus-oracle/eigenlayer-adapter.js";
+import { OracleVerificationBridge } from "../consensus-oracle/oracle-bridge.js";
+import { evaluateEvidence } from "../consensus-oracle/evidence-evaluator.js";
 import { TMPValidatorBridge } from "../tmp-validator-bridge.js";
 import { EvidenceVerifier } from "../evidence-verifier.js";
 import { CommitmentService } from "../commitment-service.js";
