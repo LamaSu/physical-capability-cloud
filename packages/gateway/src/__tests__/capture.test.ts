@@ -847,3 +847,161 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Section 7 — Thin query routes for MCP (Wave 6 Scope B) — 7 tests
+// GET /api/capture/verdicts
+// GET /api/capture/registry/:captureHash
+// GET /api/capture/verifier-health
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("GET /api/capture/verdicts", () => {
+  async function seedVerdictRow(opts: {
+    id?: string;
+    jobId: string;
+    verdict?: "PASS" | "FAIL" | "PARTIAL";
+    createdAt?: string;
+  }) {
+    const { db } = getStore();
+    const id = opts.id ?? crypto.randomUUID();
+    db.insert(captureVerdicts)
+      .values({
+        id,
+        jobId: opts.jobId,
+        operatorId: AUTH_ADDRESS,
+        captureHash: TEST_CAPTURE_HASH_0X,
+        manifestHash: DUMMY_MANIFEST_HASH,
+        declaredClass: 0,
+        verifiedClass: 0,
+        verdict: opts.verdict ?? "PASS",
+        gatesPassed: [1],
+        gatesFailed: [],
+        warnings: [],
+        anchorCandidate: 1,
+        resultJson: makeVerifierResult({ verdict: opts.verdict ?? "PASS" }),
+        declaredClassStr: "CC0",
+        verifiedClassStr: "CC0",
+        createdAt: opts.createdAt ?? NOW_ISO,
+      })
+      .run();
+    return id;
+  }
+
+  it("returns 401 without auth", async () => {
+    mockSession.mockReturnValue(null);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verdicts",
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("returns recent verdicts newest-first without a jobId filter", async () => {
+    await seedVerdictRow({ jobId: "job-A", createdAt: "2026-04-20T00:00:00.000Z" });
+    await seedVerdictRow({ jobId: "job-B", createdAt: "2026-04-22T00:00:00.000Z" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verdicts",
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.count).toBe(2);
+    expect(body.verdicts[0].jobId).toBe("job-B");
+    expect(body.verdicts[1].jobId).toBe("job-A");
+    expect(body.limit).toBe(50);
+  });
+
+  it("filters by jobId and clamps limit above 200", async () => {
+    await seedVerdictRow({ jobId: "job-target" });
+    await seedVerdictRow({ jobId: "job-other" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verdicts?jobId=job-target&limit=500",
+    });
+    // limit=500 exceeds the Zod max(200); Zod rejects with 400.
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_query");
+  });
+
+  it("accepts a valid limit and returns only matching jobId rows", async () => {
+    await seedVerdictRow({ jobId: "job-target" });
+    await seedVerdictRow({ jobId: "job-other" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verdicts?jobId=job-target&limit=10",
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.count).toBe(1);
+    expect(body.verdicts[0].jobId).toBe("job-target");
+    expect(body.limit).toBe(10);
+    expect(body.jobId).toBe("job-target");
+  });
+});
+
+describe("GET /api/capture/registry/:captureHash", () => {
+  it("returns 401 without auth", async () => {
+    mockSession.mockReturnValue(null);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/capture/registry/${TEST_CAPTURE_HASH_0X}`,
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("returns 202 deferred when CAPTURE_REGISTRY_ADDRESS is unset", async () => {
+    delete process.env.CAPTURE_REGISTRY_ADDRESS;
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/capture/registry/${TEST_CAPTURE_HASH_0X}`,
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.status).toBe("deferred");
+    expect(body.onchain).toBeNull();
+  });
+});
+
+describe("GET /api/capture/verifier-health", () => {
+  it("returns 401 without auth", async () => {
+    mockSession.mockReturnValue(null);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verifier-health",
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("lists the 4 production adapters with ok staleness by default", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/capture/verifier-health",
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.adaptersLoaded).toEqual(["c2pa", "webauthn", "appattest", "playintegrity"]);
+    expect(body.staleness.c2pa).toBe("ok");
+    expect(body.staleness.webauthn).toBe("ok");
+    expect(body.staleness.appattest).toBe("ok");
+    expect(body.staleness.playintegrity).toBe("ok");
+    expect(typeof body.challengeCacheSize).toBe("number");
+    expect(typeof body.registryDeployed).toBe("boolean");
+    expect(typeof body.checkedAt).toBe("string");
+  });
+
+  it("applies PCC_VERIFIER_HEALTH env override when set", async () => {
+    process.env.PCC_VERIFIER_HEALTH = JSON.stringify({ c2pa: "stale" });
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/capture/verifier-health",
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.staleness.c2pa).toBe("stale");
+      expect(body.staleness.webauthn).toBe("ok");
+    } finally {
+      delete process.env.PCC_VERIFIER_HEALTH;
+    }
+  });
+});
