@@ -18,11 +18,11 @@ contributors (adapters, capabilities, datasets, trained models).
 - [x] 07. Sablier
 - [x] 08. Story Protocol (PIL / IP Graph)
 - [x] 09. EIP-2535 Diamond Standard
-- [ ] 10. ERC-6551 Token-Bound Accounts
-- [ ] 11. Rate-schedule DSLs (Curve / Balancer / Uniswap v3 / Compound)
-- [ ] 12. Adoption-indexed rates (prior art)
-- [ ] 13. Content-addressed metadata standards (EIP-4884, etc.)
-- [ ] 14. Programmatic splits for DAG provenance
+- [x] 10. ERC-6551 Token-Bound Accounts
+- [x] 11. Rate-schedule DSLs (Curve / Balancer / Uniswap v3 / Compound)
+- [x] 12. Adoption-indexed rates (prior art)
+- [x] 13. Content-addressed metadata standards (EIP-4884, etc.)
+- [x] 14. Programmatic splits for DAG provenance
 
 ## Design Hook (framing for each section)
 
@@ -1118,3 +1118,996 @@ Aavegotchi-style Diamond codebases are a siren song — heavy to audit,
 non-trivial deployment, and not needed for a ContributorNFT.
 
 ---
+
+## 10. ERC-6551 — Non-fungible Token Bound Accounts
+
+**Sources**: [EIP-6551 formal spec](https://eips.ethereum.org/EIPS/eip-6551);
+[thirdweb explainer](https://blog.thirdweb.com/erc-6551-token-bound-accounts/);
+[RareSkills ERC-6551 deep dive](https://rareskills.io/post/erc-6551);
+[GoldRush complete guide](https://goldrush.dev/guides/a-complete-guide-to-erc-6551-token-bound-accounts/);
+[Quicknode deploy guide](https://www.quicknode.com/guides/ethereum-development/nfts/how-to-create-and-deploy-an-erc-6551-nft).
+
+### What it is
+
+ERC-6551 assigns an Ethereum smart-contract account (Token Bound Account, TBA)
+to every NFT. The TBA is a fully-featured smart wallet owned by the NFT's
+current `ownerOf`. Transferring the NFT transfers control of the TBA.
+
+Mainnet launch: May 7, 2023. Backwards-compatible with all existing ERC-721
+contracts (no changes required).
+
+### Architecture
+
+Three contracts:
+
+1. **`ERC6551Registry`** — singleton deployed at a canonical address on
+   every chain. Computes deterministic TBA addresses via `CREATE2`.
+2. **`IERC6551Account` implementation** — the TBA's logic contract. Many
+   implementations exist (Tokenbound's canonical one, thirdweb's, custom
+   ones that add features like batch calls or EIP-1271 signing).
+3. **Each TBA instance** — an ERC-1167 minimal proxy to a chosen
+   implementation. Bytecode has `(chainId, tokenContract, tokenId, salt)`
+   appended as constant data; the proxy reads this to answer
+   `token()` queries.
+
+### Registry interface (exact)
+
+```solidity
+interface IERC6551Registry {
+    function createAccount(
+        address implementation,
+        bytes32 salt,
+        uint256 chainId,
+        address tokenContract,
+        uint256 tokenId
+    ) external returns (address account);
+
+    function account(
+        address implementation,
+        bytes32 salt,
+        uint256 chainId,
+        address tokenContract,
+        uint256 tokenId
+    ) external view returns (address account);
+}
+```
+
+### Account interface (exact)
+
+```solidity
+interface IERC6551Account {
+    receive() external payable;
+    function token() external view
+        returns (uint256 chainId, address tokenContract, uint256 tokenId);
+    function state() external view returns (uint256);
+    function isValidSigner(address signer, bytes calldata context)
+        external view returns (bytes4 magicValue);
+}
+
+interface IERC6551Executable {
+    function execute(address to, uint256 value, bytes calldata data, uint8 operation)
+        external payable returns (bytes memory);
+}
+```
+
+`operation` modes: 0 = CALL, 1 = DELEGATECALL, 2 = CREATE, 3 = CREATE2.
+
+### Ownership semantics
+
+`owner()` is typically implemented as `IERC721(tokenContract).ownerOf(tokenId)`.
+When the NFT changes hands, the TBA's owner changes automatically — no
+migration needed.
+
+### Fit for ContributorNFT (score 5/5)
+
+| Axis | Fit | Notes |
+|---|---|---|
+| Carrier | 5 | Gives each ContributorNFT its own wallet — holds earnings, signs attestations, interacts with other contracts |
+| Rate DSL | 3 | Not a rate DSL itself; enables rate logic to live in the TBA's implementation |
+| Immutability | 4 | TBA implementation is fixed per ERC-6551 proxy; fresh implementation requires new salt -> new TBA address. Useful for versioning |
+| DAG split | 4 | TBA can be the endpoint for 0xSplits / Drips distributions, cleanly wrapping per-contributor state |
+| Gas fit | 4 | Registry call ~200k gas one-time. TBA-as-recipient adds minimal overhead on settlements |
+
+**Verdict**: **ADOPT — ContributorNFT grants a TBA to each contributor.**
+
+### Concrete integration plan
+
+1. On `mint(contributor)`, also call `ERC6551Registry.createAccount(...)` to
+   deploy the contributor's TBA. The TBA address is deterministic so we
+   can predict it off-chain without a second tx.
+2. The TBA holds:
+   - **Accumulated settlement earnings** (USDC balance)
+   - **Reputation proofs** (ERC-8004 attestations from PCC jobs that used
+     the contribution)
+   - **Subsidiary ContributorNFTs** the author has composed (e.g., a
+     "model" author could hold ContributorNFTs for each dataset they
+     used, with splits flowing to them)
+3. When a ContributorNFT transfers, the TBA's contents transfer with it —
+   no migration script, no storage sync.
+4. Splits: the recipient in the `SplitV2` / Drips config points at the
+   TBA address, not the contributor's EOA. This cleanly decouples
+   "who can sign for the contributor" (NFT owner) from "where revenue
+   pools up" (TBA).
+
+### Key gotchas
+
+- **Ownership cycle risk**: if the ContributorNFT is transferred INTO its
+  own TBA, the TBA becomes permanently unreachable (no signer can be
+  derived). Must block this at the NFT contract level via a
+  `_beforeTokenTransfer` hook that rejects transfers to any
+  `isTokenBoundAccount(address, tokenId)`.
+- **Front-running on sale**: a malicious seller can drain the TBA between
+  a marketplace listing and the sale clearing. Marketplaces now support
+  a "TBA-aware" sale (Seaport 1.6, Reservoir, Zora v3 all have this) but
+  the UX is still inconsistent. Protect our users by documenting TBA
+  contents in the listing flow.
+- **Gas griefing**: `execute()` with an untrusted `to` can be used to
+  mount gas bombs. Our canonical implementation should include
+  reasonable gas caps.
+
+### Why pair ERC-6551 + 0xSplits together
+
+- 0xSplits recipients are addresses, not NFTs. The TBA is an address
+  uniquely tied to a ContributorNFT. Perfect bridge.
+- ERC-6551 without 0xSplits: we'd have to build our own recipient
+  registry.
+- 0xSplits without ERC-6551: recipient becomes a fresh EOA or a
+  shared multisig, losing per-contributor attestation/reputation
+  state.
+- Combined: `Split -> TBA_A, TBA_B, TBA_C` where each TBA is bound
+  to a ContributorNFT. Elegant.
+
+---
+
+## 11. Rate-Schedule DSLs — Prior Art
+
+**Goal for this section**: evaluate existing on-chain "committed schedule"
+primitives as templates for our RateSchedule DSL. Options examined:
+Uniswap v3 ticks, Balancer weighted pool time-varying weights, Curve's
+piecewise curves, and Sablier LockupDynamic segments.
+
+**Sources**: [Uniswap v3 ticks primer](https://rareskills.io/post/uniswap-v3-ticks);
+[Atis Elsts — Uniswap v3 liquidity math PDF](https://atiselsts.github.io/pdfs/uniswap-v3-liquidity-math.pdf);
+[Balancer Weighted Math](https://docs.balancer.fi/concepts/explore-available-balancer-pools/weighted-pool/weighted-math.html);
+[Balancer docs repo — weighted-math.md](https://github.com/balancer/docs-developers/blob/main/resources/pool-math/weighted-math.md);
+[Curve bonding-curve primer — Linum Labs](https://www.linumlabs.com/articles/bonding-curves-the-what-why-and-shapes-behind-it);
+[Sablier V2 LockupDynamic docs](https://docs.sablier.com/contracts/v2/guides/create-stream/lockup-linear).
+
+### 11.1 Uniswap v3 ticks (informative shape, overkill for us)
+
+Uniswap v3 discretizes prices into integer **ticks** where
+`price(i) = 1.0001^i` for `i` in `[-887272, 887272]`. Each liquidity
+position occupies a `[tickLower, tickUpper]` range. On-chain math uses
+`sqrtPriceX96` fixed-point arithmetic for precision.
+
+**Pros as rate-schedule template**:
+- Discrete ticks make "what is the rate at time T" a constant-time lookup.
+- Gas-efficient sparse representation (tick bitmaps).
+
+**Cons**:
+- Tick math is among the most complex on-chain math anywhere. Audit burden
+  is high.
+- The 1.0001^i geometric ladder is optimized for swap-price continuity, not
+  for human-readable rate schedules.
+
+**Verdict for us**: **over-engineered**. A rate schedule has 10-100 data
+points over its lifetime, not 1.8M ticks.
+
+### 11.2 Balancer weighted pools — time-varying weights
+
+Balancer V2 Liquidity Bootstrapping Pools (LBPs) linearly interpolate
+weights from `(w_start[i])` to `(w_end[i])` over a time window, using:
+
+```
+w(t) = w_start + (w_end - w_start) * (t - startTime) / (endTime - startTime)
+```
+
+Pool math uses a **weighted geometric mean invariant**:
+```
+∏ (B_i)^(w_i(t)) = k
+```
+
+**Pros**:
+- Clean linear interpolation between two anchor states.
+- Well-audited implementation (`WeightedMath.sol`).
+- Supports per-token weight schedules.
+
+**Cons**:
+- Invariant math requires fixed-point exp/log (expensive).
+- Built for AMM swap pricing; awkward for "give me the bps at time T."
+
+**Verdict for us**: **template for linear-interpolation segment of rate
+schedule**. We can lift the `interpolate(w_start, w_end, t, startTime,
+endTime)` logic without the invariant math.
+
+### 11.3 Curve / piecewise bonding curves
+
+Piecewise curves are defined by multiple sub-curves each applying to a
+given input range:
+
+```
+if supply in [0, 5]:        price = a1 * supply + b1   (linear)
+if supply in [5, 10]:       price = polynomial(supply)  (polynomial)
+if supply >= 10:            price = constant            (flat ceiling)
+```
+
+The dispatch is a chain of `if/else` with stored breakpoints.
+
+**Pros**:
+- Dead simple to understand and audit.
+- Supports arbitrary segment shapes as long as each segment is expressible.
+- Gas-efficient: constant-time segment lookup via binary search on
+  breakpoints.
+
+**Cons**:
+- No standard library — every implementation rolls its own.
+
+**Verdict for us**: **BEST TEMPLATE**. Piecewise linear segments over
+`(t, adoption)` is exactly what our RateSchedule needs. See section 11.5
+for concrete proposed DSL.
+
+### 11.4 Sablier LockupDynamic segments
+
+Sablier's LockupDynamic stores an array of segments:
+
+```solidity
+struct Segment {
+    uint128 amount;        // cumulative tokens unlocked at this milestone
+    uint64 exponent;       // shape of unlock within the segment (fixed18)
+    uint40 milestone;      // timestamp at which this segment ends
+}
+```
+
+Unlock curve between milestones is:
+```
+unlocked_within_segment = segment_amount *
+    ((t - prev_milestone) / (milestone - prev_milestone)) ^ exponent
+```
+
+- `exponent = 1` -> linear
+- `exponent < 1` (e.g., 0.5) -> frontloaded (sqrt-shaped)
+- `exponent > 1` (e.g., 3) -> backloaded (cubic)
+- A zero-duration segment -> instantaneous unlock (cliff)
+
+**Pros**:
+- Battle-tested (audited by Spearbit, Cantina, Cyfrin).
+- Expressive: exponents cover a large practical design space.
+- Each segment is 40 bytes packed — storage-efficient.
+
+**Cons**:
+- Requires `exp()` math for non-linear exponents (uses PRBMath library).
+- Segments are STRICTLY time-based; cannot index on adoption metric.
+
+**Verdict for us**: **template for segment structure**. Steal the
+`Segment[]` shape. Extend with a `metric` field to support
+(t-based) OR (adoption-based) segments.
+
+### 11.5 Proposed RateSchedule DSL — concrete specification
+
+Synthesizing the above:
+
+```solidity
+library RateSchedule {
+    enum MetricType { TIME, JOBS_SETTLED, USD_VOLUME }
+    enum Shape { CONSTANT, LINEAR, EXPONENTIAL }
+
+    struct Segment {
+        MetricType metric;           // 1 byte
+        Shape shape;                 // 1 byte
+        uint64 anchor;               // start metric value (time or count)
+        uint64 horizon;              // end metric value
+        uint16 bpsStart;             // 0..10000
+        uint16 bpsEnd;               // 0..10000
+        uint16 exponent;             // fixed-point q1.15 for EXPONENTIAL
+    }
+
+    struct Schedule {
+        // Default/fallback bps if no segment matches
+        uint16 defaultBps;
+        // Sorted by (metric, anchor). Binary search at lookup time.
+        Segment[] segments;
+    }
+
+    function bpsAt(Schedule storage s, uint256 t, uint256 jobs, uint256 usd)
+        internal view returns (uint256 bps);
+}
+```
+
+Design choices:
+
+- **Packed structs**: each segment is 16 bytes, so 10-segment schedule
+  fits in 2 storage slots.
+- **Binary search on lookup**: O(log n) is fine for typical 5-15 segment
+  schedules.
+- **Three metric types**: time, jobs-settled, USD-volume. Author chooses
+  ONE per segment. A schedule can mix (e.g., TIME segment 0-6 months
+  lets bps drop by JOBS_SETTLED count).
+- **Immutability guard**: `Schedule` is written once at mint (or via a
+  controlled migration path), then all further writes must monotonically
+  decrease `bpsStart` and `bpsEnd` for every segment. Enforced by the
+  ContributorNFT contract.
+
+### Key gotchas for the rate DSL
+
+- **EXPONENTIAL overflow**: uses `PRBMath.UD60x18.pow()`. Must cap
+  `exponent` at a value where `value^exponent < 2^128` for any reasonable
+  input — PRBMath throws otherwise.
+- **Clock skew / reorgs**: timestamp-based segments near-boundary could
+  flip from one segment to another on re-org. Base settlement clears
+  finality in ~2 seconds, so practical risk is low but worth documenting.
+- **Adoption metric freshness**: if we index on `jobs_settled`, we need an
+  oracle or counter that can't be spoofed. The PCC gateway is the
+  natural counter authority — it increments a global job counter on
+  every `settleJob()`.
+
+---
+
+## 12. Adoption-Indexed Rates — Prior Art Review
+
+**Sources** (from prior searches):
+[Harberger Tax — Wikipedia](https://en.wikipedia.org/wiki/Harberger_Tax);
+[Harberger on-chain — Simon de la Rouviere](https://medium.com/@simondlr/what-is-harberger-tax-where-does-the-blockchain-fit-in-1329046922c6);
+[Harberger Taxes as business model — Tim Daub](https://timdaub.github.io/2022/03/28/harberger-tax-can-cryptos-sustainable-business-model/);
+[Dynamic royalty research — NEST Medium](https://nes-tech.medium.com/understanding-erc-2981-a-new-era-for-nft-royalty-distribution-7948fe66321a);
+[Decoding NFT Royalties — Bitbond](https://www.bitbond.com/resources/decoding-nft-royalties/);
+[Resale Royalty research paper — ScienceDirect](https://www.sciencedirect.com/science/article/abs/pii/S1057521925005599);
+[CoinLaw NFT Royalties Stats 2026](https://coinlaw.io/nft-royalties-statistics/).
+
+### Summary of prior art
+
+There is **no deployed on-chain standard** for adoption-indexed royalty
+rates. The closest analogs:
+
+1. **Dynamic royalty models (offchain)**: "5% on first resale, 3%
+   thereafter," or rates that drop as transfer-count increases. Mentioned
+   in ERC-2981 discussion (Issue #2907) as a theoretical extension but
+   never formalized as a subset EIP.
+2. **Decaying royalties**: referenced in Gemini and multiple secondary
+   sources — the idea that `royaltyAmount = base_bps * decay_factor(time,
+   transfer_count)`. Implementations exist bespoke (Transient Labs, Sound
+   Protocol, some Zora collections) but no shared interface.
+3. **Harberger Tax / Common-Ownership Self-Assessed Tax (COST)**: the
+   owner self-assesses value and pays a percentage tax; anyone can buy
+   at the self-assessed price. Used by Radical Markets proposals, Geo
+   Web (on-chain geo-land registry), and some experimental art projects
+   (Simbolo, PartialCommonOwnership smart contracts). Interesting
+   adjacent model but **not** what we need — Harberger flips incentives
+   toward undervaluing vs our goal of market-discovered rates.
+4. **Balancer LBP (Liquidity Bootstrapping Pool)**: weight-shifts over
+   time to discover a fair launch price. Conceptually: "start high,
+   auto-decay to discover demand." Could be inverted for rate discovery.
+5. **Story Protocol custom Royalty Policies**: supports arbitrary Solidity
+   policy modules. In theory a developer could write an adoption-indexed
+   policy. **Not done yet in production** per our review of Story's
+   module registry.
+
+### Statistics on dynamic royalty performance
+
+From 2026 NFT royalty research:
+
+- Average NFT royalty fee: 6.1% in 2025 (down from 7.5% in 2022).
+- "Collections that adopt dynamic royalty models (e.g., 5% on first
+  resale, 3% thereafter) are seeing slightly improved long-term revenue
+  compared to single-rate models."
+- "Dynamic royalty models can increase creator revenue by up to 40%
+  through real-time adjustments."
+- Economic research: "One standard deviation increase in the royalty
+  rate significantly correlates with a 7.04% decrease in market prices
+  and a 4.8% decrease in the resale probability of NFTs."
+
+Translation for our design: **high initial rates suppress demand; declining
+rates tied to adoption are market-efficient**. The "adoption-indexed"
+pattern is theoretically optimal but unbuilt in production.
+
+### Verdict: we'd be building novel primitives
+
+The adoption-indexed RateSchedule we want is **net-new design space**. No
+off-the-shelf on-chain DSL exists. We'd be the reference implementation.
+
+### Concrete design leverage
+
+1. From the research: rate schedules that **decrease over adoption**
+   maximize both long-tail revenue AND consumer uptake. This justifies
+   our "can only be decreased" invariant.
+2. The **per-segment metric choice** (time vs jobs vs USD volume) gives
+   authors the flexibility to express "I want to start high to recover
+   dev cost, then glide down as my adapter gets popular."
+3. The **market-discovery** angle: by making rate schedules public and
+   committed, consumers can comparison-shop between contributors. This
+   replicates the Harberger "force price discovery" idea but without
+   forcing sales.
+
+### Key gotchas
+
+- **Gaming the adoption counter**: a contributor could fake jobs through
+  a shell kernel to drive their bps down ... no, wait, they WANT high
+  bps. They'd fake jobs to increase bps? No, the schedule is
+  monotonically non-increasing, so faking jobs DECREASES rate. So the
+  attacker would want to SUPPRESS real jobs to keep rate high. Mitigation:
+  the "adoption metric" is public, and consumers can choose a competing
+  adapter if the rate is artificially inflated. Market-discipline.
+- **Inter-contributor subsidies**: if two authors collude, they can
+  route jobs to each other to grow each other's adoption count. Weak
+  concern — their bps will DROP as a result, which hurts them.
+
+---
+
+## 13. Content-Addressed NFT Metadata Standards
+
+**Sources**: [EIP-3569 Sealed NFT Metadata Standard](https://eips.ethereum.org/EIPS/eip-3569);
+[Immutable docs — Deep dive into metadata](https://docs.x.immutable.com/docs/deep-dive-metadata/);
+[IPFS NFT best practices](https://docs.ipfs.tech/how-to/best-practices-for-nft-data/);
+[EIP-6969 analysis — onekey blog](https://onekey.so/blog/ecosystem/eip-6969-new-ideas-for-erc-and-nft-metadata-construction/);
+[NFT Content Type EIP Draft](https://github.com/NFT-Standards-WG/eip-content-type/blob/main/eip-draft_nft_content_type.md);
+[Iain Nash — EIP NFT content draft](https://github.com/iainnash/eip-nft-content-draft);
+[IPFS CID explainer](https://chainscorelabs.com/glossary/nft-technologies-and-metadata/nft-metadata-standards/interplanetary-file-system-ipfs-cid);
+[NFT immutability technical nuances — rameerez blog](https://rameerez.com/problems-and-technical-nuances-of-nft-immutability-and-ipfs/).
+
+### Correction: there is NO EIP-4884 for NFT metadata
+
+The task brief referenced "EIP-4884" as a content-addressed metadata
+standard. That EIP number is **reserved for beacon-chain root
+history** (Merkle tree of parent beacon roots). Unrelated to NFTs.
+
+The actual prior art:
+
+### EIP-3569 — Sealed NFT Metadata Standard (Final)
+
+Formalizes "metadata is a content hash, not a URL." Provides a mechanism
+to commit NFT metadata by its hash, ensuring it cannot be silently swapped.
+
+Interface:
+```solidity
+interface IERC3569 /* is IERC721Metadata */ {
+    event Sealed(uint256 indexed _tokenId, bytes32 _metadataHash, string _uri);
+
+    function sealedMetadataHash(uint256 _tokenId) external view returns (bytes32);
+    function sealedMetadataURI(uint256 _tokenId) external view returns (string memory);
+}
+```
+
+The `Sealed` event marks a token's metadata as permanently committed. The
+on-chain `_metadataHash` is the keccak256 (or SHA-256 via convention) of
+the metadata JSON. The URI is a CID (IPFS/Arweave) or HTTP mirror.
+
+**Adoption**: low. Few deployed collections cite ERC-3569. Most projects
+use their own ad-hoc variant of "tokenURI returns an IPFS CID".
+
+### EIP-6969 — Content-type aware metadata (draft)
+
+Newer draft that formalizes `{mime, uri, alt, sha256}` metadata structure.
+Enables cross-chain content verification. Not final, but a useful reference
+for how to structure metadata JSON.
+
+### De facto IPFS CID pattern
+
+Most production NFT collections use `tokenURI = ipfs://<CID>`. The CID is
+a cryptographic hash of the metadata JSON — tamper-evident. The issue
+is that this is a **convention**, not an enforced on-chain contract. A
+malicious contract could `setTokenURI(tokenId, "ipfs://differentCID")`.
+
+### What we need for ContributorNFT
+
+Our ContributorNFT's tokenURI should point at a **schema document** that
+describes the contribution:
+- The contribution type (adapter, capability, dataset, model)
+- Pointer to the actual artifact (Storacha CID for datasets, GitHub
+  commit hash for code, model weights CID)
+- Dependency declarations (which other ContributorNFTs this uses)
+- The RateSchedule JSON (redundant with on-chain but useful off-chain)
+- ERC-8004 agent registration fields
+
+The metadata IS content-addressed and IS immutable — this is a strong fit
+for the ERC-3569 pattern and/or the CSD (Capability StructureDefinition)
+pattern PCC already uses.
+
+### Fit for ContributorNFT (score 5/5)
+
+| Axis | Fit | Notes |
+|---|---|---|
+| Carrier | 5 | tokenURI is an ERC-721 field; standard |
+| Rate DSL | 2 | Metadata CAN contain rate schedule but authoritative source is on-chain |
+| Immutability | 5 | Content-addressing gives free immutability via crypto hash |
+| DAG split | 3 | Metadata declares dependencies; DAG lives on-chain via references |
+| Gas fit | 5 | Just a string; trivially cheap |
+
+**Verdict**: **STRONG ADOPT — ERC-3569 `Sealed` event + IPFS/Storacha CID.**
+
+### Concrete integration plan
+
+1. Define a `ContributorManifest` JSON schema (stored in a repo).
+2. On mint, require a Storacha CID pointing at a valid manifest.
+3. Verify the on-chain `sha256` hash matches the CID's content (done
+   off-chain pre-mint).
+4. Emit `Sealed(tokenId, metadataHash, cid)` per ERC-3569.
+5. Override `tokenURI()` to return `ipfs://<CID>` permanently — no setter.
+6. Provide a read-helper `manifest(tokenId)` that returns `(hash, uri)`.
+
+### Key gotchas
+
+- **IPFS pinning**: CIDs can become unreachable if no one pins them.
+  PCC already uses Storacha, which provides durable storage. Use
+  Storacha's space (`pcc-evidence`) or a new dedicated space for
+  contributor manifests. Tag pinning to the ContributorNFT's token
+  balance (each transfer triggers a pin refresh).
+- **Manifest schema evolution**: our manifest format will evolve. Embed
+  a `schemaVersion` field. Old NFTs stay valid forever at their version;
+  new mints use the latest schema.
+- **Multi-file contributions** (model weights + README + example
+  notebooks): use a directory CID (IPFS MFS) or a single JSON manifest
+  listing child CIDs.
+
+---
+
+## 14. Programmatic Splits for DAG Provenance
+
+**Sources**: [TreeTrunk reference implementation](https://github.com/treetrunkio/treetrunk-nft-reference-implementation);
+[EIP-4910 Royalty Bearing NFTs](https://eips.ethereum.org/EIPS/eip-4910);
+[Decrypt — TreeTrunk profile](https://decrypt.co/93097/ethereum-nft-protocol-treetrunk-promises-new-royalty-options-artists);
+[Envision Blockchain — EIP-4910 analysis](https://envisionblockchain.com/eip4910/);
+[EIP-6059 — Nestable NFT discussion](https://ethereum-magicians.org/t/eip-6059-parent-governed-nestable-non-fungible-tokens/12092);
+[ERC-6220 Composable Equippable](https://eips.ethereum.org/EIPS/eip-6220);
+[Chainlink — Tokenized Royalties explainer](https://chain.link/article/tokenized-royalties-smart-contracts);
+[Provenance DAG on-chain research (arXiv)](https://arxiv.org/pdf/1810.09843);
+[Verifiable Off-Chain Governance (arXiv)](https://arxiv.org/html/2512.23618v1).
+
+### The niche: recursive split through a DAG
+
+We need a contract that, at job-settlement time, walks a provenance DAG
+(adapter -> capability -> dataset -> model) and routes basis-point-fractions
+of the settlement value to every ContributorNFT in the closure. **This is
+not a thing any of the standards above do natively.**
+
+### EIP-4910 — Royalty Bearing NFTs
+
+Final proposal by TreeTrunk.io. Extends ERC-721 with royalty account
+management and hierarchical derivatives.
+
+Core pattern:
+- Each NFT can declare a **parent NFT** at mint.
+- On-chain royalty balances accumulate at each node.
+- A "parent's share" is fractionally forwarded on every settlement.
+- Settlement can be traced upward through the chain until it reaches the
+  root NFT.
+
+```solidity
+// EIP-4910 core additions (approximate)
+function mint(address to, uint256 parentTokenId, uint16 parentShareBps) external;
+function payRoyalty(uint256 tokenId, IERC20 token, uint256 amount) external;
+function balanceOfRoyalty(uint256 tokenId, IERC20 token) external view returns (uint256);
+function claimRoyalty(uint256 tokenId, IERC20 token, address to) external;
+```
+
+**Key insight from EIP-4910**: the "N-deep recursive hierarchy" problem is
+decomposed into **N separate single-hop problems, one per layer**. Each
+NFT only stores its parent's share. The recursive walk is a series of
+single-step settlement calls. This bounds the work per layer to O(1) storage
+and moves the recursion cost to settlement-time.
+
+**Adoption**: very low. TreeTrunk's reference implementation is a tech demo,
+not deployed at scale. But the IDEA is sound, and Story Protocol's Royalty
+Module has evolved a similar pattern.
+
+### ERC-6059 — Parent-Governed Nestable NFTs
+
+RMRK-originated standard. An NFT can be "nested into" another NFT, creating
+a parent-child tree. Focuses on **ownership** (the parent NFT owns the child)
+rather than royalty splits.
+
+```solidity
+function nestTransferFrom(
+    address from, address to, uint256 tokenId, uint256 destinationId, bytes data
+) external;
+function childrenOf(uint256 parentId) external view returns (Child[] memory);
+function rejectAllChildren(uint256 parentId) external;
+```
+
+**Fit**: provides a **DAG encoding** primitive. The parent-child tree is
+what we need — but ERC-6059 is tree-only, not DAG. A contribution can
+have multiple parents (a "fine-tuned model" built on dataset A and dataset
+B), which ERC-6059 doesn't model.
+
+### ERC-6220 — Composable Equippable Parts
+
+Another RMRK standard for NFT composition via "equippable parts." More
+about visual/metadata composition than revenue. Not a fit.
+
+### Our synthesis — SplitPayoutEngine + DependencyRegistry
+
+Given the absence of a directly-applicable standard, we build our own.
+Design:
+
+```solidity
+contract DependencyRegistry {
+    // tokenId -> list of (parentTokenId, weight) tuples, where weight
+    // is out of DEP_DENOMINATOR (e.g., 1_000_000).
+    mapping(uint256 => Dep[]) public deps;
+    struct Dep { uint256 tokenId; uint32 weight; }
+
+    // Called at ContributorNFT mint time to declare dependencies.
+    function declare(uint256 tokenId, Dep[] calldata parents) external;
+    // Mint time only; no update path unless author renounces immutability.
+
+    // Traverses the DAG up to some depth, returns flat list of
+    // (tokenId, effectiveWeight) summed.
+    function flatten(uint256 rootTokenId, uint8 maxDepth)
+        external view returns (Flat[] memory);
+    struct Flat { uint256 tokenId; uint256 effectiveWeight; }
+}
+
+contract SplitPayoutEngine {
+    function splitPayout(
+        uint256 rootTokenId,
+        IERC20 token,
+        uint256 amount
+    ) external {
+        Flat[] memory leaves = DepRegistry.flatten(rootTokenId, MAX_DEPTH);
+        uint256 totalWeight = _sumWeights(leaves);
+        for (uint i = 0; i < leaves.length; i++) {
+            uint256 share = amount * leaves[i].effectiveWeight / totalWeight;
+            // recipient = ERC6551 TBA of leaves[i].tokenId
+            address tba = ERC6551_REGISTRY.account(
+                TBA_IMPL, SALT, block.chainid, CONTRIB_NFT, leaves[i].tokenId
+            );
+            uint256 bps = ContributorNFT(CONTRIB_NFT).bpsAt(leaves[i].tokenId);
+            // Apply per-contributor rate schedule
+            uint256 contributorShare = share * bps / 10_000;
+            token.safeTransfer(tba, contributorShare);
+            // Remainder (if any) goes to residual pool or payer
+        }
+    }
+}
+```
+
+Key design properties:
+
+- **Flatten-at-read**: DependencyRegistry computes the flat list at query
+  time, not at settlement. This lets us cache / off-chain compute for gas
+  optimization.
+- **Capped depth**: `MAX_DEPTH = 8` (following Story Protocol's precedent)
+  prevents pathological gas costs.
+- **Rate schedule applied at leaf**: each contributor's ContributorNFT has
+  its own RateSchedule; the engine multiplies `share * bps` per contributor.
+- **DAG encoding**: each node has a list of parents (not a single parent).
+  Non-trivial cycles are forbidden — enforced at `declare()` time via a
+  DFS cycle check. Depth cap prevents pathological cases even if cycles
+  slip through.
+- **Immutability**: `deps` is write-once per tokenId. Follows our
+  commit-don't-mutate principle.
+
+### Gas cost estimation
+
+For a 5-deep DAG with 15 contributors:
+
+- `flatten()` (view): ~200k gas (fits in eth_call / callStatic, doesn't
+  affect transaction cost).
+- `splitPayout()`: ~50k fixed + (~20k + 1 SSTORE + ERC-20 transfer) per
+  contributor. 15 contributors -> ~50k + 15*85k = ~1.3M gas. On Base at
+  30 gwei: ~$0.12 per settlement.
+
+This is **at the upper edge** of our $0.10 target. Optimizations:
+1. Replace the `splitPayout` loop with 0xSplits PullSplit: one distribute
+   call, funds land in Warehouse, contributors pull. Cuts per-settlement
+   gas to ~100k at the cost of additional withdraw gas per contributor.
+2. Off-chain compute: the payer submits a Merkle root of the split, and
+   a keeper verifies + distributes. Reduces to ~50k gas total.
+3. Compress the Flat[] list via sorted-by-tokenId + delta-encoded weights.
+
+### Fit for ContributorNFT (score 5/5 — purpose-built)
+
+This is OUR CONTRIBUTION. The research confirmed no off-the-shelf
+standard does this. We must build it, but we have strong prior art to
+draw from (EIP-4910 parent-share decomposition + Story Protocol recursive
+policy + Drips splits graph + 0xSplits warehouse).
+
+**Verdict**: **BUILD. Cite prior art heavily in audit package.**
+
+### Key gotchas
+
+- **Cycle detection**: DAG (not cyclic). `declare()` must run a DFS over
+  the existing graph to reject cycles. O(depth * breadth) per mint,
+  cheap at mint time.
+- **Weight normalization**: sum of dep weights should equal
+  `DEP_DENOMINATOR`. If less, the residual is the ContributorNFT's own
+  "self-retained share." Document this.
+- **Settlement currency**: our `splitPayout` only supports ERC-20 (USDC).
+  ETH payouts require a WETH wrapping step. Document.
+- **ERC-8004 reputation decay during settlement**: the `bpsAt()` lookup
+  must be deterministic at block.timestamp. If the rate schedule is
+  adoption-indexed, we need to fix the adoption counter at the beginning
+  of the settlement tx so all leaves see the same count.
+
+---
+
+## Summary Table
+
+All 14 items, scored on the five axes. Final verdict column drives our
+recommended stack.
+
+| # | Standard / Protocol | Carrier | RateDSL | Immut | DAG | Gas | Total /25 | Verdict |
+|---|--------------------|---------|---------|-------|-----|-----|-----------|---------|
+| 01 | ERC-2981 | 5 | 2 | 3 | 1 | 5 | 16 | ADOPT interface only (marketplace interop) |
+| 02 | EIP-5585 | - | - | - | - | - | informational | SKIP (not about royalty enforcement) |
+| 03 | Manifold Royalty Registry + Operator Filter | 2 | 1 | 2 | 2 | 4 | 11 | SKIP registry; learn from Operator Filter failure |
+| 04 | Drips | 4 | 3 | 5 | 5 | 4 | 21 | STRONG ADOPT as primary split graph |
+| 05 | 0xSplits | 2 | 2 | 5 | 5 | 5 | 19 | STRONG ADOPT as per-node splitter primitive |
+| 06 | Superfluid | 2 | 4 | 3 | 3 | 3 | 15 | PARTIAL — future streaming tier, not v1 |
+| 07 | Sablier | 5 | 4 | 4 | 1 | 3 | 17 | BORROW patterns (NFT-as-stream, LockupDynamic segments) |
+| 08 | Story Protocol | 5 | 3 | 4 | 5 | 3 | 20 | PARTIAL ADOPT — IP Graph model; Path A (Base-native) for v1 |
+| 09 | EIP-2535 Diamond | 3 | 3 | 2 | 1 | 2 | 11 | SKIP — opposite of our immutability goal |
+| 10 | ERC-6551 TBAs | 5 | 3 | 4 | 4 | 4 | 20 | ADOPT — each ContributorNFT gets a TBA |
+| 11 | Rate-schedule DSLs (Sablier/Balancer template) | - | 5 | 5 | - | 4 | 14 | BUILD our own, template from Sablier LockupDynamic + Curve piecewise |
+| 12 | Adoption-indexed rates | - | 5 | 5 | - | 4 | 14 | NOVEL — we're the reference implementation |
+| 13 | Content-addressed metadata (ERC-3569) | 5 | 2 | 5 | 3 | 5 | 20 | STRONG ADOPT — tokenURI is a Storacha CID, Sealed event emitted |
+| 14 | Programmatic DAG splits (EIP-4910 + custom) | 5 | 5 | 5 | 5 | 4 | 24 | BUILD — own `DependencyRegistry` + `SplitPayoutEngine` |
+
+---
+
+## Recommended Stack for ContributorNFT + RateSchedule
+
+Based on the landscape, the recommended architecture is a **layered
+composite** rather than adoption of a single existing protocol.
+
+### Layer 1 — Carrier: ERC-721 + ERC-6551 + ERC-2981 + ERC-3569
+
+`ContributorNFT` is a standard OpenZeppelin ERC-721 that also implements:
+
+- **ERC-2981 `royaltyInfo()`** pointing to the SplitPayoutEngine address
+  (so marketplace resales still route through our split logic).
+- **ERC-3569 `Sealed` event** + immutable `tokenURI` pointing to an
+  IPFS/Storacha CID of the contributor manifest (schema at
+  `schemas/contributor-manifest-v1.json`).
+- **ERC-6551 TBA** auto-deployed at mint time via the canonical
+  `ERC6551Registry.createAccount()` call. TBA is the settlement recipient.
+
+Rationale: the ERC-721 base + ERC-6551 TBA gives us a per-contributor
+wallet; ERC-2981 gives us marketplace interop without opting into the
+broken royalty-enforcement game; ERC-3569 gives us metadata integrity.
+
+### Layer 2 — Rate DSL: custom `RateSchedule` library
+
+We build `RateSchedule.sol` with packed `Segment[]` storage, inspired by
+Sablier LockupDynamic segments + Balancer LBP linear interpolation +
+Curve piecewise bonding curves.
+
+- Segments support `MetricType = {TIME, JOBS_SETTLED, USD_VOLUME}`.
+- Shapes: `CONSTANT`, `LINEAR`, `EXPONENTIAL`.
+- Monotonicity invariant: author can only DECREASE bps of any segment,
+  never INCREASE. Enforced at the contract level.
+- Storage: ~10-20 segments per NFT, ~200 bytes storage total.
+- Lookup: binary search on anchor, O(log n) per `bpsAt()` call.
+
+Rationale: no existing DSL does adoption-indexed rates with an
+immutability/monotonic guarantee. We build it, using the Sablier
+segment shape as template.
+
+### Layer 3 — Split Graph: `DependencyRegistry` + 0xSplits PullSplit or Drips
+
+Two concrete options, both viable:
+
+**Option A (0xSplits-centric)**:
+- Each capability's "split root" is a 0xSplits PullSplit contract.
+- Recipients are either (a) ERC-6551 TBAs of leaf ContributorNFTs, or
+  (b) nested PullSplits for sub-capabilities.
+- Immutability: set `owner = 0` on each PullSplit at creation.
+- Warehouse holds funds; contributors pull.
+
+**Option B (Drips-centric)**:
+- Each ContributorNFT's TBA has a Drips `NFTDriver` account ID.
+- Splits config encoded in Drips storage via `ImmutableSplitsDriver`.
+- Revenue flows via `Drips.give()` at settlement; `split()` cascades.
+
+**Recommendation: Option A (0xSplits)** for v1, because:
+1. 0xSplits has broader audit history and more ecosystem tooling.
+2. Warehouse withdraw UX is better understood.
+3. Gas cost is lower for discrete settlement events.
+4. Drips is better suited to CONTINUOUS streams — overkill for our
+   event-driven settlement.
+
+Revisit Drips for v2 if we add recurring/subscription revenue (e.g.,
+"every active kernel pays X USDC/day to load model Y").
+
+**On top**, we build our own `DependencyRegistry` to encode the DAG
+explicitly (multi-parent), and `SplitPayoutEngine` to orchestrate a
+settlement across the DAG (calling 0xSplits distribute at each layer
+and applying the per-node RateSchedule).
+
+### Layer 4 — Settlement Integration with PCC MilestoneEscrow
+
+The existing PCC `MilestoneEscrow.sol` contract already handles
+job escrow + release-on-evidence. We add a hook:
+
+```solidity
+// MilestoneEscrow addition
+interface ISplitPayoutEngine {
+    function splitPayout(uint256 rootContributorTokenId, IERC20 token, uint256 amount) external;
+}
+
+// On milestone release:
+function _releaseMilestone(uint256 milestoneId) internal {
+    // existing payout logic: protocol fee + operator settlement
+    uint256 ownerShare = ...; // after the 2.35% protocol fee
+    uint256 contributorShare = ownerShare * CONTRIBUTOR_BPS / 10_000;
+    uint256 operatorShare = ownerShare - contributorShare;
+
+    USDC.safeTransfer(operator, operatorShare);
+    USDC.safeApprove(splitEngine, contributorShare);
+    splitEngine.splitPayout(rootContributorTokenId, USDC, contributorShare);
+}
+```
+
+The protocol fee remains fixed (2.35%). A configurable CONTRIBUTOR_BPS
+(e.g., 2000 = 20% of operator revenue) goes into the split. Operator
+keeps the rest. **Market forces set CONTRIBUTOR_BPS** — too high and
+kernels refuse to run the capability; too low and contributors route to
+other platforms.
+
+### Layer 5 — ERC-2981 interop (marketplace path)
+
+If a ContributorNFT is listed on OpenSea / Zora / Manifold, the resale
+royalty path runs through `royaltyInfo()`:
+
+```solidity
+function royaltyInfo(uint256 tokenId, uint256 salePrice)
+    external view returns (address receiver, uint256 royaltyAmount)
+{
+    // Marketplace resales route to a dedicated ResaleSplit contract
+    // that splits between the seller + the ContributorNFT's DAG ancestors
+    // (e.g., dataset authors get a cut of fine-tuned-model resales).
+    return (address(resaleSplit), salePrice * RESALE_ROYALTY_BPS / 10_000);
+}
+```
+
+This integrates with ERC-2981 advisory semantics. Not the primary
+revenue path — secondary.
+
+---
+
+## 3 Concrete Next Steps (prioritized)
+
+### 1. Prototype `DependencyRegistry` + `SplitPayoutEngine` against 0xSplits on Base Sepolia (WEEK 1-2)
+
+- Deploy a trivial `ContributorNFT` (OpenZeppelin ERC-721 + ERC-6551 registry
+  wiring + stub `bpsAt()` that returns a constant).
+- Deploy `DependencyRegistry.sol` with `declare()` + `flatten(depth)` + DFS
+  cycle check.
+- Deploy `SplitPayoutEngine.sol` that calls 0xSplits PullSplit at the root
+  and pushes share to each leaf's TBA.
+- Test: mint 5 ContributorNFTs in a 3-deep DAG (root adapter -> capability
+  -> dataset + model); simulate a `splitPayout(root, USDC, 1000 USDC)`;
+  verify gas cost and correctness.
+- Metric: confirm gas is under target ($0.12 per settlement with 10
+  contributors on Base at 30 gwei).
+
+**Deliverable**: working contracts + Hardhat tests + gas report.
+
+### 2. Design + spec `RateSchedule` DSL with adoption indexing (WEEK 2-3)
+
+- Write the formal spec (this document is the design brief — next step is
+  a GRD with concrete Solidity interfaces).
+- Define the three MetricType / three Shape combinations with test cases.
+- Implement `RateSchedule.sol` library with `bpsAt()` lookup, monotonicity
+  enforcement, and PRBMath-based exponential.
+- Write fuzz tests that random-walk through the schedule and verify:
+  (a) bps never exceeds the committed ceiling, (b) monotonic decrease
+  invariant holds across any `_setSegment()` call, (c) cross-segment
+  transitions are continuous.
+
+**Deliverable**: `RateSchedule.sol` + `RateSchedule.t.sol` foundry tests.
+
+### 3. Integrate `SplitPayoutEngine` into `MilestoneEscrow` + validate with the E2E real-robot flow (WEEK 3-4)
+
+- Add `CONTRIBUTOR_BPS` to the escrow contract (default 0 = backward
+  compatible).
+- Add a `setContributorBps(capabilityId, bps)` governance method (DAO-
+  gated eventually; owner-gated for v1).
+- Add a `rootContributorTokenId` field to the Job struct; set it at
+  job-submission time from the capability's declared ContributorNFT.
+- On milestone release, route the contributor share through the engine.
+- Run a full E2E: submit a job on the HP printer kernel; verify evidence
+  releases; verify contributor splits land in each TBA; verify
+  contributors can `withdraw()` from the Warehouse.
+
+**Deliverable**: integrated settlement path + E2E trace in
+`scripts/real-e2e-verbose.ts` showing a split to a demo ContributorNFT.
+
+---
+
+## Appendix A — What We DID NOT Adopt and Why
+
+- **ERC-2535 Diamond**: too-complex, opposite of our immutability needs.
+- **EIP-5585 NFT Authorization**: not about royalties; informational only.
+- **OpenSea Operator Filter**: deprecated; transfer-layer enforcement lost.
+- **Superfluid CFA for contributor revenue**: mismatch — settlements are
+  discrete events, not streams. Revisit in v2.
+- **Sablier direct use**: one-payer-to-one-recipient; doesn't split.
+- **Drips for primary split**: excellent, but 0xSplits chosen for v1 due
+  to simpler event-driven semantics. Revisit in v2 for subscription
+  revenue.
+- **Story Protocol Path B (mirror-on-Story-Network)**: cross-chain
+  complexity too high for v1. Path A (Base-native, IP Graph as template)
+  adopted. Revisit in v2.
+- **EIP-4910 TreeTrunk direct use**: low adoption; we use its design
+  pattern (N-deep problem -> N single-hop problems) in our custom
+  `DependencyRegistry`.
+- **ERC-6059 / ERC-6220 Nestable / Equippable NFTs**: tree-only; we need
+  multi-parent DAG support.
+
+---
+
+## Appendix B — Sources (Canonical Index)
+
+Standards:
+- [ERC-2981 NFT Royalty Standard (Final)](https://eips.ethereum.org/EIPS/eip-2981)
+- [EIP-5585 ERC-721 NFT Authorization (Final)](https://eips.ethereum.org/EIPS/eip-5585)
+- [EIP-2535 Diamonds Multi-Facet Proxy (Final)](https://eips.ethereum.org/EIPS/eip-2535)
+- [ERC-6551 Non-fungible Token Bound Accounts (Final)](https://eips.ethereum.org/EIPS/eip-6551)
+- [EIP-3569 Sealed NFT Metadata Standard](https://eips.ethereum.org/EIPS/eip-3569)
+- [EIP-4910 Royalty Bearing NFTs](https://eips.ethereum.org/EIPS/eip-4910)
+- [ERC-6220 Composable Equippable Parts](https://eips.ethereum.org/EIPS/eip-6220)
+- [OpenZeppelin ERC-2981 reference implementation](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/common/ERC2981.sol)
+
+Protocols:
+- [Manifold Royalty Registry (royaltyregistry.eth)](https://github.com/manifoldxyz/royalty-registry-solidity)
+- [OpenSea Operator Filter Registry (deprecated)](https://github.com/ProjectOpenSea/operator-filter-registry)
+- [Drips Protocol Contracts](https://github.com/drips-network/contracts)
+- [Drips Docs — Overview](https://docs.drips.network/the-protocol/overview/)
+- [0xSplits Splits V2 monorepo](https://github.com/0xSplits/splits-contracts-monorepo)
+- [Splits.org core docs](https://docs.splits.org/core/split-v2)
+- [Superfluid Protocol V1 overview](https://github.com/superfluid-org/protocol-monorepo/wiki/Superfluid-Protocol-V1-Overview)
+- [Superfluid GDA (General Distribution Agreement)](https://github.com/superfluid-org/protocol-monorepo/wiki/General-Distribution-Agreement)
+- [Sablier V2 launch post](https://blog.sablier.com/introducing-sablier-v2/)
+- [Sablier V2 LockupLinear docs](https://docs.sablier.com/contracts/v2/guides/create-stream/lockup-linear)
+- [Story Protocol documentation](https://docs.story.foundation/)
+- [Story Whitepaper PDF](https://www.story.foundation/whitepaper.pdf)
+- [TreeTrunk reference implementation (EIP-4910)](https://github.com/treetrunkio/treetrunk-nft-reference-implementation)
+
+Research papers:
+- [Resale Royalty in NFT Marketplaces (ISR)](https://pubsonline.informs.org/doi/10.1287/isre.2023.0035)
+- [Economics of resale royalties (ScienceDirect)](https://www.sciencedirect.com/science/article/abs/pii/S1057521925005599)
+- [CoinLaw NFT Royalties Statistics 2026](https://coinlaw.io/nft-royalties-statistics/)
+- [Atis Elsts — Uniswap v3 liquidity math](https://atiselsts.github.io/pdfs/uniswap-v3-liquidity-math.pdf)
+- [Balancer Weighted Math (docs)](https://docs.balancer.fi/concepts/explore-available-balancer-pools/weighted-pool/weighted-math.html)
+- [Liquidity Provider Returns in Geometric Mean Markets](https://cryptoeconomicsystems.pubpub.org/pub/evans-g3m-returns)
+
+News / adoption references:
+- [CoinTelegraph — OpenSea disables Operator Filter](https://cointelegraph.com/news/opensea-disable-on-chain-royalty-enforcement-tool)
+- [The Defiant — OpenSea to CORI](https://thedefiant.io/opensea-cori)
+- [Fortune Crypto — Blur vs OpenSea](https://fortune.com/crypto/2023/02/26/nft-marketplace-blur-opensea-trading/)
+- [Gemini — Exploring the NFT Royalty Standard](https://www.gemini.com/blog/exploring-the-nft-royalty-standard-eip-2981)
+- [RareSkills — ERC-6551 deep dive](https://rareskills.io/post/erc-6551)
+- [thirdweb — ERC-6551 Token Bound Accounts](https://blog.thirdweb.com/erc-6551-token-bound-accounts/)
+- [Chainlink — Tokenized Royalties](https://chain.link/article/tokenized-royalties-smart-contracts)
+- [Decrypt — TreeTrunk](https://decrypt.co/93097/ethereum-nft-protocol-treetrunk-promises-new-royalty-options-artists)
+
+---
+
+## Appendix C — Open Questions and Deferred Research
+
+1. **Which 0xSplits version is deployed on Base?** Need to confirm V2
+   (Warehouse + PullSplit) availability on Base mainnet and Base Sepolia.
+   Fallback: V1 is universally deployed, adequate for prototype.
+2. **Can Drips Base deployment interop with 0xSplits on same chain?** Both
+   are address-based, so yes at the recipient level. A Drips payout can
+   land in a 0xSplits PullSplit, for example.
+3. **ERC-6551 canonical registry address on Base?** Need confirmation.
+   Official Tokenbound deployment is `0x000000006551c19487814612e58FE06813775758`
+   per the whitepaper, and this should be live on most chains.
+4. **What is the ERC-8004 overlap?** Our contributor TBAs may also carry
+   ERC-8004 agent identity + reputation. Need spec cross-reference pass
+   (defer to a separate research task).
+5. **Legal framework for RateSchedule commitments**: do we need a
+   Programmable IP License-style off-chain instrument to accompany
+   the on-chain RateSchedule? Story Protocol Path A adoption suggests
+   yes — but v1 can proceed without it.
+6. **Fuzz-test strategy for monotonicity invariant**: need to design
+   randomized test harness that proves bps never exceeds the committed
+   ceiling under any state transition sequence.
+7. **Keeper economics for SplitPayoutEngine**: at what protocol fee is
+   it self-sustaining to pay keepers to trigger distribute() on behalf
+   of contributors? The `distributionIncentive` parameter in 0xSplits
+   is a knob here.
+
+---
+
+END OF LANDSCAPE.
