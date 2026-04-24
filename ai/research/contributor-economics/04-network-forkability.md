@@ -487,3 +487,508 @@ CAIP-10 gives us addresses that are chain-agnostic: `eip155:8453:0xabc...123` me
 |---|---|
 | **5/5** (ENS) **4/5** (Safe/Zodiac) **4/5** (Human Passport) | ENS is essential — gives us universal handles. Safe/Zodiac is optional but useful at network level. Human Passport is optional per-network for sybil resistance. All three fit the "no shared kill-switch" model because none of them are protocol-level requirements. |
 
+
+## 11. Message-passing patterns for job settlement
+
+### The problem
+In a multi-network PCC world, a job may be posted on Base, accepted by an operator registered on Arbitrum, use materials owned by a contributor on Optimism, settle on Polygon (because USDC gas is cheapest there), and have reputation updates applied to the ContributorNFT on Ethereum mainnet. The core question: **how do these five chains coordinate atomically?**
+
+### Option A: Chainlink CCIP + CCT (enterprise-grade)
+URL: https://chain.link/cross-chain, https://docs.chain.link/ccip/concepts/cross-chain-token
+
+- **Architecture**: DON (Decentralized Oracle Network) of 5-11 nodes per lane. Each lane is a chain-pair. Messages are signed by DON quorum and verified on destination.
+- **Security**: multiple DONs, independent risk management, proven at institutional scale (Swift, DTCC, 11,000+ banks via Chainlink integrations as of 2026).
+- **Speed**: ~10-20 minutes between chains (slow compared to LayerZero).
+- **Cost**: moderate. Higher than LayerZero, lower than native bridges.
+- **NFT support**: via CCT (Cross-Chain Token Standard, 2024) — burn/mint or lock/mint.
+
+### Option B: LayerZero v2 OApp (fastest, widest reach)
+URL: https://docs.layerzero.network/v2/concepts/applications/oapp-standard
+
+- **Architecture**: Ultra-Light Node on each chain, DVNs (Decentralized Verifier Networks) chosen per-application. "Application-owned security" — each OApp picks its own DVN set.
+- **Security**: configurable. Default uses LayerZero Labs + Google Cloud + another DVN for a 3-of-3 requirement. Apps can require more DVNs.
+- **Speed**: 30 seconds to 3 minutes (fastest).
+- **Cost**: lowest among major options. Gas on source + destination only.
+- **NFT support**: native via ONFT v2 standard.
+- **Reach**: 150+ chains, 75% of cross-chain bridge volume (2025).
+
+### Option C: Hyperlane (permissionless, sovereign)
+URL: https://www.hyperlane.xyz
+
+- **Architecture**: mailbox contract on each chain. Messages delivered by permissionless relayers. Security via Interchain Security Modules (ISM) — apps pick between multisig, light client, ZK proof, or custom.
+- **Permissionless**: anyone can deploy Hyperlane to any chain without asking permission.
+- **Speed**: 30 seconds to 5 minutes.
+- **Cost**: very low. Relayer-market-priced.
+- **NFT support**: via custom OApp-style contracts; no ONFT-equivalent standard.
+- **Reach**: 150+ chains.
+
+### Option D: Axelar GMP (General Message Passing)
+URL: https://docs.axelar.dev/dev/general-message-passing/overview/
+
+- **Architecture**: Axelar blockchain is the hub. Gateway contracts on each chain relay messages through Axelar validators.
+- **Security**: 75 active validators, proof-of-stake consensus with $AXL staking.
+- **Speed**: ~2 minutes (120 seconds gateway-to-gateway).
+- **Cost**: moderate. Pay in any supported token, not just AXL.
+- **NFT support**: via ITS (Interchain Token Service) which supports NFTs with some work.
+- **Reach**: 70+ chains.
+
+### Option E: Native bridges (e.g., Optimism, Arbitrum standard bridges)
+- **Architecture**: canonical chain-specific bridge, e.g., Optimism L1StandardBridge.
+- **Security**: backed by the L2's fraud proof system.
+- **Speed**: fast deposits (minutes), slow withdrawals (7 days for optimistic rollups).
+- **Cost**: high gas on withdrawals.
+- **NFT support**: canonical ERC-721 bridging.
+
+### Option F: IBC (Cosmos-native, Eureka for EVM)
+URL: https://cosmos.network/ibc-eureka
+
+- **Architecture**: light client on each chain, Merkle proofs verify cross-chain packets.
+- **Security**: per-chain consensus. Most decentralized.
+- **Speed**: ~30 seconds.
+- **Cost**: low.
+- **NFT support**: via ICS-721 (cross-chain NFT standard for Cosmos).
+- **Reach**: 100+ Cosmos chains, Ethereum via IBC Eureka (2025).
+
+### Comparison table
+
+| Protocol | Speed | Cost | Security Model | NFT support | Reach | Decentralization |
+|---|---|---|---|---|---|---|
+| CCIP | 10-20 min | $$ | DON quorum | CCT (good) | 40+ chains | Medium |
+| LayerZero v2 | 0.5-3 min | $ | Configurable DVNs | ONFT (excellent) | 150+ chains | Medium |
+| Hyperlane | 0.5-5 min | $ | Configurable ISM | Custom | 150+ chains | High (permissionless) |
+| Axelar | ~2 min | $$ | PoS validators | ITS | 70+ chains | Medium |
+| Native bridges | Fast in, slow out | $$$ | L2-specific | ERC-721 | Per-L2 | Varies |
+| IBC Eureka | 0.5 min | $ | Light clients | ICS-721 | 50+ | Very high |
+
+### Recommendation for PCC
+Use **LayerZero v2 OApp** as the default for job-settlement messages (fast, cheap, widely deployed). Use **CCIP** as a fallback for networks that explicitly require enterprise-grade Chainlink-verified messaging (some regulated contexts). Wire both as interchangeable adapters.
+
+Specific PCC message types:
+- `JobReceiptV1` — includes jobId, settlement details, evidence CID, contributor royalty split. Sent from settlement chain to contributor chain via LayerZero.
+- `ReputationUpdateV1` — sent from any network to Mainnet ENS reputation record via LayerZero.
+- `DisputeEscalatedV1` — sent from any network to the dispute-arbitration AVS (on Ethereum for slashing) via LayerZero.
+
+### Fit for PCC 1-5
+
+| Score | Rationale |
+|---|---|
+| **5/5** | Essential primitive. LayerZero v2 is the clear winner for PCC's use case (fast, cheap, NFT-native, 150+ chains). Hyperlane is a strong permissionless alternative. Use an adapter pattern so PCC can switch if needed. |
+
+## 12. Treasury design without a single treasury
+
+### The problem
+If the protocol takes zero fee, who funds:
+- Audits of the core contracts?
+- Test-vector runs (reference implementations)?
+- Developer tooling (SDKs, CLIs, docs)?
+- Maintenance of shared registries (the canonical ContributorNFT factory)?
+- Public advocacy and documentation?
+
+### Model 1: Protocol Guild (pure public-goods funding)
+URL: https://protocol-guild.readthedocs.io, https://splits.org/blog/protocol-guild/
+
+Protocol Guild (Ethereum Core Devs) is the canonical model:
+- A self-curated membership of active contributors (Ethereum currently ~190 members across ~30 teams)
+- A 0x4F...split contract on Ethereum receives donations
+- Donations vest to members over time (4-year cliff-vesting is common)
+- Members don't evaluate proposals; you're a member by maintaining a registry entry that's approved by peers
+- **No protocol fee.** All funding comes from donations — projects that voluntarily pledge 1% of token supply, foundations (VanEck ETF donates 10% of profits), and one-off grants (Arbitrum gave $3.4M)
+
+For PCC, this maps to:
+- `PCCGuild`: self-curated registry of active protocol contributors
+- Splits-style vesting contract on mainnet
+- Donations voluntary, not mandated
+- Members = people who ship protocol contracts, SDKs, specs, not people who run networks
+
+Advantage: **zero coercion**. Networks that want to use the PCC protocol don't have to donate. Contributors are paid only to the extent the ecosystem feels they should be. Matches credible neutrality.
+
+Risk: underfunded in early days. Protocol Guild only took off after Ethereum became a $300B asset.
+
+### Model 2: Optimism RetroPGF (impact-based)
+URL: https://medium.com/ethereum-optimism/retroactive-public-goods-funding-33c9b7d00f0c
+
+RetroPGF works retroactively:
+- A DAO ("Results Oracle") decides what delivered value in the last cycle
+- Funds projects after the fact based on demonstrated impact
+- Typical cycle: 3-6 months, $10M-$50M distributed per cycle (Optimism)
+
+For PCC, this would require a PCC token for RetroPGF to use as the funding unit, which contradicts the "no governance token at protocol level" principle.
+
+Hybrid option: Use USDC as the RetroPGF unit, funded by voluntary network operator donations (e.g., `pcc-network-foo` can optionally contribute 0.5% of its treasury to a rolling public-goods pool). Impact assessment by rotating committee.
+
+### Model 3: Optional per-network treasury with bps config
+Each network sets its own `treasury_bps` (basis points taken from each settlement). The treasury address is set by the network operator. Networks compete on fee policy:
+- `pcc-network-zerofee`: `treasury_bps = 0`
+- `pcc-network-sustainability`: `treasury_bps = 50` (0.5%) -> goes to PCCGuild
+- `pcc-network-operator-funded`: `treasury_bps = 200` (2%) -> goes to the operator's own multisig
+
+Requesters see the fee before committing; they can choose the network with the fee model they prefer.
+
+The PROTOCOL contract just enforces the bps split mechanically. It doesn't receive any of it.
+
+### Model 4: Quadratic funding rounds
+Gitcoin-style quadratic funding rounds paid for by voluntary donors, matched by a one-off matching pool. Good for project-specific funding but less predictable.
+
+### Recommended hybrid for PCC
+Combine Models 1 + 3:
+- **Protocol-level treasury: ZERO**. Hardcoded in contracts. Immutable.
+- **Network-level treasury: OPTIONAL**. Network operator sets `treasury_bps` at deployment. Can be 0. Treasury address is the operator's own.
+- **PCCGuild (Protocol Guild model)**: Splits-based vesting contract on Ethereum. Funded by voluntary donations from anyone (including network operators who choose to). Members are self-curated. Registry is publicly verifiable.
+- **Encouraged (not required) convention**: networks that opt-in to the "Community-Supported" badge voluntarily route some percentage of their network treasury to PCCGuild.
+
+### Fit for PCC 1-5
+
+| Score | Rationale |
+|---|---|
+| **5/5** | Protocol Guild + network-optional-treasury is the credibly-neutral answer. No single treasury captures protocol value. Funding flows voluntarily based on network operator choice and community support. Matches user requirement exactly. |
+
+## 13. Dispute resolution per network
+
+### The design
+Each network picks its arbiter. The protocol exposes an `IArbiter` interface; networks plug in their choice. A job run on `pcc-network-A` with `arbiter = Kleros` will have disputes resolved by Kleros; the same operator running a job on `pcc-network-B` with `arbiter = UMA` will have disputes resolved by UMA.
+
+### Arbiter options
+
+#### A. Kleros
+URL: https://kleros.io, https://docs.kleros.io/products/court
+
+- **Model**: juror-based court system. Jurors stake PNK tokens. Random selection with stake-weighted probability. Appeals double the jury size.
+- **Evidence**: structured; parties submit evidence via smart contract.
+- **Precedent**: A Mexican court enforced a Kleros ruling in 2023 — legal legitimacy precedent.
+- **Fit for PCC**: best for human-judgment disputes ("did this 3D print meet the contract specs?"). Bad for pure-data disputes (use UMA instead).
+
+#### B. UMA Optimistic Oracle
+URL: https://docs.uma.xyz
+
+- **Model**: optimistic — a proposer asserts a fact, a liveness period allows disputes, escalation to DVM voting if disputed.
+- **Best for**: binary or numeric fact disputes ("did the delivery arrive?", "is this sensor reading within spec?").
+- **Cost**: very low for uncontested proposals; moderate for contested ones.
+- **Speed**: 0.5-2 hour liveness; longer if escalated.
+- **Integration**: Across Protocol (bridge) is the most prominent user, securing billions in cross-chain transfers.
+- **Fit for PCC**: excellent for evidence verification disputes. Default for `pcc-network-default`.
+
+#### C. Claros Layer 5 (optimistic-challenge) — PCC's own
+Based on PCC's existing Claros Trust Layer 5 design. Operators post evidence optimistically; challengers can stake to dispute; unchallenged evidence finalizes after a window. This is the PCC-native default.
+
+#### D. User-elected jury
+Each network has a pool of registered jurors (human). Disputes are randomly assigned. Networks can require jurors to have certain credentials (licensed engineer, medical-device technician, etc.) for regulated verticals.
+
+#### E. Network operator multisig
+Low-decentralization but high-speed. The network operator manually arbitrates. Acceptable for small/closed networks (e.g., a company running `pcc-network-internal` for their own robots).
+
+#### F. EigenLayer AVS dispute-arbitration
+Operators who stake ETH attest to dispute outcomes. Slashing on demonstrably wrong attestations. This is the most decentralized and economically-secure option but requires AVS bootstrap.
+
+### Cross-network disputes
+What if a job on network A has an operator registered on network B, and they disagree? Who arbitrates?
+
+**Answer: the network where the JOB was posted arbitrates.** The job posting establishes the contract. The operator implicitly agreed to that network's arbiter when they accepted the job.
+
+Cross-network dispute flow:
+1. Requester on network A posts job, selects `pcc-network-A` (arbiter = UMA).
+2. Operator on network B accepts the job. Their acceptance message crosses via LayerZero; it includes an ack of the network A arbiter.
+3. Dispute arises. UMA arbitration happens on network A. Slashing of the operator's bond happens on network A (bonds are locked on network A at job-acceptance time; the operator's network B identity is linked via ContributorNFT).
+4. Reputation update (bad outcome for this operator) crosses via LayerZero to network B's reputation registry.
+
+Key invariant: **the job's arbiter is set at job-post time, not at dispute time.** This prevents arbiter-shopping.
+
+### Fit for PCC 1-5
+
+| Score | Rationale |
+|---|---|
+| **5/5** | Plug-in arbiter interface + network-level choice is the correct design. Default = UMA for speed + Claros L5 for evidence-specific, with Kleros available for human-judgment complexity. Cross-network dispute flow resolves at the job-posting network. No shared kill-switch. |
+
+## 14. Semi-sovereign appchains (Polkadot parachains, Avalanche subnets)
+
+### Polkadot parachains + JAM (2026)
+URL: https://polkadot.network, https://polkadot.com/technology/jam
+
+Polkadot's shared security model lets parachains inherit Relay Chain validator security without running their own validator set. The JAM (Join-Accumulate Machine) upgrade (2026) generalizes this to "services" — any computation can run on Polkadot's validator set as a service, not just parachain blocks.
+
+- **Sovereignty per chain**: tokenomics, governance, runtime logic — fully controlled by parachain team.
+- **Shared**: security (Relay Chain validators), XCM cross-chain messaging.
+- **Cost**: historically ~$1-5M/year for a parachain slot lease. With JAM's services model, costs should drop significantly — pay per compute used.
+- **Interop**: XCM (Cross-Consensus Messaging), native to Polkadot. Does NOT natively talk to EVM chains; requires bridges.
+
+For PCC: overkill unless Polkadot ecosystem has a killer feature PCC needs. Would fragment from EVM developer base.
+
+### Avalanche L1s (formerly Subnets)
+URL: https://build.avax.network
+
+After the Etna upgrade (2024-12), Avalanche L1s are "fully sovereign Layer 1s" with ~99.9% reduced launch costs (no longer need 2,000 AVAX per validator):
+
+- **Sovereignty**: define own validator set, tokenomics, execution logic, compliance rules
+- **Shared**: Avalanche subnet coordination layer, Warp Messaging for cross-L1 comms
+- **Cost**: dramatically reduced post-Etna. Small operators can now run L1s.
+- **Interop**: Warp Messaging within Avalanche ecosystem; external chains via bridges.
+- **Regulatory-friendly**: operators can define KYC rules at L1 level (good for enterprise PCC networks)
+
+For PCC: interesting as one of the network options. An enterprise deploying `pcc-network-pharma` (FDA-regulated, KYC-required) could launch an Avalanche L1 with baked-in compliance rules. But the protocol itself should stay EVM-multichain.
+
+### Cosmos appchains (see section 05)
+
+### When to use an appchain vs a contract deployment
+
+| Situation | Appchain? |
+|---|---|
+| Regulatory isolation needed (e.g., sanctioned-jurisdiction compliance) | Yes — Avalanche L1 with baked-in KYC |
+| Privacy-required (medical, defense) | Maybe — zkSync Hyperchain with Validium |
+| High-throughput robotics control | Yes — L3 on Arbitrum Orbit or ZK Stack |
+| Standard capability marketplace | No — deploy contracts on Base/Arbitrum/Polygon |
+| Small network (<1k operators) | No — contracts on existing chain |
+
+### Fit for PCC 1-5
+
+| Score | Rationale |
+|---|---|
+| **2.5/5** | Semi-sovereign appchains are useful for *some* PCC networks (regulated verticals) but shouldn't be the default. Protocol stays on commodity EVM chains; specialty networks can opt into Avalanche L1 or Hyperchain if their vertical requires it. Don't build a PCC-specific appchain. |
+
+## 15. The simple alternative: permissionless deployment on every EVM chain
+
+### The pattern
+Deploy the same contracts, at the same addresses (via CREATE2 deterministic factories), on every chain PCC wants to reach. No L2/L3 decision. No shared sequencer. No shared governance. Just:
+
+- `PCCProtocolFactory` at `0x<deterministic>` on Base, Arbitrum, Optimism, Polygon, zkSync, Linea, Scroll, Mantle, Celo, Avalanche C-chain, Ethereum, etc.
+- `ContributorNFT` (LayerZero ONFT v2) at `0x<deterministic>` on every chain
+- `JobEscrow` implementation at `0x<deterministic>` on every chain
+- `ArbiterInterface` on every chain, with each network picking its arbiter at deploy time
+
+### CREATE2 deterministic addresses
+URL: https://www.getfoundry.sh/guides/deterministic-deployments-using-create2
+
+CREATE2 lets you deploy contracts to deterministic addresses based on:
+- The deployer address (can be a singleton factory like Safe Proxy Factory)
+- The contract bytecode
+- A salt (any bytes32 you choose)
+
+By using a canonical "Deterministic Deployment Proxy" contract at the same address on all EVM chains (it's already deployed there — it's a well-known utility), PCC can ensure that `PCCProtocolFactory` exists at THE SAME address on Ethereum mainnet, Base, Arbitrum, Polygon, zkSync, Avalanche C-chain, BSC, Celo, Scroll, Mantle, Linea, and so on.
+
+Benefits:
+- **Trust simplification**: the contract at `0x<canonical>` on any chain is provably the same bytecode.
+- **UX simplification**: SDK can hardcode ONE address, works on every chain.
+- **Fork-tolerance**: a fork can deploy the same contract on a new chain, and it'll work with every existing client.
+
+### Mainnet canonical registry
+One canonical chain (Ethereum mainnet) hosts:
+- `pcc.eth` ENS domain
+- The canonical `ContributorNFT` home (where reputation history aggregates)
+- The canonical `PCCGuild` splits contract
+
+Other chains have local copies. LayerZero cross-chain messages sync reputation to mainnet. Reads on any chain can CCIP-Read from mainnet.
+
+### No shared chain-level governance
+There is no Law of Chains, no Superchain Registry, no cross-chain multisig. Each chain is just a deployment target. The protocol contracts are immutable on each.
+
+### What is shared vs not shared
+| Shared (standards only) | Not shared (per-network decision) |
+|---|---|
+| `ContributorNFT` (ONFT) standard | Fee model |
+| `JobReceipt` event schema | Arbiter |
+| `CompositionManifest` schema | Sybil resistance / KYC policy |
+| `IArbiter` interface | Operator allowlist |
+| CAIP-10 address format | Gas token |
+| LayerZero OApp message envelope | Chain-specific bridge preferences |
+
+### Cost breakdown
+- **Protocol development**: one-time. Audit the core contracts once ($200-500k for serious auditors).
+- **Per-chain deployment**: gas only. Base deployment of PCC protocol contracts per chain: ~$50-500 in gas.
+- **Maintenance**: minimal. Contracts are immutable.
+- **SDK and client infra**: one codebase, deployed anywhere. ~$100k/year for a small maintainer team (funded by PCCGuild).
+- **Mainnet canonical registry**: modest gas for reputation writes (~$5-50 per update, batched).
+
+### Limitations
+- No shared sequencer benefits (PCC doesn't need this)
+- No single "PCC chain" brand to rally around (good for credible neutrality, neutral for marketing)
+- Each new chain adds a dependency on that chain's continued existence (graceful: if a chain dies, NFTs and reputation on other chains are unaffected)
+
+### Fit for PCC 1-5
+
+| Score | Rationale |
+|---|---|
+| **5/5** | **This is the answer.** Permissionless deployment on every EVM chain + LayerZero ONFT for NFTs + CCIP/LayerZero for messages + ENS for canonical names + PCCGuild for public-goods funding. Matches every stated constraint. Practical to build. Preserves EVM ecosystem compatibility. Supports unlimited network operators with zero permission. |
+
+## Recommendation: PCC Network Architecture
+
+**Chosen pattern**: Permissionless multichain deployment + LayerZero ONFT v2 + optional per-network treasury + plug-in arbiter + PCCGuild public-goods funding.
+
+### The architecture in one diagram
+
+```
+        CANONICAL REGISTRY                    NETWORK-SPECIFIC DEPLOYMENTS
+        (Ethereum Mainnet)                      (on any EVM chain)
+        -------------------                   ----------------------------
+        pcc.eth ENS domain                  pcc-network-default (Base)
+        ContributorNFT home                 - treasury_bps = 0
+        PCCGuild splits                     - arbiter = UMA + Claros L5
+        ERC-8004 registry                   - sybil = none
+                |                           pcc-network-zerofee (Optimism)
+                | sync via                   - treasury_bps = 0
+                | LayerZero OApp             - arbiter = Kleros
+                v                            - sybil = none
+                                            pcc-network-regulated (Avalanche L1)
+        CROSS-CHAIN MESSAGES                 - treasury_bps = 150 (to FDA reg fund)
+        -----------------------              - arbiter = licensed engineer jury
+        JobReceiptV1                         - sybil = gov ID + credential check
+        ReputationUpdateV1                  pcc-network-internal (Base private L3)
+        DisputeEscalatedV1                   - treasury_bps = 0 (internal use)
+                                             - arbiter = company multisig
+                                             - sybil = employee allowlist
+```
+
+### Deployment layers
+
+**Layer 0 — Core protocol contracts (immutable, CREATE2-deployed on every EVM chain)**
+- `PCCProtocolFactory` — deploys network instances (JobEscrow, ArbiterRegistry)
+- `ContributorNFT` (LayerZero ONFT v2) — portable contributor identity
+- `JobEscrow` implementation — milestone-based settlement
+- `IArbiter`, `ISybilResistance`, `ITreasury` — interfaces networks implement
+- `LayerZeroOApp` router — message passing
+
+**Layer 1 — Canonical registries (Ethereum mainnet only)**
+- ENS domain `pcc.eth` with CCIP Read resolvers pointing to L2 ContributorNFT data
+- ERC-8004 Agent Registration File (already in use by PCC, see CLAUDE.md)
+- PCCGuild splits contract
+- `ContributorNFTMaster` — canonical home for reputation aggregation
+
+**Layer 2 — Network instances (deployed by operators)**
+- `PCCNetworkConfig` — sets `treasury_bps`, `treasury_address`, `arbiter`, `sybil_policy`
+- Network-specific allowlists, KYC integration, pricing policy
+- Can be deployed on ANY EVM chain, including permissioned L3s
+
+**Layer 3 — Cross-chain message layer**
+- LayerZero v2 for job receipts, reputation, disputes
+- CCIP as fallback for enterprise-only networks
+- IBC Eureka for bridging to Cosmos if needed (unlikely short-term)
+
+**Layer 4 — Dispute resolution**
+- Default: UMA Optimistic Oracle + Claros L5 (optimistic challenge)
+- Opt-in: Kleros (complex human judgment)
+- Regulated: licensed jury (per vertical)
+- Advanced: EigenLayer AVS dispute-arbitration service (future)
+
+**Layer 5 — Public goods funding**
+- PCCGuild (Protocol Guild model) at `pccguild.eth` on mainnet
+- Funded by voluntary donations from networks, foundations, individual donors
+- Vests to active contributors (4-year cliff typical)
+- No coercion; networks with `treasury_bps=0` are first-class citizens
+
+### What this achieves
+
+- **No single treasury**: protocol contracts take zero fee. Each network has optional treasury. PCCGuild is voluntary.
+- **No single kill-switch**: no multisig can pause protocol contracts. No DAO votes on protocol. Each chain deployment is immutable.
+- **Fork-tolerant**: if someone forks the protocol and deploys a competing ContributorNFT standard, their NFTs don't work with existing networks (incompatible standard), so forks naturally lose to the network effect of the original. If someone deploys a new NETWORK with the same protocol, that's fine and encouraged.
+- **Seamless cross-network operation**: ContributorNFT portable via LayerZero ONFT, reputation synced via OApp messages, payments settle on whichever chain is cheapest, dispute arbitration follows the job posting.
+- **Standards-based interop**: ContributorNFT, CompositionManifest, JobReceipt schemas are fixed; implementations plug-in.
+
+### Concrete deployment plan
+
+**Phase 1 — Standards finalization (Q2 2026)**
+- Finalize ContributorNFT v1 spec (LayerZero ONFT v2-based)
+- Finalize CompositionManifest v1 spec (reuse from existing PCC CSD)
+- Finalize JobReceiptV1, ReputationUpdateV1, DisputeEscalatedV1 message schemas
+- Publish as PCC-IP-1, PCC-IP-2, PCC-IP-3 (PCC Improvement Proposals)
+- Get 3+ outside implementations for each spec
+
+**Phase 2 — Core contract deployment (Q3 2026)**
+- Deploy `PCCProtocolFactory`, `ContributorNFT`, `JobEscrow` at deterministic CREATE2 addresses on: Ethereum, Base, Arbitrum One, Optimism, Polygon PoS, Linea, Scroll, zkSync Era, Celo, Mantle, BSC, Avalanche C-chain, Ink
+- Audit: $300k budget (Trail of Bits or similar)
+- Register `pcc.eth` ENS with CCIP Read resolvers
+
+**Phase 3 — Reference networks (Q4 2026)**
+- `pcc-network-default`: Base, treasury_bps=0, arbiter=UMA+ClarosL5, sybil=none
+- `pcc-network-op`: Optimism, treasury_bps=0, arbiter=Kleros, sybil=none
+- `pcc-network-zerofee`: Arbitrum, treasury_bps=0, arbiter=ClarosL5, sybil=none
+
+Document each. Open-source the network deployment scripts. Make it a 1-command deployment for new network operators.
+
+**Phase 4 — Migration + retirement of single-chain model (Q1 2027)**
+- Migrate existing PCC state from Base Sepolia single-chain 2.35%-fee model to multichain zero-fee model
+- Deprecate the 2.35% fee escrow contract
+- Airdrop existing ContributorNFT holders to the new standard
+- Set up PCCGuild, seed with initial donations
+
+**Phase 5 — Ecosystem expansion (2027+)**
+- Encourage third parties to spin up their own PCC networks
+- Document operator onboarding (how to run `pcc-network-yourname`)
+- Integrate with leading wallets (MetaMask, Rabby, Coinbase Wallet) via standard NFT display
+
+### Why not other options
+
+- **Optimism Superchain**: forces revenue sharing; fails credible neutrality.
+- **zkSync Hyperchains**: good sovereignty, but ZK focus limits EVM NFT ecosystem access.
+- **Arbitrum Orbit**: good option for a specific network, not the whole protocol.
+- **Polygon CDK / Agglayer**: Agglayer adds a light governance overlay; unnecessary complexity.
+- **Cosmos / IBC**: philosophically perfect but EVM ecosystem incompatible.
+- **Dedicated appchain** (Polkadot / Avalanche L1 / custom): premature; hurts ecosystem access; delays shipping.
+
+### Open questions for implementation
+
+1. **Canonical gas sponsor for cross-chain messaging**: who pays LayerZero fees when a reputation update crosses from settlement network to canonical registry? Likely the network operator bakes this into their `treasury_bps` or eats the cost as part of operating the network.
+
+2. **Reputation merge conflicts**: if the same contributor acts badly on two networks simultaneously, do their reputations propagate atomically? Probably eventually-consistent with timestamped updates is fine.
+
+3. **NFT recovery if a chain dies**: if Polygon PoS were to be deprecated, contributors whose ContributorNFT is on Polygon would need a migration path. Standard: their ContributorNFT, being LayerZero ONFT v2, can burn on Polygon and mint on any other supported chain at any time (already supported by ONFT standard).
+
+4. **Slashing and operator bonds across networks**: an operator with a bond on network A takes a job on network B. Dispute on B. Slashing on B fails (no bond). Cross-chain slashing is hard; likely solution is to require operators to have bonds on each network they accept jobs on, OR have a global bond contract that any network can slash against (runs on mainnet, expensive but clean).
+
+5. **Anti-Sybil across networks**: a bad actor may mint ContributorNFTs from many addresses to farm reputation. Mitigation: Human Passport integration at the `pcc.eth` registration layer (optional per-network).
+
+6. **Legal entity wrapping**: networks may want a legal entity wrapper (LLC, Liechtenstein Stiftung, etc.). Protocol remains entity-less. Networks can wrap themselves.
+
+### Summary table
+
+| Requirement | Met? | By |
+|---|---|---|
+| No single treasury | YES | Protocol contracts take zero fee |
+| Anyone can spin up pcc-network-foo | YES | PCCProtocolFactory is permissionless |
+| Custom treasury per network (incl. zero) | YES | Network sets `treasury_bps` at deploy |
+| Seamless cross-network operation | YES | LayerZero ONFT + cross-chain messages |
+| No single-org kill-switch | YES | Protocol contracts immutable on every chain |
+| Standards-based interop | YES | ContributorNFT, CompositionManifest, JobReceipt |
+| Operator can run on net-A, get paid for job on net-B | YES | ContributorNFT portable + cross-chain settlement |
+
+---
+
+## Sources
+
+- [Optimism Superchain interop explainer](https://docs.optimism.io/interop/explainer)
+- [OP Stack Interop Specification](https://specs.optimism.io/interop/overview.html)
+- [SuperchainWETH / ETH Shared Lockbox](https://docs.optimism.io/stack/interop/superchain-weth)
+- [zkSync ZK Stack Overview](https://docs.zksync.io/zk-stack)
+- [ZKsync Chains](https://docs.zksync.io/zk-stack/zk-chains)
+- [Introducing the ZK Stack](https://blog.matter-labs.io/introducing-the-zk-stack-c24240c2532a)
+- [Arbitrum Orbit](https://arbitrum.io/orbit)
+- [Arbitrum Orbit AnyTrust Chains](https://blog.arbitrum.io/arbitrum-orbit-anytrust-chains/)
+- [Polygon CDK](https://polygon.technology/polygon-cdk)
+- [Polygon CDK Docs](https://docs.polygon.technology/cdk/)
+- [Cosmos IBC](https://cosmos.network/ibc)
+- [IBC Eureka](https://cosmos.network/ibc-eureka)
+- [EigenLayer AVS list](https://app.eigenlayer.xyz/avs)
+- [Karak / Symbiotic / EigenLayer comparison](https://unchainedcrypto.com/eigenlayer-competitors-symbiotic-karak/)
+- [Vitalik credible neutrality original essay (Nakamoto 2020)](https://nakamoto.com/credible-neutrality/)
+- [Credible neutrality as a guiding principle (Messari)](https://messari.io/report/credible-neutrality-as-a-guiding-principle)
+- [Legally Credible Neutrality on Ethereum (Barczentewicz SSRN)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5029164)
+- [LayerZero ONFT v2](https://docs.layerzero.network/v2/developers/evm/onft/quickstart)
+- [LayerZero v2 OApp](https://docs.layerzero.network/v2/developers/evm/oapp/overview)
+- [Chainlink CCIP](https://chain.link/cross-chain)
+- [Chainlink CCT standard](https://docs.chain.link/ccip/concepts/cross-chain-token)
+- [Hyperlane](https://www.hyperlane.xyz)
+- [Hyperlane Sovereign Consensus](https://medium.com/hyperlane/wut-hyperlane-wut-sovereign-consensus-with-ugly-pictures-f96c479e3a00)
+- [Axelar GMP](https://docs.axelar.dev/dev/general-message-passing/overview/)
+- [Wormhole NFT bridge whitepaper](https://github.com/wormhole-foundation/wormhole/blob/main/whitepapers/0006_nft_bridge.md)
+- [ENS CCIP Read](https://docs.ens.domains/resolvers/ccip-read/)
+- [ENS L2/Offchain Resolution](https://docs.ens.domains/learn/ccip-read/)
+- [Safe + Zodiac multisig governance](https://docs.tally.xyz/set-up-and-technical-documentation/using-governor-with-gnosis-safe/zodiac-governor-module-for-subdaos-and-grants-programs)
+- [Human Passport (formerly Gitcoin)](https://passport.human.tech)
+- [Kleros dispute resolution](https://kleros.io)
+- [Kleros whitepaper](https://kleros.io/whitepaper.pdf)
+- [UMA Optimistic Oracle](https://docs.uma.xyz/protocol-overview/how-does-umas-oracle-work)
+- [Optimism RetroPGF explainer](https://medium.com/ethereum-optimism/retroactive-public-goods-funding-33c9b7d00f0c)
+- [Protocol Guild](https://protocol-guild.readthedocs.io/en/latest/)
+- [Protocol Guild using Splits](https://splits.org/blog/protocol-guild/)
+- [Avalanche L1 sovereignty (Etna)](https://build.avax.network/blog/etna-enhancing-sovereignty-avalanche-l1s)
+- [Polkadot JAM roadmap](https://polkadot.com/technology/jam)
+- [ERC-8004 Trustless Agents](https://eips.ethereum.org/EIPS/eip-8004)
+- [CREATE2 deterministic deployments (Foundry)](https://www.getfoundry.sh/guides/deterministic-deployments-using-create2)
+- [Cross-chain messaging comparison (BlockEden 2025)](https://blockeden.xyz/blog/2025/07/28/cross-chain-messaging-and-shared-liquidity/)
+
