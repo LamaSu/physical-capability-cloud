@@ -12,8 +12,8 @@ the protocol honors it forever (until contributor ships a v2 under a new NFT).
 - [x] 2. Streaming money (Superfluid, Sablier v2, Drips)
 - [x] 3. Bonding curves (Balancer LBP, Uniswap v3 tick, Bancor)
 - [x] 4. Rate limits / TWAMM (Uniswap v4 hooks)
-- [ ] 5. On-chain step functions (arrays, packed uints, LUTs)
-- [ ] 6. Piecewise linear encoding (ABDK, PRB Math, Solmate)
+- [x] 5. On-chain step functions (arrays, packed uints, LUTs)
+- [x] 6. Piecewise linear encoding (ABDK, PRB Math, Solmate)
 - [ ] 7. Commit-reveal schemes (IPFS/Arweave + hash commit)
 - [ ] 8. DSLs for contracts (Chainlink Automation, Gelato, Superform)
 - [ ] 9. Contract upgradeability conflict (Solidstate, Clones, ERC-4906)
@@ -461,5 +461,228 @@ artifact, the interface is the standard.
 
 ---
 
-## Checkpoint: Sections 3-4 complete.
+## 5. On-chain Step Functions (Encoding Tradeoffs)
+
+A step function `f(t)` returns one of N constant values depending on which
+time bucket `t` falls in. This is the most common rate-schedule shape in
+real legal contracts (90%+ of actual contributor economics is "Y bp for
+first X months, Z bp after"). Cheap to store, cheap to evaluate.
+
+### 5.1 Array of structs
+
+```solidity
+struct Step {
+    uint40 boundary;   // boundary timestamp
+    uint16 bpRate;     // basis points (max 65535 = 655.35%)
+}
+Step[] public schedule;  // N steps, each 7 bytes → 1 slot fits ~4
+```
+
+**Gas evaluation (linear scan for N steps):**
+- Cold SLOAD: 2,100 gas
+- Warm SLOAD: 100 gas
+- For N=3 array: ceil(3 * 7 / 32) = 1 cold SLOAD + ... ≈ **2,300 gas**
+- For N=10: 3 cold SLOADs ≈ **6,500 gas**
+- For N=20: 5 cold SLOADs ≈ **10,700 gas**
+
+**Binary search for N>8:** O(log N) SLOADs but overhead of the search
+itself costs more than linear for small N. Crossover is around N=10.
+
+### 5.2 Packed into a single storage slot
+
+For up to 7 boundaries + 7 rates in 256 bits:
+```solidity
+// Layout: [r0][r1][...][r6][b0][b1][...][b6] — 16 bits each
+uint256 public packedSchedule;
+```
+- 7 × uint16 rates (112 bits) + 7 × uint16 boundaries (112 bits) = 224 bits
+- 32 bits spare for "steps count" + active flag
+
+**Gas evaluation:** ONE SLOAD (2,100 cold or 100 warm) + bit-shift unpacking
+(~100-200 gas). Total **~2,300 gas cold, ~300 gas warm**.
+
+This is the **cheapest possible** encoding for a step function with up to 7
+steps. Storage cost to WRITE is just 22,100 gas (new slot), vs 22,100 × N
+for an array.
+
+**Tradeoff:** Limited to 7 steps at 16-bit boundaries. If boundaries are
+timestamps (40 bits), you could fit 4 boundaries + 4 rates = 4 steps per slot.
+
+### 5.3 Mapping with binary search over stored boundaries
+
+```solidity
+mapping(uint256 tokenId => Step[]) private schedules;
+```
+
+Cost per evaluation: O(log N) SLOADs ≈ 2-5 warm SLOADs for N=10 = **~1k gas
+warm**. But first access is cold (2,100).
+
+This is what Sablier LockupTranched uses. Good for larger N (up to ~50)
+where packed encoding breaks.
+
+### 5.4 Precomputed lookup table (LUT) with uint256 bitmap
+
+For "rate is X before time T, else Y" (2-step only), you need one bit per
+step, one uint256 for all boundaries up to 256 distinct boundaries:
+```solidity
+uint256 public rateABitmap;    // bit i set if step i uses rate A
+uint256 public rateAValue;     // the A value
+uint256 public rateBValue;
+```
+
+Too inflexible for our needs. Mentioned only for completeness.
+
+### 5.5 Recommendation for our system
+
+Use the **packed-single-slot encoding (5.2)** for up to 7 steps, and
+fall back to a storage array (5.1) when 8+ needed. The simplest practical
+approach is:
+
+```solidity
+struct StepSchedule {
+    uint8 stepCount;           // 0-7
+    uint16[7] rates;            // bp
+    uint40[7] boundaries;       // unix ts; 0 = "until stepCount end"
+}
+mapping(uint256 tokenId => StepSchedule) internal _stepSchedules;
+```
+
+Total storage: 8 + 112 + 280 = 400 bits ≈ 2 slots per schedule. Evaluation:
+2 cold SLOADs = 4,200 gas, or 2 warm SLOADs = 200 gas.
+
+**This already beats Sablier Tranched for our 1-3 step case.**
+
+### 5.6 Deployment-cost consideration
+
+Each cold SLOAD costs the SETTLEMENT caller, not the contributor. So the
+choice is: "do we optimize for cheap minting (one struct write = 22,100 gas)
+or cheap evaluation (one SLOAD = 2,100 gas per job)?"
+
+Rate schedules are written ONCE per contributor but read MANY times (once
+per job that uses the adapter). Evaluation cost dominates by 2-4 orders of
+magnitude. **Optimize for read.**
+
+---
+
+## 6. Piecewise Linear Encoding + Fixed-Point Math Libraries
+
+For curves that aren't step functions (time-decay, adoption-indexed),
+we need some form of interpolation and/or nonlinear math. Here are the
+libraries available, with gas benchmarks.
+
+### 6.1 PRBMath (Paul R. Berg) — current standard
+
+**Source**: https://github.com/PaulRBerg/prb-math
+**License**: MIT
+**Version**: v4.x (current)
+
+**Two types:**
+- `UD60x18` (unsigned 60.18 fixed-point, MIT)
+- `SD59x18` (signed, slightly slower for abs/neg)
+
+**Gas benchmarks (from README, UD60x18):**
+
+| Operation | Min gas | Max gas | Avg gas | Notes                         |
+|-----------|---------|---------|---------|-------------------------------|
+| pow       | 64      | 10,637  | 6,635   | variable — Taylor terms        |
+| exp       | 1,874   | 2,742   | 2,244   | e^x                            |
+| exp2      | 1,784   | 2,652   | 2,156   | 2^x                            |
+| ln        | 419     | 6,902   | 3,814   | natural log                    |
+| log2      | 330     | 6,825   | 3,426   | log base 2                     |
+| sqrt      | 114     | 846     | 710     | Babylonian                     |
+| inv       | 40      | 40      | 40      | 1/x                            |
+| mul       | 219     | 275     | 247     | fixed-point multiply            |
+| div       | 205     | 205     | 205     | fixed-point divide              |
+
+Note: these are **inclusive of storage/call overhead** — pure arithmetic
+is even cheaper if inlined.
+
+**Used by:** Sablier v2, many DeFi protocols. This is the modern default.
+
+### 6.2 ABDK Math 64.64 — older but still used
+
+**Source**: https://github.com/abdk-consulting/abdk-libraries-solidity
+**License**: BSD-4-Clause
+
+**Format**: 64.64 bit signed fixed-point stored in int128.
+
+**Gas comparison (from krushiraj.github.io benchmark):**
+
+| Operation | ABDK 64.64 | PRBMath UD60x18 |
+|-----------|------------|-----------------|
+| mul       | 1,058      | 877             |
+| pow       | 2,302      | 2,723           |
+
+PRBMath wins on exp/log/inv, ABDK wins on mul/div/powu/sqrt (per RareSkills
+and PRBMath's own docs). Difference is small — roughly 10-20% on most ops.
+
+**When to prefer ABDK:** if you need 128-bit precision (rare for our bp
+rates). For 16-bit bp rates, both are massive overkill.
+
+### 6.3 Solmate / Solady FixedPointMathLib — minimalist WAD math
+
+**Source**: https://github.com/transmissions11/solmate/blob/main/src/utils/FixedPointMathLib.sol
+**Solady variant**: https://github.com/Vectorized/solady/blob/main/src/utils/FixedPointMathLib.sol
+
+**Format**: WAD = 1e18. Unsigned only (Solmate). Solady adds expWad/lnWad.
+
+**Signatures:**
+- `mulWadDown(x, y)`, `mulWadUp`, `divWadDown`, `divWadUp`
+- `rpow(x, n, scalar)` — integer-power
+- `sqrt(x)` — Babylonian
+- Solady adds: `expWad(x)`, `lnWad(x)`, `powWad(x, y)` (via exp(ln(x)*y))
+
+**Gas cost** (Solady, from benchmarks):
+- `mulWad`: ~80-150 gas (pure assembly)
+- `sqrt`: ~400-800 gas
+- `expWad`: ~2,000-3,500 gas (less precise than PRBMath exp)
+- `lnWad`: ~2,500-4,500 gas
+
+**Key advantage:** Solady is written almost entirely in inline assembly,
+shaving 10-30% off PRBMath for the same ops. The library is MIT.
+
+**When to prefer:** if you want small binary size and you only need mul/div/
+sqrt/exp. For our adoption-indexed rate (sqrt of job count), Solady's sqrt
+at ~700 gas is the right pick.
+
+### 6.4 Piecewise Linear (PWL) approximation
+
+For any smooth curve f(t), approximate with N breakpoints (ti, yi) and
+linearly interpolate between them:
+```
+f(t) = yi + (y(i+1) - yi) * (t - ti) / (t(i+1) - ti)   for t in [ti, t(i+1)]
+```
+
+This is how most complex curves get compiled to on-chain form when
+evaluation must be cheap.
+
+**Gas cost:**
+- Find segment: O(log N) SLOADs ≈ 2-3 warm SLOADs for N=7 = **~300 gas**
+- Interpolate: 1 mul + 1 div + 1 add = **~500 gas**
+- Total: **~800-1200 gas** per evaluation for N=7 breakpoints.
+
+**Tradeoff:** worse fidelity than true nonlinear eval, but 3-10x cheaper
+than calling pow() or exp(). For a "smooth decay from 80bp to 10bp over
+18 months", 7 breakpoints at 2-month intervals give ~1% max relative error.
+
+**Design choice for us:** since our bp rates are already coarse (1-2 digit
+integer precision), PWL approximation is fine. A "smooth time-decay" template
+can ship as 7 breakpoints, linearly interpolated.
+
+### 6.5 Academic note: optimal breakpoint placement
+
+Literature (arXiv:2407.21081) shows optimal PWL for a known nonlinear
+target uses Chebyshev-node spacing: breakpoints concentrated where curvature
+is highest. For our use case, the Contributor UI precomputes the breakpoints
+from the contributor's specified curve type (e.g., "exponential decay with
+half-life 6 months") and stores those breakpoints on-chain. No math happens
+at evaluation time.
+
+This means we can SHIP any smooth curve the UI can precompute, as long as
+the on-chain form is breakpoints + linear interpolation. The math runs
+off-chain at mint time; on-chain, only the cheap PWL lookup runs.
+
+---
+
+## Checkpoint: Sections 5-6 complete. Committing.
 
