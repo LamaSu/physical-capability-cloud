@@ -30,6 +30,46 @@ export interface StoryIPRegistration {
 }
 
 /**
+ * ContributorRole — the canonical taxonomy of parties who can earn from a job.
+ *
+ * Introduced by ADR-12 (2026-04-23). Replaces the former 5-value union
+ * (`designer | operator | verifier | assembler | curator`) with a 10-value
+ * union that separates execution, trust, contribution, coordination, and
+ * network concerns.
+ *
+ * Semantics per role are documented in ADR-12 §2.1 and §4.
+ *
+ * Migration notes:
+ *   - `designer` is kept as a deprecated member so legacy records still decode.
+ *     See ADR-12 §2.2 for the designer→{protocol-author|assembler|integrator}
+ *     data-migration plan.
+ *   - All other legacy roles (operator, verifier, assembler, curator) carry
+ *     forward unchanged.
+ */
+export type ContributorRole =
+  // Execution — always present
+  | "operator"
+  // Trust layer
+  | "verifier"
+  | "insurer"
+  // Contribution layers — all use ContributorNFT + RateSchedule
+  | "integrator"
+  | "protocol-author"
+  | "model-author"
+  | "dataset-contributor"
+  // Coordination (unchanged from legacy enum)
+  | "curator"
+  | "assembler"
+  // Network
+  | "network-treasury"
+  /**
+   * @deprecated Use `protocol-author`, `assembler`, or `integrator` depending
+   * on CSD kind. Retained for backward compatibility so legacy records still
+   * decode. See ADR-12 §2.2 for the migration map.
+   */
+  | "designer";
+
+/**
  * Revenue split configuration for an IP Asset.
  * 100 Royalty Tokens total; each token = 1% of all future revenue.
  */
@@ -39,8 +79,8 @@ export interface StoryRoyaltySplit {
   splits: Array<{
     /** Recipient wallet address */
     address: string;
-    /** Role in the production of this capability */
-    role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+    /** Role in the production of this capability (ContributorRole). */
+    role: ContributorRole;
     /** Integer 1-100; all splits must sum to 100 */
     percentage: number;
     /** Human-readable label, e.g. "CSD Author", "Machine Operator" */

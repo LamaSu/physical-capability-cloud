@@ -11,6 +11,7 @@ import type {
   StoryDerivativeLink,
   StoryRevenueSnapshot,
   StoryDispute,
+  ContributorRole,
 } from "../types/story.js";
 
 // ── StoryIPRegistration ───────────────────────────────────────────────────────
@@ -70,11 +71,45 @@ describe("StoryRoyaltySplit", () => {
     expect(split.totalTokensDistributed).toBe(100);
   });
 
-  it("all role values are accepted", () => {
+  it("all legacy role values still decode (backward compat)", () => {
     const roles: StoryRoyaltySplit["splits"][number]["role"][] = [
       "designer", "operator", "verifier", "assembler", "curator",
     ];
     expect(roles).toHaveLength(5);
+  });
+
+  it("all new ContributorRole values are accepted (ADR-12)", () => {
+    const roles: ContributorRole[] = [
+      "operator",
+      "verifier",
+      "insurer",
+      "integrator",
+      "protocol-author",
+      "model-author",
+      "dataset-contributor",
+      "curator",
+      "assembler",
+      "network-treasury",
+      "designer", // deprecated but still valid
+    ];
+    expect(roles).toHaveLength(11);
+  });
+
+  it("StoryRoyaltySplit accepts new roles in splits entries", () => {
+    const split: StoryRoyaltySplit = {
+      ipId: "0xip_new_roles",
+      splits: [
+        { address: "0x001", role: "operator",            percentage: 87, label: "Operator" },
+        { address: "0x002", role: "verifier",            percentage:  3, label: "Verifier" },
+        { address: "0x003", role: "protocol-author",     percentage:  2, label: "CSD Author" },
+        { address: "0x004", role: "integrator",          percentage:  2, label: "Adapter Author" },
+        { address: "0x005", role: "model-author",        percentage:  4, label: "Model Author" },
+        { address: "0x006", role: "network-treasury",    percentage:  2, label: "Network Treasury" },
+      ],
+      totalTokensDistributed: 100,
+    };
+    const total = split.splits.reduce((s, x) => s + x.percentage, 0);
+    expect(total).toBe(100);
   });
 
   it("split can have a single holder at 100%", () => {
