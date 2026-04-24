@@ -55,6 +55,24 @@ contract MilestoneEscrow {
         bool challengerWon;
     }
 
+    /**
+     * @notice A single payment destination in a multi-recipient payout map.
+     * @dev Stored per-milestone by the payer via setPayoutMap() before fund().
+     *      After funding, the map is immutable and consumed by release().
+     *
+     * @param recipient  EOA or contract receiving the payment.
+     * @param bps        Basis points of distributable amount (post protocol-fee). Max 5000 (50%).
+     * @param roleTag    keccak256 hash of the role name (e.g. keccak256("integrator")).
+     *                   Canonical set defined in packages/contracts/ts/payouts.ts.
+     * @param ipId       Story Protocol IP Asset ID for off-chain attribution. bytes32(0) if N/A.
+     */
+    struct Payout {
+        address recipient;
+        uint256 bps;
+        bytes32 roleTag;
+        bytes32 ipId;
+    }
+
     // ── State ────────────────────────────────────────────────────────────
 
     address public payer;
@@ -71,6 +89,22 @@ contract MilestoneEscrow {
 
     bool public funded;
     uint256 public totalAmount;
+
+    // ── splitPayout State (ADR-11) ───────────────────────────────────────
+
+    /// @notice Per-milestone payout map. Set by payer after addMilestone() and before fund().
+    /// @dev Private + read via getPayoutMap() so we return Payout[] memory cleanly.
+    mapping(uint256 => Payout[]) private _payoutMap;
+
+    /// @notice True if a payout map has been set for a milestone.
+    /// @dev Public so off-chain tooling can cheaply query whether split is active.
+    mapping(uint256 => bool) public payoutMapSet;
+
+    /// @notice Maximum payouts per milestone. Caps release() loop gas at ~450k worst-case.
+    uint256 public constant MAX_PAYOUTS = 16;
+
+    /// @notice Per-payout basis-point ceiling. Sanity floor: no single recipient takes >50%.
+    uint256 public constant MAX_SINGLE_BPS = 5000;
 
     // ── Reentrancy Guard ─────────────────────────────────────────────────
 
@@ -100,6 +134,22 @@ contract MilestoneEscrow {
     event DisputeResolved(uint256 indexed milestoneIndex, bool challengerWon);
     event MilestoneRefunded(uint256 indexed milestoneIndex, uint256 amount);
     event BondSlashed(uint256 indexed milestoneIndex, address slashedParty, uint256 amount);
+
+    // ── splitPayout Events (ADR-11) ──────────────────────────────────────
+
+    /// @notice Emitted when a payer registers a payout map for a milestone.
+    event PayoutMapSet(uint256 indexed milestoneIndex, uint256 payoutCount, uint256 totalBps);
+
+    /// @notice Emitted per-recipient during release() when a payout map is active.
+    /// @dev Off-chain indexers (Graph subgraph) use these for per-role revenue dashboards.
+    event SplitPayoutExecuted(
+        uint256 indexed milestoneIndex,
+        address indexed recipient,
+        bytes32 indexed roleTag,
+        bytes32 ipId,
+        address token,
+        uint256 amount
+    );
 
     // ── Modifiers ────────────────────────────────────────────────────────
 
