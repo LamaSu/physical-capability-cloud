@@ -74,6 +74,8 @@ export {
 export type {
   RevenueSplitProfile,
   SplitEntry,
+  SplitRole,
+  SplitProfileName,
   ResolvedSplit,
   DistributionEntry,
 } from "./story-defaults.js";
