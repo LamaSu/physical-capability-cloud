@@ -14,10 +14,10 @@ the protocol honors it forever (until contributor ships a v2 under a new NFT).
 - [x] 4. Rate limits / TWAMM (Uniswap v4 hooks)
 - [x] 5. On-chain step functions (arrays, packed uints, LUTs)
 - [x] 6. Piecewise linear encoding (ABDK, PRB Math, Solmate)
-- [ ] 7. Commit-reveal schemes (IPFS/Arweave + hash commit)
-- [ ] 8. DSLs for contracts (Chainlink Automation, Gelato, Superform)
-- [ ] 9. Contract upgradeability conflict (Solidstate, Clones, ERC-4906)
-- [ ] 10. Multi-signer schedule updates (governance)
+- [x] 7. Commit-reveal schemes (IPFS/Arweave + hash commit)
+- [x] 8. DSLs for contracts (Chainlink Automation, Gelato, Superform)
+- [x] 9. Contract upgradeability conflict (Solidstate, Clones, ERC-4906)
+- [x] 10. Multi-signer schedule updates (governance)
 - [ ] 11. Off-chain schedule + on-chain commit
 - [ ] 12. Hybrid declarative templates (enum + struct)
 - [ ] 13. Enforcement at settlement
@@ -684,5 +684,257 @@ off-chain at mint time; on-chain, only the cheap PWL lookup runs.
 
 ---
 
-## Checkpoint: Sections 5-6 complete. Committing.
+## 7. Commit-Reveal Schemes / Off-Chain Schedule + On-Chain Hash
+
+### 7.1 IPFS CID + on-chain hash commit
+
+**Model:**
+1. Contributor computes their full rate schedule off-chain (JSON file).
+2. Uploads JSON to IPFS, gets CID (content-addressed SHA-256 hash).
+3. Mints ContributorNFT with `scheduleCID` + `scheduleHash` stored in
+   immutable fields of the NFT.
+4. Settlement fetches the JSON from IPFS (optionally verifies hash) and
+   evaluates the schedule off-chain.
+
+**Pros:**
+- Schedule can be arbitrarily complex — full Turing-complete off-chain
+  evaluator if you want.
+- Inspectable by anyone with the CID — open data.
+- On-chain storage is minimal (~46 bytes for a CIDv1).
+- Content-addressed = **immutable by the laws of hashing**. If the bytes
+  change, the CID changes, and the NFT's commitment is invalid.
+
+**Cons:**
+- Settlement **cannot complete on-chain alone**. It requires an off-chain
+  evaluator to fetch the CID, compute the rate, and submit a signed rate
+  attestation. This is a trust model question.
+- IPFS persistence is not guaranteed unless pinned. If the CID becomes
+  unreachable, the schedule is effectively lost. (Fix: pin on Arweave or
+  Storacha for permanence.)
+- Multi-hop evaluation = more latency + gas.
+
+**Gas cost:** on-chain = just 1 SLOAD for the CID + 1 SLOAD for hash = ~4k
+gas. Off-chain evaluator cost is separate (API call + signature verify = ~10k gas
+to verify the signed attestation on-chain).
+
+**Applicability:** this is the right pattern if we want to support **arbitrary**
+schedule logic (e.g., "rate depends on external oracle data we haven't
+anticipated yet"). For our 5-template system, overkill — we don't need a
+Turing-complete DSL off-chain.
+
+**Fit score 1-5: 3 as fallback for rare custom cases.** NOT the primary mechanism.
+
+### 7.2 Arweave / Storacha permanence
+
+Arweave pays miners once up-front for permanent storage. Storacha (formerly
+Web3.Storage) uses Filecoin for long-term pinning. Both provide cryptographic
+permanence beyond what IPFS alone offers.
+
+**For our system:** if we do go with off-chain schedule + hash commit, we
+pin to Storacha (PCC already uses it for evidence bundles — same path).
+Commit Arweave tx ID on-chain if we want to be extra paranoid about
+century-scale persistence.
+
+### 7.3 Commit-reveal is NOT what we want here
+
+Traditional commit-reveal is for hiding a value then proving it later
+(auctions, RNG). We don't need to hide the schedule — we WANT it public.
+The pattern we want is just "hash commit for integrity". No reveal phase.
+
+---
+
+## 8. Domain-Specific Languages for On-Chain Logic
+
+### 8.1 Chainlink Automation — triggers, not DSL
+
+**Source**: https://docs.chain.link/chainlink-automation
+
+**Model:** Your contract implements `AutomationCompatibleInterface`:
+```solidity
+function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData);
+function performUpkeep(bytes calldata performData) external;
+```
+
+Automation nodes poll `checkUpkeep` off-chain. When it returns true, they
+call `performUpkeep`. Conditional logic lives in Solidity, not a DSL — the
+"DSL" is just "any view function returns bool".
+
+**Fit for our rate schedule:** NOT applicable. We don't need triggered
+execution — settlement is called by the escrow contract when a job is released.
+No off-chain polling required.
+
+**Fit score 1-5: 1.**
+
+### 8.2 Gelato Web3 Functions — TypeScript on IPFS
+
+**Source**: https://docs.gelato.cloud/
+
+**Model:** TypeScript function stored on IPFS, run by Gelato executors.
+Returns `canExec` + `execData`. Logic is arbitrary off-chain code with
+access to on-chain state via providers.
+
+**Fit for our rate schedule:** also not applicable. Gelato is a decentralized
+trigger network; we have a predictable on-chain call path.
+
+**One useful concept:** the TypeScript-on-IPFS approach could be useful
+for **off-chain schedule evaluators** as a fallback for custom schedules.
+But adds a whole new dependency vs our 5-template on-chain approach.
+
+**Fit score 1-5: 1.**
+
+### 8.3 Superform (DeFi aggregator) — template-per-strategy
+
+Superform has a "Form" abstraction: each DeFi protocol has a standardized
+wrapper contract. Users call a Form, and it adapts to the underlying protocol.
+Superform is unrelated to rate schedules — I couldn't find a "schedule DSL"
+in it despite the name sounding promising.
+
+**Fit score 1-5: 1.**
+
+### 8.4 Actus Financial Contracts — declarative financial contract DSL
+
+**Source**: https://www.actusfrf.org/
+
+ACTUS is a taxonomy of 32 financial contract types with a formal DSL for
+expressing cash flow patterns. Originally from IBM research. Subset has
+been implemented as Solidity libraries.
+
+**Relevance:** ACTUS formalizes exactly the kind of "flow schedule" we care
+about — it has standard types for principal + interest schedules, step-rate,
+bond amortization, etc.
+
+**For our system:** ACTUS is a **vocabulary**, not a code library. Reading
+the ACTUS taxonomy helps us validate that our 5-template set covers the
+common cases (it does — our templates are a subset of ACTUS Plain Vanilla
+contracts + bond amortization patterns).
+
+**Fit score 1-5: 3** for vocabulary / design validation.
+
+### 8.5 Marlowe (Cardano) — actually is a contract DSL
+
+Cardano's Marlowe is a Turing-incomplete DSL for financial contracts with
+formal semantics. Not applicable to Ethereum, but worth citing as the
+canonical example of a financial-contract DSL done right.
+
+**Takeaway:** Marlowe proves that you can express 90%+ of financial
+contract logic in a non-Turing-complete, analyzable DSL. Our enum + struct
+template approach is in the same spirit: limited expressiveness, full
+analyzability.
+
+---
+
+## 9. Contract Upgradeability and Immutability-by-Construction
+
+### 9.1 The proxy problem
+
+If our RateSchedule contract lives behind a proxy (UUPS, Transparent Proxy,
+Beacon), it is NOT immutable. Someone with the admin key can replace the
+implementation. That's the entire point of proxies.
+
+**For our system: proxies are an anti-pattern.** Direct bytecode immutability
+is the only way to provide credible "rate cannot change".
+
+### 9.2 EIP-1167 Minimal Proxy (Clones)
+
+**Source**: https://eips.ethereum.org/EIPS/eip-1167
+**OZ implementation**: https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/proxy/Clones.sol
+
+**Model:** Every clone is a 45-byte bytecode stub that DELEGATECALL-forwards
+to a shared implementation. The implementation address is hardcoded in the
+clone's bytecode — it CANNOT be changed.
+
+**Properties:**
+- Clone creation code: 55 bytes (45 bytes runtime + 10 bytes constructor)
+- Gas to deploy: ~32,000-45,000 (vs 200k-2M for a full contract)
+- Via CREATE2: deterministic address from salt + implementation
+- **Immutable:** no admin, no upgrade path
+
+**Use case for us:** if we want each contributor's RateSchedule to live at
+its own address (like each Sablier stream NFT has its own... wait, no,
+Sablier streams share a contract). EIP-1167 clones are appropriate when
+the per-instance state is significant and lives in storage of the clone.
+
+For our case, each contributor's schedule is small (2-3 storage slots). We
+DON'T need a clone per contributor. A single mapping in one immutable
+contract suffices. Clones would add 32k gas per contributor for zero
+benefit.
+
+**Fit score 1-5: 2.** The pattern is well-understood but overkill for our
+data size. However, if we want each schedule to be INDEPENDENTLY
+DEPLOYED (e.g., for governance-minimal branding or L2 compatibility), clones
+are the right tool.
+
+### 9.3 ERC-4906 (metadata update event)
+
+**Source**: https://eips.ethereum.org/EIPS/eip-4906
+
+**Full spec:**
+```solidity
+event MetadataUpdate(uint256 _tokenId);
+event BatchMetadataUpdate(uint256 _fromTokenId, uint256 _toTokenId);
+```
+
+Purely a signaling extension. No requirement that metadata actually
+changes. The EIP explicitly says implementers SHOULD NOT emit on mint/burn,
+only on intentional metadata change.
+
+**For our system:** we can emit `MetadataUpdate` on the rare case where a
+rate schedule has a URI pointing to IPFS-hosted documentation and that
+document gets re-pinned or cached. But the SCHEDULE ITSELF never mutates,
+so we'd almost never emit this. Clean to implement, no functional impact.
+
+**Fit score 1-5: 2** — optional but standard-compliant.
+
+### 9.4 Immutable-by-construction pattern summary
+
+For our ContributorNFT + RateSchedule:
+1. Single non-upgradeable `ContributorNFT` contract deployed once.
+2. `mapping(uint256 tokenId => Schedule)` stores each contributor's
+   schedule.
+3. The **only** write path to the mapping is inside `mintContributor()`.
+4. No `setSchedule`, no `update`, no proxy.
+5. To "update", contributor mints a new tokenId (v2) which the protocol
+   may choose to honor separately.
+
+This gives contract-level immutability (not bytecode-level) but it's
+equivalent from a trust standpoint: anyone can read the contract source
+and verify no mutation path exists.
+
+### 9.5 Solidstate, Diamond / EIP-2535 — hard no
+
+Solidstate and the Diamond pattern are designed for UPGRADEABLE modular
+contracts. Both assume a governance/admin. Explicit anti-pattern for our
+immutability requirement.
+
+---
+
+## 10. Multi-Signer Schedule Updates (Governance) — Intentionally Avoided
+
+Compound Comet, Aave, and Morpho all use governance-controlled interest rate
+model swaps. Pattern:
+1. Governance proposal to change the IRM address.
+2. After timelock, execute.
+3. Rates change on next interaction.
+
+**Why we reject this pattern:** the user directive explicitly says "MARKET
+sorts rates, no governance". Contributors compete on published-and-frozen
+rates. A governance process that can alter a contributor's rate post-mint
+destroys the entire mechanism:
+- Market signal becomes noise (why trust a frozen rate if gov can thaw it?)
+- Contributors are forced to monitor governance, which is overhead.
+- The whole point of "mint an NFT to publish a commitment" is lost.
+
+**Mentioned here only to flag for review:** any PR that adds a setter,
+emergency pause, or governance hook to the RateSchedule storage mapping
+is a protocol-level regression. Reject at code review.
+
+**One acceptable compromise** (NOT recommended for v1, but possible later):
+a **versioned migration path** where a new `ContributorNFT_v2` contract can
+be deployed with different rate logic, and existing holders can opt-in to
+migrate (burn old NFT, mint new). This is NOT a governance override — it's
+a fork the holder chooses.
+
+---
+
+## Checkpoint: Sections 7-10 complete. Committing.
 
