@@ -1009,7 +1009,30 @@ server.tool(
 
 server.tool(
   "pcc_ip_set_splits",
-  "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset. Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP. Default recommended: designer 10%, operator 70%, verifier 10%, network 10%.",
+  [
+    "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.",
+    "Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.",
+    "",
+    "ContributorRole taxonomy (ADR-12 §4 — see role responsibility table):",
+    "  • operator             — runs the physical machine; residual share (typically 80-95% after others)",
+    "  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)",
+    "  • insurer              — underwrites job failure coverage; opt-in (0-3%)",
+    "  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps",
+    "  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps",
+    "  • model-author         — trained the AI model invoked at execution time; 0-80 bps",
+    "  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest",
+    "  • curator              — organizes/audits a collection of contributions; 0-5%",
+    "  • assembler            — composed multiple capabilities into a workflow; 0-50 bps",
+    "  • network-treasury     — per-network protocol treasury (verification, grants, security); 0-3%",
+    "",
+    "Legacy aliases kept for backward decoding only — prefer the canonical names above:",
+    "  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind",
+    "  • `network`  → use `network-treasury`",
+    "",
+    "Recommended starting splits:",
+    "  • Standard job (no AI):   operator 92, verifier 3, protocol-author 2, integrator 2, network-treasury 1",
+    "  • Job with AI model:      operator 87, verifier 3, protocol-author 2, integrator 2, model-author 4, network-treasury 2",
+  ].join("\n"),
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
     splits: z
@@ -1017,8 +1040,27 @@ server.tool(
         z.object({
           address: z.string().describe("Recipient wallet address (0x...)"),
           role: z
-            .enum(["designer", "operator", "verifier", "assembler", "curator"])
-            .describe("Collaborator role"),
+            .enum([
+              // Canonical ContributorRole values (ADR-12 §2.1)
+              "operator",
+              "verifier",
+              "insurer",
+              "integrator",
+              "protocol-author",
+              "model-author",
+              "dataset-contributor",
+              "curator",
+              "assembler",
+              "network-treasury",
+              // Deprecated legacy aliases — kept so older callers still validate.
+              // Prefer `protocol-author`/`assembler`/`integrator` over `designer`,
+              // and `network-treasury` over `network`.
+              "designer",
+              "network",
+            ])
+            .describe(
+              "Collaborator role — see tool description for the full ContributorRole taxonomy and migration map for legacy values (`designer`, `network`).",
+            ),
           percentage: z
             .number()
             .min(1)
@@ -1036,7 +1078,21 @@ server.tool(
     ipId: string;
     splits: Array<{
       address: string;
-      role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+      role:
+        | "operator"
+        | "verifier"
+        | "insurer"
+        | "integrator"
+        | "protocol-author"
+        | "model-author"
+        | "dataset-contributor"
+        | "curator"
+        | "assembler"
+        | "network-treasury"
+        /** @deprecated alias for `network-treasury` */
+        | "network"
+        /** @deprecated use `protocol-author` / `assembler` / `integrator` */
+        | "designer";
       percentage: number;
       label: string;
     }>;

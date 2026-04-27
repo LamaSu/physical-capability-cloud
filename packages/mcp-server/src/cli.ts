@@ -292,8 +292,12 @@ pcc ip claim <ipId> [--tokenIds='["id1"]']
 pcc ip lineage <ipId>
   Get IP lineage chain (ancestors + descendants).
 
-pcc ip splits <ipId> --splits='[{"address":"0x...","role":"designer","percentage":10,"label":"CSD Author"}]'
+pcc ip splits <ipId> --splits='[{"address":"0x...","role":"protocol-author","percentage":2,"label":"CSD Author"},{"address":"0x...","role":"integrator","percentage":2,"label":"Adapter Integrator"},{"address":"0x...","role":"operator","percentage":92,"label":"Machine Operator"},{"address":"0x...","role":"verifier","percentage":3,"label":"Evidence Verifier"},{"address":"0x...","role":"network-treasury","percentage":1,"label":"Network Treasury"}]'
   Configure revenue splits for an IP Asset. Splits must sum to 100.
+  Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,
+  model-author, dataset-contributor, curator, assembler, network-treasury.
+  Legacy aliases `designer` and `network` still decode for backward compat —
+  prefer the canonical names above.
 `.trim(),
 
   swf: `
