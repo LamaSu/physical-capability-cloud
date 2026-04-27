@@ -98,3 +98,12 @@ export type {
   EnforcementResult,
   RoyaltySettlement,
 } from "./ip-enforcement.js";
+
+// splitPayout helpers (ADR-11) — Payout struct + ROLE_TAGS + buildPayoutMap stub
+export { ROLE_TAGS, buildPayoutMap } from "./payouts.js";
+export type {
+  Payout,
+  RoleTagKey,
+  BuildPayoutMapInput,
+  BuildPayoutMapResult,
+} from "./payouts.js";
