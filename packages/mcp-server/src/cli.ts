@@ -296,7 +296,7 @@ pcc ip splits <ipId> --splits='[{"address":"0x...","role":"protocol-author","per
   Configure revenue splits for an IP Asset. Splits must sum to 100.
   Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,
   model-author, dataset-contributor, curator, assembler, network-treasury.
-  Legacy aliases `designer` and `network` still decode for backward compat —
+  Legacy aliases 'designer' and 'network' still decode for backward compat —
   prefer the canonical names above.
 `.trim(),
 

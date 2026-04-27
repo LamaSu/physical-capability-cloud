@@ -335,6 +335,13 @@ describe("POST /api/ip/distribute-royalties", () => {
   });
 
   it("backward compat: legacy `network` role (alias for network-treasury) still decodes", async () => {
+    // The gateway types splits[].role as ContributorRole, which does NOT
+    // include the pre-ADR-12 `network` literal — that string was only ever
+    // present in story-defaults.ts and a2a IPRevenueSplitEntry. The route
+    // does no runtime enum validation though, so older clients still
+    // ship-through. We cast the payload to keep the test honest about what
+    // it asserts: runtime tolerance for legacy `network` strings, not type
+    // membership.
     const res = await app.inject({
       method: "POST",
       url: "/api/ip/distribute-royalties",
@@ -345,7 +352,7 @@ describe("POST /api/ip/distribute-royalties", () => {
           { address: "0xBBBB", role: "verifier", percentage: 10, label: "Verifier" },
           { address: "0xCCCC", role: "network",  percentage: 10, label: "Protocol Treasury" },
         ],
-      },
+      } as unknown,
     });
 
     expect(res.statusCode).toBe(200);
