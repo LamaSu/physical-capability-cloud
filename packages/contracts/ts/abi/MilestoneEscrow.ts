@@ -13,6 +13,7 @@ export const MilestoneEscrowABI = [
       { name: "_arbiter", type: "address" },
       { name: "_token", type: "address" },
       { name: "_cwmId", type: "bytes32" },
+      { name: "_protocolRoot", type: "address" },
     ],
     stateMutability: "nonpayable",
   },
@@ -195,6 +196,70 @@ export const MilestoneEscrowABI = [
     inputs: [{ name: "milestoneIndex", type: "uint256" }],
     outputs: [],
   },
+
+  // ── splitPayout views (ADR-11) ───────────────────────────────────
+
+  {
+    name: "MAX_PAYOUTS",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "MAX_SINGLE_BPS",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "payoutMapSet",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "getPayoutMap",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "milestoneIndex", type: "uint256" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple[]",
+        components: [
+          { name: "recipient", type: "address" },
+          { name: "bps", type: "uint256" },
+          { name: "roleTag", type: "bytes32" },
+          { name: "ipId", type: "bytes32" },
+        ],
+      },
+    ],
+  },
+
+  // ── splitPayout state-changing (ADR-11) ──────────────────────────
+
+  {
+    name: "setPayoutMap",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "milestoneIndex", type: "uint256" },
+      {
+        name: "payouts",
+        type: "tuple[]",
+        components: [
+          { name: "recipient", type: "address" },
+          { name: "bps", type: "uint256" },
+          { name: "roleTag", type: "bytes32" },
+          { name: "ipId", type: "bytes32" },
+        ],
+      },
+    ],
+    outputs: [],
+  },
   {
     name: "fileDispute",
     type: "function",
@@ -312,6 +377,30 @@ export const MilestoneEscrowABI = [
     inputs: [
       { name: "milestoneIndex", type: "uint256", indexed: true },
       { name: "slashedParty", type: "address", indexed: false },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+
+  // ── splitPayout events (ADR-11) ──────────────────────────────────
+
+  {
+    name: "PayoutMapSet",
+    type: "event",
+    inputs: [
+      { name: "milestoneIndex", type: "uint256", indexed: true },
+      { name: "payoutCount", type: "uint256", indexed: false },
+      { name: "totalBps", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    name: "SplitPayoutExecuted",
+    type: "event",
+    inputs: [
+      { name: "milestoneIndex", type: "uint256", indexed: true },
+      { name: "recipient", type: "address", indexed: true },
+      { name: "roleTag", type: "bytes32", indexed: true },
+      { name: "ipId", type: "bytes32", indexed: false },
+      { name: "token", type: "address", indexed: false },
       { name: "amount", type: "uint256", indexed: false },
     ],
   },
