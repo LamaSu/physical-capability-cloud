@@ -55,11 +55,43 @@ interface RegisterJobEvidenceBody {
   ipfsCid?: string;
 }
 
+/**
+ * Role union accepted in a `DistributeRoyaltiesBody.splits[].role`.
+ *
+ * Mirrors the canonical `ContributorRole` from @pcc/spec (ADR-12 §2.1) plus
+ * two legacy aliases kept so older clients and persisted records still
+ * decode without migration:
+ *
+ *   - `designer` (deprecated; use `protocol-author` / `assembler` /
+ *     `integrator` depending on CSD kind — see ADR-12 §2.2)
+ *   - `network`  (deprecated alias for `network-treasury`)
+ *
+ * The route handler does not enforce this enum at runtime — it only checks
+ * the `splits` array shape and that percentages sum to 100. The union here
+ * is for TypeScript callers and for the matching MCP tool / dashboard
+ * presets to stay in sync.
+ */
+type DistributeRoyaltiesRole =
+  | "operator"
+  | "verifier"
+  | "insurer"
+  | "integrator"
+  | "protocol-author"
+  | "model-author"
+  | "dataset-contributor"
+  | "curator"
+  | "assembler"
+  | "network-treasury"
+  /** @deprecated alias for `network-treasury` */
+  | "network"
+  /** @deprecated use `protocol-author` / `assembler` / `integrator` */
+  | "designer";
+
 interface DistributeRoyaltiesBody {
   ipId: string;
   splits: Array<{
     address: string;
-    role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+    role: DistributeRoyaltiesRole;
     percentage: number;
     label: string;
   }>;
