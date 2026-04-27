@@ -430,17 +430,28 @@ contract MilestoneEscrow {
     }
 
     /**
-     * @notice Release funds to operator after challenge window expires.
+     * @notice Release funds after challenge window expires.
      *
-     * If a protocolRoot is set, deducts the protocol fee from the milestone
-     * payment (not the bond) and transfers it to the fee recipient before
-     * paying the operator. The bond is always returned to the operator in full.
+     * @dev Two distribution paths (CEI preserved in both):
      *
-     * Fee flow (when protocolRoot is set):
-     *   fee = milestone.amount * protocolRoot.protocolFeeBps() / 10000
-     *   token.transfer(protocolRoot.feeRecipient(), fee)
-     *   token.transfer(operator, milestone.amount - fee + operatorBond)
-     *   protocolRoot.collectFee(token, fee)  // accounting
+     *      1. Legacy (no payout map set):
+     *           protocol fee → feeRecipient (if protocolRoot != 0)
+     *           amount - fee + bond → operator
+     *
+     *      2. splitPayout (payoutMapSet[idx] == true) per ADR-11 §3:
+     *           protocol fee → feeRecipient (FIRST, on gross amount)
+     *           distributable = amount - fee
+     *           for each Payout p in _payoutMap[idx]:
+     *               (distributable * p.bps) / 10000 → p.recipient
+     *               emit SplitPayoutExecuted
+     *           operator receives (distributable - sumDistributed) + bond
+     *
+     *      Operator's bond is ALWAYS returned in full, regardless of path.
+     *      `m.status = Released` is set BEFORE any external call (CEI),
+     *      and `nonReentrant` provides defense-in-depth.
+     *
+     *      The legacy path is byte-equivalent to the prior implementation
+     *      so existing escrows/tests are unaffected.
      */
     function release(uint256 milestoneIndex) external nonReentrant milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
@@ -457,6 +468,21 @@ contract MilestoneEscrow {
 
         emit MilestoneReleased(milestoneIndex, operator, amount);
 
+        if (payoutMapSet[milestoneIndex]) {
+            _distributeWithMap(milestoneIndex, amount, operator, operatorBond);
+        } else {
+            _distributeLegacy(amount, operator, operatorBond);
+        }
+    }
+
+    // ── Internal Distribution Helpers (release() split for stack-depth) ─────
+
+    /**
+     * @dev Legacy single-operator distribution path. Behavior is identical to
+     *      the pre-splitPayout `release()` body — fee deduction (if root set),
+     *      operator receives net + bond. Existing tests rely on this exact flow.
+     */
+    function _distributeLegacy(uint256 amount, address operator, uint256 operatorBond) internal {
         if (protocolRoot != address(0)) {
             IPCCProtocol root = IPCCProtocol(protocolRoot);
             uint256 feeBps = root.protocolFeeBps();
@@ -475,6 +501,73 @@ contract MilestoneEscrow {
         } else {
             uint256 payout = amount + operatorBond; // Return bond + payment
             require(token.transfer(operator, payout), "Transfer failed");
+        }
+    }
+
+    /**
+     * @dev splitPayout distribution path (ADR-11 §3).
+     *
+     *      1. Deduct protocol fee on the GROSS amount and route to feeRecipient
+     *         (if protocolRoot is set). Notify root via collectFee().
+     *      2. distributable = amount - protocolFee
+     *      3. For each Payout p, transfer (distributable * p.bps) / 10000 to
+     *         p.recipient and emit SplitPayoutExecuted.
+     *      4. Operator receives (distributable - sumDistributed) + bond. Any
+     *         integer dust from per-recipient truncation accumulates into the
+     *         operator residual (intentional, prevents stuck funds).
+     *
+     *      Read of `_payoutMap[idx]` is via storage pointer for gas efficiency.
+     *      Each iteration copies the Payout into memory before transferring.
+     */
+    function _distributeWithMap(
+        uint256 milestoneIndex,
+        uint256 amount,
+        address operator,
+        uint256 operatorBond
+    ) internal {
+        // 1. Protocol fee on gross
+        uint256 protocolFee = 0;
+        address tokenAddr = address(token);
+        if (protocolRoot != address(0)) {
+            IPCCProtocol root = IPCCProtocol(protocolRoot);
+            uint256 feeBps = root.protocolFeeBps();
+            protocolFee = (amount * feeBps) / 10000;
+            if (protocolFee > 0) {
+                require(token.transfer(root.feeRecipient(), protocolFee), "Fee transfer failed");
+            }
+            // Accounting hook fires regardless (root may want to record zero-fee event)
+            root.collectFee(tokenAddr, protocolFee);
+        }
+
+        uint256 distributable = amount - protocolFee;
+
+        // 2. Per-recipient distribution
+        Payout[] storage payouts = _payoutMap[milestoneIndex];
+        uint256 distributed = 0;
+        uint256 n = payouts.length;
+        for (uint256 i = 0; i < n; i++) {
+            Payout memory p = payouts[i];
+            uint256 share = (distributable * p.bps) / 10000;
+            if (share > 0) {
+                require(token.transfer(p.recipient, share), "Split transfer failed");
+                distributed += share;
+            }
+            emit SplitPayoutExecuted(
+                milestoneIndex,
+                p.recipient,
+                p.roleTag,
+                p.ipId,
+                tokenAddr,
+                share
+            );
+        }
+
+        // 3. Operator residual + bond. Subtraction is safe: distributed is the
+        //    sum of (distributable * p.bps) / 10000 for each p, and totalBps in
+        //    setPayoutMap() is required to be <= 10000, so distributed <= distributable.
+        uint256 operatorAmount = (distributable - distributed) + operatorBond;
+        if (operatorAmount > 0) {
+            require(token.transfer(operator, operatorAmount), "Operator residual transfer failed");
         }
     }
 
