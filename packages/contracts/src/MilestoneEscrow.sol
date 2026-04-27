@@ -281,6 +281,80 @@ contract MilestoneEscrow {
         totalAmount += _amount;
     }
 
+    // ── splitPayout Configuration (ADR-11) ───────────────────────────────
+
+    /**
+     * @notice Register a payout map for a milestone.
+     * @dev Per ADR-11 §4:
+     *      - Callable only by payer (onlyPayer modifier)
+     *      - Milestone must still be Unfunded (map is immutable after fund())
+     *      - No prior map may already be set (single-shot, no re-configuration)
+     *      - payouts.length <= MAX_PAYOUTS (16)
+     *      - Each entry: recipient != 0, bps in (0, MAX_SINGLE_BPS]
+     *        (bps=0 entries are REJECTED — omit the entry instead. Minor deviation
+     *        from ADR-11 §8 wording; eliminates no-op attribution events that would
+     *        confuse off-chain indexers and burn gas.)
+     *      - No duplicate (recipient, roleTag) pairs (O(n²), bounded by MAX_PAYOUTS)
+     *      - Sum of bps <= 10000 (operator collects residual 10000 - sum)
+     *
+     *      The operator is NEVER an explicit entry — they receive the residual
+     *      (10000 - totalBps) of distributable plus their bond in full.
+     *      The protocol fee is deducted FIRST in release() on the gross amount,
+     *      and the payout map distributes the net (distributable) remainder.
+     *
+     * @param milestoneIndex Index of the milestone in milestones[].
+     * @param payouts Array of Payout entries. Must satisfy all rules above.
+     */
+    function setPayoutMap(uint256 milestoneIndex, Payout[] calldata payouts)
+        external
+        onlyPayer
+        milestoneExists(milestoneIndex)
+    {
+        Milestone storage m = milestones[milestoneIndex];
+        require(m.status == MilestoneStatus.Unfunded, "Milestone already funded");
+        require(!payoutMapSet[milestoneIndex], "Payout map already set");
+        require(payouts.length <= MAX_PAYOUTS, "Too many payouts");
+
+        uint256 totalBps = 0;
+        uint256 n = payouts.length;
+        for (uint256 i = 0; i < n; i++) {
+            Payout calldata p = payouts[i];
+            require(p.recipient != address(0), "Zero recipient");
+            require(p.bps > 0, "Zero bps - omit the entry instead");
+            require(p.bps <= MAX_SINGLE_BPS, "Single payout > 50% of milestone");
+
+            // Reject duplicate (recipient, roleTag) pairs. O(n^2) but bounded by MAX_PAYOUTS.
+            for (uint256 j = i + 1; j < n; j++) {
+                require(
+                    !(payouts[j].recipient == p.recipient && payouts[j].roleTag == p.roleTag),
+                    "Duplicate recipient+roleTag"
+                );
+            }
+
+            totalBps += p.bps;
+            _payoutMap[milestoneIndex].push(p);
+        }
+        require(totalBps <= 10000, "Total bps exceeds 100%");
+
+        payoutMapSet[milestoneIndex] = true;
+        emit PayoutMapSet(milestoneIndex, n, totalBps);
+    }
+
+    /**
+     * @notice Read the payout map for a milestone.
+     * @dev Returns empty array if no map has been set.
+     * @param milestoneIndex Index of the milestone.
+     * @return The full Payout[] (copy, not storage reference).
+     */
+    function getPayoutMap(uint256 milestoneIndex)
+        external
+        view
+        milestoneExists(milestoneIndex)
+        returns (Payout[] memory)
+    {
+        return _payoutMap[milestoneIndex];
+    }
+
     /**
      * @notice Fund the escrow. Transfers totalAmount + total operator bonds from payer.
      *         Operators must also deposit their bonds separately.
