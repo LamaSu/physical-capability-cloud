@@ -1,8 +1,8 @@
 # Contributor Economics
 
-**Status**: Shipped on `feat/contributor-economics` (53 commits, 32 forge tests + 700+ TS tests passing).
+**Status**: Shipped on `feat/contributor-economics` (40 new forge tests across 3 contributor-economics test files; the broader contracts suite runs 58 tests when the MilestoneEscrow base suite is included; 700+ TS tests passing).
 **Live target**: deploys to Base Sepolia via `script/DeployContributorEconomics.s.sol`.
-**Branch HEAD when this doc was written**: `c5de9be` (April 24, 2026).
+**Branch state**: see `ai/research/contributor-economics/99-resume-here.md` for the current commit count and HEAD (this header was deliberately de-pinned to avoid bit-rot — run `git rev-parse HEAD` and `git rev-list --count master..HEAD` for the live numbers).
 
 ---
 
@@ -75,7 +75,7 @@ Sources:
 - `C:/Users/globa/pcc-contributor-economics/packages/spec/src/types/composition-manifest.ts`
 - `C:/Users/globa/pcc-contributor-economics/packages/spec/src/types/training-manifest.ts`
 
-### 2. Persistence — `@pcc/store`
+### 2. Persistence — `@pcc/db`
 
 Drizzle schema with 4 tables (one migration, `contributor` schema):
 
@@ -87,8 +87,8 @@ Drizzle schema with 4 tables (one migration, `contributor` schema):
 | `composition_manifests` | Audit-trail commits of ordered `[{ipId, role, contributorAddress, rateScheduleHash}]` for one job |
 
 Sources:
-- `C:/Users/globa/pcc-contributor-economics/packages/store/src/schema/contributor.ts`
-- `C:/Users/globa/pcc-contributor-economics/packages/store/src/repos/contributor-repository.ts`
+- `C:/Users/globa/pcc-contributor-economics/packages/db/src/schema/contributor.ts`
+- `C:/Users/globa/pcc-contributor-economics/packages/db/src/repositories/contributor.ts`
 
 ### 3. On-chain — `@pcc/contracts`
 
@@ -101,7 +101,7 @@ Three Solidity contracts wire the off-chain types to settlement:
 Sources:
 - `C:/Users/globa/pcc-contributor-economics/packages/contracts/src/RateScheduleRegistry.sol`
 - `C:/Users/globa/pcc-contributor-economics/packages/contracts/src/ContributorNFT.sol`
-- `C:/Users/globa/pcc-contributor-economics/packages/contracts/src/MilestoneEscrow.sol` lines 580-700 (the splitPayout flow)
+- `C:/Users/globa/pcc-contributor-economics/packages/contracts/src/MilestoneEscrow.sol` — see the `release()` and `splitPayout()` functions (the new distribution branch)
 - ADR-11 selected Option A (on-chain payout map): see `ai/research/contributor-economics/11-adr-splitpayout-contract.md`
 
 ---
@@ -118,25 +118,32 @@ export PCC_KEY=$(curl -s -X POST https://capability.network/api/auth/provision \
   -d '{"email":"me@example.com","name":"My Adapter Shop"}' | jq -r .api_key)
 
 # 1. Publish a sealed RateSchedule (content-addressed; same JSON → same hash).
+#    The wire body is {publishedBy, schedule}; the server canonicalizes the
+#    inner schedule JSON, computes sha256, and returns the resulting hash.
 SCHEDULE_HASH=$(curl -s -X POST https://capability.network/api/contributors/schedules \
   -H "Authorization: Bearer $PCC_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-        "version": 1,
-        "segments": [
-          {"kind":"constant","startTime":0,"endTime":null,"bps":40}
-        ],
-        "notes": "Flat 40bps integrator share, forever."
+        "publishedBy": "0xYourWallet",
+        "schedule": {
+          "version": 1,
+          "segments": [
+            {"kind":"constant","startTime":0,"endTime":null,"bps":40}
+          ],
+          "notes": "Flat 40bps integrator share, forever."
+        }
       }' | jq -r .scheduleHash)
 
 # 2. Register a contributor profile bound to the schedule.
+#    NOTE: RegisterProfileBodySchema accepts {address, role, scheduleHash,
+#    ipId?, metadataUri?, contributorNftTokenId?} — there is no `label` field
+#    today. Annotate role/wallet using metadataUri or ipId.
 curl -s -X POST https://capability.network/api/contributors \
   -H "Authorization: Bearer $PCC_KEY" \
   -H "Content-Type: application/json" \
   -d "{
         \"address\": \"0xYourWallet\",
         \"role\": \"integrator\",
-        \"label\": \"OctoPrint adapter v3.2\",
         \"scheduleHash\": \"$SCHEDULE_HASH\"
       }"
 
@@ -148,9 +155,13 @@ curl -s -X POST "https://capability.network/api/contributors/schedules/$SCHEDULE
 # → {"bps":40,"segmentIndex":0,"kind":"constant"}
 
 # 4. (Payer, off-chain → on-chain) Compose the payout map and call setPayoutMap()
-#    on the milestone escrow before fund(). The dashboard "Composition Builder"
-#    tab does this for you, or use packages/contracts/ts/payouts.ts:buildPayoutMap()
-#    from a script.
+#    on the milestone escrow before fund().
+#    HEADS-UP: `packages/contracts/ts/payouts.ts:buildPayoutMap()` is currently
+#    a stub that throws "not implemented — Wave 3c (LicensingEngine extension)".
+#    Until the LicensingEngine extension lands, the payer must hand-build the
+#    `Payout[]` array — see ADR-11 for the on-chain Payout struct shape and
+#    the `MilestoneEscrow.setPayoutMap` signature. The dashboard "Composition
+#    Builder" / "SplitEditor" surfaces are still post-MVP for this flow.
 
 # 5. (Operator) Run the job; settlement automatically calls splitPayout via release().
 #    Every recipient gets paid in one tx; you (the integrator) receive
@@ -158,7 +169,7 @@ curl -s -X POST "https://capability.network/api/contributors/schedules/$SCHEDULE
 ```
 
 For the full REST + MCP surface (8 endpoints, 7 MCP tools added in v2.8.0),
-see `docs/AGENT_INTEGRATION.md` §14.
+see `docs/AGENT_INTEGRATION.md` §12.
 
 ---
 
@@ -238,17 +249,17 @@ The full segment grammar (5 of 6 kinds shown above; `step`, `exponential-decay`,
 | Rate-schedule DSL landscape (Sablier prior art) | `C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/02-rate-schedule-dsl.md` |
 | Dataset / Model provenance research | `C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/03-dataset-model-provenance.md` |
 | Network-forkability research | `C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/04-network-forkability.md` |
-| API reference (REST + MCP) | `C:/Users/globa/pcc-contributor-economics/docs/AGENT_INTEGRATION.md` §14 |
+| API reference (REST + MCP) | `C:/Users/globa/pcc-contributor-economics/docs/AGENT_INTEGRATION.md` §12 (Contributor Economics) |
 | Deploy the new contracts | `C:/Users/globa/pcc-contributor-economics/docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md` |
 | The Solidity contracts | `C:/Users/globa/pcc-contributor-economics/packages/contracts/src/{ContributorNFT,RateScheduleRegistry,MilestoneEscrow}.sol` |
 | Deploy script | `C:/Users/globa/pcc-contributor-economics/packages/contracts/script/DeployContributorEconomics.s.sol` |
 | The TS types | `C:/Users/globa/pcc-contributor-economics/packages/spec/src/types/{rate-schedule,composition-manifest,training-manifest}.ts` |
-| The DB schema | `C:/Users/globa/pcc-contributor-economics/packages/store/src/schema/contributor.ts` |
-| The DB repo | `C:/Users/globa/pcc-contributor-economics/packages/store/src/repos/contributor-repository.ts` |
+| The DB schema | `C:/Users/globa/pcc-contributor-economics/packages/db/src/schema/contributor.ts` |
+| The DB repo | `C:/Users/globa/pcc-contributor-economics/packages/db/src/repositories/contributor.ts` |
 | Gateway routes | `C:/Users/globa/pcc-contributor-economics/packages/gateway/src/routes/contributors.ts` |
 | MCP tools | `C:/Users/globa/pcc-contributor-economics/packages/mcp-server/src/index.ts` (search for `contributor_`) |
 | Forge tests | `C:/Users/globa/pcc-contributor-economics/packages/contracts/test/{ContributorNFT,RateScheduleRegistry,MilestoneEscrow.splitPayout}.t.sol` |
-| TS tests | `C:/Users/globa/pcc-contributor-economics/packages/spec/src/__tests__/`, `packages/store/src/__tests__/`, `packages/gateway/src/routes/__tests__/contributors.test.ts` |
+| TS tests | `C:/Users/globa/pcc-contributor-economics/packages/spec/src/__tests__/`, `packages/db/src/__tests__/contributor-db.test.ts`, `packages/gateway/src/__tests__/contributors.test.ts` |
 | Resume point if work is paused | `C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/99-resume-here.md` |
 
 ---
@@ -260,7 +271,7 @@ The full segment grammar (5 of 6 kinds shown above; `step`, `exponential-decay`,
 - **Not a marketplace UI** (yet). The dashboard's `Composition Builder` and `SplitEditor` tabs were extended to render the new roles and presets, but a polished "publish your schedule" UI is still post-MVP.
 - **Not zkML-attested.** v1 is hash-commit + reputational slashing for `model-author` and `dataset-contributor`. zkML training attestation is in `03-dataset-model-provenance.md` as v2 work.
 - **Not "OEMs forbidden."** OEMs are first-class participants — as Operators / Integrators / Protocol Authors / Model Authors. The protocol just has no special royalty class for hardware manufacturing as a historical fact (see `docs/claros-layer4-amendment.md`).
-- **Not audited.** 32 forge tests + 700+ TS tests pass. External audit (OpenZeppelin / Trail of Bits) is a v2 task. Do not deploy to a chain handling real money without one.
+- **Not audited.** 40 contributor-economics forge tests pass (11 RateScheduleRegistry + 15 ContributorNFT + 14 splitPayout); the broader contracts suite runs 58 tests when the MilestoneEscrow base suite is included; 700+ TS tests pass. External audit (OpenZeppelin / Trail of Bits) is a v2 task. Do not deploy to a chain handling real money without one.
 
 ---
 
