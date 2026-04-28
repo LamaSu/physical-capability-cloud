@@ -1,153 +1,157 @@
 # Resume Point — Contributor Economics Build
 
-**Paused**: 2026-04-23 — ran into Claude Max rate limit (resets 9pm PT).
-Agents `impl-roles-alpha`, `impl-splitpayout-bravo`, `scout-networks-delta`,
-`scout-provenance-charlie`, `scout-schedules-bravo` all terminated with
-"limit hit" mid-run. A lot still landed — this doc tells you exactly where to pick up.
-
+**Updated**: 2026-04-24 (after gap-fill `/go` run).
 **Worktree**: `C:/Users/globa/pcc-contributor-economics`
 **Branch**: `feat/contributor-economics` (based on `master` @ `8550d5e`)
-**Head commit when paused**: `a1083f6` (feat(a2a): extend IPRevenueSplitEntry)
+**Head commit**: `c5de9be docs(integration): bring AGENT_INTEGRATION.md forward from docs/split-operator-rules branch` (53 commits ahead of master).
+**NOT pushed to `lamasu` remote yet.**
 
-## What's already landed (don't redo)
+---
 
-### Research (all 4 scouts delivered)
-| File | Lines | Status |
-|---|---|---|
-| `ai/research/contributor-economics/01-royalty-nft-standards.md` | 2113 | DONE — 14 topics, 5-layer recommended stack, 3 next steps |
-| `ai/research/contributor-economics/02-rate-schedule-dsl.md` | 938 | DONE — 10 sections through DSLs + upgradeability |
-| `ai/research/contributor-economics/03-dataset-model-provenance.md` | 1413 | DONE — full v1 with Solidity pseudocode + separate `03-appendices.md` (800 lines) |
-| `ai/research/contributor-economics/04-network-forkability.md` | 994 | DONE — 15 sections + PCC network architecture recommendation |
+## Front door for new readers
 
-### Architecture (all 3 ADRs delivered)
-| File | Lines | Status |
-|---|---|---|
-| `ai/research/contributor-economics/10-adr-licensing-engine-extension.md` | 776 | DONE — conflicts with 11 on split mechanism (see below) |
-| `ai/research/contributor-economics/11-adr-splitpayout-contract.md` | 613 | DONE — Option A on-chain payout map (CHOSEN) |
-| `ai/research/contributor-economics/12-adr-role-taxonomy-and-no-oem.md` | 366 | DONE — 10-role enum + OEM-free audit of full repo (14 hits, all LEAVE-ALONE) |
-| `ai/architecture/target-state-splitpayout-escrow.md` | 124 | DONE — target-state doc from splitpayout-bravo |
+If you are an agent or human dropping into this branch with no prior context,
+**read `docs/CONTRIBUTOR_ECONOMICS.md` first**. It is the 5-minute quickstart
+covering the 10-role taxonomy, the 3-layer architecture (off-chain types →
+persistence → contracts), 5-command path to publish a schedule, and the cheat
+sheet of where every artifact lives. This file (`99-resume-here.md`) is for
+"what's done vs deferred"; the docs file is for "how do I use this."
 
-### ADR conflicts that were resolved
+---
 
-**Split mechanism**: ADR-10 proposed Option B (off-chain compute + ECDSA verify
-at release). ADR-11 proposed Option A (on-chain payout map set by payer pre-fund).
-**Option A was chosen** — trust-less, matches existing PCC code patterns, user
-directive of publicly-visible immutable schedules is still honored (schedule
-evaluated at fund time → payer commits → contributors see the exact amounts
-before fund lands). Option B needs a signing authority = centralization the
-user explicitly rejected.
+## Status snapshot
 
-**Role taxonomy**: ADR-10 and ADR-12 disagreed on migration. **ADR-12 was chosen**
-— preserves `assembler` and `curator` unchanged (ADR-10 collapsed them into
-other roles, which would break existing data), and introduces `insurer` as a
-distinct new role (ADR-10 wanted to repurpose `curator`, bad).
+| Layer | Status |
+|---|---|
+| Wave 1: scout research (4 reports) | DONE — all four landed in earlier session |
+| Wave 2: ADRs (3 + reconciliation amendment) | DONE — ADR-10 / 11 / 12 all in tree, ADR-10 has the §0 reconciliation block |
+| Wave 3a: TS types (`@pcc/spec`) | DONE — `RateSchedule`, `CompositionManifest`, `TrainingManifest`, `ContributorRole` enum |
+| Wave 3b: persistence (`@pcc/store`) | DONE — Drizzle schema, `ContributorRepository` impl, migrations, 18+ tests |
+| Wave 3c: on-chain (`@pcc/contracts`) | DONE — `RateScheduleRegistry`, `ContributorNFT`, `MilestoneEscrow.splitPayout`, `LicensingEngine` extension, 32 forge tests |
+| Wave 3d: SDK + ABI | DONE — ABI exports for both new contracts, `payouts.ts` with `buildPayoutMap()` |
+| Wave 4a: REST routes | DONE — `/api/contributors/*` (8 endpoints) on the gateway, 23 route tests |
+| Wave 4b: MCP tools | DONE — 7 new tools (`pcc_contributor_*`), agent-package.json regenerated to v2.8.0 (218 tools) |
+| Wave 4c: docs | DONE — `docs/CONTRIBUTOR_ECONOMICS.md`, README section, AGENT_INTEGRATION.md §14, DEPLOY_CONTRIBUTOR_ECONOMICS.md, claros-layer4-amendment.md |
+| Wave 4d: dashboard UI | DONE for role taxonomy + presets (NegotiationPanel / BuilderPage / NegotiationPage / SplitEditor / IPDetailPage all extended) |
+| Wave 5: tests | DONE — 32 forge + 700+ TS pass; integration test for full job-settles-through-splitPayout is the one gap (see deferred list) |
 
-ADR-10 needs a reconciliation amendment block in Wave 4 docs pass.
+Everything in `00-plan.md` Wave 1-4 is shipped. Wave 5 is partially shipped
+(unit + contract + route tests yes; an end-to-end "fund→evidence→attest→
+release-with-payout-map→all balances correct" integration on a live testnet
+is the largest gap).
 
-### Code already committed
+---
 
-`f3c15d2 feat(spec): extend ContributorRole enum` — 10-role enum in
-  `packages/spec/src/types/story.ts`. Old `designer`/`network` still decode
-  for backward compat. Tests in `packages/spec/src/__tests__/story-types.test.ts`
-  updated.
+## What just landed in the gap-fill `/go` run
 
-`d2407db feat(contracts): add contributor-economics split profile templates` —
-  `packages/contracts/ts/story-defaults.ts` has new profiles:
-  `contributor-economics-minimal` and `contributor-economics-with-ai`. Tests in
-  `packages/contracts/ts/__tests__/story-defaults.test.ts` updated.
+These commits (in roughly the order they were made) closed the priority-1, 2,
+and 3 lists from the previous version of this resume doc:
 
-`a1083f6 feat(a2a): extend IPRevenueSplitEntry role enum` —
-  `packages/a2a/src/types.ts` extended. Tests in
-  `packages/a2a/src/__tests__/ip-intents.test.ts` added.
+- `b094e02 feat(contracts): RateScheduleRegistry — content-addressed immutable schedule storage`
+- `f2ec2c6 test(contracts): RateScheduleRegistry — 11 tests covering publish/get/exists invariants`
+- `0942e62 feat(contracts): ContributorNFT — ERC-721 + ERC-2981, sealed metadata, scheduleHash + role + ipId per token`
+- `1eb6e74 test(contracts): ContributorNFT — 15 tests covering mint, ERC-721, ERC-2981, sealed metadata`
+- `0f50641 feat(db): IContributorRepository interface + record types`
+- `b081812 feat(db): contributor-economics schema — profiles, rate_schedules, training_manifests, composition_manifests`
+- `b4305d9 feat(db): ContributorRepository — Drizzle impl with canonical JSON serialization`
+- `93b0c03 test(db): 18+ test cases for ContributorRepository`
+- `749499b feat(db): migrations for contributor-economics tables + indexes`
+- `40aa498 chore(contracts): ABI export for ContributorNFT + RateScheduleRegistry`
+- `2785c9d chore(contracts): deploy script for RateScheduleRegistry + ContributorNFT` (`packages/contracts/script/DeployContributorEconomics.s.sol`)
+- `7bb61c0 feat(gateway): /api/contributors/* — profiles, schedules, evaluate, training manifests`
+- `802034f test(gateway): /api/contributors/* — 23 tests covering routes, validation, errors`
+- `12b16d0 feat(mcp): 7 contributor-economics tools — register, list, schedules, manifests`
+- `d69cc7c chore(agent-package): regenerate with 7 contributor tools — total 218`
+- `c5de9be docs(integration): bring AGENT_INTEGRATION.md forward from docs/split-operator-rules branch`
 
-`dedd057 feat(contracts): add Payout struct + storage for splitPayout` —
-  `packages/contracts/src/MilestoneEscrow.sol` has the new Payout struct +
-  `_payoutMap` mapping + `payoutMapSet` mapping + MAX_PAYOUTS/MAX_SINGLE_BPS
-  constants + `PayoutMapSet` and `SplitPayoutExecuted` events. No functions
-  implemented yet.
+Plus the Wave 4 docs trio (this commit and the two preceding it):
 
-Plus the orchestrator's plan doc + the scout/architect commits listed above.
+- `docs: CONTRIBUTOR_ECONOMICS.md — 5-minute quickstart for the new primitives`
+- `docs(readme): add Contributor Economics section + cross-links`
+- `docs(resume): update 99-resume-here.md to reflect gap-fill complete state`
 
-## What still needs to be done (resume checklist)
+(The earlier-session commits — `f3c15d2`, `d2407db`, `a1083f6`, `dedd057`,
+`85f0a58`, `06c18f9`, `9bab2ef`, `4ffaf09` — are still in tree as the lower
+layers that this run built on. See `git log --oneline master..HEAD` for the
+full 53-commit list.)
 
-### Priority 1 — finish what impl-*-alpha/bravo started
+---
 
-**impl-roles-alpha steps 4-7** (~30-45 min agent-time):
+## What is genuinely still deferred (post-gap-fill)
 
-- [ ] Step 4: `packages/gateway/src/routes/ip.ts` line ~62 — extend Zod union for `role` in `POST /api/ip/splits`. Keep `designer` as a decoder alias.
-- [ ] Step 5: `packages/mcp-server/src/index.ts` line ~1039 — extend `pcc_ip_set_splits` tool input schema to enumerate all 10 roles. Update `packages/mcp-server/src/cli.ts` line ~295 help text to use `protocol-author` + `integrator` in example.
-- [ ] Step 6: Dashboard UI (5 files per ADR-12 §5):
-  - `apps/dashboard/src/components/builder/NegotiationPanel.tsx` lines 23-38
-  - `apps/dashboard/src/pages/BuilderPage.tsx` lines 15-33
-  - `apps/dashboard/src/pages/NegotiationPage.tsx` lines 15-23
-  - `apps/dashboard/src/components/SplitEditor.tsx` lines 28-37
-  - `apps/dashboard/src/pages/IPDetailPage.tsx` lines 81-84
-  - Add color assignments for 6 new roles; add `contributor-economics-with-ai` preset everywhere.
-- [x] Step 7: `docs/claros-layer4-amendment.md` — **DONE by orchestrator before pause**
+Each of these has prior-art research already on the branch — none is "we
+forgot about it"; all four are deliberate scope cuts from the original plan.
 
-**impl-splitpayout-bravo steps 2-6** (~45-60 min agent-time):
+### Cross-chain `ContributorNFT` portability
+- LayerZero ONFT or CCIP wrapping for `ContributorNFT`. Today the NFT lives
+  on whichever chain you deploy `ContributorNFT.sol` to (Base Sepolia for
+  the testnet target).
+- Research: `04-network-forkability.md` §10-12 covers the design space.
+- Should ship before mainnet, since contributor identity is supposed to be
+  per-network-sovereign with cross-network earnings.
 
-- [ ] Step 2: `setPayoutMap(milestoneIndex, Payout[])` with validation rules from ADR-11 §4 (sum ≤10000, no duplicate recipient+roleTag pairs, max 16 payouts, callable only on Unfunded milestone). Don't forget `getPayoutMap()` view.
-- [ ] Step 3: Modify `release()` per ADR-11 §3 — CEI preserved, operator gets residual, protocol fee first on gross, fallback to legacy path when `!payoutMapSet[idx]`. Emits `SplitPayoutExecuted` per recipient.
-- [ ] Step 4: `packages/contracts/test/MilestoneEscrow.splitPayout.t.sol` — 14 test cases from ADR-11 §7.
-- [ ] Step 5: Run `forge test` (local first, fall back to `spark-run` if OOM). Ralph loop fixes.
-- [ ] Step 6: `packages/contracts/ts/payouts.ts` — Payout type + ROLE_TAGS keccak256 constants + `buildPayoutMap()` stub. Use viem or @noble/hashes for keccak256 (check existing imports). ABI regen if needed: `packages/contracts/ts/abi/MilestoneEscrow.ts`.
+### zkML training attestation
+- For `model-author` and `dataset-contributor` roles, v1 relies on hash-commit
+  + reputational slashing. zkML proofs that "this model was actually trained
+  on these datasets in these proportions" is a v2 task.
+- Research: `03-dataset-model-provenance.md` + `03-appendices.md`.
 
-### Priority 2 — LicensingEngine extension (Wave 3c)
+### Production audit
+- 32 forge tests + 700+ TS tests pass. **No external audit.**
+- Do not deploy to a chain handling real value (mainnet, prod) without one.
+- Candidates noted in research: OpenZeppelin, Trail of Bits, Spearbit.
 
-Was blocked waiting on scout-schedules-bravo. That scout landed 938 lines.
-Ready to proceed now. Spawn a new implementer:
+### Mainnet deploy
+- `script/DeployContributorEconomics.s.sol` targets testnet (Base Sepolia +
+  Flow EVM testnet today).
+- Mainnet deploy is gated on (a) audit completion, (b) cross-chain ONFT
+  resolution, (c) Railway prod promotion gate (see `docs/DEPLOY.md` —
+  build-once-deploy-many invariants apply).
 
-- [ ] `packages/spec/src/types/rate-schedule.ts` — new type (`RateSchedule`, `Segment[]` pattern from scout research § on Sablier LockupDynamic). Use ERC-3569 content-addressed pattern: `scheduleHash` commits the schedule.
-- [ ] `packages/spec/src/types/composition-manifest.ts` — `CompositionManifest` (ordered list of `{ipId, role, contributorAddress, rateScheduleHash}`).
-- [ ] `packages/spec/src/types/training-manifest.ts` — `TrainingManifest` for ModelNFT linking to DatasetNFTs with weights.
-- [ ] `packages/contracts/ts/licensing-engine.ts` — add `setRateSchedule()`, `evaluateRateSchedule(ipId, context)`, `linkModel(modelIpId, manifest)`, `getRoyaltyDistributionRich()` that traverses both derivative tree AND training manifest.
-- [ ] `packages/contracts/ts/payouts.ts` — fill in `buildPayoutMap()` (from Priority 1 step 6 stub) using the rich royalty distribution from LicensingEngine.
+### Integration test (end-to-end)
+- All unit / contract / route tests pass. A live test "fund a milestone with
+  a 4-recipient payout map → submit evidence → attest → wait challenge window
+  → release → verify N transfers emitted + balances correct → re-test with a
+  TrainingManifest-attributed model" is the missing seam.
+- Requires either testnet env (slow, but real) or a forge-level integration
+  harness that mocks the chain; either is one focused implementer-day of
+  work.
 
-### Priority 3 — Wave 4: docs + integration
+### Dashboard UX polish
+- Role taxonomy + presets are wired through 5 dashboard files (NegotiationPanel
+  / BuilderPage / NegotiationPage / SplitEditor / IPDetailPage), but a
+  dedicated "publish my RateSchedule" wizard, a "browse other contributors'
+  schedules" gallery, and an "evaluate this schedule at a moment" sandbox
+  are still post-MVP.
 
-- [ ] Update `docs/AGENT_INTEGRATION.md` § to document new `pcc_ip_*` tools
-  that handle RateSchedule + ContributorNFT + DatasetNFT/ModelNFT. Bump tool
-  count from 219 → ~230.
-- [ ] Regenerate `/agent-package.json` at the gateway.
-- [ ] Update `docs/whitepaper.md` — ensure no OEM-royalty framing anywhere;
-  add section describing contributor economics (cite ADR-10/11/12).
-- [ ] Reconciliation amendment to ADR-10 noting ADR-11's Option A was chosen
-  and which role-taxonomy choices from ADR-12 supersede ADR-10's proposal.
+---
 
-### Priority 4 — Wave 5: tests
+## ADR conflict resolution status
 
-- [ ] Integration test: full job submits → fund with payout map → evidence →
-  attestation → release → verify N transfers emitted + balances correct.
-- [ ] Integration test: job with training-manifest-attributed model →
-  payout traverses up the DAG to dataset contributors.
-- [ ] Smoke test on Base Sepolia (requires DEPLOYER_PRIVATE_KEY).
+Both ADR conflicts called out in the previous version of this doc were
+resolved during the build. The reconciliation amendment to `10-adr-licensing-engine-extension.md`
+is in tree at commit `4ffaf09`. ADR-12's role taxonomy and ADR-11's on-chain
+payout map are the canonical choices.
 
-### Out of scope for this build (stretch goals)
+---
 
-- Cross-chain ContributorNFT portability (LayerZero ONFT / CCIP) — scout-networks-delta
-  covered it; defer to a separate branch.
-- zkML training attestation — scout-provenance-charlie covered it; defer to v2.
-- Production audit (OpenZeppelin or Trail of Bits) — obviously not in a /go run.
+## How to resume from here
 
-## Known conflicts flagged during the build
+If you are picking this up:
 
-See "ADR conflicts that were resolved" above. Both conflicts were resolved in
-favor of the more thorough ADR (11 over 10, 12 over 10) without stopping the
-impl agents. The Wave 4 docs pass should land the explicit reconciliation
-amendment to ADR-10.
+1. **Read `docs/CONTRIBUTOR_ECONOMICS.md` first.** It's the front door.
+2. Run `git log --oneline master..HEAD` to confirm the 53-commit count.
+3. Run the test suite once locally (or via `spark-run` if your local box is
+   16GB) to confirm green:
+   ```bash
+   spark-run "cd ~/projects/physical-capability-cloud && pnpm --workspace-concurrency=1 -r test"
+   spark-run "cd ~/projects/physical-capability-cloud/packages/contracts && forge test"
+   ```
+4. **Push to `lamasu` remote** when you're ready: `git push lamasu feat/contributor-economics`. Open PR.
+5. Pick the highest-leverage deferred item from the list above. Most likely
+   "integration test" (smallest scope, biggest confidence delta) or
+   "production audit" (longest lead time, blocks mainnet).
 
-## How to resume in the next session
-
-1. Re-read this file first.
-2. Check `git log --oneline` for any commits that landed after `a1083f6`.
-3. Start with Priority 1 — they're the most concrete and scope-isolated.
-4. Fire impl-roles-alpha-resume and impl-splitpayout-bravo-resume in parallel
-   (independent files).
-5. Then fire Priority 2 (LicensingEngine extension, Wave 3c).
-6. Then Wave 4 docs + reconciliation.
-7. Then Wave 5 tests.
-8. Push to `lamasu` remote when green. Open PR.
-
-Estimated remaining agent work: ~3-5 hours of implementer + 1-2 hours of docs.
-That's one more /go run plus one shorter follow-up.
+Estimated remaining agent work to ship to mainnet: 1-2 implementer days for
+the integration test, 4-8 weeks of calendar time for the audit, then the
+mainnet promotion via the build-once / retag pipeline (`docs/DEPLOY.md`).
