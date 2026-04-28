@@ -130,24 +130,74 @@ cast call "$CONTRIBUTOR_NFT" "scheduleRegistry()(address)" --rpc-url "$BASE_SEPO
 
 ### 2. Smoke-publish a schedule
 
-A 40-bps constant rate schedule, sealed under its sha256:
+A 40-bps constant rate schedule, sealed under its sha256.
+
+> **CRITICAL — canonicalization.** The on-chain `RateScheduleRegistry.publish(bytes, expectedHash)`
+> recomputes `sha256(bytes)` and reverts on mismatch. The bytes you submit on-chain
+> MUST match the canonical (lex-sorted-keys, no-whitespace) bytes the gateway used
+> to compute the off-chain `scheduleHash`. Literal user-typed JSON like
+> `{"version":1,"segments":[...]}` is NOT canonical (the gateway sorts keys, so
+> `segments` precedes `version`) and will publish under a different hash than the
+> one returned by `POST /api/contributors/schedules`. A `ContributorNFT.mint()`
+> call against that off-chain hash would then revert with `Schedule not registered`.
+> The gateway's publish response includes `canonicalBytes` precisely so this
+> recipe can use them verbatim.
 
 ```bash
-SCHEDULE_BYTES='{"version":1,"segments":[{"kind":"constant","startTime":0,"endTime":null,"bps":40}]}'
-SCHEDULE_HASH=$(printf '%s' "$SCHEDULE_BYTES" | shasum -a 256 | cut -d' ' -f1)
+# Step 2a: publish to the gateway and capture both the hash AND the canonical bytes
+PUBLISH_RESPONSE=$(curl -s -X POST https://capability.network/api/contributors/schedules \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "publishedBy": "'"$DEPLOYER_ADDRESS"'",
+        "schedule": {
+          "version": 1,
+          "segments": [{"kind":"constant","startTime":0,"endTime":null,"bps":40}]
+        }
+      }')
 
+SCHEDULE_HASH=$(echo "$PUBLISH_RESPONSE" | jq -r .scheduleHash)
+# scheduleHash example: 0xe0e75ab2547d106ab6f3e211f0859cb85fe3f9bdb1b081dde24e20122d50f61a
+SCHEDULE_BYTES=$(echo "$PUBLISH_RESPONSE" | jq -r .canonicalBytes)
+# canonicalBytes example: {"segments":[{"bps":40,"endTime":null,"kind":"constant","startTime":0}],"version":1}
+# Note that `segments` precedes `version` — that is the lex-sorted canonical form.
+
+# Step 2b: publish the SAME bytes on-chain — sha256(SCHEDULE_BYTES) MUST equal SCHEDULE_HASH
 cast send "$RATE_SCHEDULE_REGISTRY" \
   "publish(bytes,bytes32)(bytes32)" \
   "0x$(printf '%s' "$SCHEDULE_BYTES" | xxd -p | tr -d '\n')" \
-  "0x$SCHEDULE_HASH" \
+  "$SCHEDULE_HASH" \
   --private-key "$DEPLOYER_PRIVATE_KEY" \
   --rpc-url "$BASE_SEPOLIA_RPC"
+```
+
+If you do not have the gateway available, you can canonicalize locally before
+sending. The canonical-JSON algorithm is in
+`packages/spec/src/util/canonical.ts`; a one-liner equivalent:
+
+```bash
+SCHEDULE_BYTES=$(node -e '
+  const c = (v) => {
+    if (v === null || v === undefined) return "null";
+    if (typeof v === "string") return JSON.stringify(v);
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return "[" + v.map(c).join(",") + "]";
+    if (typeof v === "object") {
+      const k = Object.keys(v).sort();
+      return "{" + k.filter(x => v[x] !== undefined)
+        .map(x => JSON.stringify(x) + ":" + c(v[x])).join(",") + "}";
+    }
+    return String(v);
+  };
+  console.log(c({version:1, segments:[{kind:"constant",startTime:0,endTime:null,bps:40}]}));
+')
+SCHEDULE_HASH=0x$(printf '%s' "$SCHEDULE_BYTES" | shasum -a 256 | cut -d' ' -f1)
 ```
 
 ### 3. Verify it stored
 
 ```bash
-cast call "$RATE_SCHEDULE_REGISTRY" "exists(bytes32)(bool)" "0x$SCHEDULE_HASH" \
+cast call "$RATE_SCHEDULE_REGISTRY" "exists(bytes32)(bool)" "$SCHEDULE_HASH" \
   --rpc-url "$BASE_SEPOLIA_RPC"
 # Should return: true
 ```

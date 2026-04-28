@@ -337,11 +337,24 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // Compute the canonical bytes that hash to `computed`. These are the
+    // exact bytes the on-chain RateScheduleRegistry.publish() must consume so
+    // its sha256 matches the off-chain `scheduleHash` we just returned.
+    // Without this, integrators end up sending literal user-typed JSON to
+    // the chain (whose bytes hash to a DIFFERENT value), publishing under
+    // hash X, then reverting on ContributorNFT.mint(Y) — see SEAM-1 in
+    // ai/research/contributor-economics/verify-05-e2e.md.
+    const canonicalBytes = canonicalize({
+      version: schedule.version,
+      segments: schedule.segments,
+    });
+
     const repos = getRepos();
     const existing = repos.contributors.getSchedule(computed);
     if (existing) {
       return {
         scheduleHash: computed,
+        canonicalBytes,
         alreadyPublished: true,
       };
     }
@@ -368,6 +381,7 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
 
     return {
       scheduleHash: computed,
+      canonicalBytes,
       alreadyPublished: false,
     };
   });

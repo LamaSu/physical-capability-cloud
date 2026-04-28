@@ -27,6 +27,15 @@ interface IRateScheduleRegistry {
  *
  *         The pairing with MintContributor.s.sol:
  *           1. Off-chain: build canonical-JSON bytes of the schedule + hash.
+ *              Use the gateway (POST /api/contributors/schedules → response
+ *              includes both `scheduleHash` AND `canonicalBytes`) OR the
+ *              local canonicalize helper. DO NOT use literal user-typed
+ *              JSON — `{"version":1,"segments":[...]}` is NOT canonical (the
+ *              canonicalizer sorts object keys lex, so `segments` precedes
+ *              `version`), and its sha256 will not match the gateway hash.
+ *              See SEAM-1 in ai/research/contributor-economics/verify-05-e2e.md
+ *              for the failure mode (publishes under hash X, ContributorNFT
+ *              mint(Y) reverts with "Schedule not registered").
  *           2. PublishSchedule.s.sol — this script — to RateScheduleRegistry.
  *           3. MintContributor.s.sol references the now-published hash.
  *
@@ -34,7 +43,10 @@ interface IRateScheduleRegistry {
  *           RATE_SCHEDULE_REGISTRY_ADDRESS  — deployed registry address
  *           SCHEDULE_BYTES_HEX              — hex-encoded canonical-JSON bytes
  *                                             (with or without 0x prefix; the
- *                                             vm.parseBytes helper is lenient)
+ *                                             vm.parseBytes helper is lenient).
+ *                                             MUST be the canonical (lex-sorted-
+ *                                             keys, no-whitespace) form, not
+ *                                             literal user-typed JSON.
  *           EXPECTED_HASH                   — sha256 hex (as bytes32) of those
  *                                             bytes; the registry will revert
  *                                             on mismatch
@@ -43,8 +55,28 @@ interface IRateScheduleRegistry {
  *         Optional env vars:
  *           RPC_URL                         — falls back to script CLI flag
  *
- *         Usage (Base Sepolia):
- *           SCHEDULE_BYTES='{"version":1,"segments":[{"kind":"constant","startTime":0,"endTime":null,"bps":40}]}'
+ *         Usage (Base Sepolia, gateway-driven — recommended):
+ *           # Get canonical bytes + hash from the gateway in one call:
+ *           RESP=$(curl -s -X POST https://capability.network/api/contributors/schedules \
+ *             -H "Authorization: Bearer $PCC_KEY" \
+ *             -H "Content-Type: application/json" \
+ *             -d '{"publishedBy":"'"$DEPLOYER_ADDRESS"'","schedule":{"version":1,"segments":[{"kind":"constant","startTime":0,"endTime":null,"bps":40}]}}')
+ *           SCHEDULE_BYTES=$(echo "$RESP" | jq -r .canonicalBytes)
+ *           EXPECTED_HASH=$(echo "$RESP" | jq -r .scheduleHash)
+ *           SCHEDULE_BYTES_HEX="0x$(printf '%s' "$SCHEDULE_BYTES" | xxd -p | tr -d '\n')"
+ *
+ *           RATE_SCHEDULE_REGISTRY_ADDRESS=0x... \
+ *           SCHEDULE_BYTES_HEX="$SCHEDULE_BYTES_HEX" \
+ *           EXPECTED_HASH="$EXPECTED_HASH" \
+ *           DEPLOYER_PRIVATE_KEY=0x... \
+ *           forge script script/PublishSchedule.s.sol:PublishSchedule \
+ *             --rpc-url https://sepolia.base.org \
+ *             --broadcast \
+ *             -vvvv
+ *
+ *         Usage (Base Sepolia, fully off-line):
+ *           # Canonicalize locally — equivalent to the pcc/spec computeScheduleHash.
+ *           SCHEDULE_BYTES=$(node -e 'const c=(v)=>{if(v===null||v===undefined)return"null";if(typeof v==="string")return JSON.stringify(v);if(typeof v==="number"||typeof v==="boolean")return String(v);if(Array.isArray(v))return"["+v.map(c).join(",")+"]";if(typeof v==="object"){const k=Object.keys(v).sort();return"{"+k.filter(x=>v[x]!==undefined).map(x=>JSON.stringify(x)+":"+c(v[x])).join(",")+"}"}return String(v);};console.log(c({version:1,segments:[{kind:"constant",startTime:0,endTime:null,bps:40}]}))')
  *           SCHEDULE_HASH=$(printf '%s' "$SCHEDULE_BYTES" | shasum -a 256 | cut -d' ' -f1)
  *           SCHEDULE_BYTES_HEX="0x$(printf '%s' "$SCHEDULE_BYTES" | xxd -p | tr -d '\n')"
  *

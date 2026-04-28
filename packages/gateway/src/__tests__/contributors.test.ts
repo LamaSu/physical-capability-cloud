@@ -16,6 +16,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { createHash } from "node:crypto";
 import { contributorRoutes } from "../routes/contributors.js";
 import { initStore, closeStore } from "../db.js";
 import { computeScheduleHash, type RateSegment } from "@pcc/spec";
@@ -440,6 +441,97 @@ describe("POST /api/contributors/schedules", () => {
     expect(res.statusCode).toBe(400);
     const body = res.json<{ error: string }>();
     expect(body.error).toBe("schedule_hash_mismatch");
+  });
+
+  // SEAM-1 round-trip: response.canonicalBytes must hash to response.scheduleHash
+  // exactly. This is the bytes-vs-hash invariant the on-chain
+  // RateScheduleRegistry.publish(bytes, expectedHash) check enforces, so the
+  // gateway response must hand integrators bytes that DO hash to the value
+  // they will reference at ContributorNFT.mint() time. Without this, the
+  // off-chain hash and on-chain bytes drift apart and mint reverts with
+  // "Schedule not registered" — see verify-05-e2e.md SEAM-1.
+  it("returns canonicalBytes whose sha256 equals scheduleHash (on-chain round-trip)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: {
+          // Note: caller submits keys in version-first / segments-second order.
+          // Server must still return canonical bytes with `segments` first
+          // (lex-sort), and that canonical sha256 is the one ContributorNFT
+          // will gate against.
+          version: 1,
+          segments: FLAT_500_SEGMENTS,
+        },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{
+      scheduleHash: string;
+      canonicalBytes: string;
+      alreadyPublished: boolean;
+    }>();
+
+    // 1. canonicalBytes is present
+    expect(typeof body.canonicalBytes).toBe("string");
+    expect(body.canonicalBytes.length).toBeGreaterThan(0);
+
+    // 2. canonicalBytes is in canonical (lex-sorted-keys) form — segments before version
+    expect(body.canonicalBytes.indexOf('"segments"')).toBeLessThan(
+      body.canonicalBytes.indexOf('"version"'),
+    );
+
+    // 3. The on-chain invariant: sha256(canonicalBytes) === scheduleHash.
+    //    This is exactly what `RateScheduleRegistry.publish(bytes, expectedHash)`
+    //    re-checks on-chain. If this assertion ever fails, integrators following
+    //    the deploy doc will publish under one hash and mint under another.
+    const computedHashHex = createHash("sha256")
+      .update(body.canonicalBytes)
+      .digest("hex");
+    expect(`0x${computedHashHex}`.toLowerCase()).toBe(
+      body.scheduleHash.toLowerCase(),
+    );
+  });
+
+  it("returns canonicalBytes on duplicate publishes too (for idempotent on-chain re-runs)", async () => {
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: { version: 1, segments: FLAT_500_SEGMENTS },
+      },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: BOB,
+        schedule: { version: 1, segments: FLAT_500_SEGMENTS },
+      },
+    });
+    expect(second.statusCode).toBe(200);
+
+    const firstBody = first.json<{ canonicalBytes: string; scheduleHash: string }>();
+    const secondBody = second.json<{
+      canonicalBytes: string;
+      scheduleHash: string;
+      alreadyPublished: boolean;
+    }>();
+
+    expect(secondBody.alreadyPublished).toBe(true);
+    // alreadyPublished response must STILL include canonicalBytes — operators
+    // re-running a deploy script on an already-published schedule still need
+    // those bytes to feed the on-chain publish (which itself short-circuits
+    // via exists()).
+    expect(secondBody.canonicalBytes).toBe(firstBody.canonicalBytes);
+    expect(secondBody.scheduleHash.toLowerCase()).toBe(
+      firstBody.scheduleHash.toLowerCase(),
+    );
   });
 });
 
