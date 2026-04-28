@@ -1,10 +1,12 @@
 # Resume Point — Contributor Economics Build
 
-**Updated**: 2026-04-24 (after gap-fill `/go` run).
+**Updated**: 2026-04-28 (after validator-driven doc-fix run).
 **Worktree**: `C:/Users/globa/pcc-contributor-economics`
 **Branch**: `feat/contributor-economics` (based on `master` @ `8550d5e`)
-**Head commit**: `c5de9be docs(integration): bring AGENT_INTEGRATION.md forward from docs/split-operator-rules branch` (53 commits ahead of master).
+**Head commit**: `4fabc4c fix(docs): README — reconcile tool counts, update MCP tool total to 56, fix §14→§12` — 69 commits ahead of master and growing as Group 4-6 doc fixes land.
 **NOT pushed to `lamasu` remote yet.**
+
+> The exact head SHA + commit-count above will drift each time a new commit lands. Run `git rev-parse HEAD` and `git rev-list --count master..HEAD` for live numbers.
 
 ---
 
@@ -24,21 +26,23 @@ sheet of where every artifact lives. This file (`99-resume-here.md`) is for
 | Layer | Status |
 |---|---|
 | Wave 1: scout research (4 reports) | DONE — all four landed in earlier session |
-| Wave 2: ADRs (3 + reconciliation amendment) | DONE — ADR-10 / 11 / 12 all in tree, ADR-10 has the §0 reconciliation block |
+| Wave 2: ADRs (3 + reconciliation amendment) | DONE — ADR-10 / 11 / 12 all in tree, ADR-10 has the Reconciliation Amendment section (referenced from a §0 header at the top, full content at end of file) |
 | Wave 3a: TS types (`@pcc/spec`) | DONE — `RateSchedule`, `CompositionManifest`, `TrainingManifest`, `ContributorRole` enum |
-| Wave 3b: persistence (`@pcc/store`) | DONE — Drizzle schema, `ContributorRepository` impl, migrations, 18+ tests |
-| Wave 3c: on-chain (`@pcc/contracts`) | DONE — `RateScheduleRegistry`, `ContributorNFT`, `MilestoneEscrow.splitPayout`, `LicensingEngine` extension, 32 forge tests |
-| Wave 3d: SDK + ABI | DONE — ABI exports for both new contracts, `payouts.ts` with `buildPayoutMap()` |
-| Wave 4a: REST routes | DONE — `/api/contributors/*` (8 endpoints) on the gateway, 23 route tests |
-| Wave 4b: MCP tools | DONE — 7 new tools (`pcc_contributor_*`), agent-package.json regenerated to v2.8.0 (218 tools) |
-| Wave 4c: docs | DONE — `docs/CONTRIBUTOR_ECONOMICS.md`, README section, AGENT_INTEGRATION.md §14, DEPLOY_CONTRIBUTOR_ECONOMICS.md, claros-layer4-amendment.md |
+| Wave 3b: persistence (`@pcc/db`) | DONE — Drizzle schema, `ContributorRepository` impl, migrations, 26 tests in `packages/db/src/__tests__/contributor-db.test.ts` |
+| Wave 3c: on-chain (`@pcc/contracts`) | DONE — `RateScheduleRegistry`, `ContributorNFT`, `MilestoneEscrow.splitPayout`, `LicensingEngine` extension. 40 contributor-economics forge tests (11 RateScheduleRegistry + 15 ContributorNFT + 14 splitPayout); 58 total when the broader MilestoneEscrow base suite is included. |
+| Wave 3d: SDK + ABI | DONE — ABI exports for both new contracts, `payouts.ts` with `buildPayoutMap()` shipped (sister code agent committed the implementation during this run; was a stub at the start of the validator pass) |
+| Wave 4a: REST routes | DONE — `/api/contributors/*` (8 endpoints) on the gateway, 23 route tests in `packages/gateway/src/__tests__/contributors.test.ts` |
+| Wave 4b: MCP tools | DONE — 7 new tools (50–56: `pcc_contributor_register`, `pcc_contributor_list`, `pcc_schedule_publish`, `pcc_schedule_get`, `pcc_schedule_evaluate`, `pcc_training_manifest_set`, `pcc_training_manifest_get`), agent-package.json regenerated to v2.8.0 (218 tools) |
+| Wave 4c: docs | DONE — `docs/CONTRIBUTOR_ECONOMICS.md`, README section, `AGENT_INTEGRATION.md` §12, `DEPLOY_CONTRIBUTOR_ECONOMICS.md`, `claros-layer4-amendment.md` |
 | Wave 4d: dashboard UI | DONE for role taxonomy + presets (NegotiationPanel / BuilderPage / NegotiationPage / SplitEditor / IPDetailPage all extended) |
-| Wave 5: tests | DONE — 32 forge + 700+ TS pass; integration test for full job-settles-through-splitPayout is the one gap (see deferred list) |
+| Wave 5: tests | DONE — 40 contributor-economics forge tests + 700+ TS pass; integration test for full job-settles-through-splitPayout is the one gap (see deferred list). Starting scaffold: `packages/contracts/test/MilestoneEscrow.splitPayout.t.sol` for forge-level harness, `packages/gateway/src/__tests__/contributors.test.ts` for off-chain harness. |
 
 Everything in `00-plan.md` Wave 1-4 is shipped. Wave 5 is partially shipped
 (unit + contract + route tests yes; an end-to-end "fund→evidence→attest→
 release-with-payout-map→all balances correct" integration on a live testnet
-is the largest gap).
+is the largest gap — pick up `packages/contracts/test/MilestoneEscrow.splitPayout.t.sol`
+as the starting forge harness; the off-chain side already has 23 route
+tests in `packages/gateway/src/__tests__/contributors.test.ts`).
 
 ---
 
@@ -73,7 +77,7 @@ Plus the Wave 4 docs trio (this commit and the two preceding it):
 (The earlier-session commits — `f3c15d2`, `d2407db`, `a1083f6`, `dedd057`,
 `85f0a58`, `06c18f9`, `9bab2ef`, `4ffaf09` — are still in tree as the lower
 layers that this run built on. See `git log --oneline master..HEAD` for the
-full 53-commit list.)
+full commit list and `git rev-list --count master..HEAD` for the live count.)
 
 ---
 
@@ -86,7 +90,10 @@ forgot about it"; all four are deliberate scope cuts from the original plan.
 - LayerZero ONFT or CCIP wrapping for `ContributorNFT`. Today the NFT lives
   on whichever chain you deploy `ContributorNFT.sol` to (Base Sepolia for
   the testnet target).
-- Research: `04-network-forkability.md` §10-12 covers the design space.
+- Research: `04-network-forkability.md` §09 (Cross-chain NFT ownership:
+  LayerZero ONFT, Wormhole, CCIP, CCT) covers the design space directly;
+  §10-12 (Shared registries, Message-passing, Treasury) provide adjacent
+  context for the broader cross-network architecture.
 - Should ship before mainnet, since contributor identity is supposed to be
   per-network-sovereign with cross-network earnings.
 
@@ -97,7 +104,8 @@ forgot about it"; all four are deliberate scope cuts from the original plan.
 - Research: `03-dataset-model-provenance.md` + `03-appendices.md`.
 
 ### Production audit
-- 32 forge tests + 700+ TS tests pass. **No external audit.**
+- 40 contributor-economics forge tests (58 with the broader MilestoneEscrow
+  base suite) + 700+ TS tests pass. **No external audit.**
 - Do not deploy to a chain handling real value (mainnet, prod) without one.
 - Candidates noted in research: OpenZeppelin, Trail of Bits, Spearbit.
 
@@ -129,8 +137,12 @@ forgot about it"; all four are deliberate scope cuts from the original plan.
 ## ADR conflict resolution status
 
 Both ADR conflicts called out in the previous version of this doc were
-resolved during the build. The reconciliation amendment to `10-adr-licensing-engine-extension.md`
-is in tree at commit `4ffaf09`. ADR-12's role taxonomy and ADR-11's on-chain
+resolved during the build. The reconciliation amendment in
+`10-adr-licensing-engine-extension.md` is in tree at commit `4ffaf09`,
+flagged with a `## §0 Reconciliation Amendment` header at the top of the
+file that summarizes + links down to the full block at the end of the
+file (the original ADR text is preserved verbatim between them for the
+historical record). ADR-12's role taxonomy and ADR-11's on-chain
 payout map are the canonical choices.
 
 ---
@@ -140,7 +152,7 @@ payout map are the canonical choices.
 If you are picking this up:
 
 1. **Read `docs/CONTRIBUTOR_ECONOMICS.md` first.** It's the front door.
-2. Run `git log --oneline master..HEAD` to confirm the 53-commit count.
+2. Run `git log --oneline master..HEAD` and `git rev-list --count master..HEAD` to inspect the live commit list and current count.
 3. Run the test suite once locally (or via `spark-run` if your local box is
    16GB) to confirm green:
    ```bash
