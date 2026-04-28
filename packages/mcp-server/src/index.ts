@@ -1295,7 +1295,7 @@ server.tool(
 
 server.tool(
   "pcc_contributor_register",
-  "Register a contributor profile binding a wallet address to a role and a published RateSchedule. Body: address (0x40hex), role (10 ContributorRole values + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail).",
+  "Register a contributor profile (DB-only). Mints to the on-chain ContributorNFT happen separately via script/MintContributor.s.sol — this tool does not currently broadcast on-chain transactions. Body: address (0x40hex), role (10 ContributorRole values + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail).",
   {
     address: z.string().describe("Wallet address (0x + 40 hex chars)"),
     role: z
