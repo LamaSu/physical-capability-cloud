@@ -14,7 +14,10 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
 - §11. pcc-node (Python Operator Node)
-- §12. Agent Workflows (Quick Reference)
+- §12. Contributor Economics (NEW 2026-04)
+- §13. Agent Workflows (Quick Reference)
+
+> **What's new (2026-04)**: Contributor economics primitives (per-job royalties for adapter authors / protocol authors / model authors / dataset contributors / verifiers / insurers). 7 new MCP tools (50-56), 8 new REST endpoints under `/api/contributors`, full RateSchedule DSL. See §12.
 
 ---
 
@@ -833,7 +836,106 @@ export KERNEL_ID=my-kernel-001  # optional
 
 ---
 
-## 12. Agent Workflows (Quick Reference)
+## 12. Contributor Economics
+
+> **What's new (2026-04)**: Adapter authors, protocol authors, model authors, dataset contributors, verifiers, and insurers can now earn per-job royalties via the Contributor Economics primitives. See §12.6 for an end-to-end walkthrough.
+
+### 12.1 What contributor economics is
+
+Contributor economics is the protocol layer that lets non-operator participants earn per-job royalties on PCC. Each contributor publishes an immutable `RateSchedule` (canonicalized + content-addressed) and mints a `ContributorNFT` that anchors their wallet address + role + schedule on-chain. At job settlement time, `MilestoneEscrow.splitPayout()` evaluates every attached contributor's schedule (current time + job value + adoption stats) and routes the on-chain Payout array directly to each contributor's wallet — no manual reconciliation, no off-chain bookkeeping.
+
+### 12.2 The 8 new REST endpoints
+
+All endpoints under `/api/contributors`. All require `Authorization: Bearer <key>` (same as other routes).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/contributors` | Register a contributor profile (DB row). Body: `{address, role, scheduleHash, ipId?, metadataUri?, contributorNftTokenId?}`. Returns 201 with `profileId`. |
+| GET | `/api/contributors/:address` | List all profiles for an address. Returns `{profiles: ContributorProfile[]}`. |
+| GET | `/api/contributors/by-role/:role` | List all addresses with a given role. Returns `{role, profiles: ContributorProfile[]}`. |
+| POST | `/api/contributors/schedules` | Publish a rate schedule. Body: `{publishedBy, schedule: RateSchedule}`. Server canonicalizes JSON, computes sha256, persists. Returns `{scheduleHash, alreadyPublished}`. |
+| GET | `/api/contributors/schedules/:scheduleHash` | Fetch a published schedule (Zod-validated). Returns `{schedule, publishedBy, publishedAt}`. |
+| POST | `/api/contributors/schedules/:scheduleHash/evaluate` | Evaluate a schedule. Body: `{now, jobValueCents?, jobsPerDay?}`. Returns `{bps, segmentKind}`. |
+| POST | `/api/contributors/training-manifests` | Register a model's training manifest. Body: `{modelIpId, baseModelIpId?, datasetWeights: [{datasetIpId, weightBps}]}`. Server computes `manifestHash`. Returns `{modelIpId, manifestHash}`. |
+| GET | `/api/contributors/training-manifests/:modelIpId` | Fetch a training manifest. Returns `{manifest, manifestHash, registeredAt}`. |
+
+### 12.3 The 7 new MCP tools
+
+These are tools 50-56 in the MCP server (see §7).
+
+| # | Tool | Description |
+|---|------|-------------|
+| 50 | `pcc_contributor_register` | Register a contributor profile (DB + optional on-chain `ContributorNFT` mint) |
+| 51 | `pcc_contributor_list` | List all profiles for an address |
+| 52 | `pcc_schedule_publish` | Publish an immutable `RateSchedule` (canonicalized + sha256-keyed) |
+| 53 | `pcc_schedule_get` | Fetch a published `RateSchedule` by hash |
+| 54 | `pcc_schedule_evaluate` | Evaluate a `RateSchedule` at given time / jobValue / jobsPerDay → `bps` |
+| 55 | `pcc_training_manifest_set` | Register a `ModelNFT`'s training manifest (dataset weights) |
+| 56 | `pcc_training_manifest_get` | Fetch a model's training manifest |
+
+### 12.4 The 10-role taxonomy
+
+Contributor profiles must declare a `role` from this fixed taxonomy:
+
+`operator` (residual recipient — gets whatever is left after splits) · `verifier` · `insurer` · `integrator` · `protocol-author` · `model-author` · `dataset-contributor` · `curator` · `assembler` · `network-treasury`
+
+**Note (explicit, by design)**: there is no OEM royalty class. Hardware manufacturers do not get a built-in revenue stream — only the contributors who produce the executable assets running on top of that hardware. Full rationale: `docs/claros-layer4-amendment.md` and `ai/research/contributor-economics/12-adr-role-taxonomy-and-no-oem.md`.
+
+### 12.5 RateSchedule segment DSL
+
+A `RateSchedule` is a list of segments evaluated against `(now, jobValueCents, jobsPerDay)`. Six segment kinds are supported: `constant`, `step`, `linear-decay`, `exponential-decay`, `adoption-indexed`, `piecewise-value`.
+
+Example — a tapering rate that decays from 80bp to 10bp over 18 months:
+
+```typescript
+const schedule = {
+  version: 1,
+  segments: [
+    { kind: "constant", startTime: 0, endTime: 15552000, bps: 80 },        // 80bp first 6mo
+    { kind: "constant", startTime: 15552000, endTime: 47174400, bps: 40 }, // 40bp mo 7-18
+    { kind: "constant", startTime: 47174400, endTime: null, bps: 10 },     // 10bp forever after
+  ],
+};
+```
+
+Full DSL — including the other 5 segment kinds, validation rules, and the canonicalization spec — lives at `packages/spec/src/types/rate-schedule.ts`.
+
+### 12.6 End-to-end walkthrough
+
+How an integrator publishes a schedule, mints an NFT, and gets paid through a real job:
+
+```bash
+# 1. Publish the schedule (off-chain, canonicalized + content-addressed)
+SCHEDULE='{"version":1,"segments":[{"kind":"constant","startTime":0,"endTime":null,"bps":40}]}'
+curl -X POST https://capability.network/api/contributors/schedules \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"publishedBy\":\"0xMy...Address\",\"schedule\":$SCHEDULE}"
+# -> {"scheduleHash":"0xabc...","alreadyPublished":false}
+
+# 2. (Optional) Publish on-chain so anyone can verify the bytes
+forge script script/PublishSchedule.s.sol --broadcast \
+  --rpc-url $BASE_SEPOLIA_RPC
+
+# 3. Register your contributor profile (pointing at the schedule)
+curl -X POST https://capability.network/api/contributors \
+  -H "Authorization: Bearer $PCC_KEY" \
+  -d '{"address":"0xMy...Address","role":"integrator","scheduleHash":"0xabc..."}'
+
+# 4. (Optional) Mint a ContributorNFT on-chain
+forge script script/MintContributor.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RPC
+
+# 5. When a job uses your adapter, the payer's buildPayoutMap()
+#    automatically evaluates your schedule and includes you in the on-chain
+#    Payout[] passed to MilestoneEscrow.setPayoutMap().
+#    On release(), splitPayout sends your share directly to your wallet.
+```
+
+For deployment recipes (forge scripts, contract addresses, env vars), see `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`. For end-user docs (how to register, how splits work, FAQ), see `docs/CONTRIBUTOR_ECONOMICS.md`.
+
+---
+
+## 13. Agent Workflows (Quick Reference)
 
 **New operator setup**:
 `provision key` -> `setup detect` -> `generate config` -> `validate` -> `register kernel` -> `register device` -> `test job` -> `prove`
@@ -849,3 +951,6 @@ export KERNEL_ID=my-kernel-001  # optional
 
 **Embed a button**:
 `GET /api/capabilities/:id/button?format=script` -> paste HTML into any website
+
+**Publish a contributor royalty schedule** (see §12):
+`publish schedule` (POST `/api/contributors/schedules`) -> `register profile` (POST `/api/contributors`) -> `mint ContributorNFT` (forge) -> earn on every job
