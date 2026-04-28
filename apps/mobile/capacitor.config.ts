@@ -24,7 +24,6 @@ const config: CapacitorConfig = {
   // copy/sync of assets like splash and icon overlays). We point it at a
   // small static folder we maintain in this package.
   webDir: "public",
-  bundledWebRuntime: false,
   server: {
     url: serverUrl,
     androidScheme: "https",
