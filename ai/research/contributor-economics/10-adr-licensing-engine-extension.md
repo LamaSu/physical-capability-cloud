@@ -774,3 +774,84 @@ Wave 3 implementers receive this ADR as the source-of-truth contract. Build in t
 - Gateway logs `SplitPayoutResult` to `split_payout_logs` table after successful `releaseSplit()`
 - Add `/api/ip/milestone/:milestoneId/payout-log` GET route for audit trail
 - OpenTelemetry span: `contributor.payout.split` with attributes {recipient_count, total_bps_allocated, operator_residual_bps}
+
+---
+
+## Reconciliation Amendment (2026-04-24)
+
+This ADR was authored by `arch-integration-alpha` in parallel with ADR-11
+(`arch-splitpayout-bravo`) and ADR-12 (`arch-roles-charlie`). Two of this ADR's
+proposals were **superseded** during implementation by the paired ADRs. The
+text above is preserved for the historical record of the alternative; the
+sections below state what was actually built.
+
+### Supersession 1: splitPayout mechanism
+
+This ADR's Section 1 + Section 6 proposed **Option B** (off-chain compute +
+on-chain ECDSA-verified `releaseSplit()` taking `Payout[] calldata + bytes
+signature`).
+
+**ADR-11 chose Option A** (on-chain payout map: `setPayoutMap()` called by
+payer pre-fund; `release()` reads the stored map and executes N transfers in
+one tx). Option A was implemented in `MilestoneEscrow.sol` (commits `dedd057`,
+`9cd43a0`, `708fbf8`) with a 14-case Forge test suite (commit `ab8b3b4`,
+all 32 tests pass: 18 existing + 14 new).
+
+**Why Option A won**: trust-less by construction (no signing authority needed),
+matches existing PCC code patterns (every other state mutation in
+`MilestoneEscrow.sol` is direct-write, no off-chain quorum dependency), and
+honors the user directive of "publicly-visible immutable schedules" — the
+schedule's bps are evaluated at fund time, written on-chain in the payout map,
+and any contributor can `getPayoutMap()` to verify their entry before the job
+runs. Option B would have required a signing authority = centralization the
+user explicitly rejected.
+
+The off-chain `LicensingEngine.evaluateRateSchedule()` + `buildPayoutMap()`
+work as designed in this ADR — they just produce inputs for `setPayoutMap()`
+instead of an EIP-712 signature.
+
+### Supersession 2: Role taxonomy
+
+This ADR's Section 2 proposed:
+- `designer` → `protocol-author` (rename, single mapping)
+- `assembler` → `integrator` (rename, collapse)
+- `curator` → `insurer` (rename, repurpose)
+
+**ADR-12 chose a different migration** that preserves more semantic precision:
+- `designer` → disambiguates by CSD kind: `protocol-author` (for base/profile/extension)
+  OR `assembler` (for workflow CSDs) OR `integrator` (for adapter modules)
+- `assembler` → **kept unchanged** (compositional workflow author, distinct from integrator)
+- `curator` → **kept unchanged** (collection organizer, distinct from insurer)
+- `insurer` → **net-new role** (failure-coverage underwriter, opt-in per job)
+
+ADR-12's taxonomy was implemented in commits `f3c15d2` (spec), `d2407db`
+(contracts), `a1083f6` (a2a), plus dashboard UI updates. All 5 dashboard files
+have ADR-12 colors + presets; legacy `designer` and `network` strings still
+decode for backward compat.
+
+**Why ADR-12 won**: it was based on a full codebase audit (every file using
+the role enum was inventoried) and it preserves data-decoding compatibility
+for existing records that have `assembler` or `curator` roles assigned. ADR-10
+would have required a destructive migration of those records.
+
+### What from this ADR was kept
+
+- **Section 1 primitive mapping** for ContributorNFT, RateSchedule, DatasetNFT,
+  ModelNFT, TrainingManifest, CompositionManifest — all implemented as proposed.
+- **Section 5 LicensingEngine extension methods** — `setRateSchedule()`,
+  `evaluateRateSchedule()`, `linkModel()`, `getRoyaltyDistributionRich()` all
+  shipped in commit `9bab2ef`.
+- **Section 7 schema extensions** for `rate_schedules`, `training_manifests`,
+  `composition_manifests`, `contributor_profiles` — types in `@pcc/spec` shipped
+  via commits `fa08b9a`, `85f0a58`, `06c18f9`. Database tables deferred to a
+  follow-up migration (the off-chain logic is type-complete; persistence pending).
+- **Section 4-5 type signatures** for `RateSchedule`, `RateScheduleParams`,
+  `ContributorRole`, `TrainingManifest`, `CompositionManifest`, `SplitPayoutResult`
+  — all shipped in `packages/spec/src/types/`.
+
+### Net result
+
+This ADR plus ADR-11 plus ADR-12 collectively define the contributor-economics
+design. Where they conflicted, the more thorough / less destructive proposal
+won (ADR-11 over ADR-10 §6, ADR-12 over ADR-10 §2). The remaining 80% of this
+ADR is the canonical record of what was built.
