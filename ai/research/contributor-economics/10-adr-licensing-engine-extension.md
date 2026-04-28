@@ -1,9 +1,43 @@
 # ADR: LicensingEngine Extension for Contributor Economics
 
-**Status**: Proposed
+**Status**: Superseded in part — see §0 Reconciliation Amendment below
 **Author**: arch-integration-alpha
 **Date**: 2026-04-22
 **Branch**: feat/contributor-economics
+
+---
+
+## §0 Reconciliation Amendment (2026-04-24, summary)
+
+This ADR was authored in parallel with ADR-11 (`11-adr-splitpayout-contract.md`)
+and ADR-12 (`12-adr-role-taxonomy-and-no-oem.md`). Two of this ADR's proposals
+were superseded during implementation. **Read this header first**; the full
+amendment block at the end of the file (`## Reconciliation Amendment (2026-04-24)`)
+preserves the historical alternative for the record.
+
+The headlines:
+
+- **splitPayout mechanism**: ADR-10 §1 + §6 proposed Option B (off-chain
+  compute + on-chain ECDSA-verified `releaseSplit()`). **ADR-11 chose Option A**
+  (on-chain payout map: `setPayoutMap()` is called by the payer pre-fund;
+  `release()` reads the stored map and executes N transfers in one tx).
+  Option A was implemented in `MilestoneEscrow.sol` and is what ships.
+- **Role taxonomy**: ADR-10 §2 proposed renaming `designer` → `protocol-author`,
+  `assembler` → `integrator`, `curator` → `insurer`. **ADR-12 chose a more
+  precise migration**: `designer` disambiguates by CSD kind; `assembler`,
+  `curator`, and `insurer` are kept as distinct roles. ADR-12's taxonomy is
+  what shipped.
+- **What ADR-10 keeps**: §1 primitive mapping (ContributorNFT, RateSchedule,
+  DatasetNFT, ModelNFT, TrainingManifest, CompositionManifest) — all
+  implemented as proposed. §5 LicensingEngine extension methods,
+  §7 schema extensions, §4-5 type signatures all shipped.
+
+For the full reasoning + which commit the amendment landed in, jump to the
+end of this file: `## Reconciliation Amendment (2026-04-24)`.
+
+The original ADR-10 text below is preserved verbatim (Section 1 onward) so
+the alternative design is not lost. Where the text below conflicts with the
+§0 summary, **the §0 summary wins**.
 
 ---
 
