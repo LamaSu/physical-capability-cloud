@@ -928,13 +928,11 @@ curl -X POST https://capability.network/api/contributors/schedules \
   -d "{\"publishedBy\":\"0xMy...Address\",\"schedule\":$SCHEDULE}"
 # -> {"scheduleHash":"0xabc...","alreadyPublished":false}
 
-# 2. (Optional) Publish on-chain so anyone can verify the bytes.
-#    Stand-alone PublishSchedule / MintContributor forge scripts are landing
-#    incrementally — check `packages/contracts/script/` for the current set.
-#    Until they appear, drive the `RateScheduleRegistry.publish(bytes,bytes32)`
-#    call directly via `cast send` (see docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md
-#    "Smoke-publish a schedule") or roll a one-off forge script that calls
-#    `registry.publish(bytes, expectedHash)`.
+# 2. (Optional) Publish on-chain so anyone can verify the bytes. The forge
+#    script lives at `packages/contracts/script/PublishSchedule.s.sol` and
+#    calls `RateScheduleRegistry.publish(bytes, expectedHash)`. For the
+#    cast-send equivalent (no forge), see
+#    `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md` "Smoke-publish a schedule".
 forge script script/PublishSchedule.s.sol --broadcast \
   --rpc-url $BASE_SEPOLIA_RPC
 
@@ -943,10 +941,10 @@ curl -X POST https://capability.network/api/contributors \
   -H "Authorization: Bearer $PCC_KEY" \
   -d '{"address":"0xMy...Address","role":"integrator","scheduleHash":"0xabc..."}'
 
-# 4. (Optional) Mint a ContributorNFT on-chain. Same caveat as Step 2 — the
-#    bundled MintContributor.s.sol script is being added incrementally;
-#    until it lands, call `nft.mint(role, scheduleHash, ipId, metadataUri)`
-#    directly via `cast send` against the deployed ContributorNFT.
+# 4. (Optional) Mint a ContributorNFT on-chain. The forge script lives at
+#    `packages/contracts/script/MintContributor.s.sol` and calls
+#    `nft.mint(role, scheduleHash, ipId, metadataUri)` against the deployed
+#    ContributorNFT.
 forge script script/MintContributor.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RPC
 
 # 5. When a job uses your adapter, the payer's buildPayoutMap()
