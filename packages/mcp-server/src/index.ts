@@ -1284,6 +1284,234 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Contributor-economics tools (Wave 2 of feat/contributor-economics)
+//
+// Surfaces the @pcc/store ContributorRepository via /api/contributors/*. Each
+// tool maps 1:1 onto a route in packages/gateway/src/routes/contributors.ts.
+// Listed last so the help/CLI ordering tracks the feature waves.
+// ---------------------------------------------------------------------------
+
+// 50. pcc_contributor_register
+
+server.tool(
+  "pcc_contributor_register",
+  "Register a contributor profile binding a wallet address to a role and a published RateSchedule. Body: address (0x40hex), role (10 ContributorRole values + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail).",
+  {
+    address: z.string().describe("Wallet address (0x + 40 hex chars)"),
+    role: z
+      .enum([
+        "operator",
+        "verifier",
+        "insurer",
+        "integrator",
+        "protocol-author",
+        "model-author",
+        "dataset-contributor",
+        "curator",
+        "assembler",
+        "network-treasury",
+        "designer",
+      ])
+      .describe("ContributorRole — 10 ADR-12 roles + deprecated 'designer'"),
+    scheduleHash: z
+      .string()
+      .describe("0x + 64 hex sha256 of a published RateSchedule"),
+    ipId: z.string().optional().describe("Story Protocol IP Asset ID"),
+    metadataUri: z.string().optional().describe("ipfs:// or https:// URI"),
+    contributorNftTokenId: z
+      .string()
+      .optional()
+      .describe("ContributorNFT tokenId once minted on-chain"),
+  },
+  async ({
+    address,
+    role,
+    scheduleHash,
+    ipId,
+    metadataUri,
+    contributorNftTokenId,
+  }: {
+    address: string;
+    role: string;
+    scheduleHash: string;
+    ipId?: string;
+    metadataUri?: string;
+    contributorNftTokenId?: string;
+  }) => {
+    const data = await pccFetch("/api/contributors", {
+      method: "POST",
+      body: { address, role, scheduleHash, ipId, metadataUri, contributorNftTokenId },
+    });
+    return toolResult(data);
+  },
+);
+
+// 51. pcc_contributor_list
+
+server.tool(
+  "pcc_contributor_list",
+  "List all contributor profiles for an address across roles. Returns an array of {id, address, role, scheduleHash, ipId, contributorNftTokenId, metadataUri, registeredAt}.",
+  {
+    address: z.string().describe("Wallet address (0x + 40 hex chars)"),
+  },
+  async ({ address }: { address: string }) => {
+    const data = await pccFetch(`/api/contributors/${encodeURIComponent(address)}`);
+    return toolResult(data);
+  },
+);
+
+// 52. pcc_schedule_publish
+
+server.tool(
+  "pcc_schedule_publish",
+  "Publish a sealed off-chain RateSchedule. Computes scheduleHash server-side via the canonical sha256-over-canonical-JSON algorithm; idempotent on duplicate content. Returns {scheduleHash, alreadyPublished}.",
+  {
+    publishedBy: z
+      .string()
+      .describe("Address that publishes (0x + 40 hex chars)"),
+    schedule: z
+      .object({
+        version: z.number().int().min(1),
+        segments: z.array(z.record(z.unknown())).min(1),
+        notes: z.string().optional(),
+      })
+      .describe(
+        "RateSchedule body — version, segments (constant/step/linear-decay/exponential-decay/adoption-indexed/piecewise-value), and optional notes",
+      ),
+  },
+  async ({
+    publishedBy,
+    schedule,
+  }: {
+    publishedBy: string;
+    schedule: { version: number; segments: Array<Record<string, unknown>>; notes?: string };
+  }) => {
+    const data = await pccFetch("/api/contributors/schedules", {
+      method: "POST",
+      body: { publishedBy, schedule },
+    });
+    return toolResult(data);
+  },
+);
+
+// 53. pcc_schedule_get
+
+server.tool(
+  "pcc_schedule_get",
+  "Fetch a published RateSchedule by its content hash. Returns {schedule, publishedBy} or 404 if not found.",
+  {
+    scheduleHash: z
+      .string()
+      .describe("0x + 64 hex sha256 of the schedule"),
+  },
+  async ({ scheduleHash }: { scheduleHash: string }) => {
+    const data = await pccFetch(
+      `/api/contributors/schedules/${encodeURIComponent(scheduleHash)}`,
+    );
+    return toolResult(data);
+  },
+);
+
+// 54. pcc_schedule_evaluate
+
+server.tool(
+  "pcc_schedule_evaluate",
+  "Evaluate a published RateSchedule at a moment, returning the effective bps. Inputs: scheduleHash + now (unix seconds) + optional jobValueCents (piecewise-value) + optional jobsPerDay (adoption-indexed). Returns {scheduleHash, bps, segmentKind, segmentIndex}.",
+  {
+    scheduleHash: z.string().describe("0x + 64 hex schedule hash"),
+    now: z.number().int().min(0).describe("Unix seconds at evaluation moment"),
+    jobValueCents: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Job value in cents (piecewise-value segments)"),
+    jobsPerDay: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Rolling 24h job count (adoption-indexed segments)"),
+  },
+  async ({
+    scheduleHash,
+    now,
+    jobValueCents,
+    jobsPerDay,
+  }: {
+    scheduleHash: string;
+    now: number;
+    jobValueCents?: number;
+    jobsPerDay?: number;
+  }) => {
+    const data = await pccFetch(
+      `/api/contributors/schedules/${encodeURIComponent(scheduleHash)}/evaluate`,
+      { method: "POST", body: { now, jobValueCents, jobsPerDay } },
+    );
+    return toolResult(data);
+  },
+);
+
+// 55. pcc_training_manifest_set
+
+server.tool(
+  "pcc_training_manifest_set",
+  "Set (insert-or-replace) the TrainingManifest for a model IP — the dataset weight map the LicensingEngine walks when distributing payouts to a 'model-author' entry. Dataset weightBps must sum to ≤ 10000. Returns {modelIpId, manifestHash}.",
+  {
+    modelIpId: z.string().describe("Story IP Asset ID for the model"),
+    baseModelIpId: z
+      .string()
+      .optional()
+      .describe("Optional parent ModelNFT IP if this was fine-tuned"),
+    datasetWeights: z
+      .array(
+        z.object({
+          datasetIpId: z.string(),
+          weightBps: z.number().int().min(0).max(10000),
+          dataPointCount: z.number().int().min(0).optional(),
+        }),
+      )
+      .describe("DatasetIP entries with weightBps (sum ≤ 10000)"),
+    methodologyHash: z
+      .string()
+      .optional()
+      .describe("Optional 0x64hex reproducibility hash"),
+  },
+  async ({
+    modelIpId,
+    baseModelIpId,
+    datasetWeights,
+    methodologyHash,
+  }: {
+    modelIpId: string;
+    baseModelIpId?: string;
+    datasetWeights: Array<{ datasetIpId: string; weightBps: number; dataPointCount?: number }>;
+    methodologyHash?: string;
+  }) => {
+    const data = await pccFetch("/api/contributors/training-manifests", {
+      method: "POST",
+      body: { modelIpId, baseModelIpId, datasetWeights, methodologyHash },
+    });
+    return toolResult(data);
+  },
+);
+
+// 56. pcc_training_manifest_get
+
+server.tool(
+  "pcc_training_manifest_get",
+  "Fetch the TrainingManifest for a model IP. Returns the parsed datasets array + manifestHash + createdAt, or 404 if no manifest has been set.",
+  {
+    modelIpId: z.string().describe("Story IP Asset ID for the model"),
+  },
+  async ({ modelIpId }: { modelIpId: string }) => {
+    const data = await pccFetch(
+      `/api/contributors/training-manifests/${encodeURIComponent(modelIpId)}`,
+    );
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
