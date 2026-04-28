@@ -8,6 +8,33 @@ Every machine, lab, and factory on Earth just became a programmable endpoint.
 
 ---
 
+## Contributor Economics — new on `feat/contributor-economics`
+
+Anyone who contributes to a job — adapter author, capability protocol
+author, AI model trainer, pilot who collected the training data — can
+mint an immutable, publicly-committed rate schedule once and earn a
+fraction of every job that uses their work, forever (or until they ship
+a v2). At settlement, `MilestoneEscrow.splitPayout()` routes funds
+across all attached contributors in a single transaction. There is **no
+OEM royalty class** — by design. OEMs participate as Operators,
+Integrators, Protocol Authors, or Model Authors on equal terms with
+everyone else.
+
+53 commits, 32 new Forge tests, 700+ TS tests passing, 7 new MCP tools,
+8 new REST endpoints under `/api/contributors/*`, agent-package v2.8.0
+(218 tools).
+
+- **Quickstart**: [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md) — 5-minute "I am a contributor and I want to earn from my work" path
+- **API reference**: [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) §14
+- **Deploy**: [`docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`](docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md)
+- **No-OEM thesis**: [`docs/claros-layer4-amendment.md`](docs/claros-layer4-amendment.md)
+
+### What's new
+
+- **2026-04**: Contributor economics layer (53 commits, 700+ tests). See [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md).
+
+---
+
 ## What will you build?
 
 Your AI agent can now control real physical hardware — anywhere, on demand.
