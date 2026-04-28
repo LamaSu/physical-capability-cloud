@@ -1,0 +1,33 @@
+{
+  "name": "@pcc/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capacitor 7 mobile shell wrapping the PCC Operator PWA — iOS + Android",
+  "type": "module",
+  "scripts": {
+    "dev": "echo 'Mobile dev: open the Operator PWA at http://localhost:5173/operator/mobile'",
+    "build": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .vite",
+    "cap:sync": "echo 'Run: npx cap sync (requires native toolchains — see README)'",
+    "cap:doctor": "npx cap doctor"
+  },
+  "dependencies": {
+    "@capacitor/android": "7.6.2",
+    "@capacitor/core": "7.6.2",
+    "@capacitor/ios": "7.6.2",
+    "@capacitor/preferences": "7.0.0",
+    "capacitor-secure-storage-plugin": "0.13.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "7.6.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "fake-indexeddb": "^6.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
