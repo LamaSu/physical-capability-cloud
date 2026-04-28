@@ -1,0 +1,38 @@
+{
+  "name": "PCC Mobile",
+  "short_name": "PCC",
+  "description": "Physical Capability Cloud — Operator + User mobile app",
+  "id": "/operator/mobile",
+  "start_url": "/operator/mobile",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "portrait",
+  "background_color": "#0A1A0F",
+  "theme_color": "#10B981",
+  "categories": ["business", "productivity", "utilities"],
+  "icons": [
+    { "src": "/pcc-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/pcc-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Active jobs",
+      "short_name": "Jobs",
+      "description": "Jump straight to the operator jobs tab",
+      "url": "/operator/mobile?tab=jobs",
+      "icons": [
+        { "src": "/pcc-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+      ]
+    },
+    {
+      "name": "Capture evidence",
+      "short_name": "Capture",
+      "description": "Open the camera capture pipeline",
+      "url": "/operator/mobile?tab=camera",
+      "icons": [
+        { "src": "/pcc-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+      ]
+    }
+  ]
+}
