@@ -9,8 +9,8 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §4. Facades & How They Work
 - §5. Safety & Compliance
 - §6. Settlement & Payments
-- §7. MCP Server (49 Tools)
-- §8. Agent Package (219 Tools)
+- §7. MCP Server (56 Tools)
+- §8. Agent Package (218 Tools)
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
 - §11. pcc-node (Python Operator Node)
@@ -219,7 +219,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 219-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
@@ -665,7 +665,7 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 ---
 
-## 7. MCP Server (49 Tools)
+## 7. MCP Server (56 Tools)
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
@@ -682,7 +682,7 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 }
 ```
 
-**All 49 MCP tools**:
+**All 56 MCP tools** (tools 50-56 are contributor-economics primitives — see §12):
 
 | # | Tool | Description |
 |---|------|-------------|
@@ -735,12 +735,21 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 47 | `pcc_submit_withdrawal` | Withdraw USDC to fiat |
 | 48 | `pcc_get_ramp_activity` | Recent ramp activity |
 | 49 | `pcc_send_enterprise_payout` | Wise bank payout (40+ currencies) |
+| 50 | `pcc_contributor_register` | Register a contributor profile (DB + optional on-chain `ContributorNFT` mint) |
+| 51 | `pcc_contributor_list` | List all profiles for an address |
+| 52 | `pcc_schedule_publish` | Publish an immutable `RateSchedule` (canonicalized + sha256-keyed) |
+| 53 | `pcc_schedule_get` | Fetch a published `RateSchedule` by hash |
+| 54 | `pcc_schedule_evaluate` | Evaluate a `RateSchedule` at given time / jobValue / jobsPerDay → `bps` |
+| 55 | `pcc_training_manifest_set` | Register a `ModelNFT`'s training manifest (dataset weights) |
+| 56 | `pcc_training_manifest_get` | Fetch a model's training manifest |
+
+For the full contributor-economics surface (REST endpoints, DSL, walkthrough), see §12.
 
 ---
 
-## 8. Agent Package (219 Tools)
+## 8. Agent Package (218 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 219 tools with input schemas and endpoint mappings.
+The agent package is a single JSON file any LLM can consume, containing 218 tools with input schemas and endpoint mappings (re-numbered in v2.8.0 — was 219 before contributor-economics consolidation).
 
 **Fetch it**:
 ```bash
@@ -752,6 +761,8 @@ curl https://capability.network/agent-package.json
 **How to use**: Load the JSON, present tool descriptions to your LLM, and when the LLM selects a tool, make the corresponding HTTP request to `https://capability.network` + the endpoint path, passing the input as the request body (POST/PUT/PATCH) or query params (GET).
 
 The `system_prompt` field in the package contains bootstrap instructions including the 5-step self-onboarding flow.
+
+The package now includes the 7 contributor-economics tools (rows 50-56 in §7, fully described in §12).
 
 ---
 
