@@ -19,6 +19,19 @@ import type {
   LicensingTerms,
   LicenseGrant,
   StandingOffer,
+  RateSchedule,
+  RateScheduleEvaluationContext,
+  TrainingManifest,
+  CompositionManifest,
+  CompositionEntry,
+  CompositionRole,
+} from "@pcc/spec";
+import {
+  evaluateRateSchedule,
+  computeScheduleHash,
+  computeTrainingManifestHash,
+  assertScheduleIsWellFormed,
+  assertTrainingManifestIsWellFormed,
 } from "@pcc/spec";
 
 // ── Public interfaces ─────────────────────────────────────────────────
@@ -58,6 +71,12 @@ export interface RoyaltyDistribution {
   sharePercent: number;
   effectivePercent: number;        // after decay
   amount: string;                  // calculated from jobRevenue
+  /**
+   * Optional role tag from CompositionManifest / TrainingManifest paths.
+   * Populated only by `getRoyaltyDistributionRich`; legacy
+   * `getRoyaltyDistribution` always omits this.
+   */
+  role?: CompositionRole;
 }
 
 // ── Internal tree node ────────────────────────────────────────────────
@@ -82,6 +101,22 @@ export class LicensingEngine {
 
   /** Child→parent mapping */
   private readonly parents = new Map<string, string>();
+
+  // ── Wave 3c — RateSchedule + TrainingManifest registries ─────────────
+
+  /**
+   * Per-IP RateSchedule registry. In-memory cache; the canonical source of
+   * truth is the on-chain ContributorNFT metadata hash. Populated by the
+   * gateway layer at startup or on first lookup.
+   */
+  private readonly rateSchedules = new Map<string, RateSchedule>();
+
+  /**
+   * Per-model TrainingManifest registry. In-memory cache. Walked by
+   * `getRoyaltyDistributionRich` to recursively distribute model-author
+   * shares to dataset contributors.
+   */
+  private readonly trainingManifests = new Map<string, TrainingManifest>();
 
   // ── Terms storage ────────────────────────────────────────────────────
 
@@ -413,7 +448,267 @@ export class LicensingEngine {
     return this.children.get(parentIpId) ?? [];
   }
 
+  // ── Wave 3c — RateSchedule registry ──────────────────────────────────
+
+  /**
+   * Register an immutable RateSchedule for an IP Asset. Validates the
+   * schedule's well-formedness and that the supplied scheduleHash actually
+   * matches the canonical hash of the schedule body.
+   *
+   * Schedules are SUPPOSED to be immutable (the on-chain ContributorNFT
+   * metadata hash is the canonical source of truth). The in-memory store
+   * here is a cache. Re-registering with the same hash is idempotent;
+   * re-registering with a different hash is allowed at this layer (the
+   * gateway is responsible for the immutability/version semantics).
+   */
+  setRateSchedule(ipId: string, schedule: RateSchedule): void {
+    if (!ipId) throw new Error("setRateSchedule: ipId is required");
+    assertScheduleIsWellFormed(schedule);
+
+    const expected = computeScheduleHash({
+      version: schedule.version,
+      segments: schedule.segments,
+      publishedAt: schedule.publishedAt,
+    });
+    if (schedule.scheduleHash.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(
+        `setRateSchedule: scheduleHash mismatch. Provided ${schedule.scheduleHash}, computed ${expected}`,
+      );
+    }
+
+    this.rateSchedules.set(ipId, schedule);
+  }
+
+  getRateSchedule(ipId: string): RateSchedule | undefined {
+    return this.rateSchedules.get(ipId);
+  }
+
+  /**
+   * Evaluate the current bps for an IP's registered rate schedule against
+   * an evaluation context. Returns 0 if no schedule is registered.
+   */
+  evaluateRateScheduleForIp(
+    ipId: string,
+    context: RateScheduleEvaluationContext,
+  ): number {
+    const s = this.rateSchedules.get(ipId);
+    if (!s) return 0;
+    return evaluateRateSchedule(s, context).bps;
+  }
+
+  // ── Wave 3c — TrainingManifest registry ──────────────────────────────
+
+  /**
+   * Link a ModelNFT to its TrainingManifest. Validates:
+   *   - manifest.modelIpId matches the supplied modelIpId
+   *   - dataset weightBps sum to 10000
+   *   - manifestHash matches the computed canonical hash
+   */
+  linkModel(modelIpId: string, manifest: TrainingManifest): void {
+    if (!modelIpId) throw new Error("linkModel: modelIpId is required");
+
+    if (manifest.modelIpId !== modelIpId) {
+      throw new Error(
+        `linkModel: manifest.modelIpId (${manifest.modelIpId}) does not match argument modelIpId (${modelIpId})`,
+      );
+    }
+
+    assertTrainingManifestIsWellFormed({ datasets: manifest.datasets });
+
+    const expected = computeTrainingManifestHash({
+      modelIpId: manifest.modelIpId,
+      datasets: manifest.datasets,
+      baseModelIpId: manifest.baseModelIpId,
+      methodologyHash: manifest.methodologyHash,
+      trainedAt: manifest.trainedAt,
+    });
+    if (manifest.manifestHash.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(
+        `linkModel: manifestHash mismatch. Provided ${manifest.manifestHash}, computed ${expected}`,
+      );
+    }
+
+    this.trainingManifests.set(modelIpId, manifest);
+  }
+
+  getTrainingManifest(modelIpId: string): TrainingManifest | undefined {
+    return this.trainingManifests.get(modelIpId);
+  }
+
+  // ── Wave 3c — Rich royalty distribution ──────────────────────────────
+
+  /**
+   * Walk a CompositionManifest + TrainingManifest DAG to produce the full
+   * per-recipient royalty distribution at the moment described by `context`.
+   *
+   * Behavior:
+   *   1. If manifest is provided, walk its entries:
+   *      - For each entry, evaluate the registered RateSchedule for entry.ipId
+   *        at `context`. The resulting bps is the entry's share of jobRevenue.
+   *      - For entries with role="model-author", additionally walk the
+   *        TrainingManifest registered for entry.ipId. The model-author's
+   *        bps share is reproduced for the dataset contributors recursively
+   *        (their share = modelBps * weightBps / 10000). Each dataset
+   *        contributor is emitted as its own RoyaltyDistribution row with
+   *        role="dataset-contributor".
+   *      - If the TrainingManifest has a baseModelIpId, recurse one level
+   *        further (depth-capped at 5 to prevent runaway loops).
+   *   2. If manifest is NOT provided, fall back to the legacy
+   *      `getRoyaltyDistribution` (capability ancestor-chain only).
+   */
+  getRoyaltyDistributionRich(input: {
+    childIpId: string;
+    jobRevenue: bigint;
+    context: RateScheduleEvaluationContext;
+    manifest?: CompositionManifest;
+  }): RoyaltyDistribution[] {
+    const { childIpId, jobRevenue, context, manifest } = input;
+
+    // Fallback to legacy traversal when no composition manifest is supplied.
+    if (!manifest) {
+      return this.getRoyaltyDistribution(childIpId, String(jobRevenue));
+    }
+
+    const distributions: RoyaltyDistribution[] = [];
+
+    for (const entry of manifest.entries) {
+      const bps = this.evaluateRateScheduleForIp(entry.ipId, context);
+      if (bps === 0) continue;
+
+      // Apply optional groupBps weighting (to split a role across co-authors).
+      // groupBps is a fraction of 10000 of THE ENTRY'S share, not of the job.
+      const effectiveBps =
+        entry.groupBps !== undefined && entry.groupBps !== 10000
+          ? Math.round((bps * entry.groupBps) / 10000)
+          : bps;
+
+      if (effectiveBps === 0) continue;
+
+      this.pushDistribution(
+        distributions,
+        entry.contributorAddress,
+        entry.ipId,
+        entry.role,
+        effectiveBps,
+        jobRevenue,
+      );
+
+      // For model-author entries, recursively expand training manifest.
+      if (entry.role === "model-author") {
+        this.expandTrainingManifest({
+          modelIpId: entry.ipId,
+          modelBps: effectiveBps,
+          jobRevenue,
+          context,
+          distributions,
+          depth: 0,
+          visited: new Set([entry.ipId]),
+        });
+      }
+    }
+
+    return distributions;
+  }
+
   // ── Private helpers ───────────────────────────────────────────────────
+
+  private pushDistribution(
+    out: RoyaltyDistribution[],
+    recipient: string,
+    ipId: string,
+    role: CompositionRole | "dataset-contributor",
+    bps: number,
+    jobRevenue: bigint,
+  ): void {
+    const sharePercent = bps / 100;
+    const amountBig = (jobRevenue * BigInt(bps)) / 10000n;
+    out.push({
+      recipientAddress: recipient,
+      ipId,
+      depth: 0,
+      sharePercent,
+      effectivePercent: sharePercent,
+      amount: String(amountBig),
+      role: role as CompositionRole,
+    });
+  }
+
+  /**
+   * Recursively distribute a model author's bps share across its training
+   * manifest's datasets (and, if present, its baseModel's manifest). Caps
+   * depth at 5 and tracks visited modelIpIds to prevent cycles.
+   */
+  private expandTrainingManifest(args: {
+    modelIpId: string;
+    modelBps: number;
+    jobRevenue: bigint;
+    context: RateScheduleEvaluationContext;
+    distributions: RoyaltyDistribution[];
+    depth: number;
+    visited: Set<string>;
+  }): void {
+    const MAX_DEPTH = 5;
+    if (args.depth >= MAX_DEPTH) return;
+
+    const tm = this.trainingManifests.get(args.modelIpId);
+    if (!tm) return;
+
+    for (const ds of tm.datasets) {
+      // Each dataset's share = modelBps * weightBps / 10000
+      const dsBps = Math.round((args.modelBps * ds.weightBps) / 10000);
+      if (dsBps === 0) continue;
+
+      const datasetSchedule = this.rateSchedules.get(ds.datasetIpId);
+      if (!datasetSchedule) {
+        // No schedule registered for this dataset — we still emit a row at
+        // the manifest-implied bps so the dataset contributor can be wired
+        // off-chain. The address has to come from somewhere — without a
+        // ContributorProfile we can't resolve it; emit with empty address
+        // and let the gateway reject or pre-fill. Skip entirely here to
+        // avoid emitting an unaddressable Payout. This mirrors the
+        // "no schedule = no payout" rule from evaluateRateScheduleForIp.
+        continue;
+      }
+
+      // Dataset's recipient address is sourced from the schedule's IP terms
+      // (designerAddress on the LicensingTerms for that ipId), or from a
+      // ContributorProfile if separately registered. For Wave 3c this lives
+      // in the LicensingTerms.designerAddress slot, which the existing
+      // legacy traversal also uses. Fall back to "0x0" when missing — the
+      // off-chain payout-builder is responsible for filtering those.
+      const dsTerms = this.terms.get(ds.datasetIpId);
+      const recipient =
+        dsTerms?.designerAddress ?? "0x0000000000000000000000000000000000000000";
+
+      this.pushDistribution(
+        args.distributions,
+        recipient,
+        ds.datasetIpId,
+        "dataset-contributor",
+        dsBps,
+        args.jobRevenue,
+      );
+    }
+
+    // Recurse into baseModel lineage if declared (depth-capped).
+    if (tm.baseModelIpId && !args.visited.has(tm.baseModelIpId)) {
+      args.visited.add(tm.baseModelIpId);
+      this.expandTrainingManifest({
+        modelIpId: tm.baseModelIpId,
+        // The base model gets its OWN scheduled bps (not the descendant
+        // model's bps). If no schedule is registered for the base model,
+        // the recursion contributes nothing.
+        modelBps: this.evaluateRateScheduleForIp(tm.baseModelIpId, args.context),
+        jobRevenue: args.jobRevenue,
+        context: args.context,
+        distributions: args.distributions,
+        depth: args.depth + 1,
+        visited: args.visited,
+      });
+    }
+  }
+
+  // ── Existing private helpers (unchanged) ─────────────────────────────
 
   /**
    * Compute the derivative depth of a new IP that would be a child of parentIpId.
