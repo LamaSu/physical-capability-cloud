@@ -735,7 +735,7 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 | 47 | `pcc_submit_withdrawal` | Withdraw USDC to fiat |
 | 48 | `pcc_get_ramp_activity` | Recent ramp activity |
 | 49 | `pcc_send_enterprise_payout` | Wise bank payout (40+ currencies) |
-| 50 | `pcc_contributor_register` | Register a contributor profile (DB + optional on-chain `ContributorNFT` mint) |
+| 50 | `pcc_contributor_register` | Register a contributor profile (DB-only; on-chain `ContributorNFT` mint is a separate forge step — see §12.6) |
 | 51 | `pcc_contributor_list` | List all profiles for an address |
 | 52 | `pcc_schedule_publish` | Publish an immutable `RateSchedule` (canonicalized + sha256-keyed) |
 | 53 | `pcc_schedule_get` | Fetch a published `RateSchedule` by hash |
@@ -861,14 +861,14 @@ All endpoints under `/api/contributors`. All require `Authorization: Bearer <key
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/contributors` | Register a contributor profile (DB row). Body: `{address, role, scheduleHash, ipId?, metadataUri?, contributorNftTokenId?}`. Returns 201 with `profileId`. |
+| POST | `/api/contributors` | Register a contributor profile (DB row). Body: `{address, role, scheduleHash, ipId?, metadataUri?, contributorNftTokenId?}`. Returns 201 with `{profile: ContributorProfile}` (the full upserted profile, not just an id). |
 | GET | `/api/contributors/:address` | List all profiles for an address. Returns `{profiles: ContributorProfile[]}`. |
-| GET | `/api/contributors/by-role/:role` | List all addresses with a given role. Returns `{role, profiles: ContributorProfile[]}`. |
-| POST | `/api/contributors/schedules` | Publish a rate schedule. Body: `{publishedBy, schedule: RateSchedule}`. Server canonicalizes JSON, computes sha256, persists. Returns `{scheduleHash, alreadyPublished}`. |
-| GET | `/api/contributors/schedules/:scheduleHash` | Fetch a published schedule (Zod-validated). Returns `{schedule, publishedBy, publishedAt}`. |
-| POST | `/api/contributors/schedules/:scheduleHash/evaluate` | Evaluate a schedule. Body: `{now, jobValueCents?, jobsPerDay?}`. Returns `{bps, segmentKind}`. |
-| POST | `/api/contributors/training-manifests` | Register a model's training manifest. Body: `{modelIpId, baseModelIpId?, datasetWeights: [{datasetIpId, weightBps}]}`. Server computes `manifestHash`. Returns `{modelIpId, manifestHash}`. |
-| GET | `/api/contributors/training-manifests/:modelIpId` | Fetch a training manifest. Returns `{manifest, manifestHash, registeredAt}`. |
+| GET | `/api/contributors/by-role/:role` | List all addresses with a given role. Returns `{profiles: ContributorProfile[]}` (the route does not echo the `role` parameter back). |
+| POST | `/api/contributors/schedules` | Publish a rate schedule. Body: `{publishedBy, schedule: RateSchedule}`. The inner `schedule` may also carry `notes`, `scheduleHash`, `publishedAt` — all optional; the server recomputes the hash and rejects mismatches. Server canonicalizes JSON, computes sha256, persists. Returns `{scheduleHash, alreadyPublished}`. |
+| GET | `/api/contributors/schedules/:scheduleHash` | Fetch a published schedule (Zod-validated). Returns `{schedule, publishedBy}` where `publishedAt` is nested INSIDE `schedule` (and `scheduleHash` is also embedded in `schedule`). |
+| POST | `/api/contributors/schedules/:scheduleHash/evaluate` | Evaluate a schedule. Body: `{now, jobValueCents?, jobsPerDay?}`. Returns `{scheduleHash, bps, segmentKind, segmentIndex}`. |
+| POST | `/api/contributors/training-manifests` | Register a model's training manifest. Body: `{modelIpId, baseModelIpId?, datasetWeights: [{datasetIpId, weightBps}], methodologyHash?}` (the optional `methodologyHash` is a 0x64hex reproducibility hash). Server computes `manifestHash`. Returns `{modelIpId, manifestHash}`. |
+| GET | `/api/contributors/training-manifests/:modelIpId` | Fetch a training manifest. Returns `{manifest: {modelIpId, baseModelIpId, datasets, methodologyHash, manifestHash, createdAt}}` — note `manifestHash` is nested inside `manifest` (not a top-level field) and the timestamp field is `createdAt`, not `registeredAt`. |
 
 ### 12.3 The 7 new MCP tools
 
@@ -876,7 +876,7 @@ These are tools 50-56 in the MCP server (see §7).
 
 | # | Tool | Description |
 |---|------|-------------|
-| 50 | `pcc_contributor_register` | Register a contributor profile (DB + optional on-chain `ContributorNFT` mint) |
+| 50 | `pcc_contributor_register` | Register a contributor profile (DB-only; on-chain `ContributorNFT` mint is a separate forge step — see §12.6) |
 | 51 | `pcc_contributor_list` | List all profiles for an address |
 | 52 | `pcc_schedule_publish` | Publish an immutable `RateSchedule` (canonicalized + sha256-keyed) |
 | 53 | `pcc_schedule_get` | Fetch a published `RateSchedule` by hash |
@@ -891,6 +891,8 @@ Contributor profiles must declare a `role` from this fixed taxonomy:
 `operator` (residual recipient — gets whatever is left after splits) · `verifier` · `insurer` · `integrator` · `protocol-author` · `model-author` · `dataset-contributor` · `curator` · `assembler` · `network-treasury`
 
 **Note (explicit, by design)**: there is no OEM royalty class. Hardware manufacturers do not get a built-in revenue stream — only the contributors who produce the executable assets running on top of that hardware. Full rationale: `docs/claros-layer4-amendment.md` and `ai/research/contributor-economics/12-adr-role-taxonomy-and-no-oem.md`.
+
+**Footnote on legacy roles**: `packages/spec/src/types/story.ts` retains a deprecated `designer` member purely so legacy records still decode (see ADR-12 §2.2). Do not register new profiles with `designer`; pick the appropriate post-migration role instead (`protocol-author`, `assembler`, or `integrator`, depending on what the legacy record described).
 
 ### 12.5 RateSchedule segment DSL
 
@@ -911,6 +913,8 @@ const schedule = {
 
 Full DSL — including the other 5 segment kinds, validation rules, and the canonicalization spec — lives at `packages/spec/src/types/rate-schedule.ts`.
 
+**Note on wire format vs evaluator input**: the example above is the *wire body* you POST to `/api/contributors/schedules` — the server canonicalizes the inner JSON, computes `scheduleHash`, and stamps `publishedAt` for you. If you instead want to call `evaluateRateSchedule(schedule, ctx)` directly (off-chain, in a script), `RateScheduleSchema` requires both `scheduleHash: 0x<64hex>` and `publishedAt: ISO-8601 string` to be present locally; either fill them in by hand or fetch the materialized schedule via `GET /api/contributors/schedules/:scheduleHash` first.
+
 ### 12.6 End-to-end walkthrough
 
 How an integrator publishes a schedule, mints an NFT, and gets paid through a real job:
@@ -924,7 +928,13 @@ curl -X POST https://capability.network/api/contributors/schedules \
   -d "{\"publishedBy\":\"0xMy...Address\",\"schedule\":$SCHEDULE}"
 # -> {"scheduleHash":"0xabc...","alreadyPublished":false}
 
-# 2. (Optional) Publish on-chain so anyone can verify the bytes
+# 2. (Optional) Publish on-chain so anyone can verify the bytes.
+#    Stand-alone PublishSchedule / MintContributor forge scripts are landing
+#    incrementally — check `packages/contracts/script/` for the current set.
+#    Until they appear, drive the `RateScheduleRegistry.publish(bytes,bytes32)`
+#    call directly via `cast send` (see docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md
+#    "Smoke-publish a schedule") or roll a one-off forge script that calls
+#    `registry.publish(bytes, expectedHash)`.
 forge script script/PublishSchedule.s.sol --broadcast \
   --rpc-url $BASE_SEPOLIA_RPC
 
@@ -933,14 +943,30 @@ curl -X POST https://capability.network/api/contributors \
   -H "Authorization: Bearer $PCC_KEY" \
   -d '{"address":"0xMy...Address","role":"integrator","scheduleHash":"0xabc..."}'
 
-# 4. (Optional) Mint a ContributorNFT on-chain
+# 4. (Optional) Mint a ContributorNFT on-chain. Same caveat as Step 2 — the
+#    bundled MintContributor.s.sol script is being added incrementally;
+#    until it lands, call `nft.mint(role, scheduleHash, ipId, metadataUri)`
+#    directly via `cast send` against the deployed ContributorNFT.
 forge script script/MintContributor.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RPC
 
 # 5. When a job uses your adapter, the payer's buildPayoutMap()
 #    automatically evaluates your schedule and includes you in the on-chain
 #    Payout[] passed to MilestoneEscrow.setPayoutMap().
 #    On release(), splitPayout sends your share directly to your wallet.
+#
+#    HEADS-UP: `packages/contracts/ts/payouts.ts:buildPayoutMap()` is
+#    currently a stub that throws "not implemented — Wave 3c
+#    (LicensingEngine extension)". Until LicensingEngine ships, payers must
+#    hand-build the Payout[] passed to setPayoutMap(). The on-chain
+#    setPayoutMap + splitPayout + release path is fully shipped — only the
+#    off-chain helper that constructs the array is gated.
 ```
+
+> **Note**: `BASE_SEPOLIA_RPC` referenced in Steps 2 and 4 above defaults to
+> `https://sepolia.base.org` (the same value used in
+> `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`). Set it explicitly if you want to
+> override (Alchemy / Infura / QuickNode endpoints work; pair with
+> `--rpc-url $BASE_SEPOLIA_RPC` on every cast/forge call).
 
 For deployment recipes (forge scripts, contract addresses, env vars), see `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`. For end-user docs (how to register, how splits work, FAQ), see `docs/CONTRIBUTOR_ECONOMICS.md`.
 

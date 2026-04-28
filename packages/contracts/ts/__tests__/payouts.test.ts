@@ -57,18 +57,17 @@ describe("ROLE_TAGS", () => {
   });
 });
 
-describe("buildPayoutMap (stub)", () => {
-  it("throws with the Wave 3c not-implemented message", () => {
-    expect(() =>
-      buildPayoutMap({
-        milestoneIndex: 0,
-        jobValue: 100_000_000n, // 100 USDC
-        capabilityIpId:
-          "0x0000000000000000000000000000000000000000000000000000000000000000",
-      }),
-    ).toThrow(
-      "buildPayoutMap: not implemented — Wave 3c (LicensingEngine extension)",
-    );
+describe("buildPayoutMap (no manifest)", () => {
+  it("returns empty payouts + 10000 bps to operator when no manifest is supplied", () => {
+    const result = buildPayoutMap({
+      milestoneIndex: 0,
+      jobValue: 100_000_000n, // 100 USDC
+      capabilityIpId:
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+    });
+    expect(result.payouts).toEqual([]);
+    expect(result.operatorResidualBps).toBe(10000);
+    expect(result.breakdown).toEqual([]);
   });
 });
 
