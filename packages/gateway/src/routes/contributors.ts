@@ -1,0 +1,483 @@
+/**
+ * Contributor-economics REST routes.
+ *
+ * Surfaces the @pcc/store ContributorRepository + the @pcc/spec evaluation
+ * helpers (computeScheduleHash / evaluateRateSchedule / computeTrainingManifestHash)
+ * over Fastify so external agents can:
+ *
+ *   POST /api/contributors                                  — register a profile (DB row)
+ *   GET  /api/contributors/:address                         — list profiles for an address
+ *   GET  /api/contributors/by-role/:role                    — list profiles bound to a role
+ *   POST /api/contributors/schedules                        — publish a sealed RateSchedule
+ *   GET  /api/contributors/schedules/:scheduleHash          — fetch a published schedule
+ *   POST /api/contributors/schedules/:scheduleHash/evaluate — evaluate the curve at a moment
+ *   POST /api/contributors/training-manifests               — set TrainingManifest for a model IP
+ *   GET  /api/contributors/training-manifests/:modelIpId    — fetch a TrainingManifest
+ *
+ * Conventions:
+ *  - Inputs validated with Zod; failures return `{error: "invalid_request", message}` 400.
+ *  - All schedule writes recompute `scheduleHash` server-side via the @pcc/spec
+ *    canonicalizer, then reject when the caller's claimed hash mismatches. This
+ *    keeps the registry content-addressed exactly the way the on-chain
+ *    `RateScheduleRegistry.publish(...)` does.
+ *  - Training manifests enforce dataset weight sum ≤ 10000 bps at the gateway
+ *    (the on-chain payout map currently expects exact == 10000 sum, but for
+ *    the registry surface we accept ≤ to allow incremental publishing of
+ *    partial mixes; the validation note here matches the brief).
+ *
+ * Tests live in __tests__/contributors.test.ts and exercise the full route
+ * surface against an in-memory better-sqlite3 store.
+ */
+
+import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+import { getRepos } from "../db.js";
+import {
+  RateSegmentSchema,
+  computeScheduleHash,
+  evaluateRateSchedule,
+  type RateSchedule,
+  type RateSegment,
+  TrainingDatasetEntrySchema,
+  computeTrainingManifestHash,
+  canonicalize,
+} from "@pcc/spec";
+
+// ---------------------------------------------------------------------------
+// Validation primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical 10-role taxonomy from @pcc/spec story.ts ContributorRole, plus the
+ * deprecated `designer` alias retained for backward compatibility (ADR-12
+ * §2.2). Mirrors the union type because spec does not currently export a Zod
+ * enum form (CompositionRoleSchema in composition-manifest.ts is a near-dup
+ * but adds `pilot` and omits `designer`, so it cannot be reused verbatim).
+ */
+const ContributorRoleSchema = z.enum([
+  "operator",
+  "verifier",
+  "insurer",
+  "integrator",
+  "protocol-author",
+  "model-author",
+  "dataset-contributor",
+  "curator",
+  "assembler",
+  "network-treasury",
+  // Deprecated alias retained for legacy decode (ADR-12 §2.2).
+  "designer",
+] as const);
+
+const ScheduleHashSchema = z
+  .string()
+  .regex(/^0x[a-f0-9]{64}$/i, "scheduleHash must be 0x + 64 lowercase hex chars");
+
+const AddressSchema = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{40}$/, "address must be 0x + 40 hex chars");
+
+// ---------------------------------------------------------------------------
+// Body / params shapes (Zod-driven, not interface-typed)
+// ---------------------------------------------------------------------------
+
+const RegisterProfileBodySchema = z.object({
+  address: AddressSchema,
+  role: ContributorRoleSchema,
+  scheduleHash: ScheduleHashSchema,
+  ipId: z.string().min(1).optional(),
+  metadataUri: z.string().min(1).optional(),
+  contributorNftTokenId: z.string().min(1).optional(),
+});
+
+/**
+ * Body for `POST /api/contributors/schedules`. Caller submits the parsed
+ * RateSchedule sans the scheduleHash field — we recompute the hash server-side
+ * and seal it. Callers that already know the hash (e.g., they computed it
+ * client-side and want to gate-check) MAY include `scheduleHash`; if it
+ * mismatches the recomputed value we reject 400.
+ */
+const PublishScheduleBodySchema = z.object({
+  publishedBy: AddressSchema,
+  schedule: z.object({
+    version: z.number().int().min(1),
+    segments: z.array(RateSegmentSchema).min(1),
+    notes: z.string().optional(),
+    scheduleHash: ScheduleHashSchema.optional(),
+    publishedAt: z.string().optional(),
+  }),
+});
+
+const EvaluateScheduleBodySchema = z.object({
+  now: z.number().int().min(0),
+  jobValueCents: z.number().int().min(0).optional(),
+  jobsPerDay: z.number().min(0).optional(),
+});
+
+const TrainingManifestBodySchema = z.object({
+  modelIpId: z.string().min(1),
+  baseModelIpId: z.string().min(1).optional(),
+  datasetWeights: z.array(TrainingDatasetEntrySchema).min(1),
+  methodologyHash: z
+    .string()
+    .regex(/^0x[a-f0-9]{64}$/i)
+    .optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Route plugin
+// ---------------------------------------------------------------------------
+
+export async function contributorRoutes(app: FastifyInstance): Promise<void> {
+  // ── POST /api/contributors ───────────────────────────────────────────────
+
+  app.post("/api/contributors", async (req, reply) => {
+    const parse = RegisterProfileBodySchema.safeParse(req.body);
+    if (!parse.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: parse.error.issues[0]?.message ?? "validation failed",
+        details: parse.error.issues,
+      });
+    }
+
+    const body = parse.data;
+    const repos = getRepos();
+
+    // The `id` is a deterministic composite of address + role + (tokenId or
+    // scheduleHash). This matches the schema comment on contributorProfiles.id.
+    const idTail = body.contributorNftTokenId ?? body.scheduleHash;
+    const id = `${body.address}:${body.role}:${idTail}`;
+
+    const profile = {
+      id,
+      address: body.address,
+      role: body.role,
+      scheduleHash: body.scheduleHash,
+      ipId: body.ipId ?? null,
+      contributorNftTokenId: body.contributorNftTokenId ?? null,
+      metadataUri: body.metadataUri ?? null,
+      registeredAt: new Date().toISOString(),
+    };
+
+    try {
+      repos.contributors.upsertProfile(profile);
+      return reply.code(201).send({ profile });
+    } catch (err) {
+      return reply.code(500).send({
+        error: "register_profile_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // ── GET /api/contributors/by-role/:role ──────────────────────────────────
+  // IMPORTANT: registered BEFORE /:address so Fastify's static-segment-first
+  // resolver picks this branch even when role values look like addresses.
+
+  app.get<{ Params: { role: string } }>(
+    "/api/contributors/by-role/:role",
+    async (req, reply) => {
+      const role = req.params.role;
+      const parse = ContributorRoleSchema.safeParse(role);
+      if (!parse.success) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: `unknown role: ${role}`,
+        });
+      }
+      const repos = getRepos();
+      const profiles = repos.contributors.listProfilesByRole(parse.data);
+      return { profiles };
+    },
+  );
+
+  // ── GET /api/contributors/schedules/:scheduleHash ────────────────────────
+  // Registered BEFORE /:address so static segments win over the dynamic one.
+
+  app.get<{ Params: { scheduleHash: string } }>(
+    "/api/contributors/schedules/:scheduleHash",
+    async (req, reply) => {
+      const parsed = ScheduleHashSchema.safeParse(req.params.scheduleHash);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: parsed.error.issues[0]?.message ?? "invalid scheduleHash",
+        });
+      }
+
+      const repos = getRepos();
+      const record = repos.contributors.getSchedule(parsed.data);
+      if (!record) {
+        return reply.code(404).send({ error: "schedule_not_found" });
+      }
+
+      // Re-parse segmentsJson and validate via Zod so callers always receive
+      // a structurally-checked RateSegment[] back, not an opaque string.
+      let segments: RateSegment[];
+      try {
+        const raw = JSON.parse(record.segmentsJson);
+        segments = z.array(RateSegmentSchema).parse(raw);
+      } catch (err) {
+        return reply.code(500).send({
+          error: "schedule_corrupt",
+          message: `stored segmentsJson failed to parse: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      const schedule: RateSchedule = {
+        scheduleHash: record.scheduleHash as `0x${string}`,
+        version: record.version,
+        segments,
+        notes: record.notes ?? undefined,
+        publishedAt: record.publishedAt,
+      };
+
+      return { schedule, publishedBy: record.publishedBy };
+    },
+  );
+
+  // ── POST /api/contributors/schedules/:scheduleHash/evaluate ──────────────
+
+  app.post<{ Params: { scheduleHash: string } }>(
+    "/api/contributors/schedules/:scheduleHash/evaluate",
+    async (req, reply) => {
+      const hashParse = ScheduleHashSchema.safeParse(req.params.scheduleHash);
+      if (!hashParse.success) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: hashParse.error.issues[0]?.message ?? "invalid scheduleHash",
+        });
+      }
+      const bodyParse = EvaluateScheduleBodySchema.safeParse(req.body);
+      if (!bodyParse.success) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: bodyParse.error.issues[0]?.message ?? "validation failed",
+          details: bodyParse.error.issues,
+        });
+      }
+
+      const repos = getRepos();
+      const record = repos.contributors.getSchedule(hashParse.data);
+      if (!record) {
+        return reply.code(404).send({ error: "schedule_not_found" });
+      }
+
+      let segments: RateSegment[];
+      try {
+        segments = z.array(RateSegmentSchema).parse(JSON.parse(record.segmentsJson));
+      } catch (err) {
+        return reply.code(500).send({
+          error: "schedule_corrupt",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const schedule: RateSchedule = {
+        scheduleHash: record.scheduleHash as `0x${string}`,
+        version: record.version,
+        segments,
+        notes: record.notes ?? undefined,
+        publishedAt: record.publishedAt,
+      };
+
+      const result = evaluateRateSchedule(schedule, {
+        now: bodyParse.data.now,
+        jobValueCents: bodyParse.data.jobValueCents ?? 0,
+        jobsPerDay: bodyParse.data.jobsPerDay ?? 0,
+      });
+
+      return {
+        scheduleHash: record.scheduleHash,
+        bps: result.bps,
+        segmentKind: result.kind,
+        segmentIndex: result.segmentIndex,
+      };
+    },
+  );
+
+  // ── POST /api/contributors/schedules ─────────────────────────────────────
+
+  app.post("/api/contributors/schedules", async (req, reply) => {
+    const parse = PublishScheduleBodySchema.safeParse(req.body);
+    if (!parse.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: parse.error.issues[0]?.message ?? "validation failed",
+        details: parse.error.issues,
+      });
+    }
+
+    const { publishedBy, schedule } = parse.data;
+
+    // Recompute the canonical hash server-side. This is the same algorithm
+    // (sha256 over canonical JSON of {version, segments}) used by the on-chain
+    // RateScheduleRegistry.publish() — the value MUST match if the caller
+    // claimed a hash up-front.
+    let computed: `0x${string}`;
+    try {
+      computed = computeScheduleHash({
+        version: schedule.version,
+        segments: schedule.segments,
+        notes: schedule.notes,
+        publishedAt: schedule.publishedAt ?? "",
+      });
+    } catch (err) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: `computeScheduleHash failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    if (schedule.scheduleHash && schedule.scheduleHash.toLowerCase() !== computed.toLowerCase()) {
+      return reply.code(400).send({
+        error: "schedule_hash_mismatch",
+        message: `caller-claimed hash ${schedule.scheduleHash} does not match recomputed ${computed}`,
+      });
+    }
+
+    const repos = getRepos();
+    const existing = repos.contributors.getSchedule(computed);
+    if (existing) {
+      return {
+        scheduleHash: computed,
+        alreadyPublished: true,
+      };
+    }
+
+    // Canonicalize segmentsJson before write so on read we always parse back
+    // the same shape, regardless of insertion order in the input.
+    const segmentsJson = canonicalize(schedule.segments);
+
+    try {
+      repos.contributors.publishSchedule({
+        scheduleHash: computed,
+        version: schedule.version,
+        segmentsJson,
+        notes: schedule.notes ?? null,
+        publishedBy,
+        publishedAt: schedule.publishedAt ?? new Date().toISOString(),
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        error: "publish_schedule_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return {
+      scheduleHash: computed,
+      alreadyPublished: false,
+    };
+  });
+
+  // ── POST /api/contributors/training-manifests ────────────────────────────
+
+  app.post("/api/contributors/training-manifests", async (req, reply) => {
+    const parse = TrainingManifestBodySchema.safeParse(req.body);
+    if (!parse.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: parse.error.issues[0]?.message ?? "validation failed",
+        details: parse.error.issues,
+      });
+    }
+
+    const { modelIpId, baseModelIpId, datasetWeights, methodologyHash } = parse.data;
+
+    const totalBps = datasetWeights.reduce((sum, d) => sum + d.weightBps, 0);
+    if (totalBps > 10000) {
+      return reply.code(400).send({
+        error: "weights_exceed_total",
+        message: `dataset weightBps sum to ${totalBps}, must be ≤ 10000`,
+      });
+    }
+
+    // computeTrainingManifestHash signs the structural body (modelIpId + datasets
+    // + optional baseModelIpId + optional methodologyHash) — exactly mirrors the
+    // off-chain definition in @pcc/spec/types/training-manifest.ts.
+    const manifestHash = computeTrainingManifestHash({
+      modelIpId,
+      datasets: datasetWeights,
+      baseModelIpId,
+      methodologyHash: methodologyHash as `0x${string}` | undefined,
+      trainedAt: new Date().toISOString(),
+    });
+
+    const datasetWeightsJson = canonicalize(datasetWeights);
+
+    try {
+      const repos = getRepos();
+      repos.contributors.setTrainingManifest({
+        modelIpId,
+        baseModelIpId: baseModelIpId ?? null,
+        datasetWeightsJson,
+        methodologyHash: methodologyHash ?? null,
+        manifestHash,
+        createdAt: new Date().toISOString(),
+      });
+
+      return { modelIpId, manifestHash };
+    } catch (err) {
+      return reply.code(500).send({
+        error: "set_training_manifest_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // ── GET /api/contributors/training-manifests/:modelIpId ──────────────────
+
+  app.get<{ Params: { modelIpId: string } }>(
+    "/api/contributors/training-manifests/:modelIpId",
+    async (req, reply) => {
+      const repos = getRepos();
+      const record = repos.contributors.getTrainingManifest(req.params.modelIpId);
+      if (!record) {
+        return reply.code(404).send({ error: "training_manifest_not_found" });
+      }
+
+      let datasets: unknown;
+      try {
+        datasets = JSON.parse(record.datasetWeightsJson);
+      } catch (err) {
+        return reply.code(500).send({
+          error: "training_manifest_corrupt",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      return {
+        manifest: {
+          modelIpId: record.modelIpId,
+          baseModelIpId: record.baseModelIpId,
+          datasets,
+          methodologyHash: record.methodologyHash,
+          manifestHash: record.manifestHash,
+          createdAt: record.createdAt,
+        },
+      };
+    },
+  );
+
+  // ── GET /api/contributors/:address ───────────────────────────────────────
+  // Registered LAST so Fastify resolves the static segments first
+  // (/by-role/:role, /schedules/:hash, /training-manifests/:id).
+
+  app.get<{ Params: { address: string } }>(
+    "/api/contributors/:address",
+    async (req, reply) => {
+      const parse = AddressSchema.safeParse(req.params.address);
+      if (!parse.success) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: parse.error.issues[0]?.message ?? "invalid address",
+        });
+      }
+      const repos = getRepos();
+      const profiles = repos.contributors.listProfilesByAddress(parse.data);
+      return { profiles };
+    },
+  );
+}
