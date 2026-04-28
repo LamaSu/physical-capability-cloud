@@ -25,13 +25,14 @@ reference the freshly-deployed registry. The NFT's `scheduleRegistry` is
 ## Prerequisites
 
 - [ ] `forge` installed locally (Foundry — Spark does not have it; deploy from local).
-      Verify with `forge --version`.
+      Verify with `forge --version`. Tested with forge 1.5+; older 0.x releases may
+      misinterpret the `--verify` / `--etherscan-api-key` flag pair, so upgrade if
+      you see odd flag-parsing errors.
 - [ ] `DEPLOYER_PRIVATE_KEY` env var set to a funded Base Sepolia testnet key.
       Get test ETH from https://www.alchemy.com/faucets/base-sepolia (~0.01 ETH plenty).
 - [ ] `ETHERSCAN_API_KEY` env var set to a BaseScan API key (free at
       https://basescan.org/myapikey). Required for `--verify`.
 - [ ] On `feat/contributor-economics` branch (or merged into `master`).
-- [ ] `~/.credentials.json` has the active credentials (per `~/.claude` memory).
 
 Optional:
 
@@ -46,9 +47,17 @@ forge build
 forge test --match-path 'test/{ContributorNFT,RateScheduleRegistry,MilestoneEscrow}*' -vv
 ```
 
-Expected: 58 tests pass, 0 fail. If anything fails, **do not deploy** — fix the
-failure first. Splitting payouts to >16 recipients is the most common source
-of `OutOfGas` failures and means the schedule is malformed; do not ship it.
+Expected: 58 tests pass, 0 fail. (Breakdown: 11 RateScheduleRegistry +
+15 ContributorNFT + 14 MilestoneEscrow.splitPayout + 18 MilestoneEscrow
+base.) If anything fails, **do not deploy** — fix the failure first.
+
+> **Why does the test glob include `MilestoneEscrow*` when this script
+> doesn't deploy MilestoneEscrow?** The new `splitPayout` extension and its
+> 14-test suite live inside the existing `MilestoneEscrow.sol` contract;
+> we run the broader MilestoneEscrow base suite alongside for coverage
+> hygiene. The actual MilestoneEscrow deploy is handled by a separate
+> script in the parent PCC repo (`Deploy.s.sol`). This script only
+> deploys `RateScheduleRegistry` and `ContributorNFT`.
 
 ## Deploy command
 
@@ -129,7 +138,7 @@ SCHEDULE_HASH=$(printf '%s' "$SCHEDULE_BYTES" | shasum -a 256 | cut -d' ' -f1)
 
 cast send "$RATE_SCHEDULE_REGISTRY" \
   "publish(bytes,bytes32)(bytes32)" \
-  "$(printf '%s' "$SCHEDULE_BYTES" | xxd -p | tr -d '\n')" \
+  "0x$(printf '%s' "$SCHEDULE_BYTES" | xxd -p | tr -d '\n')" \
   "0x$SCHEDULE_HASH" \
   --private-key "$DEPLOYER_PRIVATE_KEY" \
   --rpc-url "$BASE_SEPOLIA_RPC"
@@ -185,22 +194,29 @@ field `receipts[*].blockNumber`, hex-decoded to decimal).
 Commit these JSON files in a `chore(contracts):` commit so the addresses are
 auditable in git history.
 
-## Wiring into the gateway
+## Wiring into the gateway (future work)
 
-After deploy, set these env vars on the gateway service (Railway → service →
-Variables, both `staging` and `production` envs):
+The gateway routes in `packages/gateway/src/routes/contributors.ts` are
+purely off-chain today: they persist contributor profiles, schedules, and
+training manifests to the DB (better-sqlite3 in dev, Postgres in prod) and
+return content-addressed `scheduleHash` values without ever consulting an
+on-chain contract. There is no `viem` `readContract` call in the gateway
+that consumes the deployed `RateScheduleRegistry` or `ContributorNFT`
+addresses today.
 
-```
-RATE_SCHEDULE_REGISTRY_ADDRESS=0x...
-CONTRIBUTOR_NFT_ADDRESS=0x...
-```
+**Future work**: when the on-chain `exists()` cross-check is wired into
+the gateway, env vars like `RATE_SCHEDULE_REGISTRY_ADDRESS` and
+`CONTRIBUTOR_NFT_ADDRESS` will appear on the gateway service (Railway →
+service → Variables, both `staging` and `production` envs). Until that
+work lands, setting those vars is a no-op — see the deferred list in
+`ai/research/contributor-economics/99-resume-here.md` for the broader
+"contracts wired into the gateway / dashboard" thread.
 
-The gateway routes in `packages/gateway/src/routes/contributors.ts` do all of
-their primary work against the off-chain DB (better-sqlite3 in dev, Postgres in
-prod). The on-chain registry is consulted only when a caller requests an
-on-chain `exists()` cross-check — so the gateway boots and serves traffic in
-"degraded mode" without these vars, and lights up the on-chain path once they
-are set. No restart drama, just stronger guarantees.
+Today, the on-chain authority is consulted only by the deploy script's
+own verification steps (cast call `scheduleRegistry()`, `exists()`) and
+by ad-hoc operator tooling. The DB-side `scheduleHash` is the
+content-addressed identity that already provides cross-check capability
+without an RPC round-trip.
 
 ## Mainnet deployment
 
@@ -220,8 +236,8 @@ are set. No restart drama, just stronger guarantees.
 The contracts have no admin, no `pause`, and no proxy. "Rollback" means:
 
 1. Deploy a v2 of whichever contract has the bug.
-2. Migrate the gateway env vars to point at v2 (`RATE_SCHEDULE_REGISTRY_ADDRESS`,
-   `CONTRIBUTOR_NFT_ADDRESS`).
+2. Update operator tooling and (when the gateway gains an on-chain
+   path — see "Wiring into the gateway") any env vars that point at v1.
 3. Existing tokens / schedules referencing v1 continue to function — they're
    just snapshotted against the older registry. The off-chain DB rows are
    forward-compatible because they store `scheduleHash` (a content address),
@@ -240,7 +256,7 @@ schedule under its new hash and route new mints to it.
 | `Already published` on `publish()` | The same hash was already stored — registry is sealed | Read with `get(scheduleHash)`; if you wanted a different schedule, change the bytes (which changes the hash) |
 | `Zero registry` on `ContributorNFT` constructor | Deployer passed `address(0)` | Pass the deployed `RateScheduleRegistry` address. The script does this automatically — only fails if you re-ran the NFT deploy in isolation |
 | `Zero scheduleHash` on `mint()` | Caller passed `bytes32(0)` as `scheduleHash` | Hash a real schedule first; `bytes32(0)` is a sentinel for "uninitialized" and is forbidden |
-| Gas runs out on `MilestoneEscrow.splitPayout` | More than ~16 recipients in one milestone | Split the milestone into multiple sub-milestones, each ≤16 recipients |
+| `setPayoutMap` reverts with `"Too many payouts"` | More than `MAX_PAYOUTS = 16` recipients passed to `setPayoutMap()` (see `MilestoneEscrow.sol:104` for the constant and line 316 for the require). Note: `MilestoneEscrow` itself is **not** deployed by this script — that contract is shared with the parent PCC stack and ships via its own deploy script; the row appears here because the splitPayout extension lives inside the same contract and the test glob covers it for hygiene. | Split the milestone into multiple sub-milestones, each ≤16 recipients |
 | Forge `Stack too deep` | Compiler optimizer disabled or hitting limits | Build with `forge build --via-ir` (uses Yul IR pipeline; slower but handles deeper stacks) |
 | Verification fails on BaseScan | Wrong `--etherscan-api-key` or BaseScan rate-limited | Verify the key at https://basescan.org/myapikey; retry with `forge verify-contract` after the deploy if `--verify` failed mid-broadcast |
 | Deploy reverts with no message | Insufficient ETH on deployer for gas | Top up the testnet wallet from https://www.alchemy.com/faucets/base-sepolia |
