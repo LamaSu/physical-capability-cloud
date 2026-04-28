@@ -20,18 +20,20 @@ OEM royalty class** — by design. OEMs participate as Operators,
 Integrators, Protocol Authors, or Model Authors on equal terms with
 everyone else.
 
-53 commits, 32 new Forge tests, 700+ TS tests passing, 7 new MCP tools,
-8 new REST endpoints under `/api/contributors/*`, agent-package v2.8.0
-(218 tools).
+40 new Forge tests across 3 contributor-economics test files (11
+RateScheduleRegistry + 15 ContributorNFT + 14 splitPayout; 58 total
+when the broader MilestoneEscrow base suite is included), 700+ TS
+tests passing, 7 new MCP tools, 8 new REST endpoints under
+`/api/contributors/*`, agent-package v2.8.0 (218 tools).
 
 - **Quickstart**: [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md) — 5-minute "I am a contributor and I want to earn from my work" path
-- **API reference**: [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) §14
+- **API reference**: [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) §12
 - **Deploy**: [`docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`](docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md)
 - **No-OEM thesis**: [`docs/claros-layer4-amendment.md`](docs/claros-layer4-amendment.md)
 
 ### What's new
 
-- **2026-04**: Contributor economics layer (53 commits, 700+ tests). See [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md).
+- **2026-04**: Contributor economics layer (40 new Forge tests + 7 MCP tools + 8 REST endpoints, 700+ TS tests passing). See [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md).
 
 ---
 
@@ -55,7 +57,7 @@ Your AI agent can now control real physical hardware — anywhere, on demand.
 **Connect your AI agent:**
 ```bash
 curl https://capability.network/agent-package.json | pbcopy
-# Paste into Claude, GPT-4, or any agent. 219 tools. Done.
+# Paste into Claude, GPT-4, or any agent. 218 tools. Done.
 ```
 
 **Connect your hardware:**
@@ -120,7 +122,7 @@ Every job that settles pays a protocol fee. More operators, more volume, more fe
 
 ## The numbers
 
-25 packages. 3,300+ tests. 219 agent tools. 497+ gateway tests. 66 Forge tests. 38 A2A intents. 6 real-time SSE streams. Live at [capability.network](https://capability.network) with real hardware running right now.
+25 packages. 3,300+ tests. 218 agent tools. 497+ gateway tests. 66 Forge tests. 38 A2A intents. 6 real-time SSE streams. Live at [capability.network](https://capability.network) with real hardware running right now.
 
 ---
 
@@ -178,7 +180,7 @@ packages/
   pcc-node/          # Python CLI — hardware discovery, daemon, operator onboarding
   dht/               # WebSocket gossip DHT for decentralized capability discovery
   db/                # SQLite shared database layer
-  mcp-server/        # 49 MCP tools over stdio
+  mcp-server/        # 56 MCP tools over stdio
   contract-builder/  # Interactive capability contract builder
   identity-8004/     # ERC-8004 identity + reputation registries
   ui/                # Shared React components
