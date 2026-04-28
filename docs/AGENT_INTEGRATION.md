@@ -954,12 +954,10 @@ forge script script/MintContributor.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RP
 #    Payout[] passed to MilestoneEscrow.setPayoutMap().
 #    On release(), splitPayout sends your share directly to your wallet.
 #
-#    HEADS-UP: `packages/contracts/ts/payouts.ts:buildPayoutMap()` is
-#    currently a stub that throws "not implemented — Wave 3c
-#    (LicensingEngine extension)". Until LicensingEngine ships, payers must
-#    hand-build the Payout[] passed to setPayoutMap(). The on-chain
-#    setPayoutMap + splitPayout + release path is fully shipped — only the
-#    off-chain helper that constructs the array is gated.
+#    `packages/contracts/ts/payouts.ts:buildPayoutMap()` consumes the
+#    capability's CompositionManifest + each contributor's RateSchedule and
+#    produces a Payout[] ready to feed setPayoutMap(). The full on-chain
+#    setPayoutMap + splitPayout + release path is shipped.
 ```
 
 > **Note**: `BASE_SEPOLIA_RPC` referenced in Steps 2 and 4 above defaults to

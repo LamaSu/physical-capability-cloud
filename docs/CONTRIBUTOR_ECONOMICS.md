@@ -155,13 +155,12 @@ curl -s -X POST "https://capability.network/api/contributors/schedules/$SCHEDULE
 # → {"bps":40,"segmentIndex":0,"kind":"constant"}
 
 # 4. (Payer, off-chain → on-chain) Compose the payout map and call setPayoutMap()
-#    on the milestone escrow before fund().
-#    HEADS-UP: `packages/contracts/ts/payouts.ts:buildPayoutMap()` is currently
-#    a stub that throws "not implemented — Wave 3c (LicensingEngine extension)".
-#    Until the LicensingEngine extension lands, the payer must hand-build the
-#    `Payout[]` array — see ADR-11 for the on-chain Payout struct shape and
-#    the `MilestoneEscrow.setPayoutMap` signature. The dashboard "Composition
-#    Builder" / "SplitEditor" surfaces are still post-MVP for this flow.
+#    on the milestone escrow before fund(). Use
+#    `packages/contracts/ts/payouts.ts:buildPayoutMap()` to compose the on-chain
+#    `Payout[]` array from a `CompositionManifest` + RateSchedule lookup. See
+#    ADR-11 for the Payout struct shape and the `MilestoneEscrow.setPayoutMap`
+#    signature. The dashboard "Composition Builder" / "SplitEditor" surfaces
+#    are still post-MVP for this flow — script-driven composition works today.
 
 # 5. (Operator) Run the job; settlement automatically calls splitPayout via release().
 #    Every recipient gets paid in one tx; you (the integrator) receive
