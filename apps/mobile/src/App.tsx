@@ -7,6 +7,11 @@ import {
   type Role,
 } from "./storage/secure-api-key.js";
 import { registerServiceWorker } from "./sw/service-worker.js";
+import {
+  ApprovalSheet,
+  type ApprovalSession,
+  type SignedReceipt,
+} from "./components/ApprovalSheet.js";
 
 /**
  * App-shell entry point for the Capacitor wrap.
@@ -28,6 +33,12 @@ import { registerServiceWorker } from "./sw/service-worker.js";
  */
 export function App(): ReactElement {
   const [role, setRole] = useState<Role | null>(null);
+  // Week 3: holds the session proposed for the user's approval, or null
+  // when there is nothing to approve. In production this is driven by an
+  // SSE/push channel from the server; in dev mode we stub one in via a
+  // setTimeout below so the UI is exercisable without a backend.
+  const [pendingApproval, setPendingApproval] =
+    useState<ApprovalSession | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +64,43 @@ export function App(): ReactElement {
       cancelled = true;
     };
   }, []);
+
+  // Week 3 dev-mode fake-approval trigger. Fires once after 3s in
+  // user-mode under DEV builds OR when the magic query string is set, so
+  // the ApprovalSheet is testable without a server. In production this
+  // hook is replaced by an SSE/push handler that calls
+  // setPendingApproval with the real server-issued session.
+  useEffect(() => {
+    if (role !== "user") return;
+    if (!isDevModeFakeApprovalEnabled()) return;
+    const t = setTimeout(() => {
+      setPendingApproval({
+        id: "dev-session-001",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre's Hair Salon",
+        evidenceHash:
+          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        captureClass: "tier-1-photo",
+      });
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [role]);
+
+  const handleApprove = async (signed: SignedReceipt): Promise<void> => {
+    // In Week 4 this POSTs to /api/sessions/:id/approve with the
+    // assertion. For Week 3 we just log and dismiss.
+    console.info("[pcc-mobile] session approved", {
+      sessionId: signed.sessionId,
+      signedAt: signed.signedAt,
+    });
+    setPendingApproval(null);
+  };
+
+  const handleDecline = (): void => {
+    console.info("[pcc-mobile] session declined");
+    setPendingApproval(null);
+  };
 
   if (role === null) {
     return (
@@ -84,10 +132,53 @@ export function App(): ReactElement {
   }
 
   return (
-    <UserMobilePage
-      onSwitchToOperator={() => setRole("operator")}
-    />
+    <>
+      <UserMobilePage
+        onSwitchToOperator={() => setRole("operator")}
+      />
+      {pendingApproval && (
+        <ApprovalSheet
+          session={pendingApproval}
+          onApprove={handleApprove}
+          onDecline={handleDecline}
+          enrollOptions={{
+            userId: "pcc-user",
+            displayName: "PCC User",
+          }}
+        />
+      )}
+    </>
   );
+}
+
+/**
+ * Detect whether the dev-mode fake-approval trigger should fire. Enabled
+ * when:
+ *   - import.meta.env.DEV is true (vite dev mode), OR
+ *   - the URL has ?devApproval=1 (allows ad-hoc demos in production
+ *     builds for QA), OR
+ *   - localStorage["pcc-mobile-dev-approval"] === "1"
+ */
+function isDevModeFakeApprovalEnabled(): boolean {
+  // import.meta.env is replaced at build time by Vite. In jsdom unit
+  // tests it's undefined; we treat undefined as "not dev" so tests don't
+  // accidentally trigger.
+  let isViteDev = false;
+  try {
+    const meta = (import.meta as { env?: { DEV?: boolean } }).env;
+    isViteDev = !!meta?.DEV;
+  } catch {
+    // import.meta is missing in CommonJS-style runners — ignore.
+  }
+  if (isViteDev) return true;
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location?.search ?? "");
+    if (params.get("devApproval") === "1") return true;
+  }
+  if (typeof localStorage !== "undefined") {
+    if (localStorage.getItem("pcc-mobile-dev-approval") === "1") return true;
+  }
+  return false;
 }
 
 /**
