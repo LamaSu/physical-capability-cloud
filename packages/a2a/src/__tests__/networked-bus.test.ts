@@ -44,10 +44,18 @@ function makeMessage(overrides: Partial<A2AMessage> = {}): A2AMessage {
   };
 }
 
-/** Wait for a condition to become true, polling every 20ms */
+/**
+ * Wait for a condition to become true, polling every 20ms.
+ *
+ * Default timeout bumped from 3000ms to 15000ms (2026-04-29) — the original
+ * 3s was timing out 8 tests reliably under parallel CI/Spark load. Real
+ * websocket roundtrips (Fastify boot + ws upgrade + first message) can take
+ * 1-3s on a busy box; we want headroom to the slowest realistic case
+ * without giving up on genuine deadlocks.
+ */
 async function waitFor(
   fn: () => boolean | Promise<boolean>,
-  timeoutMs = 3000,
+  timeoutMs = 15000,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
