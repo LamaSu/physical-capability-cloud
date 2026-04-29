@@ -24,6 +24,11 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // @pcc/spec is Node-first (uses node:crypto.createHash for sha256).
+      // Map node:crypto -> a tiny browser-compatible shim so vite/rollup
+      // can bundle the runtime helpers (computeScheduleHash,
+      // evaluateRateSchedule) used by RateSchedule pages.
+      "node:crypto": path.resolve(__dirname, "./src/lib/node-crypto-shim.ts"),
     },
   },
   build: {
