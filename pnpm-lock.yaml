@@ -557,6 +557,9 @@ importers:
       '@pcc/dht':
         specifier: workspace:*
         version: link:../dht
+      '@pcc/escrow-ledger':
+        specifier: workspace:*
+        version: link:../escrow-ledger
       '@pcc/evidence-embeddings':
         specifier: workspace:*
         version: link:../evidence-embeddings
@@ -581,6 +584,9 @@ importers:
       '@pcc/touchstone':
         specifier: workspace:*
         version: link:../touchstone
+      '@pcc/transparency-log':
+        specifier: workspace:*
+        version: link:../transparency-log
       '@pcc/verifier':
         specifier: workspace:*
         version: link:../verifier
@@ -707,9 +713,15 @@ importers:
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
+      '@pcc/transparency-log':
+        specifier: workspace:*
+        version: link:../transparency-log
       tweetnacl:
         specifier: ^1.0.3
         version: 1.0.3
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.4.0
