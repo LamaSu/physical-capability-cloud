@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# Virtualenv
+.venv/
+venv/
+env/
+ENV/
+
+# Test artifacts
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env files (NEVER commit secrets)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Pipecat/Twilio runtime artifacts
+recordings/
+*.wav
+*.mp3
+audio-cache/
+
+# OS
+.DS_Store
+Thumbs.db
