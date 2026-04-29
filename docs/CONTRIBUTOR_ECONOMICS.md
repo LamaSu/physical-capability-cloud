@@ -416,6 +416,18 @@ Until that work lands, treat `ContributorNFT` and `StoryIPRegistration` as
 **two coordinated registries that point to the same logical IP** rather
 than as a unified graph.
 
+**Audit + migration plan**: a row-by-row audit of all 8
+`/api/contributors/*` routes and all 7 contributor MCP tools (50-56)
+against `/api/ip/*` and `pcc_ip_*` is in
+[`ai/research/contributor-economics/20-api-unification-audit.md`](../ai/research/contributor-economics/20-api-unification-audit.md).
+The migration plan, the per-surface pay-model split, and the deprecation
+schedule for the v2 cutover are documented in `docs/AGENT_INTEGRATION.md`
+§12.7 ("Contributor Economics ↔ Story Protocol IP routes — relationship +
+migration path"). Headline result: zero v1 deprecations because there are
+zero v1 operation-level duplicates; every contributor route targets a
+distinct on-chain pay rail (`MilestoneEscrow.splitPayout`) from the
+Story-Royalty-Vault rail used by `/api/ip/*`.
+
 ---
 
 ## Open scope cuts (deliberate, documented in `99-resume-here.md`)

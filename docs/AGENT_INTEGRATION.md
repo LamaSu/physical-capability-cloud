@@ -966,6 +966,60 @@ forge script script/MintContributor.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RP
 
 For deployment recipes (forge scripts, contract addresses, env vars), see `docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`. For end-user docs (how to register, how splits work, FAQ), see `docs/CONTRIBUTOR_ECONOMICS.md`.
 
+### 12.7 Contributor Economics ↔ Story Protocol IP routes — relationship + migration path
+
+The contributor-economics surface (`/api/contributors/*` + tools 50-56) and
+the Story Protocol surface (`/api/ip/*` + tools 35-39) are **two parallel
+first-class APIs**, not a deprecation chain. Both are stable in v1.
+
+**Why two surfaces exist**:
+
+| Surface | Storage | On-chain rail | Pay model |
+|---------|---------|---------------|-----------|
+| `/api/ip/*` (tools 35-39) | `repos.story.*` (`storyIpRegistrations`, `storyDerivativeLinks`, `storyRoyaltySplits`, `storyRevenueClaims`) | Story Protocol Royalty Vault (`distributeRoyaltyTokens`, `payJobRoyalty`, `claimRevenue`) | **Percentage splits** — `splits[]` summing to 100, written once per IP, claimed lazily from a per-IP vault |
+| `/api/contributors/*` (tools 50-56) | `repos.contributors.*` (`contributorProfiles`, `rateSchedules`, `trainingManifests`, `compositionManifests`) | `MilestoneEscrow.splitPayout` (off-chain `buildPayoutMap` → on-chain `Payout[]` directly to wallets at job-release time) | **Per-contributor curve** — one row per `(address, role, scheduleHash)`, payout amount computed by `RateSchedule.evaluateAt(now, jobValueCents, jobsPerDay)` at settlement |
+
+The two registries can co-exist on the same IP — a single capability can
+have BOTH a Story Royalty Vault `splits` map AND attached
+`contributorProfile` rows with rate schedules. They target different on-chain
+mechanisms and different on-chain treasuries.
+
+**Audit verdict (`ai/research/contributor-economics/20-api-unification-audit.md`)**:
+zero operational duplicates between the two surfaces. Each `/api/contributors/*`
+endpoint and each `pcc_contributor_*` / `pcc_schedule_*` /
+`pcc_training_manifest_*` MCP tool was checked against every `/api/ip/*` route
+and `pcc_ip_*` tool. None map to the same operation, and none write to the
+same repository methods. No deprecation headers were added in v1 because there
+are no duplicates to deprecate.
+
+**For new client integrators**: pick the surface that matches your pay
+model, not the route prefix.
+
+- Building a one-time percentage split that pays out from an
+  IP-Asset-anchored vault? → `/api/ip/distribute-royalties` +
+  `/api/ip/:ipId/claim`.
+- Granting a contributor a time/value/adoption-conditioned curve that
+  pays directly to their wallet at job-release? →
+  `POST /api/contributors/schedules` + `POST /api/contributors` (profile).
+
+**v2 unification path**: a future branch will collapse the two surfaces
+by minting each `ContributorNFT` as a Story Protocol `IPAsset` at registration
+time and folding `CompositionManifest` entries into the Story derivative
+graph. At that point — and only at that point — the
+`/api/contributors/*` routes that have a v2 `/api/ip/*` replacement WILL
+get `Deprecation: true` + `Sunset: <date>` headers pointing at the
+unified surface. The full migration map is documented in
+`docs/CONTRIBUTOR_ECONOMICS.md` "Relationship to Story Protocol — honest
+scoping". Until v2 lands, do not assume any contributor route has an
+`/api/ip/*` replacement.
+
+**Hard rule for future contributors** (read this before adding a route to
+either surface): if you find yourself adding a `/api/contributors/*` route
+that does the same work as an existing `/api/ip/*` route, **stop and unify
+the backend instead** — extend the existing repository method or the
+existing route, do not introduce a third parallel path. The audit doc
+linked above is the canonical place to record any new mapping decision.
+
 ---
 
 ## 13. Agent Workflows (Quick Reference)
