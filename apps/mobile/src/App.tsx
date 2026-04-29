@@ -3,6 +3,7 @@ import { RoleSwitch } from "./RoleSwitch.js";
 import { UserMobilePage } from "./UserMobilePage.js";
 import {
   getRole,
+  getSessionToken,
   migrateLegacyApiKey,
   type Role,
 } from "./storage/secure-api-key.js";
@@ -12,6 +13,10 @@ import {
   type ApprovalSession,
   type SignedReceipt,
 } from "./components/ApprovalSheet.js";
+import {
+  startApprovalListener,
+  type ApprovalListenerHandle,
+} from "./sse/approval-listener.js";
 
 /**
  * App-shell entry point for the Capacitor wrap.
@@ -31,14 +36,56 @@ import {
  * either move them into the dashboard at /user/mobile (and just navigate
  * there) or keep them React-shell-resident. See ARCHITECTURE.md § 2.
  */
+/**
+ * Week 5: how the listener knows which channel to subscribe to.
+ *
+ * The gateway publishes approval requests to topic `approval:<sessionId>`.
+ * For v1 the mobile uses its persisted Week-4 passkey session token AS
+ * the channel id — i.e. the agent issuing a request on the user's behalf
+ * POSTs to `/api/sessions/<that-token>/request-approval`. This works
+ * because:
+ *   - The token is already opaque, unguessable, and per-device.
+ *   - The user shares the token with their agent at the same moment they
+ *     authorize that agent to act for them.
+ *   - The gateway's per-topic SSE isolation means no other subscriber
+ *     can fish for the user's events.
+ *
+ * Decoupling channel-id from session-token is a Week 6+ refinement
+ * (likely tying it to a "subscription" record minted at agent-onboarding
+ * time so a single agent can hand the channel-id to multiple sessions).
+ */
+function getChannelIdFromToken(token: string | null): string | null {
+  return token;
+}
+
+/** Resolve the gateway base URL for SSE. Falls back to capability.network. */
+function getGatewayBaseUrl(): string {
+  // Build-time env injected by Vite, e.g. VITE_PCC_GATEWAY_URL.
+  // In jsdom unit tests `import.meta.env` is undefined; we treat that as
+  // production gateway since the unit tests mock EventSource anyway.
+  try {
+    const meta = (import.meta as { env?: { VITE_PCC_GATEWAY_URL?: string } })
+      .env;
+    if (meta?.VITE_PCC_GATEWAY_URL) return meta.VITE_PCC_GATEWAY_URL;
+  } catch {
+    /* ignore */
+  }
+  return "https://capability.network";
+}
+
 export function App(): ReactElement {
   const [role, setRole] = useState<Role | null>(null);
   // Week 3: holds the session proposed for the user's approval, or null
-  // when there is nothing to approve. In production this is driven by an
-  // SSE/push channel from the server; in dev mode we stub one in via a
-  // setTimeout below so the UI is exercisable without a backend.
+  // when there is nothing to approve. Week 5 wires this to a real SSE
+  // listener that subscribes to the gateway's approval-request topic.
+  // The dev-mode fake trigger is preserved as a fallback for test/dev
+  // when no token is configured.
   const [pendingApproval, setPendingApproval] =
     useState<ApprovalSession | null>(null);
+  // The persisted Week-4 passkey session token. Loaded asynchronously
+  // alongside role; used as both the SSE channel id and the ?token= auth
+  // param.
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,33 +103,94 @@ export function App(): ReactElement {
       } catch (err) {
         console.warn("[pcc-mobile] service worker registration failed:", err);
       }
-      // 3. Resolve role
-      const r = await getRole();
-      if (!cancelled) setRole(r);
+      // 3. Resolve role + session token in parallel
+      const [r, t] = await Promise.all([getRole(), getSessionToken()]);
+      if (!cancelled) {
+        setRole(r);
+        setSessionToken(t);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Week 3 dev-mode fake-approval trigger. Fires once after 3s in
-  // user-mode under DEV builds OR when the magic query string is set, so
-  // the ApprovalSheet is testable without a server. In production this
-  // hook is replaced by an SSE/push handler that calls
-  // setPendingApproval with the real server-issued session.
+  /**
+   * Real SSE approval listener — Week 5.
+   *
+   * Active when role === "user" AND a session token exists in secure
+   * storage. On approval-request events the payload is mapped onto
+   * ApprovalSession (which is a structural superset of the wire shape)
+   * and surfaced via setPendingApproval — same UI path the dev-mode
+   * fake trigger uses.
+   *
+   * Cleanup: the returned handle's `stop()` is invoked on unmount or
+   * when role/sessionToken change.
+   */
+  useEffect(() => {
+    if (role !== "user") return;
+    const channelId = getChannelIdFromToken(sessionToken);
+    if (!channelId) return;
+    let handle: ApprovalListenerHandle | null = null;
+    try {
+      handle = startApprovalListener({
+        sessionId: channelId,
+        sessionToken,
+        baseUrl: getGatewayBaseUrl(),
+        onApproval: (payload) => {
+          // The wire shape from POST /api/sessions/:id/request-approval
+          // is structurally compatible with ApprovalSession (id,
+          // capability, amountUsd, operatorName, evidenceHash, optional
+          // captureClass). Extra fields (kernelId, params, requestedAt)
+          // pass through harmlessly.
+          if (
+            payload &&
+            typeof payload === "object" &&
+            !Array.isArray(payload)
+          ) {
+            setPendingApproval(payload as ApprovalSession);
+          }
+        },
+        onError: (err) => {
+          // Logged but not surfaced — the listener auto-reconnects.
+          console.warn("[pcc-mobile] approval listener error:", err.message);
+        },
+      });
+    } catch (err) {
+      console.warn(
+        "[pcc-mobile] approval listener could not be started:",
+        (err as Error).message,
+      );
+    }
+    return () => {
+      handle?.stop();
+    };
+  }, [role, sessionToken]);
+
+  // Week 3 dev-mode fallback: when the dev-mode flag is on AND we have
+  // not yet received a real approval-request event, stub one in after
+  // 3s so the UI is exercisable without a backend. Preserved on purpose
+  // — useful for storybook/dev work and CI smoke screenshots. In
+  // production builds with a configured session token, the real
+  // listener will fire long before the 3s timer.
   useEffect(() => {
     if (role !== "user") return;
     if (!isDevModeFakeApprovalEnabled()) return;
     const t = setTimeout(() => {
-      setPendingApproval({
-        id: "dev-session-001",
-        capability: "haircut",
-        amountUsd: 32,
-        operatorName: "Andre's Hair Salon",
-        evidenceHash:
-          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-        captureClass: "tier-1-photo",
-      });
+      // Only stub if the real listener hasn't already populated one.
+      setPendingApproval((prev) =>
+        prev !== null
+          ? prev
+          : {
+              id: "dev-session-001",
+              capability: "haircut",
+              amountUsd: 32,
+              operatorName: "Andre's Hair Salon",
+              evidenceHash:
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+              captureClass: "tier-1-photo",
+            },
+      );
     }, 3000);
     return () => clearTimeout(t);
   }, [role]);
