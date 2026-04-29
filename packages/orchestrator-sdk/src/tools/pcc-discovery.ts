@@ -20,7 +20,7 @@
 // Ported from `LamaSu/navi` packages/backend/src/tools/pcc-discovery.ts. Wave 2
 // adapts the base URL to live in PCC's ENV name space.
 
-import { emit } from "../lib/event-bus.js";
+import { emit } from "../core/event-bus.js";
 
 const MOCK = process.env.MOCK_PCC_DISCOVERY !== "false";
 const PCC_BASE = process.env.PCC_BASE_URL ?? "https://capability.network";

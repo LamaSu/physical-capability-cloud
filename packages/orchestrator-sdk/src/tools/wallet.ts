@@ -12,7 +12,7 @@
 // gone. Ported from `LamaSu/navi` packages/backend/src/tools/cdp-x402.ts.
 
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { emit } from "../lib/event-bus.js";
+import { emit } from "../core/event-bus.js";
 
 const MOCK = process.env.MOCK_CDP !== "false";
 

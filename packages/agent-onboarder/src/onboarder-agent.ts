@@ -21,10 +21,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { LLMAgent, type ChatOptions, type ChatResult, type ToolCaller, type ToolDef } from "@pcc/agent-runtime";
 import { z } from "zod";
 
-import { extractStructured } from "./tools/web-extract.js";
-import { publishOperator, searchCapabilities, type DiscoveryProfile } from "./tools/pcc-discovery.js";
-import { writeOperatorMirror } from "./tools/static-mirror.js";
-import { createAgentWallet } from "./tools/wallet.js";
+import {
+  extractStructured,
+  publishOperator,
+  searchCapabilities,
+  writeOperatorMirror,
+  createAgentWallet,
+  type DiscoveryProfile,
+} from "@pcc/orchestrator-sdk";
 import { ONBOARDER_SYSTEM_PROMPT } from "./system-prompt.js";
 
 /** Default schema used by extract_url when the model doesn't supply its own.

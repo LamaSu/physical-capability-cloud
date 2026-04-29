@@ -1,8 +1,8 @@
 {
-  "name": "@pcc/template-physical-operator",
+  "name": "@pcc/orchestrator-sdk",
   "version": "0.1.0",
   "private": true,
-  "description": "Physical-operator onboarding template for @pcc/orchestrator-sdk. Onboards machine shops, fleets, labs, and warehouses to PCC. (Package directory is still named agent-onboarder; npm name is canonical.)",
+  "description": "Horizontal SDK for building business-process orchestrators on PCC. Provides core (state-machine, event-bus, snapshot), tools (web-extract, pcc-discovery, static-mirror, wallet, zod-json-schema), and a template registry. Templates ship as separate packages (@pcc/template-*) and register here.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,8 +23,6 @@
     "@anthropic-ai/sdk": "^0.40.0",
     "@pcc/a2a": "workspace:*",
     "@pcc/agent-runtime": "workspace:*",
-    "@pcc/onboard-kit": "workspace:*",
-    "@pcc/orchestrator-sdk": "workspace:*",
     "@pcc/spec": "workspace:*",
     "viem": "^2.21.0",
     "zod": "^3.23.0"

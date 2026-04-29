@@ -10,46 +10,43 @@ import { LLMAgent, type ToolDef } from "@pcc/agent-runtime";
 import { OnboarderAgent } from "./onboarder-agent.js";
 import { ONBOARDER_SYSTEM_PROMPT } from "./system-prompt.js";
 
-// Mock all sub-tools at the module boundary so the agent's tool callers run
-// against fakes. Keeps the test fast + deterministic.
-vi.mock("./tools/web-extract.js", () => ({
-  extractStructured: vi.fn(async () => ({
-    name: "Oakland Titanium Mills",
-    machines: [{ name: "Mazak Integrex i-400", kind: "5-axis mill-turn" }],
-    services: ["titanium machining", "inconel turning"],
-    contact: "ops@example.com",
-    certifications: ["AS9100 Rev D"],
-  })),
-}));
-
-vi.mock("./tools/pcc-discovery.js", () => ({
-  publishOperator: vi.fn(async (p: { enterprise_id: string; name: string }) => ({
-    registration_id: `reg-${p.enterprise_id.slice(0, 6)}`,
-    discovery_url: `https://capability.network/operators/${p.enterprise_id.slice(0, 6)}`,
-    dht_announced: true,
-  })),
-  searchCapabilities: vi.fn(async () => ({
-    templates: [{ capabilityType: "fdm" }],
-    items: [],
-  })),
-}));
-
-vi.mock("./tools/static-mirror.js", () => ({
-  writeOperatorMirror: vi.fn(async (p: { name: string }) => ({
-    path: `/tmp/operators/${p.name.replace(/\s+/g, "-").toLowerCase()}.html`,
-    slug: p.name.replace(/\s+/g, "-").toLowerCase(),
-    url_path: `/operators/${p.name.replace(/\s+/g, "-").toLowerCase()}.html`,
-  })),
-}));
-
-vi.mock("./tools/wallet.js", () => ({
-  createAgentWallet: vi.fn(async (input: { enterprise_id: string }) => ({
-    address: `0xabc${input.enterprise_id.slice(0, 6)}`,
-    chain: "base-sepolia",
-    funded: false,
-    private_key_redacted: "0xabcd***1234",
-  })),
-}));
+// Mock the SDK exports at the module boundary so the agent's tool callers
+// run against fakes. Keeps the test fast + deterministic.
+vi.mock("@pcc/orchestrator-sdk", async () => {
+  const actual = await vi.importActual<typeof import("@pcc/orchestrator-sdk")>(
+    "@pcc/orchestrator-sdk"
+  );
+  return {
+    ...actual,
+    extractStructured: vi.fn(async () => ({
+      name: "Oakland Titanium Mills",
+      machines: [{ name: "Mazak Integrex i-400", kind: "5-axis mill-turn" }],
+      services: ["titanium machining", "inconel turning"],
+      contact: "ops@example.com",
+      certifications: ["AS9100 Rev D"],
+    })),
+    publishOperator: vi.fn(async (p: { enterprise_id: string; name: string }) => ({
+      registration_id: `reg-${p.enterprise_id.slice(0, 6)}`,
+      discovery_url: `https://capability.network/operators/${p.enterprise_id.slice(0, 6)}`,
+      dht_announced: true,
+    })),
+    searchCapabilities: vi.fn(async () => ({
+      templates: [{ capabilityType: "fdm" }],
+      items: [],
+    })),
+    writeOperatorMirror: vi.fn(async (p: { name: string }) => ({
+      path: `/tmp/operators/${p.name.replace(/\s+/g, "-").toLowerCase()}.html`,
+      slug: p.name.replace(/\s+/g, "-").toLowerCase(),
+      url_path: `/operators/${p.name.replace(/\s+/g, "-").toLowerCase()}.html`,
+    })),
+    createAgentWallet: vi.fn(async (input: { enterprise_id: string }) => ({
+      address: `0xabc${input.enterprise_id.slice(0, 6)}`,
+      chain: "base-sepolia",
+      funded: false,
+      private_key_redacted: "0xabcd***1234",
+    })),
+  };
+});
 
 // Helper to build a fake Anthropic client that returns scripted responses.
 function makeFakeClient(responses: Anthropic.Message[]): {
