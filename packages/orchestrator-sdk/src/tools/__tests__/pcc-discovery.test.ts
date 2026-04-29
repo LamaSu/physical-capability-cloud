@@ -30,14 +30,33 @@ const sampleProfile = {
 };
 
 describe("publishOperator", () => {
-  it("returns a deterministic mock when MOCK_PCC_DISCOVERY is unset", async () => {
-    setEnv({ MOCK_PCC_DISCOVERY: undefined, PCC_BASE_URL: "https://capability.network" });
+  it("T1.8 — returns a deterministic mock ONLY when MOCK_PCC_DISCOVERY=true (explicit opt-in)", async () => {
+    setEnv({ MOCK_PCC_DISCOVERY: "true", PCC_BASE_URL: "https://capability.network" });
     const { publishOperator } = await import("../pcc-discovery.js");
     const out = await publishOperator(sampleProfile);
     expect(out.registration_id).toContain("pcc-mock-reg-");
     expect(out.registration_id).toContain("ent-abc1");
     expect(out.discovery_url).toContain("/operators/");
     expect(out.dht_announced).toBe(true);
+  });
+
+  it("T1.8 — does NOT mock when MOCK_PCC_DISCOVERY is unset (default to real path)", async () => {
+    setEnv({ MOCK_PCC_DISCOVERY: undefined, PCC_BASE_URL: "https://capability.network" });
+    // Stub fetch so we can prove the real path was taken without hitting the
+    // live network. If MOCK was still on by default, fetch would not be
+    // reached.
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "ok", registration: { id: "real-path-reg" } }),
+      text: async () => "",
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const { publishOperator } = await import("../pcc-discovery.js");
+    const out = await publishOperator(sampleProfile);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(out.registration_id).toBe("real-path-reg");
+    expect(out.registration_id).not.toContain("pcc-mock-reg-");
   });
 
   it("registers via /api/onboard/register when MOCK_PCC_DISCOVERY=false", async () => {
@@ -168,8 +187,8 @@ describe("publishOperator", () => {
 });
 
 describe("searchCapabilities", () => {
-  it("returns mock data when MOCK_PCC_DISCOVERY is unset", async () => {
-    setEnv({ MOCK_PCC_DISCOVERY: undefined });
+  it("T1.8 — returns mock data ONLY when MOCK_PCC_DISCOVERY=true (explicit opt-in)", async () => {
+    setEnv({ MOCK_PCC_DISCOVERY: "true" });
     const { searchCapabilities } = await import("../pcc-discovery.js");
     const out = await searchCapabilities("3d printing");
     expect(out.templates).toHaveLength(1);

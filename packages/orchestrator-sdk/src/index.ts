@@ -31,6 +31,12 @@ export {
   type TakeSnapshotOptions,
 } from "./core/snapshot.js";
 
+export {
+  assertProductionReady,
+  findEnabledMocks,
+  type BootCheckResult,
+} from "./core/boot-check.js";
+
 // --- Tools ---
 export {
   extractStructured,

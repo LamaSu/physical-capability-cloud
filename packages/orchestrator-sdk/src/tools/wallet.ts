@@ -10,11 +10,15 @@
 //
 // Renamed from `cdp-x402.ts` to `wallet.ts` in Wave 2.1 since CDP gating is
 // gone. Ported from `LamaSu/navi` packages/backend/src/tools/cdp-x402.ts.
+//
+// T1.8 (2026-04-29): default flipped from `!== "false"` to `=== "true"`.
+// Production deploys must never silently mint a fake `0xmock…` wallet — set
+// MOCK_CDP=true explicitly when running offline tests / fixture flows.
 
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { emit } from "../core/event-bus.js";
 
-const MOCK = process.env.MOCK_CDP !== "false";
+const MOCK = process.env.MOCK_CDP === "true";
 
 /**
  * Mint a fresh Ethereum wallet on Base Sepolia for an operator.

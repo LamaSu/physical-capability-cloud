@@ -14,15 +14,19 @@
 // (wave 1.3 Navi v2 migration). Source of truth for the tool list:
 // https://capability.network/agent-package.json (schema pcc-agent-package/2.0).
 //
-// Mode: when MOCK_PCC_DISCOVERY=true (default in dev), returns deterministic
-// fakes so the wider build flow continues to work without a live network.
+// Mode: when MOCK_PCC_DISCOVERY=true returns deterministic fakes so the
+// wider build flow can run without a live network. Defaults to FALSE so
+// production deploys never silently mint fake registration IDs — set the
+// env var explicitly when running fixture-driven tests / dev runs.
 //
 // Ported from `LamaSu/navi` packages/backend/src/tools/pcc-discovery.ts. Wave 2
 // adapts the base URL to live in PCC's ENV name space.
+//
+// T1.8 (2026-04-29): default flipped from `!== "false"` to `=== "true"`.
 
 import { emit } from "../core/event-bus.js";
 
-const MOCK = process.env.MOCK_PCC_DISCOVERY !== "false";
+const MOCK = process.env.MOCK_PCC_DISCOVERY === "true";
 const PCC_BASE = process.env.PCC_BASE_URL ?? "https://capability.network";
 const PCC_API_KEY = process.env.PCC_API_KEY ?? "";
 
