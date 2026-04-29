@@ -805,3 +805,139 @@ describe("GET /api/contributors/training-manifests/:modelIpId", () => {
     expect(body.error).toBe("training_manifest_not_found");
   });
 });
+
+// ---------------------------------------------------------------------------
+// No-deprecation contract — codifies the audit finding
+// ---------------------------------------------------------------------------
+//
+// The 2026-04-27 audit
+// (`ai/research/contributor-economics/20-api-unification-audit.md`) checked
+// every `/api/contributors/*` endpoint against every `/api/ip/*` route and
+// concluded that ZERO operationally duplicate routes exist. Therefore no
+// `Deprecation: true` / `Sunset: <date>` headers should appear on any
+// contributor route in v1.
+//
+// These tests guard that finding. If a future change adds a `Deprecation`
+// header to a contributor route, this block will fail and force the author
+// to (a) update the audit doc with the new mapping, (b) document the
+// canonical `/api/ip/*` replacement in `AGENT_INTEGRATION.md` §12.7, and
+// (c) flip the assertion. That's deliberate friction — the v2 unification
+// path is documented; we just don't want anyone slipping a misleading
+// header in without going through the audit.
+//
+// Cross-reference: `docs/AGENT_INTEGRATION.md` §12.7 (relationship +
+// migration path), `ai/research/contributor-economics/20-api-unification-audit.md`
+// "Why no deprecations were added".
+
+describe("contributor routes — no-deprecation contract (audit 2026-04-27)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  /** Helper: returns lowercased response headers for assertion. */
+  function lowercased(headers: Record<string, string | string[] | undefined>) {
+    const out: Record<string, string | string[] | undefined> = {};
+    for (const [k, v] of Object.entries(headers)) out[k.toLowerCase()] = v;
+    return out;
+  }
+
+  /**
+   * Assertion: no contributor route advertises a Deprecation/Sunset/Link
+   * (rel=successor-version) header. The audit conclusion is that none of
+   * these routes have an `/api/ip/*` replacement in v1.
+   */
+  function assertNoDeprecationHeaders(headers: Record<string, string | string[] | undefined>) {
+    const h = lowercased(headers);
+    expect(h["deprecation"]).toBeUndefined();
+    expect(h["sunset"]).toBeUndefined();
+    // We allow Link headers in general (paging, profile, etc.) but specifically
+    // forbid rel="successor-version" — that's the deprecation signal RFC 8594
+    // pairs with Sunset.
+    const link = h["link"];
+    if (link !== undefined) {
+      const linkStr = Array.isArray(link) ? link.join(", ") : link;
+      expect(linkStr.toLowerCase()).not.toContain('rel="successor-version"');
+      expect(linkStr.toLowerCase()).not.toContain("rel=successor-version");
+    }
+  }
+
+  it("POST /api/contributors does not advertise deprecation", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors",
+      payload: {
+        address: ALICE,
+        role: "operator",
+        scheduleHash: FLAT_500_HASH,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    assertNoDeprecationHeaders(res.headers);
+  });
+
+  it("GET /api/contributors/:address does not advertise deprecation", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/contributors/${ALICE}`,
+    });
+    expect(res.statusCode).toBe(200);
+    assertNoDeprecationHeaders(res.headers);
+  });
+
+  it("GET /api/contributors/by-role/:role does not advertise deprecation", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/contributors/by-role/operator",
+    });
+    expect(res.statusCode).toBe(200);
+    assertNoDeprecationHeaders(res.headers);
+  });
+
+  it("POST /api/contributors/schedules does not advertise deprecation", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: BOB,
+        schedule: {
+          version: 1,
+          segments: FLAT_500_SEGMENTS,
+        },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    assertNoDeprecationHeaders(res.headers);
+  });
+
+  it("POST /api/contributors/training-manifests does not advertise deprecation", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/training-manifests",
+      payload: {
+        modelIpId: "0xmodel-no-dep",
+        datasetWeights: [{ datasetIpId: "0xdataset-1", weightBps: 10000 }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    assertNoDeprecationHeaders(res.headers);
+  });
+
+  it("GET /api/contributors/schedules/:hash does not advertise deprecation (404 path)", async () => {
+    // Tests the not-found path — verifies the audit-guard applies to error
+    // responses too, since deprecation headers are typically attached at the
+    // route level, not the handler level.
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/contributors/schedules/${BOUNDED_HASH}`,
+    });
+    expect(res.statusCode).toBe(404);
+    assertNoDeprecationHeaders(res.headers);
+  });
+});
