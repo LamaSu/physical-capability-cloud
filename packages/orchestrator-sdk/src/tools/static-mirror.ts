@@ -40,6 +40,24 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/**
+ * JSON.stringify can produce a string containing `</script>` if the input
+ * contains literal "</script>" — which breaks out of an HTML <script> block.
+ * Escape the leading `<` to its unicode form so the string is still valid
+ * JSON but cannot terminate the surrounding script tag.
+ *
+ * Reference: OWASP "Output Encoding" — when embedding JSON inside HTML, both
+ * the HTML and the JSON contexts must be escaped.
+ */
+function jsonForScriptTag(value: unknown): string {
+  return JSON.stringify(value, null, 2)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 export interface RenderOptions {
   outDir?: string;
   generatedAt?: string;
@@ -80,7 +98,7 @@ export function renderOperatorHtml(profile: DiscoveryProfile, generatedAt = new 
   <meta name="generated-at" content="${escapeHtml(generatedAt)}">
   <link rel="canonical" href="${escapeHtml(profile.url ?? "")}">
   <script type="application/ld+json">
-${JSON.stringify(jsonLd, null, 2)}
+${jsonForScriptTag(jsonLd)}
   </script>
   <style>
     body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #111; }

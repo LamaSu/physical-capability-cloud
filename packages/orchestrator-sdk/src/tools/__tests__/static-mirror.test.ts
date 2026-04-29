@@ -89,6 +89,41 @@ describe("renderOperatorHtml", () => {
     expect(out).toContain("a&amp;b");
   });
 
+  it("T1.3 — escapes </script> breakout sequences inside the JSON-LD block", () => {
+    const malicious: DiscoveryProfile = {
+      enterprise_id: "x",
+      name: "Acme",
+      // Capability label contains a script-tag break-out attempt. If the
+      // JSON-LD writer used naive JSON.stringify, this would close the
+      // <script type="application/ld+json"> tag and execute alert(1).
+      capabilities: ["</script><script>alert(1)</script>"],
+    };
+    const out = renderOperatorHtml(malicious);
+    // Locate just the application/ld+json script body. The xss attempt
+    // must NOT appear literally inside it.
+    const m = out.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    const body = m![1]!;
+    // The literal `</script>` must not appear inside — would have terminated
+    // the application/ld+json block early.
+    expect(body).not.toContain("</script>");
+    expect(body).not.toContain("<script>alert(1)");
+    // It should still parse as JSON (the escapes are valid \uXXXX inside
+    // a JSON string literal).
+    const parsed = JSON.parse(body);
+    expect(parsed.knowsAbout).toEqual(["</script><script>alert(1)</script>"]);
+  });
+
+  it("T1.3 — application/ld+json content survives a round-trip parse", () => {
+    // Belt-and-suspenders: even with the unicode-escape mitigation in place,
+    // the JSON must still be valid.
+    const html = renderOperatorHtml(sampleProfile, "2026-04-24T00:00:00Z");
+    const m = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+    expect(m).not.toBeNull();
+    const parsed = JSON.parse(m![1]!);
+    expect(parsed.name).toBe("Oakland Titanium Mills");
+  });
+
   it("renders capabilities, materials, certifications as list items", () => {
     expect(html).toContain("<li>Ti-6Al-4V machining</li>");
     expect(html).toContain("<li>Inconel 718</li>");
