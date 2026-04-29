@@ -94,6 +94,45 @@ previously rate-limited mid-flight. Both touch only NON-OVERLAPPING paths:
 
 Neither should touch your zone. If they do, that's a bug — please ping me.
 
+#### 3a. Resume-run outcome (post-hoc note from `impl-api-unify-resume`)
+
+**Final scope diverged from #3 above.** The resume agent picked up the
+original mission brief (Deprecation/Sunset headers + MCP markers + repo
+unification), but on reading the audit doc that the original
+`impl-api-unify` had ALREADY committed
+(`ai/research/contributor-economics/20-api-unification-audit.md`,
+commit `4bff44f`), found that the audit conclusion was: zero operational
+duplicates exist between `/api/contributors/*` and `/api/ip/*`. Adding
+deprecation headers to non-duplicates would be misleading,
+self-fulfilling, and honesty-violating (audit doc, "Why no deprecations
+were added").
+
+**What the resume agent actually shipped** (2 commits on
+`feat/contributor-economics`):
+
+1. `f95a338 test(gateway): no-deprecation contract for /api/contributors/*
+   (audit guard)` — 6 new test cases in
+   `packages/gateway/src/__tests__/contributors.test.ts` asserting that
+   none of the 8 contributor routes advertise `Deprecation`/`Sunset`/
+   `Link rel="successor-version"` headers. Defensive — future authors
+   trying to add those headers must first update the audit doc.
+2. `83516ea docs(audit): addendum — impl-api-unify-resume verdict` —
+   appended to the audit doc explaining why the resume run intentionally
+   diverged from the brief. Marks the v2 migration signal: when
+   ContributorNFT-as-IPAsset migration lands, that agent MUST update
+   both files.
+
+**Files NOT touched** (matching the brief's overlap-avoidance rules):
+`apps/dashboard/`, `packages/contracts/`, `packages/spec/`,
+`docs/CONTRIBUTOR_ECONOMICS.md` proper. The audit doc edit is the only
+`ai/research/` write, in line with the brief's exception for this file.
+
+**Test result**: gateway/contributors.test 31 passed (was 25 + 6 new),
+gateway/ip.test 33 passed unchanged, mcp-server 51 passed unchanged.
+
+**No push.** Local-only commits per the brief's "do NOT push to any
+remote" constraint.
+
 ### 4. Cross-chain `ContributorNFT` portability
 
 I'm also writing a separate prompt + context doc for a fresh agent to start
