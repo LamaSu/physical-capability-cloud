@@ -409,7 +409,7 @@ Standard protocols for communicating with physical hardware across manufacturing
 | W3C DIDs v1.1 | IMPLEMENTED | — | L1.1 |
 | W3C VCs 2.0 | IMPLEMENTED | — | L1.1, L1.4 |
 | ERC-8004 | IMPLEMENTED | — | L1.1 |
-| MCP | IMPLEMENTED (49 tools) | — | L1.2 |
+| MCP | IMPLEMENTED (56 tools) | — | L1.2 |
 | IPFS/CID | IMPLEMENTED | — | L1.4 |
 | A2A (PCC custom, 34 intents) | IMPLEMENTED | — | L1.3 |
 | OPC-UA adapter | IMPLEMENTED | — | L1.6 |
