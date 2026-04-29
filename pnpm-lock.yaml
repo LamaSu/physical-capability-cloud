@@ -157,6 +157,9 @@ importers:
       '@capacitor/preferences':
         specifier: 7.0.0
         version: 7.0.0(@capacitor/core@7.6.2)
+      '@pcc/transparency-log':
+        specifier: workspace:*
+        version: link:../../packages/transparency-log
       '@simplewebauthn/browser':
         specifier: 13.3.0
         version: 13.3.0
