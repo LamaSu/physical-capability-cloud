@@ -25,6 +25,7 @@ import type {
   CompositionManifest,
   CompositionEntry,
   CompositionRole,
+  CaptureClass,
 } from "@pcc/spec";
 import {
   evaluateRateSchedule,
@@ -603,6 +604,18 @@ export class LicensingEngine {
    *        further (depth-capped at 5 to prevent runaway loops).
    *   2. If manifest is NOT provided, fall back to the legacy
    *      `getRoyaltyDistribution` (capability ancestor-chain only).
+   *
+   * CVP integration: the supplied `context` may carry a `captureClass`
+   * (CC0..CC5) read off the settled evidence bundle. This flows through
+   * unchanged into every `evaluateRateSchedule` call inside this method
+   * (entry rate schedules, dataset rate schedules, base-model rate
+   * schedules), so any contributor whose schedule includes a
+   * `capture-class-indexed` segment is paid the bps the segment pins for
+   * that class. Legacy / non-CVP jobs simply omit `captureClass`, in which
+   * case capture-indexed segments evaluate to their `default` bps and
+   * non-capture-aware segments are unaffected. Callers may use
+   * `captureClassFromEvidence()` at the top of the file to populate the
+   * context from an evidence bundle.
    */
   getRoyaltyDistributionRich(input: {
     childIpId: string;
@@ -883,4 +896,36 @@ export function getLicensingEngine(): LicensingEngine {
 
 export function resetLicensingEngine(): void {
   _engine = null;
+}
+
+// ── CVP <-> economics bridge ──────────────────────────────────────────
+
+/**
+ * Reads the captureClass from a job's settled evidence bundle.
+ *
+ * Returns `undefined` when no capture verdict is attached — either because
+ * the job predates the Capture Verification Protocol (legacy job), or
+ * because the operator settled with no CVP evidence (non-CVP job). Both
+ * are valid.
+ *
+ * Caller is responsible for passing the result into the
+ * `RateScheduleEvaluationContext` consumed by `getRoyaltyDistributionRich`
+ * (or any downstream `evaluateRateSchedule` call). When the context lacks
+ * a captureClass, `capture-class-indexed` segments fall back to their
+ * `default` bps — so legacy jobs always get a sensible payout even when a
+ * contributor's schedule is class-indexed.
+ *
+ * The argument is shaped permissively (just `{captureClass?: CaptureClass}`)
+ * because real-world callers pull this from heterogeneous sources:
+ *   - On-chain `MilestoneEscrow` evidence pointers
+ *   - `EvidenceBundle` rows in @pcc/db
+ *   - `CaptureManifest` upload payloads (post-detector)
+ *   - In-memory verifier output
+ *
+ * Anchoring on the field name keeps this helper free of import cycles.
+ */
+export function captureClassFromEvidence(evidence?: {
+  captureClass?: CaptureClass;
+}): CaptureClass | undefined {
+  return evidence?.captureClass;
 }

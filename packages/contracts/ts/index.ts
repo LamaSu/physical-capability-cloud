@@ -87,6 +87,7 @@ export {
   LicensingEngine,
   getLicensingEngine,
   resetLicensingEngine,
+  captureClassFromEvidence,
 } from "./licensing-engine.js";
 export type {
   LicenseEvaluation,
