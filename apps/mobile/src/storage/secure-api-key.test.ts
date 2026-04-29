@@ -3,11 +3,14 @@ import {
   _setPluginForTests,
   getApiKey,
   getRole,
+  getSessionToken,
   isNative,
   migrateLegacyApiKey,
   removeApiKey,
+  removeSessionToken,
   setApiKey,
   setRole,
+  setSessionToken,
 } from "./secure-api-key.js";
 
 interface FakeStore {
@@ -205,5 +208,51 @@ describe("migrateLegacyApiKey", () => {
     localStorage.setItem("pcc-api-key", "pcc_live_stale");
     expect(await migrateLegacyApiKey()).toBe("already-native");
     expect(localStorage.getItem("pcc-api-key")).toBeNull();
+  });
+});
+
+// ── Week 5: passkey session-token storage ────────────────────────────
+
+describe("getSessionToken / setSessionToken (PWA fallback)", () => {
+  it("returns null when nothing stored", async () => {
+    expect(await getSessionToken()).toBeNull();
+  });
+
+  it("setSessionToken + getSessionToken round-trips via localStorage", async () => {
+    await setSessionToken("token-abc-123");
+    expect(localStorage.getItem("pcc-session-token")).toBe("token-abc-123");
+    expect(await getSessionToken()).toBe("token-abc-123");
+  });
+
+  it("removeSessionToken clears localStorage", async () => {
+    await setSessionToken("token-abc-123");
+    await removeSessionToken();
+    expect(await getSessionToken()).toBeNull();
+    expect(localStorage.getItem("pcc-session-token")).toBeNull();
+  });
+});
+
+describe("getSessionToken / setSessionToken (native)", () => {
+  it("setSessionToken writes to native and clears localStorage", async () => {
+    const { store } = setNativeWithPlugin();
+    localStorage.setItem("pcc-session-token", "stale-token");
+    await setSessionToken("token-native");
+    expect(store.data.get("pcc-session-token")).toBe("token-native");
+    expect(localStorage.getItem("pcc-session-token")).toBeNull();
+  });
+
+  it("getSessionToken reads from native", async () => {
+    const { store } = setNativeWithPlugin();
+    store.data.set("pcc-session-token", "token-from-native");
+    expect(await getSessionToken()).toBe("token-from-native");
+  });
+
+  it("removeSessionToken removes from both native and localStorage", async () => {
+    const { store } = setNativeWithPlugin();
+    store.data.set("pcc-session-token", "to-be-removed");
+    localStorage.setItem("pcc-session-token", "stale");
+    await removeSessionToken();
+    expect(store.data.has("pcc-session-token")).toBe(false);
+    expect(localStorage.getItem("pcc-session-token")).toBeNull();
   });
 });
