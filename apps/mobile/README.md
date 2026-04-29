@@ -18,16 +18,82 @@ This is **Week 1** of the 6-8 week mobile build. See:
 | pnpm package + Capacitor 7.6.2 deps | `package.json` | n/a |
 | Capacitor config with `server.url` override | `capacitor.config.ts` | n/a |
 | Mobile-specific webmanifest at `/operator/mobile` start_url | `public/manifest.webmanifest` | n/a |
-| IndexedDB-backed offline queue (FIFO, retry, idempotency) | `src/sw/offline-queue.ts` | 17 tests |
+| IndexedDB-backed offline queue (FIFO, retry, idempotency) | `src/sw/offline-queue.ts` | 20 tests |
 | Service worker scaffold (queue queueable POSTs on fetch failure) | `src/sw/service-worker.ts` | n/a (E2E in Week 4) |
-| Capacitor secure-storage wrapper for `pcc-api-key` + role | `src/storage/secure-api-key.ts` | 24 tests |
-| Role-switch UI (user|operator) | `src/RoleSwitch.tsx` | 5 tests |
+| Capacitor secure-storage wrapper for `pcc-api-key` + role | `src/storage/secure-api-key.ts` | 21 tests |
+| Role-switch UI (user|operator) | `src/RoleSwitch.tsx` | 4 tests |
 | User-mode landing placeholder | `src/UserMobilePage.tsx` | n/a |
-| Shell entrypoint (boot sequence + routing) | `src/App.tsx` | n/a |
+| Shell entrypoint (boot sequence + routing) | `src/App.tsx` | 3 tests |
+
+## Week 3 — Passkey + ApprovalSheet
+
+This is the **Option C** identity primitive (per
+`15-MOBILE-APP-FIRST-PRINCIPLES.md` v3 + `16-CENTRALIZED-ALTERNATIVE.md`):
+the mobile device signs **server-issued receipt-approval challenges** with a
+P-256 platform passkey (Apple Secure Enclave / Android StrongBox / Windows
+Hello). The signed assertion authorizes the centralized substrate; the
+substrate handles on-chain settlement. Mobile is **not** a smart-wallet
+signer — secp256k1 + Coinbase Smart Wallet UserOps were intentionally
+removed in v3.
+
+| Capability | File(s) | Tested? |
+|---|---|---|
+| Passkey enrollment + biometric-gated signing | `src/wallet/passkey-manager.ts` | 15 tests |
+| Bottom-sheet review/approve UI | `src/components/ApprovalSheet.tsx` | 7 tests |
+| Wired into App.tsx with dev-mode fake trigger | `src/App.tsx` | 3 tests |
+
+### Passkey enrollment
+
+`enrollPasskey({ userId, displayName })` runs `navigator.credentials.create()`
+against PCC's relying-party config (`rpId: "capability.network"`), persists
+the credential id + public key to native secure storage (Keychain /
+EncryptedSharedPreferences) on Capacitor and `localStorage` on plain PWAs,
+and returns the base64url-encoded id + public key. Server-side enrollment
+endpoints land in Week 4.
+
+### Biometric gates
+
+On Capacitor (`Capacitor.isNativePlatform() === true`):
+- `signApproval()` calls `@aparajita/capacitor-biometric-auth.authenticate()`
+  first to surface Face ID / Touch ID / fingerprint / iris before WebAuthn.
+- The biometric plugin is loaded lazily so the PWA bundle stays slim.
+
+On a plain browser PWA: WebAuthn's `userVerification: 'required'` prompts
+the OS biometric directly through the platform authenticator — no separate
+plugin call.
+
+### Dev-mode fake trigger
+
+To exercise the `<ApprovalSheet>` end-to-end without a server, App.tsx
+schedules a stub `pendingApproval` 3 seconds after mount when **any** of:
+
+- `import.meta.env.DEV === true` (vite dev), OR
+- `?devApproval=1` query string is present, OR
+- `localStorage["pcc-mobile-dev-approval"] === "1"`
+
+In production, this hook is replaced by the SSE/push handler that listens
+for server-issued sessions on `/sse/notifications` (Week 4).
+
+### What's still missing (lands in Week 4)
+
+- Server-side `POST /api/passkey/register` and `POST /api/passkey/challenge`
+  routes that issue the challenge bytes, verify the assertion signature
+  against the stored public key, and emit a transparency-log entry.
+- `<ReceiptDetail>` component for user inspection of past approvals.
+- Real SSE handler that calls `setPendingApproval` from `/sse/notifications`.
+
+### Manual demo
+
+```bash
+pnpm --filter @pcc/dashboard dev
+# In another shell, set the dev-mode flag in your browser console, then visit:
+#   http://localhost:5173/operator/mobile?devApproval=1
+# Switch to "user" role; an ApprovalSheet appears 3s later. The "Approve"
+# button enrolls a passkey on first run and signs the stub challenge.
+```
 
 What's NOT in Week 1: native iOS/Android projects (require Xcode + Android
-Studio; created in Week 2), passkey + smart-wallet integration (Week 2),
-Live Activities + push (Week 3), camera-attest pipeline (Week 4),
+Studio; created in Week 2), camera-attest pipeline (Week 4),
 CallKit/full-screen-Intent (Week 5), BLE/NFC (Week 6).
 
 ## Install
