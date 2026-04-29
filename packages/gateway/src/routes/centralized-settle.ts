@@ -53,6 +53,7 @@ import {
   ApprovalTimeoutError,
   type ApprovalRequestPayload,
 } from "./approval-request.js";
+import { getChannelIdForSession } from "./subscription.js";
 import { streamHub } from "../sse/stream-hub.js";
 
 // ── Singletons (module-level) ─────────────────────────────────────────
@@ -274,8 +275,17 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
       //   - no SSE subscriber → returns 503 with `error: no_subscriber`
       //     so the caller can surface a helpful UI prompt
       if (shouldGateOnApproval(session, body)) {
-        const topicForCount = { type: "approval" as const, id: sessionId };
-        const subscriberCount = streamHub.getSubscriberCount(topicForCount);
+        // W6 A3: subscribers may be on EITHER the session-id topic
+        // (W5 token-as-channel-id mobiles) OR the per-session channel-id
+        // topic (W6 subscribe-mobiles). Count both.
+        const sessionTopic = { type: "approval" as const, id: sessionId };
+        const channelId = getChannelIdForSession(sessionId);
+        const channelTopic = channelId
+          ? { type: "approval" as const, id: channelId }
+          : null;
+        const subscriberCount =
+          streamHub.getSubscriberCount(sessionTopic) +
+          (channelTopic ? streamHub.getSubscriberCount(channelTopic) : 0);
         if (subscriberCount === 0) {
           return reply.status(503).send({
             error: "no_subscriber",

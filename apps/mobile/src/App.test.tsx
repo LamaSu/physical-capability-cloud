@@ -6,6 +6,12 @@
  * correctly under role==="user" + persisted session token, and is NOT
  * started for operator mode or when no token is present.
  *
+ * Week 6 adds:
+ *   - Channel-id mint flow (A3): mocked fetch returns a channelId; the
+ *     listener opens with that id instead of the session token.
+ *   - Live Activity wiring (B5): a mocked plugin records the start/end
+ *     calls when an approval-request lands.
+ *
  * The Week 1 baseline did not include an App.test.tsx because the wiring
  * was trivial; Week 3 adds the ApprovalSheet hook so a smoke test is
  * worth having.
@@ -15,6 +21,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "./App.js";
 import { setRole, setSessionToken } from "./storage/secure-api-key.js";
+import {
+  _setPluginForTests,
+  type LiveActivityPlugin,
+} from "./live-activity/approval-activity.js";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -62,6 +72,21 @@ class MockEventSource {
   }
 }
 
+/**
+ * Week 6 A3: the listener now POSTs to /api/sessions/:tok/subscribe to
+ * mint a per-channel id before opening the EventSource. We mock fetch
+ * to fail-fast so the listener falls back to the W5 token-as-channel-id
+ * path — that lets us keep the existing assertions
+ * (`url.includes('/sse/stream/approval/<token>')`) without rewriting them.
+ *
+ * One test below asserts the mint-then-channel path explicitly.
+ */
+function installFailingFetch(): void {
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
+    .fn()
+    .mockRejectedValue(new Error("test: subscribe disabled")) as unknown as typeof fetch;
+}
+
 beforeEach(async () => {
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -75,6 +100,7 @@ beforeEach(async () => {
   MockEventSource.reset();
   (globalThis as unknown as { EventSource: typeof EventSource }).EventSource =
     MockEventSource as unknown as typeof EventSource;
+  installFailingFetch();
 });
 
 afterEach(() => {
@@ -86,10 +112,13 @@ afterEach(() => {
     localStorage.clear();
   }
   delete (globalThis as { EventSource?: unknown }).EventSource;
+  delete (globalThis as { fetch?: unknown }).fetch;
 });
 
 async function flush(): Promise<void> {
-  for (let i = 0; i < 6; i++) {
+  // Bumped from 6 → 12 to cover the W6 A3 subscribe-fetch IIFE before
+  // the listener actually opens the EventSource.
+  for (let i = 0; i < 12; i++) {
     await act(async () => {
       await Promise.resolve();
     });
@@ -156,10 +185,7 @@ describe("App SSE approval listener (Week 5)", () => {
     act(() => {
       root.render(<App />);
     });
-    await act(async () => {
-      // give the async useEffect time to run
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
+    await flush();
     expect(MockEventSource.instances.length).toBe(0);
   });
 
@@ -168,9 +194,7 @@ describe("App SSE approval listener (Week 5)", () => {
     act(() => {
       root.render(<App />);
     });
-    await act(async () => {
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
+    await flush();
     expect(MockEventSource.instances.length).toBe(1);
     const url = MockEventSource.instances[0].url;
     // Channel id = the session token in v1.
@@ -185,9 +209,7 @@ describe("App SSE approval listener (Week 5)", () => {
     act(() => {
       root.render(<App />);
     });
-    await act(async () => {
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
+    await flush();
     // Operator mode triggers a redirect (jsdom location.replace), but
     // crucially it should NOT fire an SSE listener.
     expect(MockEventSource.instances.length).toBe(0);
@@ -198,9 +220,7 @@ describe("App SSE approval listener (Week 5)", () => {
     act(() => {
       root.render(<App />);
     });
-    await act(async () => {
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
+    await flush();
     expect(MockEventSource.instances.length).toBe(1);
     // No sheet yet — no event fired.
     expect(
@@ -234,9 +254,7 @@ describe("App SSE approval listener (Week 5)", () => {
     act(() => {
       root.render(<App />);
     });
-    await act(async () => {
-      for (let i = 0; i < 6; i++) await Promise.resolve();
-    });
+    await flush();
     expect(MockEventSource.instances.length).toBe(1);
     expect(MockEventSource.instances[0].closed).toBe(false);
 
@@ -251,5 +269,193 @@ describe("App SSE approval listener (Week 5)", () => {
 
     // The original EventSource should be closed.
     expect(MockEventSource.instances[0].closed).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 6 A3 — opt-in channel-id subscribe flow
+// ──────────────────────────────────────────────────────────────────────
+
+describe("App SSE listener — Week 6 A3 mint-then-channel", () => {
+  it("uses the minted channelId on the SSE URL when subscribe succeeds", async () => {
+    await setSessionToken("token-mint-A3");
+    // Override fetch to return a successful subscribe response.
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          channelId: "ch_abc_minted_xyz",
+          sessionId: "token-mint-A3",
+        }),
+      } as Response) as unknown as typeof fetch;
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    // The listener opens with the MINTED channel id, not the token.
+    expect(MockEventSource.instances.length).toBe(1);
+    const url = MockEventSource.instances[0].url;
+    expect(url).toContain("/sse/stream/approval/ch_abc_minted_xyz");
+    // The token is still passed via ?token= for auth.
+    expect(url).toContain("token=token-mint-A3");
+  });
+
+  it("falls back to token-as-channel-id when subscribe call fails", async () => {
+    await setSessionToken("token-fb-A3");
+    // fetch throws (the default in the outer beforeEach).
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    expect(MockEventSource.instances.length).toBe(1);
+    const url = MockEventSource.instances[0].url;
+    // No channelId minted — listener uses the token.
+    expect(url).toContain("/sse/stream/approval/token-fb-A3");
+  });
+
+  it("falls back when subscribe returns non-OK response", async () => {
+    await setSessionToken("token-fb-B3");
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = vi
+      .fn()
+      .mockResolvedValue({
+        ok: false,
+        json: async () => ({ error: "unauthorized" }),
+      } as Response) as unknown as typeof fetch;
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    expect(MockEventSource.instances.length).toBe(1);
+    const url = MockEventSource.instances[0].url;
+    expect(url).toContain("/sse/stream/approval/token-fb-B3");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 6 B5 — Live Activity wiring
+// ──────────────────────────────────────────────────────────────────────
+
+describe("App Live Activity wiring (Week 6 B5)", () => {
+  interface CallLog {
+    start: { id: string; data: Record<string, unknown> }[];
+    end: { id: string; data?: Record<string, unknown> }[];
+  }
+
+  function mkPlugin(): { plugin: LiveActivityPlugin; log: CallLog } {
+    const log: CallLog = { start: [], end: [] };
+    const plugin: LiveActivityPlugin = {
+      startActivity: async (o) => {
+        log.start.push(o);
+      },
+      endActivity: async (o) => {
+        log.end.push(o);
+      },
+    };
+    return { plugin, log };
+  }
+
+  afterEach(() => {
+    _setPluginForTests(null);
+  });
+
+  it("starts a Live Activity when an approval-request event arrives", async () => {
+    await setSessionToken("token-LA-001");
+    const { plugin, log } = mkPlugin();
+    _setPluginForTests(plugin);
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    expect(MockEventSource.instances.length).toBe(1);
+
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-LA-001",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre's Hair Salon",
+        evidenceHash: "ab".repeat(32),
+        captureClass: "tier-1-photo",
+        requestedAt: new Date().toISOString(),
+      });
+      // Drain microtasks so the IIFE inside fireStart runs.
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    expect(log.start.length).toBe(1);
+    expect(log.start[0].id).toBe("sess-LA-001");
+    expect(log.start[0].data.capability).toBe("haircut");
+    expect(log.start[0].data.amountUsd).toBe(32);
+    expect(log.start[0].data.operatorName).toBe("Andre's Hair Salon");
+  });
+
+  it("ends the Live Activity with outcome=approve when the user approves", async () => {
+    await setSessionToken("token-LA-002");
+    const { plugin, log } = mkPlugin();
+    _setPluginForTests(plugin);
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-LA-002",
+        capability: "haircut",
+        amountUsd: 25,
+        operatorName: "Andre",
+        evidenceHash: "cd".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    expect(log.start.length).toBe(1);
+
+    // User clicks "Decline" (mapped to reject) — exercises the simpler
+    // path that doesn't require a passkey signature.
+    const declineBtn = container.querySelector(
+      "[data-testid='approval-decline']",
+    ) as HTMLButtonElement | null;
+    expect(declineBtn).not.toBeNull();
+    await act(async () => {
+      declineBtn!.click();
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    expect(log.end.length).toBe(1);
+    expect(log.end[0].id).toBe("sess-LA-002");
+    expect(log.end[0].data?.outcome).toBe("reject");
+  });
+
+  it("no-ops the activity when no plugin is registered", async () => {
+    await setSessionToken("token-LA-003");
+    _setPluginForTests(null);
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+
+    // Should not throw on event arrival even without a plugin.
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-LA-003",
+        capability: "haircut",
+        amountUsd: 10,
+        operatorName: "Andre",
+        evidenceHash: "ef".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    // The sheet still opens — graceful degradation.
+    expect(
+      container.querySelector("[data-testid='approval-sheet']"),
+    ).not.toBeNull();
   });
 });
