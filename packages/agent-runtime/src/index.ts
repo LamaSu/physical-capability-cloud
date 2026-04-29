@@ -41,6 +41,9 @@ export {
 export {
   LLMAgent,
   runAgent,
+  validateToolNames,
+  RetryableLLMError,
+  BudgetExceededError,
   type ToolDef,
   type ToolCaller,
   type LLMAgentOptions,
