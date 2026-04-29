@@ -925,7 +925,7 @@ SCHEDULE='{"version":1,"segments":[{"kind":"constant","startTime":0,"endTime":nu
 curl -X POST https://capability.network/api/contributors/schedules \
   -H "Authorization: Bearer $PCC_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"publishedBy\":\"0xMy...Address\",\"schedule\":$SCHEDULE}"
+  -d "{\"publishedBy\":\"0x000000000000000000000000000000000000dEaD\",\"schedule\":$SCHEDULE}"
 # -> {"scheduleHash":"0xabc...","alreadyPublished":false}
 
 # 2. (Optional) Publish on-chain so anyone can verify the bytes. The forge
@@ -939,7 +939,7 @@ forge script script/PublishSchedule.s.sol --broadcast \
 # 3. Register your contributor profile (pointing at the schedule)
 curl -X POST https://capability.network/api/contributors \
   -H "Authorization: Bearer $PCC_KEY" \
-  -d '{"address":"0xMy...Address","role":"integrator","scheduleHash":"0xabc..."}'
+  -d '{"address":"0x000000000000000000000000000000000000dEaD","role":"integrator","scheduleHash":"0xabc..."}'
 
 # 4. (Optional) Mint a ContributorNFT on-chain. The forge script lives at
 #    `packages/contracts/script/MintContributor.s.sol` and calls

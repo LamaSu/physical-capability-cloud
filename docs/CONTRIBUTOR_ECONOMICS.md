@@ -75,7 +75,7 @@ Sources:
 - `C:/Users/globa/pcc-contributor-economics/packages/spec/src/types/composition-manifest.ts`
 - `C:/Users/globa/pcc-contributor-economics/packages/spec/src/types/training-manifest.ts`
 
-### 2. Persistence — `@pcc/db`
+### 2. Persistence — `@pcc/store` (directory: `packages/db/`)
 
 Drizzle schema with 4 tables (one migration, `contributor` schema):
 
@@ -124,7 +124,7 @@ SCHEDULE_HASH=$(curl -s -X POST https://capability.network/api/contributors/sche
   -H "Authorization: Bearer $PCC_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-        "publishedBy": "0xYourWallet",
+        "publishedBy": "0x000000000000000000000000000000000000dEaD",
         "schedule": {
           "version": 1,
           "segments": [
@@ -142,7 +142,7 @@ curl -s -X POST https://capability.network/api/contributors \
   -H "Authorization: Bearer $PCC_KEY" \
   -H "Content-Type: application/json" \
   -d "{
-        \"address\": \"0xYourWallet\",
+        \"address\": \"0x000000000000000000000000000000000000dEaD\",
         \"role\": \"integrator\",
         \"scheduleHash\": \"$SCHEDULE_HASH\"
       }"
@@ -164,7 +164,7 @@ curl -s -X POST "https://capability.network/api/contributors/schedules/$SCHEDULE
 
 # 5. (Operator) Run the job; settlement automatically calls splitPayout via release().
 #    Every recipient gets paid in one tx; you (the integrator) receive
-#    (distributable * 40 / 10000) credited to 0xYourWallet.
+#    (distributable * 40 / 10000) credited to your wallet.
 ```
 
 For the full REST + MCP surface (8 endpoints, 7 MCP tools added in v2.8.0),
