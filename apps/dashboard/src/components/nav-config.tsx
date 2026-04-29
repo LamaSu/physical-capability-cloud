@@ -32,6 +32,7 @@ import {
   TracesIcon,
   NegotiationIcon,
   IPRevenueIcon,
+  RateScheduleIcon,
   WalletIcon,
   BatchBoardIcon,
   NegotiationSessionIcon,
@@ -121,6 +122,7 @@ export const navGroups: NavGroup[] = [
       { label: "DePIN", path: "/depin", icon: <DePINIcon /> },
       { label: "Wealth Fund", path: "/swf", icon: <SWFIcon /> },
       { label: "IP Revenue", path: "/ip", icon: <IPRevenueIcon /> },
+      { label: "Publish RateSchedule", path: "/contributors/schedules/publish", icon: <RateScheduleIcon /> },
     ],
   },
   {
