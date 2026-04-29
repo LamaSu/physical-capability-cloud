@@ -450,6 +450,162 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         );
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Test 3: dispute path bypasses the payout map
+    //
+    // Confirms that a payout map only takes effect on the happy path through
+    // release(). When a milestone is disputed and the challenger wins:
+    //
+    //   - Funds are refunded to the payer (full milestone amount)
+    //   - Operator's bond is slashed and routed to the challenger along
+    //     with the challenger's own bond
+    //   - The payout map is NEVER executed — recipients receive nothing
+    //   - No SplitPayoutExecuted events are emitted
+    //
+    // This is the same behavior as the legacy dispute path
+    // (MilestoneEscrowTest.test_dispute_challengerWins). The integration
+    // adds: a payout map IS configured before disputeFile, but the
+    // resolveDispute() codepath ignores it entirely (verified by reading
+    // MilestoneEscrow.sol — `resolveDispute` never references
+    // payoutMapSet or _payoutMap).
+    //
+    // Math (challenger wins):
+    //   payer refund         = MILESTONE_AMOUNT     = 100_000_000
+    //   challenger payout    = challengerBond + operatorBond
+    //                        = 5_000_000 + 5_000_000 = 10_000_000
+    //   operator final       = 0 (started with bond, deposited it, slashed)
+    //   protocol fee         = 0 (no fee on dispute resolution)
+    //   payout recipients    = 0 each (map ignored)
+    // ──────────────────────────────────────────────────────────────────────
+
+    function test_integration_disputeBypassesPayoutMap() public {
+        uint256 challengerBond = OPERATOR_BOND;
+
+        // ── Phase 1: addMilestone + setPayoutMap (4-recipient cohort) ────
+        vm.prank(payer);
+        escrow.addMilestone(stepId1, operator, MILESTONE_AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW);
+
+        MilestoneEscrow.Payout[] memory payouts = _fourRecipientPayoutMap();
+        vm.prank(payer);
+        escrow.setPayoutMap(0, payouts);
+        assertTrue(escrow.payoutMapSet(0), "payout map registered before dispute");
+
+        // ── Phase 2: fund + bond + evidence + attestation ────────────────
+        vm.startPrank(payer);
+        usdc.approve(address(escrow), MILESTONE_AMOUNT);
+        escrow.fund();
+        vm.stopPrank();
+
+        vm.startPrank(operator);
+        usdc.approve(address(escrow), OPERATOR_BOND);
+        escrow.depositBond(0);
+        escrow.submitEvidence(0, keccak256("evidence-dispute-001"));
+        vm.stopPrank();
+
+        vm.prank(verifierOracle);
+        escrow.submitAttestation(0, keccak256("attestation-dispute-001"));
+        assertEq(uint8(escrow.getMilestone(0).status), 4, "milestone Attested");
+
+        // ── Phase 3: challenger files dispute INSIDE challenge window ────
+        vm.startPrank(challenger);
+        usdc.approve(address(escrow), challengerBond);
+        escrow.fileDispute(
+            0,
+            challengerBond,
+            keccak256("counter-evidence-dispute-001"),
+            "Drift alert: print failed safety threshold"
+        );
+        vm.stopPrank();
+
+        assertEq(uint8(escrow.getMilestone(0).status), 6, "milestone Disputed");
+        // Escrow now holds milestone + operator bond + challenger bond.
+        assertEq(
+            usdc.balanceOf(address(escrow)),
+            MILESTONE_AMOUNT + OPERATOR_BOND + challengerBond,
+            "escrow holds milestone + both bonds"
+        );
+
+        // ── Phase 4: capture pre-balances; arbiter resolves (challenger wins)
+        uint256 prePayer = usdc.balanceOf(payer);
+        uint256 preChallenger = usdc.balanceOf(challenger);
+
+        // Arm a recordLogs scope so we can confirm zero SplitPayoutExecuted
+        // events fire during dispute resolution. The legacy events
+        // (BondSlashed, DisputeResolved) are still expected and asserted via
+        // direct event matchers.
+        vm.recordLogs();
+
+        vm.expectEmit(true, false, false, true);
+        emit MilestoneEscrow.BondSlashed(0, operator, OPERATOR_BOND);
+        vm.expectEmit(true, false, false, true);
+        emit MilestoneEscrow.DisputeResolved(0, true);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(0, true);
+
+        // ── Assertions: status + funds ───────────────────────────────────
+        assertEq(uint8(escrow.getMilestone(0).status), 8, "milestone Slashed");
+
+        // Payer refunded the full milestone amount.
+        assertEq(
+            usdc.balanceOf(payer) - prePayer,
+            MILESTONE_AMOUNT,
+            "payer refunded milestone"
+        );
+
+        // Challenger receives challenger bond + slashed operator bond.
+        assertEq(
+            usdc.balanceOf(challenger) - preChallenger,
+            challengerBond + OPERATOR_BOND,
+            "challenger receives both bonds"
+        );
+
+        // Operator received nothing (started with bond, deposited it, slashed).
+        assertEq(usdc.balanceOf(operator), 0, "operator final zero (bond slashed)");
+
+        // Payout map recipients receive ZERO — the map is bypassed.
+        assertEq(usdc.balanceOf(verifierRecipient), 0, "verifier: no funds (map bypassed)");
+        assertEq(usdc.balanceOf(integrator),        0, "integrator: no funds (map bypassed)");
+        assertEq(usdc.balanceOf(protocolAuthor),    0, "protocol-author: no funds (map bypassed)");
+        assertEq(usdc.balanceOf(modelAuthor),       0, "model-author: no funds (map bypassed)");
+
+        // No protocol fee charged — disputes don't pass through release().
+        assertEq(usdc.balanceOf(protocolFeeRecipient), 0, "protocol fee recipient zero");
+        assertEq(
+            protocolRootImpl.feesCollected(address(usdc)),
+            0,
+            "protocol root: no accounting fired during dispute"
+        );
+
+        // Escrow contract drained to zero.
+        assertEq(usdc.balanceOf(address(escrow)), 0, "escrow drained");
+
+        // ── Confirm zero SplitPayoutExecuted events fired ────────────────
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 splitTopic = MilestoneEscrow.SplitPayoutExecuted.selector;
+        uint256 splitCount;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == splitTopic) {
+                splitCount++;
+            }
+        }
+        assertEq(splitCount, 0, "no SplitPayoutExecuted during dispute resolution");
+
+        // ── Conservation check ───────────────────────────────────────────
+        // Sum of (payer refund + challenger payout) must equal the funds
+        // that entered the escrow (milestone + operator bond + challenger bond).
+        // Note: challenger's NET position is -challengerBond + (challengerBond + operatorBond) = +operatorBond
+        // and payer's NET is +MILESTONE_AMOUNT (refund), starting from -MILESTONE_AMOUNT (funded).
+        uint256 totalRefunded =
+            (usdc.balanceOf(payer) - prePayer)
+            + (usdc.balanceOf(challenger) - preChallenger);
+        assertEq(
+            totalRefunded,
+            MILESTONE_AMOUNT + OPERATOR_BOND + challengerBond,
+            "conservation: refund + challenger payout = escrow holdings"
+        );
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     /// @dev Build the canonical 4-recipient payout map for Test 1.
