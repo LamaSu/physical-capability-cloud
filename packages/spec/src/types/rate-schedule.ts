@@ -6,13 +6,18 @@
  * sequence of segments; the contributor publishes it once per ContributorNFT version,
  * and the protocol honors it forever (until they ship a new version under a new NFT).
  *
- * Six segment kinds cover the curve types from the research:
- *   - constant:           "50bps flat from t0 to t1 (or forever)"
- *   - step:               single bps from t0 forward (used for absolute step-functions)
- *   - linear-decay:       interpolates startBps → endBps linearly between t0 and t1
- *   - exponential-decay:  bps = startBps * exp(-k * elapsed), clamped at endBps floor
- *   - adoption-indexed:   bps = clamp(scale / sqrt(jobsPerDay), floor, cap)
- *   - piecewise-value:    bps depends on jobValueCents (under threshold → low, else high)
+ * Seven segment kinds cover the curve types from the research:
+ *   - constant:               "50bps flat from t0 to t1 (or forever)"
+ *   - step:                   single bps from t0 forward (used for absolute step-functions)
+ *   - linear-decay:           interpolates startBps → endBps linearly between t0 and t1
+ *   - exponential-decay:      bps = startBps * exp(-k * elapsed), clamped at endBps floor
+ *   - adoption-indexed:       bps = clamp(scale / sqrt(jobsPerDay), floor, cap)
+ *   - piecewise-value:        bps depends on jobValueCents (under threshold → low, else high)
+ *   - capture-class-indexed:  bps depends on the captureClass (CC0..CC5) of the evidence
+ *                             bundle attached to the job. Higher capture classes (more
+ *                             rigorous evidence) earn higher bps. Closes the loop between
+ *                             CVP (regulated industries get heavier evidence) and
+ *                             economics (those operators can earn more for that effort).
  *
  * Evaluation: walk segments in order, find the one whose [startTime, endTime) contains
  * `now`, evaluate its formula. Schedules without a covering segment evaluate to 0 bps
@@ -26,6 +31,7 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { canonicalize } from "../util/canonical.js";
+import { CaptureClass } from "./capture.js";
 
 // ── Segment kinds (discriminator) ─────────────────────────────────────
 
@@ -36,6 +42,7 @@ export const RateSegmentKindSchema = z.enum([
   "exponential-decay",
   "adoption-indexed",
   "piecewise-value",
+  "capture-class-indexed",
 ] as const);
 export type RateSegmentKind = z.infer<typeof RateSegmentKindSchema>;
 
@@ -115,6 +122,46 @@ export const PiecewiseValueSegmentSchema = z.object({
 });
 export type PiecewiseValueSegment = z.infer<typeof PiecewiseValueSegmentSchema>;
 
+/**
+ * Capture-class-indexed segment. bps depends on the captureClass of the
+ * evidence bundle attached to the job. Higher capture classes (more rigorous
+ * evidence — see CVP design doc, packages/spec/src/types/capture.ts) earn
+ * higher bps so operators in regulated industries are paid for the extra
+ * effort.
+ *
+ * Inputs from EvaluationContext: { captureClass: CC0 | CC1 | CC2 | CC3 | CC4 | CC5 }
+ *
+ * If captureClass is missing from context (legacy jobs predating CVP), the
+ * bps is the value at `default`. If captureClass is present but not in
+ * `byClass`, it falls back to `default` as well — `byClass` is intentionally
+ * sparse so authors only pin the classes they care about.
+ *
+ * Per-class bps follow the same 0..10000 invariants as every other segment.
+ * The Zod schema validates each class entry; the evaluator clamps the final
+ * value to [0, 10000] regardless.
+ */
+export const CaptureClassIndexedSegmentSchema = z.object({
+  kind: z.literal("capture-class-indexed"),
+  startTime: z.number().int().min(0),
+  endTime: z.number().int().min(0).nullable(),
+  /** bps for each capture class. Missing classes fall back to `default`. */
+  byClass: z
+    .object({
+      CC0: z.number().int().min(0).max(10000).optional(),
+      CC1: z.number().int().min(0).max(10000).optional(),
+      CC2: z.number().int().min(0).max(10000).optional(),
+      CC3: z.number().int().min(0).max(10000).optional(),
+      CC4: z.number().int().min(0).max(10000).optional(),
+      CC5: z.number().int().min(0).max(10000).optional(),
+    })
+    .strict(),
+  /** bps when captureClass is missing or not in `byClass`. */
+  default: z.number().int().min(0).max(10000),
+});
+export type CaptureClassIndexedSegment = z.infer<
+  typeof CaptureClassIndexedSegmentSchema
+>;
+
 // ── Discriminated union ─────────────────────────────────────────────────
 
 export const RateSegmentSchema = z.discriminatedUnion("kind", [
@@ -124,6 +171,7 @@ export const RateSegmentSchema = z.discriminatedUnion("kind", [
   ExponentialDecaySegmentSchema,
   AdoptionIndexedSegmentSchema,
   PiecewiseValueSegmentSchema,
+  CaptureClassIndexedSegmentSchema,
 ]);
 export type RateSegment = z.infer<typeof RateSegmentSchema>;
 
@@ -162,6 +210,16 @@ export interface RateScheduleEvaluationContext {
   jobValueCents: number;
   /** Rolling 24h job count (used by adoption-indexed segments). */
   jobsPerDay: number;
+  /**
+   * Capture class of the evidence bundle attached to the job, when the job
+   * has been settled through the Capture Verification Protocol (CVP). Used
+   * by `capture-class-indexed` segments to scale bps by evidence rigor.
+   *
+   * Optional — legacy jobs predating CVP, and segments that don't depend on
+   * captureClass, can omit it. `capture-class-indexed` segments fall back to
+   * their `default` bps when this is missing.
+   */
+  captureClass?: CaptureClass;
 }
 
 export interface RateScheduleEvaluationResult {
@@ -194,7 +252,7 @@ export function evaluateRateSchedule(
   schedule: RateSchedule,
   context: RateScheduleEvaluationContext,
 ): RateScheduleEvaluationResult {
-  const { now, jobValueCents, jobsPerDay } = context;
+  const { now, jobValueCents, jobsPerDay, captureClass } = context;
 
   for (let i = 0; i < schedule.segments.length; i++) {
     const seg = schedule.segments[i];
@@ -239,6 +297,20 @@ export function evaluateRateSchedule(
       case "piecewise-value":
         bps = jobValueCents < seg.thresholdCents ? seg.bpsLow : seg.bpsHigh;
         break;
+
+      case "capture-class-indexed": {
+        // Fall back to `default` when:
+        //   - context.captureClass is missing (legacy / non-CVP job), or
+        //   - the supplied class is not pinned in this segment's byClass.
+        // The byClass keys are CaptureClass enum values ("CC0".."CC5"); we
+        // index by the raw string key since the enum values ARE the strings.
+        const pinned =
+          captureClass !== undefined
+            ? seg.byClass[captureClass]
+            : undefined;
+        bps = pinned !== undefined ? pinned : seg.default;
+        break;
+      }
     }
 
     // Round + clamp to legal bps range.
