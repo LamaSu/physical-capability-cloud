@@ -1,7 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { ROLE_TAGS, buildPayoutMap, type Payout } from "../index.js";
+// Direct import from @pcc/spec to verify @pcc/contracts re-exports the
+// SAME map (single-source-of-truth invariant).
+import { ROLE_TAGS as SPEC_ROLE_TAGS } from "@pcc/spec";
 
 describe("ROLE_TAGS", () => {
+  it("is the same object re-exported from @pcc/spec (single source of truth)", () => {
+    // Identity check — re-export must point at the spec map, not a copy.
+    expect(ROLE_TAGS).toBe(SPEC_ROLE_TAGS);
+  });
+
   it("exposes all 10 ContributorRole tags", () => {
     const expected = [
       "operator",

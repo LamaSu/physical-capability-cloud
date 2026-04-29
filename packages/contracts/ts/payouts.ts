@@ -12,18 +12,23 @@
  *
  * This module ships:
  *   - The Payout shape (mirrors the on-chain Payout struct)
- *   - ROLE_TAGS constants (keccak256 of the canonical role strings)
+ *   - ROLE_TAGS constants (re-exported from @pcc/spec — single source of truth;
+ *     mirrored on-chain by packages/contracts/src/RoleTags.sol via codegen)
  *   - BuildPayoutMapInput / BuildPayoutMapResult types
  *   - buildPayoutMap() — the production composer
  */
 
-import { keccak256, stringToHex } from "viem";
 import type {
   CompositionManifest,
   RateSchedule,
   RateScheduleEvaluationContext,
 } from "@pcc/spec";
-import { evaluateRateSchedule } from "@pcc/spec";
+import { evaluateRateSchedule, ROLE_TAGS, type RoleTagKey } from "@pcc/spec";
+
+// Re-export ROLE_TAGS + RoleTagKey from @pcc/spec — single source of truth.
+// On-chain mirror lives at packages/contracts/src/RoleTags.sol (codegen).
+export { ROLE_TAGS } from "@pcc/spec";
+export type { RoleTagKey } from "@pcc/spec";
 
 // ──────────────────────────────────────────────────────────────────────────
 // Solidity-shaped types
@@ -55,35 +60,12 @@ export interface Payout {
 // ──────────────────────────────────────────────────────────────────────────
 // Canonical role tag constants (ADR-12 ContributorRole taxonomy)
 // ──────────────────────────────────────────────────────────────────────────
-
-/**
- * ROLE_TAGS — keccak256 of the canonical ContributorRole strings.
- *
- * These are the bytes32 values written into Payout.roleTag on-chain.
- * The roleTag is purely for off-chain attribution / per-role indexing in the
- * SplitPayoutExecuted event; the on-chain contract does not interpret roleTag
- * semantically — it just stores and re-emits.
- *
- * Keys mirror the ContributorRole union in @pcc/spec exactly. The "operator"
- * tag is included for completeness (used in ADR-11 §3 example pseudocode for
- * the operator-residual emission, though the current implementation does NOT
- * emit a SplitPayoutExecuted for the operator residual to avoid double-counting
- * with MilestoneReleased).
- */
-export const ROLE_TAGS = {
-  operator: keccak256(stringToHex("operator")),
-  verifier: keccak256(stringToHex("verifier")),
-  insurer: keccak256(stringToHex("insurer")),
-  integrator: keccak256(stringToHex("integrator")),
-  "protocol-author": keccak256(stringToHex("protocol-author")),
-  "model-author": keccak256(stringToHex("model-author")),
-  "dataset-contributor": keccak256(stringToHex("dataset-contributor")),
-  curator: keccak256(stringToHex("curator")),
-  assembler: keccak256(stringToHex("assembler")),
-  "network-treasury": keccak256(stringToHex("network-treasury")),
-} as const;
-
-export type RoleTagKey = keyof typeof ROLE_TAGS;
+//
+// ROLE_TAGS lives in @pcc/spec/payouts (re-exported above) and is mirrored
+// on-chain by `packages/contracts/src/RoleTags.sol` (codegen). The roleTag
+// is purely for off-chain attribution / per-role indexing in the
+// SplitPayoutExecuted event; the on-chain contract does not interpret
+// roleTag semantically — it just stores and re-emits.
 
 const ZERO_BYTES32: `0x${string}` =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
