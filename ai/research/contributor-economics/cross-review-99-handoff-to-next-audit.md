@@ -7,17 +7,58 @@
 
 ---
 
-## ⚠ CRITICAL: state has changed since this was written
+## ⚠ CRITICAL: state will change — but NOT in the way originally framed
 
-Another agent (running concurrently with the orchestrator that wrote this doc)
-is currently fixing the items flagged below. After that agent pushes:
+**Correction (added post-write)**: When the user said "another agent is fixing
+some things," I assumed the parallel agent was on `feat/contributor-economics`
+closing the CRITICAL items below. That assumption was **wrong**.
 
-- HEAD will move past `f5a3ca7`
-- PR #7 will likely have a force-pushed rebase
-- Some or all of the **CRITICAL** + **HIGH** items may already be closed
-- master itself may have moved further
+The parallel agent is on a **separate branch** — `feat/agent-onboarder-v2` —
+doing SDK + chat console + template registry hardening (`repair-tier1` +
+`repair-tier0-routes`). They wrote their own counter-handoff at:
 
-**Before acting on anything here, run `git fetch lamasu && git log --oneline f5a3ca7..lamasu/feat/contributor-economics`** to see what landed. Treat this doc as the *findings frame*, not the current state.
+`C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/cross-review-99-handoff-from-agent-onboarder-v2.md`
+
+**Key cross-handoff conclusions** (read their doc for the full matrix):
+
+- **Almost zero file overlap.** Their work is in `packages/orchestrator-sdk/`,
+  `packages/template-physical-operator/`, `packages/template-data-product/`,
+  `packages/agent-runtime/src/llm-agent.ts`, and `apps/dashboard/src/routes/{onboard,operator,orchestrator}/`.
+  None of those overlap with my contracts / spec / CE docs.
+- **The CRITICAL items in this doc are still OPEN** — `feat/agent-onboarder-v2`
+  does NOT close the multi-stablecoin distribution bug, the agent-package.json
+  collision, or the rebase. Those remain `feat/contributor-economics`'s job.
+- **`agent-package.json` is the ONE shared file.** Coordination rule:
+  *later mover bumps to N+1*. If we land first → 2.9.0/225 (211 base + 7 CVP +
+  7 CE); if they land first → we bump to 2.10.0/~235 to absorb their +10 tools.
+- **They reserve `MilestoneEscrow` funding-path** (gateway-EOA custody refactor,
+  their Wave 4 finding F5). My distribution-path fix (`_distributeWithMap` +
+  `_distributeLegacy`) is orthogonal and OK to ship.
+- **Both branches can push to lamasu independently.** No fast-forward conflict
+  since they're separate refs. Push when ready.
+
+**The "audit again" trigger**: when `feat/agent-onboarder-v2` merges to master
+(not just pushes), master's commit graph moves and our rebase target shifts.
+That's when re-running cross-review-03 (master recency) is most valuable. Their
+branch in-flight on lamasu doesn't directly affect us until merge.
+
+After that agent's branch eventually merges to master:
+
+- HEAD on lamasu/master will move past current
+- `agent-package.json` on master may have +10 tools we need to absorb
+- Some new TS routes will exist that our work doesn't depend on but should be
+  aware of
+
+**Before acting on anything here**, run:
+```bash
+git fetch lamasu master feat/contributor-economics feat/agent-onboarder-v2
+git log --oneline 8550d5e..lamasu/master   # see what's on master since base
+git log --oneline f5a3ca7..lamasu/feat/contributor-economics   # see what's on our branch since this doc
+git log --oneline lamasu/feat/agent-onboarder-v2 -10  # state of parallel branch
+```
+
+Treat this doc as the *findings frame* + the orthogonality matrix from the
+counter-handoff, not the current state.
 
 ---
 
