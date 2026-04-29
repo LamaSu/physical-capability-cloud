@@ -321,9 +321,71 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       };
     },
   );
+
+  /**
+   * POST /api/passkey/challenge
+   *
+   * Issue a single-use 32-byte nonce challenge for a userId. The user must
+   * have at least one registered passkey. The challenge expires after
+   * `CHALLENGE_TTL_MS` (5 minutes) and is consumed (deleted) on first
+   * successful verify().
+   *
+   * Returns:
+   *   { challengeId, challenge (base64 of 32 random bytes), expiresAt (ISO) }
+   */
+  app.post<{ Body: ChallengeBody }>(
+    "/api/passkey/challenge",
+    async (req, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as ChallengeBody;
+      const userId = body.userId;
+
+      if (!isString(userId)) {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message: "userId is a required string",
+        });
+      }
+
+      // The user must have at least one registered passkey. Otherwise we
+      // refuse to issue a challenge — there's nothing for them to sign with.
+      const userCreds = state.credentialsByUser.get(userId);
+      if (!userCreds || userCreds.size === 0) {
+        return reply.status(404).send({
+          error: "user_not_registered",
+          message: `No passkey registered for userId "${userId}"`,
+        });
+      }
+
+      sweepExpiredChallenges();
+
+      const challengeBytes = randomBytes(CHALLENGE_NONCE_BYTES);
+      const challengeIdBytes = randomBytes(16);
+      const challengeId = b64encode(challengeIdBytes)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+      const challenge = b64encode(challengeBytes);
+      const expiresAtMs = nowMs() + CHALLENGE_TTL_MS;
+
+      const pending: PendingChallenge = {
+        challengeId,
+        userId,
+        challenge,
+        challengeBytes,
+        expiresAtMs,
+        used: false,
+      };
+      state.challenges.set(challengeId, pending);
+
+      return {
+        challengeId,
+        challenge,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+      };
+    },
+  );
 }
 
 // Avoid the unused-import warning when we expand the file later.
 void p256;
 void sha256;
-void randomBytes;
