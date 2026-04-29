@@ -131,4 +131,67 @@ export async function advanceSession(
 export function _resetStoreForTests(): void {
   store.clear();
   locks.clear();
+  idempotencyCache.clear();
+}
+
+// ─── T1.10: Idempotency on retryable build-agent sub-steps ─────────────────
+//
+// A single onboarding session can fan out into N side-effecting sub-steps
+// (publish_operator, write_static_mirror, create_wallet, etc.). The chat /
+// voice doorways may retry the build flow if a downstream tool blips, which
+// without dedup creates duplicate registrations + duplicate wallets per run.
+//
+// Strategy: hash(session_id + step_name) -> stored Promise of the result.
+// Concurrent calls with the same key share the same promise; later calls get
+// the cached resolution. Wave 4 replaces this in-memory Map with a Postgres
+// `idempotency_keys` table keyed off the same SHA-256 + a 24h TTL.
+
+import { createHash } from "node:crypto";
+
+/**
+ * Map idempotency-key -> in-flight or resolved Promise. We deliberately store
+ * Promises (not values) so two callers entering withIdempotency at the same
+ * time both observe the FIRST in-flight call rather than racing each other.
+ */
+const idempotencyCache = new Map<string, Promise<unknown>>();
+
+export function idempotencyKey(sessionId: string, stepName: string): string {
+  return createHash("sha256").update(`${sessionId}::${stepName}`).digest("hex");
+}
+
+/**
+ * Run `fn` exactly once per (sessionId, stepName). Subsequent calls return
+ * the cached resolution. Errors are NOT cached — a failed step can be
+ * retried — so this is "at-least-once-with-coalescing" not "exactly-once".
+ *
+ * If two callers enter at the same time, both observe the same in-flight
+ * promise, so the body runs once.
+ */
+export async function withIdempotency<T>(
+  sessionId: string,
+  stepName: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const key = idempotencyKey(sessionId, stepName);
+  const existing = idempotencyCache.get(key);
+  if (existing) {
+    return existing as Promise<T>;
+  }
+  const promise = (async () => {
+    try {
+      return await fn();
+    } catch (err) {
+      // Don't cache failures — let the next caller retry the step.
+      idempotencyCache.delete(key);
+      throw err;
+    }
+  })();
+  idempotencyCache.set(key, promise as Promise<unknown>);
+  return promise;
+}
+
+/** Test-only helper. Real callers shouldn't need this — the cache is
+ *  intentionally process-lifetime in scope until Wave 4. */
+export function _clearIdempotencyForTests(): void {
+  idempotencyCache.clear();
 }

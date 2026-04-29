@@ -27,6 +27,7 @@ import {
   searchCapabilities,
   writeOperatorMirror,
   createAgentWallet,
+  withIdempotency,
   type DiscoveryProfile,
 } from "@pcc/orchestrator-sdk";
 import { ONBOARDER_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -221,16 +222,26 @@ export class OnboarderAgent {
         return searchCapabilities(input.query, input.limit !== undefined ? { limit: input.limit } : {});
       },
       publish_operator: async (raw) => {
+        // T1.10 — idempotency: the LLM may call publish_operator twice during
+        // the same onboarding session if the chat doorway retries on a 5xx.
+        // Wrap in withIdempotency so the second call returns the first
+        // call's result instead of registering a duplicate operator.
         const profile = raw as DiscoveryProfile;
-        return publishOperator(profile);
+        return withIdempotency(profile.enterprise_id, "publish_operator", () =>
+          publishOperator(profile)
+        );
       },
       write_static_mirror: async (raw) => {
         const profile = raw as DiscoveryProfile;
-        return writeOperatorMirror(profile);
+        return withIdempotency(profile.enterprise_id, "write_static_mirror", () =>
+          writeOperatorMirror(profile)
+        );
       },
       create_wallet: async (raw) => {
         const input = raw as { enterprise_id: string };
-        return createAgentWallet(input);
+        return withIdempotency(input.enterprise_id, "create_wallet", () =>
+          createAgentWallet(input)
+        );
       },
     };
   }

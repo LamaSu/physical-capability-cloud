@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   startSession,
   getSession,
   advanceSession,
+  withIdempotency,
+  idempotencyKey,
   _resetStoreForTests,
 } from "./state-machine.js";
 
@@ -118,6 +120,63 @@ describe("state-machine — T1.4 mutex", () => {
     expect(b!.state).toBe("docs_ingested");
     expect(a!.extras?.who).toBe("a");
     expect(b!.extras?.who).toBe("b");
+  });
+
+  it("T1.10 idempotencyKey is deterministic and step-scoped", () => {
+    const k1 = idempotencyKey("sess-A", "publish_operator");
+    const k2 = idempotencyKey("sess-A", "publish_operator");
+    const k3 = idempotencyKey("sess-A", "create_wallet");
+    const k4 = idempotencyKey("sess-B", "publish_operator");
+    expect(k1).toBe(k2);
+    expect(k1).not.toBe(k3);
+    expect(k1).not.toBe(k4);
+    // SHA-256 hex = 64 chars
+    expect(k1).toHaveLength(64);
+  });
+
+  it("T1.10 withIdempotency runs the body exactly once for the same key", async () => {
+    const fn = vi.fn(async () => ({ id: "reg-1", side_effect: Math.random() }));
+    const r1 = await withIdempotency("sess-1", "publish", fn);
+    const r2 = await withIdempotency("sess-1", "publish", fn);
+    const r3 = await withIdempotency("sess-1", "publish", fn);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(r1).toEqual(r2);
+    expect(r2).toEqual(r3);
+  });
+
+  it("T1.10 different (session, step) pairs do NOT share cache", async () => {
+    const fn = vi.fn(async () => ({ id: "reg-x" }));
+    await withIdempotency("sess-A", "publish", fn);
+    await withIdempotency("sess-A", "wallet", fn);
+    await withIdempotency("sess-B", "publish", fn);
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("T1.10 concurrent calls share the in-flight promise (no double-execute)", async () => {
+    const fn = vi.fn(async () => {
+      // Sleep so all three callers enter before the body resolves.
+      await new Promise((r) => setTimeout(r, 5));
+      return { id: "shared" };
+    });
+    const [a, b, c] = await Promise.all([
+      withIdempotency("sess-X", "step", fn),
+      withIdempotency("sess-X", "step", fn),
+      withIdempotency("sess-X", "step", fn),
+    ]);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+  });
+
+  it("T1.10 errors are NOT cached — retry is allowed", async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce({ id: "ok" });
+    await expect(withIdempotency("sess-Y", "step", fn)).rejects.toThrow(/transient/);
+    const r2 = await withIdempotency("sess-Y", "step", fn);
+    expect(r2).toEqual({ id: "ok" });
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it("locks are released after errors (no deadlock on subsequent calls)", async () => {
