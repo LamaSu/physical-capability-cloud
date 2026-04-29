@@ -96,6 +96,9 @@ import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
+import { templateSessionRoutes } from "./routes/template-session.js";
+import { orchestratorTemplatesRoutes } from "./routes/orchestrator-templates.js";
+import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-agents.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
@@ -396,6 +399,28 @@ export async function createGateway(port = 3200) {
 
   // Third-party digital kernel marketplace
   await app.register(kernelMarketplaceRoutes);
+
+  // ── Tier-0 orchestrator routes ────────────────────────────────────────────
+  // Repair-tier0-routes wired the eight backend routes the orchestrator chat
+  // console at apps/dashboard/src/routes/orchestrator/[slug]/chat/index.tsx
+  // calls. The two global routes (templates list + match) plus two mounts of
+  // the generic templateSessionRoutes plugin (one per template).
+  //
+  // Mount order is intentional: mount the public template-directory routes
+  // first so they're discoverable even if a template-session mount errors.
+  await app.register(orchestratorTemplatesRoutes);
+  // physical-operator session driver (real OnboarderAgent backing).
+  await app.register(templateSessionRoutes, {
+    prefix: "/api/onboard",
+    template: "physical-operator",
+    agentFactory: physicalOperatorAgent,
+  });
+  // data-product session driver (stub — full flow lands in Wave 2.5).
+  await app.register(templateSessionRoutes, {
+    prefix: "/api/orchestrator/data-product",
+    template: "data-product",
+    agentFactory: dataProductStubAgent,
+  });
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);
