@@ -1,0 +1,48 @@
+# cloudflared tunnel config for pcc-voice-onboarder on Spark.
+#
+# This template exposes the local FastAPI server (port 8765) to the public
+# internet at https://voice-onboarder.capability.network so Twilio's HTTP
+# webhook + WebSocket media stream can reach it.
+#
+# Replace <TUNNEL_ID> + <SPARK_HOSTNAME> + cert-path before installing.
+#
+# One-time setup on Spark:
+#
+#   cloudflared tunnel login
+#   cloudflared tunnel create pcc-voice-onboarder      # prints <TUNNEL_ID>
+#   cloudflared tunnel route dns pcc-voice-onboarder voice-onboarder.capability.network
+#   cp deploy/cloudflared.yml ~/.cloudflared/config.yml
+#   # edit the file, set <TUNNEL_ID> + path
+#   cloudflared --config ~/.cloudflared/config.yml tunnel run pcc-voice-onboarder
+#
+# Or run as a service (recommended):
+#   sudo cloudflared --config /etc/cloudflared/config.yml service install
+#
+# Twilio side: set the inbound voice webhook URL on the phone number to
+#   https://voice-onboarder.capability.network/twilio/inbound
+# (HTTP POST, no signature validation needed for the smoke test; for prod
+#  set TWILIO_AUTH_TOKEN and verify the X-Twilio-Signature header.)
+
+tunnel: <TUNNEL_ID>
+credentials-file: /home/<SPARK_USER>/.cloudflared/<TUNNEL_ID>.json
+
+# Optional: set the metrics endpoint so we can scrape tunnel health.
+# metrics: 0.0.0.0:9090
+
+ingress:
+  - hostname: voice-onboarder.capability.network
+    service: http://localhost:8765
+    originRequest:
+      # Twilio media streams are long-lived WebSockets — bump timeouts.
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 100
+      noTLSVerify: false
+      # Pipecat needs HTTP/2 OFF for the websocket upgrade to be reliable
+      # behind cloudflared in our experience.
+      http2Origin: false
+
+  # Fallthrough — anything else gets a 404.
+  - service: http_status:404
