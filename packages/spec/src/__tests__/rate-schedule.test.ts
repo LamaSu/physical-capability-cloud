@@ -11,6 +11,7 @@ import {
   type RateSchedule,
   type RateSegment,
 } from "../types/rate-schedule.js";
+import { CaptureClass } from "../types/capture.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -75,18 +76,76 @@ describe("RateScheduleSchema", () => {
     ).toThrow();
   });
 
-  it("accepts all six segment kinds in one schedule", () => {
+  it("accepts all seven segment kinds in one schedule", () => {
     const segments: RateSegment[] = [
       { kind: "constant", startTime: 0, endTime: 100, bps: 500 },
       { kind: "step", startTime: 100, endTime: 200, bps: 400 },
       { kind: "linear-decay", startTime: 200, endTime: 300, startBps: 400, endBps: 100 },
       { kind: "exponential-decay", startTime: 300, endTime: 400, startBps: 300, endBps: 50, decayPerSecond: 0.01 },
       { kind: "adoption-indexed", startTime: 400, endTime: 500, scale: 1000, floorBps: 10, capBps: 800 },
-      { kind: "piecewise-value", startTime: 500, endTime: null, thresholdCents: 5000, bpsLow: 0, bpsHigh: 250 },
+      { kind: "piecewise-value", startTime: 500, endTime: 600, thresholdCents: 5000, bpsLow: 0, bpsHigh: 250 },
+      {
+        kind: "capture-class-indexed",
+        startTime: 600,
+        endTime: null,
+        byClass: { CC0: 50, CC1: 100, CC2: 150, CC3: 200, CC4: 250, CC5: 300 },
+        default: 75,
+      },
     ];
     const s = makeSchedule(segments);
     expect(() => RateScheduleSchema.parse(s)).not.toThrow();
-    expect(s.segments).toHaveLength(6);
+    expect(s.segments).toHaveLength(7);
+  });
+
+  it("accepts capture-class-indexed segments", () => {
+    const s = makeSchedule([
+      {
+        kind: "capture-class-indexed",
+        startTime: 0,
+        endTime: null,
+        byClass: { CC0: 25, CC3: 250 },
+        default: 100,
+      },
+    ]);
+    expect(() => RateScheduleSchema.parse(s)).not.toThrow();
+  });
+
+  it("rejects negative bps in byClass", () => {
+    expect(() =>
+      RateScheduleSchema.parse({
+        scheduleHash: ZERO_HASH,
+        version: 1,
+        segments: [
+          {
+            kind: "capture-class-indexed",
+            startTime: 0,
+            endTime: null,
+            byClass: { CC0: -1 },
+            default: 100,
+          },
+        ],
+        publishedAt: PUBLISHED,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects bps > 10000 in byClass", () => {
+    expect(() =>
+      RateScheduleSchema.parse({
+        scheduleHash: ZERO_HASH,
+        version: 1,
+        segments: [
+          {
+            kind: "capture-class-indexed",
+            startTime: 0,
+            endTime: null,
+            byClass: { CC3: 10001 },
+            default: 100,
+          },
+        ],
+        publishedAt: PUBLISHED,
+      }),
+    ).toThrow();
   });
 });
 
@@ -234,6 +293,113 @@ describe("evaluateRateSchedule — piecewise-value", () => {
     ]);
     expect(evaluateRateSchedule(s, ctx({ jobValueCents: 1000 })).bps).toBe(200);
     expect(evaluateRateSchedule(s, ctx({ jobValueCents: 100_000 })).bps).toBe(200);
+  });
+});
+
+describe("evaluateRateSchedule — capture-class-indexed", () => {
+  // A schedule that pays heavily for high-rigor capture classes (CC3+) but
+  // discounts low-class captures. Mirrors how a regulated-industry operator
+  // would stratify their fees by evidence rigor.
+  const regulatedSchedule = makeSchedule([
+    {
+      kind: "capture-class-indexed",
+      startTime: 0,
+      endTime: null,
+      byClass: { CC0: 50, CC1: 100, CC2: 150, CC3: 300, CC4: 400, CC5: 500 },
+      default: 75,
+    },
+  ]);
+
+  it("evaluates to byClass[CC3] when context has captureClass=CC3", () => {
+    const r3 = evaluateRateSchedule(regulatedSchedule, {
+      ...ctx(),
+      captureClass: CaptureClass.CC3,
+    });
+    expect(r3.bps).toBe(300);
+    expect(r3.kind).toBe("capture-class-indexed");
+    expect(r3.segmentIndex).toBe(0);
+
+    const r5 = evaluateRateSchedule(regulatedSchedule, {
+      ...ctx(),
+      captureClass: CaptureClass.CC5,
+    });
+    expect(r5.bps).toBe(500);
+
+    const r0 = evaluateRateSchedule(regulatedSchedule, {
+      ...ctx(),
+      captureClass: CaptureClass.CC0,
+    });
+    expect(r0.bps).toBe(50);
+  });
+
+  it("falls back to default when captureClass missing from context", () => {
+    const r = evaluateRateSchedule(regulatedSchedule, ctx());
+    expect(r.bps).toBe(75);
+    expect(r.kind).toBe("capture-class-indexed");
+  });
+
+  it("falls back to default when captureClass is not pinned in byClass", () => {
+    // Sparse schedule: only pins CC3+. CC0/CC1/CC2 should hit default.
+    const sparseSchedule = makeSchedule([
+      {
+        kind: "capture-class-indexed",
+        startTime: 0,
+        endTime: null,
+        byClass: { CC3: 200, CC4: 300, CC5: 400 },
+        default: 50,
+      },
+    ]);
+    expect(
+      evaluateRateSchedule(sparseSchedule, {
+        ...ctx(),
+        captureClass: CaptureClass.CC0,
+      }).bps,
+    ).toBe(50);
+    expect(
+      evaluateRateSchedule(sparseSchedule, {
+        ...ctx(),
+        captureClass: CaptureClass.CC1,
+      }).bps,
+    ).toBe(50);
+    expect(
+      evaluateRateSchedule(sparseSchedule, {
+        ...ctx(),
+        captureClass: CaptureClass.CC4,
+      }).bps,
+    ).toBe(300);
+  });
+
+  it("returns 0 / -1 outside the segment's time window", () => {
+    const s = makeSchedule([
+      {
+        kind: "capture-class-indexed",
+        startTime: 1000,
+        endTime: 2000,
+        byClass: { CC3: 200 },
+        default: 100,
+      },
+    ]);
+    // before start
+    expect(
+      evaluateRateSchedule(s, {
+        ...ctx({ now: 500 }),
+        captureClass: CaptureClass.CC3,
+      }).segmentIndex,
+    ).toBe(-1);
+    // inside
+    expect(
+      evaluateRateSchedule(s, {
+        ...ctx({ now: 1500 }),
+        captureClass: CaptureClass.CC3,
+      }).bps,
+    ).toBe(200);
+    // after end
+    expect(
+      evaluateRateSchedule(s, {
+        ...ctx({ now: 2500 }),
+        captureClass: CaptureClass.CC3,
+      }).segmentIndex,
+    ).toBe(-1);
   });
 });
 
