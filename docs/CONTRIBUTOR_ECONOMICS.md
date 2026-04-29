@@ -457,3 +457,40 @@ mistake the v1 scope for the eventual v2 scope:
   added role-aware colors and split presets but did NOT add a
   "publish my RateSchedule" wizard, a "browse other contributors'
   schedules" gallery, or an evaluation sandbox. v2 work.
+
+## End-to-end proof
+
+The full flow — publish schedule → mint NFT → fund milestone with payout
+map → release with splitPayout — is validated by
+`packages/contracts/test/EndToEndContributorEconomics.t.sol`. Unlike the
+splitPayout / multistable / contributorEconomics-integration suites (which
+each cover one link in isolation), this file exercises the entire seam in
+one transaction: Solidity-built canonical-JSON bytes are sha256'd in the
+VM, published to `RateScheduleRegistry`, referenced by a
+`ContributorNFT.mint`, then consumed by a `MilestoneEscrow` payout map
+that walks the lifecycle through to per-recipient ERC-20 balance deltas.
+
+```bash
+cd packages/contracts
+forge test --match-path 'test/EndToEndContributorEconomics*' -vv
+```
+
+Two scenarios tested:
+
+1. **Single-token flow** — 4 destinations (operator residual + 3
+   contributors), default USDC, all balances exact. Asserts the
+   helper-built canonical bytes hash matches the off-chain reference
+   vector (`0xd0ba2ae3fe3c21f754281c31c6066a3214d2265f114f921ce8bfe7b186cd3d8b`),
+   so off-chain and on-chain hashing genuinely agree byte-for-byte.
+2. **Multi-stablecoin flow** — same payout map, USDT-overridden
+   milestone. Proves the `SafeERC20` distribution path correctly routes
+   USDT (no-return-bool token) to all recipients and the operator USDC
+   balance starts AND ends at zero. Regression test for the bug fixed
+   in `14cce8e` (where the prior `_distributeWithMap` silently used the
+   default token regardless of override).
+
+Helper: `packages/contracts/test/helpers/CanonicalBytes.sol` — Solidity
+constructor for canonical-JSON bytes that mirror
+`packages/spec/src/util/canonical.ts`. Each fixture carries a NatSpec
+reference vector verified against the off-chain `canonicalize()` output;
+if encoding ever drifts, the e2e test's hash assertion fails first.
