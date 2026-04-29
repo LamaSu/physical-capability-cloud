@@ -14,10 +14,13 @@
     "cap:doctor": "npx cap doctor"
   },
   "dependencies": {
+    "@aparajita/capacitor-biometric-auth": "9.1.2",
     "@capacitor/android": "7.6.2",
+    "@capacitor/app": "7.1.0",
     "@capacitor/core": "7.6.2",
     "@capacitor/ios": "7.6.2",
     "@capacitor/preferences": "7.0.0",
+    "@simplewebauthn/browser": "13.3.0",
     "capacitor-secure-storage-plugin": "0.13.0"
   },
   "devDependencies": {
