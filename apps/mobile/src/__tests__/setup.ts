@@ -9,3 +9,10 @@ import "fake-indexeddb/auto";
   isNativePlatform: () => false,
   getPlatform: () => "web",
 };
+
+// Tell React 18+ that act(...) calls are intentional. Without this flag
+// React emits "current testing environment is not configured to support
+// act(...)" warnings on every state transition during render-based tests
+// (see ApprovalSheet.test.tsx). The flag is the documented way to enable
+// act in non-RTL test runners.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
