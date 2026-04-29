@@ -307,6 +307,93 @@ contract MilestoneEscrowTest is Test {
         assertEq(d.resolved, false);
     }
 
+    // ── Centralized Settlement Tests (Week 2) ───────────────────────
+    // Settlement-mode = Centralized: emits MilestoneSettled but moves
+    // NO real funds. Real ledger lives in @pcc/escrow-ledger off-chain;
+    // the on-chain trace is just a tamper-evidence breadcrumb.
+
+    /// @dev Locally-declared event for vm.expectEmit matching (Foundry pattern).
+    event MilestoneSettled(
+        uint256 indexed milestoneId,
+        MilestoneEscrow.SettlementMode mode,
+        address indexed user,
+        address indexed operator,
+        uint256 amount,
+        bytes32 receiptHash
+    );
+
+    function test_settleCentralized_happyPath() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 receiptHash = keccak256("centralized-receipt-001");
+        uint256 settleAmount = 100e6;
+
+        // Expect the unified settlement event with mode=Centralized.
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneSettled(0, MilestoneEscrow.SettlementMode.Centralized, payer, operator, settleAmount, receiptHash);
+
+        vm.prank(payer);
+        escrow.settleCentralized(0, operator, settleAmount, receiptHash);
+
+        // No real USDC was moved — escrow still holds the funds.
+        assertEq(usdc.balanceOf(address(escrow)), 100e6, "escrow USDC unchanged");
+        assertEq(usdc.balanceOf(operator), 10_000e6, "operator USDC unchanged");
+
+        // Centrally-settled flag is now true; on-chain status remains Funded
+        // (not Released) because no on-chain settlement occurred.
+        assertEq(escrow.centrallySettled(0), true);
+        assertEq(uint8(escrow.getMilestone(0).status), 1); // Funded
+    }
+
+    function test_settleCentralized_doubleSettle_reverts() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 receiptHash = keccak256("centralized-receipt-double");
+
+        // First centralized settlement succeeds.
+        vm.prank(payer);
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+
+        // Second centralized settlement on the same milestone reverts.
+        vm.prank(payer);
+        vm.expectRevert("Already settled centrally");
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+
+        // And the on-chain release path is also locked out.
+        vm.prank(operator);
+        escrow.submitEvidence(0, keccak256("evidence-after-central"));
+        escrow.submitAttestation(0, keccak256("attestation-after-central"));
+        vm.warp(block.timestamp + 3601);
+        vm.expectRevert("Already settled centrally");
+        escrow.release(0);
+    }
+
+    function test_settleCentralized_onlyPayer() public {
+        _setupFundedEscrow(100e6, 0);
+
+        bytes32 receiptHash = keccak256("centralized-receipt-auth");
+
+        // Operator cannot call settleCentralized — same authority as on-chain release().
+        vm.prank(operator);
+        vm.expectRevert("Only payer");
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+
+        // Arbiter cannot call it either.
+        vm.prank(arbiter);
+        vm.expectRevert("Only payer");
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+
+        // A random caller cannot either.
+        vm.prank(challenger);
+        vm.expectRevert("Only payer");
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+
+        // Sanity: payer can still call it after the failures.
+        vm.prank(payer);
+        escrow.settleCentralized(0, operator, 100e6, receiptHash);
+        assertEq(escrow.centrallySettled(0), true);
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────
 
     function _setupFundedEscrow(uint256 amount, uint256 bond) internal {

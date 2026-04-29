@@ -1,8 +1,8 @@
 {
-  "name": "@pcc/kernel-sdk",
+  "name": "@pcc/transparency-log",
   "version": "0.1.0",
   "private": true,
-  "description": "SDK for building third-party digital kernels on the PCC marketplace (manifest, job handler, registration)",
+  "description": "RFC 6962 (CT-style) Merkle transparency log + Ed25519-signed receipts + Anchor.sol payload composition for PCC's centralized substrate.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,9 +20,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*",
-    "@pcc/transparency-log": "workspace:*",
-    "tweetnacl": "^1.0.3",
+    "@noble/curves": "^1.9.0",
+    "@noble/hashes": "^1.8.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
