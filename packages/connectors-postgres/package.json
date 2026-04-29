@@ -1,0 +1,25 @@
+{
+  "name": "@pcc/connectors-postgres",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin TS client for the connectors-runtime sidecar (dlt + postgres source). Wraps POST /sources, POST /pipelines, POST /pipelines/{id}/run, GET /pipelines/{id}/status.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
