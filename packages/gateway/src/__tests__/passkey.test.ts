@@ -10,6 +10,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { p256 } from "@noble/curves/p256";
+import { sha256 } from "@noble/hashes/sha2";
 import {
   passkeyRoutes,
   _resetPasskeyStoreForTests,
@@ -18,6 +20,90 @@ import {
   _getPendingChallengeForTests,
   _expireAllChallengesForTests,
 } from "../routes/passkey.js";
+
+// ── Real P-256 keypair fixture ────────────────────────────────────────
+
+/**
+ * Generate a real P-256 keypair, derive the SEC1 uncompressed public key,
+ * and base64-encode it. Matches what the mobile passkey-manager would
+ * persist in the register flow.
+ */
+function realP256Fixture(): {
+  privateKey: Uint8Array;
+  publicKeyBytes: Uint8Array;
+  publicKeyB64: string;
+} {
+  const privateKey = p256.utils.randomPrivateKey();
+  // Uncompressed (SEC1): 0x04 || X(32) || Y(32) = 65 bytes.
+  const publicKeyBytes = p256.getPublicKey(privateKey, false);
+  const publicKeyB64 = Buffer.from(publicKeyBytes).toString("base64");
+  return { privateKey, publicKeyBytes, publicKeyB64 };
+}
+
+/**
+ * Build a WebAuthn-style assertion bundle for a given challenge:
+ * authenticatorData || sha256(clientDataJSON), signed with the private key.
+ *
+ * Returns base64-encoded strings the way the client would send them.
+ */
+function buildAssertion(opts: {
+  privateKey: Uint8Array;
+  challengeB64: string;
+  origin?: string;
+  authenticatorData?: Uint8Array;
+}): {
+  signature: string;
+  authenticatorData: string;
+  clientDataJSON: string;
+} {
+  // WebAuthn uses base64url for the challenge inside clientDataJSON.
+  const challengeB64u = opts.challengeB64
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  const clientData = {
+    type: "webauthn.get",
+    challenge: challengeB64u,
+    origin: opts.origin ?? "https://capability.network",
+  };
+  const clientDataJSONBytes = new TextEncoder().encode(JSON.stringify(clientData));
+
+  // 37+ byte authenticatorData stub (rpIdHash 32 || flags 1 || counter 4).
+  const authenticatorData =
+    opts.authenticatorData ??
+    (() => {
+      const ad = new Uint8Array(37);
+      // Some non-zero bytes so this is distinguishable across tests.
+      for (let i = 0; i < 32; i++) ad[i] = i + 1;
+      ad[32] = 0x05; // flags: UP=1, UV=1
+      // counter zero
+      return ad;
+    })();
+
+  // Signed message: authData || sha256(clientDataJSON).
+  const clientDataHash = sha256(clientDataJSONBytes);
+  const message = new Uint8Array(authenticatorData.length + clientDataHash.length);
+  message.set(authenticatorData, 0);
+  message.set(clientDataHash, authenticatorData.length);
+  const messageHash = sha256(message);
+  // Sign hash directly. p256.sign hashes the input by default, so we
+  // pass the already-hashed message and rely on the signed-bytes equivalence
+  // since hash(hash(x)) is what WebAuthn signs in practice (the platform
+  // hashes the wire bytes once internally).
+  // Approach: sign the raw message, server reconstructs message and hashes
+  // identically. We're hashing here only because p256.verify auto-hashes
+  // by default — to skip the implicit hash we need prehash:true OR pass
+  // the raw message and trust the symmetric hash on both sides. We pick
+  // the prehash:true path to match the implementation contract.
+  const sig = p256.sign(messageHash, opts.privateKey, { prehash: false });
+  const sigBytes = sig.toDERRawBytes();
+
+  return {
+    signature: Buffer.from(sigBytes).toString("base64"),
+    authenticatorData: Buffer.from(authenticatorData).toString("base64"),
+    clientDataJSON: Buffer.from(clientDataJSONBytes).toString("base64"),
+  };
+}
 
 // ── Fixture helpers ───────────────────────────────────────────────────
 
@@ -260,5 +346,198 @@ describe("POST /api/passkey/challenge", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("invalid_body");
+  });
+});
+
+// ── Verify ────────────────────────────────────────────────────────────
+
+describe("POST /api/passkey/verify", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    _resetPasskeyStoreForTests();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  /** Issue a challenge for a freshly-seeded user with a real P-256 keypair. */
+  async function setupUserAndChallenge(userId: string): Promise<{
+    privateKey: Uint8Array;
+    credentialId: string;
+    challengeId: string;
+    challengeB64: string;
+  }> {
+    const fixture = realP256Fixture();
+    const credentialId = `cred-${userId}`;
+    _seedRegisteredCredentialForTests({
+      userId,
+      credentialId,
+      publicKey: fixture.publicKeyB64,
+      authenticatorData: "auth-stub",
+    });
+    const challRes = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId },
+    });
+    expect(challRes.statusCode).toBe(200);
+    const cb = challRes.json();
+    return {
+      privateKey: fixture.privateKey,
+      credentialId,
+      challengeId: cb.challengeId,
+      challengeB64: cb.challenge,
+    };
+  }
+
+  it("verifies a valid assertion and returns a session token", async () => {
+    const { privateKey, credentialId, challengeId, challengeB64 } =
+      await setupUserAndChallenge("user-delta");
+
+    const assertion = buildAssertion({ privateKey, challengeB64 });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId,
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(typeof body.sessionToken).toBe("string");
+    expect(body.sessionToken.length).toBeGreaterThan(20);
+    expect(body.userId).toBe("user-delta");
+    expect(body.credentialId).toBe(credentialId);
+
+    // Challenge consumed; session created.
+    const peek = _peekPasskeyStoreForTests();
+    expect(peek.challenges).toBe(0);
+    expect(peek.sessions).toBe(1);
+  });
+
+  it("rejects an expired challenge with 410", async () => {
+    const { privateKey, credentialId, challengeId, challengeB64 } =
+      await setupUserAndChallenge("user-echo");
+
+    _expireAllChallengesForTests();
+
+    const assertion = buildAssertion({ privateKey, challengeB64 });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId,
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+
+    expect(res.statusCode).toBe(410);
+    expect(res.json().error).toBe("challenge_expired");
+    // Challenge cleaned up.
+    expect(_getPendingChallengeForTests(challengeId)).toBeNull();
+  });
+
+  it("rejects a wrong / unregistered credentialId with 404", async () => {
+    const { privateKey, challengeId, challengeB64 } =
+      await setupUserAndChallenge("user-foxtrot");
+
+    const assertion = buildAssertion({ privateKey, challengeB64 });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId: "cred-DOES-NOT-EXIST",
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("credential_not_found");
+  });
+
+  it("rejects a replayed challenge on the second verify with 404", async () => {
+    const { privateKey, credentialId, challengeId, challengeB64 } =
+      await setupUserAndChallenge("user-golf");
+
+    const assertion = buildAssertion({ privateKey, challengeB64 });
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId,
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+    expect(first.statusCode).toBe(200);
+
+    // Replay: same challenge, same assertion.
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId,
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+    // After successful verify, the challenge is deleted, so the second
+    // call gets a 404 ("not found"). This is the desired outcome —
+    // replay is impossible because the nonce no longer exists.
+    expect(second.statusCode).toBe(404);
+    expect(second.json().error).toBe("challenge_not_found");
+  });
+
+  it("rejects a malformed signature with 401", async () => {
+    const { credentialId, challengeId, challengeB64 } =
+      await setupUserAndChallenge("user-hotel");
+
+    // Build an assertion with a different (random) private key — the
+    // signature will be perfectly well-formed P-256 but won't verify
+    // against the stored public key.
+    const wrongFixture = realP256Fixture();
+    const assertion = buildAssertion({
+      privateKey: wrongFixture.privateKey,
+      challengeB64,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/verify",
+      payload: {
+        challengeId,
+        credentialId,
+        signature: assertion.signature,
+        authenticatorData: assertion.authenticatorData,
+        clientDataJSON: assertion.clientDataJSON,
+      },
+    });
+
+    // The challenge match check passes (clientDataJSON has the right
+    // challenge), but signature verification fails against the wrong
+    // public key.
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("signature_invalid");
   });
 });

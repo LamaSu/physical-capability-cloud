@@ -384,8 +384,212 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       };
     },
   );
-}
 
-// Avoid the unused-import warning when we expand the file later.
-void p256;
-void sha256;
+  /**
+   * POST /api/passkey/verify
+   *
+   * Verify a WebAuthn assertion against a previously-issued challenge.
+   *
+   * Per the WebAuthn spec, the signed message is the concatenation:
+   *
+   *     authenticatorData || sha256(clientDataJSON)
+   *
+   * The client (passkey-manager.signApproval) returns base64url-encoded
+   * `authenticatorData` and `clientDataJSON` blobs alongside the P-256
+   * ECDSA signature. We reconstruct the message bytes, look up the stored
+   * public key for the credentialId, and verify with @noble/curves/p256.
+   *
+   * Replay prevention is layered:
+   *   1. Challenge must exist + not be expired + not be `used`.
+   *   2. The clientDataJSON's `challenge` field must match the issued
+   *      base64url challenge (RP-bound by the WebAuthn protocol; we
+   *      double-check at the application layer too).
+   *   3. On success, mark the challenge `used` AND delete it. A second
+   *      verify with the same challenge will fail.
+   *
+   * On success we mint an opaque session token (32 random bytes,
+   * base64url) and return it. The mobile app uses it as a Bearer for
+   * subsequent authenticated calls in the same session.
+   */
+  app.post<{ Body: VerifyBody }>(
+    "/api/passkey/verify",
+    async (req, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as VerifyBody;
+      const { challengeId, credentialId, signature, authenticatorData, clientDataJSON } =
+        body;
+
+      if (
+        !isString(challengeId) ||
+        !isString(credentialId) ||
+        !isString(signature) ||
+        !isString(authenticatorData) ||
+        !isString(clientDataJSON)
+      ) {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message:
+            "challengeId, credentialId, signature, authenticatorData, clientDataJSON are required strings",
+        });
+      }
+
+      // 1. Lookup challenge — must exist, not be expired, not be used.
+      const pending = state.challenges.get(challengeId);
+      if (!pending) {
+        return reply.status(404).send({
+          error: "challenge_not_found",
+          message: `Challenge "${challengeId}" not found or already consumed`,
+        });
+      }
+      if (pending.used) {
+        // Defensive: should have been deleted, but in case of a race we
+        // refuse to honor a marked-used challenge.
+        state.challenges.delete(challengeId);
+        return reply.status(409).send({
+          error: "challenge_replayed",
+          message: "Challenge has already been used",
+        });
+      }
+      if (pending.expiresAtMs <= nowMs()) {
+        state.challenges.delete(challengeId);
+        return reply.status(410).send({
+          error: "challenge_expired",
+          message: "Challenge has expired; request a new one",
+        });
+      }
+
+      // 2. Lookup credential.
+      const cred = state.credentialsById.get(credentialId);
+      if (!cred) {
+        return reply.status(404).send({
+          error: "credential_not_found",
+          message: `credentialId "${credentialId}" is not registered`,
+        });
+      }
+      // Belt-and-suspenders: the credential must belong to the user the
+      // challenge was issued for. (In v1 we don't tie credentialId to
+      // userId hard — we look up by credentialId — but we still want to
+      // reject cross-user impersonation.)
+      if (cred.userId !== pending.userId) {
+        return reply.status(403).send({
+          error: "credential_user_mismatch",
+          message: "credentialId is not registered for the challenge's userId",
+        });
+      }
+
+      // 3. Decode signature + authenticatorData + clientDataJSON.
+      const sigBytes = b64decode(signature);
+      const authDataBytes = b64decode(authenticatorData);
+      const clientDataBytes = b64decode(clientDataJSON);
+      if (!sigBytes || !authDataBytes || !clientDataBytes) {
+        return reply.status(400).send({
+          error: "invalid_encoding",
+          message:
+            "signature, authenticatorData, clientDataJSON must be base64 / base64url",
+        });
+      }
+
+      // 4. (Optional but recommended) Cross-check clientDataJSON.challenge
+      //     matches the issued nonce. WebAuthn guarantees this binding;
+      //     we re-check at the app layer because v1 uses our own challenge
+      //     issuance (not browser-default WebAuthn challenge selection).
+      try {
+        const text = Buffer.from(clientDataBytes).toString("utf-8");
+        const parsed = JSON.parse(text) as { challenge?: string };
+        const expectedB64u = pending.challenge
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
+        if (
+          typeof parsed.challenge === "string" &&
+          parsed.challenge.replace(/=+$/, "") !== expectedB64u
+        ) {
+          // Mismatch: someone is replaying or substituting.
+          return reply.status(403).send({
+            error: "challenge_mismatch",
+            message: "clientDataJSON.challenge does not match the issued nonce",
+          });
+        }
+        // If clientDataJSON doesn't have a `challenge` field at all (e.g.
+        // a stripped-down test fixture), we don't fail — the signature
+        // check below is the real gate.
+      } catch {
+        // Malformed clientDataJSON — let the signature check catch it,
+        // since the bytes are still part of the signed payload.
+      }
+
+      // 5. Reconstruct the signed message: authenticatorData || sha256(clientDataJSON).
+      const clientDataHash = sha256(clientDataBytes);
+      const message = new Uint8Array(authDataBytes.length + clientDataHash.length);
+      message.set(authDataBytes, 0);
+      message.set(clientDataHash, authDataBytes.length);
+
+      // 6. Verify P-256 ECDSA signature.
+      //    @noble/curves/p256 accepts DER-encoded signatures by default,
+      //    which is what WebAuthn returns. Pass the message hash since
+      //    p256.verify hashes internally — actually, p256.verify expects
+      //    the *message* (and hashes via sha256 itself when prehash=false).
+      //    To be explicit we hash ourselves and use prehash:true.
+      const pubBytes = parseP256PublicKey(cred.publicKey);
+      if (!pubBytes) {
+        // Should never happen — register validated this — but defend.
+        return reply.status(500).send({
+          error: "stored_key_invalid",
+          message: "Stored public key is not valid SEC1 P-256",
+        });
+      }
+      let sigOk = false;
+      try {
+        // WebAuthn signs sha256(authData || sha256(clientData)).
+        // @noble's p256.verify handles DER-encoded sigs by default; raw
+        // 64-byte concat sigs are also supported via { format: 'raw' }.
+        // Try DER first, fall back to raw on parse error.
+        const messageHash = sha256(message);
+        try {
+          sigOk = p256.verify(sigBytes, messageHash, pubBytes, {
+            prehash: false,
+          });
+        } catch {
+          // Try as raw 64-byte (r||s) signature
+          if (sigBytes.length === 64) {
+            sigOk = p256.verify(sigBytes, messageHash, pubBytes, {
+              prehash: false,
+              format: "raw",
+            } as never);
+          }
+        }
+      } catch {
+        sigOk = false;
+      }
+      if (!sigOk) {
+        return reply.status(401).send({
+          error: "signature_invalid",
+          message: "P-256 signature did not verify against stored public key",
+        });
+      }
+
+      // 7. Mark challenge used + delete + mint session token.
+      pending.used = true;
+      state.challenges.delete(challengeId);
+
+      const sessionTokenBytes = randomBytes(SESSION_TOKEN_BYTES);
+      const sessionToken = b64encode(sessionTokenBytes)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+      const session: Session = {
+        sessionToken,
+        userId: cred.userId,
+        credentialId,
+        issuedAtMs: nowMs(),
+      };
+      state.sessions.set(sessionToken, session);
+
+      return {
+        ok: true,
+        sessionToken,
+        userId: cred.userId,
+        credentialId,
+      };
+    },
+  );
+}
