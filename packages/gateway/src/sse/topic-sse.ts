@@ -2,7 +2,7 @@
  * Topic-based SSE endpoints — per-job, per-kernel, per-device, per-batch streaming.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { StreamTopic } from "@pcc/spec";
 import { streamHub } from "./stream-hub.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
@@ -16,6 +16,29 @@ const ALLOWED_SSE_ORIGINS = new Set([
   "http://127.0.0.1:5173",
   "http://127.0.0.1:3200",
 ]);
+
+/**
+ * Resolve the lastEventId for resume from EITHER the `last-event-id` HTTP
+ * header (the SSE standard) OR the `?lastEventId=` query string param
+ * (browser EventSource fallback — the native EventSource API cannot set
+ * custom headers on reconnect). The header wins when both are present.
+ *
+ * Week 6 (A1): added query-string fallback so the mobile EventSource can
+ * resume after reconnect; the mobile listener already passes lastEventId
+ * as a query param because browser EventSource has no header support.
+ *
+ * Exported for tests; production callers go through the routes which use
+ * this internally.
+ */
+export function resolveLastEventId(req: FastifyRequest): string | undefined {
+  const headerVal = req.headers["last-event-id"];
+  if (typeof headerVal === "string" && headerVal.length > 0) return headerVal;
+  // Header wins; otherwise check the query string.
+  const query = req.query as Record<string, unknown> | undefined;
+  const queryVal = query?.lastEventId;
+  if (typeof queryVal === "string" && queryVal.length > 0) return queryVal;
+  return undefined;
+}
 
 export async function topicSSE(app: FastifyInstance) {
   // Connection limit gate for all SSE topic streams (auth is checked per-route)
@@ -85,7 +108,7 @@ export async function topicSSE(app: FastifyInstance) {
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { jobId } = req.params as { jobId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const lastEventId = resolveLastEventId(req);
     const origin = req.headers.origin as string | undefined;
     setupSSE(req, reply, [{ type: "job", id: jobId }], lastEventId, origin);
     await new Promise(() => {});
@@ -98,7 +121,7 @@ export async function topicSSE(app: FastifyInstance) {
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { kernelId } = req.params as { kernelId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const lastEventId = resolveLastEventId(req);
     const origin = req.headers.origin as string | undefined;
     setupSSE(req, reply, [{ type: "kernel", id: kernelId }], lastEventId, origin);
     await new Promise(() => {});
@@ -111,7 +134,7 @@ export async function topicSSE(app: FastifyInstance) {
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { deviceId } = req.params as { deviceId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const lastEventId = resolveLastEventId(req);
     const origin = req.headers.origin as string | undefined;
     setupSSE(req, reply, [{ type: "device", id: deviceId }], lastEventId, origin);
     await new Promise(() => {});
@@ -124,7 +147,7 @@ export async function topicSSE(app: FastifyInstance) {
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { batchId } = req.params as { batchId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const lastEventId = resolveLastEventId(req);
     const origin = req.headers.origin as string | undefined;
     setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
     await new Promise(() => {});
@@ -150,7 +173,7 @@ export async function topicSSE(app: FastifyInstance) {
       return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
     }
     const { sessionId } = req.params as { sessionId: string };
-    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const lastEventId = resolveLastEventId(req);
     const origin = req.headers.origin as string | undefined;
     setupSSE(req, reply, [{ type: "approval", id: sessionId }], lastEventId, origin);
     await new Promise(() => {});
