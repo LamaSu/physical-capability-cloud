@@ -165,3 +165,54 @@ with identical request/response shapes. The 23 existing route tests in
 - `C:\Users\globa\pcc-contributor-economics\packages\db\src\repositories\story.ts` — `repos.story` (Story Protocol IP graph)
 - `C:\Users\globa\pcc-contributor-economics\packages\db\src\repositories\contributor.ts` — `repos.contributors` (contributor-economics)
 - `C:\Users\globa\pcc-contributor-economics\packages\mcp-server\src\index.ts` — tools 35-39 (`pcc_ip_*`) and 50-56 (`pcc_contributor_*` / `pcc_schedule_*` / `pcc_training_manifest_*`)
+- `C:\Users\globa\pcc-contributor-economics\packages\gateway\src\__tests__\contributors.test.ts` — "no-deprecation contract" describe block (audit guard, 6 tests, added 2026-04-29)
+
+---
+
+## Addendum (2026-04-29) — Resume run from `impl-api-unify-resume`
+
+The original `impl-api-unify` agent rate-limited after committing this audit
+doc + the §12.7 documentation cross-link. A resume agent picked up the
+mission brief that was originally written assuming the audit WOULD find
+duplicates — i.e. assuming the original agent would proceed to (a) add
+`Deprecation`/`Sunset` headers, (b) add `[DEPRECATED]` markers to MCP tool
+descriptions, (c) consolidate any duplicated repository methods.
+
+**The resume agent's verdict matches the original audit verdict, with one
+addition**: a defensive test block (6 cases) was added to
+`packages/gateway/src/__tests__/contributors.test.ts` that asserts no
+`Deprecation`/`Sunset`/`Link rel="successor-version"` headers appear on any
+`/api/contributors/*` route. Reasoning:
+
+- The mission brief premise (steps 1-3) is contradicted by the audit
+  findings. Adding fake deprecation headers to non-duplicate routes would
+  be misleading, self-fulfilling (forced 2030 sunset with no replacement),
+  and honesty-violating.
+- The repository-unification step (mission #3) is unnecessary because the
+  two repositories (`repos.story.*` vs `repos.contributors.*`) write to
+  fully disjoint tables: `storyIpRegistrations` / `storyDerivativeLinks` /
+  `storyRoyaltySplits` / `storyRevenueClaims` vs `contributorProfiles` /
+  `rateSchedules` / `trainingManifests` / `compositionManifests`. They
+  cannot share state by construction.
+- The test addition is a forward-defense: future changes that try to slap
+  deprecation headers on these routes (because the surface "looks
+  parallel") will fail, forcing whoever wrote the change to update this
+  audit doc with the new operational mapping. That's deliberate friction
+  to keep the audit conclusion durable.
+
+**Files changed in the resume run** (single commit):
+- `packages/gateway/src/__tests__/contributors.test.ts` — +136 lines, 6
+  new test cases under a new `describe("contributor routes — no-deprecation
+  contract (audit 2026-04-27)")` block.
+
+**No production-code changes were made**. Routes, MCP tool descriptions,
+and repositories are unchanged from the original audit's recommendation.
+
+**Test result**: 25 original contributor tests + 6 new no-deprecation
+tests = 31 passed; `ip.test` (33) and mcp-server suite (51) unaffected.
+
+**Sequel work**: when v2 lands (ContributorNFT-as-IPAsset migration), the
+agent landing those routes MUST update both this audit doc and the
+no-deprecation test block — flipping each affected assertion to require
+the deprecation header instead of forbidding it. That's the migration
+signal.
