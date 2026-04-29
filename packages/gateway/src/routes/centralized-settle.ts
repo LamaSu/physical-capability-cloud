@@ -46,6 +46,14 @@ import {
   EscrowEmptyError,
   type Actor,
 } from "@pcc/escrow-ledger";
+import {
+  publishApprovalRequest,
+  awaitApprovalDecision,
+  mintApprovalId,
+  ApprovalTimeoutError,
+  type ApprovalRequestPayload,
+} from "./approval-request.js";
+import { streamHub } from "../sse/stream-hub.js";
 
 // ── Singletons (module-level) ─────────────────────────────────────────
 
@@ -85,6 +93,25 @@ export interface SettleableSession {
   capability: string;
   /** Hashed user/operator identifiers for receipt actorsHashed. */
   actorsHashed: { user: string; operator: string };
+  /**
+   * Per-session settlement mode. Defaults to "centralized" when absent
+   * (matches the schema-level DEFAULT_SETTLEMENT_MODE). On-chain sessions
+   * never reach this route — they go through MilestoneEscrow.sol.
+   */
+  settlementMode?: SettlementMode;
+  /**
+   * Operator-facing display name, surfaced into the approval-request
+   * payload. Falls back to operator.id when absent.
+   */
+  operatorName?: string;
+  /**
+   * Week 6 A2: when true, the centralized-settle route fires an
+   * approval-request SSE event and blocks until the user POSTs an
+   * approve/reject (or the timeout fires). Default false — preserves
+   * the Week 2 settle-immediately contract for sessions that don't
+   * need explicit operator confirmation.
+   */
+  requiresApproval?: boolean;
 }
 
 let state: CentralizedSettleState = {
@@ -158,6 +185,45 @@ interface SettleBody {
   evidenceTimestamp?: string;
   /** Override settlement mode (defaults to "centralized"). */
   settlementMode?: SettlementMode;
+  /**
+   * Optional override per call: force this settle through the approval
+   * gate even when the session.requiresApproval flag is false. Useful for
+   * agent-issued settlements that need a per-call confirmation regardless
+   * of the configured policy.
+   */
+  requireApproval?: boolean;
+}
+
+// ── Approval gate helpers ─────────────────────────────────────────────
+
+/**
+ * Resolve whether this settle call should fire the approval gate. Three
+ * inputs in order of precedence (later overrides earlier):
+ *   1. Session.requiresApproval (per-session config)
+ *   2. Body.requireApproval (per-call override)
+ *   3. Env APPROVAL_THRESHOLD_USD (auto-fire when amount >= threshold)
+ *      — when set, sessions whose amount meets the threshold flip to
+ *      "requires approval" automatically. Default unset → no auto-fire.
+ *
+ * Centralizes the policy-or-policy decision; A future iteration tied to
+ * the capability schema can add a 4th source without changing callers.
+ */
+function shouldGateOnApproval(
+  session: SettleableSession,
+  body: SettleBody,
+): boolean {
+  if (body.requireApproval === true) return true;
+  if (body.requireApproval === false) return false; // explicit opt-out wins
+  if (session.requiresApproval === true) return true;
+  // Env-driven auto-threshold fallback (described in W6 task hints).
+  const raw = process.env.APPROVAL_THRESHOLD_USD;
+  if (raw) {
+    const cents = Math.floor(parseFloat(raw) * 100);
+    if (Number.isFinite(cents) && cents > 0 && session.amountCents >= cents) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────
@@ -193,6 +259,68 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
         });
       }
 
+      const body = (req.body ?? {}) as SettleBody;
+
+      // ── Week 6 A2: optional approval gate ────────────────────────────
+      //
+      // When the session/body/env says this settle needs operator
+      // confirmation, fire an approval-request SSE event AND block until
+      // the user POSTs an approve/reject (or the timeout fires).
+      //
+      // Behavior contract:
+      //   - approve   → continues to the regular settle path
+      //   - reject    → returns 403 settle_rejected, NO ledger changes
+      //   - timeout   → returns 408 approval_timeout, NO ledger changes
+      //   - no SSE subscriber → returns 503 with `error: no_subscriber`
+      //     so the caller can surface a helpful UI prompt
+      if (shouldGateOnApproval(session, body)) {
+        const topicForCount = { type: "approval" as const, id: sessionId };
+        const subscriberCount = streamHub.getSubscriberCount(topicForCount);
+        if (subscriberCount === 0) {
+          return reply.status(503).send({
+            error: "no_subscriber",
+            message:
+              "Settlement requires operator approval but no SSE subscriber is connected. Open the mobile app and retry.",
+          });
+        }
+        const approvalId = mintApprovalId();
+        const requestedAt = new Date().toISOString();
+        const payload: ApprovalRequestPayload = {
+          id: sessionId,
+          capability: session.capability,
+          amountUsd: session.amountCents / 100,
+          operatorName: session.operatorName ?? session.operator.id,
+          evidenceHash: body.evidenceHash ?? "00".repeat(32),
+          requestedAt,
+          approvalId,
+        };
+        publishApprovalRequest(payload, {
+          apiKeyId: null,
+          operatorId: null,
+        });
+        try {
+          const decision = await awaitApprovalDecision(sessionId, {
+            approvalId,
+          });
+          if (decision.decision === "reject") {
+            return reply.status(403).send({
+              error: "settle_rejected",
+              message: "Operator rejected the settlement",
+              ...(decision.reason ? { reason: decision.reason } : {}),
+            });
+          }
+          // Approved — fall through to the regular settle path below.
+        } catch (err) {
+          if (err instanceof ApprovalTimeoutError) {
+            return reply.status(408).send({
+              error: "approval_timeout",
+              message: `User did not approve within the timeout window for session ${sessionId}`,
+            });
+          }
+          throw err;
+        }
+      }
+
       // 1. Release the escrow balance to the operator. Throws
       //    EscrowEmptyError if there's nothing to release.
       try {
@@ -208,7 +336,6 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
       }
 
       // 2. Compose the receipt payload.
-      const body = (req.body ?? {}) as SettleBody;
       const evidenceHash =
         body.evidenceHash ??
         // Fallback for v1: deterministic placeholder when no evidence
