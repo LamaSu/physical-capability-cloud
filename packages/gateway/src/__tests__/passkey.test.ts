@@ -14,6 +14,9 @@ import {
   passkeyRoutes,
   _resetPasskeyStoreForTests,
   _peekPasskeyStoreForTests,
+  _seedRegisteredCredentialForTests,
+  _getPendingChallengeForTests,
+  _expireAllChallengesForTests,
 } from "../routes/passkey.js";
 
 // ── Fixture helpers ───────────────────────────────────────────────────
@@ -151,5 +154,111 @@ describe("POST /api/passkey/register", () => {
     });
     expect(wrongPrefix.statusCode).toBe(400);
     expect(wrongPrefix.json().error).toBe("invalid_public_key");
+  });
+});
+
+// ── Challenge ─────────────────────────────────────────────────────────
+
+describe("POST /api/passkey/challenge", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    _resetPasskeyStoreForTests();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it("issues a 32-byte challenge with TTL when the user is registered", async () => {
+    _seedRegisteredCredentialForTests({
+      userId: "user-bravo",
+      credentialId: "cred-BBBB",
+      publicKey: fakeUncompressedP256B64(4),
+      authenticatorData: "auth",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId: "user-bravo" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(typeof body.challengeId).toBe("string");
+    expect(body.challengeId.length).toBeGreaterThan(0);
+    expect(typeof body.challenge).toBe("string");
+    // 32 raw bytes → 44 chars in standard base64.
+    expect(body.challenge.length).toBeGreaterThanOrEqual(43);
+    // Decoded length is 32.
+    const decoded = Buffer.from(body.challenge, "base64");
+    expect(decoded.length).toBe(32);
+
+    // Expires roughly 5 min in the future.
+    const expiresAtMs = Date.parse(body.expiresAt);
+    const drift = expiresAtMs - Date.now();
+    expect(drift).toBeGreaterThan(4 * 60 * 1000);
+    expect(drift).toBeLessThan(6 * 60 * 1000);
+
+    // Store contains exactly one pending challenge.
+    expect(_peekPasskeyStoreForTests().challenges).toBe(1);
+    const pending = _getPendingChallengeForTests(body.challengeId);
+    expect(pending).not.toBeNull();
+    expect(pending?.userId).toBe("user-bravo");
+    expect(pending?.used).toBe(false);
+  });
+
+  it("returns 404 when the user has no registered passkey", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId: "ghost-user" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("user_not_registered");
+    expect(_peekPasskeyStoreForTests().challenges).toBe(0);
+  });
+
+  it("expires challenges and sweeps them on the next call", async () => {
+    _seedRegisteredCredentialForTests({
+      userId: "user-charlie",
+      credentialId: "cred-CCCC",
+      publicKey: fakeUncompressedP256B64(5),
+      authenticatorData: "auth",
+    });
+
+    // Issue challenge #1, then force-expire it.
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId: "user-charlie" },
+    });
+    expect(first.statusCode).toBe(200);
+    const firstId = first.json().challengeId as string;
+    _expireAllChallengesForTests();
+
+    // Issue challenge #2 — this should trigger sweep + delete the expired one.
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId: "user-charlie" },
+    });
+    expect(second.statusCode).toBe(200);
+
+    // Only the new (un-expired) challenge survives.
+    expect(_peekPasskeyStoreForTests().challenges).toBe(1);
+    expect(_getPendingChallengeForTests(firstId)).toBeNull();
+  });
+
+  it("rejects malformed body with 400", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/passkey/challenge",
+      payload: { userId: 123 }, // wrong type
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_body");
   });
 });
