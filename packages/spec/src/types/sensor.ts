@@ -138,6 +138,13 @@ export interface ProcessLogEntry {
 
 /** Topic for streaming subscriptions */
 export interface StreamTopic {
-  type: "job" | "kernel" | "device" | "batch" | "global";
+  /**
+   * Topic class. Adding `"approval"` (Week 5) lets the gateway publish
+   * server-issued approval requests to a per-session channel that the
+   * mobile app subscribes to via `GET /sse/stream/approval/:sessionId`.
+   * The `id` for an approval topic is the session id (opaque, not the
+   * passkey session token).
+   */
+  type: "job" | "kernel" | "device" | "batch" | "global" | "approval";
   id: string;
 }
