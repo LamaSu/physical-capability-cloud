@@ -14,10 +14,7 @@ import { TEMPLATE_LIST } from "./templates.js";
 export function OrchestratorLandingPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   useEffect(() => {
-    setPageMeta({
-      title: "Orchestrator",
-      subtitle: "Pick a template to automate any business process on PCC."
-    });
+    setPageMeta("Orchestrator", "Pick a template to automate any business process on PCC.");
   }, [setPageMeta]);
 
   const physical = TEMPLATE_LIST.filter((t) => t.capability_class === "physical");
