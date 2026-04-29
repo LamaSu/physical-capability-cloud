@@ -1,0 +1,58 @@
+[project]
+name = "pcc-connectors-runtime"
+version = "0.1.0"
+description = "Connectors sidecar for PCC. FastAPI REST wrapper around dlt (data load tool) — exposes source/destination/pipeline primitives so TS connector shells stay free of a Python interpreter dependency."
+requires-python = ">=3.11"
+license = {text = "MIT"}
+readme = "README.md"
+authors = [
+    {name = "Physical Capability Cloud"},
+]
+keywords = ["pcc", "connectors", "dlt", "etl", "elt", "ingest"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
+
+dependencies = [
+    # dlt is the workhorse: declarative source -> destination pipelines with
+    # automatic schema inference, incremental loads, and managed staging.
+    # Extras pulled in for the destinations and SQL-source we ship in v0.1.
+    "dlt[postgres,sql_database,filesystem]>=1.4,<2.0",
+    # FastAPI exposes dlt as REST.
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    # 12-factor config (matches voice-onboarder convention).
+    "pydantic-settings>=2.1,<3.0",
+    # HTTP client (used by destination plugins like InsForge that talk over REST).
+    "httpx>=0.27,<1.0",
+    # Structured logging (matches pcc-node + voice-onboarder style).
+    "loguru>=0.7,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4,<9.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "respx>=0.20,<1.0",
+]
+
+[project.scripts]
+pcc-connectors-runtime = "connectors_runtime.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
