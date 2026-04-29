@@ -129,4 +129,30 @@ export async function topicSSE(app: FastifyInstance) {
     setupSSE(req, reply, [{ type: "batch", id: batchId }], lastEventId, origin);
     await new Promise(() => {});
   });
+
+  // Per-session approval streaming (Week 5).
+  //
+  // Auth: requires a valid Bearer / SIWE / ?token= credential. This is the
+  // same gate as the other topic SSE routes — when SSE_AUTH_REQUIRED is
+  // not set the gate passes through (backward compat with the rest of
+  // the gateway). Production deployments should set SSE_AUTH_REQUIRED=1
+  // so unauth'd subscribers can't fish for approval events.
+  //
+  // Cross-session isolation: each session has its own `approval:<id>`
+  // topic. Subscribers only get events for the session they subscribed
+  // to. Since session-ids are unguessable opaque strings, knowing one
+  // session's id does not reveal another's. A hardened v2 can additionally
+  // bind session-id to the session token's userId; for v1 the auth gate
+  // + opaque-id is sufficient.
+  app.get("/sse/stream/approval/:sessionId", async (req, reply) => {
+    const auth = await resolveSSEAuth(req);
+    if (!auth.authenticated) {
+      return reply.status(401).send({ error: "SSE_AUTH_REQUIRED", message: auth.reason });
+    }
+    const { sessionId } = req.params as { sessionId: string };
+    const lastEventId = req.headers["last-event-id"] as string | undefined;
+    const origin = req.headers.origin as string | undefined;
+    setupSSE(req, reply, [{ type: "approval", id: sessionId }], lastEventId, origin);
+    await new Promise(() => {});
+  });
 }
