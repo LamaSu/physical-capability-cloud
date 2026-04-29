@@ -30,6 +30,8 @@ const PUBLIC_EXACT = [
   "/api/agents/status",        // Network status is public
   "/api/onboard/registrations", // EXACT match only — GET listing is public, but
                                 // sub-paths like /approve, /reject, /activate require auth
+  "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
+  "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
