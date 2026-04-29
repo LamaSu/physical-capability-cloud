@@ -214,33 +214,46 @@ export function verifyProof(
   const expectedLeafHash = hashLeaf(leaf);
   if (expectedLeafHash !== proof.leafHash) return false;
 
-  // Walk RFC 6962 path: at each level, decide whether the running hash is
-  // the left or right child based on the structural recursion. We mirror
-  // the `path()` traversal here.
-  let current = proof.leafHash;
+  // The path() recursion produces siblings bottom-up (leaf-adjacent first,
+  // root-adjacent last). To verify, we collect the directions in the same
+  // top-down recursion order, then walk siblings bottom-up while consuming
+  // directions in the same order.
+  type Side = "left" | "right";
+  const directions: Side[] = [];
   let start = 0;
   let end = proof.treeSize;
-  let siblingIdx = 0;
-
   while (end - start > 1) {
     const k = leftSubtreeSize(end - start);
     const splitAbsolute = start + k;
-    const sibling = proof.siblings[siblingIdx];
-    if (sibling === undefined) return false;
-
     if (proof.index < splitAbsolute) {
-      // Leaf in left subtree → current is left, sibling is right.
-      current = hashInner(current, sibling);
+      // current leaf is in the LEFT subtree at this level → sibling is on right
+      directions.push("right");
       end = splitAbsolute;
     } else {
-      // Leaf in right subtree → current is right, sibling is left.
-      current = hashInner(sibling, current);
+      directions.push("left");
       start = splitAbsolute;
     }
-    siblingIdx++;
   }
 
-  if (siblingIdx !== proof.siblings.length) return false;
+  // Sanity: number of directions should match number of siblings.
+  if (directions.length !== proof.siblings.length) return false;
+
+  // Now walk bottom-up: directions[directions.length-1] is leaf-adjacent
+  // (first level above the leaf), and proof.siblings[0] is also leaf-adjacent.
+  let current = proof.leafHash;
+  for (let i = 0; i < directions.length; i++) {
+    const sibling = proof.siblings[i];
+    if (sibling === undefined) return false;
+    // The bottom-up direction at level i is directions[directions.length-1-i].
+    const dir = directions[directions.length - 1 - i]!;
+    if (dir === "right") {
+      // sibling is on the right → current is left
+      current = hashInner(current, sibling);
+    } else {
+      current = hashInner(sibling, current);
+    }
+  }
+
   return current === root;
 }
 
