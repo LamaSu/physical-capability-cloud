@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {CanonicalRegistry} from "./CanonicalRegistry.sol";
+
 /**
  * @title RateScheduleRegistry
  * @notice Content-addressed immutable storage for contributor RateSchedules.
@@ -29,6 +31,14 @@ pragma solidity ^0.8.24;
  *           2. Immutability: a key, once set, is never overwritten.
  *           3. Permissionless: any address may publish any schedule.
  *           4. Cheap reads: existence + raw bytes via {exists}/{get}.
+ *
+ *         Shared invariant primitives:
+ *           Hash-binding and replay-prevention checks are factored into
+ *           {CanonicalRegistry} so the same pattern can be reused by future
+ *           content-addressed registries. {CaptureClassRegistry} (CVP) shares
+ *           the conceptual pattern — a future PR may unify its replay revert
+ *           wording so it can also call into the library. See
+ *           `ai/research/contributor-economics/13-canonical-registry-extraction.md`.
  */
 contract RateScheduleRegistry {
     // ── State ────────────────────────────────────────────────────────────
@@ -65,14 +75,16 @@ contract RateScheduleRegistry {
     /**
      * @notice Publish a RateSchedule. Stored permanently under its sha256 hash.
      * @dev    The caller asserts the off-chain-computed `expectedHash`. The
-     *         contract recomputes sha256(scheduleBytes) and reverts if the two
-     *         disagree — this catches both encoding mismatches and tampered
-     *         calldata. After verification, the bytes are stored under that
-     *         hash and the entry is sealed: any future {publish} of the same
-     *         hash reverts with "Already published".
+     *         contract recomputes sha256(scheduleBytes) via the shared
+     *         {CanonicalRegistry.verifyCanonicalHash} helper and reverts if
+     *         the two disagree — this catches both encoding mismatches and
+     *         tampered calldata. {CanonicalRegistry.requireUnclaimed} then
+     *         enforces immutability: any future {publish} of the same hash
+     *         reverts with "Already published".
      *
-     *         CEI ordering: all checks first, then the single state mutation,
-     *         then the event. No external calls. No reentrancy surface.
+     *         CEI ordering: all checks first (in the library), then the single
+     *         state mutation, then the event. No external calls. No reentrancy
+     *         surface.
      *
      * @param scheduleBytes Canonical-JSON bytes (the same bytes that were
      *                      sha256'd off-chain to derive `scheduleHash`).
@@ -85,18 +97,14 @@ contract RateScheduleRegistry {
         external
         returns (bytes32 scheduleHash)
     {
-        require(scheduleBytes.length > 0, "Empty schedule");
+        scheduleHash = CanonicalRegistry.verifyCanonicalHash(scheduleBytes, expectedHash);
+        CanonicalRegistry.requireUnclaimed(_schedules[scheduleHash].length > 0);
 
-        bytes32 actual = sha256(scheduleBytes);
-        require(actual == expectedHash, "Schedule hash mismatch");
-        require(_schedules[actual].length == 0, "Already published");
+        _schedules[scheduleHash] = scheduleBytes;
+        publisher[scheduleHash] = msg.sender;
+        publishedAt[scheduleHash] = uint64(block.timestamp);
 
-        _schedules[actual] = scheduleBytes;
-        publisher[actual] = msg.sender;
-        publishedAt[actual] = uint64(block.timestamp);
-
-        emit SchedulePublished(actual, msg.sender, scheduleBytes.length);
-        return actual;
+        emit SchedulePublished(scheduleHash, msg.sender, scheduleBytes.length);
     }
 
     // ── Views ────────────────────────────────────────────────────────────
