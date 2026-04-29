@@ -44,7 +44,7 @@ function isPublicRoute(url: string): boolean {
   return false;
 }
 
-export async function apiGate(app: FastifyInstance) {
+async function apiGateImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
@@ -77,3 +77,15 @@ export async function apiGate(app: FastifyInstance) {
     });
   });
 }
+
+// T1.5 (2026-04-29): apiGate must run as a NON-ENCAPSULATED plugin so its
+// onRequest hook applies to sibling route plugins registered against the
+// parent app. Without these symbols Fastify isolates the hook to the gate's
+// own scope, leaving every /api/* route registered AFTER apiGate effectively
+// unauthenticated. Verified via apigate-encapsulation.test.ts.
+//
+// Equivalent to wrapping with fastify-plugin(fn) without adding the dep.
+(apiGateImpl as any)[Symbol.for("skip-override")] = true;
+(apiGateImpl as any)[Symbol.for("fastify.display-name")] = "apiGate";
+
+export const apiGate = apiGateImpl;

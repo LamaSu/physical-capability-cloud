@@ -37,8 +37,17 @@ const COLD_START_JOB_THRESHOLD = 20;
 /** Reputation bonus per completed job during cold-start */
 const COLD_START_BONUS_PER_JOB = 30;
 
-/** Maximum cold-start bonus (first 20 jobs × 30 = 600 max) */
-const COLD_START_BONUS_MAX = 600;
+/**
+ * Maximum cold-start bonus.
+ *
+ * T1.5 (2026-04-29): clamped from 600 → 50 to close the sybil-farm exploit.
+ * Pre-fix, a fresh operator with 19 jobs would land at +570 effective rep,
+ * which combined with an unauthenticated /api/onboard/register endpoint let
+ * an attacker mass-mint operators that immediately ranked alongside
+ * legitimately reputable ones. The bonus still exists (small lift to
+ * unstick brand-new operators) but no longer overshoots the gate.
+ */
+const COLD_START_BONUS_MAX = 50;
 
 // ── Tier thresholds ────────────────────────────────────────────────────────
 
