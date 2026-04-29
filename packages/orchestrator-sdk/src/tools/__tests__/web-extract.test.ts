@@ -30,7 +30,7 @@ vi.mock("node:child_process", async () => {
 process.env.MOCK_WEB_EXTRACT = "false";
 
 // Imports must come AFTER vi.mock above.
-const { extractStructured, camoufoxFetch, sanitizeHtmlForLLM, PROMPT_INJECTION_GUARD } = await import("../web-extract.js");
+const { extractStructured, camoufoxFetch, sanitizeHtmlForLLM, PROMPT_INJECTION_GUARD, detectAuthWall, AuthWallError } = await import("../web-extract.js");
 const { zodToJsonSchema } = await import("../zod-json-schema.js");
 
 class MockProc extends EventEmitter {
@@ -369,6 +369,88 @@ describe("extractStructured — T1.2 prompt-injection guard wired", () => {
       })
     ).rejects.toThrow(/only http\(s\) URLs allowed/);
     expect(messagesCreateMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("detectAuthWall — T2.6", () => {
+  it("returns authWall:true on a 'please sign in' page", () => {
+    const r = detectAuthWall("<html><body><h1>Please sign in to continue</h1></body></html>");
+    expect(r.authWall).toBe(true);
+    expect(r.reason).toMatch(/keyword:/);
+  });
+
+  it("returns authWall:true on a 401 Unauthorized stub", () => {
+    const r = detectAuthWall("<html><h1>401 Unauthorized</h1><p>You need to authenticate.</p></html>");
+    expect(r.authWall).toBe(true);
+    expect(r.reason).toMatch(/keyword:401 unauthorized/);
+  });
+
+  it("returns authWall:true when a password-input form is on a short page", () => {
+    const r = detectAuthWall(
+      `<html><body><form><input type="email" /><input type="password" name="pw" /></form></body></html>`
+    );
+    expect(r.authWall).toBe(true);
+    expect(r.reason).toBe("login_form_on_short_page");
+  });
+
+  it("does NOT trigger on a normal company page that mentions 'sign in' deep inside", () => {
+    // long page (>5000 chars) with no auth keywords + a password input shouldn't fire
+    const padding = "Acme Manufacturing builds aerospace parts. ".repeat(200);
+    const r = detectAuthWall(`<html><body>${padding}<input type="password" /></body></html>`);
+    expect(r.authWall).toBe(false);
+  });
+
+  it("returns authWall:false on benign content", () => {
+    expect(detectAuthWall("<html><h1>Acme Co</h1><p>5-axis CNC, AS9100.</p></html>").authWall).toBe(false);
+  });
+
+  it("returns authWall:false on empty input", () => {
+    expect(detectAuthWall("").authWall).toBe(false);
+  });
+});
+
+describe("extractStructured — T2.6 auth-wall short-circuit", () => {
+  const draftSchema = z.object({ name: z.string() });
+
+  it("throws AuthWallError BEFORE calling Claude when the page is a login wall", async () => {
+    spawnImpl = () =>
+      makeProc({
+        stdout: JSON.stringify({
+          content: [{ type: "text", text: "<html><h1>Please log in to continue</h1></html>" }]
+        })
+      });
+
+    await expect(
+      extractStructured({
+        url: "https://example.com/login",
+        schema: draftSchema,
+        goal: "extract"
+      })
+    ).rejects.toBeInstanceOf(AuthWallError);
+    expect(messagesCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("AuthWallError carries the URL + reason for the orchestrator's UX", async () => {
+    spawnImpl = () =>
+      makeProc({
+        stdout: JSON.stringify({
+          content: [{ type: "text", text: "<html><h1>Access denied</h1></html>" }]
+        })
+      });
+
+    try {
+      await extractStructured({
+        url: "https://example.com/private",
+        schema: draftSchema,
+        goal: "extract"
+      });
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(AuthWallError);
+      const err = e as InstanceType<typeof AuthWallError>;
+      expect(err.url).toBe("https://example.com/private");
+      expect(err.reason).toMatch(/keyword:access denied/);
+    }
   });
 });
 

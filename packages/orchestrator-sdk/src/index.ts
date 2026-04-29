@@ -44,6 +44,8 @@ export {
 export {
   extractStructured,
   camoufoxFetch,
+  detectAuthWall,
+  AuthWallError,
   type ExtractOptions,
 } from "./tools/web-extract.js";
 
