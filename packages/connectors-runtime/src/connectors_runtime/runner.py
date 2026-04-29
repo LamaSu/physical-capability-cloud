@@ -65,18 +65,12 @@ async def run_pipeline_async(
     async def _do_run() -> None:
         loop = asyncio.get_running_loop()
         try:
+            # asyncio.run_in_executor doesn't accept kwargs directly. We
+            # wrap the sync call in a lambda so the keyword-only args on
+            # run_pipeline_sync() (name, dataset, table, full_refresh,
+            # storage_path) are bound at submission time.
             future = loop.run_in_executor(
-                None,  # default executor (ThreadPoolExecutor)
-                run_pipeline_sync,
-                source,
-                destination,
-                # NOTE: positional args — the function signature is well-defined,
-                # but we use keyword-only at the call site for safety. Convert here.
-            )
-            # Wrap with a real callable to pass kwargs through the executor.
-            # asyncio's run_in_executor doesn't accept kwargs directly.
-            future = loop.run_in_executor(
-                None,
+                None,  # default ThreadPoolExecutor
                 lambda: run_pipeline_sync(
                     source,
                     destination,
