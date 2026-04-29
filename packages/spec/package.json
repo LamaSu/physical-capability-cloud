@@ -39,6 +39,7 @@
     "zod": "^3.23.0"
   },
   "dependencies": {
+    "@noble/hashes": "^1.7.0",
     "zod": "^3.23.0"
   }
 }
