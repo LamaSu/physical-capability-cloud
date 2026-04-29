@@ -270,8 +270,190 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Test 2: TrainingManifest-expanded payout map
+    //
+    // SAME flow as Test 1, BUT the model-author entry expands recursively
+    // into 3 dataset contributors via the off-chain
+    // LicensingEngine.getRoyaltyDistributionRich → buildPayoutMap pipeline.
+    // The recursive expansion lives in TypeScript (see
+    // packages/contracts/ts/licensing-engine.ts:expandTrainingManifest);
+    // here we simulate APPROACH A — hand-build the equivalent on-chain
+    // Payout[] that the off-chain pipeline WOULD have produced.
+    //
+    // Off-chain math (documented inline; cross-checked in Approach B's
+    // TypeScript test):
+    //
+    //   model-author entry:  300 bps (would-have-been allocation)
+    //   trainingManifest.datasets = [
+    //     { datasetIpId: IP_DATASET_1, weightBps: 5000 },  // 50% mix
+    //     { datasetIpId: IP_DATASET_2, weightBps: 3000 },  // 30% mix
+    //     { datasetIpId: IP_DATASET_3, weightBps: 2000 },  // 20% mix
+    //   ]
+    //   weightBps sum = 10000 (TrainingManifest invariant)
+    //
+    //   Dataset bps from expandTrainingManifest:
+    //     dsBps[i] = round(modelBps * weightBps[i] / 10000)
+    //     d1: 300 * 5000 / 10000 = 150 bps
+    //     d2: 300 * 3000 / 10000 =  90 bps
+    //     d3: 300 * 2000 / 10000 =  60 bps
+    //     sum = 300 — matches the model-author allocation EXACTLY
+    //
+    //   On-chain Payout[] passed to setPayoutMap (model-author REPLACED
+    //   by the 3 dataset entries — orchestrator pre-flattens the tree):
+    //
+    //     [verifier=300, integrator=500, protocol-author=400,
+    //      dataset-1=150, dataset-2=90, dataset-3=60]
+    //
+    //     totalBps = 1500 (same cohort allocation as Test 1)
+    //
+    // On-chain math (PROTOCOL_FEE_BPS=150, amount=100_000_000):
+    //   protocolFee     = 1_500_000
+    //   distributable   = 98_500_000
+    //   verifier (300)  = 2_955_000
+    //   integrator (500)= 4_925_000
+    //   protocol-auth(400)=3_940_000
+    //   dataset-1 (150) = 98_500_000 * 150 / 10000 = 1_477_500
+    //   dataset-2  (90) = 98_500_000 *  90 / 10000 =   886_500
+    //   dataset-3  (60) = 98_500_000 *  60 / 10000 =   591_000
+    //   distributed     = 14_775_000
+    //   operator gross  = 98_500_000 - 14_775_000  = 83_725_000
+    //   operator total  = 83_725_000 + bond        = 88_725_000
+    //
+    // The model-author + dataset cohort sum is CONSERVED with Test 1:
+    // expansion preserves the parent's bps allocation by construction.
+    // ──────────────────────────────────────────────────────────────────────
+
+    function test_integration_trainingManifestExpansion() public {
+        // ── Phase 1: addMilestone + setPayoutMap with the expanded cohort
+        vm.prank(payer);
+        escrow.addMilestone(stepId1, operator, MILESTONE_AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW);
+
+        MilestoneEscrow.Payout[] memory payouts = _expandedTrainingManifestPayoutMap();
+        // Sanity: 6 entries total (verifier, integrator, protocol-author, 3 datasets)
+        assertEq(payouts.length, 6, "expanded payout map: 6 entries");
+
+        // Sanity: bps total identical to Test 1 (1500), so operator residual is conserved.
+        uint256 totalBps;
+        for (uint256 i = 0; i < payouts.length; i++) {
+            totalBps += payouts[i].bps;
+        }
+        assertEq(totalBps, 1500, "expanded payout map: total bps preserved");
+
+        vm.prank(payer);
+        escrow.setPayoutMap(0, payouts);
+
+        // ── Phase 2: fund + bond + evidence + attestation ────────────────
+        vm.startPrank(payer);
+        usdc.approve(address(escrow), MILESTONE_AMOUNT);
+        escrow.fund();
+        vm.stopPrank();
+
+        vm.startPrank(operator);
+        usdc.approve(address(escrow), OPERATOR_BOND);
+        escrow.depositBond(0);
+        escrow.submitEvidence(0, keccak256("evidence-tm-001"));
+        vm.stopPrank();
+
+        vm.prank(verifierOracle);
+        escrow.submitAttestation(0, keccak256("attestation-tm-001"));
+
+        vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
+
+        // ── Phase 3: pre-balance baselines ───────────────────────────────
+        // Datasets are fresh, no balance yet.
+        assertEq(usdc.balanceOf(dataset1Contributor), 0, "pre: dataset-1 zero");
+        assertEq(usdc.balanceOf(dataset2Contributor), 0, "pre: dataset-2 zero");
+        assertEq(usdc.balanceOf(dataset3Contributor), 0, "pre: dataset-3 zero");
+        // Model author is NOT in the expanded map (replaced by datasets).
+        assertEq(usdc.balanceOf(modelAuthor), 0, "pre: model-author zero (excluded)");
+
+        // ── Phase 4: expect events (MilestoneReleased + 6 SplitPayoutExecuted)
+        vm.expectEmit(true, false, false, true);
+        emit MilestoneEscrow.MilestoneReleased(0, operator, MILESTONE_AMOUNT);
+
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, verifierRecipient, ROLE_VERIFIER, IP_VERIFIER, address(usdc), 2_955_000
+        );
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, integrator, ROLE_INTEGRATOR, IP_INTEGRATOR, address(usdc), 4_925_000
+        );
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, protocolAuthor, ROLE_PROTOCOL_AUTHOR, IP_PROTOCOL_AUTHOR, address(usdc), 3_940_000
+        );
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, dataset1Contributor, ROLE_DATASET_CONTRIBUTOR, IP_DATASET_1, address(usdc), 1_477_500
+        );
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, dataset2Contributor, ROLE_DATASET_CONTRIBUTOR, IP_DATASET_2, address(usdc), 886_500
+        );
+        vm.expectEmit(true, true, true, true);
+        emit MilestoneEscrow.SplitPayoutExecuted(
+            0, dataset3Contributor, ROLE_DATASET_CONTRIBUTOR, IP_DATASET_3, address(usdc), 591_000
+        );
+
+        // ── Phase 5: release ─────────────────────────────────────────────
+        escrow.release(0);
+
+        // ── Assertions: each post-balance ────────────────────────────────
+        assertEq(usdc.balanceOf(protocolFeeRecipient), 1_500_000, "fee recipient");
+        assertEq(usdc.balanceOf(verifierRecipient),    2_955_000, "verifier");
+        assertEq(usdc.balanceOf(integrator),           4_925_000, "integrator");
+        assertEq(usdc.balanceOf(protocolAuthor),       3_940_000, "protocol-author");
+        assertEq(usdc.balanceOf(dataset1Contributor),  1_477_500, "dataset-1");
+        assertEq(usdc.balanceOf(dataset2Contributor),    886_500, "dataset-2");
+        assertEq(usdc.balanceOf(dataset3Contributor),    591_000, "dataset-3");
+        assertEq(usdc.balanceOf(operator),            88_725_000, "operator residual + bond");
+
+        // ── Model author NEVER receives funds — they were replaced ───────
+        assertEq(usdc.balanceOf(modelAuthor), 0, "post: model-author still zero");
+
+        // ── Conservation across the expanded cohort ──────────────────────
+        // Sum of 3 dataset payouts must equal what the model-author would
+        // have received in Test 1 (2_955_000) — proves the expansion is
+        // bps-conservative under integer truncation.
+        uint256 datasetSum =
+            usdc.balanceOf(dataset1Contributor)
+            + usdc.balanceOf(dataset2Contributor)
+            + usdc.balanceOf(dataset3Contributor);
+        assertEq(
+            datasetSum,
+            2_955_000,
+            "dataset sum equals model-author allocation from Test 1"
+        );
+
+        // Total conservation across the whole cohort
+        uint256 totalOut =
+            usdc.balanceOf(protocolFeeRecipient)
+            + usdc.balanceOf(verifierRecipient)
+            + usdc.balanceOf(integrator)
+            + usdc.balanceOf(protocolAuthor)
+            + datasetSum
+            + usdc.balanceOf(operator);
+        assertEq(
+            totalOut,
+            MILESTONE_AMOUNT + OPERATOR_BOND,
+            "conservation: total out matches total in"
+        );
+
+        assertEq(uint8(escrow.getMilestone(0).status), 5, "milestone Released");
+        assertEq(usdc.balanceOf(address(escrow)), 0, "escrow drained");
+        assertEq(
+            protocolRootImpl.feesCollected(address(usdc)),
+            1_500_000,
+            "protocol root: fee recorded"
+        );
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
     /// @dev Build the canonical 4-recipient payout map for Test 1.
-    ///      Order: integrator, model-author, verifier, protocol-author.
+    ///      Order: verifier, integrator, protocol-author, model-author.
     ///      Total bps: 1500 (15%).
     function _fourRecipientPayoutMap() internal view returns (MilestoneEscrow.Payout[] memory) {
         MilestoneEscrow.Payout[] memory p = new MilestoneEscrow.Payout[](4);
@@ -298,6 +480,60 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
             bps: 300,
             roleTag: ROLE_MODEL_AUTHOR,
             ipId: IP_MODEL_AUTHOR
+        });
+        return p;
+    }
+
+    /// @dev Build the TrainingManifest-expanded payout map for Test 2.
+    ///      Order: verifier, integrator, protocol-author, dataset-1,
+    ///      dataset-2, dataset-3. Total bps: 1500 — identical to Test 1.
+    ///      The model-author single-entry has been REPLACED by the three
+    ///      dataset rows by the off-chain orchestrator
+    ///      (LicensingEngine.getRoyaltyDistributionRich +
+    ///      buildPayoutMap pre-flatten).
+    function _expandedTrainingManifestPayoutMap()
+        internal
+        view
+        returns (MilestoneEscrow.Payout[] memory)
+    {
+        MilestoneEscrow.Payout[] memory p = new MilestoneEscrow.Payout[](6);
+        // Direct cohort (unchanged from Test 1)
+        p[0] = MilestoneEscrow.Payout({
+            recipient: verifierRecipient,
+            bps: 300,
+            roleTag: ROLE_VERIFIER,
+            ipId: IP_VERIFIER
+        });
+        p[1] = MilestoneEscrow.Payout({
+            recipient: integrator,
+            bps: 500,
+            roleTag: ROLE_INTEGRATOR,
+            ipId: IP_INTEGRATOR
+        });
+        p[2] = MilestoneEscrow.Payout({
+            recipient: protocolAuthor,
+            bps: 400,
+            roleTag: ROLE_PROTOCOL_AUTHOR,
+            ipId: IP_PROTOCOL_AUTHOR
+        });
+        // Expanded model-author tree
+        p[3] = MilestoneEscrow.Payout({
+            recipient: dataset1Contributor,
+            bps: 150, // = 300 * 5000 / 10000
+            roleTag: ROLE_DATASET_CONTRIBUTOR,
+            ipId: IP_DATASET_1
+        });
+        p[4] = MilestoneEscrow.Payout({
+            recipient: dataset2Contributor,
+            bps: 90, // = 300 * 3000 / 10000
+            roleTag: ROLE_DATASET_CONTRIBUTOR,
+            ipId: IP_DATASET_2
+        });
+        p[5] = MilestoneEscrow.Payout({
+            recipient: dataset3Contributor,
+            bps: 60, // = 300 * 2000 / 10000
+            roleTag: ROLE_DATASET_CONTRIBUTOR,
+            ipId: IP_DATASET_3
         });
         return p;
     }
