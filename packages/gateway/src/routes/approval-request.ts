@@ -55,6 +55,7 @@ import { ids } from "@pcc/spec";
 import { streamHub, type StreamEvent } from "../sse/stream-hub.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
+import { getChannelIdForSession } from "./subscription.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -217,15 +218,30 @@ export function publishApprovalRequest(
   };
   state.bySession.set(payload.id, record);
 
-  const topic: StreamTopic = { type: "approval", id: payload.id };
+  // Always publish to the canonical approval:<sessionId> topic so the
+  // W5 token-as-channel-id mobile listeners keep receiving events.
+  const sessionTopic: StreamTopic = { type: "approval", id: payload.id };
+  // Week 6 A3: when the mobile has called POST .../subscribe and minted
+  // a separate channelId, we ALSO publish to approval:<channelId>. New
+  // listeners subscribe by channelId; old listeners still see the same
+  // event on the session-id topic. Dual-publish until everyone has
+  // migrated; in a later iteration the session-id topic can become
+  // opt-out via env flag.
+  const channelId = getChannelIdForSession(payload.id);
+  const topics: StreamTopic[] = channelId
+    ? [sessionTopic, { type: "approval", id: channelId }]
+    : [sessionTopic];
+
   const event: StreamEvent = {
     id: ids.stream(),
     type: "approval-request",
     timestamp: new Date().toISOString(),
-    topic,
+    topic: sessionTopic,
     payload,
   };
-  streamHub.publish([topic], event);
+  // streamHub.publish takes a list of topics — it fan-outs the event
+  // to every topic and buffers per-topic for replay.
+  streamHub.publish(topics, event);
 
   return record;
 }

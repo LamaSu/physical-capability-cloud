@@ -17,6 +17,11 @@ import {
   startApprovalListener,
   type ApprovalListenerHandle,
 } from "./sse/approval-listener.js";
+import {
+  startApprovalActivity,
+  endApprovalActivity,
+  type ApprovalActivityHandle,
+} from "./live-activity/approval-activity.js";
 
 /**
  * App-shell entry point for the Capacitor wrap.
@@ -37,25 +42,46 @@ import {
  * there) or keep them React-shell-resident. See ARCHITECTURE.md § 2.
  */
 /**
- * Week 5: how the listener knows which channel to subscribe to.
+ * Channel-id resolution — Week 6 A3.
  *
- * The gateway publishes approval requests to topic `approval:<sessionId>`.
- * For v1 the mobile uses its persisted Week-4 passkey session token AS
- * the channel id — i.e. the agent issuing a request on the user's behalf
- * POSTs to `/api/sessions/<that-token>/request-approval`. This works
- * because:
- *   - The token is already opaque, unguessable, and per-device.
- *   - The user shares the token with their agent at the same moment they
- *     authorize that agent to act for them.
- *   - The gateway's per-topic SSE isolation means no other subscriber
- *     can fish for the user's events.
+ * On boot the mobile POSTs to `/api/sessions/<sessionToken>/subscribe`
+ * with `Authorization: Bearer <sessionToken>` to mint an opaque
+ * channelId. The listener then opens
+ * `/sse/stream/approval/<channelId>?token=<sessionToken>`.
  *
- * Decoupling channel-id from session-token is a Week 6+ refinement
- * (likely tying it to a "subscription" record minted at agent-onboarding
- * time so a single agent can hand the channel-id to multiple sessions).
+ * If the subscribe call fails for any reason (network error, server not
+ * yet upgraded, anything), we fall back to using the sessionToken AS
+ * the channelId — that's the W5 token-as-channel-id behavior. Servers
+ * upgraded to W6 still publish to BOTH topics (session-id AND
+ * channel-id) when a subscription exists, so this is a clean
+ * opt-in upgrade with no flag day.
  */
-function getChannelIdFromToken(token: string | null): string | null {
-  return token;
+async function fetchChannelId(
+  sessionToken: string,
+  baseUrl: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${baseUrl.replace(/\/+$/, "")}/api/sessions/${encodeURIComponent(
+        sessionToken,
+      )}/subscribe`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { channelId?: unknown };
+    return typeof body.channelId === "string" && body.channelId.length > 0
+      ? body.channelId
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve the gateway base URL for SSE. Falls back to capability.network. */
@@ -86,6 +112,11 @@ export function App(): ReactElement {
   // alongside role; used as both the SSE channel id and the ?token= auth
   // param.
   const [sessionToken, setSessionToken] = useState<string | null>(null);
+  // Week 6 B5: the in-flight Live Activity handle, if any. Stored so the
+  // approve/decline handlers can cleanly end the activity with the right
+  // outcome.
+  const [liveActivity, setLiveActivity] =
+    useState<ApprovalActivityHandle | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,53 +147,74 @@ export function App(): ReactElement {
   }, []);
 
   /**
-   * Real SSE approval listener — Week 5.
+   * Real SSE approval listener — Week 5 + Week 6 A3 (channel-id opt-in).
    *
    * Active when role === "user" AND a session token exists in secure
-   * storage. On approval-request events the payload is mapped onto
-   * ApprovalSession (which is a structural superset of the wire shape)
-   * and surfaced via setPendingApproval — same UI path the dev-mode
-   * fake trigger uses.
+   * storage. On boot the mobile asks the gateway for a fresh channelId
+   * via POST /api/sessions/:sessionToken/subscribe. If the call fails
+   * we fall back to the W5 path (use sessionToken AS channelId), so
+   * older gateway deployments and offline boots both keep working.
    *
    * Cleanup: the returned handle's `stop()` is invoked on unmount or
    * when role/sessionToken change.
    */
   useEffect(() => {
     if (role !== "user") return;
-    const channelId = getChannelIdFromToken(sessionToken);
-    if (!channelId) return;
+    if (!sessionToken) return;
+    let cancelled = false;
     let handle: ApprovalListenerHandle | null = null;
-    try {
-      handle = startApprovalListener({
-        sessionId: channelId,
-        sessionToken,
-        baseUrl: getGatewayBaseUrl(),
-        onApproval: (payload) => {
-          // The wire shape from POST /api/sessions/:id/request-approval
-          // is structurally compatible with ApprovalSession (id,
-          // capability, amountUsd, operatorName, evidenceHash, optional
-          // captureClass). Extra fields (kernelId, params, requestedAt)
-          // pass through harmlessly.
-          if (
-            payload &&
-            typeof payload === "object" &&
-            !Array.isArray(payload)
-          ) {
-            setPendingApproval(payload as ApprovalSession);
-          }
-        },
-        onError: (err) => {
-          // Logged but not surfaced — the listener auto-reconnects.
-          console.warn("[pcc-mobile] approval listener error:", err.message);
-        },
-      });
-    } catch (err) {
-      console.warn(
-        "[pcc-mobile] approval listener could not be started:",
-        (err as Error).message,
-      );
-    }
+    (async () => {
+      const baseUrl = getGatewayBaseUrl();
+      // Try to mint a channelId; fall back to token-as-channel-id when
+      // the call fails for any reason (W5 behavior).
+      const minted = await fetchChannelId(sessionToken, baseUrl);
+      if (cancelled) return;
+      const channelId = minted ?? sessionToken;
+      try {
+        handle = startApprovalListener({
+          sessionId: channelId,
+          sessionToken,
+          baseUrl,
+          onApproval: (payload) => {
+            if (
+              payload &&
+              typeof payload === "object" &&
+              !Array.isArray(payload)
+            ) {
+              const session = payload as ApprovalSession;
+              setPendingApproval(session);
+              // Live Activity (Week 6 B5): start a one-phase activity so
+              // the user sees the request in the iOS lock-screen / Dynamic
+              // Island. Graceful no-op when plugin/native bits are absent.
+              try {
+                const liveHandle = startApprovalActivity({
+                  id: session.id,
+                  capability: session.capability,
+                  amountUsd: session.amountUsd,
+                  operatorName: session.operatorName,
+                });
+                setLiveActivity(liveHandle);
+              } catch (err) {
+                console.warn(
+                  "[pcc-mobile] live-activity start failed:",
+                  (err as Error).message,
+                );
+              }
+            }
+          },
+          onError: (err) => {
+            console.warn("[pcc-mobile] approval listener error:", err.message);
+          },
+        });
+      } catch (err) {
+        console.warn(
+          "[pcc-mobile] approval listener could not be started:",
+          (err as Error).message,
+        );
+      }
+    })();
     return () => {
+      cancelled = true;
       handle?.stop();
     };
   }, [role, sessionToken]);
@@ -203,11 +255,34 @@ export function App(): ReactElement {
       signedAt: signed.signedAt,
     });
     setPendingApproval(null);
+    // Week 6 B5: end Live Activity with approve outcome.
+    if (liveActivity) {
+      try {
+        endApprovalActivity(liveActivity, { outcome: "approve" });
+      } catch (err) {
+        console.warn(
+          "[pcc-mobile] live-activity end failed:",
+          (err as Error).message,
+        );
+      }
+      setLiveActivity(null);
+    }
   };
 
   const handleDecline = (): void => {
     console.info("[pcc-mobile] session declined");
     setPendingApproval(null);
+    if (liveActivity) {
+      try {
+        endApprovalActivity(liveActivity, { outcome: "reject" });
+      } catch (err) {
+        console.warn(
+          "[pcc-mobile] live-activity end failed:",
+          (err as Error).message,
+        );
+      }
+      setLiveActivity(null);
+    }
   };
 
   if (role === null) {
