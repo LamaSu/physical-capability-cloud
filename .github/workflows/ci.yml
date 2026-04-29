@@ -32,7 +32,6 @@ jobs:
 
       - name: Run tests
         run: pnpm --workspace-concurrency=1 -r test
-        continue-on-error: true  # a2a networked-bus tests have pre-existing WebSocket timeouts
 
       - name: Type check
         run: pnpm -r exec tsc --noEmit
