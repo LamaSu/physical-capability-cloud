@@ -58,12 +58,13 @@ const PUBLISHER_ROLES: { value: string; label: string; description: string }[] =
 // ---------------------------------------------------------------------------
 
 const SEGMENT_KINDS: { value: RateSegmentKind; label: string; hint: string }[] = [
-  { value: "constant",          label: "Constant",          hint: "Flat bps over a window" },
-  { value: "step",              label: "Step",              hint: "Single absolute bps from t0" },
-  { value: "linear-decay",      label: "Linear Decay",      hint: "Interpolate startBps → endBps" },
-  { value: "exponential-decay", label: "Exponential Decay", hint: "bps = startBps · e^(-k·Δt)" },
-  { value: "adoption-indexed",  label: "Adoption-Indexed",  hint: "scale / sqrt(jobsPerDay), clamped" },
-  { value: "piecewise-value",   label: "Piecewise Value",   hint: "Different bps below/above $ threshold" },
+  { value: "constant",                label: "Constant",                hint: "Flat bps over a window" },
+  { value: "step",                    label: "Step",                    hint: "Single absolute bps from t0" },
+  { value: "linear-decay",            label: "Linear Decay",            hint: "Interpolate startBps → endBps" },
+  { value: "exponential-decay",       label: "Exponential Decay",       hint: "bps = startBps · e^(-k·Δt)" },
+  { value: "adoption-indexed",        label: "Adoption-Indexed",        hint: "scale / sqrt(jobsPerDay), clamped" },
+  { value: "piecewise-value",         label: "Piecewise Value",         hint: "Different bps below/above $ threshold" },
+  { value: "capture-class-indexed",   label: "Capture-Class-Indexed",   hint: "bps scales with CVP capture class (CC0..CC5)" },
 ];
 
 const ONE_DAY = 24 * 60 * 60;
@@ -118,6 +119,21 @@ function defaultSegment(kind: RateSegmentKind, prevEndMonths: number | null): Se
         bpsLow: 100,
         bpsHigh: 50,
       };
+    case "capture-class-indexed":
+      // Default ladder: more rigorous evidence (higher CC) earns more bps.
+      // CC0 (self-attested) gets the floor; CC5 (sovereign-grade) the cap.
+      return {
+        kind,
+        startMonths,
+        endMonths: null,
+        defaultBps: 100,
+        cc0: 50,
+        cc1: 100,
+        cc2: 200,
+        cc3: 350,
+        cc4: 500,
+        cc5: 750,
+      };
   }
 }
 
@@ -131,7 +147,19 @@ type SegmentRow =
   | { kind: "linear-decay"; startMonths: number; endMonths: number; startBps: number; endBps: number }
   | { kind: "exponential-decay"; startMonths: number; endMonths: number | null; startBps: number; endBps: number; decayPerSecond: number }
   | { kind: "adoption-indexed"; startMonths: number; endMonths: number | null; scale: number; floorBps: number; capBps: number }
-  | { kind: "piecewise-value"; startMonths: number; endMonths: number | null; thresholdCents: number; bpsLow: number; bpsHigh: number };
+  | { kind: "piecewise-value"; startMonths: number; endMonths: number | null; thresholdCents: number; bpsLow: number; bpsHigh: number }
+  | {
+      kind: "capture-class-indexed";
+      startMonths: number;
+      endMonths: number | null;
+      defaultBps: number;
+      cc0: number;
+      cc1: number;
+      cc2: number;
+      cc3: number;
+      cc4: number;
+      cc5: number;
+    };
 
 /** Convert a SegmentRow (months, no offset) to a RateSegment (seconds, absolute). */
 export function rowToSegment(row: SegmentRow, publishedAtSec: number): RateSegment {
@@ -183,6 +211,21 @@ export function rowToSegment(row: SegmentRow, publishedAtSec: number): RateSegme
         bpsLow: row.bpsLow,
         bpsHigh: row.bpsHigh,
       };
+    case "capture-class-indexed":
+      return {
+        kind: "capture-class-indexed",
+        startTime,
+        endTime,
+        byClass: {
+          CC0: row.cc0,
+          CC1: row.cc1,
+          CC2: row.cc2,
+          CC3: row.cc3,
+          CC4: row.cc4,
+          CC5: row.cc5,
+        },
+        default: row.defaultBps,
+      };
   }
 }
 
@@ -223,6 +266,22 @@ export function validateRows(rows: SegmentRow[]): RowValidation {
     if (r.kind === "constant" || r.kind === "step") {
       if (r.bps < 0 || r.bps > 10000) {
         return { valid: false, message: `Segment ${i + 1}: bps must be 0-10000` };
+      }
+    }
+    if (r.kind === "capture-class-indexed") {
+      const fields = [
+        ["defaultBps", r.defaultBps],
+        ["CC0", r.cc0],
+        ["CC1", r.cc1],
+        ["CC2", r.cc2],
+        ["CC3", r.cc3],
+        ["CC4", r.cc4],
+        ["CC5", r.cc5],
+      ] as const;
+      for (const [name, val] of fields) {
+        if (val < 0 || val > 10000) {
+          return { valid: false, message: `Segment ${i + 1}: ${name} must be 0-10000` };
+        }
       }
     }
     prevEnd = r.kind === "linear-decay" ? r.endMonths : r.endMonths;
@@ -803,6 +862,61 @@ function SegmentEditor({ index, row, onChange, onRemove }: SegmentEditorProps) {
               label="bps high"
               value={row.bpsHigh}
               onChange={(v) => onChange({ bpsHigh: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+          </>
+        )}
+
+        {row.kind === "capture-class-indexed" && (
+          <>
+            <NumberField
+              label="Default bps"
+              value={row.defaultBps}
+              onChange={(v) => onChange({ defaultBps: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+              hint="Used when captureClass missing"
+            />
+            <NumberField
+              label="CC0 bps"
+              value={row.cc0}
+              onChange={(v) => onChange({ cc0: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+            <NumberField
+              label="CC1 bps"
+              value={row.cc1}
+              onChange={(v) => onChange({ cc1: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+            <NumberField
+              label="CC2 bps"
+              value={row.cc2}
+              onChange={(v) => onChange({ cc2: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+            <NumberField
+              label="CC3 bps"
+              value={row.cc3}
+              onChange={(v) => onChange({ cc3: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+            <NumberField
+              label="CC4 bps"
+              value={row.cc4}
+              onChange={(v) => onChange({ cc4: v } as Partial<SegmentRow>)}
+              min={0}
+              max={10000}
+            />
+            <NumberField
+              label="CC5 bps"
+              value={row.cc5}
+              onChange={(v) => onChange({ cc5: v } as Partial<SegmentRow>)}
               min={0}
               max={10000}
             />
