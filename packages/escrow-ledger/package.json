@@ -1,0 +1,30 @@
+{
+  "name": "@pcc/escrow-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Centralized escrow state machine + atomic ledger ops backing the centralized PCC settlement substrate. Pluggable LedgerStore so future weeks can swap in Stripe Treasury or Postgres without touching call sites.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/transparency-log": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

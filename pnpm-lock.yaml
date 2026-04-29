@@ -472,6 +472,22 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
 
+  packages/escrow-ledger:
+    dependencies:
+      '@pcc/transparency-log':
+        specifier: workspace:*
+        version: link:../transparency-log
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
+
   packages/evidence-embeddings:
     dependencies:
       zod:
@@ -813,6 +829,25 @@ importers:
         specifier: workspace:*
         version: link:../spec
     devDependencies:
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
+
+  packages/transparency-log:
+    dependencies:
+      '@noble/curves':
+        specifier: ^1.9.0
+        version: 1.9.1
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(lightningcss@1.31.1)(terser@5.46.0)
