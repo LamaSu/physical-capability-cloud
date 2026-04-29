@@ -24,6 +24,9 @@
     "@simplewebauthn/browser": "13.3.0",
     "capacitor-secure-storage-plugin": "0.13.0"
   },
+  "optionalDependencies": {
+    "capacitor-live-activity": "7.1.0"
+  },
   "devDependencies": {
     "@capacitor/cli": "7.6.2",
     "@types/react": "^19.0.0",
