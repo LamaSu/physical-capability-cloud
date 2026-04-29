@@ -139,9 +139,15 @@ importers:
 
   apps/mobile:
     dependencies:
+      '@aparajita/capacitor-biometric-auth':
+        specifier: 9.1.2
+        version: 9.1.2
       '@capacitor/android':
         specifier: 7.6.2
         version: 7.6.2(@capacitor/core@7.6.2)
+      '@capacitor/app':
+        specifier: 7.1.0
+        version: 7.1.0(@capacitor/core@7.6.2)
       '@capacitor/core':
         specifier: 7.6.2
         version: 7.6.2
@@ -151,6 +157,9 @@ importers:
       '@capacitor/preferences':
         specifier: 7.0.0
         version: 7.0.0(@capacitor/core@7.6.2)
+      '@simplewebauthn/browser':
+        specifier: 13.3.0
+        version: 13.3.0
       capacitor-secure-storage-plugin:
         specifier: 0.13.0
         version: 0.13.0(@capacitor/core@7.6.2)
@@ -1003,6 +1012,10 @@ packages:
   '@adraffy/ens-normalize@1.11.1':
     resolution: {integrity: sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ==}
 
+  '@aparajita/capacitor-biometric-auth@9.1.2':
+    resolution: {integrity: sha512-cDcTFOQW4iI1+/AwkA0hRfiP53BuCSWvoxxkyp2NC7Hf0tNSg5fZ4zmXI/PcpLKUR7cd91TxnAxWYAAGJKOBig==}
+    engines: {node: '>=20.0.0'}
+
   '@apidevtools/json-schema-ref-parser@14.2.1':
     resolution: {integrity: sha512-HmdFw9CDYqM6B25pqGBpNeLCKvGPlIx1EbLrVL0zPvj50CJQUHyBNBw45Muk0kEIkogo1VZvOKHajdMuAzSxRg==}
     engines: {node: '>= 20'}
@@ -1200,6 +1213,11 @@ packages:
     resolution: {integrity: sha512-zRIn10uTPbOQaFVRqkTGKwrrDypmn3L3I/x4XZSVLiCYt3zs8MUCPoqrMudNvOD+s6nQ5m0cX4GW8JRpMxKOkQ==}
     peerDependencies:
       '@capacitor/core': ^7.6.0
+
+  '@capacitor/app@7.1.0':
+    resolution: {integrity: sha512-W7m09IWrUjZbo7AKeq+rc/KyucxrJekTBg0l4QCm/yDtCejE3hebxp/W2esU26KKCzMc7H3ClkUw32E9lZkwRA==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   '@capacitor/cli@7.6.2':
     resolution: {integrity: sha512-uPm+GDVhdWrM/DBWZ/L6c8uBVaEcge4MAXhqrIJWSkwad/9vNoVfUjtHaVgXxPE1g399PhlGm4kU8U7Qdfmwow==}
@@ -8509,6 +8527,13 @@ snapshots:
 
   '@adraffy/ens-normalize@1.11.1': {}
 
+  '@aparajita/capacitor-biometric-auth@9.1.2':
+    dependencies:
+      '@capacitor/android': 7.6.2(@capacitor/core@7.6.2)
+      '@capacitor/app': 7.1.0(@capacitor/core@7.6.2)
+      '@capacitor/core': 7.6.2
+      '@capacitor/ios': 7.6.2(@capacitor/core@7.6.2)
+
   '@apidevtools/json-schema-ref-parser@14.2.1(@types/json-schema@7.0.15)':
     dependencies:
       '@types/json-schema': 7.0.15
@@ -8733,6 +8758,10 @@ snapshots:
       '@babel/helper-validator-identifier': 7.28.5
 
   '@capacitor/android@7.6.2(@capacitor/core@7.6.2)':
+    dependencies:
+      '@capacitor/core': 7.6.2
+
+  '@capacitor/app@7.1.0(@capacitor/core@7.6.2)':
     dependencies:
       '@capacitor/core': 7.6.2
 
