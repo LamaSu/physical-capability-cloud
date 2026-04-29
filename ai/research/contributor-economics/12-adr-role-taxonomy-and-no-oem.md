@@ -198,6 +198,16 @@ If those two questions cannot be answered, the proposal fails.
 
 **Residual calculation for operator**: The operator's percentage is whatever remains after summing all other roles. In a standard single-step job: `operator% = 100% - verifier% - protocol-author% - integrator% - network-treasury%`. This means operators and the market price contribution roles against each other naturally: if integrators set high rates, the operator portion shrinks, and operators will prefer lower-rate adapters. Market discipline without protocol intervention.
 
+**Touchstone fees (digital-verifier interaction)**: When the `digital-verifier`
+branch lands, its touchstone-fee mechanism (per `poa-digital-verifier.md` —
+6 primitives including `touchstone`, `assuranceScore`, `ChallengeService`)
+funds out of the `verifier` role's bps share. There is no separate
+`touchstone` role in this enum. Verifiers who run higher-assurance touchstone
+flows can bid a higher RateSchedule for those jobs; the per-job market clears
+naturally. This avoids coupling our role taxonomy to digital-verifier's
+internal primitives prematurely — if digital-verifier's design evolves,
+only its operators' RateSchedules adjust, not the protocol's role enum.
+
 ---
 
 ## 5. Codebase Audit — What Changes

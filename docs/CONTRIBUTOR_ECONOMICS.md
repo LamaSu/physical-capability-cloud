@@ -288,6 +288,36 @@ Each has prior-art research already on the branch; pick up from there.
 | Reconciliation of pre-existing `designer` role split data | data migration, not a type change; old strings still decode (ADR-12 §2.2) |
 | Dashboard polish: contributor "publish my schedule" UI | builder/NegotiationPanel + SplitEditor were extended for new roles; full publish-flow UX TBD |
 
+### Hash-algorithm note (Pedersen vs sha256)
+
+`RateSchedule.scheduleHash` and `CompositionManifest.manifestHash` use **sha256**
+over canonical-JSON bytes — matching `RateScheduleRegistry.publish()` which
+recomputes sha256 on-chain. The parallel `wave7/verification-commitments`
+branch introduces Pedersen commitments for verifier-side commitments. These
+are different layers (per-schedule content addressing vs verifier-attestation
+binding) and do not conflict. If a future audit unifies the two, it will live
+in the canonical-registry extraction (cross-review-00 item #6).
+
+### Composing with workflow-runtime
+
+For deployments that need durable, idempotent settlement orchestration, wrap
+`MilestoneEscrow.release()` (which internally calls `splitPayout` when a map
+is set) inside a workflow-runtime step:
+
+```ts
+// Pseudo-code; concrete API lives in @pcc/workflow on feat/workflow-runtime
+await ctx.step("release-milestone", async () => {
+  return milestoneEscrow.release(milestoneIndex);
+});
+```
+
+The contract path is the source of truth (atomic on-chain tx, all-or-none).
+The workflow step adds: durable retry on RPC blips, idempotency key derived
+from `(escrowAddress, milestoneIndex)`, and a queryable run history. Use it
+for off-chain payout-map collection scenarios that need to survive multi-day
+signature-collection windows. For single-call settlement, the contract is
+enough on its own.
+
 A more granular checkpoint of "what just landed vs what's still pending" is
 `C:/Users/globa/pcc-contributor-economics/ai/research/contributor-economics/99-resume-here.md`.
 
