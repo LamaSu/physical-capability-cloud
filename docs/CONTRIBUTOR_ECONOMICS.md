@@ -334,3 +334,114 @@ explicitly refuses that pattern. Earnings track ongoing contribution: the best
 adapter wins; the best CSD wins; the best model wins; absence of contribution
 earns zero. This aligns OEM incentives with open interfaces and modularity
 rather than closure. That is the load-bearing thesis of `feat/contributor-economics`.
+
+---
+
+## Rounding behavior — where the dust goes
+
+Basis-points splits use integer division. A 153-bps allocation against a
+$100 USDC milestone (100_000_000 wei at 6 decimals) is `100_000_000 * 153 /
+10000 = 1_530_000` wei exactly — no dust. But a 153-bps allocation against
+a $0.07 milestone (70_000 wei) is `70_000 * 153 / 10000 = 1071` wei, which
+rounds DOWN; the lossless math would have been `1071.0` exactly so no loss
+here. The dust shows up when the bps × amount product isn't divisible by
+10_000.
+
+**On-chain (Solidity)**: `(distributable * bps) / 10000` truncates toward
+zero (standard EVM integer division). Per-recipient rounding loss is at
+most 0.999... wei.
+
+**Off-chain (TypeScript)**: `buildPayoutMap()` and `LicensingEngine`'s
+`groupBps` weighting use `Math.round()`. This rounds half-up, which
+introduces a 1-bps directional bias relative to on-chain truncation under
+adversarial inputs. The integration tests in
+`C:\Users\globa\pcc-contributor-economics\packages\contracts\ts\__tests__\integration.test.ts`
+verify the off-chain `Payout[]` produces exact balance matches with the
+on-chain settlement under realistic inputs (4-recipient + 6-recipient
+training-manifest expansion); under all tested scenarios the two
+calculation paths agree on the final wire value.
+
+**Where dust lands**: the operator residual. `release()` computes
+`distributed = sum(payouts[i].bps applied to distributable)` and pays the
+operator `(distributable - distributed) + operatorBond`. Any rounding loss
+across all per-recipient transfers is silently absorbed into the operator's
+residual share. At a single-milestone scale this is sub-1-wei of dust; at
+$1M/day GMV it's a few cents/day. Document this for operators: "your share
+is whatever's left after explicit recipients are paid; this includes
+sub-bps rounding dust."
+
+**No dust below 1 wei** — the contract uses raw token wei throughout. There
+is no fractional-wei accounting.
+
+---
+
+## Relationship to Story Protocol — honest scoping
+
+The original design ambition was that PCC's contributor economics would
+*extend* the existing Story Protocol IP graph integration (`pcc_ip_*` MCP
+tools, `/api/ip/*` routes, `StoryIPRegistration` types, `LicensingEngine`'s
+derivative tree). Reality landed differently:
+
+- **`ContributorNFT`** (`C:\Users\globa\pcc-contributor-economics\packages\contracts\src\ContributorNFT.sol`)
+  is a fresh ERC-721 + ERC-2981 contract. It does NOT mint itself as a
+  Story Protocol `IPAsset`. The `ipId` field on a ContributorNFT is a
+  reference to a Story IP Asset *if one exists*; it is not used to drive
+  any on-chain Story Protocol operation in v1.
+- **`TrainingManifest`** is a separate concept stored in `@pcc/db`'s
+  `training_manifests` table; it does NOT register dataset→model edges
+  with Story Protocol's derivative graph.
+- **`/api/contributors/*`** routes are parallel to (not extensions of)
+  `/api/ip/*`. The two surfaces share the same database (Drizzle) but have
+  separate Zod schemas, separate route handlers, separate MCP tools.
+- **`pcc_contributor_*` and `pcc_schedule_*` MCP tools** are parallel to
+  `pcc_ip_*` (the existing Story Protocol-backed tools), not replacements.
+
+**Why the parallel path**: the contributor-economics primitives (immutable
+`RateSchedule`, `CompositionManifest` with role-tagged entries,
+`TrainingManifest` for recursive model→dataset attribution) are different
+enough in semantics from Story Protocol's derivative-tree-with-decay model
+that a clean separation was lower-risk than retrofitting.
+
+**v2 unification path**: a future branch should converge the two graphs.
+Specifically:
+1. Mint each `ContributorNFT` as a Story Protocol `IPAsset` at registration
+   time, capturing the same `ipId` in both registries.
+2. Map `CompositionManifest` entries to Story Protocol derivative
+   registrations so a single graph traversal covers both contributor splits
+   and IP licensing decay.
+3. Deprecate `pcc_contributor_*` in favor of extended `pcc_ip_*` tools
+   (e.g., `pcc_ip_set_rate_schedule`, `pcc_ip_link_training_data`).
+
+Until that work lands, treat `ContributorNFT` and `StoryIPRegistration` as
+**two coordinated registries that point to the same logical IP** rather
+than as a unified graph.
+
+---
+
+## Open scope cuts (deliberate, documented in `99-resume-here.md`)
+
+These are **not** "we forgot" — they are explicit deferrals with
+prior-art research already in tree. Listed here so external readers don't
+mistake the v1 scope for the eventual v2 scope:
+
+- **Cross-chain `ContributorNFT` portability** (LayerZero ONFT or CCIP).
+  Today the NFT lives on whichever chain `ContributorNFT.sol` is deployed
+  to. Sovereign-network identity with cross-network earnings requires
+  this; v1 ships single-chain.
+- **zkML training attestation** for `model-author` and
+  `dataset-contributor`. v1 relies on `methodologyHash` commit +
+  reputational slashing; v2 will add cryptographic proof that a specific
+  training mix was actually used.
+- **Production audit**. 109 forge tests + 230 TS tests pass. No external
+  audit. Required gate before mainnet.
+- **Live-flow validation**. The deploy scripts
+  (`C:\Users\globa\pcc-contributor-economics\packages\contracts\script\DeployContributorEconomics.s.sol`,
+  `C:\Users\globa\pcc-contributor-economics\packages\contracts\script\PublishSchedule.s.sol`,
+  `C:\Users\globa\pcc-contributor-economics\packages\contracts\script\MintContributor.s.sol`)
+  exist and forge-compile but have **never** been broadcast to Base
+  Sepolia. No human has performed an end-to-end flow against the live
+  gateway yet.
+- **Dashboard publish/browse UI**. The 5 dashboard files updated by Wave 4d
+  added role-aware colors and split presets but did NOT add a
+  "publish my RateSchedule" wizard, a "browse other contributors'
+  schedules" gallery, or an evaluation sandbox. v2 work.
