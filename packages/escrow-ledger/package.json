@@ -1,8 +1,8 @@
 {
-  "name": "@pcc/kernel-sdk",
+  "name": "@pcc/escrow-ledger",
   "version": "0.1.0",
   "private": true,
-  "description": "SDK for building third-party digital kernels on the PCC marketplace (manifest, job handler, registration)",
+  "description": "Centralized escrow state machine + atomic ledger ops backing the centralized PCC settlement substrate. Pluggable LedgerStore so future weeks can swap in Stripe Treasury or Postgres without touching call sites.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,9 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/spec": "workspace:*",
     "@pcc/transparency-log": "workspace:*",
-    "tweetnacl": "^1.0.3",
     "zod": "^3.23.0"
   },
   "devDependencies": {

@@ -84,6 +84,22 @@ contract MilestoneEscrow {
         Slashed       // 8 - Operator bond slashed
     }
 
+    /// @notice Settlement path used to finalize a milestone.
+    /// @dev
+    ///   OnChain (0)     — Default; release() moved real ERC-20 funds via this contract.
+    ///                     Existing tests + deployments behave exactly as before.
+    ///   Centralized (1) — Settled off-chain via the pcc-escrow-ledger package;
+    ///                     settleCentralized() emits MilestoneSettled with a
+    ///                     SignedReceipt hash for the transparency log to anchor.
+    ///                     No real USDC is moved.
+    ///
+    ///   The default value (0) preserves backward compatibility with every existing
+    ///   milestone created before this update — they remain OnChain by construction.
+    enum SettlementMode {
+        OnChain,
+        Centralized
+    }
+
     struct Milestone {
         bytes32 stepId;
         address operator;
@@ -137,6 +153,14 @@ contract MilestoneEscrow {
 
     /// @notice Per-token total amount owed across all milestones (for `fund`).
     mapping(address => uint256) public totalByToken;
+
+    // ── Centralized Settlement (Week 2 — additive) ───────────────────────
+
+    /// @notice True for any milestone that has been settled via the centralized path.
+    /// @dev    Mutually exclusive with on-chain release(): the same milestoneId cannot be
+    ///         settled twice in either direction. Existing on-chain tests / deployments are
+    ///         not affected because the default value is `false`.
+    mapping(uint256 => bool) public centrallySettled;
 
     // ── Reentrancy Guard ─────────────────────────────────────────────────
 
@@ -195,6 +219,28 @@ contract MilestoneEscrow {
         address indexed token,
         uint256 amount,
         uint256 operatorBond
+    );
+
+    // ── Centralized Settlement Events ────────────────────────────────────
+
+    /// @notice Emitted when a milestone is settled via either path.
+    /// @dev    For `mode=OnChain`, this complements the existing MilestoneReleased event;
+    ///         for `mode=Centralized`, this is the *only* on-chain footprint of the
+    ///         settlement (no funds move via the contract).
+    /// @param milestoneId  Sequential index of the milestone.
+    /// @param mode         Which substrate produced the settlement.
+    /// @param user         The user/payer side of the milestone (informational; payer for now).
+    /// @param operator     The operator who is being settled to.
+    /// @param amount       The settlement amount, denominated in the milestone's token decimals.
+    /// @param receiptHash  Hash of the SignedReceipt produced by the centralized substrate;
+    ///                     for OnChain mode this should be the evidence bundle hash for parity.
+    event MilestoneSettled(
+        uint256 indexed milestoneId,
+        SettlementMode mode,
+        address indexed user,
+        address indexed operator,
+        uint256 amount,
+        bytes32 receiptHash
     );
 
     // ── Modifiers ────────────────────────────────────────────────────────
@@ -593,6 +639,8 @@ contract MilestoneEscrow {
         Milestone storage m = milestones[milestoneIndex];
         require(m.status == MilestoneStatus.Attested, "Not attested");
         require(block.timestamp >= m.challengeWindowEnd, "Challenge window open");
+        // Centralized settlement is exclusive — no double-settle in either direction.
+        require(!centrallySettled[milestoneIndex], "Already settled centrally");
 
         // ── Checks-Effects-Interactions: update state before any external calls ──
         m.status = MilestoneStatus.Released;
@@ -624,6 +672,66 @@ contract MilestoneEscrow {
             uint256 payout = amount + operatorBond; // Return bond + payment
             tok.safeTransfer(operator, payout);
         }
+
+        // Unified settlement event — for OnChain mode, receiptHash is the evidence bundle hash
+        // so the receipt anchored off-chain references the same evidence as the on-chain log.
+        emit MilestoneSettled(
+            milestoneIndex,
+            SettlementMode.OnChain,
+            payer,
+            operator,
+            amount,
+            m.evidenceBundleHash
+        );
+    }
+
+    // ── Centralized Settlement (Week 2) ──────────────────────────────────
+
+    /// @notice Mark a milestone as settled via the centralized substrate.
+    /// @dev Emits MilestoneSettled but moves NO real ERC-20 funds; the
+    ///      off-chain pcc-escrow-ledger and pcc-transparency-log packages do the
+    ///      accounting and tamper-evidence.
+    ///
+    /// Access:
+    ///   Restricted to `payer` (same authority that funds the escrow). This
+    ///   mirrors the on-chain release() guard pattern and prevents arbitrary
+    ///   callers from claiming a centralized settlement happened.
+    ///
+    /// Invariants:
+    ///   Same milestoneId can never be both released() AND settleCentralized()'d.
+    ///   Either path locks the other out via the centrallySettled / status checks.
+    ///   Operator and amount are the caller's responsibility to supply correctly;
+    ///   they are emitted in the event but NOT cross-checked against the
+    ///   stored Milestone struct (the centralized substrate already enforces
+    ///   correctness; this on-chain footprint is a tamper-evidence breadcrumb,
+    ///   not a custodial release).
+    ///
+    /// @param milestoneIndex Index of the milestone in the milestones array.
+    /// @param operator       Operator that received the centralized payout (informational).
+    /// @param amount         Settlement amount in the milestone's token decimals (informational).
+    /// @param receiptHash    Hash of the canonicalized + signed receipt produced by
+    ///                       the off-chain transparency log — anchored later in the daily Merkle root.
+    function settleCentralized(
+        uint256 milestoneIndex,
+        address operator,
+        uint256 amount,
+        bytes32 receiptHash
+    ) external onlyPayer milestoneExists(milestoneIndex) {
+        Milestone storage m = milestones[milestoneIndex];
+        // Cannot centrally settle a milestone that has already taken either path.
+        require(!centrallySettled[milestoneIndex], "Already settled centrally");
+        require(m.status != MilestoneStatus.Released, "Already released on-chain");
+
+        centrallySettled[milestoneIndex] = true;
+
+        emit MilestoneSettled(
+            milestoneIndex,
+            SettlementMode.Centralized,
+            payer,
+            operator,
+            amount,
+            receiptHash
+        );
     }
 
     // ── Disputes ─────────────────────────────────────────────────────────
