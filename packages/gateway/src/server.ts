@@ -40,6 +40,7 @@ import { registryRoutes } from "./routes/registry.js";
 import { agentChatRoutes } from "./routes/agent-chat.js";
 import { settlementRoutes } from "./routes/settlement.js";
 import { centralizedSettleRoutes } from "./routes/centralized-settle.js";
+import { passkeyRoutes } from "./routes/passkey.js";
 import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
@@ -341,6 +342,7 @@ export async function createGateway(port = 3200) {
   await app.register(agentChatRoutes);
   await app.register(settlementRoutes);
   await app.register(centralizedSettleRoutes);
+  await app.register(passkeyRoutes);
   await app.register(fiatRampRoutes);
   await app.register(bountyRoutes);
   await app.register(poolRoutes);
