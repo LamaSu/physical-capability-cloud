@@ -97,6 +97,7 @@ import { touchstoneRoutes } from "./routes/touchstone.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
 import { apiGate } from "./middleware/api-gate.js";
+import { tenantContext } from "./middleware/tenant-context.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -287,6 +288,12 @@ export async function createGateway(port = 3200) {
 
   // API key gate — requires API key or session on all /api/* routes
   await app.register(apiGate);
+
+  // Tenant context — attaches req.tenantId from API key operatorId or SIWE
+  // session. T1.9 — mounted after apiGate so the auth fields it relies on
+  // are already populated. Wave 4 RLS migration will use this to scope
+  // findAll() queries.
+  await app.register(tenantContext);
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);

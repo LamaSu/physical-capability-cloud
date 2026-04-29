@@ -61,6 +61,11 @@ export class CapabilityFacade extends BaseFacade {
       const offset = pagination?.offset ?? 0;
       const limit = pagination?.limit ?? 50;
 
+      // TODO(wave-4 / T1.9 follow-up): swap to
+      // `this.repos.capabilities.findAll({ where: { tenantId: ctx.tenantId } })`
+      // once the schema migration adds `tenant_id` columns. Capability LISTING
+      // is intentionally cross-tenant (buyer marketplace surfacing) — confirm
+      // that opt-out is still desired vs scope to ctx.tenantId at that time.
       const allCapabilities = this.repos.capabilities.findAll();
       const total = allCapabilities.length;
       const page = allCapabilities.slice(offset, offset + limit);

@@ -111,9 +111,14 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // List registrations (persistent — survives deploys)
-  app.get("/api/onboard/registrations", async () => {
+  app.get("/api/onboard/registrations", async (req) => {
     try {
       const repos = getRepos();
+      // TODO(wave-4 / T1.9 follow-up): scope to req.tenantId once
+      // registrations.tenant_id column lands. Today this is the public
+      // operator directory so the cross-tenant read is intentional, but
+      // the response is sanitised to the public-safe field set.
+      void req; // tenantId attached by tenantContext middleware
       const registrations = repos.registrations.findAll();
       // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
       const sanitized = registrations.map((r: any) => ({
