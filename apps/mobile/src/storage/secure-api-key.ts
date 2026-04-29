@@ -26,6 +26,14 @@
 
 const STORAGE_KEY = "pcc-api-key";
 const ROLE_KEY = "pcc-role";
+/**
+ * Week 4 passkey-verify mints an opaque session token. The mobile app
+ * persists it under this key so subsequent requests (notably the Week 5
+ * SSE approval listener) can authenticate. Stored in the same secure
+ * store as the API key — secure-enclave on native, localStorage fallback
+ * on PWA. Same dual-write semantics as `pcc-api-key`.
+ */
+const SESSION_TOKEN_KEY = "pcc-session-token";
 
 export type Role = "user" | "operator";
 
@@ -236,6 +244,71 @@ export async function getRole(): Promise<Role> {
   }
   if (raw === "operator" || raw === "user") return raw;
   return "user";
+}
+
+/**
+ * Read the persisted Week-4 passkey session token, if any. Returns null
+ * when no token has been minted yet (i.e. user has never approved on
+ * this device, or the token was cleared on logout).
+ *
+ * Same dual-store semantics as `getApiKey`: native secure storage when
+ * running inside Capacitor, localStorage fallback on PWA.
+ */
+export async function getSessionToken(): Promise<string | null> {
+  if (isNative()) {
+    const plugin = await getPlugin();
+    if (plugin) {
+      try {
+        const { value } = await plugin.get({ key: SESSION_TOKEN_KEY });
+        return value || null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  if (typeof localStorage === "undefined") return null;
+  return localStorage.getItem(SESSION_TOKEN_KEY);
+}
+
+/** Write the Week-4 passkey session token. Mirrors setApiKey semantics. */
+export async function setSessionToken(value: string): Promise<void> {
+  if (isNative()) {
+    const plugin = await getPlugin();
+    if (plugin) {
+      await plugin.set({ key: SESSION_TOKEN_KEY, value });
+      if (typeof localStorage !== "undefined") {
+        try {
+          localStorage.removeItem(SESSION_TOKEN_KEY);
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+  }
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(SESSION_TOKEN_KEY, value);
+}
+
+/** Remove the persisted Week-4 passkey session token everywhere. */
+export async function removeSessionToken(): Promise<void> {
+  if (isNative()) {
+    const plugin = await getPlugin();
+    if (plugin) {
+      try {
+        await plugin.remove({ key: SESSION_TOKEN_KEY });
+      } catch {
+        /* ignore — plugin throws if key absent */
+      }
+    }
+  }
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.removeItem(SESSION_TOKEN_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**
