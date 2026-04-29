@@ -411,13 +411,13 @@ export async function createGateway(port = 3200) {
   await app.register(orchestratorTemplatesRoutes);
   // physical-operator session driver (real OnboarderAgent backing).
   await app.register(templateSessionRoutes, {
-    prefix: "/api/onboard",
+    routePrefix: "/api/onboard",
     template: "physical-operator",
     agentFactory: physicalOperatorAgent,
   });
   // data-product session driver (stub — full flow lands in Wave 2.5).
   await app.register(templateSessionRoutes, {
-    prefix: "/api/orchestrator/data-product",
+    routePrefix: "/api/orchestrator/data-product",
     template: "data-product",
     agentFactory: dataProductStubAgent,
   });

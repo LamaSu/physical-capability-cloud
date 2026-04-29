@@ -147,10 +147,17 @@ export interface TemplateAgentHooks {
  */
 export type TemplateAgentFactory = () => TemplateAgentHooks;
 
-/** Parameters every mount of the driver needs. */
+/** Parameters every mount of the driver needs.
+ *
+ * Note the prefix field is named `routePrefix` (not `prefix`) so Fastify's
+ * built-in `prefix` plugin option doesn't collide with ours. Fastify
+ * automatically applies an `opts.prefix` value as a route prefix; if we used
+ * the same key, our routes would end up double-prefixed
+ * (`/api/onboard/api/onboard/start`).
+ */
 export interface TemplateSessionRoutesOptions {
   /** Route prefix, e.g. "/api/onboard" or "/api/orchestrator/data-product". */
-  prefix: string;
+  routePrefix: string;
   /** Slug for audit + event tagging, e.g. "physical-operator", "data-product". */
   template: string;
   /** Hook factory — returns the agent that handles the four side-effecting
@@ -210,12 +217,12 @@ function progressFromState(state: TemplateSession["state"]): number {
  *
  * Usage in server.ts:
  *   await app.register(templateSessionRoutes, {
- *     prefix: "/api/onboard",
+ *     routePrefix: "/api/onboard",
  *     template: "physical-operator",
  *     agentFactory: physicalOperatorAgent,
  *   });
  *   await app.register(templateSessionRoutes, {
- *     prefix: "/api/orchestrator/data-product",
+ *     routePrefix: "/api/orchestrator/data-product",
  *     template: "data-product",
  *     agentFactory: dataProductStubAgent,
  *   });
@@ -227,7 +234,7 @@ export async function templateSessionRoutes(
   app: FastifyInstance,
   opts: TemplateSessionRoutesOptions
 ): Promise<void> {
-  const { prefix, template } = opts;
+  const { routePrefix: prefix, template } = opts;
   // Resolve the agent once per mount. The factory pattern lets templates
   // create per-mount lazy state if needed (e.g. an LLM client) without
   // tying us to a singleton.
@@ -288,7 +295,7 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.session_started`,
-        actor: req.operatorId ?? req.apiKeyId ?? null,
+        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: sessionId,
         action: "create",
@@ -353,7 +360,7 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.scrape`,
-        actor: req.operatorId ?? req.apiKeyId ?? null,
+        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: session.id,
         action: "scrape",
@@ -411,7 +418,7 @@ export async function templateSessionRoutes(
 
       auditService.log({
         eventType: `${template}.ingest_docs`,
-        actor: req.operatorId ?? req.apiKeyId ?? null,
+        actor: req.operatorId ?? req.apiKeyId ?? undefined,
         resourceType: "template_session",
         resourceId: session.id,
         action: "ingest_docs",
@@ -459,7 +466,7 @@ export async function templateSessionRoutes(
 
         auditService.log({
           eventType: `${template}.build_complete`,
-          actor: req.operatorId ?? req.apiKeyId ?? null,
+          actor: req.operatorId ?? req.apiKeyId ?? undefined,
           resourceType: "template_session",
           resourceId: session.id,
           action: "build",
