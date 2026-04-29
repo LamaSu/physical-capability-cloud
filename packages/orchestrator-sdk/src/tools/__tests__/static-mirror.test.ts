@@ -161,6 +161,37 @@ describe("writeOperatorMirror", () => {
     const stat = await fs.stat(r.path);
     expect(stat.isFile()).toBe(true);
   });
+
+  it("T2.5 — appends -2 suffix when slug already exists in outDir", async () => {
+    // First operator lands at the base slug.
+    const first = await writeOperatorMirror(sampleProfile, { outDir: tmpDir });
+    expect(first.slug).toBe("oakland-titanium-mills");
+
+    // Second operator with the same slugified name must NOT overwrite the first.
+    const collidingProfile: DiscoveryProfile = {
+      ...sampleProfile,
+      enterprise_id: "ent-different",
+      name: "Oakland Titanium Mills", // identical input → identical base slug
+      city: "Berkeley", // different content so we can verify the right file got the right body
+    };
+    const second = await writeOperatorMirror(collidingProfile, { outDir: tmpDir });
+    expect(second.slug).toBe("oakland-titanium-mills-2");
+    expect(second.url_path).toBe("/operators/oakland-titanium-mills-2.html");
+
+    // Both files exist with their distinct content.
+    const firstHtml = await fs.readFile(first.path, "utf8");
+    const secondHtml = await fs.readFile(second.path, "utf8");
+    expect(firstHtml).toContain("Located in Oakland");
+    expect(secondHtml).toContain("Located in Berkeley");
+  });
+
+  it("T2.5 — counts up through -3 on triple collision", async () => {
+    await writeOperatorMirror(sampleProfile, { outDir: tmpDir });
+    const second = await writeOperatorMirror(sampleProfile, { outDir: tmpDir });
+    const third = await writeOperatorMirror(sampleProfile, { outDir: tmpDir });
+    expect(second.slug).toBe("oakland-titanium-mills-2");
+    expect(third.slug).toBe("oakland-titanium-mills-3");
+  });
 });
 
 describe("renderDirectoryHtml + writeOperatorDirectory", () => {

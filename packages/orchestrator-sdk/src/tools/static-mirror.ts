@@ -133,14 +133,44 @@ ${jsonForScriptTag(jsonLd)}
 `;
 }
 
+/**
+ * Find a non-colliding slug under outDir. If `${baseSlug}.html` already exists,
+ * try `${baseSlug}-2`, `${baseSlug}-3`, …, up to -99. Falls back to a base36
+ * timestamp suffix beyond that so we never block forever on a degenerate name.
+ *
+ * T2.5 (2026-04-29): two operators with names that slugify identically used to
+ * silently overwrite each other's static-mirror HTML. The directory page would
+ * then show one entry pointing at the wrong content. Collision detection here
+ * keeps both intact at distinct URLs.
+ */
+async function findAvailableSlug(outDir: string, baseSlug: string): Promise<string> {
+  const exists = async (s: string): Promise<boolean> => {
+    try {
+      await fs.access(path.join(outDir, `${s}.html`));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await exists(baseSlug))) return baseSlug;
+  for (let i = 2; i <= 99; i++) {
+    const candidate = `${baseSlug}-${i}`;
+    if (!(await exists(candidate))) return candidate;
+  }
+  return `${baseSlug}-${Date.now().toString(36)}`;
+}
+
 export async function writeOperatorMirror(
   profile: DiscoveryProfile,
   options: RenderOptions = {}
 ): Promise<MirrorWriteResult> {
   const outDir = options.outDir ?? DEFAULT_DIR;
-  const slug = slugify(profile.name);
-  const html = renderOperatorHtml(profile, options.generatedAt);
   await fs.mkdir(outDir, { recursive: true });
+  // T2.5: collision-aware slug — if the slugified name already has a mirror,
+  // append -2/-3/... so we don't overwrite a previously-onboarded operator.
+  const baseSlug = slugify(profile.name);
+  const slug = await findAvailableSlug(outDir, baseSlug);
+  const html = renderOperatorHtml(profile, options.generatedAt);
   const filePath = path.join(outDir, `${slug}.html`);
   await fs.writeFile(filePath, html, "utf8");
   return { path: filePath, slug, url_path: `/operators/${slug}.html` };
