@@ -1,12 +1,44 @@
 # Resume Point — Contributor Economics Build
 
-**Updated**: 2026-04-28 (after validator-driven doc-fix run).
+**Updated**: 2026-04-29 (after master-merge + multi-stablecoin refactor).
 **Worktree**: `C:/Users/globa/pcc-contributor-economics`
-**Branch**: `feat/contributor-economics` (based on `master` @ `8550d5e`)
-**Head commit**: `4fabc4c fix(docs): README — reconcile tool counts, update MCP tool total to 56, fix §14→§12` — 69 commits ahead of master and growing as Group 4-6 doc fixes land.
-**NOT pushed to `lamasu` remote yet.**
+**Branch**: `feat/contributor-economics` (originally based on `master` @ `8550d5e`; **merged with `lamasu/master` @ commit `14cce8e`** to absorb 66 commits of CVP + multi-stablecoin work).
+**Head commit**: `1748a39 docs: fold low-priority cross-review items` — ~93 commits ahead of pre-merge master.
+**Pushed to `lamasu`**: yes, current.
+**PR**: [#7](https://github.com/LamaSu/physical-capability-cloud/pull/7) — open + mergeable.
 
-> The exact head SHA + commit-count above will drift each time a new commit lands. Run `git rev-parse HEAD` and `git rev-list --count master..HEAD` for live numbers.
+## What's done as of this update
+
+Cross-branch audit (cross-review-00-synthesis.md) flagged 2 CRITICAL +
+3 HIGH + 5 MEDIUM-LOW items. Status:
+
+- ✅ CRITICAL #1 multi-stablecoin distribution refactor — `_distributeWithMap`
+  + `_distributeLegacy` now take `IERC20 tok` as a parameter resolved via
+  `tokenForMilestone(idx)`, all transfers use `safeTransfer`. Fixes the silent
+  "USDT escrows revert / mixed-token escrows misroute" bug.
+- ✅ CRITICAL #2 agent-package.json collision — merged to v2.9.0/225 tools
+  (211 base + 7 CVP + 7 CE), both tool blocks present.
+- ✅ HIGH #3 rebase onto live master — done via merge (66 commits absorbed,
+  5 conflicts resolved).
+- ✅ HIGH #4 MilestoneAdded event — assertions don't break (the only test
+  that needed updating was `test_release_rejectsTransferFailureForAllRecipients`
+  which now expects `SafeERC20FailedOperation` instead of literal string).
+- ✅ LOW #8-10 — touchstone-fees paragraph in ADR-12 §4, Pedersen note in
+  CONTRIBUTOR_ECONOMICS.md, workflow-runtime example added.
+- ⏳ MED #5 captureClass→LicensingEngine wiring — deferred to follow-up PR.
+- ⏳ MED #6 CanonicalRegistry shared library — deferred to follow-up PR.
+- ⏳ MED #7 ROLE_TAGS codegen to @pcc/spec — deferred to follow-up PR.
+
+## Test totals post-merge
+
+- forge: **89/89** passing (was 58 pre-merge)
+- @pcc/spec: 379/379
+- @pcc/contracts: 230/230 (was 226 — CVP added 4)
+- @pcc/store: 143/143
+- @pcc/mcp-server: 51/51 (was 34 — CVP added 17)
+- **Total: 892 tests passing, all green**
+
+> Run `git rev-parse HEAD` + `git rev-list --count master..HEAD` for live numbers.
 
 ---
 
