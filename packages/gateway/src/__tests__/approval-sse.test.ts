@@ -39,7 +39,7 @@ import {
   _getPendingApprovalForTests,
   type ApprovalRequestPayload,
 } from "../routes/approval-request.js";
-import { topicSSE } from "../sse/topic-sse.js";
+import { topicSSE, resolveLastEventId } from "../sse/topic-sse.js";
 import { streamHub, type StreamEvent } from "../sse/stream-hub.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
@@ -427,4 +427,99 @@ describe("GET /sse/stream/approval/:sessionId — auth gate", () => {
   // For end-to-end SSE testing under a real HTTP listener, see the
   // mobile-side `apps/mobile/src/sse/approval-listener.test.ts` which
   // mocks EventSource + verifies the on-the-wire URL/auth/event flow.
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 6 A1: resolveLastEventId — header vs ?lastEventId= query string
+//
+// Native browser EventSource cannot set headers on reconnect, so the
+// mobile listener appends `?lastEventId=<id>` to the URL. The server
+// must accept either source; the header wins when both are present.
+// ──────────────────────────────────────────────────────────────────────
+
+describe("resolveLastEventId — header + query string fallback (Week 6 A1)", () => {
+  it("reads from last-event-id header when present", () => {
+    const req = {
+      headers: { "last-event-id": "evt-from-header" },
+      query: {},
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBe("evt-from-header");
+  });
+
+  it("reads from ?lastEventId= query string when no header is present", () => {
+    const req = {
+      headers: {},
+      query: { lastEventId: "evt-from-query" },
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBe("evt-from-query");
+  });
+
+  it("prefers the header over the query string when both are present", () => {
+    const req = {
+      headers: { "last-event-id": "evt-from-header" },
+      query: { lastEventId: "evt-from-query" },
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBe("evt-from-header");
+  });
+
+  it("returns undefined when neither source provides a value", () => {
+    const req = {
+      headers: {},
+      query: {},
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBeUndefined();
+  });
+
+  it("ignores empty-string values from either source", () => {
+    const req = {
+      headers: { "last-event-id": "" },
+      query: { lastEventId: "" },
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBeUndefined();
+  });
+
+  it("ignores non-string types from query (defensive)", () => {
+    const req = {
+      headers: {},
+      query: { lastEventId: 12345 },
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    expect(resolveLastEventId(req)).toBeUndefined();
+  });
+
+  // Integration: verify that streamHub.subscribe replays from the buffer
+  // when the lastEventId comes via query — same observable behavior as
+  // the existing header-based resume covered in the publishApprovalRequest
+  // suite above. We can simulate the full plumbing without a live SSE
+  // connection by routing through streamHub directly with the value the
+  // resolver would extract.
+  it("query-string lastEventId drives the same buffer-replay path as the header", () => {
+    // Two events buffered for the same topic.
+    publishApprovalRequest(
+      { ...buildPayload(), id: "session-q-resume" },
+      { apiKeyId: null, operatorId: null },
+    );
+    publishApprovalRequest(
+      { ...buildPayload(), id: "session-q-resume", capability: "second" },
+      { apiKeyId: null, operatorId: null },
+    );
+
+    // Pretend the resolver extracted "non-existent-event-id" from
+    // ?lastEventId= (mimics resume against an event no longer in buffer
+    // — falls through to "all" exactly like the header path).
+    const req = {
+      headers: {},
+      query: { lastEventId: "non-existent-event-id-q" },
+    } as unknown as Parameters<typeof resolveLastEventId>[0];
+    const resolvedId = resolveLastEventId(req);
+    expect(resolvedId).toBe("non-existent-event-id-q");
+
+    const replayed: StreamEvent[] = [];
+    const unsub = streamHub.subscribe(
+      [{ type: "approval", id: "session-q-resume" }],
+      (e) => replayed.push(e),
+      resolvedId,
+    );
+    expect(replayed.length).toBe(2);
+    unsub();
+  });
 });
