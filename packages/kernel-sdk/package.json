@@ -21,7 +21,9 @@
   },
   "dependencies": {
     "@pcc/spec": "workspace:*",
-    "tweetnacl": "^1.0.3"
+    "@pcc/transparency-log": "workspace:*",
+    "tweetnacl": "^1.0.3",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
