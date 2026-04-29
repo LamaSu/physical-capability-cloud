@@ -455,11 +455,14 @@ export class LicensingEngine {
    * schedule's well-formedness and that the supplied scheduleHash actually
    * matches the canonical hash of the schedule body.
    *
-   * Schedules are SUPPOSED to be immutable (the on-chain ContributorNFT
-   * metadata hash is the canonical source of truth). The in-memory store
-   * here is a cache. Re-registering with the same hash is idempotent;
-   * re-registering with a different hash is allowed at this layer (the
-   * gateway is responsible for the immutability/version semantics).
+   * Schedules are immutable — the on-chain `RateScheduleRegistry` enforces
+   * this for canonical truth. This in-memory cache mirrors that invariant:
+   * re-registering with the SAME hash is idempotent; re-registering with a
+   * DIFFERENT hash for the same `ipId` throws. To genuinely replace a
+   * schedule (e.g., re-syncing a cache after a chain reorg or after a
+   * contributor explicitly published v2 with a new ContributorNFT), call
+   * `unsafeReplaceRateSchedule()` explicitly. That extra friction matches
+   * the on-chain semantics and prevents silent off-chain/on-chain drift.
    */
   setRateSchedule(ipId: string, schedule: RateSchedule): void {
     if (!ipId) throw new Error("setRateSchedule: ipId is required");
@@ -473,6 +476,51 @@ export class LicensingEngine {
     if (schedule.scheduleHash.toLowerCase() !== expected.toLowerCase()) {
       throw new Error(
         `setRateSchedule: scheduleHash mismatch. Provided ${schedule.scheduleHash}, computed ${expected}`,
+      );
+    }
+
+    const existing = this.rateSchedules.get(ipId);
+    if (
+      existing &&
+      existing.scheduleHash.toLowerCase() !== schedule.scheduleHash.toLowerCase()
+    ) {
+      throw new Error(
+        `setRateSchedule: ipId "${ipId}" already has schedule ${existing.scheduleHash} ` +
+          `(v${existing.version}) — refusing to replace with ${schedule.scheduleHash} ` +
+          `(v${schedule.version}). Use unsafeReplaceRateSchedule() if you really mean ` +
+          `to replace the cached schedule (e.g., after a chain reorg or v2 publish).`,
+      );
+    }
+
+    this.rateSchedules.set(ipId, schedule);
+  }
+
+  /**
+   * Replace the cached RateSchedule for an `ipId` even if the hash differs.
+   *
+   * The deliberate friction in `setRateSchedule` exists to match the on-chain
+   * `RateScheduleRegistry`'s immutability guarantee. Use this method only
+   * when you genuinely need to overwrite the cache:
+   *   - Re-syncing after a chain reorg invalidated the previously-cached schedule
+   *   - A contributor published a v2 schedule (new ContributorNFT, new hash)
+   *   - Test setup explicitly resetting state
+   *
+   * Validates the supplied scheduleHash matches the canonical hash. The
+   * absence of an immutability check is the ONLY behavioural difference vs.
+   * `setRateSchedule`.
+   */
+  unsafeReplaceRateSchedule(ipId: string, schedule: RateSchedule): void {
+    if (!ipId) throw new Error("unsafeReplaceRateSchedule: ipId is required");
+    assertScheduleIsWellFormed(schedule);
+
+    const expected = computeScheduleHash({
+      version: schedule.version,
+      segments: schedule.segments,
+      publishedAt: schedule.publishedAt,
+    });
+    if (schedule.scheduleHash.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(
+        `unsafeReplaceRateSchedule: scheduleHash mismatch. Provided ${schedule.scheduleHash}, computed ${expected}`,
       );
     }
 
