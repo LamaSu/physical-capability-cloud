@@ -40,6 +40,26 @@ export const CapabilityTypeSchema = z.enum([
   "inspection", "assembly", "custom",
 ]);
 
+/**
+ * Per-capability settlement mode (Week 2 — centralized substrate).
+ *
+ * - "centralized": gateway holds the ledger, signs receipts with its
+ *   server Ed25519 key, anchors a daily Merkle root via Anchor.sol.
+ *   No per-milestone gas. Default for new capabilities.
+ * - "onchain": uses MilestoneEscrow.sol on Base Sepolia for every
+ *   settlement. Higher trust, higher gas. Existing capabilities that
+ *   were configured for on-chain escrow keep this mode.
+ *
+ * The schema field is OPTIONAL: capabilities authored before Week 2
+ * have no settlementMode and are interpreted as "centralized" by
+ * default. To opt into on-chain escrow, set "onchain" explicitly.
+ */
+export const SettlementModeSchema = z.enum(["centralized", "onchain"]);
+export type SettlementMode = z.infer<typeof SettlementModeSchema>;
+
+/** Default settlement mode applied when a capability omits the field. */
+export const DEFAULT_SETTLEMENT_MODE: SettlementMode = "centralized";
+
 export const WorkEnvelopeSchema = z.object({
   x: z.number().positive(),
   y: z.number().positive(),
@@ -79,7 +99,27 @@ export const CapabilitySchema = z.object({
   location: GeoLocationSchema,
   queueDepth: z.number().int().min(0),
   tags: z.array(z.string()).optional(),
+  /**
+   * Per-capability settlement mode (Week 2 centralized substrate).
+   * Optional for backward compatibility; absence is interpreted as
+   * `DEFAULT_SETTLEMENT_MODE` ("centralized") by consumers via
+   * `resolveSettlementMode()`. Existing on-chain capabilities must set
+   * "onchain" explicitly to keep their MilestoneEscrow.sol behavior.
+   */
+  settlementMode: SettlementModeSchema.optional(),
 });
+
+/**
+ * Resolve a capability's effective settlement mode. Centralizes the
+ * default-application logic so callers don't independently re-derive
+ * "centralized" — that would silently flip an on-chain capability if a
+ * caller forgot to handle the missing-field case.
+ */
+export function resolveSettlementMode(
+  capability: { settlementMode?: SettlementMode } | null | undefined,
+): SettlementMode {
+  return capability?.settlementMode ?? DEFAULT_SETTLEMENT_MODE;
+}
 
 // ============================================================
 // Evidence Schemas
