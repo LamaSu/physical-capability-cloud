@@ -21,6 +21,7 @@ import type {
 import { DEFAULT_TIER_REQUIREMENTS, DEFAULT_VERIFIER_CRITERIA } from "@pcc/spec";
 import type { CWMStep } from "@pcc/spec";
 import { computeAssuranceScore } from "@pcc/verifier";
+import type { CaptureVerdictRow } from "@pcc/store";
 import { BaseFacade } from "./base.facade.js";
 import type {
   EvidenceSummaryDTO,
@@ -31,6 +32,7 @@ import type {
   AggregatedAttestationDTO,
   AgentRole,
   PopulationContext,
+  CaptureVerificationSummaryDTO,
 } from "./types.js";
 import {
   populateEvidenceSummaryDTO,
@@ -62,6 +64,19 @@ class NotFoundError extends Error {
 interface BundleWithEvents {
   raw: RawEvidenceBundle;
   events: EvidenceEvent[];
+}
+
+/**
+ * Extension of BundleWithEvents for cross-facade CVP integration.
+ * When captureVerdicts have been loaded for a job, they are attached to the
+ * bundle so ALCOA+ computation can tighten `accurate`, `credible`, and
+ * `original` based on capture verdict outcomes.
+ *
+ * The `captureVerdicts` field is always an array — empty when no CVP work
+ * has been performed for the underlying jobId (the common case).
+ */
+interface BundleWithCaptureContext extends BundleWithEvents {
+  captureVerdicts: CaptureVerdictRow[];
 }
 
 // ── ComplianceFacade ──────────────────────────────────────────────────────────
@@ -191,11 +206,21 @@ export class ComplianceFacade extends BaseFacade {
         }
       });
 
+      // Attach captureVerdicts to each bundle so ALCOA+ can cross-reference
+      // CVP outcomes. Verdicts are linked by jobId (NOT bundleId) — a job can
+      // have verdicts without evidence bundles and vice versa. Missing/empty
+      // is the normal case and contributes [] (no tightening).
+      const bundlesWithCapture: BundleWithCaptureContext[] = bundlesWithEvents.map((b) => ({
+        ...b,
+        captureVerdicts: this.loadCaptureVerdictsForJob(b.raw.jobId),
+      }));
+
       // Aggregate all events from those bundles
       const allEvents: EvidenceEvent[] = bundlesWithEvents.flatMap((b) => b.events);
 
-      // ALCOA+ analysis
-      const alcoaStatus = this.computeAlcoa(bundlesWithEvents);
+      // ALCOA+ analysis — uses the capture-aware variant, which falls through
+      // to plain computeAlcoa when no verdicts were found.
+      const alcoaStatus = this.computeAlcoaWithCapture(bundlesWithCapture);
 
       // Tier compliance map — check all 4 tiers against the combined event set
       const tierCompliance: Record<AssuranceTier, boolean> = {
@@ -237,7 +262,16 @@ export class ComplianceFacade extends BaseFacade {
         })),
       });
 
-      return {
+      // Capture-verification aggregate — only emitted when ≥1 verdict was
+      // loaded from the recent bundles. Keeps the DTO tight for legacy
+      // callers that don't use CVP.
+      const allVerdicts = bundlesWithCapture.flatMap((b) => b.captureVerdicts);
+      const captureVerification: CaptureVerificationSummaryDTO | undefined =
+        allVerdicts.length > 0
+          ? buildCaptureVerificationSummary(allVerdicts)
+          : undefined;
+
+      const report: ComplianceReportDTO = {
         capabilityId,
         kernelId,
         satisfiedStandards,
@@ -247,6 +281,10 @@ export class ComplianceFacade extends BaseFacade {
         driftAlerts,
         assuranceScore,
       };
+      if (captureVerification) {
+        report.captureVerification = captureVerification;
+      }
+      return report;
     });
   }
 
@@ -326,6 +364,60 @@ export class ComplianceFacade extends BaseFacade {
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Load capture verdicts for a job. Returns [] when jobId is missing or
+   * no verdicts exist. Never throws — verdict lookup is optional context.
+   */
+  private loadCaptureVerdictsForJob(jobId: string | null | undefined): CaptureVerdictRow[] {
+    if (!jobId) return [];
+    try {
+      return this.repos.evidence.findCaptureVerdictsByJob(jobId) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * ALCOA+ with capture-verdict cross-facade tightening.
+   *
+   * Falls through to the base `computeAlcoa` when no verdicts are attached
+   * (ensuring zero-impact for pre-CVP callers). When verdicts exist, it
+   * tightens three flags per the ai/research/cvp-alcoa-integration.md
+   * mapping:
+   *
+   *   accurate  AND noCC0ForTier2    — a CC0 capture on a tier-2+ bundle
+   *                                    means the capture couldn't be
+   *                                    corroborated at all, so ALCOA
+   *                                    "Accurate" is not satisfied.
+   *   credible  AND passRate >= 0.9  — the PCC verifier-credibility bar
+   *                                    for the CVP sub-protocol.
+   *   original  AND allAnchorCandidates — every verdict must be anchor-
+   *                                    eligible; a non-anchorable capture
+   *                                    breaks "Original" because the
+   *                                    kernel signature chain is unsupported.
+   */
+  private computeAlcoaWithCapture(bundles: BundleWithCaptureContext[]): ALCOAStatus {
+    const base = this.computeAlcoa(bundles);
+    const allVerdicts = bundles.flatMap((b) => b.captureVerdicts);
+    if (allVerdicts.length === 0) return base;
+
+    const passCount = allVerdicts.filter((v) => v.verdict === "PASS").length;
+    const passRate = passCount / allVerdicts.length;
+    const allAnchorCandidates = allVerdicts.every((v) => v.anchorCandidate === 1);
+    const noCC0ForTier2 = bundles.every(
+      (b) =>
+        (b.raw.assuranceTier ?? 0) < 2 ||
+        !b.captureVerdicts.some((v) => v.verifiedClass === 0),
+    );
+
+    return {
+      ...base,
+      accurate: base.accurate && noCC0ForTier2,
+      credible: base.credible && passRate >= 0.9,
+      original: base.original && allAnchorCandidates,
+    };
+  }
 
   /** Compute ALCOA+ status from a set of bundles with their pre-loaded events. */
   private computeAlcoa(bundles: BundleWithEvents[]): ALCOAStatus {
@@ -538,6 +630,47 @@ function deduplicateByVerifier(attestations: VerificationAttestation[]): Verific
     }
   }
   return [...map.values()];
+}
+
+/**
+ * Build the CaptureVerificationSummaryDTO from a flat list of verdict rows.
+ *
+ * `verifiedClass` is the integer (0..5) stored on-chain; we map it to the
+ * "CC0".."CC5" string form the dashboard expects so the UI never has to
+ * reverse-map. All six buckets are zero-filled so callers can read any
+ * class without guarding for `undefined`.
+ */
+function buildCaptureVerificationSummary(
+  verdicts: CaptureVerdictRow[],
+): CaptureVerificationSummaryDTO {
+  const verdictCount = verdicts.length;
+  const passCount = verdicts.filter((v) => v.verdict === "PASS").length;
+  const failCount = verdicts.filter((v) => v.verdict === "FAIL").length;
+  const partialCount = verdicts.filter((v) => v.verdict === "PARTIAL").length;
+  const passRate = verdictCount > 0 ? passCount / verdictCount : 0;
+
+  // Zero-fill all six CC-buckets, then increment from the verdict rows.
+  const classHistogram: Record<string, number> = {
+    CC0: 0,
+    CC1: 0,
+    CC2: 0,
+    CC3: 0,
+    CC4: 0,
+    CC5: 0,
+  };
+  for (const v of verdicts) {
+    const key = `CC${v.verifiedClass}`;
+    classHistogram[key] = (classHistogram[key] ?? 0) + 1;
+  }
+
+  return {
+    verdictCount,
+    passRate,
+    passCount,
+    failCount,
+    partialCount,
+    classHistogram,
+  };
 }
 
 /** Return a fully-false ALCOA+ status (used when no bundles are available) */

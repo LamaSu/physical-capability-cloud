@@ -1306,6 +1306,41 @@ export function migrateDatabase(sqlite: Database.Database): void {
       updated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS comp_prof_kernel ON compliance_profiles(kernel_id);
+
+    -- ── Capture Verification Protocol (Wave 4 — gateway-golf) ────────
+    -- Mirrors packages/db/src/migrations/0001_capture_verdicts.sql and
+    -- 0002_capture_anchors.sql. Kept inline here because the gateway's
+    -- runtime migration is a single better-sqlite3 exec(), not drizzle-kit.
+    CREATE TABLE IF NOT EXISTS capture_verdicts (
+      id              TEXT PRIMARY KEY,
+      job_id          TEXT,
+      operator_id     TEXT NOT NULL,
+      capture_hash    TEXT NOT NULL,
+      manifest_hash   TEXT NOT NULL,
+      declared_class  INTEGER NOT NULL,
+      verified_class  INTEGER NOT NULL,
+      verdict         TEXT NOT NULL CHECK (verdict IN ('PASS','PARTIAL','FAIL')),
+      gates_passed    TEXT NOT NULL DEFAULT '[]',
+      gates_failed    TEXT NOT NULL DEFAULT '[]',
+      warnings        TEXT NOT NULL DEFAULT '[]',
+      anchor_candidate INTEGER NOT NULL DEFAULT 0,
+      result_json     TEXT NOT NULL DEFAULT '{}',
+      declared_class_str TEXT NOT NULL,
+      verified_class_str TEXT NOT NULL,
+      created_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_capture_verdicts_job ON capture_verdicts(job_id);
+    CREATE INDEX IF NOT EXISTS idx_capture_verdicts_hash ON capture_verdicts(capture_hash);
+    CREATE INDEX IF NOT EXISTS idx_capture_verdicts_operator ON capture_verdicts(operator_id);
+
+    CREATE TABLE IF NOT EXISTS capture_anchors (
+      verdict_id   TEXT PRIMARY KEY REFERENCES capture_verdicts(id),
+      tx_hash      TEXT NOT NULL UNIQUE,
+      block_number INTEGER NOT NULL,
+      gas_used     TEXT NOT NULL DEFAULT '0',
+      anchored_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_capture_anchors_tx ON capture_anchors(tx_hash);
   `);
 
   // ══════════════════════════════════════════════════════════════════

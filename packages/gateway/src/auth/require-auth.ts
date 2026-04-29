@@ -39,11 +39,21 @@ declare module "fastify" {
 /**
  * Require authentication. Returns 401 if no valid session found.
  * On success, sets `request.userId` to the ethereum address.
+ *
+ * Accepts either:
+ *   - SIWE session (cookie or Bearer <session-token>)
+ *   - API key (Bearer pcc_live_... / pcc_test_...) already validated by apiGate
+ *     (which sets `req.userId` before any preHandler runs)
  */
 export async function requireAuth(
   req: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
+  // apiGate (onRequest) may have already accepted an API key and set userId.
+  // Don't demand a SIWE session on top of that — agents calling with a
+  // pcc_live_* key are already authenticated for this request.
+  if (req.userId) return;
+
   const session = resolveSession(req);
   if (!session) {
     reply.status(401).send({ error: "Authentication required" });

@@ -50,7 +50,7 @@ export function createStore(options: StoreOptions = {}): Store {
 export type { StoreDB, Repositories };
 export { schema, buildRepositories, createDatabase, migrateDatabase, seedAll };
 // Re-export drizzle-orm operators for gateway routes that need direct table queries
-export { eq, and, or, sql, count } from "drizzle-orm";
+export { eq, and, or, sql, count, desc, asc } from "drizzle-orm";
 // Repository interfaces — the public contract for the data access layer
 export type { IRepositories } from "./interfaces/index.js";
 export type {
@@ -79,6 +79,7 @@ export type {
   RateScheduleRecord,
   TrainingManifestRecord,
   CompositionManifestRecord,
+  CaptureVerdictRow,
 } from "./interfaces/index.js";
 
 // Re-export repository classes for direct use

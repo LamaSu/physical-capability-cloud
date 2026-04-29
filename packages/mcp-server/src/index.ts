@@ -18,6 +18,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { PCC_URL, pccFetch } from "./api.js";
+import { registerCaptureTools } from "./tools/capture.js";
 
 // ---------------------------------------------------------------------------
 // Tool result helper
@@ -1510,6 +1511,14 @@ server.tool(
     return toolResult(data);
   },
 );
+
+// ---------------------------------------------------------------------------
+// Capture Verification Protocol (CVP) tools — Wave 6 Scope B
+// Registered out-of-line to keep index.ts slim. The module owns its own Zod
+// shapes + endpoint metadata for test introspection.
+// ---------------------------------------------------------------------------
+
+registerCaptureTools(server);
 
 // ---------------------------------------------------------------------------
 // Boot

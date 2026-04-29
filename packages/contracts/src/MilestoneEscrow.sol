@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IPGTRForwarder} from "./interfaces/IPGTRForwarder.sol";
 import {IPCCProtocol} from "./interfaces/IPCCProtocol.sol";
+import {SafeERC20} from "./libraries/SafeERC20.sol";
 
 /**
  * @title MilestoneEscrow
@@ -18,9 +19,58 @@ import {IPCCProtocol} from "./interfaces/IPCCProtocol.sol";
  * If disputed, an arbiter resolves. Bonds are slashed for proven fraud.
  *
  * Flow: fund → submitEvidence → submitAttestation → [challenge window] → release
+ *
+ * Multi-stablecoin support
+ * -----------------------------------------------------------------------------
+ * The escrow has a DEFAULT token (set at construction) for backward compatibility.
+ * It also maintains an owner-curated allowlist of approved stablecoins, each
+ * with an on-chain `ReserveAttestation` pointer to a vetted reserve report
+ * (maintained off-chain). Milestones added via `addMilestoneWithToken(..., token)`
+ * may use any allowlisted stablecoin instead of the default.
+ *
+ * The default token is always considered implicitly "allowed" for backward
+ * compatibility with escrows deployed before multi-stablecoin support existed.
+ * Explicit attestations for the default token can still be added via
+ * `allowStablecoin` and are recommended in new deployments.
+ *
+ * SafeERC20 is used for all transfers so the escrow is compatible with
+ * tokens such as USDT that do NOT return a boolean from transfer/transferFrom.
+ * Fee-on-transfer tokens are rejected: every inbound transfer is verified by
+ * balance delta and reverts if the received amount does not equal the claimed
+ * amount.
  */
 contract MilestoneEscrow {
+    using SafeERC20 for IERC20;
+
     // ── Types ────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Metadata pointing at a vetted reserve/reserves-of-reserves report for
+     *         an allowlisted stablecoin. The report itself lives off-chain; this
+     *         struct only anchors governance decisions to an attestor and URL.
+     *
+     * @param attestor         Address of the party who vouched for the reserves.
+     *                         Typically a trusted auditor, multisig, or the protocol
+     *                         governor. Informational — not used for on-chain auth.
+     * @param attestedAt       Block timestamp when the attestation was recorded.
+     * @param reportUri        URI pointing at the reserve report (HTTP, ipfs://, ar://).
+     *                         Empty string is valid but discouraged.
+     * @param maxDeviationBps  Governance parameter indicating the largest deviation
+     *                         (in basis points) from 1 USD that the attestor tolerates
+     *                         before the token should be considered unsafe. Also
+     *                         informational — not enforced on-chain because there is
+     *                         no live price oracle here (by design — see Non-goals).
+     * @param active           True if the stablecoin is currently allowed for NEW
+     *                         milestones. Revoking sets this false without touching
+     *                         existing milestones.
+     */
+    struct ReserveAttestation {
+        address attestor;
+        uint64  attestedAt;
+        string  reportUri;
+        uint16  maxDeviationBps;
+        bool    active;
+    }
 
     enum MilestoneStatus {
         Unfunded,     // 0 - Created but no funds
@@ -106,6 +156,22 @@ contract MilestoneEscrow {
     /// @notice Per-payout basis-point ceiling. Sanity floor: no single recipient takes >50%.
     uint256 public constant MAX_SINGLE_BPS = 5000;
 
+    // ── Multi-Stablecoin Storage ────────────────────────────────────────
+
+    /// @notice Owner-curated allowlist of approved stablecoin tokens with reserve metadata.
+    mapping(address => ReserveAttestation) public reserves;
+
+    /// @notice List of every token ever added to `reserves`, for enumeration / UIs.
+    /// @dev Does not shrink when `revokeStablecoin` flips `.active = false`.
+    address[] private _reserveTokens;
+
+    /// @notice Per-milestone token override. If `address(0)`, the milestone uses
+    ///         the default `token` set at construction.
+    mapping(uint256 => address) public tokenOf;
+
+    /// @notice Per-token total amount owed across all milestones (for `fund`).
+    mapping(address => uint256) public totalByToken;
+
     // ── Reentrancy Guard ─────────────────────────────────────────────────
 
     uint256 private _locked = 1;
@@ -149,6 +215,36 @@ contract MilestoneEscrow {
         bytes32 ipId,
         address token,
         uint256 amount
+    );
+
+    // ── Multi-Stablecoin Events ──────────────────────────────────────────
+
+    /// @notice Emitted when the payer adds a stablecoin to the allowlist.
+    /// @param token          The ERC-20 address approved for escrow.
+    /// @param attestor       Party vouching for the reserves.
+    /// @param reportUri      Pointer to the off-chain reserve report.
+    /// @param maxDeviationBps Largest 1-USD deviation (in bps) tolerated before this token should be revoked.
+    event StablecoinAllowed(
+        address indexed token,
+        address indexed attestor,
+        string reportUri,
+        uint16 maxDeviationBps
+    );
+
+    /// @notice Emitted when a stablecoin is revoked for NEW milestones.
+    /// @dev Existing milestones using this token are unaffected and will still settle.
+    event StablecoinRevoked(address indexed token);
+
+    /// @notice Emitted when a milestone is created, including the token used.
+    /// @dev Supplements the (historically absent) MilestoneAdded event so callers can
+    ///      reconstruct token-per-milestone from logs alone.
+    event MilestoneAdded(
+        uint256 indexed milestoneIndex,
+        bytes32 stepId,
+        address indexed operator,
+        address indexed token,
+        uint256 amount,
+        uint256 operatorBond
     );
 
     // ── Modifiers ────────────────────────────────────────────────────────
@@ -254,10 +350,82 @@ contract MilestoneEscrow {
         authorizedVerifiers[verifier] = false;
     }
 
+    // ── Stablecoin Allowlist ─────────────────────────────────────────────
+
+    /**
+     * @notice Add or refresh a stablecoin on the allowlist. Only the payer (contract owner) can call.
+     *
+     * Updating an existing entry overwrites attestation metadata and re-activates it
+     * if it had been revoked. Emits `StablecoinAllowed` either way.
+     *
+     * @param _token           The ERC-20 token contract. Must have code (contract, not EOA).
+     * @param _attestor        Informational — the party vouching for the reserves.
+     * @param _reportUri       URI pointing at the off-chain reserve report.
+     * @param _maxDeviationBps Governance hint (informational).
+     */
+    function allowStablecoin(
+        address _token,
+        address _attestor,
+        string calldata _reportUri,
+        uint16 _maxDeviationBps
+    ) external onlyPayer {
+        require(_token != address(0), "Zero token");
+        require(_token.code.length > 0, "Token not a contract");
+
+        ReserveAttestation storage r = reserves[_token];
+        bool isNew = r.attestedAt == 0 && !r.active && r.attestor == address(0);
+
+        r.attestor = _attestor;
+        r.attestedAt = uint64(block.timestamp);
+        r.reportUri = _reportUri;
+        r.maxDeviationBps = _maxDeviationBps;
+        r.active = true;
+
+        if (isNew) {
+            _reserveTokens.push(_token);
+        }
+
+        emit StablecoinAllowed(_token, _attestor, _reportUri, _maxDeviationBps);
+    }
+
+    /**
+     * @notice Deactivate a stablecoin — prevents NEW milestones using this token.
+     *         Existing milestones that already used this token are unaffected.
+     * @param _token The ERC-20 token to deactivate.
+     */
+    function revokeStablecoin(address _token) external onlyPayer {
+        require(reserves[_token].attestedAt != 0, "Not allowlisted");
+        reserves[_token].active = false;
+        emit StablecoinRevoked(_token);
+    }
+
+    /**
+     * @notice View helper: is a token currently accepted for new milestones?
+     *         The default token (from constructor) is ALWAYS accepted even without an
+     *         explicit allowlist entry (backward compatibility with single-token escrows).
+     */
+    function isStablecoinAllowed(address _token) public view returns (bool) {
+        if (_token == address(token)) return true;
+        return reserves[_token].active;
+    }
+
+    /**
+     * @notice Enumerate every token that has ever been added to the reserves map.
+     * @dev Includes both active and revoked entries; callers should cross-check with
+     *      `reserves[token].active`.
+     */
+    function getReserveTokens() external view returns (address[] memory) {
+        return _reserveTokens;
+    }
+
     // ── Setup ────────────────────────────────────────────────────────────
 
     /**
-     * @notice Add a milestone. Must be called before funding.
+     * @notice Add a milestone denominated in the escrow's DEFAULT token.
+     *         This preserves the original single-stablecoin ABI.
+     *
+     * @dev Equivalent to `addMilestoneWithToken(_stepId, _operator, _amount,
+     *      _operatorBond, _challengeWindowSeconds, address(token))`.
      */
     function addMilestone(
         bytes32 _stepId,
@@ -266,7 +434,60 @@ contract MilestoneEscrow {
         uint256 _operatorBond,
         uint256 _challengeWindowSeconds
     ) external onlyPayer {
+        _addMilestone(
+            _stepId,
+            _operator,
+            _amount,
+            _operatorBond,
+            _challengeWindowSeconds,
+            address(token)
+        );
+    }
+
+    /**
+     * @notice Add a milestone denominated in a specific allowlisted token.
+     *         The token must be on the reserves allowlist (or be the default token).
+     *
+     * @param _stepId                 Workflow step identifier.
+     * @param _operator               Address of the operator executing the step.
+     * @param _amount                 Payment amount in the chosen token's decimals.
+     * @param _operatorBond           Bond the operator must deposit before evidence.
+     * @param _challengeWindowSeconds Seconds the challenge window stays open after attestation.
+     * @param _token                  ERC-20 token to denominate this milestone in.
+     *                                MUST be `isStablecoinAllowed`.
+     */
+    function addMilestoneWithToken(
+        bytes32 _stepId,
+        address _operator,
+        uint256 _amount,
+        uint256 _operatorBond,
+        uint256 _challengeWindowSeconds,
+        address _token
+    ) external onlyPayer {
+        _addMilestone(
+            _stepId,
+            _operator,
+            _amount,
+            _operatorBond,
+            _challengeWindowSeconds,
+            _token
+        );
+    }
+
+    /// @dev Internal implementation shared by both public entry points.
+    function _addMilestone(
+        bytes32 _stepId,
+        address _operator,
+        uint256 _amount,
+        uint256 _operatorBond,
+        uint256 _challengeWindowSeconds,
+        address _token
+    ) internal {
         require(!funded, "Already funded");
+        require(_token != address(0), "Zero token");
+        require(isStablecoinAllowed(_token), "Token not allowed");
+
+        uint256 idx = milestones.length;
         milestones.push(Milestone({
             stepId: _stepId,
             operator: _operator,
@@ -278,7 +499,17 @@ contract MilestoneEscrow {
             challengeWindowEnd: 0,
             challengeWindowSeconds: _challengeWindowSeconds
         }));
+
+        // Only persist an override when it differs from the default; keeps storage clean
+        // and lets single-token escrows keep their existing gas profile.
+        if (_token != address(token)) {
+            tokenOf[idx] = _token;
+        }
+
         totalAmount += _amount;
+        totalByToken[_token] += _amount;
+
+        emit MilestoneAdded(idx, _stepId, _operator, _token, _amount, _operatorBond);
     }
 
     // ── splitPayout Configuration (ADR-11) ───────────────────────────────
@@ -356,14 +587,36 @@ contract MilestoneEscrow {
     }
 
     /**
-     * @notice Fund the escrow. Transfers totalAmount + total operator bonds from payer.
-     *         Operators must also deposit their bonds separately.
+     * @notice Resolve the token used by a specific milestone.
+     * @dev Falls back to the default `token` if no override was set.
+     */
+    function tokenForMilestone(uint256 milestoneIndex) public view returns (address) {
+        address override_ = tokenOf[milestoneIndex];
+        return override_ == address(0) ? address(token) : override_;
+    }
+
+    /**
+     * @notice Fund the escrow. Transfers per-token milestone totals from the payer.
+     *         For each unique token used by any milestone, pulls the total owed for
+     *         that token in ONE `transferFrom`. Operators must deposit their own bonds
+     *         separately via `depositBond`.
+     *
+     * @dev Each inbound transfer is checked by balance delta — if the received amount
+     *      differs from the expected (e.g. fee-on-transfer tokens), funding reverts.
      */
     function fund() external onlyPayer {
         require(!funded, "Already funded");
         require(milestones.length > 0, "No milestones");
 
-        require(token.transferFrom(msg.sender, address(this), totalAmount), "Transfer failed");
+        // Pull per-token totals. We iterate `_reserveTokens` PLUS the default token
+        // so escrows that never called `allowStablecoin` still work.
+        _pullToken(address(token));
+        for (uint256 i = 0; i < _reserveTokens.length; i++) {
+            address t = _reserveTokens[i];
+            if (t != address(token)) {
+                _pullToken(t);
+            }
+        }
 
         for (uint256 i = 0; i < milestones.length; i++) {
             milestones[i].status = MilestoneStatus.Funded;
@@ -372,8 +625,22 @@ contract MilestoneEscrow {
         emit EscrowFunded(cwmId, totalAmount);
     }
 
+    /// @dev Pulls `totalByToken[t]` from the payer for a single token and verifies
+    ///      the received amount equals the expected (rejects fee-on-transfer tokens).
+    function _pullToken(address t) internal {
+        uint256 expected = totalByToken[t];
+        if (expected == 0) return;
+
+        IERC20 asErc20 = IERC20(t);
+        uint256 before = asErc20.balanceOf(address(this));
+        asErc20.safeTransferFrom(msg.sender, address(this), expected);
+        uint256 actualReceived = asErc20.balanceOf(address(this)) - before;
+        require(actualReceived == expected, "Fee-on-transfer token");
+    }
+
     /**
      * @notice Operator deposits their bond for a milestone.
+     *         The bond token is the SAME as the milestone's payment token.
      */
     function depositBond(uint256 milestoneIndex) external milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
@@ -382,7 +649,11 @@ contract MilestoneEscrow {
         require(m.status == MilestoneStatus.Funded, "Not funded");
         require(m.operatorBond > 0, "No bond required");
 
-        require(token.transferFrom(sender, address(this), m.operatorBond), "Bond transfer failed");
+        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
+        uint256 before = tok.balanceOf(address(this));
+        tok.safeTransferFrom(sender, address(this), m.operatorBond);
+        require(tok.balanceOf(address(this)) - before == m.operatorBond, "Fee-on-transfer token");
+
         m.status = MilestoneStatus.Locked;
         emit MilestoneLocked(milestoneIndex, m.stepId);
     }
@@ -465,13 +736,14 @@ contract MilestoneEscrow {
         address operator = m.operator;
         uint256 amount = m.amount;
         uint256 operatorBond = m.operatorBond;
+        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
 
         emit MilestoneReleased(milestoneIndex, operator, amount);
 
         if (payoutMapSet[milestoneIndex]) {
-            _distributeWithMap(milestoneIndex, amount, operator, operatorBond);
+            _distributeWithMap(milestoneIndex, amount, operator, operatorBond, tok);
         } else {
-            _distributeLegacy(amount, operator, operatorBond);
+            _distributeLegacy(amount, operator, operatorBond, tok);
         }
     }
 
@@ -481,26 +753,35 @@ contract MilestoneEscrow {
      * @dev Legacy single-operator distribution path. Behavior is identical to
      *      the pre-splitPayout `release()` body — fee deduction (if root set),
      *      operator receives net + bond. Existing tests rely on this exact flow.
+     *
+     *      `tok` is the milestone-specific token resolved by the caller via
+     *      `tokenForMilestone(idx)`. This parameter is required for multi-stablecoin
+     *      compatibility (one escrow may host milestones in USDC, USDT, DAI, etc.).
      */
-    function _distributeLegacy(uint256 amount, address operator, uint256 operatorBond) internal {
+    function _distributeLegacy(
+        uint256 amount,
+        address operator,
+        uint256 operatorBond,
+        IERC20 tok
+    ) internal {
         if (protocolRoot != address(0)) {
             IPCCProtocol root = IPCCProtocol(protocolRoot);
             uint256 feeBps = root.protocolFeeBps();
             uint256 fee = (amount * feeBps) / 10000;
             address recipient = root.feeRecipient();
 
-            // Transfer fee to recipient
-            require(token.transfer(recipient, fee), "Fee transfer failed");
+            // Transfer fee to recipient (in the milestone's token)
+            tok.safeTransfer(recipient, fee);
 
-            // Transfer net payment + bond to operator
+            // Transfer net payment + bond to operator (in the milestone's token)
             uint256 operatorPayout = amount - fee + operatorBond;
-            require(token.transfer(operator, operatorPayout), "Transfer failed");
+            tok.safeTransfer(operator, operatorPayout);
 
-            // Accounting callback
-            root.collectFee(address(token), fee);
+            // Accounting callback — tell the protocol which token the fee was paid in
+            root.collectFee(address(tok), fee);
         } else {
             uint256 payout = amount + operatorBond; // Return bond + payment
-            require(token.transfer(operator, payout), "Transfer failed");
+            tok.safeTransfer(operator, payout);
         }
     }
 
@@ -518,22 +799,28 @@ contract MilestoneEscrow {
      *
      *      Read of `_payoutMap[idx]` is via storage pointer for gas efficiency.
      *      Each iteration copies the Payout into memory before transferring.
+     *
+     *      `tok` is the milestone-specific token resolved by the caller via
+     *      `tokenForMilestone(idx)`. Required for multi-stablecoin escrows.
+     *      All transfers go through `safeTransfer` (USDT compatibility — USDT does
+     *      not return a bool from transfer).
      */
     function _distributeWithMap(
         uint256 milestoneIndex,
         uint256 amount,
         address operator,
-        uint256 operatorBond
+        uint256 operatorBond,
+        IERC20 tok
     ) internal {
-        // 1. Protocol fee on gross
+        // 1. Protocol fee on gross (in the milestone's token)
         uint256 protocolFee = 0;
-        address tokenAddr = address(token);
+        address tokenAddr = address(tok);
         if (protocolRoot != address(0)) {
             IPCCProtocol root = IPCCProtocol(protocolRoot);
             uint256 feeBps = root.protocolFeeBps();
             protocolFee = (amount * feeBps) / 10000;
             if (protocolFee > 0) {
-                require(token.transfer(root.feeRecipient(), protocolFee), "Fee transfer failed");
+                tok.safeTransfer(root.feeRecipient(), protocolFee);
             }
             // Accounting hook fires regardless (root may want to record zero-fee event)
             root.collectFee(tokenAddr, protocolFee);
@@ -541,7 +828,7 @@ contract MilestoneEscrow {
 
         uint256 distributable = amount - protocolFee;
 
-        // 2. Per-recipient distribution
+        // 2. Per-recipient distribution (in the milestone's token)
         Payout[] storage payouts = _payoutMap[milestoneIndex];
         uint256 distributed = 0;
         uint256 n = payouts.length;
@@ -549,7 +836,7 @@ contract MilestoneEscrow {
             Payout memory p = payouts[i];
             uint256 share = (distributable * p.bps) / 10000;
             if (share > 0) {
-                require(token.transfer(p.recipient, share), "Split transfer failed");
+                tok.safeTransfer(p.recipient, share);
                 distributed += share;
             }
             emit SplitPayoutExecuted(
@@ -567,14 +854,15 @@ contract MilestoneEscrow {
         //    setPayoutMap() is required to be <= 10000, so distributed <= distributable.
         uint256 operatorAmount = (distributable - distributed) + operatorBond;
         if (operatorAmount > 0) {
-            require(token.transfer(operator, operatorAmount), "Operator residual transfer failed");
+            tok.safeTransfer(operator, operatorAmount);
         }
     }
 
     // ── Disputes ─────────────────────────────────────────────────────────
 
     /**
-     * @notice File a dispute during the challenge window. Requires a bond.
+     * @notice File a dispute during the challenge window. Requires a bond
+     *         posted in the SAME token as the milestone being disputed.
      */
     function fileDispute(
         uint256 milestoneIndex,
@@ -588,7 +876,10 @@ contract MilestoneEscrow {
         require(block.timestamp < m.challengeWindowEnd, "Challenge window closed");
         require(_challengerBond > 0, "Bond required");
 
-        require(token.transferFrom(sender, address(this), _challengerBond), "Bond transfer failed");
+        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
+        uint256 before = tok.balanceOf(address(this));
+        tok.safeTransferFrom(sender, address(this), _challengerBond);
+        require(tok.balanceOf(address(this)) - before == _challengerBond, "Fee-on-transfer token");
 
         disputes[milestoneIndex] = Dispute({
             challenger: sender,
@@ -629,20 +920,22 @@ contract MilestoneEscrow {
         uint256 operatorBond = m.operatorBond;
         uint256 milestoneAmount = m.amount;
 
+        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
+
         if (_challengerWon) {
             m.status = MilestoneStatus.Slashed;
             emit BondSlashed(milestoneIndex, operator, operatorBond);
             emit DisputeResolved(milestoneIndex, _challengerWon);
             // Refund payer + return challenger bond + slash operator bond
-            require(token.transfer(payer, milestoneAmount), "Refund failed");
-            require(token.transfer(challenger, challengerBond + operatorBond), "Challenger payout failed");
+            tok.safeTransfer(payer, milestoneAmount);
+            tok.safeTransfer(challenger, challengerBond + operatorBond);
         } else {
             m.status = MilestoneStatus.Released;
             emit BondSlashed(milestoneIndex, challenger, challengerBond);
             emit DisputeResolved(milestoneIndex, _challengerWon);
             // Release to operator + slash challenger bond
             uint256 payout = milestoneAmount + operatorBond + challengerBond;
-            require(token.transfer(operator, payout), "Operator payout failed");
+            tok.safeTransfer(operator, payout);
         }
     }
 

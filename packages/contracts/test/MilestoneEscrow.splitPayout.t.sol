@@ -462,9 +462,11 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         uint256 preOperator = bad.balanceOf(operator);
 
         // The first recipient (integrator) succeeds; the second (modelAuthor)
-        // returns false → require() trips → entire tx reverts → all balances
-        // restored.
-        vm.expectRevert("Split transfer failed");
+        // returns false → SafeERC20.safeTransfer() reverts with
+        // SafeERC20FailedOperation → entire tx reverts → all balances restored.
+        // (Migrated from raw `require(token.transfer(...))` to safeTransfer for
+        // multi-stablecoin compatibility — USDT does not return a bool.)
+        vm.expectRevert();
         badEscrow.release(0);
 
         // No state mutated (revert rolled everything back)
