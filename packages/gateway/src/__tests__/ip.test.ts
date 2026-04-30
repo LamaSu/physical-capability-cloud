@@ -281,6 +281,104 @@ describe("POST /api/ip/distribute-royalties", () => {
 
     expect(res.statusCode).toBe(400);
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ADR-12: extended ContributorRole taxonomy
+  //
+  // The new 10-value role enum (operator/verifier/insurer/integrator/
+  // protocol-author/model-author/dataset-contributor/curator/assembler/
+  // network-treasury) must be accepted, and the legacy aliases (`designer`,
+  // `network`) must continue to decode without error so older clients keep
+  // working. The route's only runtime validation is the sum-to-100 check;
+  // these tests pin the contract that role strings are passed through.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it("accepts the ADR-12 contributor-economics-with-ai split (6 new-taxonomy roles)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/ip/distribute-royalties",
+      payload: {
+        ipId,
+        splits: [
+          { address: "0xAAAA", role: "operator",           percentage: 87, label: "Machine Operator" },
+          { address: "0xBBBB", role: "verifier",           percentage:  3, label: "Evidence Verifier" },
+          { address: "0xCCCC", role: "protocol-author",    percentage:  2, label: "CSD Author" },
+          { address: "0xDDDD", role: "integrator",         percentage:  2, label: "Adapter Integrator" },
+          { address: "0xEEEE", role: "model-author",       percentage:  4, label: "Model Author" },
+          { address: "0xFFFF", role: "network-treasury",   percentage:  2, label: "Network Treasury" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ txHash: string; distributed: number }>();
+    expect(body.distributed).toBe(100);
+  });
+
+  it("backward compat: legacy `designer` role still decodes", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/ip/distribute-royalties",
+      payload: {
+        ipId,
+        splits: [
+          { address: "0xAAAA", role: "designer", percentage: 10, label: "Designer" },
+          { address: "0xBBBB", role: "operator", percentage: 70, label: "Operator" },
+          { address: "0xCCCC", role: "verifier", percentage: 10, label: "Verifier" },
+          { address: "0xDDDD", role: "curator",  percentage: 10, label: "Curator" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ distributed: number }>().distributed).toBe(100);
+  });
+
+  it("backward compat: legacy `network` role (alias for network-treasury) still decodes", async () => {
+    // The gateway types splits[].role as ContributorRole, which does NOT
+    // include the pre-ADR-12 `network` literal — that string was only ever
+    // present in story-defaults.ts and a2a IPRevenueSplitEntry. The route
+    // does no runtime enum validation though, so older clients still
+    // ship-through. We cast the payload to keep the test honest about what
+    // it asserts: runtime tolerance for legacy `network` strings, not type
+    // membership.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/ip/distribute-royalties",
+      payload: {
+        ipId,
+        splits: [
+          { address: "0xAAAA", role: "operator", percentage: 80, label: "Operator" },
+          { address: "0xBBBB", role: "verifier", percentage: 10, label: "Verifier" },
+          { address: "0xCCCC", role: "network",  percentage: 10, label: "Protocol Treasury" },
+        ],
+      } as unknown,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ distributed: number }>().distributed).toBe(100);
+  });
+
+  it("accepts insurer and dataset-contributor roles introduced by ADR-12", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/ip/distribute-royalties",
+      payload: {
+        ipId,
+        splits: [
+          { address: "0xAAAA", role: "operator",            percentage: 85, label: "Operator" },
+          { address: "0xBBBB", role: "verifier",            percentage:  3, label: "Verifier" },
+          { address: "0xCCCC", role: "insurer",             percentage:  2, label: "Insurer" },
+          { address: "0xDDDD", role: "model-author",        percentage:  4, label: "Model Author" },
+          { address: "0xEEEE", role: "dataset-contributor", percentage:  3, label: "Dataset Contributor" },
+          { address: "0xFFFF", role: "network-treasury",    percentage:  3, label: "Network Treasury" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ distributed: number }>().distributed).toBe(100);
+  });
 });
 
 // ---------------------------------------------------------------------------

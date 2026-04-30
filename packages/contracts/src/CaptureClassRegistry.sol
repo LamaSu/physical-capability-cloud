@@ -21,6 +21,18 @@ pragma solidity ^0.8.24;
  *
  * The capture class (CC0..CC5) is a trust tier the operator declares, and the
  * gateway's detector pipeline may lower before anchoring. See design doc §1.
+ *
+ * Shared content-addressing pattern:
+ *   This contract implements the same "sha256-keyed, immutable, publish-once"
+ *   pattern as {RateScheduleRegistry}, factored into the {CanonicalRegistry}
+ *   library. CaptureClassRegistry intentionally does NOT call into the library
+ *   today (its replay revert string is "replay" rather than the library's
+ *   "Already published", and the captureHash is supplied externally rather
+ *   than derived from raw bytes). A future PR may either (a) migrate this
+ *   contract to {CanonicalRegistry.requireUnclaimedWith(exists[h], "replay")}
+ *   for the replay check, or (b) unify revert strings across both registries.
+ *   See `ai/research/contributor-economics/13-canonical-registry-extraction.md`
+ *   for design rationale.
  */
 contract CaptureClassRegistry {
     // ── Types ──────────────────────────────────────────────────────────────

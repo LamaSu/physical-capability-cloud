@@ -23,6 +23,7 @@
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
+    "gen:role-tags": "tsx script/codegen/gen-role-tags.ts",
     "forge:build": "forge build",
     "forge:test": "forge test -vvv",
     "forge:deploy:local": "forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://127.0.0.1:8545 --broadcast -vvvv",

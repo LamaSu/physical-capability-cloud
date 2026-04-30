@@ -74,6 +74,11 @@ export type {
   IAuditLogRepository,
   IRegistrationRepository,
   IA2AMessageRepository,
+  IContributorRepository,
+  ContributorProfileRecord,
+  RateScheduleRecord,
+  TrainingManifestRecord,
+  CompositionManifestRecord,
   CaptureVerdictRow,
 } from "./interfaces/index.js";
 
@@ -98,5 +103,6 @@ export {
   ApiKeyRepository,
   AuditLogRepository,
   A2AMessageRepository,
+  ContributorRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

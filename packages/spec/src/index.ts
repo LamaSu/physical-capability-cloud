@@ -10,3 +10,6 @@ export * from "./identity/erc8004.js";
 export * from "./identity/ephemeral.js";
 // CSD (Capability StructureDefinition) — schema, types, and registry
 export * from "./csd/index.js";
+// ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
+// (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
+export * from "./payouts.js";

@@ -18,6 +18,8 @@ export {
   PCC_DEFAULT_FEE_BPS,
   PCC_FEE_BPS_MIN,
   PCC_FEE_BPS_MAX,
+  RateScheduleRegistryABI,
+  ContributorNFTABI,
 } from "./abi/index.js";
 export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
@@ -74,6 +76,8 @@ export {
 export type {
   RevenueSplitProfile,
   SplitEntry,
+  SplitRole,
+  SplitProfileName,
   ResolvedSplit,
   DistributionEntry,
 } from "./story-defaults.js";
@@ -83,6 +87,7 @@ export {
   LicensingEngine,
   getLicensingEngine,
   resetLicensingEngine,
+  captureClassFromEvidence,
 } from "./licensing-engine.js";
 export type {
   LicenseEvaluation,
@@ -96,3 +101,12 @@ export type {
   EnforcementResult,
   RoyaltySettlement,
 } from "./ip-enforcement.js";
+
+// splitPayout helpers (ADR-11) — Payout struct + ROLE_TAGS + buildPayoutMap stub
+export { ROLE_TAGS, buildPayoutMap } from "./payouts.js";
+export type {
+  Payout,
+  RoleTagKey,
+  BuildPayoutMapInput,
+  BuildPayoutMapResult,
+} from "./payouts.js";

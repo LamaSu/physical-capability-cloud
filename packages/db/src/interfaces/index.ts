@@ -192,6 +192,21 @@ export type {
   ComplianceProfileRow,
   ComplianceProfileInsert,
 } from "./IAnalyticsRepository.js";
+export type {
+  IContributorRepository,
+  ContributorProfileRecord,
+  ContributorProfileRow,
+  ContributorProfileInsert,
+  RateScheduleRecord,
+  RateScheduleRow,
+  RateScheduleInsert,
+  TrainingManifestRecord,
+  TrainingManifestRow,
+  TrainingManifestInsert,
+  CompositionManifestRecord,
+  CompositionManifestRow,
+  CompositionManifestInsert,
+} from "./IContributorRepository.js";
 
 import type { IJobRepository } from "./IJobRepository.js";
 import type { IKernelRepository } from "./IKernelRepository.js";
@@ -216,6 +231,7 @@ import type { IA2AMessageRepository } from "./IA2AMessageRepository.js";
 import type { IGovernanceRepository } from "./IGovernanceRepository.js";
 import type { ITemplateStoreRepository } from "./ITemplateStoreRepository.js";
 import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
+import type { IContributorRepository } from "./IContributorRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -247,4 +263,5 @@ export interface IRepositories {
   governance: IGovernanceRepository;
   templateStore: ITemplateStoreRepository;
   analytics: IAnalyticsRepository;
+  contributors: IContributorRepository;
 }

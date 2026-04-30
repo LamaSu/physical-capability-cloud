@@ -2,12 +2,12 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Verifiable on-chain skill wrapper for any physical capability. Machines register what they can do as soulbound NFTs. Agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.",
-  "version": "2.8.0",
-  "toolCount": 218,
-  "lastUpdated": "2026-04-23T00:00:00Z",
+  "version": "2.9.0",
+  "toolCount": 225,
+  "lastUpdated": "2026-04-29T00:00:00Z",
   "homepage": "https://capability.network",
   "api_base": "https://capability.network",
-  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network \u2014 a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key \u2014 it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key \u2014 get your Bearer token\n2. create_kernel \u2014 register your physical site (lab, workshop, factory)\n3. setup_register_device \u2014 add each machine to your kernel\n4. setup_test_job \u2014 verify the pipeline end-to-end\n5. mint_certificate \u2014 prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers \u2014 query the distributed gossip network for capabilities. Public, no auth needed.\npcc_dht_announce \u2014 broadcast capabilities to all connected peers.\npcc_dht_metrics \u2014 DHT telemetry counters and recent events.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration \u2014 manage operator equipment registrations. Two paths to go live:\n- Manual: submitted \u2192 approved \u2192 active (requires admin review)\n- Fast-track: submitted \u2192 prove_registration (submit evidence bundle) \u2192 auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Capture Verification (CVP)\npcc_capture_challenge, pcc_capture_upload, pcc_capture_anchor, pcc_capture_status, pcc_list_verdicts, pcc_capture_class_registry, pcc_verifier_health \u2014 issue a block-anchored nonce, upload the captured media + CaptureManifest for 6-gate verification (CC0..CC5), and anchor PASS verdicts to CaptureClassRegistry on-chain. Use pcc_verifier_health to diagnose adapter availability when a capture class is rejected or degraded.\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Equipment Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Supplies & Materials Marketplace\nmarketplace_categories, marketplace_list_listings, marketplace_get_listing, marketplace_create_listing, marketplace_update_listing, marketplace_delete_listing, marketplace_place_order, marketplace_list_orders, marketplace_get_order \u2014 buy and sell raw materials, lab reagents, tooling, consumables, and other physical production inputs.\n\n### NEAR Cross-Chain Payments\nnear_status, near_quote, near_intent, near_intent_status \u2014 fund escrow contracts using any asset on any chain via NEAR 1Click solver network (chaindefuser.com).\n\n### PCCProtocol (On-Chain)\nprotocol_state, protocol_fee, protocol_token_fees, protocol_escrow_fees, protocol_create_escrow \u2014 read protocol fee rates and create factory-deployed escrow contracts.\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Paid Job Flow (end-to-end)\npcc_submit_paid_job \u2014 one-call fast-track: DHT discovery straight to funded escrow + active scope. Returns jobId, scopeId, escrowId, quote.\npcc_job_complete \u2014 complete a job: gathers evidence bundle, SHA-256 hash, settles escrow.\npcc_job_settlement \u2014 get settlement status: escrow, milestones, evidence hash, paid amount.\n\n### Generic Device Relay\npcc_relay_generic_tool_call \u2014 relay a tool call to any kernel (not just OT-2). Uses /api/relay/:kernelId/tool-call. Validates against device tool manifest.\npcc_get_tool_manifest \u2014 get the tool manifest for a device type (opentrons, octoprint, generic). Lists all available tools and their safety classification.\n\n### Generative UI\npcc_generate_ui \u2014 generate a dynamic visual interface (HTML) and serve it locally via pcc-node. Supports: plate-layout, protocol-builder, job-status, camera-viewer, device-config templates, or custom HTML.\npcc_get_ui_submissions \u2014 read form submissions from generated UIs. Users interact with the UI in their browser, submissions are queued for the agent to process.\n\n### Software Import\nUse `pcc-node import-job <file>` to import from existing tools:\n- G-code (.gcode, .gco, .nc) \u2014 3D printer or CNC programs from PrusaSlicer, Cura, Fusion 360\n- STL (.stl) \u2014 3D models (flags needsSlicing)\n- Opentrons protocols (.py) \u2014 liquid handling protocols with metadata extraction\n- CSV plate layouts (.csv) \u2014 well/volume/sample data from lab software\nImported files are validated against the target machine's capabilities before submission.\n\n### Request Decomposition (High-Level Requests \u2192 Capability DAGs)\npcc_submit_request, pcc_list_requests, pcc_get_request, pcc_decompose_request, pcc_publish_request, pcc_get_request_dag, pcc_get_request_critical_path, pcc_assign_node_operator, pcc_update_node_status, pcc_update_request, pcc_cancel_request \u2014 Submit a natural language request (e.g. 'Build a cute animatronic plush desk robot by tomorrow') and the system decomposes it into a capability DAG with dependencies, cost/hour estimates, and critical path. Nodes map to PCC capability types (fdm, cnc, hplc, pcb, assembly, software, logistics, etc.). Each node can be published as a bounty for operators to claim.\n\n### Oracle Verification\npcc_oracle_status \u2014 check if the verification oracle is online and get its signing address.\npcc_oracle_verify \u2014 submit evidence for oracle verification. Returns a signed EIP-712 attestation required for escrow settlement. Every settlement passes through the oracle \u2014 no attestation, no fund release.\n\n### Protocol Economics\nThe protocol charges a 2.35% fee on every settlement, hardcoded in the PCCProtocol smart contract. The fee is immutable \u2014 no admin, no governance, no upgrade path can change it. The fee recipient wallet is a constant in the contract bytecode. This fee funds protocol development and is the business model.\n\n\n### Diagnostics & Support\nsend_diagnostics, send_support_message, check_support_replies, reply_to_support_thread \u2014 when the operator's node has problems, upload an encrypted diagnostic bundle and open a support thread. Discord webhook notifies the PCC team immediately. The pcc-node CLI has `pcc-node logs --send`, `pcc-node support \"msg\"`, and `pcc-node feedback on` for local use.\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess \u2014 always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
+  "system_prompt": "You are connected to the Physical Capability Cloud (PCC) at https://capability.network \u2014 a distributed, verifiable network for physical capabilities. Operators run their own nodes (pip install pcc-node), machines register what they can do, and agents discover, price, and orchestrate those capabilities through smart contracts with milestone escrow.\n\n## Architecture\nPCC is a distributed network, not a centralized platform. Operators run pcc-node on their own hardware. Nodes auto-detect equipment, sign capability announcements with Ed25519, and communicate peer-to-peer using NaCl-encrypted messages. The gateway at capability.network is a bootstrap and discovery service. A DHT provides decentralized capability discovery.\n\n## STEP 1: Get your API key (ALWAYS do this first)\nCall provision_api_key with either an email address OR a walletAddress. This returns a pcc_live_* API key. Include it as 'Authorization: Bearer <key>' on ALL subsequent requests. Without it, every endpoint returns 401. Save the key \u2014 it is shown only once.\n\n## 5-Step Self-Onboarding Flow\n1. provision_api_key \u2014 get your Bearer token\n2. create_kernel \u2014 register your physical site (lab, workshop, factory)\n3. setup_register_device \u2014 add each machine to your kernel\n4. setup_test_job \u2014 verify the pipeline end-to-end\n5. mint_certificate \u2014 prove your capability on-chain (soulbound NFT)\n\nAlternatively, operators can run `pip install pcc-node && pcc-node start` to auto-detect hardware and join the network in one command.\n\n## Execution Scopes\nWhen controlling physical equipment remotely, use execution scopes to bound what operations are allowed. Create a scope with pcc_create_scope before issuing SCOPED WRITE operations (protocol upload, run create, run action). READ operations (health, pipettes, calibration) and SAFE CONTROL operations (home, lights) do not require a scope. PRIVILEGED operations (shell) require operator approval.\n\n## Tool Categories\n\n### Auth & Provisioning\nprovision_api_key, list_api_keys, revoke_api_key\n\n### Setup & Onboarding\nsetup_detect, setup_generate_config, setup_validate, setup_register_device, setup_test_job, setup_status, onboard_machine, analyze_machine_docs, redeem_invite, check_invite\n\n### Capabilities & Discovery\nlist_capability_types, search_capabilities, get_build_options, calculate_price, build_contract\n\n### DHT & P2P Discovery\npcc_dht_query, pcc_dht_peers \u2014 query the distributed gossip network for capabilities. Public, no auth needed.\npcc_dht_announce \u2014 broadcast capabilities to all connected peers.\npcc_dht_metrics \u2014 DHT telemetry counters and recent events.\n\n### Registration & Approval\nlist_registrations, get_registration, approve_registration, reject_registration, activate_registration, prove_registration \u2014 manage operator equipment registrations. Two paths to go live:\n- Manual: submitted \u2192 approved \u2192 active (requires admin review)\n- Fast-track: submitted \u2192 prove_registration (submit evidence bundle) \u2192 auto-approved + active immediately\nOperators who can demonstrate their device works (photo of test output, device health, evidence bundle) skip the review queue entirely.\n\n### Execution Scopes\npcc_create_scope, pcc_revoke_scope, pcc_scope_audit\n\n### Device Relay & Camera\npcc_relay_tool_call, pcc_get_tool_result, pcc_camera_latest\n\n### Chat\npcc_chat_send, pcc_chat_history\n\n### Kernels & Devices\nlist_kernels, get_kernel, get_kernel_devices, get_kernel_jobs, create_kernel\n\n### Jobs\nlist_jobs, get_job, update_job_status\n\n### Escrow & On-Chain\nlist_escrows, get_escrow, get_escrow_chain_state, get_escrow_events, get_token_balance, get_token_allowance, get_escrow_dispute, get_write_status, fund_escrow, approve_token, release_milestone, file_escrow_dispute, deposit_bond, submit_evidence_hash, submit_attestation\n\n### Evidence & Encryption\narchive_evidence, get_evidence_bundle, grant_evidence_access, list_evidence_grants, archive_encrypted_bundle, get_bundle_ipfs, retrieve_ipfs, get_lit_conditions, lit_decrypt\n\n### ZK Proofs\nverify_evidence_zk, commit_evidence\n\n### Telemetry & Logs\nget_telemetry_stats, get_active_telemetry, get_job_telemetry, get_telemetry_logs, emit_telemetry\n\n### Human Verification\nsubmit_for_human_verification, get_verification_assignments, get_verification_status, respond_to_verification, dispute_verification\n\n### Story Protocol IP\nregister_capability_ip, register_job_evidence_ip, distribute_royalties, pay_ip_royalty, claim_ip_revenue, get_ip_revenue, get_ip_lineage, get_capability_ip, raise_ip_dispute\n\n### Protocols & Runs\nlist_protocols, get_protocol, create_protocol, update_protocol, publish_protocol, fork_protocol, get_protocol_forks, list_protocol_runs, get_protocol_run, create_protocol_run, start_protocol_run, pause_protocol_run, resume_protocol_run, cancel_protocol_run, validate_protocol\n\n### Automation & Orchestration\nget_workflows, get_workflow, get_transfer_graphs, list_automation_status, get_automation_status, record_episode, advance_automation, list_transfer_agents\n\n### Logistics\nget_logistics_overview, get_shipments, create_shipment, get_shipment_quote, get_installations, get_space_bookings\n\n### Spaces\nsearch_spaces, get_space, match_spaces\n\n### Equipment Marketplace & ROI\nget_marketplace_overview, get_equipment_classes, get_demand_supply, calculate_roi\n\n### Supplies & Materials Marketplace\nmarketplace_categories, marketplace_list_listings, marketplace_get_listing, marketplace_create_listing, marketplace_update_listing, marketplace_delete_listing, marketplace_place_order, marketplace_list_orders, marketplace_get_order \u2014 buy and sell raw materials, lab reagents, tooling, consumables, and other physical production inputs.\n\n### NEAR Cross-Chain Payments\nnear_status, near_quote, near_intent, near_intent_status \u2014 fund escrow contracts using any asset on any chain via NEAR 1Click solver network (chaindefuser.com).\n\n### PCCProtocol (On-Chain)\nprotocol_state, protocol_fee, protocol_token_fees, protocol_escrow_fees, protocol_create_escrow \u2014 read protocol fee rates and create factory-deployed escrow contracts.\n\n### Operator\nget_operator_dashboard, get_operator_machines, get_operator_earnings, get_operator_certs\n\n### Sensors\nget_sensor_channels, get_kernel_sensors\n\n### Settlement & Rewards\nget_settlement_status, get_settlement_epochs, get_depin_stats, mint_certificate\n\n### Bounties & Pools\nsubmit_demand, list_bounties, claim_bounty, verify_bounty, get_top_demand, get_bounty_leaderboard, create_investment_pool, stake_in_pool, get_pool_earnings, get_pool, list_pools, close_pool, claim_pool, convert_bounty_to_pool\n\n### A2A & Agent Communication\nlist_conversations, get_subnet_status, get_subnet_miners\n\n### Paid Job Flow (end-to-end)\npcc_submit_paid_job \u2014 one-call fast-track: DHT discovery straight to funded escrow + active scope. Returns jobId, scopeId, escrowId, quote.\npcc_job_complete \u2014 complete a job: gathers evidence bundle, SHA-256 hash, settles escrow.\npcc_job_settlement \u2014 get settlement status: escrow, milestones, evidence hash, paid amount.\n\n### Generic Device Relay\npcc_relay_generic_tool_call \u2014 relay a tool call to any kernel (not just OT-2). Uses /api/relay/:kernelId/tool-call. Validates against device tool manifest.\npcc_get_tool_manifest \u2014 get the tool manifest for a device type (opentrons, octoprint, generic). Lists all available tools and their safety classification.\n\n### Generative UI\npcc_generate_ui \u2014 generate a dynamic visual interface (HTML) and serve it locally via pcc-node. Supports: plate-layout, protocol-builder, job-status, camera-viewer, device-config templates, or custom HTML.\npcc_get_ui_submissions \u2014 read form submissions from generated UIs. Users interact with the UI in their browser, submissions are queued for the agent to process.\n\n### Software Import\nUse `pcc-node import-job <file>` to import from existing tools:\n- G-code (.gcode, .gco, .nc) \u2014 3D printer or CNC programs from PrusaSlicer, Cura, Fusion 360\n- STL (.stl) \u2014 3D models (flags needsSlicing)\n- Opentrons protocols (.py) \u2014 liquid handling protocols with metadata extraction\n- CSV plate layouts (.csv) \u2014 well/volume/sample data from lab software\nImported files are validated against the target machine's capabilities before submission.\n\n### Request Decomposition (High-Level Requests \u2192 Capability DAGs)\npcc_submit_request, pcc_list_requests, pcc_get_request, pcc_decompose_request, pcc_publish_request, pcc_get_request_dag, pcc_get_request_critical_path, pcc_assign_node_operator, pcc_update_node_status, pcc_update_request, pcc_cancel_request \u2014 Submit a natural language request (e.g. 'Build a cute animatronic plush desk robot by tomorrow') and the system decomposes it into a capability DAG with dependencies, cost/hour estimates, and critical path. Nodes map to PCC capability types (fdm, cnc, hplc, pcb, assembly, software, logistics, etc.). Each node can be published as a bounty for operators to claim.\n\n### Oracle Verification\npcc_oracle_status \u2014 check if the verification oracle is online and get its signing address.\npcc_oracle_verify \u2014 submit evidence for oracle verification. Returns a signed EIP-712 attestation required for escrow settlement. Every settlement passes through the oracle \u2014 no attestation, no fund release.\n\n### Protocol Economics\nThe protocol charges a 2.35% fee on every settlement, hardcoded in the PCCProtocol smart contract. The fee is immutable \u2014 no admin, no governance, no upgrade path can change it. The fee recipient wallet is a constant in the contract bytecode. This fee funds protocol development and is the business model.\n\n\n### Contributor Economics (ADR-12)\npcc_contributor_register, pcc_contributor_list — bind a wallet+role to a published RateSchedule. Profiles are composite-keyed (address:role:tail) so one wallet can hold multiple roles concurrently.\npcc_schedule_publish, pcc_schedule_get, pcc_schedule_evaluate — publish sealed off-chain RateSchedules (sha256-content-addressed, idempotent), fetch by hash, and evaluate the curve at any moment given (now, jobValueCents?, jobsPerDay?). Six segment kinds are supported: constant, step, linear-decay, exponential-decay, adoption-indexed, piecewise-value.\npcc_training_manifest_set, pcc_training_manifest_get — link a Model IP to its DatasetIPs with weightBps so the LicensingEngine recursively distributes the model author's payout share to data contributors at settlement time. Weights must sum to ≤ 10000 bps.\n\n### Diagnostics & Support\nsend_diagnostics, send_support_message, check_support_replies, reply_to_support_thread \u2014 when the operator's node has problems, upload an encrypted diagnostic bundle and open a support thread. Discord webhook notifies the PCC team immediately. The pcc-node CLI has `pcc-node logs --send`, `pcc-node support \"msg\"`, and `pcc-node feedback on` for local use.\n### Feedback\nsubmit_feedback\n\n## API calls\nAll tool endpoints resolve against https://capability.network. Always include your API key as Authorization: Bearer <key>.\nUse tools to fetch live data. Never guess \u2014 always query the network.\nFor multi-step workflows, guide step-by-step and wait for each result.",
   "tools": [
     {
       "name": "provision_api_key",
@@ -5515,6 +5515,161 @@
       }
     },
     {
+      "name": "pcc_contributor_register",
+      "description": "Register a contributor profile binding a wallet address to a role and a published RateSchedule. Body: address (0x40hex), role (10 ContributorRole values from ADR-12 §2.1 + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail). Idempotent on the composite id — re-posting the same (address, role, contributorNftTokenId) replaces the prior profile.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Wallet address (0x + 40 hex chars)" },
+          "role": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "verifier",
+              "insurer",
+              "integrator",
+              "protocol-author",
+              "model-author",
+              "dataset-contributor",
+              "curator",
+              "assembler",
+              "network-treasury",
+              "designer"
+            ],
+            "description": "ContributorRole — 10 ADR-12 roles + deprecated 'designer'"
+          },
+          "scheduleHash": { "type": "string", "description": "0x + 64 hex sha256 of a published RateSchedule" },
+          "ipId": { "type": "string", "description": "Optional Story Protocol IP Asset ID" },
+          "metadataUri": { "type": "string", "description": "Optional ipfs:// or https:// URI" },
+          "contributorNftTokenId": { "type": "string", "description": "Optional ContributorNFT tokenId once minted on-chain" }
+        },
+        "required": ["address", "role", "scheduleHash"]
+      },
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/contributors"
+      }
+    },
+    {
+      "name": "pcc_contributor_list",
+      "description": "List all contributor profiles for an address across roles. Returns an array of {id, address, role, scheduleHash, ipId, contributorNftTokenId, metadataUri, registeredAt}. Returns empty array when no profiles exist for the address.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "Wallet address (0x + 40 hex chars)" }
+        },
+        "required": ["address"]
+      },
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/contributors/{address}"
+      }
+    },
+    {
+      "name": "pcc_schedule_publish",
+      "description": "Publish a sealed off-chain RateSchedule. Computes scheduleHash server-side via the canonical sha256-over-canonical-JSON algorithm (matching the on-chain RateScheduleRegistry.publish() invariant). Idempotent: re-publishing the same content returns alreadyPublished:true. Returns {scheduleHash, alreadyPublished}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "publishedBy": { "type": "string", "description": "Address that publishes (0x + 40 hex chars)" },
+          "schedule": {
+            "type": "object",
+            "description": "RateSchedule body — version, segments (constant/step/linear-decay/exponential-decay/adoption-indexed/piecewise-value), and optional notes",
+            "properties": {
+              "version": { "type": "integer", "minimum": 1 },
+              "segments": { "type": "array", "items": { "type": "object" }, "minItems": 1 },
+              "notes": { "type": "string" }
+            },
+            "required": ["version", "segments"]
+          }
+        },
+        "required": ["publishedBy", "schedule"]
+      },
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/contributors/schedules"
+      }
+    },
+    {
+      "name": "pcc_schedule_get",
+      "description": "Fetch a published RateSchedule by its content hash. Returns {schedule, publishedBy} with segments re-validated via Zod, or 404 if not found.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scheduleHash": { "type": "string", "description": "0x + 64 hex sha256 of the schedule" }
+        },
+        "required": ["scheduleHash"]
+      },
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/contributors/schedules/{scheduleHash}"
+      }
+    },
+    {
+      "name": "pcc_schedule_evaluate",
+      "description": "Evaluate a published RateSchedule at a moment, returning the effective bps. Inputs: scheduleHash + now (unix seconds) + optional jobValueCents (piecewise-value) + optional jobsPerDay (adoption-indexed). Returns {scheduleHash, bps, segmentKind, segmentIndex}. segmentIndex=-1 + bps=0 when no segment covers the moment (silent gap).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scheduleHash": { "type": "string", "description": "0x + 64 hex schedule hash" },
+          "now": { "type": "integer", "minimum": 0, "description": "Unix seconds at evaluation moment" },
+          "jobValueCents": { "type": "integer", "minimum": 0, "description": "Job value in cents (piecewise-value segments)" },
+          "jobsPerDay": { "type": "number", "minimum": 0, "description": "Rolling 24h job count (adoption-indexed segments)" }
+        },
+        "required": ["scheduleHash", "now"]
+      },
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/contributors/schedules/{scheduleHash}/evaluate"
+      }
+    },
+    {
+      "name": "pcc_training_manifest_set",
+      "description": "Set (insert-or-replace) the TrainingManifest for a model IP — the dataset weight map the LicensingEngine walks when distributing payouts to a 'model-author' entry in a CompositionManifest. Dataset weightBps must sum to ≤ 10000 (gateway accepts partial mixes; on-chain enforces exact 10000). Returns {modelIpId, manifestHash}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "modelIpId": { "type": "string", "description": "Story IP Asset ID for the model" },
+          "baseModelIpId": { "type": "string", "description": "Optional parent ModelNFT IP if this was fine-tuned" },
+          "datasetWeights": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "datasetIpId": { "type": "string" },
+                "weightBps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+                "dataPointCount": { "type": "integer", "minimum": 0 }
+              },
+              "required": ["datasetIpId", "weightBps"]
+            },
+            "description": "DatasetIP entries with weightBps (sum ≤ 10000)"
+          },
+          "methodologyHash": { "type": "string", "description": "Optional 0x + 64 hex reproducibility hash" }
+        },
+        "required": ["modelIpId", "datasetWeights"]
+      },
+      "endpoint": {
+        "method": "POST",
+        "path": "/api/contributors/training-manifests"
+      }
+    },
+    {
+      "name": "pcc_training_manifest_get",
+      "description": "Fetch the TrainingManifest for a model IP. Returns the parsed datasets array + manifestHash + createdAt, or 404 if no manifest has been set.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "modelIpId": { "type": "string", "description": "Story IP Asset ID for the model" }
+        },
+        "required": ["modelIpId"]
+      },
+      "endpoint": {
+        "method": "GET",
+        "path": "/api/contributors/training-manifests/{modelIpId}"
+      }
+    },
+    {
       "name": "pcc_capture_challenge",
       "description": "Issue a fresh block-anchored CaptureNonceChallenge for a job. The operator's device must render this nonce into the captured media (QR code, audio tone, etc.) before calling pcc_capture_upload. The nonce is derived from (challengeId, latest blockHash, workOutputRoot) so captures cannot be pre-computed. Returns challengeId, 64-char hex nonce, blockNumber, maxAgeSeconds (clamped to 120).",
       "input_schema": {
@@ -5701,7 +5856,7 @@
     "openai": "const OpenAI = require('openai');\nconst pkg = require('./agent-package.json');\nconst client = new OpenAI();\n\nconst PCC_BASE = pkg.api_base; // https://capability.network\nconst tools = pkg.tools.map(t => ({\n  type: 'function',\n  function: { name: t.name, description: t.description, parameters: t.input_schema },\n}));\n\nlet apiKey = null;\n\nasync function callTool(toolName, input) {\n  const tool = pkg.tools.find(t => t.name === toolName);\n  let path = tool.endpoint.path;\n  for (const [k, v] of Object.entries(input)) path = path.replace(`{${k}}`, v);\n  const headers = { 'Content-Type': 'application/json' };\n  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;\n  const res = await fetch(`${PCC_BASE}${path}`, {\n    method: tool.endpoint.method,\n    headers,\n    body: tool.endpoint.method !== 'GET' ? JSON.stringify(input) : undefined,\n  });\n  const data = await res.json();\n  if (toolName === 'provision_api_key' && data.api_key) apiKey = data.api_key;\n  return data;\n}\n\nasync function chat(userMessage) {\n  const messages = [\n    { role: 'system', content: pkg.system_prompt },\n    { role: 'user', content: userMessage },\n  ];\n  while (true) {\n    const response = await client.chat.completions.create({ model: 'gpt-4o', tools, messages });\n    const msg = response.choices[0].message;\n    messages.push(msg);\n    if (!msg.tool_calls) break;\n    for (const call of msg.tool_calls) {\n      const result = await callTool(call.function.name, JSON.parse(call.function.arguments));\n      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });\n    }\n  }\n  return messages;\n}\n\nchat('I want to register my HPLC lab and start accepting jobs on the PCC network.');"
   },
   "metadata": {
-    "tool_count": 218,
-    "updated": "2026-04-23T00:00:00Z"
+    "tool_count": 225,
+    "updated": "2026-04-29T00:00:00Z"
   }
 }

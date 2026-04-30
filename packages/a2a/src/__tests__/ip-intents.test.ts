@@ -319,6 +319,43 @@ describe("IP Intent Types — construction", () => {
     expect(intent.splits[0].role).toBe("assembler");
   });
 
+  it("accepts the full ADR-12 ContributorRole enum in splits", () => {
+    const splits: IPRevenueSplitEntry[] = [
+      { address: "0xOP",  role: "operator",            percentage: 87, label: "Operator" },
+      { address: "0xVR",  role: "verifier",            percentage:  3, label: "Verifier" },
+      { address: "0xPA",  role: "protocol-author",     percentage:  2, label: "CSD Author" },
+      { address: "0xIN",  role: "integrator",          percentage:  2, label: "Integrator" },
+      { address: "0xMA",  role: "model-author",        percentage:  4, label: "Model Author" },
+      { address: "0xNT",  role: "network-treasury",    percentage:  2, label: "Treasury" },
+    ];
+    const intent: IPProposeSplitIntent = {
+      type: "ip_propose_split",
+      ipId: "0xnew_roles_ip",
+      splits,
+    };
+    expect(intent.splits).toHaveLength(6);
+    expect(intent.splits.reduce((s, e) => s + e.percentage, 0)).toBe(100);
+    const roles = intent.splits.map((e) => e.role);
+    expect(roles).toContain("protocol-author");
+    expect(roles).toContain("integrator");
+    expect(roles).toContain("model-author");
+    expect(roles).toContain("network-treasury");
+  });
+
+  it("accepts insurer and dataset-contributor roles", () => {
+    const splits: IPRevenueSplitEntry[] = [
+      { address: "0xINS", role: "insurer",             percentage: 50, label: "Insurer" },
+      { address: "0xDS",  role: "dataset-contributor", percentage: 50, label: "Pilot" },
+    ];
+    const intent: IPProposeSplitIntent = {
+      type: "ip_propose_split",
+      ipId: "0xinsurer_ip",
+      splits,
+    };
+    expect(intent.splits[0].role).toBe("insurer");
+    expect(intent.splits[1].role).toBe("dataset-contributor");
+  });
+
   it("narrows ip_propose_split from Intent union", () => {
     const intent: Intent = {
       type: "ip_propose_split",
