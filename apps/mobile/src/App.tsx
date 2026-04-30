@@ -17,6 +17,7 @@ import {
   startApprovalListener,
   type ApprovalListenerHandle,
 } from "./sse/approval-listener.js";
+import { postApprovalDecision } from "./sse/approval-decision.js";
 import {
   startApprovalActivity,
   endApprovalActivity,
@@ -247,11 +248,70 @@ export function App(): ReactElement {
     return () => clearTimeout(t);
   }, [role]);
 
+  /**
+   * Approve handler — Week 7 A5.
+   *
+   * Closes the W7-A loop. Flow on tap of "Approve with Face ID":
+   *   1. ApprovalSheet has already biometric-signed and is calling us
+   *      with the SignedReceipt (assertion bytes inside).
+   *   2. We POST the decision back to the gateway via
+   *      postApprovalDecision(). The gateway's awaitApprovalDecision()
+   *      resolves and the parked centralized-settle proceeds.
+   *   3. On success we dismiss the sheet + end the Live Activity with
+   *      outcome=approve. On error we THROW so ApprovalSheet's existing
+   *      error-state machinery surfaces the message and the user can
+   *      retry — leaving the sheet open AND the Live Activity running.
+   *
+   * Failure modes:
+   *   - 401 / authError → throw with a re-enroll-friendly message; the
+   *     sheet shows it, the user can retry after re-enrolling. Live
+   *     Activity stays up.
+   *   - Network / 5xx  → throw the error message; sheet surfaces it.
+   *     Live Activity stays up so the user knows the request is still
+   *     pending server-side.
+   *   - 404 / 409      → treated as success by postApprovalDecision
+   *     (idempotent / stale-id) — UI dismisses, Live Activity ends.
+   *
+   * Missing approvalId / sessionToken: the dev-mode synthetic event
+   * doesn't carry one. In that case we skip the POST entirely and just
+   * dismiss locally (preserves the W3-W6 dev-mode behavior).
+   */
   const handleApprove = async (signed: SignedReceipt): Promise<void> => {
-    // In Week 4 this POSTs to /api/sessions/:id/approve with the
-    // assertion. For Week 3 we just log and dismiss.
+    const approvalId = pendingApproval?.approvalId;
+    const sessionId = pendingApproval?.id ?? signed.sessionId;
+    if (approvalId && sessionToken) {
+      const baseUrl = getGatewayBaseUrl();
+      const result = await postApprovalDecision({
+        baseUrl,
+        sessionId,
+        approvalId,
+        sessionToken,
+        decision: "approve",
+        // Forward the biometric assertion so the server-side audit log
+        // can record it. The gateway's resolveApprovalGate() doesn't
+        // require a signature for the gate-resolve to succeed, but the
+        // signed receipt is durable evidence the user really tapped.
+        body: { signature: serializeAssertion(signed) },
+      });
+      if (!result.success) {
+        // Hand the error back to ApprovalSheet so it stays open and the
+        // user can retry. We do NOT end the Live Activity here — leaving
+        // it visible signals to the user that the request is still
+        // pending server-side.
+        const message =
+          result.authError === true
+            ? "Sign-in expired. Re-enroll your passkey and try again."
+            : (result.error ?? `Failed to send approval (HTTP ${result.status}).`);
+        throw new Error(message);
+      }
+    } else {
+      console.info("[pcc-mobile] approve: no approvalId/token — dev-mode path", {
+        sessionId,
+      });
+    }
+
     console.info("[pcc-mobile] session approved", {
-      sessionId: signed.sessionId,
+      sessionId,
       signedAt: signed.signedAt,
     });
     setPendingApproval(null);
@@ -269,8 +329,46 @@ export function App(): ReactElement {
     }
   };
 
+  /**
+   * Decline handler — Week 7 A5.
+   *
+   * Mirror of handleApprove on the reject path. Differences:
+   *   - No SignedReceipt — the user chose to dismiss without signing,
+   *     so we POST an empty body.
+   *   - We dismiss the sheet + end the Live Activity unconditionally.
+   *     If the decision POST fails (network/server), we still consider
+   *     the user's intent honored locally — the W6 timeout will eventually
+   *     reject the gate anyway.
+   *
+   * The void return type matches ApprovalSheet's onDecline signature
+   * (sync void), so we kick off the async POST without awaiting it.
+   */
   const handleDecline = (): void => {
-    console.info("[pcc-mobile] session declined");
+    const approvalId = pendingApproval?.approvalId;
+    const sessionId = pendingApproval?.id;
+    if (approvalId && sessionId && sessionToken) {
+      const baseUrl = getGatewayBaseUrl();
+      void postApprovalDecision({
+        baseUrl,
+        sessionId,
+        approvalId,
+        sessionToken,
+        decision: "reject",
+        body: { reason: "user-declined" },
+      })
+        .then((result) => {
+          if (!result.success) {
+            console.warn(
+              "[pcc-mobile] decline POST failed:",
+              result.error ?? `HTTP ${result.status}`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn("[pcc-mobile] decline POST threw:", (err as Error).message);
+        });
+    }
+    console.info("[pcc-mobile] session declined", { sessionId });
     setPendingApproval(null);
     if (liveActivity) {
       try {
@@ -284,6 +382,29 @@ export function App(): ReactElement {
       setLiveActivity(null);
     }
   };
+
+  /**
+   * Compress the WebAuthn SignedReceipt into a compact opaque string for
+   * the server-side audit log. Server doesn't verify it — any non-empty
+   * string lets the gate resolve. We use base64url(JSON({sessionId, decision,
+   * signedAt, assertion-id})) so the trail is human-readable in dev tools
+   * but doesn't bloat the request.
+   */
+  function serializeAssertion(signed: SignedReceipt): string {
+    try {
+      const compact = {
+        sessionId: signed.sessionId,
+        decision: signed.decision,
+        signedAt: signed.signedAt,
+        // SignResult shape varies per platform; we extract id when present.
+        assertionId:
+          (signed.assertion as unknown as { id?: string })?.id ?? null,
+      };
+      return JSON.stringify(compact);
+    } catch {
+      return "passkey-assertion-opaque";
+    }
+  }
 
   if (role === null) {
     return (
