@@ -46,6 +46,14 @@ export interface ApprovalSession {
   captureClass?: string;
   /** Stable, pre-canonicalized payload to be signed. */
   challengePayload?: unknown;
+  /**
+   * W7 A2: opaque per-request id minted by the gateway. Echoed back to
+   * `POST /api/sessions/:sid/approval/:aid/{approve,reject}` so the
+   * server can route the decision to the right awaitable gate. Optional
+   * for backward-compat with tests/dev-mode synthetic events that don't
+   * carry one — the decision POST will short-circuit when missing.
+   */
+  approvalId?: string;
 }
 
 export interface SignedReceipt {
