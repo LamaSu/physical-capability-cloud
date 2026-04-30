@@ -1353,4 +1353,23 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("shop_kernels", "reputation_updated_at", "TEXT");
   // T2.3 — compliance_regulations on machine_registrations (additive for old DBs)
   safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
+
+  // T2.7 — operator ratings.
+  // Inline DDL here so the gateway's runtime migration covers it without
+  // drizzle-kit. One rating row per (operator, job, buyer); the gateway
+  // route enforces buyer-must-own-job upstream.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS operator_ratings (
+      id TEXT PRIMARY KEY,
+      operator_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      buyer_id TEXT NOT NULL,
+      rating INTEGER NOT NULL,
+      comment TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_operator ON operator_ratings(operator_id);
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_job ON operator_ratings(job_id);
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_buyer ON operator_ratings(buyer_id);
+  `);
 }

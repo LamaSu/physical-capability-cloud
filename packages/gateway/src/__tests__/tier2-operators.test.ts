@@ -263,3 +263,178 @@ describe("T2.4 — Discoverability Diagnostics", () => {
     await authedApp.close();
   });
 });
+
+// ── T2.7 — Operator Ratings ─────────────────────────────────────────────
+
+describe("T2.7 — Operator Ratings", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  // The /rate POST infers buyerId from the auth context, so we manually
+  // mark req.operatorId in a test-only preHandler — same shape api-gate
+  // would inject after authenticating an api key.
+  async function buildAuthedApp(buyerId: string): Promise<FastifyInstance> {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+    const a = Fastify({ logger: false });
+    a.addHook("preHandler", async (req) => {
+      (req as any).operatorId = buyerId;
+    });
+    await a.register(onboardRoutes);
+    await a.register(operatorsPublicRoutes);
+    await a.ready();
+    return a;
+  }
+
+  it("POST /rate happy path: 201 + persists row", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    await app.close();
+    const a = await buildAuthedApp("buyer-alpha");
+
+    const res = await a.inject({
+      method: "POST",
+      url: `/api/operators/${opId}/rate`,
+      payload: { rating: 5, jobId: "job-123", comment: "fast turnaround" },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.rating.rating).toBe(5);
+    expect(body.rating.operatorId).toBe(opId);
+    expect(body.rating.buyerId).toBe("buyer-alpha");
+    expect(body.rating.jobId).toBe("job-123");
+    await a.close();
+  });
+
+  it("POST /rate rejects rating outside 1..5 with 422", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    await app.close();
+    const a = await buildAuthedApp("buyer-alpha");
+
+    for (const bad of [0, 6, 3.5, -1]) {
+      const res = await a.inject({
+        method: "POST",
+        url: `/api/operators/${opId}/rate`,
+        payload: { rating: bad, jobId: "job-x" },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("invalid_rating");
+    }
+    await a.close();
+  });
+
+  it("POST /rate rejects missing jobId with 400", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    await app.close();
+    const a = await buildAuthedApp("buyer-alpha");
+
+    const res = await a.inject({
+      method: "POST",
+      url: `/api/operators/${opId}/rate`,
+      payload: { rating: 4 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("job_id_required");
+    await a.close();
+  });
+
+  it("POST /rate is idempotent per (buyer, job) — 409 on second attempt", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    await app.close();
+    const a = await buildAuthedApp("buyer-alpha");
+
+    const first = await a.inject({
+      method: "POST",
+      url: `/api/operators/${opId}/rate`,
+      payload: { rating: 5, jobId: "job-dup" },
+    });
+    expect(first.statusCode).toBe(201);
+
+    const second = await a.inject({
+      method: "POST",
+      url: `/api/operators/${opId}/rate`,
+      payload: { rating: 3, jobId: "job-dup" },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("already_rated");
+    await a.close();
+  });
+
+  it("POST /rate returns 404 for unknown operator", async () => {
+    const a = await buildAuthedApp("buyer-alpha");
+    const res = await a.inject({
+      method: "POST",
+      url: `/api/operators/does-not-exist/rate`,
+      payload: { rating: 4, jobId: "job-x" },
+    });
+    expect(res.statusCode).toBe(404);
+    await a.close();
+  });
+
+  it("GET /ratings returns aggregates + recent (public, no auth)", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    // Seed a few ratings directly via the repo to keep the test fast.
+    const repos = getRepos();
+    const seed = (rating: number, jobId: string, buyerId: string) =>
+      repos.ratings.insert({
+        id: `rate-${jobId}`,
+        operatorId: opId,
+        jobId,
+        buyerId,
+        rating,
+        comment: null,
+        createdAt: new Date().toISOString(),
+      });
+    seed(5, "j1", "b1");
+    seed(4, "j2", "b2");
+    seed(5, "j3", "b3");
+    seed(3, "j4", "b4");
+
+    const res = await app.inject({ method: "GET", url: `/api/operators/${opId}/ratings` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.count).toBe(4);
+    expect(body.avg).toBeCloseTo(4.25, 2);
+    expect(body.distribution).toEqual({ 1: 0, 2: 0, 3: 1, 4: 1, 5: 2 });
+    expect(body.recent).toHaveLength(4);
+    // Sanitisation: buyerId must NOT leak in public response.
+    for (const r of body.recent) {
+      expect(r.buyerId).toBeUndefined();
+    }
+  });
+
+  it("GET /ratings empty operator returns zero aggregates", async () => {
+    const opId = await registerMachine(app, { name: "Acme Co" });
+    const res = await app.inject({ method: "GET", url: `/api/operators/${opId}/ratings` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.count).toBe(0);
+    expect(body.avg).toBe(0);
+    expect(body.distribution).toEqual({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 });
+    expect(body.recent).toEqual([]);
+  });
+
+  it("GET /ratings is public (apiGate doesn't gate it)", async () => {
+    await app.close();
+    const opId = "test-public-op";
+    initStore({ seed: true });
+    // Don't register the operator — we only need to confirm apiGate doesn't 401.
+    // The route itself returns 404, but importantly NOT 401.
+    const authedApp = await buildApp({ withAuth: true });
+    const res = await authedApp.inject({
+      method: "GET",
+      url: `/api/operators/${opId}/ratings`,
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("operator_not_found");
+    await authedApp.close();
+  });
+});

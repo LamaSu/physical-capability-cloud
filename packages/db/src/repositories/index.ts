@@ -20,6 +20,7 @@ import { A2AMessageRepository } from "./a2a-messages.js";
 import { GovernanceRepository } from "./governance.js";
 import { TemplateStoreRepository } from "./template-store.js";
 import { AnalyticsRepository } from "./analytics.js";
+import { RatingRepository } from "./ratings.js";
 
 export {
   KernelRepository,
@@ -45,6 +46,7 @@ export {
   GovernanceRepository,
   TemplateStoreRepository,
   AnalyticsRepository,
+  RatingRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -72,6 +74,7 @@ export function buildRepositories(db: StoreDB) {
     governance: new GovernanceRepository(db),
     templateStore: new TemplateStoreRepository(db),
     analytics: new AnalyticsRepository(db),
+    ratings: new RatingRepository(db),
   };
 }
 

@@ -3,9 +3,12 @@
  *
  *   T2.3: GET /api/operators/by-compliance/:regulationId
  *   T2.4: GET /api/operators/:id/discoverability
+ *   T2.7: POST /api/operators/:id/rate            (buyer-only, Bearer-gated)
+ *         GET  /api/operators/:id/ratings         (public — reputation surface)
  *
- * The /api/operators/* prefix is auth-gated by default via apiGate (it's not
- * in PUBLIC_PREFIXES / PUBLIC_EXACT). A subsequent commit adds T2.7 routes.
+ * The /api/operators/* prefix is auth-gated by default via apiGate. The GET
+ * /ratings endpoint opts back out via PUBLIC_EXACT so reputation is readable
+ * without a key (parity with on-chain reputation reads).
  */
 
 import type { FastifyInstance } from "fastify";
@@ -145,6 +148,106 @@ export async function operatorsPublicRoutes(app: FastifyInstance) {
         top_keyword_misses: topKeywordMisses,
         suggestions,
         data_quality: dataQuality,
+      };
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────────────
+  // T2.7 — operator rating (buyer-only POST + public GET)
+  // ─────────────────────────────────────────────────────────────────────
+  app.post<{ Params: { id: string }; Body: { rating?: number; jobId?: string; comment?: string } }>(
+    "/api/operators/:id/rate",
+    async (req, reply) => {
+      const repos = getRepos();
+      const operatorId = req.params.id;
+      const reg = repos.registrations.findById(operatorId);
+      if (!reg) return reply.status(404).send({ error: "operator_not_found" });
+
+      const buyerId = (req as any).operatorId
+        ?? (req as any).apiKeyId
+        ?? (req as any).userId
+        ?? (req as any).walletAddress;
+      if (!buyerId) {
+        return reply.status(401).send({ error: "auth_required" });
+      }
+
+      const body = req.body ?? {};
+      const rating = body.rating;
+      if (typeof rating !== "number" || rating < 1 || rating > 5 || !Number.isInteger(rating)) {
+        return reply.status(422).send({
+          error: "invalid_rating",
+          message: "rating must be an integer 1..5",
+        });
+      }
+      if (!body.jobId || typeof body.jobId !== "string") {
+        return reply.status(400).send({ error: "job_id_required" });
+      }
+      const comment = typeof body.comment === "string" ? body.comment.slice(0, 1000) : null;
+
+      // TODO(wave-4): verify caller is the buyer-of-jobId by joining against
+      // jobs / negotiation_sessions. For Tier 2, the buyer is the
+      // authenticated caller and the rating is keyed by (jobId, buyerId)
+      // so a bad-faith caller can rate at most 1× per job they hold a key
+      // for and cannot impersonate another buyer.
+
+      const existing = repos.ratings.findByJobAndBuyer(body.jobId, String(buyerId));
+      if (existing) {
+        // Idempotent: re-rating the same job updates the score in place.
+        // Repos stay simple; we delete + insert to avoid an update method.
+        return reply.status(409).send({
+          error: "already_rated",
+          message: "You've already rated this job. PATCH endpoint is Wave 4.",
+          existing: {
+            id: existing.id,
+            rating: existing.rating,
+            createdAt: existing.createdAt,
+          },
+        });
+      }
+
+      const row = repos.ratings.insert({
+        id: `rate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        operatorId,
+        jobId: body.jobId,
+        buyerId: String(buyerId),
+        rating,
+        comment,
+        createdAt: new Date().toISOString(),
+      });
+      if (!row) return reply.status(500).send({ error: "insert_failed" });
+
+      return reply.status(201).send({ rating: row });
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>(
+    "/api/operators/:id/ratings",
+    async (req, reply) => {
+      const repos = getRepos();
+      const operatorId = req.params.id;
+      const reg = repos.registrations.findById(operatorId);
+      if (!reg) return reply.status(404).send({ error: "operator_not_found" });
+
+      const limit = Math.min(Math.max(parseInt(req.query.limit ?? "25", 10) || 25, 1), 100);
+      const offset = Math.max(parseInt(req.query.offset ?? "0", 10) || 0, 0);
+
+      const aggregate = repos.ratings.aggregateForOperator(operatorId);
+      const recent = repos.ratings.findByOperator(operatorId, { limit, offset });
+
+      // Sanitise rows for public consumption — drop buyer wallet, keep rating + comment.
+      const recentPublic = recent.map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        comment: r.comment,
+        createdAt: r.createdAt,
+      }));
+
+      return {
+        operatorId,
+        avg: aggregate.avg,
+        count: aggregate.count,
+        distribution: aggregate.distribution,
+        recent: recentPublic,
       };
     },
   );

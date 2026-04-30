@@ -38,11 +38,16 @@ const PUBLIC_EXACT = [
 // Covers: /api/capabilities/:id  AND  /api/capabilities/:id/button
 const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button)?$/;
 
+// T2.7 — operator rating reads are public (reputation surface). The POST
+// /rate route remains auth-gated because it falls outside this regex.
+const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
+
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
+  if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
   return false;
 }
 
