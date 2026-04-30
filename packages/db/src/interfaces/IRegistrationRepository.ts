@@ -18,4 +18,19 @@ export interface IRegistrationRepository {
     status: string,
     extra?: { approvedAt?: string; description?: string },
   ): RegistrationRow | undefined;
+  /**
+   * T2.2 — partial update of a registration. Only the fields listed in
+   * RegistrationPatch are honored; status changes go through updateStatus.
+   * Returns the updated row, or undefined if the id isn't found.
+   */
+  update(id: string, patch: RegistrationPatch): RegistrationRow | undefined;
+}
+
+export interface RegistrationPatch {
+  description?: string | null;
+  photos?: string[];
+  capabilities?: RegistrationRow["capabilities"];
+  spaceRequirements?: RegistrationRow["spaceRequirements"];
+  pricing?: RegistrationRow["pricing"];
+  complianceRegulations?: string[];
 }

@@ -438,3 +438,176 @@ describe("T2.7 — Operator Ratings", () => {
     await authedApp.close();
   });
 });
+
+// ── T2.2 — Edit / Delete Registration (GDPR) ────────────────────────────
+
+describe("T2.2 — Edit / Delete Registration", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  // Helper: build app with a fixed caller identity
+  async function buildAuthedApp(callerId: string): Promise<FastifyInstance> {
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: true });
+    const a = Fastify({ logger: false });
+    a.addHook("preHandler", async (req) => {
+      (req as any).operatorId = callerId;
+    });
+    await a.register(onboardRoutes);
+    await a.register(operatorsPublicRoutes);
+    await a.ready();
+    return a;
+  }
+
+  it("PATCH happy path: owner can update mutable fields", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp(wallet);
+
+    const res = await a.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/${opId}`,
+      payload: {
+        description: "Updated description",
+        complianceRegulations: ["AS9100:2016"],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.registration.description).toBe("Updated description");
+    expect(body.registration.complianceRegulations).toEqual(["AS9100:2016"]);
+    await a.close();
+  });
+
+  it("PATCH non-owner returns 403", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp("0xinterloperaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    const res = await a.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/${opId}`,
+      payload: { description: "I'm hijacking this" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("forbidden");
+    await a.close();
+  });
+
+  it("PATCH rejects status changes with 400 (immutable via this route)", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp(wallet);
+
+    const res = await a.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/${opId}`,
+      payload: { status: "active" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("status_immutable");
+    await a.close();
+  });
+
+  it("PATCH 404 for missing registration", async () => {
+    const a = await buildAuthedApp("0xanyone000000000000000000000000000000abc");
+    const res = await a.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/does-not-exist`,
+      payload: { description: "x" },
+    });
+    expect(res.statusCode).toBe(404);
+    await a.close();
+  });
+
+  it("DELETE soft-deletes (sets status=deleted, row stays in DB)", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp(wallet);
+
+    const res = await a.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${opId}`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().soft).toBe(true);
+    expect(res.json().registration.status).toBe("deleted");
+
+    // Row is still in the DB (audit + recovery), just status flipped.
+    const repos = getRepos();
+    const stored = repos.registrations.findById(opId);
+    expect(stored).toBeDefined();
+    expect(stored!.status).toBe("deleted");
+    expect(stored!.description).toMatch(/^DELETED at /);
+    await a.close();
+  });
+
+  it("DELETE non-owner returns 403", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp("0xinterloperaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    const res = await a.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${opId}`,
+    });
+    expect(res.statusCode).toBe(403);
+    await a.close();
+  });
+
+  it("DELETE is idempotent (already-deleted returns 200 with alreadyDeleted flag)", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp(wallet);
+
+    const first = await a.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${opId}`,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().soft).toBe(true);
+
+    const second = await a.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${opId}`,
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().alreadyDeleted).toBe(true);
+    await a.close();
+  });
+
+  it("PATCH on a soft-deleted registration returns 410", async () => {
+    const wallet = "0xowner000000000000000000000000000000acme";
+    const opId = await registerMachine(app, { name: "Acme", operatorWallet: wallet });
+    await app.close();
+    const a = await buildAuthedApp(wallet);
+
+    await a.inject({
+      method: "DELETE",
+      url: `/api/onboard/registrations/${opId}`,
+    });
+    const res = await a.inject({
+      method: "PATCH",
+      url: `/api/onboard/registrations/${opId}`,
+      payload: { description: "trying to revive" },
+    });
+    expect(res.statusCode).toBe(410);
+    expect(res.json().error).toBe("deleted");
+    await a.close();
+  });
+});

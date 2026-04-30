@@ -193,6 +193,116 @@ export async function onboardRoutes(app: FastifyInstance) {
     return { registration: reg, rejected: true };
   });
 
+  // ── T2.2 — Edit registration (PATCH, owner-only) ──
+  app.patch<{
+    Params: { id: string };
+    Body: {
+      description?: string | null;
+      photos?: string[];
+      capabilities?: unknown[];
+      spaceRequirements?: Record<string, unknown>;
+      pricing?: { baseCost: string; minimum: string; currency: string; perMinute?: string; perGram?: string; perCm3?: string };
+      complianceRegulations?: string[];
+      status?: string; // explicitly rejected
+    };
+  }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+
+    // Caller must own the registration. Mirror the /prove ownership check.
+    const callerId = (req as any).operatorId
+      ?? (req as any).userId
+      ?? (req as any).apiKeyId
+      ?? (req as any).walletAddress;
+    const regOperator = (reg as any).operator?.walletAddress
+      ?? (reg as any).operator?.email
+      ?? (reg as any).walletAddress
+      ?? (reg as any).email
+      ?? (reg as any).operatorId;
+    if (callerId && regOperator && callerId !== regOperator) {
+      return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
+    }
+    if (reg.status === "deleted") {
+      return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
+    }
+
+    const body = req.body ?? {};
+    if (body.status !== undefined) {
+      return reply.status(400).send({
+        error: "status_immutable",
+        message: "Status changes go through /approve, /reject, /activate — not PATCH.",
+      });
+    }
+
+    const patch: any = {};
+    if (body.description !== undefined) patch.description = body.description;
+    if (body.photos !== undefined && Array.isArray(body.photos)) patch.photos = body.photos;
+    if (body.capabilities !== undefined && Array.isArray(body.capabilities)) {
+      patch.capabilities = body.capabilities;
+    }
+    if (body.spaceRequirements !== undefined) patch.spaceRequirements = body.spaceRequirements;
+    if (body.pricing !== undefined) patch.pricing = body.pricing;
+    if (body.complianceRegulations !== undefined && Array.isArray(body.complianceRegulations)) {
+      patch.complianceRegulations = body.complianceRegulations;
+    }
+
+    const updated = repos.registrations.update(req.params.id, patch);
+    if (!updated) return reply.status(500).send({ error: "update_failed" });
+
+    auditService.log({
+      eventType: "operator.edited",
+      actor: callerId ?? "anonymous",
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "update",
+      metadata: { fields: Object.keys(patch) },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    return { registration: updated };
+  });
+
+  // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
+  app.delete<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+
+    const callerId = (req as any).operatorId
+      ?? (req as any).userId
+      ?? (req as any).apiKeyId
+      ?? (req as any).walletAddress;
+    const regOperator = (reg as any).operator?.walletAddress
+      ?? (reg as any).operator?.email
+      ?? (reg as any).walletAddress
+      ?? (reg as any).email
+      ?? (reg as any).operatorId;
+    if (callerId && regOperator && callerId !== regOperator) {
+      return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
+    }
+    if (reg.status === "deleted") {
+      return { registration: reg, alreadyDeleted: true };
+    }
+
+    const deletedAt = new Date().toISOString();
+    repos.registrations.updateStatus(req.params.id, "deleted", {
+      description: `DELETED at ${deletedAt} by ${callerId ?? "anonymous"} — original: ${reg.description ?? "(no description)"}`,
+    });
+
+    auditService.log({
+      eventType: "operator.deleted",
+      actor: callerId ?? "anonymous",
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "delete",
+      metadata: { soft: true, deletedAt },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
+  });
+
   // ── Activate an approved registration ──
   app.post<{ Params: { id: string } }>("/api/onboard/registrations/:id/activate", async (req, reply) => {
     const repos = getRepos();

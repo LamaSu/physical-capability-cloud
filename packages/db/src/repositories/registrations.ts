@@ -4,6 +4,7 @@ import type { StoreDB } from "../connection.js";
 import type {
   IRegistrationRepository,
   RegistrationRow,
+  RegistrationPatch,
 } from "../interfaces/IRegistrationRepository.js";
 
 export class RegistrationRepository implements IRegistrationRepository {
@@ -48,5 +49,29 @@ export class RegistrationRepository implements IRegistrationRepository {
     if (extra?.approvedAt) data.approvedAt = extra.approvedAt;
     if (extra?.description) data.description = extra.description;
     return this.db.update(machineRegistrations).set(data).where(eq(machineRegistrations.id, id)).returning().get();
+  }
+
+  /**
+   * T2.2 — partial update of mutable fields. Status changes are intentionally
+   * NOT permitted here; the route layer rejects them with 400 before calling.
+   * Repos.updateStatus is the one path to status mutation.
+   */
+  update(id: string, patch: RegistrationPatch): RegistrationRow | undefined {
+    const data: Partial<typeof machineRegistrations.$inferInsert> = {};
+    if (patch.description !== undefined) data.description = patch.description;
+    if (patch.photos !== undefined) data.photos = patch.photos;
+    if (patch.capabilities !== undefined) data.capabilities = patch.capabilities;
+    if (patch.spaceRequirements !== undefined) data.spaceRequirements = patch.spaceRequirements;
+    if (patch.pricing !== undefined) data.pricing = patch.pricing;
+    if (patch.complianceRegulations !== undefined) {
+      data.complianceRegulations = patch.complianceRegulations;
+    }
+    if (Object.keys(data).length === 0) return this.findById(id);
+    return this.db
+      .update(machineRegistrations)
+      .set(data)
+      .where(eq(machineRegistrations.id, id))
+      .returning()
+      .get();
   }
 }
