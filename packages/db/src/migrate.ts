@@ -689,6 +689,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       space_requirements TEXT NOT NULL,  -- JSON
       pricing TEXT NOT NULL,  -- JSON
       operator TEXT NOT NULL,  -- JSON
+      compliance_regulations TEXT,  -- T2.3: JSON string[] of regulationIds (optional)
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
       submitted_at TEXT,
@@ -1350,4 +1351,6 @@ export function migrateDatabase(sqlite: Database.Database): void {
   };
   safeAddColumn("jobs", "parameters", "TEXT");
   safeAddColumn("shop_kernels", "reputation_updated_at", "TEXT");
+  // T2.3 — compliance_regulations on machine_registrations (additive for old DBs)
+  safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
 }

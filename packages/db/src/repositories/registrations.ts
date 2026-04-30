@@ -1,7 +1,10 @@
 import { eq } from "drizzle-orm";
 import { machineRegistrations } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
-import type { IRegistrationRepository } from "../interfaces/IRegistrationRepository.js";
+import type {
+  IRegistrationRepository,
+  RegistrationRow,
+} from "../interfaces/IRegistrationRepository.js";
 
 export class RegistrationRepository implements IRegistrationRepository {
   constructor(private db: StoreDB) {}
@@ -16,6 +19,24 @@ export class RegistrationRepository implements IRegistrationRepository {
 
   findByStatus(status: string) {
     return this.db.select().from(machineRegistrations).where(eq(machineRegistrations.status, status)).all();
+  }
+
+  /**
+   * T2.3 — find by compliance regulationId.
+   *
+   * SQLite doesn't have first-class JSON-array membership operators, so we
+   * filter in JS on the parsed JSON column. The dataset is small (operator
+   * directory), so this is fine; if it ever grows we'd index a separate
+   * `registration_compliance(reg_id, regulation_id)` table and join.
+   */
+  findByCompliance(regulationId: string): RegistrationRow[] {
+    if (!regulationId) return [];
+    const rows = this.db.select().from(machineRegistrations).all();
+    return rows.filter((r) => {
+      const list = r.complianceRegulations;
+      if (!Array.isArray(list)) return false;
+      return list.includes(regulationId);
+    });
   }
 
   insert(reg: typeof machineRegistrations.$inferInsert) {

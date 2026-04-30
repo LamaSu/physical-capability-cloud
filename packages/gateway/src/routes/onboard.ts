@@ -71,6 +71,10 @@ export async function onboardRoutes(app: FastifyInstance) {
         certifications: [],
         trainingAcknowledgments: {},
       },
+      // T2.3 — persist compliance regulations the operator claims to meet
+      complianceRegulations: Array.isArray(body.complianceRegulations)
+        ? body.complianceRegulations.filter((s) => typeof s === "string" && s.length > 0)
+        : undefined,
       status: "submitted",
       createdAt: new Date().toISOString(),
       submittedAt: new Date().toISOString(),
@@ -90,6 +94,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         spaceRequirements: registration.spaceRequirements as any,
         pricing: registration.pricing as any,
         operator: registration.operator as any,
+        complianceRegulations: registration.complianceRegulations,
         status: registration.status,
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,

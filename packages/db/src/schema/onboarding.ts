@@ -45,6 +45,8 @@ export const machineRegistrations = sqliteTable("machine_registrations", {
     trainingAcknowledgments: Record<string, boolean>;
     insurance?: { provider: string; policyNumber: string; coverageAmount: string };
   }>(),
+  /** T2.3 — Compliance regulationId strings (e.g., "ISO-9001:2015"). Optional. */
+  complianceRegulations: text("compliance_regulations", { mode: "json" }).$type<string[]>(),
   status: text("status").notNull(), // "draft" | "submitted" | "reviewing" | "approved" | "active" | "suspended"
   createdAt: text("created_at").notNull(),
   submittedAt: text("submitted_at"),

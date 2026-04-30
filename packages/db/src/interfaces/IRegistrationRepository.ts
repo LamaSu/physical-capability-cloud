@@ -7,6 +7,11 @@ export interface IRegistrationRepository {
   findAll(): RegistrationRow[];
   findById(id: string): RegistrationRow | undefined;
   findByStatus(status: string): RegistrationRow[];
+  /**
+   * T2.3 — find registrations whose `complianceRegulations` JSON array
+   * contains the given regulationId (membership test on a JSON column).
+   */
+  findByCompliance(regulationId: string): RegistrationRow[];
   insert(reg: RegistrationInsert): RegistrationRow | undefined;
   updateStatus(
     id: string,
