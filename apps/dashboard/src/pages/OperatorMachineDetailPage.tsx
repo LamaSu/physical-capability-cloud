@@ -4,6 +4,8 @@ import { GlassPanel, GlowBadge, UtilizationGauge, EarningsChart, MaintenanceTime
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
 import { mockEarningsData, mockMaintenanceEvents } from "../api/mock-onboarding-data.js";
+import { DiscoverabilityPanel } from "../components/operator/DiscoverabilityPanel.js";
+import { RatingsPanel } from "../components/operator/RatingsPanel.js";
 
 const machines: Record<string, { name: string; type: string; manufacturer: string; model: string; utilization: number; jobsCompleted: number; uptime: number }> = {
   "reg-001": { name: "Prusa MK4 Workshop", type: "fdm", manufacturer: "Prusa Research", model: "MK4", utilization: 72, jobsCompleted: 98, uptime: 99.2 },
@@ -64,6 +66,14 @@ export function OperatorMachineDetailPage() {
           <div className="text-lg font-mono text-white/60 mt-1">{machine.utilization}%</div>
         </GlassPanel>
       </div>
+
+      {/* T2.4 + T2.7 — discoverability + ratings (real API) */}
+      {machineId && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <DiscoverabilityPanel operatorId={machineId} />
+          <RatingsPanel operatorId={machineId} />
+        </div>
+      )}
 
       {/* Earnings */}
       <EarningsChart
