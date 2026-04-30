@@ -113,6 +113,20 @@ export interface SettleableSession {
    * need explicit operator confirmation.
    */
   requiresApproval?: boolean;
+  /**
+   * Week 7 B: per-capability default snapshotted onto the session at
+   * creation time from the capability spec's `requiresApproval` field.
+   * Used when `session.requiresApproval` is undefined. Allows a
+   * capability to declare "always require approval" without every
+   * session-creation site having to remember to set the flag.
+   */
+  capabilityRequiresApproval?: boolean;
+  /**
+   * Week 7 B: per-capability monetary threshold snapshotted from the
+   * capability spec's `approvalThresholdUsd`. When set and the session's
+   * `amountCents` meets the threshold (in cents), the gate fires.
+   */
+  capabilityApprovalThresholdUsd?: number;
 }
 
 let state: CentralizedSettleState = {
@@ -198,25 +212,42 @@ interface SettleBody {
 // ── Approval gate helpers ─────────────────────────────────────────────
 
 /**
- * Resolve whether this settle call should fire the approval gate. Three
- * inputs in order of precedence (later overrides earlier):
- *   1. Session.requiresApproval (per-session config)
- *   2. Body.requireApproval (per-call override)
- *   3. Env APPROVAL_THRESHOLD_USD (auto-fire when amount >= threshold)
- *      — when set, sessions whose amount meets the threshold flip to
- *      "requires approval" automatically. Default unset → no auto-fire.
+ * Resolve whether this settle call should fire the approval gate.
+ * Override hierarchy, highest priority first (each layer can short-
+ * circuit the rest by returning a definite true/false):
  *
- * Centralizes the policy-or-policy decision; A future iteration tied to
- * the capability schema can add a 4th source without changing callers.
+ *   1. body.requireApproval === false  → false (explicit per-call opt-out)
+ *   2. body.requireApproval === true   → true  (explicit per-call opt-in)
+ *   3. session.requiresApproval === true        → true  (W6: per-session)
+ *   4. session.capabilityRequiresApproval === true → true  (W7 B: per-capability default)
+ *   5. session.capabilityApprovalThresholdUsd     → true if amount meets threshold
+ *   6. env APPROVAL_THRESHOLD_USD                 → true if amount meets threshold
+ *   7. default                                    → false
+ *
+ * Note: layer 1 (explicit `false` from caller) wins over EVERYTHING,
+ * including a capability that has `requiresApproval: true`. This is
+ * intentional — agent-issued settlements with their own authorization
+ * out-of-band can suppress the gate. If a capability needs an
+ * un-overridable gate, that's a separate policy primitive (W8+).
  */
 function shouldGateOnApproval(
   session: SettleableSession,
   body: SettleBody,
 ): boolean {
+  // 1+2: explicit per-call override wins.
   if (body.requireApproval === true) return true;
-  if (body.requireApproval === false) return false; // explicit opt-out wins
+  if (body.requireApproval === false) return false;
+  // 3: per-session flag (W6).
   if (session.requiresApproval === true) return true;
-  // Env-driven auto-threshold fallback (described in W6 task hints).
+  // 4: per-capability default (W7 B).
+  if (session.capabilityRequiresApproval === true) return true;
+  // 5: per-capability threshold (W7 B).
+  const capCutoffUsd = session.capabilityApprovalThresholdUsd;
+  if (typeof capCutoffUsd === "number" && capCutoffUsd >= 0) {
+    const capCutoffCents = Math.floor(capCutoffUsd * 100);
+    if (session.amountCents >= capCutoffCents) return true;
+  }
+  // 6: env threshold fallback (W6 hint).
   const raw = process.env.APPROVAL_THRESHOLD_USD;
   if (raw) {
     const cents = Math.floor(parseFloat(raw) * 100);
@@ -224,6 +255,7 @@ function shouldGateOnApproval(
       return true;
     }
   }
+  // 7: default.
   return false;
 }
 

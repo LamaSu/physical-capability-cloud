@@ -409,4 +409,112 @@ describe("Centralized settle — A2 approval gate (Week 6)", () => {
     expect(res.statusCode).toBe(408); // gate fired, timeout
     unsubscribe();
   });
+
+  // ── W7 B — capability-level requiresApproval / approvalThresholdUsd ──
+
+  it("W7 B: capabilityRequiresApproval=true (session.requiresApproval undefined) fires the gate", async () => {
+    process.env.APPROVAL_TIMEOUT_MS = "20";
+    const session: SettleableSession = {
+      ...baseSession,
+      id: "sess-w7-cap-default",
+      requiresApproval: undefined,
+      capabilityRequiresApproval: true,
+    };
+    seedSettleableSessionForTests(session);
+    const { unsubscribe } = subscribeApproval(session.id);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/settle`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(408); // gate fired, timed out (no decision posted)
+    unsubscribe();
+  });
+
+  it("W7 B: capabilityApprovalThresholdUsd + amount above threshold fires the gate", async () => {
+    process.env.APPROVAL_TIMEOUT_MS = "20";
+    const session: SettleableSession = {
+      ...baseSession,
+      id: "sess-w7-cap-threshold-over",
+      amountCents: 7500, // $75
+      requiresApproval: false,
+      capabilityRequiresApproval: false,
+      capabilityApprovalThresholdUsd: 50, // $50 → 5000 cents; 7500 >= 5000
+    };
+    seedSettleableSessionForTests(session);
+    const { unsubscribe } = subscribeApproval(session.id);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/settle`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(408);
+    unsubscribe();
+  });
+
+  it("W7 B: capabilityApprovalThresholdUsd + amount BELOW threshold does NOT fire the gate (settles)", async () => {
+    const session: SettleableSession = {
+      ...baseSession,
+      id: "sess-w7-cap-threshold-under",
+      amountCents: 4000, // $40
+      requiresApproval: false,
+      capabilityRequiresApproval: false,
+      capabilityApprovalThresholdUsd: 50, // $50 cutoff; 4000 < 5000
+    };
+    seedSettleableSessionForTests(session);
+    const { unsubscribe } = subscribeApproval(session.id);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/settle`,
+      payload: {},
+    });
+    // Gate did NOT fire → normal settle path. We're not asserting full
+    // 200 happy-path here (that's W2's territory) — just that we didn't
+    // get 408/503/403, which would prove the gate fired.
+    expect([408, 503, 403]).not.toContain(res.statusCode);
+    unsubscribe();
+  });
+
+  it("W7 B: body.requireApproval=false overrides capabilityRequiresApproval=true (explicit opt-out wins)", async () => {
+    const session: SettleableSession = {
+      ...baseSession,
+      id: "sess-w7-body-opt-out-vs-cap",
+      requiresApproval: false,
+      capabilityRequiresApproval: true,
+    };
+    seedSettleableSessionForTests(session);
+    const { unsubscribe } = subscribeApproval(session.id);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/settle`,
+      payload: { requireApproval: false },
+    });
+    // Gate suppressed by body false → no 408/503.
+    expect([408, 503]).not.toContain(res.statusCode);
+    unsubscribe();
+  });
+
+  it("W7 B: session.requiresApproval=false does NOT suppress capability layer (only body=false does)", async () => {
+    process.env.APPROVAL_TIMEOUT_MS = "20";
+    const session: SettleableSession = {
+      ...baseSession,
+      id: "sess-w7-session-false-cap-true",
+      requiresApproval: false, // session opt-out is non-binding for layers below
+      capabilityRequiresApproval: true,
+    };
+    seedSettleableSessionForTests(session);
+    const { unsubscribe } = subscribeApproval(session.id);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/settle`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(408); // capability layer still fires
+    unsubscribe();
+  });
 });

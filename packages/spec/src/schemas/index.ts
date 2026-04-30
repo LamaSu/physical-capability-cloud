@@ -107,6 +107,22 @@ export const CapabilitySchema = z.object({
    * "onchain" explicitly to keep their MilestoneEscrow.sol behavior.
    */
   settlementMode: SettlementModeSchema.optional(),
+  /**
+   * Week 7 B: per-capability default for the approval gate. When true,
+   * settlements for this capability fire the SSE approval-request gate
+   * unless explicitly overridden at the session or call layer. Optional
+   * for backward compatibility; absence falls through to the
+   * approvalThresholdUsd / env / default-false layers.
+   */
+  requiresApproval: z.boolean().optional(),
+  /**
+   * Week 7 B: per-capability amount threshold (USD). When set, settles
+   * whose amount meets this threshold fire the approval gate even if
+   * `requiresApproval` is false/unset. Useful for capabilities that
+   * are usually unattended but require operator confirmation above a
+   * configured monetary cutoff.
+   */
+  approvalThresholdUsd: z.number().nonnegative().optional(),
 });
 
 /**
