@@ -216,6 +216,7 @@ import type { IA2AMessageRepository } from "./IA2AMessageRepository.js";
 import type { IGovernanceRepository } from "./IGovernanceRepository.js";
 import type { ITemplateStoreRepository } from "./ITemplateStoreRepository.js";
 import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
+import type { IOrchestratorSessionRepository } from "./IOrchestratorSessionRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -247,4 +248,8 @@ export interface IRepositories {
   governance: IGovernanceRepository;
   templateStore: ITemplateStoreRepository;
   analytics: IAnalyticsRepository;
+  // Wave 4.3 — orchestrator-sdk session store. The gateway wires
+  // OrchestratorSessionStore (in services/) onto this and calls
+  // setSessionStore() to swap the SDK's in-memory Map.
+  orchestratorSessions: IOrchestratorSessionRepository;
 }

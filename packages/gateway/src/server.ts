@@ -10,7 +10,7 @@ import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { initStore, closeStore } from "./db.js";
+import { initStore, closeStore, getRepos } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
@@ -102,6 +102,8 @@ import { orchestratorTemplatesRoutes } from "./routes/orchestrator-templates.js"
 import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-agents.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
+import { setSessionStore } from "@pcc/orchestrator-sdk";
+import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -298,6 +300,13 @@ export async function createGateway(port = 3200) {
   // are already populated. Wave 4 RLS migration will use this to scope
   // findAll() queries.
   await app.register(tenantContext);
+
+  // Wave 4.3 — wire SQLite-backed orchestrator-sdk session store. Replaces
+  // the SDK's default in-memory Map so onboarding sessions resume across
+  // gateway restarts. Must run before any onboarding routes register so
+  // the SDK is ready by the time requests arrive.
+  setSessionStore(new OrchestratorSessionStore(getRepos().orchestratorSessions));
+  app.log.info("orchestrator-sdk session store: SQLite-backed");
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
