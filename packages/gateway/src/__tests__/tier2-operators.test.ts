@@ -1,16 +1,18 @@
 /**
- * Tier 2 backend polish — T2.3 (compliance regulations).
+ * Tier 2 backend polish — T2.3 (compliance) + T2.4 (discoverability).
  *
  * External services (PostHog, pipelineTelemetry, auditService) are mocked so
- * the test stays offline and deterministic. Subsequent commits add T2.4 /
- * T2.7 / T2.2 test cases to this file.
+ * the test stays offline and deterministic. Subsequent commits add T2.7 /
+ * T2.2 test cases to this file.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { onboardRoutes } from "../routes/onboard.js";
 import { operatorsPublicRoutes } from "../routes/operators-public.js";
+import { apiGate } from "../middleware/api-gate.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { recordMatchQuery, _clearMatchLogForTests } from "../services/match-log.js";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 
@@ -36,11 +38,14 @@ vi.mock("../telemetry.js", () => ({
 
 // ── App builder ──────────────────────────────────────────────────────────
 
-async function buildApp(): Promise<FastifyInstance> {
+async function buildApp(opts: { withAuth?: boolean } = {}): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  if (opts.withAuth) {
+    await app.register(apiGate);
+  }
   await app.register(onboardRoutes);
   await app.register(operatorsPublicRoutes);
   await app.ready();
@@ -185,5 +190,76 @@ describe("T2.3 — Compliance Regulations", () => {
     });
     const reg = getRepos().registrations.findById(regId);
     expect(reg?.complianceRegulations).toEqual(["ISO-9001:2015", "ISO-14001:2015"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// T2.4 — Discoverability diagnostics
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("T2.4 — Discoverability Diagnostics", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    _clearMatchLogForTests();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+    _clearMatchLogForTests();
+  });
+
+  it("returns placeholder shape when no match-log entries exist", async () => {
+    const regId = await registerMachine(app, { name: "Quiet Shop" });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/operators/${regId}/discoverability`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data_quality).toBe("placeholder");
+    expect(body.top_keyword_misses).toEqual([]);
+    expect(Array.isArray(body.suggestions)).toBe(true);
+    expect(body.suggestions.length).toBeGreaterThan(0);
+    expect(body.last_match_query_at).toBeNull();
+    expect(body.indexed_at).toBeTruthy();
+  });
+
+  it("returns live shape with mocked match-log entries", async () => {
+    const regId = await registerMachine(app, {
+      name: "FDM Shop",
+      category: "fdm",
+    });
+
+    // Buyer searched for "aerospace" 3 times against this operator with low score
+    recordMatchQuery({ operatorId: regId, query: "aerospace certified parts", score: 0.1 });
+    recordMatchQuery({ operatorId: regId, query: "aerospace tolerance", score: 0.05 });
+    recordMatchQuery({ operatorId: regId, query: "aerospace materials", score: 0.2 });
+    // One high-scoring match — should NOT count as a miss
+    recordMatchQuery({ operatorId: regId, query: "fdm printing", score: 0.85 });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/operators/${regId}/discoverability`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data_quality).toBe("live");
+    expect(body.top_keyword_misses).toContain("aerospace");
+    expect(body.last_match_query_at).toBeTruthy();
+    expect(body.suggestions.some((s: string) => s.includes("aerospace"))).toBe(true);
+  });
+
+  it("returns 401 without a bearer token (apiGate rejects)", async () => {
+    const authedApp = await buildApp({ withAuth: true });
+    const res = await authedApp.inject({
+      method: "GET",
+      url: "/api/operators/some-id/discoverability",
+    });
+    expect(res.statusCode).toBe(401);
+    await authedApp.close();
   });
 });
