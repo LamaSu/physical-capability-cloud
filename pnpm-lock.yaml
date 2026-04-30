@@ -166,6 +166,10 @@ importers:
       capacitor-secure-storage-plugin:
         specifier: 0.13.0
         version: 0.13.0(@capacitor/core@7.6.2)
+    optionalDependencies:
+      capacitor-live-activity:
+        specifier: 7.1.0
+        version: 7.1.0(@capacitor/core@7.6.2)
     devDependencies:
       '@capacitor/cli':
         specifier: 7.6.2
@@ -4430,6 +4434,11 @@ packages:
 
   caniuse-lite@1.0.30001776:
     resolution: {integrity: sha512-sg01JDPzZ9jGshqKSckOQthXnYwOEP50jeVFhaSFbZcOy05TiuuaffDOfcwtCisJ9kNQuLBFibYywv2Bgm9osw==}
+
+  capacitor-live-activity@7.1.0:
+    resolution: {integrity: sha512-Y13LnSgfjzjg62eqx77mOhb8m/jRNFEGh+jb/MQf9XbP+8/WjHMSFiL/uwlWZY/MQKIExJnkFHz8ZrSqu6Zihw==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   capacitor-secure-storage-plugin@0.13.0:
     resolution: {integrity: sha512-+rLC/9Z0LTaRRt6L6HjBwcDh5gqgI3NPmDSwo4hk41XQOy3EBrRo81VleIqFsowsMA3oMT+E59Bl8/HiWk0nhQ==}
@@ -13592,6 +13601,11 @@ snapshots:
   camelcase@6.3.0: {}
 
   caniuse-lite@1.0.30001776: {}
+
+  capacitor-live-activity@7.1.0(@capacitor/core@7.6.2):
+    dependencies:
+      '@capacitor/core': 7.6.2
+    optional: true
 
   capacitor-secure-storage-plugin@0.13.0(@capacitor/core@7.6.2):
     dependencies:
