@@ -13,5 +13,10 @@ export interface IRatingRepository {
   insert(r: RatingInsert): RatingRow | undefined;
   findByOperator(operatorId: string, opts?: { limit?: number; offset?: number }): RatingRow[];
   findByJob(jobId: string): RatingRow | undefined;
+  /**
+   * Find a specific buyer's rating for a job. Lets the route layer detect
+   * (and 409) on a duplicate-rating attempt by the same buyer.
+   */
+  findByJobAndBuyer(jobId: string, buyerId: string): RatingRow | undefined;
   aggregateForOperator(operatorId: string): RatingAggregate;
 }

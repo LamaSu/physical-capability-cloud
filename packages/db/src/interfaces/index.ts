@@ -217,6 +217,14 @@ import type { IGovernanceRepository } from "./IGovernanceRepository.js";
 import type { ITemplateStoreRepository } from "./ITemplateStoreRepository.js";
 import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
 import type { IOrchestratorSessionRepository } from "./IOrchestratorSessionRepository.js";
+import type { IRatingRepository } from "./IRatingRepository.js";
+
+export type {
+  IRatingRepository,
+  RatingRow,
+  RatingInsert,
+  RatingAggregate,
+} from "./IRatingRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -252,4 +260,7 @@ export interface IRepositories {
   // OrchestratorSessionStore (in services/) onto this and calls
   // setSessionStore() to swap the SDK's in-memory Map.
   orchestratorSessions: IOrchestratorSessionRepository;
+  // T2.7 — buyer-side operator ratings; aggregate + recent for the public
+  // /api/operators/:id/ratings surface plus the auth-gated /rate POST.
+  ratings: IRatingRepository;
 }
