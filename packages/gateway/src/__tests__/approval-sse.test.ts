@@ -316,6 +316,9 @@ describe("POST /api/sessions/:sessionId/request-approval", () => {
     expect(body.sessionId).toBe("sess-bearer");
     expect(typeof body.requestedAt).toBe("string");
     expect(body.subscriberCount).toBe(1);
+    // W7 A1: every published approval-request carries an approvalId.
+    expect(typeof body.approvalId).toBe("string");
+    expect(body.approvalId).toMatch(/^appr_/);
 
     // SSE event delivered.
     expect(received.length).toBe(1);
@@ -327,6 +330,9 @@ describe("POST /api/sessions/:sessionId/request-approval", () => {
     expect(payload.operatorName).toBe("Andre's Hair Salon");
     expect(payload.captureClass).toBe("tier-1-photo");
     expect(payload.params).toEqual({ duration_min: 30 });
+    // W7 A1: payload echoes the approvalId so SSE clients can POST the
+    // user's decision back to /api/sessions/:sid/approval/:aid/{a,r}.
+    expect(payload.approvalId).toBe(body.approvalId);
 
     // Persistence.
     const stored = _getPendingApprovalForTests("sess-bearer");

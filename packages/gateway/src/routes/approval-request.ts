@@ -490,6 +490,17 @@ export async function approvalRequestRoutes(
       }
 
       const requestedAt = new Date().toISOString();
+      // W7 A1: every published approval-request carries an approvalId so
+      // mobile clients can POST a decision back to
+      // /api/sessions/:sid/approval/:aid/{approve,reject}. Note: the W5
+      // publish endpoint does NOT register an awaitable gate — only the
+      // centralized-settle path does (via awaitApprovalDecision). A mobile
+      // POST with an id minted here will correctly 404 if no settle is
+      // parked, which the client tolerates as "decision delivered, no
+      // server awaiter". When the W5 publish is later used as the only
+      // side of an external flow, callers can pre-mint and pass the id
+      // explicitly to keep both halves consistent.
+      const approvalId = nextApprovalId();
       const payload: ApprovalRequestPayload = {
         id: sessionId,
         capability,
@@ -502,6 +513,7 @@ export async function approvalRequestRoutes(
           ? { params: params as Record<string, unknown> }
           : {}),
         requestedAt,
+        approvalId,
       };
 
       // Capture subscriber count BEFORE publish so the response reflects
@@ -519,6 +531,7 @@ export async function approvalRequestRoutes(
       return reply.status(201).send({
         ok: true,
         sessionId,
+        approvalId,
         requestedAt,
         subscriberCount,
       });
