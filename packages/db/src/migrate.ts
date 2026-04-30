@@ -1343,6 +1343,69 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_capture_anchors_tx ON capture_anchors(tx_hash);
   `);
 
+  // ══════════════════════════════════════════════════════════════════
+  // Contributor Economics — 4 tables for ContributorNFT profiles,
+  // sealed RateSchedules, TrainingManifests, and CompositionManifests.
+  // Wave 3c persistence; types live in @pcc/spec.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS contributor_profiles (
+      id TEXT PRIMARY KEY,
+      address TEXT NOT NULL,
+      role TEXT NOT NULL,
+      schedule_hash TEXT NOT NULL,
+      ip_id TEXT,
+      contributor_nft_token_id TEXT,
+      metadata_uri TEXT,
+      registered_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS contributor_profiles_address
+      ON contributor_profiles(address);
+    CREATE INDEX IF NOT EXISTS contributor_profiles_role
+      ON contributor_profiles(role);
+    CREATE INDEX IF NOT EXISTS contributor_profiles_schedule_hash
+      ON contributor_profiles(schedule_hash);
+
+    CREATE TABLE IF NOT EXISTS rate_schedules (
+      schedule_hash TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      segments_json TEXT NOT NULL,
+      notes TEXT,
+      published_by TEXT NOT NULL,
+      published_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS rate_schedules_published_by
+      ON rate_schedules(published_by);
+    CREATE INDEX IF NOT EXISTS rate_schedules_published_at
+      ON rate_schedules(published_at);
+
+    CREATE TABLE IF NOT EXISTS training_manifests (
+      model_ip_id TEXT PRIMARY KEY,
+      base_model_ip_id TEXT,
+      dataset_weights_json TEXT NOT NULL,
+      methodology_hash TEXT,
+      manifest_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS training_manifests_base_model
+      ON training_manifests(base_model_ip_id);
+
+    CREATE TABLE IF NOT EXISTS composition_manifests (
+      id TEXT PRIMARY KEY,
+      capability_ip_id TEXT NOT NULL,
+      escrow_address TEXT NOT NULL,
+      milestone_index INTEGER NOT NULL,
+      manifest_json TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      operator_residual_bps INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS composition_manifests_escrow_milestone
+      ON composition_manifests(escrow_address, milestone_index);
+    CREATE INDEX IF NOT EXISTS composition_manifests_capability
+      ON composition_manifests(capability_ip_id);
+  `);
+
   // ── Safe column additions for existing databases ──────────────────
   // SQLite ALTER TABLE ADD COLUMN is idempotent-safe when wrapped in try/catch.
   const safeAddColumn = (table: string, col: string, type: string) => {

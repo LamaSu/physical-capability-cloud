@@ -1010,7 +1010,30 @@ server.tool(
 
 server.tool(
   "pcc_ip_set_splits",
-  "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset. Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP. Default recommended: designer 10%, operator 70%, verifier 10%, network 10%.",
+  [
+    "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.",
+    "Splits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.",
+    "",
+    "ContributorRole taxonomy (ADR-12 §4 — see role responsibility table):",
+    "  • operator             — runs the physical machine; residual share (typically 80-95% after others)",
+    "  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)",
+    "  • insurer              — underwrites job failure coverage; opt-in (0-3%)",
+    "  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps",
+    "  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps",
+    "  • model-author         — trained the AI model invoked at execution time; 0-80 bps",
+    "  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest",
+    "  • curator              — organizes/audits a collection of contributions; 0-5%",
+    "  • assembler            — composed multiple capabilities into a workflow; 0-50 bps",
+    "  • network-treasury     — per-network protocol treasury (verification, grants, security); 0-3%",
+    "",
+    "Legacy aliases kept for backward decoding only — prefer the canonical names above:",
+    "  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind",
+    "  • `network`  → use `network-treasury`",
+    "",
+    "Recommended starting splits:",
+    "  • Standard job (no AI):   operator 92, verifier 3, protocol-author 2, integrator 2, network-treasury 1",
+    "  • Job with AI model:      operator 87, verifier 3, protocol-author 2, integrator 2, model-author 4, network-treasury 2",
+  ].join("\n"),
   {
     ipId: z.string().describe("Story Protocol IP Asset address (0x...)"),
     splits: z
@@ -1018,8 +1041,27 @@ server.tool(
         z.object({
           address: z.string().describe("Recipient wallet address (0x...)"),
           role: z
-            .enum(["designer", "operator", "verifier", "assembler", "curator"])
-            .describe("Collaborator role"),
+            .enum([
+              // Canonical ContributorRole values (ADR-12 §2.1)
+              "operator",
+              "verifier",
+              "insurer",
+              "integrator",
+              "protocol-author",
+              "model-author",
+              "dataset-contributor",
+              "curator",
+              "assembler",
+              "network-treasury",
+              // Deprecated legacy aliases — kept so older callers still validate.
+              // Prefer `protocol-author`/`assembler`/`integrator` over `designer`,
+              // and `network-treasury` over `network`.
+              "designer",
+              "network",
+            ])
+            .describe(
+              "Collaborator role — see tool description for the full ContributorRole taxonomy and migration map for legacy values (`designer`, `network`).",
+            ),
           percentage: z
             .number()
             .min(1)
@@ -1037,7 +1079,21 @@ server.tool(
     ipId: string;
     splits: Array<{
       address: string;
-      role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+      role:
+        | "operator"
+        | "verifier"
+        | "insurer"
+        | "integrator"
+        | "protocol-author"
+        | "model-author"
+        | "dataset-contributor"
+        | "curator"
+        | "assembler"
+        | "network-treasury"
+        /** @deprecated alias for `network-treasury` */
+        | "network"
+        /** @deprecated use `protocol-author` / `assembler` / `integrator` */
+        | "designer";
       percentage: number;
       label: string;
     }>;
@@ -1224,6 +1280,234 @@ server.tool(
       method: "POST",
       body: { sourceAmount: amount, recipient: { name: recipientName, currency, type: accountType, details }, reference },
     });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Contributor-economics tools (Wave 2 of feat/contributor-economics)
+//
+// Surfaces the @pcc/store ContributorRepository via /api/contributors/*. Each
+// tool maps 1:1 onto a route in packages/gateway/src/routes/contributors.ts.
+// Listed last so the help/CLI ordering tracks the feature waves.
+// ---------------------------------------------------------------------------
+
+// 50. pcc_contributor_register
+
+server.tool(
+  "pcc_contributor_register",
+  "Register a contributor profile (DB-only). Mints to the on-chain ContributorNFT happen separately via script/MintContributor.s.sol — this tool does not currently broadcast on-chain transactions. Body: address (0x40hex), role (10 ContributorRole values + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail).",
+  {
+    address: z.string().describe("Wallet address (0x + 40 hex chars)"),
+    role: z
+      .enum([
+        "operator",
+        "verifier",
+        "insurer",
+        "integrator",
+        "protocol-author",
+        "model-author",
+        "dataset-contributor",
+        "curator",
+        "assembler",
+        "network-treasury",
+        "designer",
+      ])
+      .describe("ContributorRole — 10 ADR-12 roles + deprecated 'designer'"),
+    scheduleHash: z
+      .string()
+      .describe("0x + 64 hex sha256 of a published RateSchedule"),
+    ipId: z.string().optional().describe("Story Protocol IP Asset ID"),
+    metadataUri: z.string().optional().describe("ipfs:// or https:// URI"),
+    contributorNftTokenId: z
+      .string()
+      .optional()
+      .describe("ContributorNFT tokenId once minted on-chain"),
+  },
+  async ({
+    address,
+    role,
+    scheduleHash,
+    ipId,
+    metadataUri,
+    contributorNftTokenId,
+  }: {
+    address: string;
+    role: string;
+    scheduleHash: string;
+    ipId?: string;
+    metadataUri?: string;
+    contributorNftTokenId?: string;
+  }) => {
+    const data = await pccFetch("/api/contributors", {
+      method: "POST",
+      body: { address, role, scheduleHash, ipId, metadataUri, contributorNftTokenId },
+    });
+    return toolResult(data);
+  },
+);
+
+// 51. pcc_contributor_list
+
+server.tool(
+  "pcc_contributor_list",
+  "List all contributor profiles for an address across roles. Returns an array of {id, address, role, scheduleHash, ipId, contributorNftTokenId, metadataUri, registeredAt}.",
+  {
+    address: z.string().describe("Wallet address (0x + 40 hex chars)"),
+  },
+  async ({ address }: { address: string }) => {
+    const data = await pccFetch(`/api/contributors/${encodeURIComponent(address)}`);
+    return toolResult(data);
+  },
+);
+
+// 52. pcc_schedule_publish
+
+server.tool(
+  "pcc_schedule_publish",
+  "Publish a sealed off-chain RateSchedule. Computes scheduleHash server-side via the canonical sha256-over-canonical-JSON algorithm; idempotent on duplicate content. Returns {scheduleHash, alreadyPublished}.",
+  {
+    publishedBy: z
+      .string()
+      .describe("Address that publishes (0x + 40 hex chars)"),
+    schedule: z
+      .object({
+        version: z.number().int().min(1),
+        segments: z.array(z.record(z.unknown())).min(1),
+        notes: z.string().optional(),
+      })
+      .describe(
+        "RateSchedule body — version, segments (constant/step/linear-decay/exponential-decay/adoption-indexed/piecewise-value), and optional notes",
+      ),
+  },
+  async ({
+    publishedBy,
+    schedule,
+  }: {
+    publishedBy: string;
+    schedule: { version: number; segments: Array<Record<string, unknown>>; notes?: string };
+  }) => {
+    const data = await pccFetch("/api/contributors/schedules", {
+      method: "POST",
+      body: { publishedBy, schedule },
+    });
+    return toolResult(data);
+  },
+);
+
+// 53. pcc_schedule_get
+
+server.tool(
+  "pcc_schedule_get",
+  "Fetch a published RateSchedule by its content hash. Returns {schedule, publishedBy} or 404 if not found.",
+  {
+    scheduleHash: z
+      .string()
+      .describe("0x + 64 hex sha256 of the schedule"),
+  },
+  async ({ scheduleHash }: { scheduleHash: string }) => {
+    const data = await pccFetch(
+      `/api/contributors/schedules/${encodeURIComponent(scheduleHash)}`,
+    );
+    return toolResult(data);
+  },
+);
+
+// 54. pcc_schedule_evaluate
+
+server.tool(
+  "pcc_schedule_evaluate",
+  "Evaluate a published RateSchedule at a moment, returning the effective bps. Inputs: scheduleHash + now (unix seconds) + optional jobValueCents (piecewise-value) + optional jobsPerDay (adoption-indexed). Returns {scheduleHash, bps, segmentKind, segmentIndex}.",
+  {
+    scheduleHash: z.string().describe("0x + 64 hex schedule hash"),
+    now: z.number().int().min(0).describe("Unix seconds at evaluation moment"),
+    jobValueCents: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Job value in cents (piecewise-value segments)"),
+    jobsPerDay: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Rolling 24h job count (adoption-indexed segments)"),
+  },
+  async ({
+    scheduleHash,
+    now,
+    jobValueCents,
+    jobsPerDay,
+  }: {
+    scheduleHash: string;
+    now: number;
+    jobValueCents?: number;
+    jobsPerDay?: number;
+  }) => {
+    const data = await pccFetch(
+      `/api/contributors/schedules/${encodeURIComponent(scheduleHash)}/evaluate`,
+      { method: "POST", body: { now, jobValueCents, jobsPerDay } },
+    );
+    return toolResult(data);
+  },
+);
+
+// 55. pcc_training_manifest_set
+
+server.tool(
+  "pcc_training_manifest_set",
+  "Set (insert-or-replace) the TrainingManifest for a model IP — the dataset weight map the LicensingEngine walks when distributing payouts to a 'model-author' entry. Dataset weightBps must sum to ≤ 10000. Returns {modelIpId, manifestHash}.",
+  {
+    modelIpId: z.string().describe("Story IP Asset ID for the model"),
+    baseModelIpId: z
+      .string()
+      .optional()
+      .describe("Optional parent ModelNFT IP if this was fine-tuned"),
+    datasetWeights: z
+      .array(
+        z.object({
+          datasetIpId: z.string(),
+          weightBps: z.number().int().min(0).max(10000),
+          dataPointCount: z.number().int().min(0).optional(),
+        }),
+      )
+      .describe("DatasetIP entries with weightBps (sum ≤ 10000)"),
+    methodologyHash: z
+      .string()
+      .optional()
+      .describe("Optional 0x64hex reproducibility hash"),
+  },
+  async ({
+    modelIpId,
+    baseModelIpId,
+    datasetWeights,
+    methodologyHash,
+  }: {
+    modelIpId: string;
+    baseModelIpId?: string;
+    datasetWeights: Array<{ datasetIpId: string; weightBps: number; dataPointCount?: number }>;
+    methodologyHash?: string;
+  }) => {
+    const data = await pccFetch("/api/contributors/training-manifests", {
+      method: "POST",
+      body: { modelIpId, baseModelIpId, datasetWeights, methodologyHash },
+    });
+    return toolResult(data);
+  },
+);
+
+// 56. pcc_training_manifest_get
+
+server.tool(
+  "pcc_training_manifest_get",
+  "Fetch the TrainingManifest for a model IP. Returns the parsed datasets array + manifestHash + createdAt, or 404 if no manifest has been set.",
+  {
+    modelIpId: z.string().describe("Story IP Asset ID for the model"),
+  },
+  async ({ modelIpId }: { modelIpId: string }) => {
+    const data = await pccFetch(
+      `/api/contributors/training-manifests/${encodeURIComponent(modelIpId)}`,
+    );
     return toolResult(data);
   },
 );

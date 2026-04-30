@@ -83,6 +83,8 @@ const SponsorTelemetryPage = lazy(() => import("./pages/SponsorTelemetryPage.js"
 const SystemDashboardPage = lazy(() => import("./pages/SystemDashboardPage.js").then(m => ({ default: m.SystemDashboardPage })));
 const AnalyticsDashboardPage = lazy(() => import("./pages/AnalyticsDashboardPage.js").then(m => ({ default: m.AnalyticsDashboardPage })));
 const KernelLeaderboardPage = lazy(() => import("./pages/KernelLeaderboardPage.js").then(m => ({ default: m.KernelLeaderboardPage })));
+const RateSchedulePublishPage = lazy(() => import("./pages/RateSchedulePublishPage.js").then(m => ({ default: m.RateSchedulePublishPage })));
+const RateScheduleViewPage = lazy(() => import("./pages/RateScheduleViewPage.js").then(m => ({ default: m.RateScheduleViewPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -262,6 +264,8 @@ function DashboardShell() {
               <Route path="/sponsors" element={<SponsorTelemetryPage />} />
               <Route path="/system" element={<SystemDashboardPage />} />
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />
+              <Route path="/contributors/schedules/publish" element={<RateSchedulePublishPage />} />
+              <Route path="/contributors/schedules/:hash" element={<RateScheduleViewPage />} />
             </Routes>
           </Suspense>
         </PageTransition>

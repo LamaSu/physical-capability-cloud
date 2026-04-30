@@ -37,3 +37,6 @@ export * from "./governance.js";
 export * from "./query-templates.js";
 export * from "./analytics.js";
 export * from "./compliance-templates.js";
+export * from "./rate-schedule.js";
+export * from "./composition-manifest.js";
+export * from "./training-manifest.js";

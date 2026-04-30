@@ -77,11 +77,18 @@ const MOCK_REVENUE: RevenueSnapshot = {
   ],
 };
 
+// Mock splits demonstrate the ADR-12 contributor-economics-with-ai profile:
+// operator residual + verifier + protocol-author (replaces legacy `designer`)
+// + integrator + model-author + network-treasury. This gives the IP detail
+// view at least one example each of the new ContributorRole values so the
+// PieChart and SplitEditor render the new color palette out of the box.
 const MOCK_SPLITS: RoyaltySplit[] = [
-  { address: "0x1111111111111111111111111111111111111111", role: "designer", percentage: 60, label: "Designer" },
-  { address: "0x2222222222222222222222222222222222222222", role: "operator", percentage: 25, label: "Operator" },
-  { address: "0x3333333333333333333333333333333333333333", role: "verifier", percentage: 10, label: "Verifier" },
-  { address: "0x4444444444444444444444444444444444444444", role: "curator", percentage: 5, label: "Network" },
+  { address: "0x1111111111111111111111111111111111111111", role: "operator",         percentage: 87, label: "Machine Operator" },
+  { address: "0x2222222222222222222222222222222222222222", role: "protocol-author",  percentage:  2, label: "CSD Author" },
+  { address: "0x3333333333333333333333333333333333333333", role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+  { address: "0x4444444444444444444444444444444444444444", role: "model-author",     percentage:  4, label: "Model Author" },
+  { address: "0x5555555555555555555555555555555555555555", role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+  { address: "0x6666666666666666666666666666666666666666", role: "network-treasury", percentage:  2, label: "Network Treasury" },
 ];
 
 const MOCK_DERIVATIVES: DerivativeLink[] = [

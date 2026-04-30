@@ -105,6 +105,24 @@ contract MilestoneEscrow {
         bool challengerWon;
     }
 
+    /**
+     * @notice A single payment destination in a multi-recipient payout map.
+     * @dev Stored per-milestone by the payer via setPayoutMap() before fund().
+     *      After funding, the map is immutable and consumed by release().
+     *
+     * @param recipient  EOA or contract receiving the payment.
+     * @param bps        Basis points of distributable amount (post protocol-fee). Max 5000 (50%).
+     * @param roleTag    keccak256 hash of the role name (e.g. keccak256("integrator")).
+     *                   Canonical set defined in packages/contracts/ts/payouts.ts.
+     * @param ipId       Story Protocol IP Asset ID for off-chain attribution. bytes32(0) if N/A.
+     */
+    struct Payout {
+        address recipient;
+        uint256 bps;
+        bytes32 roleTag;
+        bytes32 ipId;
+    }
+
     // ── State ────────────────────────────────────────────────────────────
 
     address public payer;
@@ -121,6 +139,22 @@ contract MilestoneEscrow {
 
     bool public funded;
     uint256 public totalAmount;
+
+    // ── splitPayout State (ADR-11) ───────────────────────────────────────
+
+    /// @notice Per-milestone payout map. Set by payer after addMilestone() and before fund().
+    /// @dev Private + read via getPayoutMap() so we return Payout[] memory cleanly.
+    mapping(uint256 => Payout[]) private _payoutMap;
+
+    /// @notice True if a payout map has been set for a milestone.
+    /// @dev Public so off-chain tooling can cheaply query whether split is active.
+    mapping(uint256 => bool) public payoutMapSet;
+
+    /// @notice Maximum payouts per milestone. Caps release() loop gas at ~450k worst-case.
+    uint256 public constant MAX_PAYOUTS = 16;
+
+    /// @notice Per-payout basis-point ceiling. Sanity floor: no single recipient takes >50%.
+    uint256 public constant MAX_SINGLE_BPS = 5000;
 
     // ── Multi-Stablecoin Storage ────────────────────────────────────────
 
@@ -166,6 +200,22 @@ contract MilestoneEscrow {
     event DisputeResolved(uint256 indexed milestoneIndex, bool challengerWon);
     event MilestoneRefunded(uint256 indexed milestoneIndex, uint256 amount);
     event BondSlashed(uint256 indexed milestoneIndex, address slashedParty, uint256 amount);
+
+    // ── splitPayout Events (ADR-11) ──────────────────────────────────────
+
+    /// @notice Emitted when a payer registers a payout map for a milestone.
+    event PayoutMapSet(uint256 indexed milestoneIndex, uint256 payoutCount, uint256 totalBps);
+
+    /// @notice Emitted per-recipient during release() when a payout map is active.
+    /// @dev Off-chain indexers (Graph subgraph) use these for per-role revenue dashboards.
+    event SplitPayoutExecuted(
+        uint256 indexed milestoneIndex,
+        address indexed recipient,
+        bytes32 indexed roleTag,
+        bytes32 ipId,
+        address token,
+        uint256 amount
+    );
 
     // ── Multi-Stablecoin Events ──────────────────────────────────────────
 
@@ -462,6 +512,80 @@ contract MilestoneEscrow {
         emit MilestoneAdded(idx, _stepId, _operator, _token, _amount, _operatorBond);
     }
 
+    // ── splitPayout Configuration (ADR-11) ───────────────────────────────
+
+    /**
+     * @notice Register a payout map for a milestone.
+     * @dev Per ADR-11 §4:
+     *      - Callable only by payer (onlyPayer modifier)
+     *      - Milestone must still be Unfunded (map is immutable after fund())
+     *      - No prior map may already be set (single-shot, no re-configuration)
+     *      - payouts.length <= MAX_PAYOUTS (16)
+     *      - Each entry: recipient != 0, bps in (0, MAX_SINGLE_BPS]
+     *        (bps=0 entries are REJECTED — omit the entry instead. Minor deviation
+     *        from ADR-11 §8 wording; eliminates no-op attribution events that would
+     *        confuse off-chain indexers and burn gas.)
+     *      - No duplicate (recipient, roleTag) pairs (O(n²), bounded by MAX_PAYOUTS)
+     *      - Sum of bps <= 10000 (operator collects residual 10000 - sum)
+     *
+     *      The operator is NEVER an explicit entry — they receive the residual
+     *      (10000 - totalBps) of distributable plus their bond in full.
+     *      The protocol fee is deducted FIRST in release() on the gross amount,
+     *      and the payout map distributes the net (distributable) remainder.
+     *
+     * @param milestoneIndex Index of the milestone in milestones[].
+     * @param payouts Array of Payout entries. Must satisfy all rules above.
+     */
+    function setPayoutMap(uint256 milestoneIndex, Payout[] calldata payouts)
+        external
+        onlyPayer
+        milestoneExists(milestoneIndex)
+    {
+        Milestone storage m = milestones[milestoneIndex];
+        require(m.status == MilestoneStatus.Unfunded, "Milestone already funded");
+        require(!payoutMapSet[milestoneIndex], "Payout map already set");
+        require(payouts.length <= MAX_PAYOUTS, "Too many payouts");
+
+        uint256 totalBps = 0;
+        uint256 n = payouts.length;
+        for (uint256 i = 0; i < n; i++) {
+            Payout calldata p = payouts[i];
+            require(p.recipient != address(0), "Zero recipient");
+            require(p.bps > 0, "Zero bps - omit the entry instead");
+            require(p.bps <= MAX_SINGLE_BPS, "Single payout > 50% of milestone");
+
+            // Reject duplicate (recipient, roleTag) pairs. O(n^2) but bounded by MAX_PAYOUTS.
+            for (uint256 j = i + 1; j < n; j++) {
+                require(
+                    !(payouts[j].recipient == p.recipient && payouts[j].roleTag == p.roleTag),
+                    "Duplicate recipient+roleTag"
+                );
+            }
+
+            totalBps += p.bps;
+            _payoutMap[milestoneIndex].push(p);
+        }
+        require(totalBps <= 10000, "Total bps exceeds 100%");
+
+        payoutMapSet[milestoneIndex] = true;
+        emit PayoutMapSet(milestoneIndex, n, totalBps);
+    }
+
+    /**
+     * @notice Read the payout map for a milestone.
+     * @dev Returns empty array if no map has been set.
+     * @param milestoneIndex Index of the milestone.
+     * @return The full Payout[] (copy, not storage reference).
+     */
+    function getPayoutMap(uint256 milestoneIndex)
+        external
+        view
+        milestoneExists(milestoneIndex)
+        returns (Payout[] memory)
+    {
+        return _payoutMap[milestoneIndex];
+    }
+
     /**
      * @notice Resolve the token used by a specific milestone.
      * @dev Falls back to the default `token` if no override was set.
@@ -577,17 +701,28 @@ contract MilestoneEscrow {
     }
 
     /**
-     * @notice Release funds to operator after challenge window expires.
+     * @notice Release funds after challenge window expires.
      *
-     * If a protocolRoot is set, deducts the protocol fee from the milestone
-     * payment (not the bond) and transfers it to the fee recipient before
-     * paying the operator. The bond is always returned to the operator in full.
+     * @dev Two distribution paths (CEI preserved in both):
      *
-     * Fee flow (when protocolRoot is set):
-     *   fee = milestone.amount * protocolRoot.protocolFeeBps() / 10000
-     *   token.transfer(protocolRoot.feeRecipient(), fee)
-     *   token.transfer(operator, milestone.amount - fee + operatorBond)
-     *   protocolRoot.collectFee(token, fee)  // accounting
+     *      1. Legacy (no payout map set):
+     *           protocol fee → feeRecipient (if protocolRoot != 0)
+     *           amount - fee + bond → operator
+     *
+     *      2. splitPayout (payoutMapSet[idx] == true) per ADR-11 §3:
+     *           protocol fee → feeRecipient (FIRST, on gross amount)
+     *           distributable = amount - fee
+     *           for each Payout p in _payoutMap[idx]:
+     *               (distributable * p.bps) / 10000 → p.recipient
+     *               emit SplitPayoutExecuted
+     *           operator receives (distributable - sumDistributed) + bond
+     *
+     *      Operator's bond is ALWAYS returned in full, regardless of path.
+     *      `m.status = Released` is set BEFORE any external call (CEI),
+     *      and `nonReentrant` provides defense-in-depth.
+     *
+     *      The legacy path is byte-equivalent to the prior implementation
+     *      so existing escrows/tests are unaffected.
      */
     function release(uint256 milestoneIndex) external nonReentrant milestoneExists(milestoneIndex) {
         Milestone storage m = milestones[milestoneIndex];
@@ -605,6 +740,30 @@ contract MilestoneEscrow {
 
         emit MilestoneReleased(milestoneIndex, operator, amount);
 
+        if (payoutMapSet[milestoneIndex]) {
+            _distributeWithMap(milestoneIndex, amount, operator, operatorBond, tok);
+        } else {
+            _distributeLegacy(amount, operator, operatorBond, tok);
+        }
+    }
+
+    // ── Internal Distribution Helpers (release() split for stack-depth) ─────
+
+    /**
+     * @dev Legacy single-operator distribution path. Behavior is identical to
+     *      the pre-splitPayout `release()` body — fee deduction (if root set),
+     *      operator receives net + bond. Existing tests rely on this exact flow.
+     *
+     *      `tok` is the milestone-specific token resolved by the caller via
+     *      `tokenForMilestone(idx)`. This parameter is required for multi-stablecoin
+     *      compatibility (one escrow may host milestones in USDC, USDT, DAI, etc.).
+     */
+    function _distributeLegacy(
+        uint256 amount,
+        address operator,
+        uint256 operatorBond,
+        IERC20 tok
+    ) internal {
         if (protocolRoot != address(0)) {
             IPCCProtocol root = IPCCProtocol(protocolRoot);
             uint256 feeBps = root.protocolFeeBps();
@@ -623,6 +782,79 @@ contract MilestoneEscrow {
         } else {
             uint256 payout = amount + operatorBond; // Return bond + payment
             tok.safeTransfer(operator, payout);
+        }
+    }
+
+    /**
+     * @dev splitPayout distribution path (ADR-11 §3).
+     *
+     *      1. Deduct protocol fee on the GROSS amount and route to feeRecipient
+     *         (if protocolRoot is set). Notify root via collectFee().
+     *      2. distributable = amount - protocolFee
+     *      3. For each Payout p, transfer (distributable * p.bps) / 10000 to
+     *         p.recipient and emit SplitPayoutExecuted.
+     *      4. Operator receives (distributable - sumDistributed) + bond. Any
+     *         integer dust from per-recipient truncation accumulates into the
+     *         operator residual (intentional, prevents stuck funds).
+     *
+     *      Read of `_payoutMap[idx]` is via storage pointer for gas efficiency.
+     *      Each iteration copies the Payout into memory before transferring.
+     *
+     *      `tok` is the milestone-specific token resolved by the caller via
+     *      `tokenForMilestone(idx)`. Required for multi-stablecoin escrows.
+     *      All transfers go through `safeTransfer` (USDT compatibility — USDT does
+     *      not return a bool from transfer).
+     */
+    function _distributeWithMap(
+        uint256 milestoneIndex,
+        uint256 amount,
+        address operator,
+        uint256 operatorBond,
+        IERC20 tok
+    ) internal {
+        // 1. Protocol fee on gross (in the milestone's token)
+        uint256 protocolFee = 0;
+        address tokenAddr = address(tok);
+        if (protocolRoot != address(0)) {
+            IPCCProtocol root = IPCCProtocol(protocolRoot);
+            uint256 feeBps = root.protocolFeeBps();
+            protocolFee = (amount * feeBps) / 10000;
+            if (protocolFee > 0) {
+                tok.safeTransfer(root.feeRecipient(), protocolFee);
+            }
+            // Accounting hook fires regardless (root may want to record zero-fee event)
+            root.collectFee(tokenAddr, protocolFee);
+        }
+
+        uint256 distributable = amount - protocolFee;
+
+        // 2. Per-recipient distribution (in the milestone's token)
+        Payout[] storage payouts = _payoutMap[milestoneIndex];
+        uint256 distributed = 0;
+        uint256 n = payouts.length;
+        for (uint256 i = 0; i < n; i++) {
+            Payout memory p = payouts[i];
+            uint256 share = (distributable * p.bps) / 10000;
+            if (share > 0) {
+                tok.safeTransfer(p.recipient, share);
+                distributed += share;
+            }
+            emit SplitPayoutExecuted(
+                milestoneIndex,
+                p.recipient,
+                p.roleTag,
+                p.ipId,
+                tokenAddr,
+                share
+            );
+        }
+
+        // 3. Operator residual + bond. Subtraction is safe: distributed is the
+        //    sum of (distributable * p.bps) / 10000 for each p, and totalBps in
+        //    setPayoutMap() is required to be <= 10000, so distributed <= distributable.
+        uint256 operatorAmount = (distributable - distributed) + operatorBond;
+        if (operatorAmount > 0) {
+            tok.safeTransfer(operator, operatorAmount);
         }
     }
 

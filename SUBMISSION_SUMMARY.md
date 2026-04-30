@@ -12,7 +12,7 @@ Physical Capability Cloud (PCC) is a coordination protocol for physical manufact
 
 ## What Was Built
 
-PCC is a pnpm monorepo of 25 packages and one application, with 3,000+ tests passing across 100+ test files, 207 agent tools, 421 API endpoints, 49 MCP tools, 34 A2A intents, and a live gateway deployed on Railway at capability.network.
+PCC is a pnpm monorepo of 25 packages and one application, with 3,000+ tests passing across 100+ test files, 218 agent tools, 421 API endpoints, 56 MCP tools, 34 A2A intents, and a live gateway deployed on Railway at capability.network.
 
 **Core infrastructure**: `@pcc/spec` defines canonical types and Zod schemas. `@pcc/kernel` is the Shop Kernel runtime — connecting real devices (OctoPrint, Modbus, OPC-UA, SiLA, Opentrons OT-2) via typed adapters, evidence emitter, and sensor pipeline. `@pcc/scheduler` compiles multi-step workflows into dependency DAGs. `@pcc/contracts` contains MilestoneEscrow with slashable bonds deployed on Base Sepolia and Flow EVM.
 
@@ -48,7 +48,7 @@ All five integrations are independently verifiable by their respective sponsor j
 
 **207-tool agent package**: Available at capability.network/agent-package.json. Any LLM agent (Claude, GPT-4, etc.) can discover, price, and book physical capabilities.
 
-**49 MCP tools**: stdio-based MCP server for Claude Code and Cursor integration.
+**56 MCP tools**: stdio-based MCP server for Claude Code and Cursor integration.
 
 ---
 

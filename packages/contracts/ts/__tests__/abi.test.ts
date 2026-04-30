@@ -7,6 +7,8 @@ import {
   getDeployment,
   getContractAddress,
   deployments,
+  RateScheduleRegistryABI,
+  ContributorNFTABI,
 } from "../index.js";
 
 describe("MilestoneEscrowABI", () => {
@@ -133,5 +135,123 @@ describe("chain-config", () => {
   it("getContractAddress returns address for deployed contract", () => {
     const addr = getContractAddress("base-sepolia", "usdc");
     expect(addr).toMatch(/^0x[a-fA-F0-9]{40}$/);
+  });
+});
+
+describe("RateScheduleRegistryABI", () => {
+  it("exports a valid ABI array", () => {
+    expect(Array.isArray(RateScheduleRegistryABI)).toBe(true);
+    expect(RateScheduleRegistryABI.length).toBeGreaterThan(0);
+  });
+
+  it("includes the publish mutation", () => {
+    const fns = RateScheduleRegistryABI
+      .filter((item) => item.type === "function")
+      .map((item) => (item as { name: string }).name);
+    expect(fns).toContain("publish");
+    expect(fns).toContain("get");
+    expect(fns).toContain("exists");
+    expect(fns).toContain("publisher");
+    expect(fns).toContain("publishedAt");
+  });
+
+  it("emits SchedulePublished", () => {
+    const events = RateScheduleRegistryABI
+      .filter((item) => item.type === "event")
+      .map((item) => (item as { name: string }).name);
+    expect(events).toContain("SchedulePublished");
+  });
+
+  it("publish has correct input/output shape", () => {
+    const publish = RateScheduleRegistryABI.find(
+      (item) => item.type === "function" && (item as { name: string }).name === "publish",
+    ) as unknown as { inputs: ReadonlyArray<{ type: string }>; outputs: ReadonlyArray<{ type: string }> };
+    expect(publish.inputs.map((i) => i.type)).toEqual(["bytes", "bytes32"]);
+    expect(publish.outputs.map((o) => o.type)).toEqual(["bytes32"]);
+  });
+});
+
+describe("ContributorNFTABI", () => {
+  it("exports a valid ABI array", () => {
+    expect(Array.isArray(ContributorNFTABI)).toBe(true);
+    expect(ContributorNFTABI.length).toBeGreaterThan(0);
+  });
+
+  it("includes ERC-721 surface", () => {
+    const fns = ContributorNFTABI
+      .filter((item) => item.type === "function")
+      .map((item) => (item as { name: string }).name);
+    expect(fns).toContain("ownerOf");
+    expect(fns).toContain("balanceOf");
+    expect(fns).toContain("transferFrom");
+    expect(fns).toContain("safeTransferFrom"); // overloaded — both variants share the name
+    expect(fns).toContain("approve");
+    expect(fns).toContain("setApprovalForAll");
+    expect(fns).toContain("getApproved");
+    expect(fns).toContain("isApprovedForAll");
+    expect(fns).toContain("tokenURI");
+    expect(fns).toContain("name");
+    expect(fns).toContain("symbol");
+  });
+
+  it("includes the mint function", () => {
+    const fns = ContributorNFTABI
+      .filter((item) => item.type === "function")
+      .map((item) => (item as { name: string }).name);
+    expect(fns).toContain("mint");
+  });
+
+  it("includes ERC-2981 royaltyInfo", () => {
+    const fns = ContributorNFTABI
+      .filter((item) => item.type === "function")
+      .map((item) => (item as { name: string }).name);
+    expect(fns).toContain("royaltyInfo");
+  });
+
+  it("includes ERC-165 supportsInterface", () => {
+    const fns = ContributorNFTABI
+      .filter((item) => item.type === "function")
+      .map((item) => (item as { name: string }).name);
+    expect(fns).toContain("supportsInterface");
+  });
+
+  it("emits Transfer + ContributorMinted", () => {
+    const events = ContributorNFTABI
+      .filter((item) => item.type === "event")
+      .map((item) => (item as { name: string }).name);
+    expect(events).toContain("Transfer");
+    expect(events).toContain("Approval");
+    expect(events).toContain("ApprovalForAll");
+    expect(events).toContain("ContributorMinted");
+  });
+
+  it("mint has the right sealed-fields signature", () => {
+    const mint = ContributorNFTABI.find(
+      (item) => item.type === "function" && (item as { name: string }).name === "mint",
+    ) as unknown as {
+      inputs: ReadonlyArray<{ type: string; name: string }>;
+      outputs: ReadonlyArray<{ type: string }>;
+    };
+    expect(mint.inputs.map((i) => i.type)).toEqual([
+      "address", // to
+      "bytes32", // role
+      "bytes32", // scheduleHash
+      "bytes32", // ipId
+      "string",  // metadataUri
+    ]);
+    expect(mint.outputs.map((o) => o.type)).toEqual(["uint256"]);
+  });
+
+  it("dataOf returns the sealed-mint tuple shape", () => {
+    const dataOf = ContributorNFTABI.find(
+      (item) => item.type === "function" && (item as { name: string }).name === "dataOf",
+    ) as unknown as { outputs: ReadonlyArray<{ type: string; name: string }> };
+    expect(dataOf.outputs.map((o) => o.type)).toEqual([
+      "bytes32", // role
+      "bytes32", // scheduleHash
+      "bytes32", // ipId
+      "string",  // metadataUri
+      "uint64",  // mintedAt
+    ]);
   });
 });

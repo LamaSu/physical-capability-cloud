@@ -14,3 +14,7 @@ export {
   PCC_FEE_BPS_MIN,
   PCC_FEE_BPS_MAX,
 } from "./PCCProtocol.js";
+
+// Contributor economics
+export { RateScheduleRegistryABI } from "./RateScheduleRegistry.js";
+export { ContributorNFTABI } from "./ContributorNFT.js";

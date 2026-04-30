@@ -26,7 +26,7 @@ import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
-import type { LicensingTerms } from "@pcc/spec";
+import type { ContributorRole, LicensingTerms } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Body / Params interfaces
@@ -55,11 +55,28 @@ interface RegisterJobEvidenceBody {
   ipfsCid?: string;
 }
 
+/**
+ * Body shape for POST /api/ip/distribute-royalties.
+ *
+ * `splits[].role` reuses the canonical `ContributorRole` taxonomy from
+ * @pcc/spec (ADR-12 §2.1). That union covers all 10 new role values
+ * (operator, verifier, insurer, integrator, protocol-author, model-author,
+ * dataset-contributor, curator, assembler, network-treasury) plus the
+ * deprecated `designer` alias kept for backward compatibility so older
+ * clients still validate.
+ *
+ * The route handler does not enforce the enum at runtime — it only checks
+ * the splits array shape and that percentages sum to 100, then forwards
+ * the payload to `svc.distributeRoyaltyTokens()`. Older clients sending
+ * the pre-ADR-12 `"network"` string therefore still decode at the JSON
+ * boundary, even though it is not part of `ContributorRole`. Such clients
+ * should migrate to `network-treasury` per ADR-12 §2.2.
+ */
 interface DistributeRoyaltiesBody {
   ipId: string;
   splits: Array<{
     address: string;
-    role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+    role: ContributorRole;
     percentage: number;
     label: string;
   }>;

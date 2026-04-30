@@ -1030,7 +1030,7 @@ Both Story mainnet (chain 1514) and Aeneid testnet (chain 1513) share the same a
 
 **Live Network**: [capability.network](https://capability.network)
 
-**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (219 tools, v2.6.0, for any LLM agent)
+**Agent Package**: [capability.network/agent-package.json](https://capability.network/agent-package.json) (218 tools, v2.8.0, for any LLM agent)
 
 **Operator Node**: `pip install pcc-node && pcc-node start`
 
