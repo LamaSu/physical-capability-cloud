@@ -1375,6 +1375,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // T2.3 — compliance_regulations on machine_registrations (additive for old DBs)
   safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
 
+  // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
+  // Application-layer filtering, gated by TENANT_ENFORCE env flag.
+  safeAddColumn("machine_registrations", "tenant_id", "TEXT");
+
   // Wave 4.3 — orchestrator_sessions.tenant_id (forward-compat for DBs that
   // pre-date the column; CREATE TABLE above already includes it for fresh DBs)
   safeAddColumn("orchestrator_sessions", "tenant_id", "TEXT");

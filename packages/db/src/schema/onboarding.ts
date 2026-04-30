@@ -47,6 +47,11 @@ export const machineRegistrations = sqliteTable("machine_registrations", {
   }>(),
   /** T2.3 — Compliance regulationId strings (e.g., "ISO-9001:2015"). Optional. */
   complianceRegulations: text("compliance_regulations", { mode: "json" }).$type<string[]>(),
+  /** T1.9 / Wave-4.1 — interim multitenancy. Backfilled from operator.walletAddress
+   *  / operator.email at write time. Public discovery routes intentionally read
+   *  cross-tenant (sanitised); per-tenant routes filter by this column when
+   *  TENANT_ENFORCE=true. */
+  tenantId: text("tenant_id"),
   status: text("status").notNull(), // "draft" | "submitted" | "reviewing" | "approved" | "active" | "suspended"
   createdAt: text("created_at").notNull(),
   submittedAt: text("submitted_at"),

@@ -1,16 +1,36 @@
-import { eq } from "drizzle-orm";
+import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { machineRegistrations } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type {
   IRegistrationRepository,
   RegistrationRow,
   RegistrationPatch,
+  TenantScopeOpts,
 } from "../interfaces/IRegistrationRepository.js";
+
+/**
+ * Wave 4.1 — build a drizzle WHERE clause for tenant scoping.
+ *
+ * Tri-state semantics:
+ *   - opts undefined / opts.tenantId === undefined → returns undefined (no filter)
+ *   - opts.tenantId === null                       → tenant_id IS NULL
+ *   - opts.tenantId === <string>                   → tenant_id = <string>
+ */
+function tenantClause(opts?: TenantScopeOpts): SQL | undefined {
+  if (!opts) return undefined;
+  if (opts.tenantId === undefined) return undefined;
+  if (opts.tenantId === null) return isNull(machineRegistrations.tenantId);
+  return eq(machineRegistrations.tenantId, opts.tenantId);
+}
 
 export class RegistrationRepository implements IRegistrationRepository {
   constructor(private db: StoreDB) {}
 
-  findAll() {
+  findAll(opts?: TenantScopeOpts) {
+    const where = tenantClause(opts);
+    if (where) {
+      return this.db.select().from(machineRegistrations).where(where).all();
+    }
     return this.db.select().from(machineRegistrations).all();
   }
 
@@ -18,8 +38,10 @@ export class RegistrationRepository implements IRegistrationRepository {
     return this.db.select().from(machineRegistrations).where(eq(machineRegistrations.id, id)).get();
   }
 
-  findByStatus(status: string) {
-    return this.db.select().from(machineRegistrations).where(eq(machineRegistrations.status, status)).all();
+  findByStatus(status: string, opts?: TenantScopeOpts) {
+    const tc = tenantClause(opts);
+    const where = tc ? and(eq(machineRegistrations.status, status), tc) : eq(machineRegistrations.status, status);
+    return this.db.select().from(machineRegistrations).where(where).all();
   }
 
   /**
@@ -29,10 +51,17 @@ export class RegistrationRepository implements IRegistrationRepository {
    * filter in JS on the parsed JSON column. The dataset is small (operator
    * directory), so this is fine; if it ever grows we'd index a separate
    * `registration_compliance(reg_id, regulation_id)` table and join.
+   *
+   * Wave 4.1 — when opts.tenantId is set we AND the tenant filter into the
+   * SQL clause before the JS membership pass, so the tenant scope reduces
+   * the row set the JSON filter has to walk.
    */
-  findByCompliance(regulationId: string): RegistrationRow[] {
+  findByCompliance(regulationId: string, opts?: TenantScopeOpts): RegistrationRow[] {
     if (!regulationId) return [];
-    const rows = this.db.select().from(machineRegistrations).all();
+    const tc = tenantClause(opts);
+    const rows = tc
+      ? this.db.select().from(machineRegistrations).where(tc).all()
+      : this.db.select().from(machineRegistrations).all();
     return rows.filter((r) => {
       const list = r.complianceRegulations;
       if (!Array.isArray(list)) return false;
