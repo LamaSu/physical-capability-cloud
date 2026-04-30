@@ -459,3 +459,127 @@ describe("App Live Activity wiring (Week 6 B5)", () => {
     ).not.toBeNull();
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 7 A5 — server POST loop close
+// ──────────────────────────────────────────────────────────────────────
+
+describe("App approval-decision POST (Week 7 A5)", () => {
+  /**
+   * Smart fetch mock: subscribe returns minted channelId, decision routes
+   * return 200, anything else throws so we catch unexpected requests.
+   */
+  function installSmartFetch(): { mock: ReturnType<typeof vi.fn> } {
+    const mock = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/subscribe")) {
+        return {
+          ok: true,
+          json: async () => ({
+            channelId: "ch_w7_minted",
+            sessionId: "tok-w7",
+          }),
+        } as Response;
+      }
+      if (u.includes("/approval/") && /\/(approve|reject)$/.test(u)) {
+        return {
+          status: 200,
+          json: async () => ({}),
+        } as Response;
+      }
+      throw new Error(`unexpected fetch in test: ${u}`);
+    });
+    (globalThis as unknown as { fetch: typeof fetch }).fetch =
+      mock as unknown as typeof fetch;
+    return { mock };
+  }
+
+  it("POSTs reject when decline tapped with approvalId + sessionToken", async () => {
+    await setSessionToken("tok-w7");
+    const { mock } = installSmartFetch();
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    expect(MockEventSource.instances.length).toBe(1);
+
+    // Fire an approval event with approvalId (W7 server-side mints it).
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-w7-001",
+        approvalId: "appr_w7_001",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre",
+        evidenceHash: "ab".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    const declineBtn = container.querySelector(
+      "[data-testid='approval-decline']",
+    ) as HTMLButtonElement | null;
+    expect(declineBtn).not.toBeNull();
+
+    await act(async () => {
+      declineBtn!.click();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+
+    // The decision POST should have been issued. Find the call by URL shape.
+    const decisionCalls = mock.mock.calls.filter((c) => {
+      const u = String(c[0]);
+      return u.includes("/api/sessions/sess-w7-001/approval/appr_w7_001/reject");
+    });
+    expect(decisionCalls.length).toBe(1);
+    const init = decisionCalls[0][1] as RequestInit | undefined;
+    expect(init?.method).toBe("POST");
+    const headers = init?.headers as Record<string, string> | undefined;
+    expect(headers?.Authorization).toBe("Bearer tok-w7");
+  });
+
+  it("skips POST on dev-mode synthetic event without approvalId", async () => {
+    await setSessionToken("tok-w7-devmode");
+    const { mock } = installSmartFetch();
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+
+    // Fire an approval event WITHOUT approvalId (the dev-mode shape).
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "dev-session-001",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre",
+        evidenceHash: "cd".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+
+    const declineBtn = container.querySelector(
+      "[data-testid='approval-decline']",
+    ) as HTMLButtonElement | null;
+    expect(declineBtn).not.toBeNull();
+
+    await act(async () => {
+      declineBtn!.click();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+
+    // No fetch call to /approval/.../reject should have been made.
+    const decisionCalls = mock.mock.calls.filter((c) =>
+      String(c[0]).includes("/approval/"),
+    );
+    expect(decisionCalls.length).toBe(0);
+    // The sheet still dismisses locally.
+    expect(
+      container.querySelector("[data-testid='approval-sheet']"),
+    ).toBeNull();
+  });
+});
