@@ -76,6 +76,11 @@ export type {
   IA2AMessageRepository,
   CaptureVerdictRow,
 } from "./interfaces/index.js";
+export type {
+  IOrchestratorSessionRepository,
+  SessionRow as OrchestratorSessionRow,
+  SessionInsert as OrchestratorSessionInsert,
+} from "./interfaces/IOrchestratorSessionRepository.js";
 
 // Re-export repository classes for direct use
 export {
@@ -98,5 +103,6 @@ export {
   ApiKeyRepository,
   AuditLogRepository,
   A2AMessageRepository,
+  OrchestratorSessionRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

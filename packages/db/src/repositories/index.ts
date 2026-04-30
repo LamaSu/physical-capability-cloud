@@ -21,6 +21,7 @@ import { GovernanceRepository } from "./governance.js";
 import { TemplateStoreRepository } from "./template-store.js";
 import { AnalyticsRepository } from "./analytics.js";
 import { RatingRepository } from "./ratings.js";
+import { OrchestratorSessionRepository } from "./orchestrator-sessions.js";
 
 export {
   KernelRepository,
@@ -47,6 +48,7 @@ export {
   TemplateStoreRepository,
   AnalyticsRepository,
   RatingRepository,
+  OrchestratorSessionRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -75,6 +77,7 @@ export function buildRepositories(db: StoreDB) {
     templateStore: new TemplateStoreRepository(db),
     analytics: new AnalyticsRepository(db),
     ratings: new RatingRepository(db),
+    orchestratorSessions: new OrchestratorSessionRepository(db),
   };
 }
 
