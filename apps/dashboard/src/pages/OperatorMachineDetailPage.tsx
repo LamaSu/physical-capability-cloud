@@ -6,6 +6,8 @@ import { useOperatorStore } from "../stores/operator-store.js";
 import { mockEarningsData, mockMaintenanceEvents } from "../api/mock-onboarding-data.js";
 import { DiscoverabilityPanel } from "../components/operator/DiscoverabilityPanel.js";
 import { RatingsPanel } from "../components/operator/RatingsPanel.js";
+import { RateSubmitForm } from "../components/operator/RateSubmitForm.js";
+import { EditDeleteBar } from "../components/operator/EditDeleteBar.js";
 
 const machines: Record<string, { name: string; type: string; manufacturer: string; model: string; utilization: number; jobsCompleted: number; uptime: number }> = {
   "reg-001": { name: "Prusa MK4 Workshop", type: "fdm", manufacturer: "Prusa Research", model: "MK4", utilization: 72, jobsCompleted: 98, uptime: 99.2 },
@@ -72,6 +74,17 @@ export function OperatorMachineDetailPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <DiscoverabilityPanel operatorId={machineId} />
           <RatingsPanel operatorId={machineId} />
+        </div>
+      )}
+
+      {/* T2.7 rate-submit + T2.2 edit/delete (real API, auth-gated) */}
+      {machineId && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <RateSubmitForm operatorId={machineId} />
+          <EditDeleteBar
+            operatorId={machineId}
+            initialDescription={`${machine.manufacturer} ${machine.model}`}
+          />
         </div>
       )}
 
