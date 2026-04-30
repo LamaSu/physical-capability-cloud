@@ -11,11 +11,17 @@ export {
   advanceSession,
   withIdempotency,
   idempotencyKey,
+  setSessionStore,
+  getSessionStore,
+  restoreSessionsFrom,
+  InMemorySessionStore,
   _resetStoreForTests,
+  _resetStoreInstanceForTests,
   _clearIdempotencyForTests,
   type OnboardSession,
   type OnboardState,
   type Capability,
+  type SessionStore,
 } from "./core/state-machine.js";
 
 export {
