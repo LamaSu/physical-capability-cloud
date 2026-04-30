@@ -151,6 +151,51 @@ surfaced via `/api/status` so operators can verify mode at runtime.
 - [ ] CI license scan (SPDX allowlist) on the public monorepo rejecting any transitive dep with `GPL-*` / `AGPL-*` / `SSPL-*` license without explicit override.
 - [ ] Optional: publish a reference oracle (Apache 2.0, no signing key) so forks can run E2E without a LamaSu-issued key.
 
+## Contributor Economics layer (added 2026-04)
+
+The `feat/contributor-economics` branch (PR #7) introduced a per-job royalty
+layer that lets adapter authors / protocol authors / model authors / dataset
+contributors / verifiers / insurers earn from every settled job. All primitives
+ship under **Apache 2.0**, on the open-core side of the boundary defined above.
+None of them depend on the proprietary `LamaSu/pcc-oracle` consensus oracle.
+
+Apache-2.0 components added by this layer:
+
+- **Solidity** (`packages/contracts/src/`):
+  `RateScheduleRegistry.sol`, `ContributorNFT.sol`, `CanonicalRegistry.sol`
+  (extracted shared library), `RoleTags.sol` (codegen-generated from
+  `@pcc/spec/payouts`), `MilestoneEscrow.splitPayout` extension.
+- **TypeScript** (`packages/spec/src/`, `packages/contracts/ts/`,
+  `packages/db/src/`, `packages/gateway/src/routes/`):
+  `rate-schedule.ts` (segment DSL incl. `capture-class-indexed`),
+  `composition-manifest.ts`, `training-manifest.ts`, `@pcc/spec/payouts.ts`
+  (single-source `ROLE_TAGS`), `LicensingEngine` `getRoyaltyDistributionRich`
+  extension, `ContributorRepository`, `/api/contributors/*` routes (8),
+  7 new MCP tools (50-56).
+
+External imports added: `@noble/hashes` (for sha256-canonical hashing in
+`@pcc/spec/payouts`). MIT-licensed, transitively MIT-only — no copyleft
+contagion.
+
+ERC standards inherited (informational): ERC-721 (Apache 2.0 / MIT-style
+compatible — referenced via OpenZeppelin), ERC-2981 (informational royalty
+standard, no license implications).
+
+The 10-role `ContributorRole` enum **does not include** an `oem` or
+`hardware-vendor` role by design. See `docs/claros-layer4-amendment.md` for
+the no-OEM thesis. This is a protocol-design decision, not a licensing one,
+but it's worth noting here because it eliminates one class of "is the OEM
+royalty class proprietary?" question that the ADR's open-core boundary
+discussion would otherwise have to answer.
+
+The proprietary `pcc-oracle` (`LamaSu/pcc-oracle`) is **not** invoked by any
+of the contributor-economics surface. Settlement attestation still flows
+through the oracle when present (i.e., when `protocolRoot` is set on
+`MilestoneEscrow`), but `splitPayout` distribution itself is purely on-chain
+arithmetic against the sealed payout map. The oracle remains the
+`PROTOCOL_FEE_BPS = 235` collector and attestor; nothing in the new layer
+requires its participation beyond that pre-existing role.
+
 ## References
 
 - Open-core precedent: Grafana Labs / Grafana Cloud, Elastic / Elastic Cloud (pre-SSPL), Sentry / sentry.io, HashiCorp / Terraform Cloud.
