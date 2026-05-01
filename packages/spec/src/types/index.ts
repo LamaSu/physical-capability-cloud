@@ -40,3 +40,11 @@ export * from "./compliance-templates.js";
 export * from "./rate-schedule.js";
 export * from "./composition-manifest.js";
 export * from "./training-manifest.js";
+// RFC-001 work primitives (dependency-ordered):
+export * from "./work-schema.js";
+export * from "./work-product.js";
+export * from "./registry.js";
+export * from "./attestation.js";
+export * from "./verification-program.js";
+export * from "./dispute-resolver.js";
+export * from "./job-spec.js";
