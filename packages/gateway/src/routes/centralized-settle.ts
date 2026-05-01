@@ -54,7 +54,69 @@ import {
   type ApprovalRequestPayload,
 } from "./approval-request.js";
 import { getChannelIdForSession } from "./subscription.js";
-import { streamHub } from "../sse/stream-hub.js";
+import { streamHub, type StreamEvent } from "../sse/stream-hub.js";
+import { ids } from "@pcc/spec";
+
+// ── Settle-progress events (Week 9 A) ─────────────────────────────────
+//
+// During the gated settle path we emit `settle-progress` SSE events on
+// the same `approval` topic the mobile is already subscribed to. The
+// payload is a fixed phase ladder that mirrors the natural beats of the
+// settle pipeline (release → sign → log_append → done) plus a 0..1
+// progress hint so the mobile Live Activity can render a deterministic
+// progress bar without needing to know the phase semantics.
+//
+// Why ride the existing approval topic instead of a new one:
+//   - The mobile listener is already subscribed to it (W5 + W6 channel-id).
+//   - The events are only meaningful during a settle that JUST cleared
+//     the approval gate; a fresh subscription is unnecessary.
+//   - The mobile dispatcher distinguishes by event `type` so adding a new
+//     type is a cheap, additive change.
+//
+// Behavior:
+//   - Only fires for gated settles. Un-gated settles return synchronously
+//     so the events would just race the HTTP response.
+//   - Dual-publish to both session-id AND channel-id topics, mirroring
+//     the W6 A3 publishApprovalRequest pattern. Either subscription
+//     surface receives the events.
+
+/** Wire-shape for settle-progress events. Stable across W9+. */
+export interface SettleProgressPayload {
+  /** The session whose settle is in flight. */
+  id: string;
+  /** Fixed phase ladder. New phases must be APPENDED at the end. */
+  phase: "release" | "sign" | "log_append" | "done";
+  /** 0..1 progress hint. Monotonically non-decreasing through a single settle. */
+  progress: number;
+}
+
+/**
+ * Publish a settle-progress event to the approval topic. Dual-publishes
+ * to both the session-id topic (W5 token-as-channel-id mobiles) and the
+ * channel-id topic when a subscription exists (W6 A3). Either side sees
+ * the event without a flag day.
+ */
+function publishSettleProgress(
+  sessionId: string,
+  phase: SettleProgressPayload["phase"],
+  progress: number,
+): void {
+  const sessionTopic = { type: "approval" as const, id: sessionId };
+  const channelId = getChannelIdForSession(sessionId);
+  const topics = channelId
+    ? [sessionTopic, { type: "approval" as const, id: channelId }]
+    : [sessionTopic];
+
+  const payload: SettleProgressPayload = { id: sessionId, phase, progress };
+  const event: StreamEvent = {
+    id: ids.stream(),
+    type: "settle-progress",
+    timestamp: new Date().toISOString(),
+    topic: sessionTopic,
+    payload,
+  };
+  streamHub.publish(topics, event);
+}
 
 // ── Singletons (module-level) ─────────────────────────────────────────
 
@@ -294,6 +356,12 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
 
       const body = (req.body ?? {}) as SettleBody;
 
+      // Tracks whether the approval gate fired for this settle. Only
+      // gated settles emit settle-progress events (W9 A) — un-gated
+      // settles return synchronously so the events would just race the
+      // HTTP response.
+      let gated = false;
+
       // ── Week 6 A2: optional approval gate ────────────────────────────
       //
       // When the session/body/env says this settle needs operator
@@ -307,6 +375,7 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
       //   - no SSE subscriber → returns 503 with `error: no_subscriber`
       //     so the caller can surface a helpful UI prompt
       if (shouldGateOnApproval(session, body)) {
+        gated = true;
         // W6 A3: subscribers may be on EITHER the session-id topic
         // (W5 token-as-channel-id mobiles) OR the per-session channel-id
         // topic (W6 subscribe-mobiles). Count both.
@@ -376,6 +445,8 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
         }
         throw err;
       }
+      // W9 A: release succeeded. Emit phase=release at 25%.
+      if (gated) publishSettleProgress(sessionId, "release", 0.25);
 
       // 2. Compose the receipt payload.
       const evidenceHash =
@@ -397,6 +468,8 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
       // 3. Sign with the server key.
       const { privateKey, publicKey } = getServerKey();
       const signed: SignedReceipt = signReceipt(payload, privateKey);
+      // W9 A: signed receipt composed. Emit phase=sign at 50%.
+      if (gated) publishSettleProgress(sessionId, "sign", 0.5);
 
       // 4. Append to the transparency log. The leaf is the canonical
       //    JSON of the signed receipt, so verifiers can re-derive the
@@ -405,6 +478,8 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
       const leafBytes = new TextEncoder().encode(leafJson);
       const { index } = state.log.appendLeaf(leafBytes);
       const proof = state.log.getProof(index);
+      // W9 A: log appended. Emit phase=log_append at 75%.
+      if (gated) publishSettleProgress(sessionId, "log_append", 0.75);
 
       // 5. Mark the session as settled and stash the record.
       session.state = "settled";
@@ -418,6 +493,13 @@ export async function centralizedSettleRoutes(app: FastifyInstance) {
         at: new Date().toISOString(),
       };
       state.receipts.set(sessionId, record);
+
+      // W9 A: settle is complete. Emit phase=done at 100% just before
+      // the HTTP response goes out. The mobile listener uses this as the
+      // "you're safe to dismiss the Live Activity" signal — though the
+      // 200 response on the original POST is the load-bearing signal for
+      // the user; this is purely a lock-screen UX nicety.
+      if (gated) publishSettleProgress(sessionId, "done", 1.0);
 
       return {
         signedReceipt: signed,
