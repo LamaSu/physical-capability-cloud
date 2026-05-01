@@ -290,6 +290,60 @@ export function validateRows(rows: SegmentRow[]): RowValidation {
 }
 
 // ---------------------------------------------------------------------------
+// Onramp helper — inline "Add USDC" button for the wallet address row.
+//
+// Calls POST /api/fiat-ramp/onramp/session with the wallet address as the
+// destination. On a Stripe-keyed gateway this returns a checkout URL; on a
+// mock-keyed gateway (no STRIPE_SECRET_KEY) it returns a stub that we surface
+// as an inline tip rather than a broken link.
+// ---------------------------------------------------------------------------
+
+const ADDRESS_RE_INLINE = /^0x[a-fA-F0-9]{40}$/;
+
+function OnrampButton({ walletAddress }: { walletAddress: string }) {
+  const [busy, setBusy] = React.useState(false);
+  const [tip, setTip] = React.useState<string | null>(null);
+  const valid = ADDRESS_RE_INLINE.test(walletAddress);
+
+  async function open() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setTip(null);
+    try {
+      const res = await apiPost<{ url?: string; sessionUrl?: string; clientSecret?: string }>(
+        "/api/fiat-ramp/onramp/session",
+        { destinationAddress: walletAddress, amountUsd: 20, currency: "USDC" },
+      );
+      const url = res.url ?? res.sessionUrl;
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else {
+        setTip("Onramp is in mock mode (no STRIPE_SECRET_KEY on gateway). Real onramp activates in production.");
+      }
+    } catch (err) {
+      setTip(err instanceof Error ? err.message : "onramp request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {tip && <span className="text-[10px] text-amber-400/70">{tip}</span>}
+      <button
+        type="button"
+        onClick={open}
+        disabled={!valid || busy}
+        className="text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-white/[0.1] text-white/60 hover:text-white hover:border-white/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+        title={valid ? "Open Stripe to add USDC to this wallet" : "Enter a valid wallet address first"}
+      >
+        {busy ? "…" : "+ $20 USDC"}
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -495,8 +549,11 @@ export function RateSchedulePublishPage() {
               onChange={(e) => setWalletAddress(e.target.value.trim())}
               className="w-full bg-white/[0.04] border border-white/[0.08] rounded px-3 py-2 text-sm font-mono text-white/80 focus:border-white/20 outline-none"
             />
-            <div className="text-[10px] text-white/30 mt-1">
-              The publishedBy address. Required.
+            <div className="flex items-center justify-between mt-1 gap-2">
+              <div className="text-[10px] text-white/30">
+                The publishedBy address. Required.
+              </div>
+              <OnrampButton walletAddress={walletAddress} />
             </div>
           </div>
         </div>

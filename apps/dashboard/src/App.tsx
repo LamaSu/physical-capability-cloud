@@ -24,6 +24,7 @@ import { SpatialApp } from "./SpatialApp.js";
 const AgentChatPage = lazy(() => import("./pages/AgentChatPage.js").then(m => ({ default: m.AgentChatPage })));
 const LandingPage = lazy(() => import("./pages/LandingPage.js").then(m => ({ default: m.LandingPage })));
 const StartPage = lazy(() => import("./pages/StartPage.js").then(m => ({ default: m.StartPage })));
+const EarnFromYourWorkPage = lazy(() => import("./pages/EarnFromYourWorkPage.js").then(m => ({ default: m.EarnFromYourWorkPage })));
 const AgentLinkPage = lazy(() => import("./pages/AgentLinkPage.js").then(m => ({ default: m.AgentLinkPage })));
 const DashboardPage = lazy(() => import("./pages/DashboardPage.js").then(m => ({ default: m.DashboardPage })));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage.js").then(m => ({ default: m.DiscoverPage })));
@@ -286,7 +287,7 @@ function Shell() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   // Public pages that don't require auth
-  const publicPaths = ["/", "/start", "/whitepaper", "/go"];
+  const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn"];
   const isPublicPage = publicPaths.includes(location.pathname);
 
   // Login page at /login
@@ -316,6 +317,16 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <StartPage />
+      </Suspense>
+    );
+  }
+
+  // Zero-friction contributor signup. Public — bundled wallet+APIkey+
+  // schedule signup via POST /api/contributors/quickstart.
+  if (location.pathname === "/earn") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <EarnFromYourWorkPage />
       </Suspense>
     );
   }

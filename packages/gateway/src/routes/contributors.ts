@@ -32,6 +32,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getRepos } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { getEmbeddedWalletAdapter } from "../auth/embedded-wallet.js";
 import {
   RateSegmentSchema,
   computeScheduleHash,
@@ -475,9 +477,198 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // ── POST /api/contributors/quickstart ────────────────────────────────────
+  //
+  // Bundled signup endpoint for the zero-friction "I want to earn from my
+  // work" flow (apps/dashboard/src/pages/EarnFromYourWorkPage.tsx). One
+  // request creates a wallet, an API key, a contributor profile, and a
+  // default RateSchedule — the four things a non-technical contributor would
+  // otherwise have to do via four separate API calls + a wallet install.
+  //
+  // The wallet is created via the EmbeddedWalletAdapter seam:
+  //   - DemoWalletAdapter (default)  → UnifiedKeychain-derived EOA, mnemonic
+  //                                    returned once for the user to back up
+  //   - PrivyWalletAdapter (active when PRIVY_APP_ID is set) → Privy ERC-4337
+  //                                    smart wallet, no seed phrase
+  //
+  // The default RateSchedule is a single `constant` segment with the user's
+  // chosen percentage as bps (1.5% → 150 bps), forever. Authors who want
+  // adoption-indexed / capture-class / step / decay schedules use the full
+  // RateSchedulePublishPage in the dashboard instead.
+
+  const QuickstartBodySchema = z.object({
+    email: z.string().email().max(255),
+    role: ContributorRoleSchema,
+    ratePercent: z.number().min(0.01).max(50),
+    contributionDescription: z.string().max(280).optional(),
+    name: z.string().max(120).optional(),
+  });
+
+  app.post("/api/contributors/quickstart", async (req, reply) => {
+    const parse = QuickstartBodySchema.safeParse(req.body);
+    if (!parse.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: parse.error.issues[0]?.message ?? "validation failed",
+        details: parse.error.issues,
+      });
+    }
+
+    const body = parse.data;
+    const adapter = getEmbeddedWalletAdapter();
+
+    // 1. Create / recover the embedded wallet for this email.
+    let wallet;
+    try {
+      wallet = await adapter.createWalletForEmail(body.email);
+    } catch (err) {
+      return reply.code(502).send({
+        error: "wallet_provider_failed",
+        provider: adapter.providerId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // 2. Provision an API key bound to this email.
+    let apiKey: string;
+    let keyId: string;
+    try {
+      const result = provisionApiKey({
+        operatorId: body.email,
+        name: body.name ?? body.email,
+        description: `Contributor quickstart (${body.role})`,
+        scopes: [
+          "contributor:read",
+          "contributor:write",
+          "schedule:read",
+          "schedule:publish",
+        ],
+        metadata: {
+          flow: "quickstart",
+          walletProvider: adapter.providerId,
+          walletAddress: wallet.address,
+          contributorRole: body.role,
+        },
+      });
+      if (!result.record) {
+        return reply.code(500).send({
+          error: "api_key_provision_failed",
+          message: "provisionApiKey returned no record",
+        });
+      }
+      apiKey = result.rawKey;
+      keyId = result.record.id;
+    } catch (err) {
+      return reply.code(500).send({
+        error: "api_key_provision_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // 3. Build a default constant-segment RateSchedule.
+    //    1.5% → 150 bps. Schedule starts now (unix seconds), no end.
+    const bps = Math.round(body.ratePercent * 100);
+    const startTime = Math.floor(Date.now() / 1000);
+    const segments: RateSegment[] = [
+      {
+        kind: "constant",
+        startTime,
+        endTime: null,
+        bps,
+      },
+    ];
+    const publishedAt = new Date().toISOString();
+    let scheduleHash: `0x${string}`;
+    try {
+      scheduleHash = computeScheduleHash({
+        version: 1,
+        segments,
+        notes: body.contributionDescription,
+        publishedAt: "",
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        error: "schedule_hash_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const segmentsJson = canonicalize(segments);
+    const repos = getRepos();
+
+    // 4. Publish the schedule (idempotent on duplicate hash).
+    const existingSchedule = repos.contributors.getSchedule(scheduleHash);
+    if (!existingSchedule) {
+      try {
+        repos.contributors.publishSchedule({
+          scheduleHash,
+          version: 1,
+          segmentsJson,
+          notes: body.contributionDescription ?? null,
+          publishedBy: wallet.address,
+          publishedAt,
+        });
+      } catch (err) {
+        return reply.code(500).send({
+          error: "schedule_publish_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // 5. Register the contributor profile.
+    const profileId = `${wallet.address}:${body.role}:${scheduleHash}`;
+    try {
+      repos.contributors.upsertProfile({
+        id: profileId,
+        address: wallet.address,
+        role: body.role,
+        scheduleHash,
+        ipId: null,
+        contributorNftTokenId: null,
+        metadataUri: null,
+        registeredAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        error: "profile_register_failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const baseUrl = `${req.protocol}://${req.hostname}`;
+
+    return reply.code(201).send({
+      apiKey,
+      keyId,
+      walletAddress: wallet.address,
+      walletProvider: adapter.providerId,
+      walletProviderUserId: wallet.providerUserId,
+      // Mnemonic is ONLY present when the demo adapter is active. The
+      // Privy adapter never returns a seed phrase. Frontend MUST display
+      // this once with a "back this up before continuing" gate.
+      mnemonic: wallet.mnemonic ?? null,
+      mnemonicWarning: wallet.mnemonic
+        ? "Save this 12-word phrase NOW. It is the only way to recover your wallet. We do not store it. If you lose it, your wallet and all royalty payouts are gone forever."
+        : null,
+      scheduleHash,
+      ratePercent: body.ratePercent,
+      bps,
+      role: body.role,
+      contributionDescription: body.contributionDescription ?? null,
+      profileId,
+      // Pointers the frontend can deep-link to.
+      links: {
+        viewSchedule: `${baseUrl}/contributors/schedules/${scheduleHash}`,
+        addUsdc: `${baseUrl}/api/fiat-ramp/onramp/session`,
+        agentPackage: `${baseUrl}/agent-package.json`,
+      },
+    });
+  });
+
   // ── GET /api/contributors/:address ───────────────────────────────────────
   // Registered LAST so Fastify resolves the static segments first
-  // (/by-role/:role, /schedules/:hash, /training-manifests/:id).
+  // (/by-role/:role, /schedules/:hash, /training-manifests/:id, /quickstart).
 
   app.get<{ Params: { address: string } }>(
     "/api/contributors/:address",

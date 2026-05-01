@@ -941,3 +941,161 @@ describe("contributor routes — no-deprecation contract (audit 2026-04-27)", ()
     assertNoDeprecationHeaders(res.headers);
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/contributors/quickstart — bundled signup
+// ---------------------------------------------------------------------------
+
+describe("POST /api/contributors/quickstart", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  it("creates wallet + API key + profile + schedule in a single request (demo adapter)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: {
+        email: "alice@example.com",
+        role: "model-author",
+        ratePercent: 1.5,
+        contributionDescription: "Vision model for cu-pipe defects",
+        name: "Alice",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json<{
+      apiKey: string;
+      keyId: string;
+      walletAddress: string;
+      walletProvider: string;
+      walletProviderUserId: string;
+      mnemonic: string | null;
+      mnemonicWarning: string | null;
+      scheduleHash: string;
+      ratePercent: number;
+      bps: number;
+      role: string;
+      profileId: string;
+      links: { viewSchedule: string; addUsdc: string; agentPackage: string };
+    }>();
+
+    // Wallet
+    expect(body.walletAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
+    expect(body.walletProvider).toBe("demo");
+    expect(body.walletProviderUserId).toBe("alice@example.com");
+    expect(body.mnemonic).toMatch(/^\w+( \w+){11}$/); // 12 BIP-39 words
+    expect(body.mnemonicWarning).toContain("Save this");
+
+    // API key
+    expect(body.apiKey).toMatch(/^pcc_(live|test)_/);
+    expect(body.keyId).toBeTruthy();
+
+    // Schedule
+    expect(body.scheduleHash).toMatch(/^0x[a-f0-9]{64}$/i);
+    expect(body.ratePercent).toBe(1.5);
+    expect(body.bps).toBe(150);
+
+    // Profile id is composite of address + role + scheduleHash
+    expect(body.profileId).toBe(`${body.walletAddress}:model-author:${body.scheduleHash}`);
+
+    // Deep links
+    expect(body.links.viewSchedule).toContain(body.scheduleHash);
+    expect(body.links.addUsdc).toContain("/api/fiat-ramp/onramp/session");
+    expect(body.links.agentPackage).toContain("/agent-package.json");
+  });
+
+  it("publishes a constant-segment schedule that round-trips via GET", async () => {
+    const post = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "bob@example.com", role: "operator", ratePercent: 2.5 },
+    });
+    expect(post.statusCode).toBe(201);
+    const { scheduleHash } = post.json<{ scheduleHash: string }>();
+
+    const get = await app.inject({
+      method: "GET",
+      url: `/api/contributors/schedules/${scheduleHash}`,
+    });
+    expect(get.statusCode).toBe(200);
+    const fetched = get.json<{
+      schedule: {
+        scheduleHash: string;
+        version: number;
+        segments: Array<{ kind: string; bps?: number }>;
+      };
+    }>();
+    expect(fetched.schedule.scheduleHash).toBe(scheduleHash);
+    expect(fetched.schedule.version).toBe(1);
+    expect(fetched.schedule.segments).toHaveLength(1);
+    expect(fetched.schedule.segments[0]?.kind).toBe("constant");
+    expect(fetched.schedule.segments[0]?.bps).toBe(250);
+  });
+
+  it("registers the contributor profile so it's discoverable by role", async () => {
+    const post = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "carol@example.com", role: "verifier", ratePercent: 0.5 },
+    });
+    expect(post.statusCode).toBe(201);
+    const { walletAddress, profileId } = post.json<{
+      walletAddress: string;
+      profileId: string;
+    }>();
+
+    const byRole = await app.inject({
+      method: "GET",
+      url: "/api/contributors/by-role/verifier",
+    });
+    expect(byRole.statusCode).toBe(200);
+    const { profiles } = byRole.json<{
+      profiles: Array<{ id: string; address: string; role: string }>;
+    }>();
+    expect(profiles.some((p) => p.id === profileId && p.address === walletAddress)).toBe(true);
+  });
+
+  it("rejects invalid email", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "not-an-email", role: "operator", ratePercent: 1 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("invalid_request");
+  });
+
+  it("rejects ratePercent outside 0.01..50", async () => {
+    const tooLow = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "x@y.com", role: "operator", ratePercent: 0 },
+    });
+    expect(tooLow.statusCode).toBe(400);
+
+    const tooHigh = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "x@y.com", role: "operator", ratePercent: 60 },
+    });
+    expect(tooHigh.statusCode).toBe(400);
+  });
+
+  it("rejects unknown role", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/quickstart",
+      payload: { email: "x@y.com", role: "ceo", ratePercent: 1 },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
