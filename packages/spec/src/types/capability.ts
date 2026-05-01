@@ -104,6 +104,12 @@ export interface AvailabilitySchedule {
   blackouts?: string[];
 }
 
+/**
+ * Per-capability settlement mode (Week 2 — centralized substrate).
+ * Imported from the schema so the schema stays the single source of truth.
+ */
+type CapabilitySettlementMode = "centralized" | "onchain";
+
 /** A capability exposed by a Shop Kernel */
 export interface Capability {
   id: Id;
@@ -130,6 +136,24 @@ export interface Capability {
   queueDepth: number;
   /** Tags for search/filtering */
   tags?: string[];
+  /**
+   * Per-capability settlement mode (Week 2 centralized substrate).
+   * Optional for backward compatibility; absence is interpreted as
+   * `"centralized"` by `resolveSettlementMode()`.
+   */
+  settlementMode?: CapabilitySettlementMode;
+  /**
+   * Week 7 B: per-capability default for the approval gate. When true,
+   * settlements for this capability fire the SSE approval-request gate
+   * unless explicitly overridden at the session or call layer.
+   */
+  requiresApproval?: boolean;
+  /**
+   * Week 7 B: per-capability amount threshold (USD). When set, settles
+   * whose amount meets this threshold fire the approval gate even if
+   * `requiresApproval` is false/unset.
+   */
+  approvalThresholdUsd?: number;
 }
 
 /** A reserved slot on a capability */
