@@ -15,7 +15,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { getStore } from "../db.js";
+import { getStore, getRepos } from "../db.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { schema, eq } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
@@ -33,6 +33,11 @@ import type {
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
 import { createJobFromSession } from "./paid-job-flow.js";
+import {
+  registerSettleableSession,
+  buildSettleableSessionFromCapability,
+  SessionAlreadyRegisteredError,
+} from "./centralized-settle.js";
 
 const challengeService = new ChallengeService();
 
@@ -445,6 +450,102 @@ export async function negotiationRoutes(app: FastifyInstance) {
         } catch (err) {
           // Paid job flow creation is best-effort — the session is already committed
           console.warn("[negotiation] Paid job flow wiring failed (best-effort):", err instanceof Error ? err.message : err);
+        }
+
+        // ── Wire (W10): register the SettleableSession for the centralized substrate ──
+        //
+        // The capability + amount + parties + intent are all known at
+        // commit time; this is the moment to snapshot the W2 + W7 B
+        // capability fields onto the session so the runtime gate decision
+        // (shouldGateOnApproval in centralized-settle.ts) reads from a
+        // session that was minted with full context.
+        //
+        // Best-effort by design: failures here MUST NOT block the commit.
+        // The on-chain settlement path doesn't need the centralized
+        // substrate at all (`settlementMode: "onchain"` capabilities
+        // settle through MilestoneEscrow.sol), so a failure here only
+        // affects centralized-mode capabilities, and even those still
+        // have the negotiated session + escrow + job persisted in the DB.
+        try {
+          const repos = getRepos();
+          // Look up the capability spec for this kernel + type. The DB
+          // schema currently doesn't store requiresApproval /
+          // approvalThresholdUsd / settlementMode columns (they live on
+          // the spec-level Capability schema), so the snapshot here will
+          // pass `undefined` for fields the DB doesn't surface. The gate
+          // hierarchy treats undefined as "do not fire", so this is the
+          // safe default. When the DB schema is extended (separate work),
+          // the snapshot picks up the values automatically.
+          const caps = repos.capabilities.findByKernel(row.kernelId);
+          const matchingCap =
+            caps.find((c) => c.type === row.capabilityType) ?? caps[0];
+
+          // Total amount, in cents. Source: the quote computed in /quote.
+          // If the quote is missing for some reason we skip registration —
+          // the substrate has no amount to settle on.
+          const quote = row.quote as Record<string, unknown> | null;
+          const totalPriceStr = (quote?.totalPrice as string | undefined) ?? null;
+          const totalPriceFloat = totalPriceStr ? parseFloat(totalPriceStr) : NaN;
+          const amountCents =
+            Number.isFinite(totalPriceFloat) && totalPriceFloat > 0
+              ? Math.round(totalPriceFloat * 100)
+              : 0;
+
+          if (amountCents > 0) {
+            // Hash actor identifiers — never persist raw ids on the
+            // receipt. SHA-256 of the lowercased id is fine; the receipt
+            // schema only enforces hex format, the hashing strategy is
+            // the session-creation site's policy decision.
+            const userHash = crypto
+              .createHash("sha256")
+              .update(row.userAgentId.toLowerCase())
+              .digest("hex");
+            const operatorHash = crypto
+              .createHash("sha256")
+              .update(row.kernelId.toLowerCase())
+              .digest("hex");
+
+            const settleableSession = buildSettleableSessionFromCapability({
+              negotiateSessionId: req.params.id,
+              capability: {
+                // Always present — it's the requested capability type.
+                type: row.capabilityType,
+                // The DB row may not surface these (see comment above);
+                // cast lets us read them when present without forcing
+                // the schema to grow now. resolveSettlementMode handles
+                // missing settlementMode safely.
+                requiresApproval: (matchingCap as { requiresApproval?: boolean } | undefined)
+                  ?.requiresApproval,
+                approvalThresholdUsd: (matchingCap as { approvalThresholdUsd?: number } | undefined)
+                  ?.approvalThresholdUsd,
+                settlementMode: (matchingCap as { settlementMode?: "centralized" | "onchain" } | undefined)
+                  ?.settlementMode,
+              },
+              user: { id: row.userAgentId, kind: "user" },
+              operator: { id: row.kernelId, kind: "operator" },
+              amountCents,
+              actorsHashed: { user: userHash, operator: operatorHash },
+              // Display name is best-effort: the kernel name lives on the
+              // shopKernels row, but a kernel id is a fine fallback and
+              // avoids a second DB roundtrip on the hot path.
+              operatorName: row.kernelId,
+            });
+
+            registerSettleableSession(settleableSession);
+          }
+        } catch (err) {
+          if (err instanceof SessionAlreadyRegisteredError) {
+            // Re-commit attempt against a session id we've already seen.
+            // The earlier 409 short-circuit should have caught this; if
+            // we got here it's a benign race. No-op.
+          } else {
+            // Substrate registration failure is non-fatal — the on-chain
+            // path still works, the DB session is still committed.
+            console.warn(
+              "[negotiation] Centralized substrate registration failed (best-effort):",
+              err instanceof Error ? err.message : err,
+            );
+          }
         }
 
         return {
