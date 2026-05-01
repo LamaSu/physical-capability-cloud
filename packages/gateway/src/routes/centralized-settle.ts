@@ -55,7 +55,7 @@ import {
 } from "./approval-request.js";
 import { getChannelIdForSession } from "./subscription.js";
 import { streamHub, type StreamEvent } from "../sse/stream-hub.js";
-import { ids } from "@pcc/spec";
+import { ids, resolveSettlementMode, type Capability } from "@pcc/spec";
 
 // ── Settle-progress events (Week 9 A) ─────────────────────────────────
 //
@@ -223,6 +223,161 @@ export function seedSettleableSessionForTests(session: SettleableSession): void 
 /** Test-only: read the current ledger snapshot. */
 export function getLedgerSnapshotForTests(): Record<string, number> {
   return state.ledger.getStore().snapshot();
+}
+
+// ── Production session registration (Week 10) ─────────────────────────
+//
+// W2 set up `state.sessions: Map<string, SettleableSession>` as the
+// in-memory registry the centralized-settle route reads on POST. W7 B
+// added `requiresApproval` + `approvalThresholdUsd` to the capability
+// schema and `capabilityRequiresApproval` + `capabilityApprovalThresholdUsd`
+// to `SettleableSession`. W8 noticed that no production code path mints
+// a SettleableSession — only the test-only `seedSettleableSessionForTests`
+// did. W9 D shipped a fixture builder that documented the snapshot
+// contract for tests.
+//
+// W10 closes the loop: this is the production-grade equivalent of the
+// fixture builder + a public registration entry-point. Wired at the
+// negotiate-session commit endpoint in `negotiation.ts`.
+
+/** Thrown when `registerSettleableSession` is called with a duplicate id. */
+export class SessionAlreadyRegisteredError extends Error {
+  constructor(public readonly sessionId: string) {
+    super(`SettleableSession "${sessionId}" already registered`);
+    this.name = "SessionAlreadyRegisteredError";
+  }
+}
+
+/** Thrown when `registerSettleableSession` invariants don't hold. */
+export class InvalidSettleableSessionError extends Error {
+  constructor(reason: string) {
+    super(`Invalid SettleableSession: ${reason}`);
+    this.name = "InvalidSettleableSessionError";
+  }
+}
+
+/**
+ * Inputs to `buildSettleableSessionFromCapability`. The spec-level
+ * `Capability` is accepted as `Pick<...>` so callers can pass either the
+ * full `Capability` (e.g. from a CapabilityFacade) or a thinner DB row
+ * with the W2 + W7 B fields surfaced. Anything missing on the input
+ * snapshots as `undefined` on the session — the gate hierarchy already
+ * treats `undefined` as "do not fire", so an absent field is safe.
+ */
+export interface BuildSettleableSessionInput {
+  /** Logical session id from the negotiate session row. */
+  negotiateSessionId: string;
+  /**
+   * Capability the session was committed against. Only the fields
+   * relevant to settlement gating are read; pass a full Capability or a
+   * subset with whichever of `type` / `requiresApproval` /
+   * `approvalThresholdUsd` / `settlementMode` are available.
+   */
+  capability: Pick<
+    Capability,
+    "type" | "requiresApproval" | "approvalThresholdUsd" | "settlementMode"
+  >;
+  /** Settlement-side actor identifiers. */
+  user: Actor;
+  operator: Actor;
+  /** Amount in cents. Must be > 0. */
+  amountCents: number;
+  /**
+   * Hashed user/operator identifiers. The caller (the negotiate-commit
+   * site) is responsible for supplying these — this helper does not
+   * derive them, because the hashing strategy is a policy decision the
+   * session-creation site owns.
+   */
+  actorsHashed: { user: string; operator: string };
+  /** Optional operator display name; falls back to operator.id. */
+  operatorName?: string;
+}
+
+/**
+ * Construct a `SettleableSession` from a capability + per-session inputs.
+ * Snapshots the W2 + W7 B fields onto the session at creation time:
+ *
+ *   capability.requiresApproval     → session.capabilityRequiresApproval
+ *   capability.approvalThresholdUsd → session.capabilityApprovalThresholdUsd
+ *   capability.settlementMode       → session.settlementMode (via resolveSettlementMode)
+ *
+ * `session.requiresApproval` is intentionally left undefined — that is
+ * the per-session opt-in lever, separate from the per-capability default.
+ * If a caller wants to flip it on at session-creation time (e.g. a
+ * trust-graded user who always requires approval), they can post-process
+ * the returned session before passing it to `registerSettleableSession`.
+ *
+ * Mirrors the test-fixture builder at
+ * `packages/spec/src/test-fixtures/capability.ts` — keeping the two in
+ * sync is the contract that lets fixture-driven tests exercise the same
+ * shape the production path produces.
+ */
+export function buildSettleableSessionFromCapability(
+  input: BuildSettleableSessionInput,
+): SettleableSession {
+  return {
+    id: input.negotiateSessionId,
+    state: "committed",
+    user: input.user,
+    operator: input.operator,
+    amountCents: input.amountCents,
+    capability: input.capability.type,
+    actorsHashed: input.actorsHashed,
+    settlementMode: resolveSettlementMode(input.capability),
+    operatorName: input.operatorName,
+    // W7 B snapshot — undefined values are correct on missing fields;
+    // the gate hierarchy treats them as "do not fire".
+    capabilityRequiresApproval: input.capability.requiresApproval,
+    capabilityApprovalThresholdUsd: input.capability.approvalThresholdUsd,
+  };
+}
+
+/**
+ * Register a SettleableSession with the centralized substrate. This is
+ * the production equivalent of `seedSettleableSessionForTests` — same
+ * end state on the in-memory map, but with explicit invariant checks
+ * and typed errors instead of test-time assumptions.
+ *
+ * Invariants (throw `InvalidSettleableSessionError` when violated):
+ *   - id non-empty
+ *   - state === "committed" (the only state the negotiate-commit site
+ *     ever produces; later transitions are owned by the settle path)
+ *   - amountCents > 0
+ *   - capability non-empty
+ *
+ * Idempotency: throws `SessionAlreadyRegisteredError` on duplicate id.
+ * The caller (negotiate commit) should treat duplicates as a programmer
+ * error — every commit mints a fresh session id.
+ *
+ * **Does NOT** lock escrow. The W2 mock-ledger lock-on-seed pattern is a
+ * test convenience; in production the on-chain or off-chain escrow
+ * funding is a separate concern handled by `paid-job-flow.ts`. The
+ * centralized substrate's ledger gets seeded by the funding path when
+ * funds arrive, not by session registration.
+ */
+export function registerSettleableSession(session: SettleableSession): void {
+  if (!session.id) {
+    throw new InvalidSettleableSessionError("id must be a non-empty string");
+  }
+  if (session.state !== "committed") {
+    throw new InvalidSettleableSessionError(
+      `state must be "committed" at registration (got "${session.state}")`,
+    );
+  }
+  if (!Number.isFinite(session.amountCents) || session.amountCents <= 0) {
+    throw new InvalidSettleableSessionError(
+      `amountCents must be a positive integer (got ${session.amountCents})`,
+    );
+  }
+  if (!session.capability) {
+    throw new InvalidSettleableSessionError(
+      "capability must be a non-empty string",
+    );
+  }
+  if (state.sessions.has(session.id)) {
+    throw new SessionAlreadyRegisteredError(session.id);
+  }
+  state.sessions.set(session.id, session);
 }
 
 /** Test-only: peek at the transparency log size. */
