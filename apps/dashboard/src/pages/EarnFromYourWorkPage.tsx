@@ -84,7 +84,7 @@ type QuickstartResponse = {
 
 type Stage = "form" | "loading" | "backup" | "done" | "error";
 
-export function EarnFromYourWorkPage(): JSX.Element {
+export function EarnFromYourWorkPage(): React.JSX.Element {
   const [stage, setStage] = useState<Stage>("form");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("operator");
