@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { shopKernels } from "./kernels.js";
 
 /** A capability exposed by a Shop Kernel */
@@ -33,4 +33,26 @@ export const capabilities = sqliteTable("capabilities", {
   location: text("location", { mode: "json" }).notNull().$type<{ lat: number; lng: number }>(),
   queueDepth: integer("queue_depth").notNull().default(0),
   tags: text("tags", { mode: "json" }).$type<string[]>(),
+  /**
+   * Week 11 (W2 + W7 B persistence): per-capability settlement mode.
+   * Values: "centralized" | "onchain". NULL means use the schema-level
+   * default ("centralized" via `resolveSettlementMode`).
+   */
+  settlementMode: text("settlement_mode").$type<"centralized" | "onchain">(),
+  /**
+   * Week 11 (W7 B persistence): per-capability default for the approval
+   * gate. NULL means "do not fire from this layer" (the gate hierarchy
+   * treats undefined as a falsy short-circuit).
+   *
+   * Stored as INTEGER 0/1 to match SQLite's boolean idiom — Drizzle
+   * surfaces it as `boolean | null` thanks to `mode: "boolean"`.
+   */
+  requiresApproval: integer("requires_approval", { mode: "boolean" }),
+  /**
+   * Week 11 (W7 B persistence): per-capability monetary threshold (USD).
+   * NULL means no threshold gate. Stored as REAL because SQLite has no
+   * NUMERIC; the precision-conscious caller is the gate hierarchy in
+   * `centralized-settle.ts` which floors to cents anyway.
+   */
+  approvalThresholdUsd: real("approval_threshold_usd"),
 });
