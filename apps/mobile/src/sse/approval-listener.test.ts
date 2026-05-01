@@ -85,6 +85,14 @@ class MockEventSource {
     this.onmessage?.(evt);
   }
 
+  /**
+   * Test helper: dispatch a settle-progress named event. Convenience over
+   * fireNamed("settle-progress", ...) so the W9 test cases read cleanly.
+   */
+  fireProgress(payload: unknown, lastEventId = ""): void {
+    this.fireNamed("settle-progress", payload, lastEventId);
+  }
+
   static reset(): void {
     MockEventSource.instances = [];
   }
@@ -389,6 +397,130 @@ describe("startApprovalListener reconnect", () => {
     // No new EventSource was opened.
     expect(MockEventSource.instances.length).toBe(1);
     expect(handle.state.running).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 9 B — settle-progress event dispatch
+// ──────────────────────────────────────────────────────────────────────
+
+describe("startApprovalListener — settle-progress (Week 9 B)", () => {
+  it("routes settle-progress events to onProgress when subscribed", () => {
+    const seen: { phase: string; progress: number; id: string }[] = [];
+    const handle = startApprovalListener({
+      sessionId: "sess-w9b-001",
+      sessionToken: "tok",
+      baseUrl: "https://capability.network",
+      onApproval: () => {},
+      onProgress: (p) => seen.push({ phase: p.phase, progress: p.progress, id: p.id }),
+      eventSourceCtor: MockEventSource as unknown as typeof EventSource,
+    });
+    const es = MockEventSource.last()!;
+    es.fireOpen();
+    es.fireProgress(
+      { id: "sess-w9b-001", phase: "release", progress: 0.25 },
+      "evt-1",
+    );
+    es.fireProgress(
+      { id: "sess-w9b-001", phase: "sign", progress: 0.5 },
+      "evt-2",
+    );
+    es.fireProgress(
+      { id: "sess-w9b-001", phase: "log_append", progress: 0.75 },
+      "evt-3",
+    );
+    es.fireProgress(
+      { id: "sess-w9b-001", phase: "done", progress: 1.0 },
+      "evt-4",
+    );
+
+    expect(seen.length).toBe(4);
+    expect(seen.map((s) => s.phase)).toEqual([
+      "release",
+      "sign",
+      "log_append",
+      "done",
+    ]);
+    expect(seen.map((s) => s.progress)).toEqual([0.25, 0.5, 0.75, 1.0]);
+    // lastEventId should track the most recent event regardless of type.
+    expect(handle.state.lastEventId).toBe("evt-4");
+    handle.stop();
+  });
+
+  it("silently ignores settle-progress when no onProgress callback is supplied", () => {
+    const seen: unknown[] = [];
+    const errs: Error[] = [];
+    const handle = startApprovalListener({
+      sessionId: "sess-w9b-noop",
+      sessionToken: null,
+      baseUrl: "https://capability.network",
+      onApproval: (p) => seen.push(p),
+      onError: (e) => errs.push(e),
+      // No onProgress.
+      eventSourceCtor: MockEventSource as unknown as typeof EventSource,
+    });
+    const es = MockEventSource.last()!;
+    es.fireOpen();
+    es.fireProgress({ id: "sess-w9b-noop", phase: "release", progress: 0.25 });
+
+    // No callback, no error.
+    expect(seen.length).toBe(0);
+    expect(errs.length).toBe(0);
+    handle.stop();
+  });
+
+  it("routes onError on malformed settle-progress payload (missing phase/progress)", () => {
+    const seen: unknown[] = [];
+    const errs: Error[] = [];
+    const handle = startApprovalListener({
+      sessionId: "sess-w9b-bad",
+      sessionToken: null,
+      baseUrl: "https://capability.network",
+      onApproval: () => {},
+      onProgress: (p) => seen.push(p),
+      onError: (e) => errs.push(e),
+      eventSourceCtor: MockEventSource as unknown as typeof EventSource,
+    });
+    const es = MockEventSource.last()!;
+    es.fireOpen();
+    // Wrong shape — missing `progress`.
+    es.fireProgress({ id: "x", phase: "release" });
+    // Wrong shape — phase isn't a string.
+    es.fireProgress({ id: "x", phase: 1, progress: 0.5 });
+
+    expect(seen.length).toBe(0);
+    expect(errs.length).toBe(2);
+    expect(errs[0].message).toMatch(/settle-progress/);
+    handle.stop();
+  });
+
+  it("approval-request and settle-progress events route independently", () => {
+    const approvals: unknown[] = [];
+    const progresses: { phase: string }[] = [];
+    const handle = startApprovalListener({
+      sessionId: "sess-w9b-mix",
+      sessionToken: null,
+      baseUrl: "https://capability.network",
+      onApproval: (p) => approvals.push(p),
+      onProgress: (p) => progresses.push({ phase: p.phase }),
+      eventSourceCtor: MockEventSource as unknown as typeof EventSource,
+    });
+    const es = MockEventSource.last()!;
+    es.fireOpen();
+    es.fireNamed("approval-request", {
+      id: "sess-w9b-mix",
+      capability: "haircut",
+      amountUsd: 32,
+      operatorName: "Andre",
+      evidenceHash: "ab".repeat(32),
+      requestedAt: new Date().toISOString(),
+    });
+    es.fireProgress({ id: "sess-w9b-mix", phase: "release", progress: 0.25 });
+    es.fireProgress({ id: "sess-w9b-mix", phase: "done", progress: 1.0 });
+
+    expect(approvals.length).toBe(1);
+    expect(progresses.map((p) => p.phase)).toEqual(["release", "done"]);
+    handle.stop();
   });
 });
 

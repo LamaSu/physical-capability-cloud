@@ -285,6 +285,42 @@ export function App(): ReactElement {
               }
             }
           },
+          /**
+           * W9 B: server-side settle-progress events drive intra-settling
+           * progress on the lock-screen Live Activity. The approval
+           * listener parses + dispatches the {phase, progress} payload
+           * here; we forward it to the live-activity wrapper so the
+           * widget can render a deterministic progress bar without
+           * waiting for the HTTP settle response.
+           *
+           * We use a setLiveActivity callback form to read the latest
+           * handle without re-subscribing on every dispatch — the
+           * handle reference is stable for the duration of an approval,
+           * so the closure-captured one works too, but the callback
+           * form is more defensive against React 18 strict-mode double-
+           * mounts.
+           */
+          onProgress: (payload) => {
+            // Skip when no Live Activity is in flight (e.g. dev-mode
+            // synthetic events that didn't start one). Reading stale
+            // closure state via setLiveActivity is fine — we just bail.
+            setLiveActivity((current) => {
+              if (current) {
+                try {
+                  updateApprovalActivity(current, {
+                    phase: "settling",
+                    progress: payload.progress,
+                  });
+                } catch (err) {
+                  console.warn(
+                    "[pcc-mobile] live-activity progress update failed:",
+                    (err as Error).message,
+                  );
+                }
+              }
+              return current; // no state change — callback form just used to read latest
+            });
+          },
           onError: (err) => {
             console.warn("[pcc-mobile] approval listener error:", err.message);
           },

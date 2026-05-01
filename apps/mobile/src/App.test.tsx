@@ -67,6 +67,18 @@ class MockEventSource {
     const s = this.listeners.get("approval-request");
     if (s) for (const fn of s) fn(evt);
   }
+  /**
+   * W9 B: dispatch any named SSE event. Used for `settle-progress` and
+   * future event types added on the approval topic.
+   */
+  fireNamed(type: string, payload: unknown, lastEventId = ""): void {
+    const evt = new MessageEvent(type, {
+      data: typeof payload === "string" ? payload : JSON.stringify(payload),
+      lastEventId,
+    });
+    const s = this.listeners.get(type);
+    if (s) for (const fn of s) fn(evt);
+  }
   static reset(): void {
     MockEventSource.instances = [];
   }
@@ -582,5 +594,146 @@ describe("App approval-decision POST (Week 7 A5)", () => {
     expect(
       container.querySelector("[data-testid='approval-sheet']"),
     ).toBeNull();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Week 9 B — settle-progress events drive Live Activity updates
+// ──────────────────────────────────────────────────────────────────────
+
+describe("App settle-progress wiring (Week 9 B)", () => {
+  /**
+   * Mock plugin that records updateActivity calls in addition to start/end.
+   * The W9 wiring routes settle-progress events to updateApprovalActivity,
+   * which on the W6 wrapper calls plugin.updateActivity.
+   */
+  interface ProgressLog {
+    start: { id: string; data: Record<string, unknown> }[];
+    update: { id: string; data: Record<string, unknown> }[];
+    end: { id: string; data?: Record<string, unknown> }[];
+  }
+
+  function mkProgressPlugin(): { plugin: LiveActivityPlugin; log: ProgressLog } {
+    const log: ProgressLog = { start: [], update: [], end: [] };
+    const plugin: LiveActivityPlugin = {
+      startActivity: async (o) => {
+        log.start.push(o);
+      },
+      updateActivity: async (o) => {
+        log.update.push(o);
+      },
+      endActivity: async (o) => {
+        log.end.push(o);
+      },
+    };
+    return { plugin, log };
+  }
+
+  afterEach(() => {
+    _setPluginForTests(null);
+  });
+
+  it("calls updateActivity with phase=settling + progress when settle-progress event arrives", async () => {
+    await setSessionToken("token-W9-001");
+    const { plugin, log } = mkProgressPlugin();
+    _setPluginForTests(plugin);
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+    expect(MockEventSource.instances.length).toBe(1);
+
+    // Fire an approval-request first to start the Live Activity.
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-W9-001",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre's Hair Salon",
+        evidenceHash: "ab".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    expect(log.start.length).toBe(1);
+
+    // Now fire a settle-progress event mid-settle.
+    await act(async () => {
+      MockEventSource.instances[0].fireNamed(
+        "settle-progress",
+        { id: "sess-W9-001", phase: "release", progress: 0.25 },
+      );
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+
+    // updateActivity should have been called with phase=settling +
+    // progress=0.25. (W9 wiring maps the gateway phase to the mobile
+    // ladder phase "settling".)
+    const settlingUpdate = log.update.find(
+      (u) => u.data.phase === "settling",
+    );
+    expect(settlingUpdate).toBeDefined();
+    expect(settlingUpdate!.data.progress).toBe(0.25);
+    expect(settlingUpdate!.id).toBe("sess-W9-001");
+  });
+
+  it("forwards multiple progress events with monotonic progress values", async () => {
+    await setSessionToken("token-W9-002");
+    const { plugin, log } = mkProgressPlugin();
+    _setPluginForTests(plugin);
+
+    act(() => {
+      root.render(<App />);
+    });
+    await flush();
+
+    await act(async () => {
+      MockEventSource.instances[0].fireApproval({
+        id: "sess-W9-002",
+        capability: "haircut",
+        amountUsd: 32,
+        operatorName: "Andre",
+        evidenceHash: "cd".repeat(32),
+        requestedAt: new Date().toISOString(),
+      });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+
+    // Fire all four phases.
+    await act(async () => {
+      const es = MockEventSource.instances[0];
+      es.fireNamed("settle-progress", {
+        id: "sess-W9-002",
+        phase: "release",
+        progress: 0.25,
+      });
+      es.fireNamed("settle-progress", {
+        id: "sess-W9-002",
+        phase: "sign",
+        progress: 0.5,
+      });
+      es.fireNamed("settle-progress", {
+        id: "sess-W9-002",
+        phase: "log_append",
+        progress: 0.75,
+      });
+      es.fireNamed("settle-progress", {
+        id: "sess-W9-002",
+        phase: "done",
+        progress: 1.0,
+      });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+
+    // Expect 4 settling-phase updates with monotonic progress.
+    const settlingUpdates = log.update.filter(
+      (u) => u.data.phase === "settling",
+    );
+    expect(settlingUpdates.length).toBe(4);
+    const progresses = settlingUpdates.map(
+      (u) => u.data.progress as number,
+    );
+    expect(progresses).toEqual([0.25, 0.5, 0.75, 1.0]);
   });
 });
