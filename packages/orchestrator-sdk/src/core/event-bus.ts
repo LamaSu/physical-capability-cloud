@@ -34,6 +34,33 @@ export interface AppEvent {
 const log: AppEvent[] = [];
 
 /**
+ * Wave 4.4 — subscriber hook so observability adapters (OTel, Sentry, custom)
+ * can attach to the bus without changing tool callsites. Subscribers are
+ * invoked synchronously after each emit; an exception in one subscriber is
+ * isolated and logged but does NOT propagate to the emitter or subsequent
+ * subscribers. Subscribers see post-redaction events (the same shape that
+ * lands in the in-memory log).
+ */
+type EventSubscriber = (e: AppEvent) => void;
+const subscribers = new Set<EventSubscriber>();
+
+/**
+ * Register a subscriber. Returns an unsubscribe function. The subscriber
+ * begins receiving events on the very next emit().
+ */
+export function subscribe(fn: EventSubscriber): () => void {
+  subscribers.add(fn);
+  return () => {
+    subscribers.delete(fn);
+  };
+}
+
+/** Test-only — drain subscriber list. */
+export function _resetSubscribersForTests(): void {
+  subscribers.clear();
+}
+
+/**
  * Patterns that match credential-shaped strings. Each pattern is paired with
  * a replacement function that preserves enough surrounding context for the
  * event to remain debuggable while removing the secret.
@@ -149,6 +176,20 @@ export function emit(e: Omit<AppEvent, "t">): AppEvent {
   };
   log.push(ev);
   if (log.length > MAX_LOG_SIZE) log.shift();
+  // Wave 4.4 — fan out to observability subscribers AFTER the event is logged
+  // so a slow/throwing subscriber can't delay the in-memory record. Errors
+  // are isolated per-subscriber so one buggy adapter doesn't break the bus
+  // (or other subscribers attached later).
+  for (const sub of subscribers) {
+    try {
+      sub(ev);
+    } catch (err) {
+      // Use stderr directly — recursive emit() to log the failure would risk
+      // infinite loops if the subscriber itself caused the failure.
+      // eslint-disable-next-line no-console
+      console.error("[event-bus] subscriber threw, ignoring:", err);
+    }
+  }
   return ev;
 }
 

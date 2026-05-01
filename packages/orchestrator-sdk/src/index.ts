@@ -29,6 +29,8 @@ export {
   tail,
   snapshot,
   tracked,
+  subscribe,
+  _resetSubscribersForTests,
   type AppEvent,
 } from "./core/event-bus.js";
 

@@ -1,15 +1,18 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   emit,
   tail,
   snapshot,
   redactString,
   redactPayload,
+  subscribe,
   _resetEventLogForTests,
+  _resetSubscribersForTests,
 } from "./event-bus.js";
 
 beforeEach(() => {
   _resetEventLogForTests();
+  _resetSubscribersForTests();
 });
 
 describe("event-bus — basic emit / tail / snapshot", () => {
@@ -177,5 +180,61 @@ describe("event-bus — T1.6 ring buffer cap", () => {
     expect(first?.text.replace(/^evt /, "")).toMatch(/^\d+$/);
     const firstIdx = Number(first!.text.replace(/^evt /, ""));
     expect(firstIdx).toBeGreaterThanOrEqual(50);
+  });
+});
+
+describe("event-bus — Wave 4.4 subscriber pattern", () => {
+  it("subscribers receive events after emit", () => {
+    const seen: string[] = [];
+    subscribe((e) => seen.push(e.text));
+    emit({ kind: "test.a", sponsor: "navi", text: "first" });
+    emit({ kind: "test.b", sponsor: "navi", text: "second" });
+    expect(seen).toEqual(["first", "second"]);
+  });
+
+  it("unsubscribe stops further deliveries", () => {
+    const seen: string[] = [];
+    const off = subscribe((e) => seen.push(e.text));
+    emit({ kind: "test.a", sponsor: "navi", text: "before" });
+    off();
+    emit({ kind: "test.b", sponsor: "navi", text: "after" });
+    expect(seen).toEqual(["before"]);
+  });
+
+  it("multiple subscribers each get every event", () => {
+    const seenA: string[] = [];
+    const seenB: string[] = [];
+    subscribe((e) => seenA.push(e.text));
+    subscribe((e) => seenB.push(e.text));
+    emit({ kind: "test.a", sponsor: "navi", text: "fanout" });
+    expect(seenA).toEqual(["fanout"]);
+    expect(seenB).toEqual(["fanout"]);
+  });
+
+  it("subscribers see redacted text + payload (post-redaction event)", () => {
+    let captured = "";
+    subscribe((e) => { captured = e.text; });
+    emit({ kind: "auth", sponsor: "navi", text: "Bearer eyJsupersecretsupersecretsupersecretsupersecret" });
+    expect(captured).toContain("Bearer ***REDACTED***");
+    expect(captured).not.toContain("eyJsupersecretsupersecretsupersecretsupersecret");
+  });
+
+  it("a throwing subscriber does not break emit() or other subscribers", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const survivor: string[] = [];
+    subscribe(() => { throw new Error("boom"); });
+    subscribe((e) => survivor.push(e.text));
+    expect(() => emit({ kind: "x", sponsor: "navi", text: "still works" })).not.toThrow();
+    expect(survivor).toEqual(["still works"]);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("emit returns the cleaned event regardless of subscribers", () => {
+    subscribe(() => { /* no-op */ });
+    const out = emit({ kind: "x", sponsor: "navi", text: "hello" });
+    expect(out.kind).toBe("x");
+    expect(out.text).toBe("hello");
+    expect(typeof out.t).toBe("number");
   });
 });

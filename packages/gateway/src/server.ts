@@ -104,6 +104,7 @@ import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
+import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -307,6 +308,13 @@ export async function createGateway(port = 3200) {
   // the SDK is ready by the time requests arrive.
   setSessionStore(new OrchestratorSessionStore(getRepos().orchestratorSessions));
   app.log.info("orchestrator-sdk session store: SQLite-backed");
+
+  // Wave 4.4 — bridge orchestrator-sdk's eventBus into PCC's existing OTel
+  // pipeline (otel.ts). Every emit() becomes a one-shot span. Bridge runs
+  // for the lifetime of the process; no explicit unsubscribe needed since
+  // the SDK is GC'd at shutdown.
+  startEventBusOtelBridge();
+  app.log.info("orchestrator-sdk event-bus → OTel bridge: active");
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
