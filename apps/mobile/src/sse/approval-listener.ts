@@ -55,6 +55,30 @@ export const MAX_BACKOFF_MS = 30_000;
 /** Multiplier per failed attempt. Standard exponential backoff. */
 export const BACKOFF_MULTIPLIER = 2;
 
+/**
+ * Phase ladder for the W9 A `settle-progress` event. Mirrors the
+ * gateway's `SettleProgressPayload.phase` shape. Kept as a wide string
+ * union (rather than literal type-imported from the gateway) to keep the
+ * mobile package free of a gateway dependency.
+ */
+export type SettleProgressPhase =
+  | "release"
+  | "sign"
+  | "log_append"
+  | "done"
+  | (string & {}); // accept future server-side phases without a code change
+
+/**
+ * Payload shape for the W9 A `settle-progress` SSE event. Matches the
+ * gateway's `SettleProgressPayload` interface 1:1 in field names; the
+ * mobile only reads `phase` + `progress` (id is a routing nicety).
+ */
+export interface SettleProgressEventPayload {
+  id: string;
+  phase: SettleProgressPhase;
+  progress: number;
+}
+
 export interface ApprovalListenerOptions {
   /** The session id you want to listen on. Topic = approval:<sessionId>. */
   sessionId: string;
@@ -72,6 +96,15 @@ export interface ApprovalListenerOptions {
    * are caught and routed to `onError` if provided.
    */
   onApproval: (payload: unknown) => void;
+  /**
+   * Week 9 B: called with the parsed payload of every `settle-progress`
+   * event. Same error-handling contract as `onApproval` — thrown errors
+   * route to `onError` and do NOT tear down the listener.
+   *
+   * Optional: when omitted, settle-progress events are silently ignored.
+   * Pre-W9 callers don't need to update.
+   */
+  onProgress?: (payload: SettleProgressEventPayload) => void;
   /**
    * Optional: called on connection open. Useful for clearing a
    * "reconnecting…" UI affordance.
@@ -281,13 +314,17 @@ export function startApprovalListener(
     };
 
     /**
-     * The gateway sends the `approval-request` event using a named SSE
-     * event (`event: approval-request`), so we listen for it specifically.
+     * The gateway sends two named SSE events on the approval topic:
+     *
+     *   approval-request  → routed to `opts.onApproval`
+     *   settle-progress   → routed to `opts.onProgress` (W9 B; optional)
+     *
      * Fallback: many SSE servers also send a default `message` event;
      * we listen there too in case of test harnesses that don't honor
-     * named events.
+     * named events. The default-message handler dispatches as
+     * `approval-request` for back-compat.
      */
-    const dispatch = (evt: MessageEvent): void => {
+    const dispatchApproval = (evt: MessageEvent): void => {
       // Track the event id so we can resume from it on reconnect.
       if (typeof evt.lastEventId === "string" && evt.lastEventId.length > 0) {
         state.lastEventId = evt.lastEventId;
@@ -300,9 +337,35 @@ export function startApprovalListener(
       }
     };
 
-    es.addEventListener("approval-request", dispatch as EventListener);
+    const dispatchProgress = (evt: MessageEvent): void => {
+      if (typeof evt.lastEventId === "string" && evt.lastEventId.length > 0) {
+        state.lastEventId = evt.lastEventId;
+      }
+      if (!opts.onProgress) return; // caller didn't subscribe
+      try {
+        const parsed = JSON.parse(String(evt.data)) as unknown;
+        // Defensive shape-check: drop malformed payloads silently rather
+        // than crashing the listener.
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed) &&
+          typeof (parsed as { phase?: unknown }).phase === "string" &&
+          typeof (parsed as { progress?: unknown }).progress === "number"
+        ) {
+          opts.onProgress(parsed as SettleProgressEventPayload);
+        } else {
+          safeReportError("settle-progress payload has unexpected shape");
+        }
+      } catch (err) {
+        safeReportError("settle-progress parse failed", err);
+      }
+    };
+
+    es.addEventListener("approval-request", dispatchApproval as EventListener);
+    es.addEventListener("settle-progress", dispatchProgress as EventListener);
     // Default message event fallback (some test harnesses).
-    es.onmessage = dispatch;
+    es.onmessage = dispatchApproval;
 
     es.onerror = (): void => {
       // EventSource errors are opaque — we can't see HTTP status. Treat
