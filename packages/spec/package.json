@@ -26,6 +26,11 @@
       "types": "./dist/tool-manifests/index.d.ts",
       "import": "./dist/tool-manifests/index.js",
       "default": "./dist/tool-manifests/index.js"
+    },
+    "./test-fixtures/capability": {
+      "types": "./dist/test-fixtures/capability.d.ts",
+      "import": "./dist/test-fixtures/capability.js",
+      "default": "./dist/test-fixtures/capability.js"
     }
   },
   "scripts": {
