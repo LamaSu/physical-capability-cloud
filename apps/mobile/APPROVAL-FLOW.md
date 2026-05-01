@@ -74,6 +74,33 @@ POST /api/sessions/:id/approval/:aid/approve  ◄────
 - **Phase 5** (cold-start deep-link): `pcc-mobile://approval/<sid>` custom-scheme parsing + `?approval=` query fallback. New `APPROVAL_CACHE_KEY` in sessionStorage holds the pending approval across JS process recycling. Activity is only RESTARTED on explicit deep-link (warm-start with stale cache rehydrates the sheet only — avoids double-start).
 - **Phase 8** (expired state): client-side timer mirrors W6's server-side `APPROVAL_TIMEOUT_MS`. 408 from `postApprovalDecision` is detected and dispatched as `outcome: "expired"` not as a generic error.
 
+## What W9 added
+
+- **Track A — gateway settle-progress events**: gated centralized-settle now emits a 4-step `settle-progress` event ladder on the existing approval SSE topic:
+
+  ```
+  release    → 0.25  (after ledger.release)
+  sign       → 0.50  (after signed receipt composed)
+  log_append → 0.75  (after log.append returns)
+  done       → 1.0   (just before reply.send)
+  ```
+
+  Un-gated settles are silent. Rejected gates are silent (settle short-circuits before release). Dual-publishes to both session-id AND channel-id topics, mirroring the W6 A3 publishApprovalRequest pattern.
+
+  `SettleProgressPayload` exported from `packages/gateway/src/routes/centralized-settle.ts`. 5 new tests in `centralized-settle-progress.test.ts`.
+
+- **Track B — mobile consumption**: `startApprovalListener` now accepts `onProgress?: (payload) => void` callback. Approval-listener dispatches `settle-progress` named events through it after shape-checking the payload. `App.tsx` wires the callback to `updateApprovalActivity({phase: "settling", progress: payload.progress})` so the lock-screen Live Activity reflects real-time progress.
+
+  4 new tests in `approval-listener.test.ts` + 2 new tests in `App.test.tsx`. Phase 3 (real progress source) — DONE for the gateway side.
+
+- **Track C — iOS scaffold prep doc**: `apps/mobile/IOS-SETUP.md` (~520 lines) walks through every step of the Mac session: prerequisites, `npx cap add ios`, Widget Extension target creation, Info.plist additions, full SwiftUI skeleton with all 4 Dynamic Island layouts (compact-leading, compact-trailing, expanded, minimal) + lock-screen view, APNs Auth Key generation, push token registration, simulator + device testing, TestFlight, App Store Connect setup. Includes verify-back checklist for when iOS bits land.
+
+  Phase 6 (Dynamic Island layouts) and Phase 7 (push-update wiring) — recipes ready, awaiting Mac session.
+
+- **Track D — test fixture builder**: `@pcc/spec/test-fixtures/capability` exposes `buildTestCapability(overrides?)` and `buildTestSession({capability, amountCents, overrides})`. Both apply sensible defaults (W7 B fields included: `requiresApproval: false`, `approvalThresholdUsd: undefined`). `buildTestSession` snapshots W7 B fields from the capability onto the session, mirroring the production session-creation contract documented on `SettleableSession` in `centralized-settle.ts`.
+
+  17 new tests in `test-fixtures.test.ts`. The Capability TS interface now has the W2/W7 B fields surfaced (previously they were only on the schema).
+
 ## Track B finding (production session-creation wiring — DEFERRED)
 
 Investigation in W8 found there is **no production code path** that mints a `SettleableSession` from a capability — `state.sessions.set` is called only in `seedSettleableSessionForTests` (test-only). W2's centralized-substrate is currently test-driven.
