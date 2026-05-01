@@ -24,7 +24,7 @@
  * any USDC transfer treat the same.
  */
 
-import { UnifiedKeychain } from "@pcc/agent-runtime";
+import { english, generateMnemonic, mnemonicToAccount } from "viem/accounts";
 
 export interface EmbeddedWallet {
   /** EVM address that receives USDC payouts and can mint a ContributorNFT. */
@@ -81,14 +81,18 @@ export interface EmbeddedWalletAdapter {
 // ---------------------------------------------------------------------------
 
 /**
- * Deterministic email→EOA derivation via the existing UnifiedKeychain.
+ * BIP-39 → EVM EOA derivation. Fresh mnemonic per signup, returned ONCE so
+ * the user can back it up. Without it, the wallet is not recoverable.
  *
- * The mnemonic is generated fresh on each call and returned ONCE. The user
- * is responsible for backing it up; without it, the wallet is not recoverable.
+ * Acceptable for dev/demo and for early adopters comfortable managing keys.
+ * NOT acceptable for the "construction worker who never coded" demographic
+ * — that user needs Privy (set PRIVY_APP_ID + PRIVY_APP_SECRET to activate).
  *
- * This is acceptable for dev/demo environments and for early adopters who are
- * comfortable managing their own keys. It is NOT acceptable for the
- * "construction worker who never coded" demographic — that user needs Privy.
+ * Implementation note: uses `viem/accounts` directly so the gateway doesn't
+ * depend on @pcc/agent-runtime (which transitively pulls @anthropic-ai/sdk
+ * into the gateway's test surface). One mnemonic, one EVM address — this
+ * adapter doesn't need the multi-chain DID/Solana/Bittensor derivation that
+ * UnifiedKeychain provides.
  */
 export class DemoWalletAdapter implements EmbeddedWalletAdapter {
   readonly providerId = "demo";
@@ -96,12 +100,12 @@ export class DemoWalletAdapter implements EmbeddedWalletAdapter {
 
   async createWalletForEmail(email: string): Promise<EmbeddedWallet> {
     const normalizedEmail = email.trim().toLowerCase();
-    const kc = new UnifiedKeychain();
-    const keys = kc.generate();
+    const mnemonic = generateMnemonic(english, 128);
+    const account = mnemonicToAccount(mnemonic);
     return {
-      address: keys.evm.address as `0x${string}`,
+      address: account.address,
       providerUserId: normalizedEmail,
-      mnemonic: keys.mnemonic,
+      mnemonic,
     };
   }
 }

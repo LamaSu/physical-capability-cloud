@@ -550,6 +550,12 @@ export async function contributorRoutes(app: FastifyInstance): Promise<void> {
           contributorRole: body.role,
         },
       });
+      if (!result.record) {
+        return reply.code(500).send({
+          error: "api_key_provision_failed",
+          message: "provisionApiKey returned no record",
+        });
+      }
       apiKey = result.rawKey;
       keyId = result.record.id;
     } catch (err) {
