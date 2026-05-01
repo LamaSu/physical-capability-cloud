@@ -470,7 +470,7 @@ describe("App approval-decision POST (Week 7 A5)", () => {
    * return 200, anything else throws so we catch unexpected requests.
    */
   function installSmartFetch(): { mock: ReturnType<typeof vi.fn> } {
-    const mock = vi.fn(async (url: unknown) => {
+    const impl = async (url: unknown): Promise<Response> => {
       const u = String(url);
       if (u.includes("/subscribe")) {
         return {
@@ -488,7 +488,8 @@ describe("App approval-decision POST (Week 7 A5)", () => {
         } as Response;
       }
       throw new Error(`unexpected fetch in test: ${u}`);
-    });
+    };
+    const mock = vi.fn().mockImplementation(impl);
     (globalThis as unknown as { fetch: typeof fetch }).fetch =
       mock as unknown as typeof fetch;
     return { mock };

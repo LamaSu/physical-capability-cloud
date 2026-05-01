@@ -21,8 +21,82 @@ import { postApprovalDecision } from "./sse/approval-decision.js";
 import {
   startApprovalActivity,
   endApprovalActivity,
+  updateApprovalActivity,
+  onApprovalActivityTap,
+  onApprovalActivityDismiss,
   type ApprovalActivityHandle,
 } from "./live-activity/approval-activity.js";
+
+/**
+ * Phase 5 (W8) — sessionStorage cache key for the in-flight approval.
+ * Survives browser tab reload + Capacitor cold-start so a Live Activity tap
+ * can re-hydrate the ApprovalSheet for the right session even when the JS
+ * process has been recycled.
+ */
+const APPROVAL_CACHE_KEY = "pcc-pending-approval";
+
+/** Stash an approval payload into sessionStorage. No-op outside browsers. */
+function cacheApproval(payload: ApprovalSession): void {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem(APPROVAL_CACHE_KEY, JSON.stringify(payload));
+    }
+  } catch {
+    /* sessionStorage unavailable / quota — non-fatal */
+  }
+}
+
+/** Read + parse cached approval; returns null if absent or malformed. */
+function readCachedApproval(): ApprovalSession | null {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    const raw = sessionStorage.getItem(APPROVAL_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as ApprovalSession;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear the cached approval (call after resolution or expiry). */
+function clearCachedApproval(): void {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.removeItem(APPROVAL_CACHE_KEY);
+    }
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/**
+ * Parse a deep-link URL of the form `pcc-mobile://approval/<sessionId>` or
+ * a same-origin `?approval=<sessionId>` query param. Returns the session id
+ * when present; null otherwise. Used by the Phase 5 cold-start handler.
+ */
+function parseApprovalDeepLink(): string | null {
+  try {
+    if (typeof window === "undefined" || !window.location) return null;
+    // Query-string form (works for any host, including local dev).
+    const search = window.location.search;
+    if (search) {
+      const params = new URLSearchParams(search);
+      const v = params.get("approval");
+      if (v) return v;
+    }
+    // Custom-scheme form. Some platforms surface it via window.location.href.
+    const href = window.location.href;
+    const m = href.match(/pcc-mobile:\/\/approval\/([^/?#]+)/);
+    if (m) return decodeURIComponent(m[1]);
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * App-shell entry point for the Capacitor wrap.
@@ -184,15 +258,23 @@ export function App(): ReactElement {
             ) {
               const session = payload as ApprovalSession;
               setPendingApproval(session);
-              // Live Activity (Week 6 B5): start a one-phase activity so
-              // the user sees the request in the iOS lock-screen / Dynamic
-              // Island. Graceful no-op when plugin/native bits are absent.
+              // Phase 5 (W8): cache the approval so a Live Activity tap on
+              // a cold-started app can re-hydrate the sheet for this session.
+              cacheApproval(session);
+              // Live Activity (Week 6 B5 + W8 Phase 2): start with the
+              // initial "waiting" content state. handleApprove / handleDecline
+              // walk the phase ladder via updateApprovalActivity.
               try {
                 const liveHandle = startApprovalActivity({
                   id: session.id,
                   capability: session.capability,
                   amountUsd: session.amountUsd,
                   operatorName: session.operatorName,
+                  expiresAt:
+                    typeof (session as { expiresAt?: unknown }).expiresAt ===
+                    "string"
+                      ? (session as { expiresAt?: string }).expiresAt
+                      : undefined,
                 });
                 setLiveActivity(liveHandle);
               } catch (err) {
@@ -249,6 +331,143 @@ export function App(): ReactElement {
   }, [role]);
 
   /**
+   * Phase 5 (W8) — cold-start deep-link rehydration.
+   *
+   * When the OS launches the app via a Live Activity tap (custom URL
+   * scheme `pcc-mobile://approval/<sessionId>` or a same-origin
+   * `?approval=<sessionId>` query), restore the cached approval payload
+   * so the ApprovalSheet renders for the right session immediately —
+   * even though the JS process has been recycled and the SSE listener
+   * hasn't re-established yet.
+   *
+   * Falls back to the cached payload alone when the deep link is
+   * absent but a cache entry exists (e.g. user re-opened the app without
+   * tapping the activity but the original session is still pending).
+   */
+  useEffect(() => {
+    if (role !== "user") return;
+    const deepLinkSessionId = parseApprovalDeepLink();
+    const cached = readCachedApproval();
+    if (!cached) return;
+    if (deepLinkSessionId && cached.id !== deepLinkSessionId) {
+      // The OS dispatched a tap for a different session than the one
+      // we cached. Trust the deep-link, drop the stale cache.
+      clearCachedApproval();
+      return;
+    }
+    // Always re-hydrate the sheet from cache — benign even without a
+    // deep-link (the SSE listener will overwrite if a fresher event lands).
+    setPendingApproval((prev) => prev ?? cached);
+    // Only restart the Live Activity when there's an explicit deep-link
+    // signal. A bare cache hit may just be leftover state from a still-
+    // running session whose activity is alive on iOS already; we'd
+    // otherwise double-start.
+    if (!deepLinkSessionId) return;
+    try {
+      const handle = startApprovalActivity({
+        id: cached.id,
+        capability: cached.capability,
+        amountUsd: cached.amountUsd,
+        operatorName: cached.operatorName,
+        expiresAt:
+          typeof (cached as { expiresAt?: unknown }).expiresAt === "string"
+            ? (cached as { expiresAt?: string }).expiresAt
+            : undefined,
+      });
+      setLiveActivity((prev) => prev ?? handle);
+    } catch {
+      /* non-fatal */
+    }
+  }, [role]);
+
+  /**
+   * Phase 4 (W8) — tap / dismiss subscribers.
+   *
+   * tap   → re-show the ApprovalSheet for the cached session (covers the
+   *         warm-start case where the JS process is alive but the user
+   *         dismissed the sheet earlier without resolving).
+   * dismiss → end the Live Activity locally without sending a server
+   *         decision; the W6 server-side approval-timeout will catch it.
+   */
+  useEffect(() => {
+    if (role !== "user") return;
+    const offTap = onApprovalActivityTap((id) => {
+      const cached = readCachedApproval();
+      if (cached && cached.id === id) {
+        setPendingApproval((prev) => prev ?? cached);
+      }
+    });
+    const offDismiss = onApprovalActivityDismiss((id) => {
+      // Dismiss without server POST. The user pulled the activity off
+      // the lock-screen; treat that as "I'll deal with it via the app".
+      setLiveActivity((prev) => {
+        if (prev && prev.id === id) {
+          try {
+            endApprovalActivity(prev, { outcome: "dismiss" });
+          } catch {
+            /* non-fatal */
+          }
+          return null;
+        }
+        return prev;
+      });
+    });
+    return () => {
+      offTap();
+      offDismiss();
+    };
+  }, [role]);
+
+  /**
+   * Phase 8 (W8) — expired-state timer.
+   *
+   * If the active approval has an `expiresAt` timestamp and that time
+   * passes without the user resolving it, end the Live Activity with
+   * outcome=expired and clear the sheet. The W6 server-side timeout
+   * (default 60s) will independently reject the gate; this is the
+   * client-side mirror so the UI reflects reality without waiting on
+   * a server round-trip.
+   */
+  useEffect(() => {
+    if (!pendingApproval) return;
+    const expiresAtRaw = (pendingApproval as { expiresAt?: unknown })
+      .expiresAt;
+    if (typeof expiresAtRaw !== "string") return;
+    const expiresAtMs = Date.parse(expiresAtRaw);
+    if (!Number.isFinite(expiresAtMs)) return;
+    const delay = expiresAtMs - Date.now();
+    if (delay <= 0) {
+      // Already expired — fire immediately on the next tick.
+      const t = setTimeout(() => {
+        setPendingApproval(null);
+        clearCachedApproval();
+        if (liveActivity) {
+          try {
+            endApprovalActivity(liveActivity, { outcome: "expired" });
+          } catch {
+            /* non-fatal */
+          }
+          setLiveActivity(null);
+        }
+      }, 0);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => {
+      setPendingApproval(null);
+      clearCachedApproval();
+      if (liveActivity) {
+        try {
+          endApprovalActivity(liveActivity, { outcome: "expired" });
+        } catch {
+          /* non-fatal */
+        }
+        setLiveActivity(null);
+      }
+    }, delay);
+    return () => clearTimeout(t);
+  }, [pendingApproval, liveActivity]);
+
+  /**
    * Approve handler — Week 7 A5.
    *
    * Closes the W7-A loop. Flow on tap of "Approve with Face ID":
@@ -279,8 +498,26 @@ export function App(): ReactElement {
   const handleApprove = async (signed: SignedReceipt): Promise<void> => {
     const approvalId = pendingApproval?.approvalId;
     const sessionId = pendingApproval?.id ?? signed.sessionId;
+    // Phase 2 (W8): user tapped approve → walk the activity phase ladder.
+    // Surfaces "approved" on the lock-screen even before the network call
+    // returns so the user has visible feedback the action registered.
+    if (liveActivity) {
+      try {
+        updateApprovalActivity(liveActivity, { phase: "approved" });
+      } catch {
+        /* non-fatal */
+      }
+    }
     if (approvalId && sessionToken) {
       const baseUrl = getGatewayBaseUrl();
+      // Phase 2 (W8): server is now processing the decision.
+      if (liveActivity) {
+        try {
+          updateApprovalActivity(liveActivity, { phase: "settling" });
+        } catch {
+          /* non-fatal */
+        }
+      }
       const result = await postApprovalDecision({
         baseUrl,
         sessionId,
@@ -294,10 +531,36 @@ export function App(): ReactElement {
         body: { signature: serializeAssertion(signed) },
       });
       if (!result.success) {
+        // Phase 8 (W8): 408 from the server means the user took longer
+        // than the gate timeout — surface as "expired" not as a generic
+        // error so the UX matches the actual server-side state.
+        if (result.status === 408) {
+          setPendingApproval(null);
+          clearCachedApproval();
+          if (liveActivity) {
+            try {
+              endApprovalActivity(liveActivity, { outcome: "expired" });
+            } catch {
+              /* non-fatal */
+            }
+            setLiveActivity(null);
+          }
+          throw new Error(
+            "This request expired before you approved. Please retry from a fresh request.",
+          );
+        }
         // Hand the error back to ApprovalSheet so it stays open and the
         // user can retry. We do NOT end the Live Activity here — leaving
         // it visible signals to the user that the request is still
-        // pending server-side.
+        // pending server-side. Roll the activity back to "waiting" so
+        // the lock-screen badge no longer says "approved".
+        if (liveActivity) {
+          try {
+            updateApprovalActivity(liveActivity, { phase: "waiting" });
+          } catch {
+            /* non-fatal */
+          }
+        }
         const message =
           result.authError === true
             ? "Sign-in expired. Re-enroll your passkey and try again."
@@ -315,9 +578,11 @@ export function App(): ReactElement {
       signedAt: signed.signedAt,
     });
     setPendingApproval(null);
-    // Week 6 B5: end Live Activity with approve outcome.
+    clearCachedApproval();
+    // Week 6 B5 + W8 Phase 2: terminal "done" content state then end.
     if (liveActivity) {
       try {
+        updateApprovalActivity(liveActivity, { phase: "done" });
         endApprovalActivity(liveActivity, { outcome: "approve" });
       } catch (err) {
         console.warn(
@@ -370,8 +635,12 @@ export function App(): ReactElement {
     }
     console.info("[pcc-mobile] session declined", { sessionId });
     setPendingApproval(null);
+    clearCachedApproval();
     if (liveActivity) {
       try {
+        // W8 Phase 2: terminal "done" before ending so the lock-screen
+        // shows the resolved state for the brief window before dismissal.
+        updateApprovalActivity(liveActivity, { phase: "done" });
         endApprovalActivity(liveActivity, { outcome: "reject" });
       } catch (err) {
         console.warn(
