@@ -15,6 +15,11 @@ import type { FastifyInstance } from "fastify";
 import { getRepos } from "../db.js";
 import { recordMatchQuery, listMatchQueriesForOperator } from "../services/match-log.js";
 import type { RegistrationRow } from "@pcc/store";
+// Wave 4.1 — TENANT_ENFORCE feature flag for by-compliance scoping.
+// Default OFF: today's behavior (cross-tenant read of public-discovery rows).
+// When ON: buyer-alpha's request scopes to alpha-tenant rows + null-tenant
+// (public discovery). See packages/gateway/src/config/tenant-enforce.ts.
+import { tenantOpts } from "../config/tenant-enforce.js";
 
 // ── Public sanitisation ─────────────────────────────────────────────────
 //
@@ -60,7 +65,11 @@ export async function operatorsPublicRoutes(app: FastifyInstance) {
       if (!regulationId) {
         return reply.status(400).send({ error: "regulation_id_required" });
       }
-      const rows = repos.registrations.findByCompliance(regulationId);
+      // Wave 4.1 — when TENANT_ENFORCE is on, scope to the buyer's tenant
+      // so cross-tenant compliance leaks are prevented. When OFF, behavior
+      // is today's (cross-tenant read of all rows for public discovery).
+      const opts = tenantOpts(req);
+      const rows = repos.registrations.findByCompliance(regulationId, opts);
       const operators = rows
         // Don't surface deleted profiles in public discovery
         .filter((r) => r.status !== "deleted")

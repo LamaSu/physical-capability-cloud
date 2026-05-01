@@ -6,6 +6,12 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos } from "../db.js";
+// Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
+// route filters registrations by req.tenantId (from T1.9 tenantContext
+// middleware). The /register handler always backfills tenant_id at insert
+// time so once the flag flips, scoped listing yields correct rows without a
+// data backfill.
+import { tenantOpts } from "../config/tenant-enforce.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -81,6 +87,11 @@ export async function onboardRoutes(app: FastifyInstance) {
     };
     try {
       const repos = getRepos();
+      // Wave 4.1 — backfill tenant_id from the authenticated principal at
+      // write time. Anonymous registers (no auth, no tenant) get null, which
+      // means "public-discovery" — these rows surface to anonymous callers
+      // even after TENANT_ENFORCE flips on.
+      const tenantIdAtWrite = (req as any).tenantId ?? null;
       repos.registrations.insert({
         id: registration.id,
         name: registration.name,
@@ -95,6 +106,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         pricing: registration.pricing as any,
         operator: registration.operator as any,
         complianceRegulations: registration.complianceRegulations,
+        tenantId: tenantIdAtWrite,
         status: registration.status,
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
@@ -119,12 +131,12 @@ export async function onboardRoutes(app: FastifyInstance) {
   app.get("/api/onboard/registrations", async (req) => {
     try {
       const repos = getRepos();
-      // TODO(wave-4 / T1.9 follow-up): scope to req.tenantId once
-      // registrations.tenant_id column lands. Today this is the public
-      // operator directory so the cross-tenant read is intentional, but
-      // the response is sanitised to the public-safe field set.
-      void req; // tenantId attached by tenantContext middleware
-      const registrations = repos.registrations.findAll();
+      // Wave 4.1 — when TENANT_ENFORCE is on, scope rows to req.tenantId
+      // (set by T1.9 tenantContext middleware from API key operatorId or
+      // SIWE wallet). When OFF (default), tenantOpts returns undefined and
+      // the repo behaves as it does today (cross-tenant read, sanitised).
+      const opts = tenantOpts(req);
+      const registrations = repos.registrations.findAll(opts);
       // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
       const sanitized = registrations.map((r: any) => ({
         id: r.id,
