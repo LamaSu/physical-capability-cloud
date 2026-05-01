@@ -45,6 +45,52 @@ const { negotiationSessions, operatorPolicies } = schema;
 
 const resolver = new TemplateResolver();
 
+/**
+ * Wire-safe view of a `WorkflowChallenge`. Mirrors the shape of the
+ * spec-level interface but with the BigInt fields stringified, because
+ * Fastify's JSON serializer throws on raw BigInt values
+ * (`TypeError: Do not know how to serialize a BigInt`).
+ *
+ * Only the negotiation route returns a challenge in its response payload
+ * today, so the conversion lives here at the response composition site
+ * rather than as a global `BigInt.prototype.toJSON` polyfill — that
+ * would pollute every JSON.stringify call across the gateway and is the
+ * stronger fix only when serialization happens in too many places to
+ * patch surgically. For the W11 scope, surgical wins.
+ */
+interface WireWorkflowChallenge {
+  challengeId: string;
+  issuedBy: string;
+  anchor: {
+    chainId: number;
+    blockNumber: string;
+    blockHash: string;
+    timestamp: string;
+  };
+  maxAgeSeconds: number;
+  scope: string;
+}
+
+/**
+ * Convert a `WorkflowChallenge` to its wire-safe form. BigInt fields on
+ * the anchor are converted to base-10 strings — clients that need the
+ * numeric value can re-parse with `BigInt(value)`.
+ */
+function toWireChallenge(c: WorkflowChallenge): WireWorkflowChallenge {
+  return {
+    challengeId: c.challengeId,
+    issuedBy: c.issuedBy,
+    anchor: {
+      chainId: c.anchor.chainId,
+      blockNumber: c.anchor.blockNumber.toString(),
+      blockHash: c.anchor.blockHash,
+      timestamp: c.anchor.timestamp.toString(),
+    },
+    maxAgeSeconds: c.maxAgeSeconds,
+    scope: c.scope,
+  };
+}
+
 export async function negotiationRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // Session CRUD
@@ -145,7 +191,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
       return {
         session,
         resolvedOptions,
-        challenge,
+        // BigInt fields on the anchor are stringified before Fastify's
+        // JSON serializer touches them. Without this, the response throws
+        // a 500 (`TypeError: Do not know how to serialize a BigInt`).
+        challenge: challenge ? toWireChallenge(challenge) : null,
         template: template ? {
           capabilityType: template.capabilityType,
           name: template.name,
