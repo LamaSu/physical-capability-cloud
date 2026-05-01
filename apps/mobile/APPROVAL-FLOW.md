@@ -101,13 +101,16 @@ POST /api/sessions/:id/approval/:aid/approve  ◄────
 
   17 new tests in `test-fixtures.test.ts`. The Capability TS interface now has the W2/W7 B fields surfaced (previously they were only on the schema).
 
-## Track B finding (production session-creation wiring — DEFERRED)
+## Track B (production session-creation wiring) — DONE in W10
 
-Investigation in W8 found there is **no production code path** that mints a `SettleableSession` from a capability — `state.sessions.set` is called only in `seedSettleableSessionForTests` (test-only). W2's centralized-substrate is currently test-driven.
+W10 closes the loop the W8 finding flagged. Two new helpers in `packages/gateway/src/routes/centralized-settle.ts`:
 
-The W7 B `capability.requiresApproval` / `capability.approvalThresholdUsd` fields are READY on both `CapabilitySchema` and `SettleableSession` (as `capabilityRequiresApproval` / `capabilityApprovalThresholdUsd`). Whoever builds the production session-creation path (likely a job-completion or commit-session flow) MUST snapshot the capability fields onto the session at creation time. The runtime decision in `shouldGateOnApproval` already reads from session fields.
+- `buildSettleableSessionFromCapability` — snapshots `capability.requiresApproval` → `session.capabilityRequiresApproval`, `capability.approvalThresholdUsd` → `session.capabilityApprovalThresholdUsd`, and `capability.settlementMode` (via `resolveSettlementMode`) → `session.settlementMode`. Mirrors the W9 D fixture builder's contract.
+- `registerSettleableSession` — production equivalent of `seedSettleableSessionForTests` with typed errors (`SessionAlreadyRegisteredError`, `InvalidSettleableSessionError`) and explicit invariants (id non-empty, state==committed, amountCents>0, capability non-empty).
 
-Action item for the production-session-creation builder: see the `// Week 7 B` comments on `SettleableSession` in `packages/gateway/src/routes/centralized-settle.ts` for the snapshot expectation.
+Wired at `POST /api/negotiate/session/:id/commit` in `packages/gateway/src/routes/negotiation.ts`: after `createJobFromSession` succeeds, look up the capability via `repos.capabilities.findByKernel` (existing pattern from `paid-job-flow.ts`), build a `SettleableSession`, register it. Best-effort: failures here MUST NOT block the commit. Coverage: 11 unit tests (`session-registration.test.ts`) + 3 e2e tests (`negotiate-commit-settle-e2e.test.ts`) prove the W7 B → W6 → W7 A loop works from real session creation through to the runtime gate decision.
+
+Note: the DB schema (`packages/db/src/schema/capabilities.ts`) does not yet persist `requiresApproval` / `approvalThresholdUsd` / `settlementMode` columns. The snapshot reads whatever is present and passes `undefined` otherwise; the gate hierarchy treats `undefined` as "do not fire". When the schema is extended (separate work), the snapshot picks up the values automatically with no further wiring.
 
 ## What's still NOT done (deferred to W9+ / Mac session)
 
