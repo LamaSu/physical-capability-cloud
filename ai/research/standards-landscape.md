@@ -121,7 +121,7 @@
 |----------|----------|--------------|--------|
 | A2A v0.3 | Growing fast | HIGH | Publish AgentCard at `.well-known/agent-card.json`, align task states |
 | FIPA ACL | Legacy | LOW | Study contract-net pattern only |
-| MCP | Production | ALREADY INTEGRATED | 49 tools live; add to MCP registry |
+| MCP | Production | ALREADY INTEGRATED | 56 tools live; add to MCP registry |
 | OpenAI Strict | Production | HIGH | Validate agent-package.json for strict-mode compat |
 
 ---
@@ -1228,7 +1228,7 @@ The gap: PCC currently executes workflows synchronously or via queue. Temporal w
 
 | Standard | PCC Component | Status |
 |----------|--------------|--------|
-| MCP | packages/mcp-server (49 tools) | LIVE |
+| MCP | packages/mcp-server (56 tools) | LIVE |
 | A2A Protocol | packages/a2a (34 intents) | IMPLEMENTED |
 | W3C DIDs | packages/spec/src/identity/ | IMPLEMENTED |
 | W3C VCs | packages/spec/src/identity/ | IMPLEMENTED |

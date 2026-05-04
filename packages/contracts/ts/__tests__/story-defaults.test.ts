@@ -22,8 +22,16 @@ import {
 // ---------------------------------------------------------------------------
 
 describe("SPLIT_PROFILES — structure", () => {
-  it("exports exactly 3 profiles: singleStep, multiStep, community", () => {
-    expect(Object.keys(SPLIT_PROFILES)).toEqual(["singleStep", "multiStep", "community"]);
+  it("exports the 5 canonical profiles (legacy + ADR-12)", () => {
+    expect(Object.keys(SPLIT_PROFILES).sort()).toEqual(
+      [
+        "community",
+        "contributorEconomicsMinimal",
+        "contributorEconomicsWithAi",
+        "multiStep",
+        "singleStep",
+      ].sort(),
+    );
   });
 
   it("each profile has name, description, and non-empty splits array", () => {
@@ -67,6 +75,62 @@ describe("SPLIT_PROFILES — sums to 100%", () => {
     const { valid, total } = validateSplitTotal(SPLIT_PROFILES.community);
     expect(total).toBe(100);
     expect(valid).toBe(true);
+  });
+
+  it("contributorEconomicsMinimal splits sum to 100", () => {
+    const { valid, total } = validateSplitTotal(SPLIT_PROFILES.contributorEconomicsMinimal);
+    expect(total).toBe(100);
+    expect(valid).toBe(true);
+  });
+
+  it("contributorEconomicsWithAi splits sum to 100", () => {
+    const { valid, total } = validateSplitTotal(SPLIT_PROFILES.contributorEconomicsWithAi);
+    expect(total).toBe(100);
+    expect(valid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// New ADR-12 profiles — role membership
+// ---------------------------------------------------------------------------
+
+describe("SPLIT_PROFILES — ADR-12 role membership", () => {
+  it("contributorEconomicsMinimal uses the new ContributorRole taxonomy", () => {
+    const roles = SPLIT_PROFILES.contributorEconomicsMinimal.splits.map((s) => s.role);
+    expect(roles).toContain("operator");
+    expect(roles).toContain("verifier");
+    expect(roles).toContain("protocol-author");
+    expect(roles).toContain("integrator");
+    expect(roles).toContain("network-treasury");
+    // No legacy roles
+    expect(roles).not.toContain("designer");
+    expect(roles).not.toContain("network");
+  });
+
+  it("contributorEconomicsMinimal operator percentage is 92", () => {
+    const op = SPLIT_PROFILES.contributorEconomicsMinimal.splits.find(
+      (s) => s.role === "operator",
+    );
+    expect(op?.percentage).toBe(92);
+  });
+
+  it("contributorEconomicsWithAi includes model-author role", () => {
+    const roles = SPLIT_PROFILES.contributorEconomicsWithAi.splits.map((s) => s.role);
+    expect(roles).toContain("model-author");
+  });
+
+  it("contributorEconomicsWithAi model-author percentage is 4", () => {
+    const model = SPLIT_PROFILES.contributorEconomicsWithAi.splits.find(
+      (s) => s.role === "model-author",
+    );
+    expect(model?.percentage).toBe(4);
+  });
+
+  it("contributorEconomicsWithAi operator percentage is 87 (residual)", () => {
+    const op = SPLIT_PROFILES.contributorEconomicsWithAi.splits.find(
+      (s) => s.role === "operator",
+    );
+    expect(op?.percentage).toBe(87);
   });
 });
 

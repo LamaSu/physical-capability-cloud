@@ -11,6 +11,7 @@ import { seedEncryption } from "./encryption.js";
 import { seedSensors } from "./sensors.js";
 import { seedBatches } from "./batches.js";
 import { seedOperatorPolicies } from "./operator-policies.js";
+import { seedGovernance } from "./governance.js";
 
 /**
  * Seeds all mock data in dependency order.
@@ -37,6 +38,7 @@ export function seedAll(db: StoreDB): void {
   seedSensors(db);
   seedBatches(db);
   seedOperatorPolicies(db);
+  seedGovernance(db);
   console.log("[seed] Mock data seeded successfully");
 }
 
@@ -51,4 +53,5 @@ export {
   seedSensors,
   seedBatches,
   seedOperatorPolicies,
+  seedGovernance,
 };

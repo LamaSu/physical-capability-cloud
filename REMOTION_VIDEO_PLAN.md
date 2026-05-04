@@ -635,7 +635,7 @@ Each screenshot slides in from right with `slide({ direction: 'from-right' })` t
 **Grid**:
 ```
 | 22 Packages      | 1,514 Tests      | 52 Dashboard Routes |
-| 65+ API Endpoints | 49 MCP Tools     | 27 A2A Intents      |
+| 65+ API Endpoints | 56 MCP Tools     | 27 A2A Intents      |
 | 64+ Components   | 6 Sponsors       | 5 SSE Streams       |
 | $3.5T Market     | 1.5% Fee         | 2.5s Demo Runtime   |
 ```

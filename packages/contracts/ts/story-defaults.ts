@@ -25,10 +25,40 @@
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * SplitRole — the role-label union accepted in a SplitEntry.
+ *
+ * Mirrors `ContributorRole` from @pcc/spec (ADR-12 §2.1) plus two legacy
+ * aliases kept so existing persisted splits decode without migration:
+ *
+ *   - `designer`  (deprecated; use `protocol-author` / `assembler` / `integrator`)
+ *   - `network`   (deprecated alias for `network-treasury`)
+ *
+ * The canonical value for the protocol treasury is `network-treasury`. The
+ * legacy `network` string continues to decode for backward compatibility so
+ * records written by the pre-ADR-12 gateway are still readable. New records
+ * should always use `network-treasury`.
+ */
+export type SplitRole =
+  | "operator"
+  | "verifier"
+  | "insurer"
+  | "integrator"
+  | "protocol-author"
+  | "model-author"
+  | "dataset-contributor"
+  | "curator"
+  | "assembler"
+  | "network-treasury"
+  /** @deprecated alias for `network-treasury` — kept for legacy decoding */
+  | "network"
+  /** @deprecated use `protocol-author` / `assembler` / `integrator` depending on CSD kind */
+  | "designer";
+
 /** A single revenue split entry within a profile. */
 export interface SplitEntry {
   /** Semantic role of the recipient. */
-  role: "designer" | "operator" | "verifier" | "network" | "assembler" | "curator";
+  role: SplitRole;
   /** Percentage of total revenue (1–100). All splits in a profile must sum to 100. */
   percentage: number;
   /** Human-readable label shown in UIs and reports. */
@@ -64,16 +94,33 @@ export interface DistributionEntry {
 // ---------------------------------------------------------------------------
 
 /**
- * SPLIT_PROFILES — three canonical revenue split configurations.
+ * SPLIT_PROFILES — canonical revenue split configurations.
  *
- * singleStep:  Standard single-capability job (10/70/10/10)
- * multiStep:   Workflow spanning multiple operators (5/75/10/10)
- * community:   Open-source CSD with community curator (20/60/5/5/10)
+ * Legacy profiles (kept for backward compatibility):
+ *   singleStep:  Standard single-capability job (10/70/10/10)
+ *   multiStep:   Workflow spanning multiple operators (5/75/10/10)
+ *   community:   Open-source CSD with community curator (20/60/5/5/10)
+ *
+ * New profiles introduced by ADR-12 (contributor-economics):
+ *   contributorEconomicsMinimal: operator 92, verifier 3, protocol-author 2,
+ *                                integrator 2, network-treasury 1
+ *   contributorEconomicsWithAi:  operator 87, verifier 3, protocol-author 2,
+ *                                integrator 2, model-author 4,
+ *                                network-treasury 2
+ *
+ * The new profiles use the expanded `ContributorRole` taxonomy: no `designer`,
+ * no generic `network`, and an explicit residual/contribution model. See
+ * ADR-12 §4 for role rate bands and the residual-calculation rule for
+ * operator percentage.
  */
-export const SPLIT_PROFILES: Record<
-  "singleStep" | "multiStep" | "community",
-  RevenueSplitProfile
-> = {
+export type SplitProfileName =
+  | "singleStep"
+  | "multiStep"
+  | "community"
+  | "contributorEconomicsMinimal"
+  | "contributorEconomicsWithAi";
+
+export const SPLIT_PROFILES: Record<SplitProfileName, RevenueSplitProfile> = {
   /**
    * Single-Step Job
    * Use for: single-capability bookings where one operator runs one machine.
@@ -120,6 +167,49 @@ export const SPLIT_PROFILES: Record<
       { role: "curator",   percentage:  5, label: "Community Curator" },
       { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
       { role: "network",   percentage: 10, label: "Protocol Treasury" },
+    ],
+  },
+
+  /**
+   * Contributor Economics — Minimal (ADR-12)
+   * Use for: standard single-capability jobs under the new role taxonomy.
+   * Operator earns the residual after verifier, protocol-author, integrator,
+   * and network-treasury take their small basis points. No AI model in play.
+   *
+   * Split: operator 92 / verifier 3 / protocol-author 2 / integrator 2 / network-treasury 1 = 100
+   */
+  contributorEconomicsMinimal: {
+    name: "Contributor Economics — Minimal",
+    description: "ADR-12 split for standard jobs with no AI model",
+    splits: [
+      { role: "operator",         percentage: 92, label: "Machine Operator" },
+      { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+      { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+      { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+      { role: "network-treasury", percentage:  1, label: "Network Treasury" },
+    ],
+  },
+
+  /**
+   * Contributor Economics — With AI Model (ADR-12)
+   * Use for: jobs where an AI model is invoked at execution time (quality
+   * assessment or autonomous execution). Model-author takes a share, which
+   * is later distributed recursively to dataset-contributors at payment
+   * time via the TrainingManifest.
+   *
+   * Split: operator 87 / verifier 3 / protocol-author 2 / integrator 2 /
+   *        model-author 4 / network-treasury 2 = 100
+   */
+  contributorEconomicsWithAi: {
+    name: "Contributor Economics — With AI Model",
+    description: "ADR-12 split when an AI model is used at execution time",
+    splits: [
+      { role: "operator",         percentage: 87, label: "Machine Operator" },
+      { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+      { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+      { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+      { role: "model-author",     percentage:  4, label: "Model Author" },
+      { role: "network-treasury", percentage:  2, label: "Network Treasury" },
     ],
   },
 };

@@ -22,6 +22,7 @@ import { TemplateStoreRepository } from "./template-store.js";
 import { AnalyticsRepository } from "./analytics.js";
 import { RatingRepository } from "./ratings.js";
 import { OrchestratorSessionRepository } from "./orchestrator-sessions.js";
+import { ContributorRepository } from "./contributor.js";
 
 export {
   KernelRepository,
@@ -49,6 +50,7 @@ export {
   AnalyticsRepository,
   RatingRepository,
   OrchestratorSessionRepository,
+  ContributorRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -78,6 +80,7 @@ export function buildRepositories(db: StoreDB) {
     analytics: new AnalyticsRepository(db),
     ratings: new RatingRepository(db),
     orchestratorSessions: new OrchestratorSessionRepository(db),
+    contributors: new ContributorRepository(db),
   };
 }
 

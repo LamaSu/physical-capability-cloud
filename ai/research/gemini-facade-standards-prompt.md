@@ -14,7 +14,7 @@ You are a senior systems architect specializing in distributed physical infrastr
 
 **Live at**: https://capability.network
 **Stack**: TypeScript monorepo (pnpm + turbo), Fastify gateway, React 19 dashboard, Viem (Ethereum), Zod schemas, SQLite, Vitest
-**Scale**: 25 packages + 1 dashboard app, 3300+ tests, 154 agent tools, 347 REST endpoints across 54 route files, 34 A2A intents, 6 SSE streams, 49 MCP tools
+**Scale**: 25 packages + 1 dashboard app, 3300+ tests, 218 agent tools, 347 REST endpoints across 54 route files, 34 A2A intents, 6 SSE streams, 56 MCP tools
 
 ### Core Concepts
 

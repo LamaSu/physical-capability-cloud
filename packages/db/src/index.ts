@@ -76,6 +76,11 @@ export type {
   RegistrationRow,
   RegistrationInsert,
   IA2AMessageRepository,
+  IContributorRepository,
+  ContributorProfileRecord,
+  RateScheduleRecord,
+  TrainingManifestRecord,
+  CompositionManifestRecord,
   CaptureVerdictRow,
   IRatingRepository,
   RatingRow,
@@ -112,5 +117,6 @@ export {
   A2AMessageRepository,
   OrchestratorSessionRepository,
   RatingRepository,
+  ContributorRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

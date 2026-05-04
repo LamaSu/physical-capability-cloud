@@ -876,10 +876,31 @@ export interface IPClaimResultIntent {
   success: boolean;
 }
 
-/** Revenue split entry in a proposed split scheme */
+/**
+ * Revenue split entry in a proposed split scheme.
+ *
+ * The `role` union mirrors the canonical `ContributorRole` taxonomy from
+ * @pcc/spec (ADR-12 §2.1) and accepts the 10 new role values plus legacy
+ * aliases (`designer`, `network`) for backward-compat decoding of older
+ * negotiation messages. See ADR-12 §2.2 for the data-migration plan.
+ */
 export interface IPRevenueSplitEntry {
   address: string;
-  role: "designer" | "operator" | "verifier" | "assembler" | "curator";
+  role:
+    | "operator"
+    | "verifier"
+    | "insurer"
+    | "integrator"
+    | "protocol-author"
+    | "model-author"
+    | "dataset-contributor"
+    | "curator"
+    | "assembler"
+    | "network-treasury"
+    /** @deprecated alias for `network-treasury` */
+    | "network"
+    /** @deprecated use `protocol-author` / `assembler` / `integrator` */
+    | "designer";
   percentage: number;
   label: string;
 }

@@ -828,7 +828,7 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 ---
 
-## 9. MCP Server (49 Tools)
+## 9. MCP Server (56 Tools)
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
@@ -845,7 +845,7 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 }
 ```
 
-**All 49 MCP tools**:
+**All 56 MCP tools**:
 
 | # | Tool | Description |
 |---|------|-------------|
@@ -901,9 +901,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (219 Tools)
+## 10. Agent Package (218 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 219 tools with input schemas and endpoint mappings.
+The agent package is a single JSON file any LLM can consume, containing 218 tools with input schemas and endpoint mappings.
 
 **Fetch it**:
 ```bash

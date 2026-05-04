@@ -22,24 +22,50 @@ export interface SplitEditorProps {
 
 // ---------------------------------------------------------------------------
 // Role color map
+//
+// Stable hue per role so users recognize each contributor across the
+// dashboard. Legacy values (designer/network) are kept so existing
+// records keep rendering. ADR-12 additions get distinct hues that don't
+// collide with the legacy palette.
+//
+// Legacy: designer=blue, operator=green, verifier=purple, network=gray,
+//         curator=yellow, assembler=orange.
+// ADR-12: integrator=cyan, protocol-author=sky, model-author=fuchsia,
+//         dataset-contributor=pink, insurer=teal, network-treasury=slate.
 // ---------------------------------------------------------------------------
 
 const ROLE_COLORS: Record<string, string> = {
+  // Legacy palette
   designer:  "bg-blue-500",
   operator:  "bg-green-500",
   verifier:  "bg-purple-500",
   network:   "bg-gray-500",
   curator:   "bg-yellow-500",
   assembler: "bg-orange-500",
+  // ADR-12 additions
+  integrator:            "bg-cyan-500",
+  "protocol-author":     "bg-sky-500",
+  "model-author":        "bg-fuchsia-500",
+  "dataset-contributor": "bg-pink-500",
+  insurer:               "bg-teal-500",
+  "network-treasury":    "bg-slate-500",
 };
 
 const ROLE_TEXT_COLORS: Record<string, string> = {
+  // Legacy palette
   designer:  "text-blue-400",
   operator:  "text-green-400",
   verifier:  "text-purple-400",
   network:   "text-gray-400",
   curator:   "text-yellow-400",
   assembler: "text-orange-400",
+  // ADR-12 additions
+  integrator:            "text-cyan-400",
+  "protocol-author":     "text-sky-400",
+  "model-author":        "text-fuchsia-400",
+  "dataset-contributor": "text-pink-400",
+  insurer:               "text-teal-400",
+  "network-treasury":    "text-slate-400",
 };
 
 function roleColor(role: string): string {

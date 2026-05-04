@@ -8,6 +8,11 @@ import type { SplitEntry } from "../components/SplitEditor.js";
 
 // ---------------------------------------------------------------------------
 // Split presets (mirrors story-defaults SPLIT_PROFILES)
+//
+// Legacy presets keep `designer`/`network` so older saved negotiations keep
+// rendering. ADR-12 contributor-economics presets show the canonical 10-value
+// ContributorRole taxonomy and match @pcc/contracts/ts/story-defaults.ts
+// SPLIT_PROFILES.contributorEconomics{Minimal,WithAi}.
 // ---------------------------------------------------------------------------
 
 const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
@@ -29,6 +34,22 @@ const SPLIT_PRESETS: Record<string, SplitEntry[]> = {
     { role: "curator",   percentage:  5, label: "Community Curator" },
     { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
     { role: "network",   percentage: 10, label: "Protocol Treasury" },
+  ],
+  // ADR-12 contributor-economics presets
+  "Contrib-Econ — Minimal": [
+    { role: "operator",         percentage: 92, label: "Machine Operator" },
+    { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+    { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+    { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+    { role: "network-treasury", percentage:  1, label: "Network Treasury" },
+  ],
+  "Contrib-Econ — With AI": [
+    { role: "operator",         percentage: 87, label: "Machine Operator" },
+    { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+    { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+    { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+    { role: "model-author",     percentage:  4, label: "Model Author" },
+    { role: "network-treasury", percentage:  2, label: "Network Treasury" },
   ],
 };
 

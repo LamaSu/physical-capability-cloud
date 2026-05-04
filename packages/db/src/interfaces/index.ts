@@ -192,6 +192,21 @@ export type {
   ComplianceProfileRow,
   ComplianceProfileInsert,
 } from "./IAnalyticsRepository.js";
+export type {
+  IContributorRepository,
+  ContributorProfileRecord,
+  ContributorProfileRow,
+  ContributorProfileInsert,
+  RateScheduleRecord,
+  RateScheduleRow,
+  RateScheduleInsert,
+  TrainingManifestRecord,
+  TrainingManifestRow,
+  TrainingManifestInsert,
+  CompositionManifestRecord,
+  CompositionManifestRow,
+  CompositionManifestInsert,
+} from "./IContributorRepository.js";
 
 import type { IJobRepository } from "./IJobRepository.js";
 import type { IKernelRepository } from "./IKernelRepository.js";
@@ -218,6 +233,7 @@ import type { ITemplateStoreRepository } from "./ITemplateStoreRepository.js";
 import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
 import type { IOrchestratorSessionRepository } from "./IOrchestratorSessionRepository.js";
 import type { IRatingRepository } from "./IRatingRepository.js";
+import type { IContributorRepository } from "./IContributorRepository.js";
 
 export type {
   IRatingRepository,
@@ -263,4 +279,5 @@ export interface IRepositories {
   // T2.7 — buyer-side operator ratings; aggregate + recent for the public
   // /api/operators/:id/ratings surface plus the auth-gated /rate POST.
   ratings: IRatingRepository;
+  contributors: IContributorRepository;
 }

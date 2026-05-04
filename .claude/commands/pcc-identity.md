@@ -56,7 +56,7 @@ node packages/mcp-server/dist/cli.js agents identity 0xAbCd...
 ```bash
 node packages/mcp-server/dist/cli.js agents registration
 ```
-Returns the gateway's `agent-registration.json` (Agent Registration File): the ERC-8004-compatible document listing all 49 MCP tools, A2A intent endpoints, capability types, and service endpoints. This is the canonical machine-readable identity document for the PCC gateway agent. It is also served at `/.well-known/agent-registration.json` on the gateway.
+Returns the gateway's `agent-registration.json` (Agent Registration File): the ERC-8004-compatible document listing all 56 MCP tools, A2A intent endpoints, capability types, and service endpoints. This is the canonical machine-readable identity document for the PCC gateway agent. It is also served at `/.well-known/agent-registration.json` on the gateway.
 
 Use this to:
 - Inspect what tools/capabilities the PCC gateway agent advertises

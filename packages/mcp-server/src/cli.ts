@@ -3,7 +3,8 @@
 /**
  * PCC CLI — command-line interface to the Physical Capability Cloud gateway.
  *
- * All 49 tools from the MCP server are available as subcommands.
+ * All 56 tools from the MCP server are available as subcommands. (49 base
+ * + 7 contributor-economics tools added in feat/contributor-economics.)
  * Output is JSON by default (for piping/jq). Use --pretty for human-readable.
  *
  * Usage:
@@ -292,8 +293,12 @@ pcc ip claim <ipId> [--tokenIds='["id1"]']
 pcc ip lineage <ipId>
   Get IP lineage chain (ancestors + descendants).
 
-pcc ip splits <ipId> --splits='[{"address":"0x...","role":"designer","percentage":10,"label":"CSD Author"}]'
+pcc ip splits <ipId> --splits='[{"address":"0x...","role":"protocol-author","percentage":2,"label":"CSD Author"},{"address":"0x...","role":"integrator","percentage":2,"label":"Adapter Integrator"},{"address":"0x...","role":"operator","percentage":92,"label":"Machine Operator"},{"address":"0x...","role":"verifier","percentage":3,"label":"Evidence Verifier"},{"address":"0x...","role":"network-treasury","percentage":1,"label":"Network Treasury"}]'
   Configure revenue splits for an IP Asset. Splits must sum to 100.
+  Roles (ADR-12): operator, verifier, insurer, integrator, protocol-author,
+  model-author, dataset-contributor, curator, assembler, network-treasury.
+  Legacy aliases 'designer' and 'network' still decode for backward compat —
+  prefer the canonical names above.
 `.trim(),
 
   swf: `

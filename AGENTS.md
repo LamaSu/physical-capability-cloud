@@ -28,7 +28,7 @@ Live at [capability.network](https://capability.network).
 | `packages/agent-support` | Support Agent: diagnostics, escalation, setup guidance |
 | `packages/pcc-node` | Python CLI for operators (`pip install pcc-node`) |
 | `packages/dht` | WebSocket gossip DHT for decentralized discovery |
-| `packages/mcp-server` | 49 MCP tools over stdio |
+| `packages/mcp-server` | 56 MCP tools over stdio |
 | `packages/contract-builder` | Interactive capability contract builder |
 | `packages/onboard-kit` | Operator scaffolding CLI |
 | `packages/orchestrator` | Multi-instrument workflow orchestration |
@@ -42,7 +42,7 @@ Live at [capability.network](https://capability.network).
 - Shop Kernel is the sole interface to a physical site
 - Every capability has an assurance tier (0-3) with defined evidence requirements
 - Escrow settles only when evidence meets tier requirements
-- MCP server: `packages/mcp-server` (49 tools)
+- MCP server: `packages/mcp-server` (56 tools)
 - Agent package: `apps/dashboard/public/agent-package.json` (19 REST tools)
 - pcc-node: `pip install pcc-node` (Python operator CLI)
 

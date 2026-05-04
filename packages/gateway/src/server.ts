@@ -54,6 +54,7 @@ import { unbrowseRoutes } from "./routes/unbrowse.js";
 import { csdRoutes } from "./routes/csd.js";
 import { discoverRoutes } from "./routes/discover.js";
 import { ipRoutes } from "./routes/ip.js";
+import { contributorRoutes } from "./routes/contributors.js";
 import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { statusRoutes } from "./routes/status.js";
@@ -381,6 +382,7 @@ export async function createGateway(port = 3200) {
   await app.register(csdRoutes);
   await app.register(discoverRoutes);
   await app.register(ipRoutes);
+  await app.register(contributorRoutes);
   await app.register(docRoutes);
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);

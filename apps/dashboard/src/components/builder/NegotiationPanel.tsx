@@ -17,6 +17,16 @@ export interface NegotiationPanelProps {
 }
 
 // ── Presets ──────────────────────────────────────────────────────
+//
+// Legacy presets (Single-Step / Multi-Step / Community) keep `designer`
+// and `network` so older saved drafts referencing them keep rendering.
+// New presets (ADR-12) demonstrate the canonical ContributorRole taxonomy:
+// protocol-author, integrator, model-author, network-treasury, etc.
+//
+// The contributor-economics presets mirror SPLIT_PROFILES.contributor*
+// in @pcc/contracts/ts/story-defaults.ts byte-for-byte by percentage and
+// role membership, so what the user sees in the UI matches what gets
+// written on chain.
 
 const PRESETS: Record<string, NegotiationSplit[]> = {
   "Single-Step": [
@@ -38,24 +48,66 @@ const PRESETS: Record<string, NegotiationSplit[]> = {
     { role: "verifier",  percentage:  5, label: "Evidence Verifier" },
     { role: "network",   percentage: 10, label: "Protocol Treasury" },
   ],
+  // ADR-12 contributor-economics presets — the canonical role taxonomy.
+  "Contrib-Econ — Minimal": [
+    { role: "operator",         percentage: 92, label: "Machine Operator" },
+    { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+    { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+    { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+    { role: "network-treasury", percentage:  1, label: "Network Treasury" },
+  ],
+  "Contrib-Econ — With AI": [
+    { role: "operator",         percentage: 87, label: "Machine Operator" },
+    { role: "verifier",         percentage:  3, label: "Evidence Verifier" },
+    { role: "protocol-author",  percentage:  2, label: "CSD Author" },
+    { role: "integrator",       percentage:  2, label: "Adapter Integrator" },
+    { role: "model-author",     percentage:  4, label: "Model Author" },
+    { role: "network-treasury", percentage:  2, label: "Network Treasury" },
+  ],
 };
 
 // ── Role styling ─────────────────────────────────────────────────
+//
+// Color assignments are stable so users can recognize each role across
+// the dashboard. New ADR-12 roles get distinct hues that don't collide
+// with the legacy palette (blue/green/purple/gray/yellow/orange):
+//   • integrator         → cyan   (bridging adapter)
+//   • protocol-author    → sky    (CSD author; close cousin of designer)
+//   • model-author       → fuchsia (AI / model R&D)
+//   • dataset-contributor → pink  (contribution lineage)
+//   • insurer            → teal   (risk/coverage)
+//   • network-treasury   → slate  (close cousin of legacy `network` gray)
 
 const ROLE_COLORS: Record<string, string> = {
+  // Legacy palette
   designer:  "bg-blue-500",
   operator:  "bg-green-500",
   verifier:  "bg-purple-500",
   network:   "bg-gray-500",
   curator:   "bg-yellow-500",
+  // ADR-12 additions
+  integrator:            "bg-cyan-500",
+  "protocol-author":     "bg-sky-500",
+  "model-author":        "bg-fuchsia-500",
+  "dataset-contributor": "bg-pink-500",
+  insurer:               "bg-teal-500",
+  "network-treasury":    "bg-slate-500",
 };
 
 const ROLE_TEXT_COLORS: Record<string, string> = {
+  // Legacy palette
   designer:  "text-blue-400",
   operator:  "text-green-400",
   verifier:  "text-purple-400",
   network:   "text-gray-400",
   curator:   "text-yellow-400",
+  // ADR-12 additions
+  integrator:            "text-cyan-400",
+  "protocol-author":     "text-sky-400",
+  "model-author":        "text-fuchsia-400",
+  "dataset-contributor": "text-pink-400",
+  insurer:               "text-teal-400",
+  "network-treasury":    "text-slate-400",
 };
 
 function roleColor(role: string) {
