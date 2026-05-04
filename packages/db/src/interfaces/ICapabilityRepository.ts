@@ -3,12 +3,17 @@ import type { capabilities } from "../schema/index.js";
 export type CapabilityRow = typeof capabilities.$inferSelect;
 export type CapabilityInsert = typeof capabilities.$inferInsert;
 
+/** Wave 4.1.x — additive tenant scope opts. Omitted = today's behavior. */
+export interface CapabilityTenantOpts {
+  tenantId?: string;
+}
+
 export interface ICapabilityRepository {
-  findAll(): CapabilityRow[];
+  findAll(opts?: CapabilityTenantOpts): CapabilityRow[];
   findById(id: string): CapabilityRow | undefined;
-  findByKernel(kernelId: string): CapabilityRow[];
-  findByType(type: string): CapabilityRow[];
-  search(query: string): CapabilityRow[];
+  findByKernel(kernelId: string, opts?: CapabilityTenantOpts): CapabilityRow[];
+  findByType(type: string, opts?: CapabilityTenantOpts): CapabilityRow[];
+  search(query: string, opts?: CapabilityTenantOpts): CapabilityRow[];
   insert(capability: CapabilityInsert): CapabilityRow | undefined;
   update(id: string, data: Partial<CapabilityInsert>): CapabilityRow | undefined;
 }

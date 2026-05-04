@@ -1,12 +1,19 @@
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { evidenceBundles, evidenceEvents, captureVerdicts } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
-import type { IEvidenceBundleRepository } from "../interfaces/IEvidenceBundleRepository.js";
+import type { IEvidenceBundleRepository, EvidenceTenantOpts } from "../interfaces/IEvidenceBundleRepository.js";
 
 export class EvidenceBundleRepository implements IEvidenceBundleRepository {
   constructor(private db: StoreDB) {}
 
-  findAll() {
+  findAll(opts?: EvidenceTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(evidenceBundles)
+        .where(eq(evidenceBundles.tenantId, opts.tenantId))
+        .all();
+    }
     return this.db.select().from(evidenceBundles).all();
   }
 
@@ -14,11 +21,25 @@ export class EvidenceBundleRepository implements IEvidenceBundleRepository {
     return this.db.select().from(evidenceBundles).where(eq(evidenceBundles.id, id)).get();
   }
 
-  findByJob(jobId: string) {
+  findByJob(jobId: string, opts?: EvidenceTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(evidenceBundles)
+        .where(and(eq(evidenceBundles.jobId, jobId), eq(evidenceBundles.tenantId, opts.tenantId)))
+        .all();
+    }
     return this.db.select().from(evidenceBundles).where(eq(evidenceBundles.jobId, jobId)).all();
   }
 
-  findByKernel(kernelId: string) {
+  findByKernel(kernelId: string, opts?: EvidenceTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(evidenceBundles)
+        .where(and(eq(evidenceBundles.kernelId, kernelId), eq(evidenceBundles.tenantId, opts.tenantId)))
+        .all();
+    }
     return this.db.select().from(evidenceBundles).where(eq(evidenceBundles.kernelId, kernelId)).all();
   }
 

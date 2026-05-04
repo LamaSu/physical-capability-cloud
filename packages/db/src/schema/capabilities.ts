@@ -33,4 +33,7 @@ export const capabilities = sqliteTable("capabilities", {
   location: text("location", { mode: "json" }).notNull().$type<{ lat: number; lng: number }>(),
   queueDepth: integer("queue_depth").notNull().default(0),
   tags: text("tags", { mode: "json" }).$type<string[]>(),
+  /** Wave 4.1.x — tenant scoping. Nullable; null = public discovery surface
+   *  (today's behavior). Buyers/marketplace queries pass `tenantOpts(req)`. */
+  tenantId: text("tenant_id"),
 });

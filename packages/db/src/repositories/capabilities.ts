@@ -1,12 +1,15 @@
 import { eq, like, and } from "drizzle-orm";
 import { capabilities } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
-import type { ICapabilityRepository } from "../interfaces/ICapabilityRepository.js";
+import type { ICapabilityRepository, CapabilityTenantOpts } from "../interfaces/ICapabilityRepository.js";
 
 export class CapabilityRepository implements ICapabilityRepository {
   constructor(private db: StoreDB) {}
 
-  findAll() {
+  findAll(opts?: CapabilityTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db.select().from(capabilities).where(eq(capabilities.tenantId, opts.tenantId)).all();
+    }
     return this.db.select().from(capabilities).all();
   }
 
@@ -14,15 +17,36 @@ export class CapabilityRepository implements ICapabilityRepository {
     return this.db.select().from(capabilities).where(eq(capabilities.id, id)).get();
   }
 
-  findByKernel(kernelId: string) {
+  findByKernel(kernelId: string, opts?: CapabilityTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(capabilities)
+        .where(and(eq(capabilities.kernelId, kernelId), eq(capabilities.tenantId, opts.tenantId)))
+        .all();
+    }
     return this.db.select().from(capabilities).where(eq(capabilities.kernelId, kernelId)).all();
   }
 
-  findByType(type: string) {
+  findByType(type: string, opts?: CapabilityTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(capabilities)
+        .where(and(eq(capabilities.type, type), eq(capabilities.tenantId, opts.tenantId)))
+        .all();
+    }
     return this.db.select().from(capabilities).where(eq(capabilities.type, type)).all();
   }
 
-  search(query: string) {
+  search(query: string, opts?: CapabilityTenantOpts) {
+    if (opts?.tenantId) {
+      return this.db
+        .select()
+        .from(capabilities)
+        .where(and(like(capabilities.name, `%${query}%`), eq(capabilities.tenantId, opts.tenantId)))
+        .all();
+    }
     return this.db.select().from(capabilities).where(like(capabilities.name, `%${query}%`)).all();
   }
 

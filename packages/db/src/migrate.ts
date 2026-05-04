@@ -1376,6 +1376,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
   // Wave 4.1.x — tenant_id on jobs (additive; same pattern as machine_registrations)
   safeAddColumn("jobs", "tenant_id", "TEXT");
+  // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
+  safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
+  safeAddColumn("capabilities", "tenant_id", "TEXT");
+  safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
 
   // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
   // Application-layer filtering, gated by TENANT_ENFORCE env flag.

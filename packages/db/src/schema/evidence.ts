@@ -15,6 +15,9 @@ export const evidenceBundles = sqliteTable("evidence_bundles", {
     algorithm: string;
     value: string;
   }>(),
+  /** Wave 4.1.x — tenant scoping. Nullable; backfilled at write time from
+   *  the buyer/operator on the parent job. Routes pass `tenantOpts(req)`. */
+  tenantId: text("tenant_id"),
   createdAt: text("created_at").notNull(),
 });
 
