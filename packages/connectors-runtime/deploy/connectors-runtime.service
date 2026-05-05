@@ -1,0 +1,56 @@
+# systemd --user unit for pcc-connectors-runtime.
+#
+# Runs the FastAPI REST sidecar on Spark. The PCC gateway proxies public
+# traffic under /api/connectors/* (Wave 4); the TS connector shells call
+# this directly via CONNECTORS_RUNTIME_URL until that proxy lands.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/connectors-runtime.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now connectors-runtime
+#   systemctl --user status connectors-runtime
+#
+# Logs:  journalctl --user -u connectors-runtime -f
+# Stop:  systemctl --user stop connectors-runtime
+# Reload after code change: systemctl --user restart connectors-runtime
+#
+# Env: edit ~/.config/connectors-runtime/connectors-runtime.env (chmod 600).
+# Optional keys (all default-able): LISTEN_HOST, LISTEN_PORT, STORAGE_PATH,
+# DLT_STAGING_PATH, MAX_PIPELINE_SECONDS, ENABLE_DESTROY_ENDPOINT,
+# INSFORGE_BASE_URL, INSFORGE_API_KEY, LOG_LEVEL.
+#
+# Default LISTEN_HOST is 127.0.0.1 — only the gateway proxy on the same
+# Spark box, or local TS shells, should reach this. Bind 0.0.0.0 only
+# behind a network policy / wireguard.
+
+[Unit]
+Description=PCC Connectors Runtime (dlt sidecar for @pcc/connectors-*)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/physical-capability-cloud/packages/connectors-runtime
+EnvironmentFile=-%h/.config/connectors-runtime/connectors-runtime.env
+# Run from the package's own venv; create with:
+#   python3.11 -m venv .venv && .venv/bin/pip install -e .
+ExecStart=%h/projects/physical-capability-cloud/packages/connectors-runtime/.venv/bin/python -m connectors_runtime.server
+Restart=always
+RestartSec=5
+# A misconfigured destination can poison-pill the unit; bound restarts so
+# we don't loop forever when the credentials are simply wrong.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=connectors-runtime
+
+# Hardening (best-effort under --user; no PrivateTmp etc as user units
+# run inside the user's own scope).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

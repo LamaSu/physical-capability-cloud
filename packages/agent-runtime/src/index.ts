@@ -38,3 +38,15 @@ export {
   type UnbrowseSearchResult,
   type UnbrowseFeedback,
 } from "./unbrowse-client.js";
+export {
+  LLMAgent,
+  runAgent,
+  validateToolNames,
+  RetryableLLMError,
+  BudgetExceededError,
+  type ToolDef,
+  type ToolCaller,
+  type LLMAgentOptions,
+  type ChatOptions,
+  type ChatResult,
+} from "./llm-agent.js";

@@ -689,6 +689,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       space_requirements TEXT NOT NULL,  -- JSON
       pricing TEXT NOT NULL,  -- JSON
       operator TEXT NOT NULL,  -- JSON
+      compliance_regulations TEXT,  -- T2.3: JSON string[] of regulationIds (optional)
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
       submitted_at TEXT,
@@ -1341,6 +1342,27 @@ export function migrateDatabase(sqlite: Database.Database): void {
       anchored_at  TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_capture_anchors_tx ON capture_anchors(tx_hash);
+
+    -- ── Orchestrator Sessions (Wave 4.3 — persistent state for onboarder) ─
+    -- Backs the @pcc/orchestrator-sdk SessionStore interface. Replaces the
+    -- in-memory Map so onboarder sessions resume across gateway restarts.
+    -- JSON columns round-trip via JSON.stringify/parse on the drizzle side.
+    CREATE TABLE IF NOT EXISTS orchestrator_sessions (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      url           TEXT,
+      contact_email TEXT,
+      state         TEXT NOT NULL,
+      capabilities  TEXT,        -- JSON array
+      data_sources  TEXT,        -- JSON array
+      backend       TEXT,        -- JSON object
+      agent         TEXT,        -- JSON object
+      extras        TEXT,        -- JSON object
+      tenant_id     TEXT,        -- TODO(wave-4.1): scope queries by tenant
+      updated_at    INTEGER NOT NULL  -- ms epoch
+    );
+    CREATE INDEX IF NOT EXISTS idx_orch_sessions_state ON orchestrator_sessions(state);
+    CREATE INDEX IF NOT EXISTS idx_orch_sessions_tenant ON orchestrator_sessions(tenant_id);
   `);
 
   // ══════════════════════════════════════════════════════════════════
@@ -1413,4 +1435,39 @@ export function migrateDatabase(sqlite: Database.Database): void {
   };
   safeAddColumn("jobs", "parameters", "TEXT");
   safeAddColumn("shop_kernels", "reputation_updated_at", "TEXT");
+  // T2.3 — compliance_regulations on machine_registrations (additive for old DBs)
+  safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
+  // Wave 4.1.x — tenant_id on jobs (additive; same pattern as machine_registrations)
+  safeAddColumn("jobs", "tenant_id", "TEXT");
+  // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
+  safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
+  safeAddColumn("capabilities", "tenant_id", "TEXT");
+  safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
+
+  // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
+  // Application-layer filtering, gated by TENANT_ENFORCE env flag.
+  safeAddColumn("machine_registrations", "tenant_id", "TEXT");
+
+  // Wave 4.3 — orchestrator_sessions.tenant_id (forward-compat for DBs that
+  // pre-date the column; CREATE TABLE above already includes it for fresh DBs)
+  safeAddColumn("orchestrator_sessions", "tenant_id", "TEXT");
+
+  // T2.7 — operator ratings.
+  // Inline DDL here so the gateway's runtime migration covers it without
+  // drizzle-kit. One rating row per (operator, job, buyer); the gateway
+  // route enforces buyer-must-own-job upstream.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS operator_ratings (
+      id TEXT PRIMARY KEY,
+      operator_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      buyer_id TEXT NOT NULL,
+      rating INTEGER NOT NULL,
+      comment TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_operator ON operator_ratings(operator_id);
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_job ON operator_ratings(job_id);
+    CREATE INDEX IF NOT EXISTS idx_operator_ratings_buyer ON operator_ratings(buyer_id);
+  `);
 }

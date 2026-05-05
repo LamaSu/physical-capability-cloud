@@ -6,6 +6,12 @@ import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos } from "../db.js";
+// Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
+// route filters registrations by req.tenantId (from T1.9 tenantContext
+// middleware). The /register handler always backfills tenant_id at insert
+// time so once the flag flips, scoped listing yields correct rows without a
+// data backfill.
+import { tenantOpts } from "../config/tenant-enforce.js";
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -71,12 +77,21 @@ export async function onboardRoutes(app: FastifyInstance) {
         certifications: [],
         trainingAcknowledgments: {},
       },
+      // T2.3 — persist compliance regulations the operator claims to meet
+      complianceRegulations: Array.isArray(body.complianceRegulations)
+        ? body.complianceRegulations.filter((s) => typeof s === "string" && s.length > 0)
+        : undefined,
       status: "submitted",
       createdAt: new Date().toISOString(),
       submittedAt: new Date().toISOString(),
     };
     try {
       const repos = getRepos();
+      // Wave 4.1 — backfill tenant_id from the authenticated principal at
+      // write time. Anonymous registers (no auth, no tenant) get null, which
+      // means "public-discovery" — these rows surface to anonymous callers
+      // even after TENANT_ENFORCE flips on.
+      const tenantIdAtWrite = (req as any).tenantId ?? null;
       repos.registrations.insert({
         id: registration.id,
         name: registration.name,
@@ -90,6 +105,8 @@ export async function onboardRoutes(app: FastifyInstance) {
         spaceRequirements: registration.spaceRequirements as any,
         pricing: registration.pricing as any,
         operator: registration.operator as any,
+        complianceRegulations: registration.complianceRegulations,
+        tenantId: tenantIdAtWrite,
         status: registration.status,
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
@@ -111,10 +128,15 @@ export async function onboardRoutes(app: FastifyInstance) {
   });
 
   // List registrations (persistent — survives deploys)
-  app.get("/api/onboard/registrations", async () => {
+  app.get("/api/onboard/registrations", async (req) => {
     try {
       const repos = getRepos();
-      const registrations = repos.registrations.findAll();
+      // Wave 4.1 — when TENANT_ENFORCE is on, scope rows to req.tenantId
+      // (set by T1.9 tenantContext middleware from API key operatorId or
+      // SIWE wallet). When OFF (default), tenantOpts returns undefined and
+      // the repo behaves as it does today (cross-tenant read, sanitised).
+      const opts = tenantOpts(req);
+      const registrations = repos.registrations.findAll(opts);
       // Return only non-sensitive fields publicly (strip addresses, GPS, device details)
       const sanitized = registrations.map((r: any) => ({
         id: r.id,
@@ -181,6 +203,116 @@ export async function onboardRoutes(app: FastifyInstance) {
       userAgent: req.headers["user-agent"],
     });
     return { registration: reg, rejected: true };
+  });
+
+  // ── T2.2 — Edit registration (PATCH, owner-only) ──
+  app.patch<{
+    Params: { id: string };
+    Body: {
+      description?: string | null;
+      photos?: string[];
+      capabilities?: unknown[];
+      spaceRequirements?: Record<string, unknown>;
+      pricing?: { baseCost: string; minimum: string; currency: string; perMinute?: string; perGram?: string; perCm3?: string };
+      complianceRegulations?: string[];
+      status?: string; // explicitly rejected
+    };
+  }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+
+    // Caller must own the registration. Mirror the /prove ownership check.
+    const callerId = (req as any).operatorId
+      ?? (req as any).userId
+      ?? (req as any).apiKeyId
+      ?? (req as any).walletAddress;
+    const regOperator = (reg as any).operator?.walletAddress
+      ?? (reg as any).operator?.email
+      ?? (reg as any).walletAddress
+      ?? (reg as any).email
+      ?? (reg as any).operatorId;
+    if (callerId && regOperator && callerId !== regOperator) {
+      return reply.status(403).send({ error: "forbidden", message: "You can only edit your own registration" });
+    }
+    if (reg.status === "deleted") {
+      return reply.status(410).send({ error: "deleted", message: "Registration was soft-deleted" });
+    }
+
+    const body = req.body ?? {};
+    if (body.status !== undefined) {
+      return reply.status(400).send({
+        error: "status_immutable",
+        message: "Status changes go through /approve, /reject, /activate — not PATCH.",
+      });
+    }
+
+    const patch: any = {};
+    if (body.description !== undefined) patch.description = body.description;
+    if (body.photos !== undefined && Array.isArray(body.photos)) patch.photos = body.photos;
+    if (body.capabilities !== undefined && Array.isArray(body.capabilities)) {
+      patch.capabilities = body.capabilities;
+    }
+    if (body.spaceRequirements !== undefined) patch.spaceRequirements = body.spaceRequirements;
+    if (body.pricing !== undefined) patch.pricing = body.pricing;
+    if (body.complianceRegulations !== undefined && Array.isArray(body.complianceRegulations)) {
+      patch.complianceRegulations = body.complianceRegulations;
+    }
+
+    const updated = repos.registrations.update(req.params.id, patch);
+    if (!updated) return reply.status(500).send({ error: "update_failed" });
+
+    auditService.log({
+      eventType: "operator.edited",
+      actor: callerId ?? "anonymous",
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "update",
+      metadata: { fields: Object.keys(patch) },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    return { registration: updated };
+  });
+
+  // ── T2.2 — Delete (soft) registration (owner-only, GDPR-required) ──
+  app.delete<{ Params: { id: string } }>("/api/onboard/registrations/:id", async (req, reply) => {
+    const repos = getRepos();
+    const reg = repos.registrations.findById(req.params.id);
+    if (!reg) return reply.status(404).send({ error: "not_found" });
+
+    const callerId = (req as any).operatorId
+      ?? (req as any).userId
+      ?? (req as any).apiKeyId
+      ?? (req as any).walletAddress;
+    const regOperator = (reg as any).operator?.walletAddress
+      ?? (reg as any).operator?.email
+      ?? (reg as any).walletAddress
+      ?? (reg as any).email
+      ?? (reg as any).operatorId;
+    if (callerId && regOperator && callerId !== regOperator) {
+      return reply.status(403).send({ error: "forbidden", message: "You can only delete your own registration" });
+    }
+    if (reg.status === "deleted") {
+      return { registration: reg, alreadyDeleted: true };
+    }
+
+    const deletedAt = new Date().toISOString();
+    repos.registrations.updateStatus(req.params.id, "deleted", {
+      description: `DELETED at ${deletedAt} by ${callerId ?? "anonymous"} — original: ${reg.description ?? "(no description)"}`,
+    });
+
+    auditService.log({
+      eventType: "operator.deleted",
+      actor: callerId ?? "anonymous",
+      resourceType: "registration",
+      resourceId: reg.id,
+      action: "delete",
+      metadata: { soft: true, deletedAt },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    return { registration: { ...reg, status: "deleted" }, deletedAt, soft: true };
   });
 
   // ── Activate an approved registration ──

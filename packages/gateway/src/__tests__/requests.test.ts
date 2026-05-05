@@ -655,15 +655,19 @@ describe("POST /api/requests/:id/nodes/:nodeId/assign", () => {
 // ---------------------------------------------------------------------------
 
 describe("PUT /api/requests/:id/nodes/:nodeId/status", () => {
+  // Red team round 5 hardened the status route to require caller auth (401
+  // without) and restrict cross-operator status updates. Mirror the
+  // /assign block above: bootstrap the request unauthed, then build an
+  // authed app for the actual status updates.
+  const OPERATOR_ID = "op-biopunk-lab";
   let app: FastifyInstance;
   let requestId: string;
   let firstNodeId: string;
 
   beforeEach(async () => {
     resetRequestsStore();
-    app = await buildApp();
-
-    const create = await app.inject({
+    const bootstrap = await buildApp();
+    const create = await bootstrap.inject({
       method: "POST",
       url: "/api/requests",
       payload: ROBOT_REQUEST,
@@ -671,6 +675,9 @@ describe("PUT /api/requests/:id/nodes/:nodeId/status", () => {
     const req = create.json().request;
     requestId = req.id;
     firstNodeId = req.capabilityDag[0].id;
+    await bootstrap.close();
+
+    app = await buildAuthedApp(OPERATOR_ID);
   });
 
   afterEach(async () => {

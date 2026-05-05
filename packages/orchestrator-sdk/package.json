@@ -1,0 +1,33 @@
+{
+  "name": "@pcc/orchestrator-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Horizontal SDK for building business-process orchestrators on PCC. Provides core (state-machine, event-bus, snapshot), tools (web-extract, pcc-discovery, static-mirror, wallet, zod-json-schema), and a template registry. Templates ship as separate packages (@pcc/template-*) and register here.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

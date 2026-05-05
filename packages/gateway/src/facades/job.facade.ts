@@ -32,6 +32,10 @@ import { trackServerEvent } from "../services/posthog-service.js";
 export interface JobFilters {
   kernelId?: string;
   status?: string;
+  /** Wave 4.1.x — when set (typically by tenantOpts(req) at the route layer
+   *  under TENANT_ENFORCE), filters rows to this tenant. Omitted = today's
+   *  cross-tenant default. */
+  tenantId?: string;
 }
 
 export interface SubmitJobInput {
@@ -123,15 +127,16 @@ export class JobFacade extends BaseFacade {
       const offset = pagination?.offset ?? 0;
       const limit = pagination?.limit ?? 50;
 
+      const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
       if (filters?.kernelId && filters?.status) {
-        jobs = this.repos.jobs.findByKernelAndStatus(filters.kernelId, filters.status);
+        jobs = this.repos.jobs.findByKernelAndStatus(filters.kernelId, filters.status, opts);
       } else if (filters?.kernelId) {
-        jobs = this.repos.jobs.findByKernel(filters.kernelId);
+        jobs = this.repos.jobs.findByKernel(filters.kernelId, opts);
       } else if (filters?.status) {
-        jobs = this.repos.jobs.findByStatus(filters.status);
+        jobs = this.repos.jobs.findByStatus(filters.status, opts);
       } else {
-        jobs = this.repos.jobs.findAll();
+        jobs = this.repos.jobs.findAll(opts);
       }
 
       const total = jobs.length;

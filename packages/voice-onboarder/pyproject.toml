@@ -1,0 +1,58 @@
+[project]
+name = "pcc-voice-onboarder"
+version = "0.1.0"
+description = "Voice-IO sidecar for @pcc/agent-onboarder. Pipecat pipeline (Twilio + Deepgram + Claude + Cartesia) that calls back to the gateway's /api/onboard/* HTTP endpoints."
+requires-python = ">=3.11"
+license = {text = "MIT"}
+readme = "README.md"
+authors = [
+    {name = "Physical Capability Cloud"},
+]
+keywords = ["pcc", "voice", "pipecat", "twilio", "onboarding"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Telephony",
+]
+
+dependencies = [
+    # Pipecat core + the four service integrations we wire in.
+    # Pinning to a major version range so patches roll forward without breaking the API.
+    "pipecat-ai[twilio,deepgram,anthropic,cartesia,silero]>=0.0.50,<1.0",
+    # HTTP client for backend tool calls.
+    "httpx>=0.27,<1.0",
+    # ASGI server (Pipecat's TwilioFrameSerializer mounts on FastAPI).
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    # 12-factor config.
+    "pydantic-settings>=2.1,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    # Structured logging (matches pcc-node style).
+    "loguru>=0.7,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4,<9.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "respx>=0.20,<1.0",
+]
+
+[project.scripts]
+pcc-voice-onboarder = "voice_onboarder.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

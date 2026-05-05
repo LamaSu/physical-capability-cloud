@@ -1,0 +1,35 @@
+{
+  "name": "@pcc/template-physical-operator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Physical-operator onboarding template for @pcc/orchestrator-sdk. Onboards machine shops, fleets, labs, and warehouses to PCC. (Package directory is still named agent-onboarder; npm name is canonical.)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@pcc/a2a": "workspace:*",
+    "@pcc/agent-runtime": "workspace:*",
+    "@pcc/onboard-kit": "workspace:*",
+    "@pcc/orchestrator-sdk": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

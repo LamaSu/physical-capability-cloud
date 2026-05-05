@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
 import { getRepos } from "../db.js";
+import { tenantOpts } from "../config/tenant-enforce.js";
 
 // Valid job status transitions (prevent arbitrary status injection)
 const VALID_STATUSES = new Set([
@@ -30,8 +31,15 @@ export async function jobRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
     async (req, reply) => {
+      // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.
+      // Default OFF preserves cross-tenant listing (today's behavior).
+      const tOpts = tenantOpts(req as any);
       const result = await facade.list(
-        { kernelId: req.query.kernelId, status: req.query.status },
+        {
+          kernelId: req.query.kernelId,
+          status: req.query.status,
+          ...(tOpts?.tenantId ? { tenantId: tOpts.tenantId } : {}),
+        },
         {},
         { offset: req.query.offset, limit: req.query.limit },
       );

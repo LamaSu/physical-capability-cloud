@@ -5,10 +5,17 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEscrows } from "../api/hooks/use-pcc-data.js";
+import { DisputeModal } from "../components/escrow/DisputeModal.js";
+
+interface DisputeContext {
+  escrowId: string;
+  milestoneStepId?: string;
+}
 
 export function EscrowPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
   const [selectedEscrow, setSelectedEscrow] = React.useState<string | null>(null);
+  const [dispute, setDispute] = React.useState<DisputeContext | null>(null);
   React.useEffect(() => { setPageMeta("Escrow", "Milestone escrow, bonds, and challenge windows"); }, [setPageMeta]);
 
   const { data: escrows = [], isLoading } = useEscrows();
@@ -62,16 +69,59 @@ export function EscrowPage() {
                   {esc.milestones.map((m: any, i: number) => (
                     <div key={i} className="flex items-center justify-between text-xs">
                       <span className="text-white/50">{m.name ?? `Milestone ${i + 1}`}</span>
-                      <GlowBadge color={m.status === "fulfilled" ? "green" : m.status === "funded" ? "gold" : "gray"}>
-                        {m.status}
-                      </GlowBadge>
+                      <div className="flex items-center gap-2">
+                        <GlowBadge color={m.status === "fulfilled" ? "green" : m.status === "funded" ? "gold" : "gray"}>
+                          {m.status}
+                        </GlowBadge>
+                        {/* T2.8 — file dispute (open per-milestone modal) */}
+                        {m.status !== "disputed" && m.status !== "refunded" && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDispute({ escrowId: esc.id, milestoneStepId: m.stepId ?? m.step_id ?? m.id });
+                            }}
+                            className="px-2 py-0.5 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/70 hover:bg-red-500/20 transition-all"
+                          >
+                            Dispute
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
+                </div>
+              )}
+              {selectedEscrow === esc.id && (!esc.milestones || esc.milestones.length === 0) && (
+                <div className="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-end">
+                  {/* T2.8 — escrow-level dispute when there are no milestones */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDispute({ escrowId: esc.id });
+                    }}
+                    className="px-2 py-1 rounded text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/70 hover:bg-red-500/20 transition-all"
+                  >
+                    File a dispute
+                  </button>
                 </div>
               )}
             </GlassPanel>
           ))}
         </div>
+      )}
+
+      {/* T2.8 — dispute modal */}
+      {dispute && (
+        <DisputeModal
+          escrowId={dispute.escrowId}
+          milestoneStepId={dispute.milestoneStepId}
+          onClose={() => setDispute(null)}
+          onFiled={() => {
+            // Real refetch is wave-4 — for now the modal closes itself and
+            // the user sees pre-refetch data until the next page tick.
+          }}
+        />
       )}
     </div>
   );

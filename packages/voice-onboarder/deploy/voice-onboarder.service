@@ -1,0 +1,53 @@
+# systemd --user unit for pcc-voice-onboarder.
+#
+# Runs the FastAPI server (Twilio TwiML inbound + WebSocket media stream
+# bridge) on Spark. Pair this with deploy/cloudflared.yml so Twilio can
+# reach the box from the public internet.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/voice-onboarder.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now voice-onboarder
+#   systemctl --user status voice-onboarder
+#
+# Logs:  journalctl --user -u voice-onboarder -f
+# Stop:  systemctl --user stop voice-onboarder
+# Reload after code change: systemctl --user restart voice-onboarder
+#
+# Env: edit ~/.config/voice-onboarder/voice-onboarder.env (chmod 600).
+# Required keys: PCC_API_KEY, DEEPGRAM_API_KEY, ANTHROPIC_API_KEY,
+# CARTESIA_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
+# TWILIO_PHONE_NUMBER, WEBHOOK_HOST.
+
+[Unit]
+Description=PCC Voice Onboarder (Pipecat sidecar for @pcc/agent-onboarder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/physical-capability-cloud/packages/voice-onboarder
+EnvironmentFile=%h/.config/voice-onboarder/voice-onboarder.env
+# Run from the package's own venv; create with:
+#   python3.11 -m venv .venv && .venv/bin/pip install -e .
+ExecStart=%h/projects/physical-capability-cloud/packages/voice-onboarder/.venv/bin/python -m voice_onboarder.server
+Restart=always
+RestartSec=5
+# Pipecat / Twilio media streams need TIME_WAIT-free reconnects on call
+# disconnect. Bound how often we restart so a poison-pill state doesn't
+# loop the unit.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voice-onboarder
+
+# Hardening (best-effort under --user; no PrivateTmp etc as user units
+# run inside the user's own scope).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

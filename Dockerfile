@@ -37,6 +37,10 @@ COPY packages/evidence-embeddings/package.json packages/evidence-embeddings/
 COPY packages/touchstone/package.json packages/touchstone/
 COPY packages/kernel-sdk/package.json packages/kernel-sdk/
 COPY packages/pcc-node/pyproject.toml packages/pcc-node/
+# Wave 2.5 SDK + first templates (don't rely on `COPY . .` fallback for these)
+COPY packages/orchestrator-sdk/package.json packages/orchestrator-sdk/
+COPY packages/agent-onboarder/package.json packages/agent-onboarder/
+COPY packages/template-data-product/package.json packages/template-data-product/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # Cache-bust: change this value to force pnpm install to re-run

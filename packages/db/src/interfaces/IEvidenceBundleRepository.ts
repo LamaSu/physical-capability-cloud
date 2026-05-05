@@ -6,11 +6,16 @@ export type EvidenceEventRow = typeof evidenceEvents.$inferSelect;
 export type EvidenceEventInsert = typeof evidenceEvents.$inferInsert;
 export type CaptureVerdictRow = typeof captureVerdicts.$inferSelect;
 
+/** Wave 4.1.x — additive tenant scope opts. Omitted = today's behavior. */
+export interface EvidenceTenantOpts {
+  tenantId?: string;
+}
+
 export interface IEvidenceBundleRepository {
-  findAll(): EvidenceRow[];
+  findAll(opts?: EvidenceTenantOpts): EvidenceRow[];
   findById(id: string): EvidenceRow | undefined;
-  findByJob(jobId: string): EvidenceRow[];
-  findByKernel(kernelId: string): EvidenceRow[];
+  findByJob(jobId: string, opts?: EvidenceTenantOpts): EvidenceRow[];
+  findByKernel(kernelId: string, opts?: EvidenceTenantOpts): EvidenceRow[];
   insert(bundle: EvidenceInsert): EvidenceRow | undefined;
   // Events sub-domain
   findEventsByBundle(bundleId: string): EvidenceEventRow[];

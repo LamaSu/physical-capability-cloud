@@ -73,6 +73,8 @@ export type {
   IApiKeyRepository,
   IAuditLogRepository,
   IRegistrationRepository,
+  RegistrationRow,
+  RegistrationInsert,
   IA2AMessageRepository,
   IContributorRepository,
   ContributorProfileRecord,
@@ -80,7 +82,16 @@ export type {
   TrainingManifestRecord,
   CompositionManifestRecord,
   CaptureVerdictRow,
+  IRatingRepository,
+  RatingRow,
+  RatingInsert,
+  RatingAggregate,
 } from "./interfaces/index.js";
+export type {
+  IOrchestratorSessionRepository,
+  SessionRow as OrchestratorSessionRow,
+  SessionInsert as OrchestratorSessionInsert,
+} from "./interfaces/IOrchestratorSessionRepository.js";
 
 // Re-export repository classes for direct use
 export {
@@ -102,7 +113,10 @@ export {
   SWFRepository,
   ApiKeyRepository,
   AuditLogRepository,
+  RegistrationRepository,
   A2AMessageRepository,
+  OrchestratorSessionRepository,
+  RatingRepository,
   ContributorRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

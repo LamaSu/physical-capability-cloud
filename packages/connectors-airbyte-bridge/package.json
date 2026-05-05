@@ -1,0 +1,25 @@
+{
+  "name": "@pcc/connectors-airbyte-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Escape hatch for enterprises that already run Airbyte. ~100 LoC TS wrapper around Airbyte's POST /v1/jobs and GET /v1/jobs/{id}. Optional dependency — only loaded when AIRBYTE_API_URL is configured.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

@@ -26,6 +26,17 @@ export interface MachineRegistration {
   spaceRequirements: PhysicalSpaceRequirements;
   pricing: PricingConfig;
   operator: OperatorProfile;
+  /**
+   * T2.3 — Compliance regulations the operator claims to meet.
+   *
+   * Loose array of regulationId strings (e.g., "ISO-9001:2015", "AS9100:2016",
+   * "ITAR-2024"). Matches the free-form `regulationId` on
+   * `ComplianceTemplate`. Buyers can search/filter operators by any of these
+   * values via `GET /api/operators/by-compliance/:regulationId`.
+   *
+   * Optional — omitted on registrations submitted before this field landed.
+   */
+  complianceRegulations?: string[];
   status: "draft" | "submitted" | "reviewing" | "approved" | "active" | "suspended" | "rejected";
   createdAt: Timestamp;
   submittedAt?: Timestamp;

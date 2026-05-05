@@ -120,38 +120,44 @@ describe("ReputationService", () => {
       });
     });
 
-    describe("cold-start bonus (< 20 jobs)", () => {
-      it("adds +30 bonus per completed job during cold-start", () => {
+    describe("cold-start bonus (< 20 jobs) — T1.5 capped at +50", () => {
+      it("adds +30 bonus for the first job", () => {
         const updatedAt = daysAgo(0, now);
-        // 5 jobs × 30 = 150 bonus → 0 + 150 = 150
-        const result = svc.computeEffectiveReputation(0, updatedAt, 5, now);
-        expect(result).toBe(150);
+        // 1 job × 30 = 30 bonus → 0 + 30 = 30
+        const result = svc.computeEffectiveReputation(0, updatedAt, 1, now);
+        expect(result).toBe(30);
       });
 
-      it("caps cold-start bonus at 600 for 20 jobs", () => {
+      it("T1.5 — caps cold-start bonus at +50 (not +600) once cumulative ≥ 50", () => {
         const updatedAt = daysAgo(0, now);
-        // 20 jobs would give 600 bonus but threshold is exactly 20 → no bonus
-        const result = svc.computeEffectiveReputation(0, updatedAt, 20, now);
-        expect(result).toBe(0); // no bonus once >= 20 jobs
+        // 2 jobs would give 60 raw, clamped to 50.
+        const result = svc.computeEffectiveReputation(0, updatedAt, 2, now);
+        expect(result).toBe(50);
       });
 
-      it("gives max bonus at 19 jobs (19 × 30 = 570)", () => {
+      it("T1.5 — caps at +50 even at 19 jobs (was +570)", () => {
         const updatedAt = daysAgo(0, now);
         const result = svc.computeEffectiveReputation(0, updatedAt, 19, now);
-        expect(result).toBe(570);
+        expect(result).toBe(50);
+      });
+
+      it("returns 0 once jobs ≥ 20 (cold-start exit threshold unchanged)", () => {
+        const updatedAt = daysAgo(0, now);
+        const result = svc.computeEffectiveReputation(0, updatedAt, 20, now);
+        expect(result).toBe(0);
       });
 
       it("cold-start bonus combined with existing base score", () => {
         const updatedAt = daysAgo(0, now);
-        // base 200 + (10 × 30 = 300) = 500
+        // base 200 + min(10 × 30, 50) = 250
         const result = svc.computeEffectiveReputation(200, updatedAt, 10, now);
-        expect(result).toBe(500);
+        expect(result).toBe(250);
       });
 
-      it("cold-start bonus is capped at 1000 total", () => {
+      it("cold-start bonus is capped at 1000 total (still respects ceiling)", () => {
         const updatedAt = daysAgo(0, now);
-        // base 800 + (15 × 30 = 450) would be 1250 → capped at 1000
-        const result = svc.computeEffectiveReputation(800, updatedAt, 15, now);
+        // base 980 + min(15 × 30, 50) = 1030 → capped at 1000
+        const result = svc.computeEffectiveReputation(980, updatedAt, 15, now);
         expect(result).toBe(1000);
       });
     });
@@ -159,7 +165,7 @@ describe("ReputationService", () => {
 
   // ── coldStartBonus ─────────────────────────────────────────────────────────
 
-  describe("coldStartBonus()", () => {
+  describe("coldStartBonus() — T1.5 capped at +50", () => {
     it("returns 0 for 0 completed jobs", () => {
       expect(svc.coldStartBonus(0)).toBe(0);
     });
@@ -168,15 +174,13 @@ describe("ReputationService", () => {
       expect(svc.coldStartBonus(1)).toBe(30);
     });
 
-    it("returns 300 for 10 completed jobs", () => {
-      expect(svc.coldStartBonus(10)).toBe(300);
+    it("T1.5 — clamps at +50 from 2 jobs onwards (was 60, 90, … 570)", () => {
+      expect(svc.coldStartBonus(2)).toBe(50);
+      expect(svc.coldStartBonus(10)).toBe(50);
+      expect(svc.coldStartBonus(19)).toBe(50);
     });
 
-    it("returns 570 for 19 completed jobs (last cold-start job)", () => {
-      expect(svc.coldStartBonus(19)).toBe(570);
-    });
-
-    it("returns 0 for exactly 20 completed jobs (threshold)", () => {
+    it("returns 0 for exactly 20 completed jobs (threshold unchanged)", () => {
       expect(svc.coldStartBonus(20)).toBe(0);
     });
 

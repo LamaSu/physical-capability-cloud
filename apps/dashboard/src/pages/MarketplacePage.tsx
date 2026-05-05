@@ -11,6 +11,7 @@ import {
   mockDemandSupplyTimeline, mockGeoMarkers,
   mockCapabilityTrends, mockPriceHistory,
 } from "../api/mock-onboarding-data.js";
+import { TemplateMatchFinder } from "../components/marketplace/TemplateMatchFinder.js";
 
 const demandColors = { high: "green" as const, medium: "gold" as const, low: "gray" as const };
 
@@ -36,6 +37,9 @@ export function MarketplacePage() {
 
   return (
     <div className="space-y-6">
+      {/* T2.1 — live template matcher (real API, replaces mock for this section) */}
+      <TemplateMatchFinder />
+
       {/* Filters */}
       <div className="flex items-center gap-3 flex-wrap">
         {categories.map((c) => (

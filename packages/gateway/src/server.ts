@@ -10,7 +10,7 @@ import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { initStore, closeStore } from "./db.js";
+import { initStore, closeStore, getRepos } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
@@ -22,6 +22,7 @@ import { onboardRoutes } from "./routes/onboard.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { captureRoutes } from "./routes/capture.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
@@ -97,7 +98,14 @@ import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
+import { templateSessionRoutes } from "./routes/template-session.js";
+import { orchestratorTemplatesRoutes } from "./routes/orchestrator-templates.js";
+import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-agents.js";
 import { apiGate } from "./middleware/api-gate.js";
+import { tenantContext } from "./middleware/tenant-context.js";
+import { setSessionStore } from "@pcc/orchestrator-sdk";
+import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
+import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
@@ -289,6 +297,26 @@ export async function createGateway(port = 3200) {
   // API key gate — requires API key or session on all /api/* routes
   await app.register(apiGate);
 
+  // Tenant context — attaches req.tenantId from API key operatorId or SIWE
+  // session. T1.9 — mounted after apiGate so the auth fields it relies on
+  // are already populated. Wave 4 RLS migration will use this to scope
+  // findAll() queries.
+  await app.register(tenantContext);
+
+  // Wave 4.3 — wire SQLite-backed orchestrator-sdk session store. Replaces
+  // the SDK's default in-memory Map so onboarding sessions resume across
+  // gateway restarts. Must run before any onboarding routes register so
+  // the SDK is ready by the time requests arrive.
+  setSessionStore(new OrchestratorSessionStore(getRepos().orchestratorSessions));
+  app.log.info("orchestrator-sdk session store: SQLite-backed");
+
+  // Wave 4.4 — bridge orchestrator-sdk's eventBus into PCC's existing OTel
+  // pipeline (otel.ts). Every emit() becomes a one-shot span. Bridge runs
+  // for the lifetime of the process; no explicit unsubscribe needed since
+  // the SDK is GC'd at shutdown.
+  startEventBusOtelBridge();
+  app.log.info("orchestrator-sdk event-bus → OTel bridge: active");
+
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
 
@@ -320,6 +348,7 @@ export async function createGateway(port = 3200) {
   await app.register(marketplaceRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorsPublicRoutes);
   await app.register(captureRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(diagnosticLogRoutes);
@@ -391,6 +420,28 @@ export async function createGateway(port = 3200) {
 
   // Third-party digital kernel marketplace
   await app.register(kernelMarketplaceRoutes);
+
+  // ── Tier-0 orchestrator routes ────────────────────────────────────────────
+  // Repair-tier0-routes wired the eight backend routes the orchestrator chat
+  // console at apps/dashboard/src/routes/orchestrator/[slug]/chat/index.tsx
+  // calls. The two global routes (templates list + match) plus two mounts of
+  // the generic templateSessionRoutes plugin (one per template).
+  //
+  // Mount order is intentional: mount the public template-directory routes
+  // first so they're discoverable even if a template-session mount errors.
+  await app.register(orchestratorTemplatesRoutes);
+  // physical-operator session driver (real OnboarderAgent backing).
+  await app.register(templateSessionRoutes, {
+    routePrefix: "/api/onboard",
+    template: "physical-operator",
+    agentFactory: physicalOperatorAgent,
+  });
+  // data-product session driver (stub — full flow lands in Wave 2.5).
+  await app.register(templateSessionRoutes, {
+    routePrefix: "/api/orchestrator/data-product",
+    template: "data-product",
+    agentFactory: dataProductStubAgent,
+  });
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);
