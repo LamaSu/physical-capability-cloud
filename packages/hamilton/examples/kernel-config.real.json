@@ -1,0 +1,19 @@
+{
+  "kernelId": "kernel_lab_west_01",
+  "devices": [
+    {
+      "id": "hamilton-prep-bench-A",
+      "type": "machine",
+      "adapterType": "hamilton",
+      "config": {
+        "url": "http://192.168.1.50",
+        "username": "REPLACE_WITH_HAMILTON_USERNAME",
+        "password": "REPLACE_WITH_HAMILTON_PASSWORD",
+        "kernelId": "kernel_lab_west_01",
+        "mockMode": false,
+        "pollIntervalMs": 3000,
+        "refreshLeadSeconds": 60
+      }
+    }
+  ]
+}
