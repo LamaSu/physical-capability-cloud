@@ -86,6 +86,7 @@ const AnalyticsDashboardPage = lazy(() => import("./pages/AnalyticsDashboardPage
 const KernelLeaderboardPage = lazy(() => import("./pages/KernelLeaderboardPage.js").then(m => ({ default: m.KernelLeaderboardPage })));
 const RateSchedulePublishPage = lazy(() => import("./pages/RateSchedulePublishPage.js").then(m => ({ default: m.RateSchedulePublishPage })));
 const RateScheduleViewPage = lazy(() => import("./pages/RateScheduleViewPage.js").then(m => ({ default: m.RateScheduleViewPage })));
+const CypherCatalogPage = lazy(() => import("./pages/CypherCatalogPage.js").then(m => ({ default: m.CypherCatalogPage })));
 
 // ---------------------------------------------------------------------------
 // Loading fallback
@@ -267,6 +268,7 @@ function DashboardShell() {
               <Route path="/analytics" element={<AnalyticsDashboardPage />} />
               <Route path="/contributors/schedules/publish" element={<RateSchedulePublishPage />} />
               <Route path="/contributors/schedules/:hash" element={<RateScheduleViewPage />} />
+              <Route path="/cypher-catalog" element={<CypherCatalogPage />} />
             </Routes>
           </Suspense>
         </PageTransition>

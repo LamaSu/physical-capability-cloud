@@ -1,0 +1,119 @@
+[
+  {
+    "_id": "fed-svc-waybio-plasmid-001",
+    "name": "Plasmid Cloning / Prep / Consultation",
+    "description": "Full-service plasmid construction, transformation, and prep with optional sequence confirmation. Buffer choice and target concentration configurable per order.",
+    "category": "molecular-biology",
+    "status": "published",
+    "visibility": "public",
+    "pricing": {
+      "currency": "USD",
+      "pricingModel": "quote",
+      "priceDescription": "Quote on request — depends on plasmid count and prep size"
+    },
+    "estimatedTurnaround": {
+      "min": 1,
+      "max": 3,
+      "unit": "weeks"
+    },
+    "provider": {
+      "name": "WayBio",
+      "slug": "waybio.cypherbio.ai",
+      "logoFileId": "logo-waybio-001",
+      "description": "Custom plasmid services and lab consultation",
+      "contactEmail": "orders@waybio.cypherbio.ai"
+    },
+    "stats": {
+      "totalOrders": 5,
+      "completedOrders": 4,
+      "reviewCount": 3
+    },
+    "sourceInstance": {
+      "_id": "inst-waybio",
+      "instanceId": "waybio-prod",
+      "name": "WayBio production",
+      "baseUrl": "https://waybio.cypherbio.ai/backend"
+    },
+    "sourceServiceId": "svc-waybio-plasmid",
+    "sourceServiceProviderId": "prov-waybio",
+    "orderFormSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "required": ["email", "company", "plasmidCount", "prepSize"],
+      "properties": {
+        "email": { "type": "string", "format": "email", "title": "Order email" },
+        "company": { "type": "string", "title": "Company / lab name" },
+        "plasmidCount": { "type": "integer", "minimum": 1, "title": "Plasmid count" },
+        "excelUpload": { "type": "string", "title": "Excel upload (file id)" },
+        "prepSize": {
+          "type": "string",
+          "enum": ["mini", "midi", "maxi", "giga"],
+          "title": "Prep size"
+        },
+        "buffer": { "type": "string", "title": "Buffer", "default": "TE" },
+        "sequenceConfirmation": { "type": "boolean", "title": "Sanger confirmation" },
+        "targetConcentration": { "type": "number", "title": "Target concentration (ng/uL)" }
+      }
+    },
+    "termsAndConditionsUrl": "https://waybio.cypherbio.ai/terms",
+    "publishedAt": "2026-04-12T15:32:00.000Z",
+    "lastSyncAt": "2026-05-06T11:00:00.000Z",
+    "syncStatus": "ok",
+    "allowedOrganizations": [],
+    "allowedUsers": []
+  },
+  {
+    "_id": "fed-svc-flockbio-pooled-001",
+    "name": "Pooled DNA Libraries",
+    "description": "High-complexity pooled DNA libraries for screening, deep mutational scanning, and CRISPR screens. Custom oligo synthesis and pooling.",
+    "category": "library-construction",
+    "status": "published",
+    "visibility": "public",
+    "pricing": {
+      "currency": "USD",
+      "pricingModel": "quote",
+      "priceDescription": "Quote on request — varies by complexity"
+    },
+    "estimatedTurnaround": {
+      "min": 4,
+      "max": 8,
+      "unit": "weeks"
+    },
+    "provider": {
+      "name": "Flock Bio",
+      "slug": "flockbio.cypherbio.ai",
+      "logoFileId": "logo-flockbio-001",
+      "description": "Pooled DNA library specialists",
+      "contactEmail": "info@flockbio.cypherbio.ai"
+    },
+    "stats": {
+      "totalOrders": 0,
+      "completedOrders": 0,
+      "reviewCount": 0
+    },
+    "sourceInstance": {
+      "_id": "inst-flockbio",
+      "instanceId": "flockbio-prod",
+      "name": "Flock Bio production",
+      "baseUrl": "https://flockbio.cypherbio.ai/backend"
+    },
+    "sourceServiceId": "svc-flockbio-pooled",
+    "sourceServiceProviderId": "prov-flockbio",
+    "orderFormSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "required": ["email", "libraryDesignFile", "expectedComplexity"],
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "libraryDesignFile": { "type": "string" },
+        "expectedComplexity": { "type": "integer", "minimum": 100 }
+      }
+    },
+    "termsAndConditionsUrl": "https://flockbio.cypherbio.ai/terms",
+    "publishedAt": "2026-04-20T08:14:00.000Z",
+    "lastSyncAt": "2026-05-06T11:00:00.000Z",
+    "syncStatus": "ok",
+    "allowedOrganizations": [],
+    "allowedUsers": []
+  }
+]
