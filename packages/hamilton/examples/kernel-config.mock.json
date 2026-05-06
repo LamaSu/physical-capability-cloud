@@ -1,0 +1,18 @@
+{
+  "kernelId": "kernel_demo_hamilton_mock",
+  "devices": [
+    {
+      "id": "hamilton-prep-mock-01",
+      "type": "machine",
+      "adapterType": "hamilton",
+      "config": {
+        "url": "http://192.0.2.1",
+        "username": "demo",
+        "password": "demo",
+        "kernelId": "kernel_demo_hamilton_mock",
+        "mockMode": true,
+        "mockRunDurationMs": 2000
+      }
+    }
+  ]
+}
