@@ -53,7 +53,7 @@ export class LimsPoller extends EventEmitter {
   private readonly workType: string | undefined;
   private readonly limit: number;
   private readonly seen: Set<string> = new Set();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private inFlight = false;
   private running = false;
 
@@ -82,23 +82,17 @@ export class LimsPoller extends EventEmitter {
   }
 
   /**
-   * Start polling. Performs an immediate first tick (no setInterval delay),
-   * then continues every `intervalMs`. Calling start() while already running
-   * is a no-op.
+   * Start polling. Performs an immediate first tick (no setTimeout delay),
+   * then re-schedules itself after each tick completes (recursive setTimeout
+   * pattern — avoids tick pile-up under sustained latency, plays nicely with
+   * fake timers in tests).
    */
   start(): void {
     if (this.running) return;
     this.running = true;
     this.emit('start');
-    // Fire-and-forget the first tick so listeners get fast feedback.
-    void this.tick();
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, this.intervalMs);
-    // Don't keep the Node event loop alive solely on this timer.
-    if (typeof this.timer.unref === 'function') {
-      this.timer.unref();
-    }
+    // Fire the first tick immediately, then chain.
+    void this.tickAndSchedule();
   }
 
   /**
@@ -109,10 +103,25 @@ export class LimsPoller extends EventEmitter {
     if (!this.running) return;
     this.running = false;
     if (this.timer !== null) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
     this.emit('stop');
+  }
+
+  /**
+   * Run a tick, then schedule the next one if still running. Pulled out of
+   * start() so tests can await pollNow() without setting up a recurring chain.
+   */
+  private async tickAndSchedule(): Promise<void> {
+    await this.tick();
+    if (!this.running) return;
+    this.timer = setTimeout(() => {
+      void this.tickAndSchedule();
+    }, this.intervalMs);
+    if (this.timer && typeof this.timer.unref === 'function') {
+      this.timer.unref();
+    }
   }
 
   /** Force a poll tick now. Useful for tests and operator-triggered refresh. */
