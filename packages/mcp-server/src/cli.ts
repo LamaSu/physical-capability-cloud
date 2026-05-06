@@ -597,8 +597,20 @@ const commands: Record<string, Record<string, Handler>> = {
       if (!deviceId) err("--deviceId is required");
       const type = flagStr(flags, "type") as "machine" | "sensor" | "camera" | undefined;
       if (!type) err("--type is required (machine, sensor, camera)");
-      const adapterType = flagStr(flags, "adapter") as "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "mock" | undefined;
-      if (!adapterType) err("--adapter is required (octoprint, modbus, opcua, sila, generic-http, mock)");
+      const adapterType = flagStr(flags, "adapter") as
+        | "octoprint"
+        | "modbus"
+        | "opcua"
+        | "sila"
+        | "ipp"
+        | "opentrons"
+        | "hamilton"
+        | "trilobio"
+        | "generic-http"
+        | "mock"
+        | undefined;
+      if (!adapterType)
+        err("--adapter is required (octoprint, modbus, opcua, sila, ipp, opentrons, hamilton, trilobio, generic-http, mock)");
       const model = flagStr(flags, "model");
       const adapterConfigRaw = flagStr(flags, "adapterConfig");
       let adapterConfig: unknown;
