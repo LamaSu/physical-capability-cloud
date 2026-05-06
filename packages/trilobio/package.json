@@ -1,0 +1,49 @@
+{
+  "name": "@pcc/trilobio",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Trilobio (tcode-api) configuration helpers for PCC operators — generate KERNEL_CONFIG, validate options, register liquid-handling capabilities for trilobot fleet controllers",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "examples"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "pcc",
+    "physical-capability-cloud",
+    "trilobio",
+    "trilobot",
+    "tcode-api",
+    "liquid-handler",
+    "robotics",
+    "lab-automation",
+    "pipetting"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LamaSu/physical-capability-cloud.git",
+    "directory": "packages/trilobio"
+  },
+  "homepage": "https://capability.network",
+  "dependencies": {},
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
