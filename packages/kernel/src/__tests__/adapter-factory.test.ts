@@ -105,6 +105,21 @@ describe("createMachineAdapter", () => {
     expect(adapter.type).toBe("liquid-handler");
   });
 
+  it("returns a MachineAdapter for adapterType 'trilobio'", () => {
+    const adapter = createMachineAdapter(
+      machineDevice("trilobio", {
+        url: "http://192.0.2.1",
+        apiKey: "test-key",
+        tcodeApiVersion: "1.25.1",
+        mockMode: true,
+      }),
+    );
+    expect(adapter).toBeDefined();
+    expect(adapter.id).toBe("test_machine_01");
+    expect(adapter.type).toBe("liquid-handler");
+    expect(adapter.source.firmwareVersion).toContain("Trilobio");
+  });
+
   it("falls back to mock for unknown adapterType", () => {
     const adapter = createMachineAdapter(machineDevice("generic-http"));
     expect(adapter).toBeDefined();
