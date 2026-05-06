@@ -72,36 +72,38 @@ describe("LimsPoller — start() / stop()", () => {
     vi.clearAllMocks();
   });
 
-  it("start() sets isRunning() to true and emits 'start'", () => {
+  it("start() sets isRunning() to true and emits 'start'", async () => {
     const { client } = makeClient();
     const poller = new LimsPoller({ client, intervalMs: 5000 });
     const startEvents: true[] = [];
     poller.on("start", () => startEvents.push(true));
     poller.start();
+    // Let the first tick promise resolve
+    await vi.advanceTimersByTimeAsync(0);
     expect(poller.isRunning()).toBe(true);
     expect(startEvents).toHaveLength(1);
     poller.stop();
   });
 
-  it("calling start() twice is a no-op (only 1 start event)", () => {
+  it("calling start() twice is a no-op (only 1 start event)", async () => {
     const { client } = makeClient();
     const poller = new LimsPoller({ client, intervalMs: 5000 });
     const startEvents: true[] = [];
     poller.on("start", () => startEvents.push(true));
     poller.start();
     poller.start();
+    await vi.advanceTimersByTimeAsync(0);
     expect(startEvents).toHaveLength(1);
     poller.stop();
   });
 
   it("stop() sets isRunning() to false and emits 'stop'", async () => {
-    const { client, listSpy } = makeClient([REQ_A]);
-    listSpy.mockResolvedValue({ ok: true, status: 200, data: [REQ_A] });
+    const { client } = makeClient([REQ_A]);
     const poller = new LimsPoller({ client, intervalMs: 5000 });
     const stopEvents: true[] = [];
     poller.on("stop", () => stopEvents.push(true));
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
     poller.stop();
     expect(poller.isRunning()).toBe(false);
     expect(stopEvents).toHaveLength(1);
@@ -113,7 +115,7 @@ describe("LimsPoller — start() / stop()", () => {
     const stopEvents: true[] = [];
     poller.on("stop", () => stopEvents.push(true));
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
     poller.stop();
     poller.stop();
     expect(stopEvents).toHaveLength(1);
@@ -121,13 +123,13 @@ describe("LimsPoller — start() / stop()", () => {
 
   it("stop() prevents further ticks from firing", async () => {
     const { client, listSpy } = makeClient([REQ_A]);
-    const poller = new LimsPoller({ client, intervalMs: 1000 });
+    const poller = new LimsPoller({ client, intervalMs: 5000 });
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
     poller.stop();
     const callsAfterStop = listSpy.mock.calls.length;
     // Advance timers — no new ticks should fire
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(15000);
     expect(listSpy.mock.calls.length).toBe(callsAfterStop);
   });
 });
@@ -148,9 +150,10 @@ describe("LimsPoller — first tick", () => {
     const { client, listSpy } = makeClient([REQ_A]);
     const poller = new LimsPoller({ client, intervalMs: 5000 });
     poller.start();
-    await vi.runAllTimersAsync();
-    expect(listSpy).toHaveBeenCalledTimes(1);
+    // Allow the first fire-and-forget tick to resolve
+    await vi.advanceTimersByTimeAsync(0);
     poller.stop();
+    expect(listSpy).toHaveBeenCalledTimes(1);
   });
 
   it("emits 'request-discovered' for each request returned by the first tick", async () => {
@@ -159,12 +162,12 @@ describe("LimsPoller — first tick", () => {
     const discovered: CypherLimsRequest[] = [];
     poller.on("request-discovered", (req) => discovered.push(req));
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
+    poller.stop();
     expect(discovered).toHaveLength(2);
     expect(discovered.map((r) => r._id)).toEqual(
       expect.arrayContaining(["req_aaa", "req_bbb"]),
     );
-    poller.stop();
   });
 });
 
@@ -190,22 +193,22 @@ describe("LimsPoller — deduplication", () => {
     const discovered: CypherLimsRequest[] = [];
     poller.on("request-discovered", (req) => discovered.push(req));
     poller.start();
-    await vi.runAllTimersAsync();
-    // Advance by another interval to trigger second tick
+    // First tick (immediate)
+    await vi.advanceTimersByTimeAsync(0);
+    // Second tick (after interval)
     await vi.advanceTimersByTimeAsync(1000);
-    await vi.runAllTimersAsync();
+    poller.stop();
     // Only 1 discovery despite 2 ticks
     expect(discovered).toHaveLength(1);
-    poller.stop();
   });
 
   it("seenCount() increments only for new requests", async () => {
     const { client } = makeClient([REQ_A, REQ_B]);
     const poller = new LimsPoller({ client, intervalMs: 5000 });
     poller.start();
-    await vi.runAllTimersAsync();
-    expect(poller.seenCount()).toBe(2);
+    await vi.advanceTimersByTimeAsync(0);
     poller.stop();
+    expect(poller.seenCount()).toBe(2);
   });
 });
 
@@ -230,10 +233,10 @@ describe("LimsPoller — error resilience", () => {
     const errors: Error[] = [];
     poller.on("error", (err) => errors.push(err));
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
+    // Poller should still be running after an error
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(Error);
-    // Poller should still be running after an error
     expect(poller.isRunning()).toBe(true);
     poller.stop();
   });
@@ -250,12 +253,12 @@ describe("LimsPoller — error resilience", () => {
     // Suppress unhandled error
     poller.on("error", () => {});
     poller.start();
-    await vi.runAllTimersAsync();
-    // Advance by interval to trigger second tick
+    // First tick (immediate) — error
+    await vi.advanceTimersByTimeAsync(0);
+    // Second tick (after interval) — success
     await vi.advanceTimersByTimeAsync(1000);
-    await vi.runAllTimersAsync();
-    expect(discovered).toHaveLength(1);
     poller.stop();
+    expect(discovered).toHaveLength(1);
   });
 });
 
@@ -279,11 +282,11 @@ describe("LimsPoller — workType passthrough", () => {
       workType: "plasmid_prep",
     });
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
+    poller.stop();
     expect(listSpy).toHaveBeenCalledWith(
       expect.objectContaining({ workType: "plasmid_prep" }),
     );
-    poller.stop();
   });
 });
 
@@ -307,10 +310,10 @@ describe("LimsPoller — multiple subscribers", () => {
     poller.on("request-discovered", (req) => received1.push(req._id));
     poller.on("request-discovered", (req) => received2.push(req._id));
     poller.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
+    poller.stop();
     expect(received1).toEqual(["req_aaa"]);
     expect(received2).toEqual(["req_aaa"]);
-    poller.stop();
   });
 });
 
