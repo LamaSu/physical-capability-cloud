@@ -364,27 +364,52 @@ export class TrilobioAdapter implements MachineAdapter {
     return headers;
   }
 
+  /**
+   * Per-request timeout. Bounds individual HTTP calls so getStatus/getProgress
+   * fail fast on unreachable controllers instead of hanging on the OS TCP
+   * connect timeout (~60s on Windows). Conservative default; can be tuned
+   * via TRILOBIO_REQUEST_TIMEOUT_MS env var if a slow LAN needs more headroom.
+   */
+  private get requestTimeoutMs(): number {
+    const fromEnv = Number(process.env.TRILOBIO_REQUEST_TIMEOUT_MS);
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 3000;
+  }
+
   private async apiGet(path: string): Promise<any> {
-    const res = await fetch(`${this.config.url}${path}`, {
-      headers: this.authHeaders(),
-    });
-    if (!res.ok) throw new Error(`Trilobio GET ${path}: ${res.status}`);
-    const ct = res.headers.get("content-type") ?? "";
-    return ct.includes("json") ? res.json() : res.text();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
+    try {
+      const res = await fetch(`${this.config.url}${path}`, {
+        headers: this.authHeaders(),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`Trilobio GET ${path}: ${res.status}`);
+      const ct = res.headers.get("content-type") ?? "";
+      return ct.includes("json") ? res.json() : res.text();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async apiPost(path: string, body: unknown): Promise<any> {
-    const res = await fetch(`${this.config.url}${path}`, {
-      method: "POST",
-      headers: {
-        ...this.authHeaders(),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Trilobio POST ${path}: ${res.status}`);
-    const ct = res.headers.get("content-type") ?? "";
-    return ct.includes("json") ? res.json() : res.text();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
+    try {
+      const res = await fetch(`${this.config.url}${path}`, {
+        method: "POST",
+        headers: {
+          ...this.authHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`Trilobio POST ${path}: ${res.status}`);
+      const ct = res.headers.get("content-type") ?? "";
+      return ct.includes("json") ? res.json() : res.text();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ---------------------------------------------------------------------------
