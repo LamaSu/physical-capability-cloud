@@ -93,14 +93,16 @@ describe("FederationPeer.register", () => {
       contactEmail: "ops@example.com",
     };
 
-    await expect(peer.register(manifest)).rejects.toBeInstanceOf(FederationAuthError);
+    let caught: unknown;
     try {
       await peer.register(manifest);
+      expect.fail("register should have thrown");
     } catch (e) {
-      expect(e).toBeInstanceOf(FederationAuthError);
-      expect((e as FederationAuthError).status).toBe(403);
-      expect((e as FederationAuthError).message).toContain("federation requires admin scope");
+      caught = e;
     }
+    expect(caught).toBeInstanceOf(FederationAuthError);
+    expect((caught as FederationAuthError).status).toBe(403);
+    expect((caught as FederationAuthError).message).toContain("federation requires admin scope");
   });
 
   it("throws FederationAuthError on 401", async () => {
