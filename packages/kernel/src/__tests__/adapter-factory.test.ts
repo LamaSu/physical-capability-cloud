@@ -77,6 +77,20 @@ describe("createMachineAdapter", () => {
     expect(adapter.type).toBe("cnc-3axis");
   });
 
+  it("returns a MachineAdapter for adapterType 'hamilton'", () => {
+    const adapter = createMachineAdapter(
+      machineDevice("hamilton", {
+        url: "http://192.0.2.1",
+        username: "test",
+        password: "test",
+        mockMode: true,
+      }),
+    );
+    expect(adapter).toBeDefined();
+    expect(adapter.id).toBe("test_machine_01");
+    expect(adapter.type).toBe("liquid-handler");
+  });
+
   it("falls back to mock for unknown adapterType", () => {
     const adapter = createMachineAdapter(machineDevice("generic-http"));
     expect(adapter).toBeDefined();

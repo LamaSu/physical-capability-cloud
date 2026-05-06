@@ -21,6 +21,7 @@ import { OPCUAAdapter } from "./adapters/opcua-adapter.js";
 import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
 import { IppAdapter } from "./adapters/ipp-adapter.js";
 import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
+import { HamiltonAdapter } from "./adapters/hamilton-adapter.js";
 
 // ---------------------------------------------------------------------------
 // Machine adapters
@@ -80,6 +81,19 @@ export function createMachineAdapter(
         pollIntervalMs: cfg.pollIntervalMs as number | undefined,
         mockMode: (cfg.mockMode as boolean | undefined) ?? false,
         maxQueueDepth: cfg.maxQueueDepth as number | undefined,
+      });
+    }
+
+    case "hamilton": {
+      return new HamiltonAdapter(device.id, {
+        url: (cfg.url as string | undefined) ?? "http://localhost",
+        username: (cfg.username as string | undefined) ?? "",
+        password: (cfg.password as string | undefined) ?? "",
+        kernelId,
+        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+        refreshLeadSeconds: cfg.refreshLeadSeconds as number | undefined,
+        mockRunDurationMs: cfg.mockRunDurationMs as number | undefined,
       });
     }
 
