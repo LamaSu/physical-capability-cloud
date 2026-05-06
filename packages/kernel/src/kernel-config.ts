@@ -23,6 +23,7 @@ export type AdapterType =
   | "sila"
   | "ipp"
   | "opentrons"
+  | "hamilton"
   | "generic-http"
   | "mock";
 
