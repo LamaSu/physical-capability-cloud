@@ -1,161 +1,102 @@
-# Physical Capability Cloud
+# Physical Capability Cloud (PCC)
 
-**AWS for the physical world.**
+> **An open protocol for verifiable, settleable physical work.** Operators run hardware. Customers (or their AI agents) discover, negotiate, escrow, and settle — all over HTTP, all anchored on-chain.
 
-Every machine, lab, and factory on Earth just became a programmable endpoint.
-
-**Live**: [capability.network](https://capability.network)
+**Live**: [capability.network](https://capability.network) · **License**: [Apache-2.0](LICENSE) · **Discord**: [PCC Network](https://discord.gg/CRFvvUgeV4)
 
 ---
 
-## Contributor Economics — new on `feat/contributor-economics`
+## What is PCC?
 
-Anyone who contributes to a job — adapter author, capability protocol
-author, AI model trainer, pilot who collected the training data — can
-mint an immutable, publicly-committed rate schedule once and earn a
-fraction of every job that uses their work, forever (or until they ship
-a v2). At settlement, `MilestoneEscrow.splitPayout()` routes funds
-across all attached contributors in a single transaction. There is **no
-OEM royalty class** — by design. OEMs participate as Operators,
-Integrators, Protocol Authors, or Model Authors on equal terms with
-everyone else.
+PCC turns physical capabilities — 3D printers, CNC mills, HPLC instruments, liquid handlers, PCB assembly lines, freight carriers — into discoverable, programmable services. Every job is contracted over HTTP, escrowed on-chain, executed on real hardware, evidenced cryptographically, and settled when the evidence meets the agreed assurance tier.
 
-40 new Forge tests across 3 contributor-economics test files (11
-RateScheduleRegistry + 15 ContributorNFT + 14 splitPayout; 58 total
-when the broader MilestoneEscrow base suite is included), 700+ TS
-tests passing, 7 new MCP tools, 8 new REST endpoints under
-`/api/contributors/*`, agent-package v2.8.0 (218 tools).
-
-- **Quickstart**: [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md) — 5-minute "I am a contributor and I want to earn from my work" path
-- **API reference**: [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) §12
-- **Deploy**: [`docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md`](docs/DEPLOY_CONTRIBUTOR_ECONOMICS.md)
-- **No-OEM thesis**: [`docs/claros-layer4-amendment.md`](docs/claros-layer4-amendment.md)
-
-### What's new
-
-- **2026-04**: Contributor economics layer (40 new Forge tests + 7 MCP tools + 8 REST endpoints, 700+ TS tests passing). See [`docs/CONTRIBUTOR_ECONOMICS.md`](docs/CONTRIBUTOR_ECONOMICS.md).
+It's substrate, not platform: anyone can run an operator node, contribute a capability adapter, or build an integration. The protocol charges 2.35% on settlement — that's the entire business model.
 
 ---
 
-## What will you build?
+## 30-second start
 
-Your AI agent can now control real physical hardware — anywhere, on demand.
-
-- Tell your agent to **3D print a bracket** and it finds an operator, negotiates the price, locks escrow, streams evidence of the print, and settles payment. You never make a phone call.
-- A biotech startup in Austin needs **HPLC compound analysis**. A lab in Buenos Aires has an idle instrument. PCC connects them in seconds — no RFQs, no NDAs, no middlemen.
-- A robotics team needs **PCB fabrication + laser-cut enclosures + assembly**. PCC decomposes the request into a capability DAG and orchestrates the entire supply chain autonomously.
-- A woman-owned lab in Kenya offers **bioreactor capacity** to pharmaceutical buyers globally — paid in local currency via mobile money.
-
-- Your 3D-printed part is done. PCC dispatches a **courier to pick it up and deliver it to your door** — same protocol, same escrow, same evidence chain. The driver is just another operator on the network. No platform taking 30-40% of their earnings.
-
-**What will you plug into the network?**
-
----
-
-## Get started in 30 seconds
-
-**Connect your AI agent:**
+**Connect an AI agent (no install):**
 ```bash
-curl https://capability.network/agent-package.json | pbcopy
-# Paste into Claude, GPT-4, or any agent. 218 tools. Done.
+curl https://capability.network/agent-package.json
+# 230+ tools as JSON Schema. Paste into Claude, GPT, or any LLM tool harness.
 ```
 
-**Connect your hardware:**
+**Connect a machine (Python operator node):**
 ```bash
-pip install pcc-node && pcc-node start --discover
-# Auto-discovers devices on your network. Registers. Starts accepting jobs.
+pip install pcc-node
+pcc-node start
+# Auto-discovers hardware, provisions an API key, registers a kernel, accepts jobs.
 ```
 
-**MCP (Claude Code / Codex):**
+**MCP server (Claude Code / Codex):**
 ```json
 { "pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"], "env": { "PCC_URL": "https://capability.network" } } }
 ```
 
 ---
 
-## What is PCC?
+## What it actually does
 
-A protocol that turns physical capabilities into composable, verifiable, settleable services — discoverable by AI agents. Operators run `pcc-node`, their hardware is auto-discovered, capabilities are announced to the network, and agents handle the rest: auction pricing, milestone escrow, cryptographic evidence, and automatic settlement.
+Tell an agent what you need. PCC handles the rest:
 
-Every job that settles pays a protocol fee. More operators, more volume, more fees. No token, no inflation, no speculation.
+- **3D-print a bracket** — an operator with idle FDM capacity gets the job, escrow locks before the print starts, evidence streams while it's running, escrow releases when the print passes verification.
+- **HPLC compound analysis** — a regulated lab in Buenos Aires has open instrument time. A startup in Austin queues a sample. The protocol routes the work, anchors the evidence, settles in USDC.
+- **Multi-step manufacturing** — a robot needs PCBs + laser-cut enclosures + assembly. PCC decomposes the request into a capability DAG and orchestrates the supply chain across operators.
+
+Operators set their own pricing. Customers pay only on verified completion.
 
 ---
 
 ## How it works
 
 ```
-  YOU / YOUR AI AGENT
+  YOUR AGENT
         │
         │  "analyze this compound and print the report"
         ▼
    ┌─────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
    │DISCOVER │───▶│   BID    │───▶│ ESCROW   │───▶│ EXECUTE  │───▶│ VERIFY   │───▶│ SETTLE   │
-   │         │    │          │    │          │    │          │    │          │    │          │
-   │ DHT     │    │ Auction  │    │ On-chain │    │ Real     │    │ Storacha │    │ Auto     │
-   │ gossip  │    │ pricing  │    │ milestone│    │ hardware │    │ Starknet │    │ release  │
-   │ network │    │          │    │ lock     │    │ evidence │    │ Lit      │    │          │
+   │ DHT     │    │ Auction  │    │ On-chain │    │ Real     │    │ Evidence │    │ Auto     │
+   │ gossip  │    │ pricing  │    │ milestone│    │ hardware │    │ pipeline │    │ release  │
    └─────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
 ```
 
-1. **DISCOVER** — Your agent broadcasts what it needs. The network finds operators with matching capabilities.
-2. **BID** — Operators compete on price. No phone calls, no RFQs, no waiting.
-3. **ESCROW** — Funds lock on-chain before work starts. Both sides are protected.
-4. **EXECUTE** — The operator's hardware runs the job. Evidence streams in real time.
-5. **VERIFY** — Evidence is encrypted, stored on IPFS, and ZK-anchored on Starknet.
-6. **SETTLE** — Funds release automatically when evidence meets the contract requirements.
+1. **Discover** — your agent broadcasts what it needs. The network finds operators with matching capabilities.
+2. **Bid** — operators compete on price. No phone calls, no RFQs, no waiting.
+3. **Escrow** — funds lock on-chain before work starts. Both sides are protected.
+4. **Execute** — the operator's hardware runs the job. Evidence streams in real time.
+5. **Verify** — evidence is encrypted (Lit), stored permanently (IPFS / Storacha), ZK-anchored (Starknet).
+6. **Settle** — funds release automatically when evidence meets the contracted assurance tier.
+
+---
+
+## Assurance tiers
+
+| Tier | Name | Evidence required | Use case |
+|------|------|-------------------|----------|
+| 0 | Self-attested | Device health snapshot | Prototyping, low-risk |
+| 1 | Verified | Bundle hash + completion events | Standard production |
+| 2 | Certified | Photo + sensor data + event log | Regulated manufacturing |
+| 3 | Sovereign | Full chain + ZK proofs + N-of-M consensus | Medical / aerospace / pharma |
+
+Higher tiers earn higher operator reputation and unlock higher-value contracts.
 
 ---
 
 ## Built on
 
 | Technology | What it does in PCC |
-|-----------|-------------------|
-| **Storacha / Filecoin** | Every evidence bundle is content-addressed and stored permanently on IPFS |
-| **Starknet** | ZK proof hashes anchored on-chain — verifiable proof that physical work happened |
-| **Lit Protocol** | Evidence encrypted with on-chain access conditions — only the buyer or verified auditors can decrypt |
-| **Flow EVM** | Settlement contracts deployed on Flow — sub-cent transaction costs |
-| **NEAR** | Cross-chain payment intents — fund escrows from any chain via 1Click solver network |
-| **Arkhai (Alkahest)** | Conditional peer-to-peer escrow with EAS attestations — boolean-native settlement |
-| **Base / Ethereum** | Primary settlement chain — MilestoneEscrow + PCCProtocol root contract |
+|------------|---------------------|
+| **Storacha / Filecoin** | Content-addressed evidence storage on IPFS |
+| **Lit Protocol** | Evidence encryption with on-chain access conditions |
+| **Starknet** | ZK proof anchors — verifiable proof that physical work happened |
+| **Base / Ethereum** | Primary settlement chain — `MilestoneEscrow` + `PCCProtocol` |
+| **Flow EVM** | Sub-cent settlement contracts |
+| **NEAR** | Cross-chain payment intents via 1Click solver network |
+| **Arkhai (Alkahest)** | Conditional peer-to-peer escrow with EAS attestations |
 
 ---
-
-## The numbers
-
-25 packages. 3,300+ tests. 218 agent tools. 497+ gateway tests. 66 Forge tests. 38 A2A intents. 6 real-time SSE streams. Live at [capability.network](https://capability.network) with real hardware running right now.
-
----
-
-## Quick start
-
-```bash
-# Build everything
-pnpm install && pnpm build --concurrency=1
-
-# Run all 3,300+ tests
-pnpm --workspace-concurrency=1 -r test
-
-# Start the gateway + dashboard
-pnpm dev
-```
-
----
-
-## Documentation
-
-| Doc | What's in it |
-|-----|-------------|
-| [Sponsor Integrations](docs/SPONSOR_INTEGRATIONS.md) | Deep technical docs for every integration — code paths, file tables, verification commands |
-| [Capture Verification](docs/CAPTURE_VERIFICATION.md) | Operator guide for CVP: capture classes CC0-CC5, API endpoints, gates G1-G6, anti-spoof policy, ALCOA+ mapping |
-| [Capture Classes](docs/CAPTURE_CLASSES.md) | Quick reference: CC0-CC5 multiplier table, tier compatibility matrix, decision tree for picking a class |
-| [Hackathon Submission](HACKATHON_SUBMISSION.md) | 390-word project summary for PL Genesis |
-| [Bounty Submissions](BOUNTY_SUBMISSIONS.md) | Every bounty we're claiming and why we qualify |
-| [Whitepaper](apps/dashboard/public/whitepaper.md) | Full protocol spec — architecture, assurance tiers, evidence chain, settlement |
-| [CLAUDE.md](CLAUDE.md) | Complete developer reference — all 25 packages, env vars, commands, invariants |
-
-### Capture Verification Protocol (CVP)
-
-CVP adds per-frame authenticity to evidence. Six capture classes (CC0-CC5) define how strongly the bytes themselves are pinned to a real device at a real moment: CC0 = unattested upload (0.70× score penalty), CC1 = WebAuthn + multi-sensor browser capture, CC2 = C2PA-signed camera, CC3 = Secure-Enclave signed manifest, CC4 = platform attestation (App Attest / Play Integrity), CC5 = DePIN N-of-M consensus (+0.05 bonus). Captures are verified through six gates (structural, signature, freshness, detection, attestation, consensus) and anchored on Base Sepolia via `CaptureClassRegistry` at `0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66`. See the [operator guide](docs/CAPTURE_VERIFICATION.md) and [class reference](docs/CAPTURE_CLASSES.md).
 
 ## Deployed contracts
 
@@ -163,56 +104,121 @@ CVP adds per-frame authenticity to evidence. Six capture classes (CC0-CC5) defin
 |-------|----------|---------|
 | Base Sepolia | MilestoneEscrow | `0x10059efeeab1ddf013489e9597a3aec4480d95e1` |
 | Base Sepolia | MockUSDC | `0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9` |
+| Base Sepolia | CaptureClassRegistry | `0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66` |
 | Flow EVM Testnet | MilestoneEscrow | [`0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15`](https://evm-testnet.flowscan.io/address/0x2b11d5bf01ec086e0bd071e1a848a848ffd2ca15) |
-| Flow EVM Testnet | MockUSDC | [`0x7e51fbd7c1051847ca3705f382387ef16849f2fd`](https://evm-testnet.flowscan.io/address/0x7e51fbd7c1051847ca3705f382387ef16849f2fd) |
 | Starknet Sepolia | ProofRegistry | `0x43643ebf182210af4e22eb3b2f5e4dbab50c00471743521b4e80d1328debcd` |
 
-## Package map
+---
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [Agent Integration Guide](docs/AGENT_INTEGRATION.md) | Complete REST API reference — auth, discovery, contracts, escrow, evidence |
+| [E2E Runbook](docs/E2E_RUNBOOK.md) | Full discovery → escrow → execute → settle walkthrough |
+| [Capture Verification](docs/CAPTURE_VERIFICATION.md) | Per-frame evidence authenticity protocol (CC0–CC5) |
+| [Capture Classes](docs/CAPTURE_CLASSES.md) | Quick reference for capture classes + multipliers |
+| [Contributor Economics](docs/CONTRIBUTOR_ECONOMICS.md) | How adapter authors and model trainers earn from settled work |
+| [Sponsor Integrations](docs/SPONSOR_INTEGRATIONS.md) | Per-chain integration deep-dives |
+| [Threat Model](docs/THREAT_MODEL.md) | Security analysis + attack surface |
+| [Architecture](docs/ARCH.md) | Internals: facades, kernels, evidence pipeline |
+| [Deploy](docs/DEPLOY.md) | CI/CD pipeline, Docker, Railway, GHCR retag |
+| [Whitepaper](apps/dashboard/public/whitepaper.md) | Full protocol spec |
+| [CLAUDE.md](CLAUDE.md) | Reference cited by the runtime — endpoints, DTOs, MCP tools, env vars |
+
+---
+
+## Capture Verification Protocol (CVP)
+
+CVP adds per-frame authenticity to evidence. Six capture classes (CC0–CC5) define how strongly the bytes are pinned to a real device at a real moment:
+
+- **CC0** — unattested upload (0.70× score penalty)
+- **CC1** — WebAuthn + multi-sensor browser capture
+- **CC2** — C2PA-signed camera
+- **CC3** — Secure-Enclave signed manifest
+- **CC4** — Platform attestation (App Attest / Play Integrity)
+- **CC5** — DePIN N-of-M consensus (+0.05 bonus)
+
+Captures pass through six gates (structural, signature, freshness, detection, attestation, consensus) and are anchored on Base Sepolia via [`CaptureClassRegistry`](https://sepolia.basescan.org/address/0xAaB3F94fdEDF02663A4817961A6f7C4f5A912A66). See the [operator guide](docs/CAPTURE_VERIFICATION.md) for the full spec.
+
+---
+
+## Build from source
+
+```bash
+git clone https://github.com/LamaSu/physical-capability-cloud.git
+cd physical-capability-cloud
+pnpm install && pnpm build --concurrency=1
+pnpm --workspace-concurrency=1 -r test
+pnpm dev   # runs gateway + dashboard
+```
+
+Requires Node 22+ and pnpm 9+. Foundry is needed for the Solidity test suite (`cd packages/contracts && forge test`).
+
+---
+
+## Repo layout
 
 ```
 packages/
-  spec/              # Types, schemas, Zod validation — single source of truth
-  contracts/         # Solidity (PCCProtocol, MilestoneEscrow, IdentityRegistry, VerifierRegistry)
-  gateway/           # Fastify HTTP gateway — 60+ route files, 497+ tests
-  kernel/            # Shop Kernel runtime — device adapters, evidence emitter, Storacha, Lit
-  verifier/          # Hybrid verifier market, ZK proofs, Starknet anchoring
-  a2a/               # Agent-to-agent typed intent bus (38 intents)
-  agent-runtime/     # Base agent framework — wallets, tools, smart accounts
-  agent-user/        # User Agent — discovers, negotiates, submits
-  agent-broker/      # Broker Agent — routes capabilities, compiles workflows
-  agent-kernel/      # Kernel Agent — accepts jobs, emits evidence
-  agent-evaluator/   # Evaluator Agent — quality assessment, attestation
-  payments/          # x402 micropayments, Meteora DLMM, fiat ramps
-  pcc-node/          # Python CLI — hardware discovery, daemon, operator onboarding
-  dht/               # WebSocket gossip DHT for decentralized capability discovery
-  db/                # SQLite shared database layer
-  mcp-server/        # 56 MCP tools over stdio
-  contract-builder/  # Interactive capability contract builder
-  identity-8004/     # ERC-8004 identity + reputation registries
-  ui/                # Shared React components
+  spec/                 # Types, schemas, Zod validation
+  contracts/            # Solidity — PCCProtocol, MilestoneEscrow, IdentityRegistry, VerifierRegistry
+  gateway/              # Fastify HTTP gateway — every API endpoint
+  kernel/               # Shop Kernel runtime — device adapters, evidence emitter
+  verifier/             # Hybrid verifier market, ZK proofs, Starknet anchoring
+  a2a/                  # Agent-to-agent typed intent bus
+  agent-runtime/        # Base agent framework — wallets, tools, smart accounts
+  agent-{user,broker,kernel,evaluator,onboarder,support}/   # Agent roles
+  payments/             # x402 micropayments, fiat ramps
+  pcc-node/             # Python operator CLI
+  voice-onboarder/      # Pipecat-based voice onboarding
+  dht/                  # Gossip DHT for decentralized discovery
+  db/                   # Drizzle + SQLite (Postgres-ready)
+  mcp-server/           # MCP tool stdio server
+  contract-builder/     # Interactive capability contract builder
+  identity-8004/        # ERC-8004 identity + reputation
+  ui/                   # Shared React components
 apps/
-  dashboard/         # Vite + React 19 dashboard — operator console, telemetry, setup wizard
+  dashboard/            # Vite + React 19 — operator console + telemetry
+  mobile/               # Capacitor shell + operator PWA
 ```
+
+---
 
 ## Environment variables
 
-| Variable | What it does |
-|----------|-------------|
-| `EVIDENCE_STORAGE=storacha` | Use Storacha w3up for evidence (default: Helia) |
-| `LIT_PROTOCOL_REAL=true` | Use real Lit Protocol encryption (default: local AES-256-GCM) |
-| `STARKNET_ACCOUNT_ADDRESS` | Enable real Starknet ZK proof anchoring |
-| `PCC_NETWORK=base-sepolia` | Settlement chain (base-sepolia, flow-evm-testnet) |
-| `ESCROW_CONTRACT_ADDRESS` | Deployed MilestoneEscrow address |
-| `PCC_GATEWAY_PRIVATE_KEY` | Gateway signer for on-chain writes |
+The most common operator-facing knobs:
 
-Full env var reference in [CLAUDE.md](CLAUDE.md).
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PCC_URL` | Gateway URL for clients and the MCP server | `https://capability.network` |
+| `PCC_BASE` | Same, for the `pcc-node` Python CLI | `https://capability.network` |
+| `PCC_API_KEY` | Bearer token for gateway API | none |
+| `KERNEL_CONFIG` | Inline JSON kernel configuration | `mock` |
+| `PCC_NETWORK` | Settlement chain (`base-sepolia`, `flow-evm-testnet`) | `base-sepolia` |
+| `EVIDENCE_STORAGE` | `local` / `helia` / `storacha` | `local` |
+| `LIT_PROTOCOL_REAL` | Use real Lit Protocol encryption (not mock AES) | `false` |
+
+Full reference in [`CLAUDE.md`](CLAUDE.md) and [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md).
+
+---
+
+## Contributing
+
+Issues and pull requests welcome. A few conventions:
+
+- **Conventional Commits required**: `feat:` / `fix:` / `perf:` / `docs:` / `refactor:` / `chore:` / `test:` / `ci:` / `build:`. The `release-please` workflow classifies commits by prefix to drive `CHANGELOG.md` and version bumps.
+- **Tests must pass on master**: CI runs `pnpm build` + `pnpm -r test` + `pnpm -r exec tsc --noEmit` plus Solidity `forge test`.
+- **Don't hand-edit `CHANGELOG.md` or `package.json` versions** — those are owned by `release-please`.
+
+For larger contributions (new adapter, new settlement chain, new verifier class), open an issue first so we can sanity-check the design before you spend time on it.
 
 ---
 
 ## License
 
-Apache 2.0
+[Apache 2.0](LICENSE). Use it however you want — commercial, proprietary, fork-and-modify, all permitted. Patent grant included.
 
 ---
 
-*Built during [PL Genesis: Frontiers of Collaboration](https://www.plgenesis.com/), March 2026.*
+*Originally shipped during [PL Genesis: Frontiers of Collaboration](https://www.plgenesis.com/), March 2026. Continued development under [LamaSu](https://github.com/LamaSu).*
