@@ -10,12 +10,13 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §5. Safety & Compliance
 - §6. Settlement & Payments
 - §7. MCP Server (63 Tools)
-- §8. Agent Package (218 Tools)
+- §8. Agent Package (237 Tools)
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
 - §11. pcc-node (Python Operator Node)
 - §12. Contributor Economics (NEW 2026-04)
 - §13. Agent Workflows (Quick Reference)
+- §14. Adapter-Specific Operator Helpers (NEW 2026-05)
 
 > **What's new (2026-04)**: Contributor economics primitives (per-job royalties for adapter authors / protocol authors / model authors / dataset contributors / verifiers / insurers). 7 new MCP tools (50-56), 8 new REST endpoints under `/api/contributors`, full RateSchedule DSL. See §12.
 
@@ -747,9 +748,9 @@ For the full contributor-economics surface (REST endpoints, DSL, walkthrough), s
 
 ---
 
-## 8. Agent Package (218 Tools)
+## 8. Agent Package (237 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 218 tools with input schemas and endpoint mappings (re-numbered in v2.8.0 — was 219 before contributor-economics consolidation).
+The agent package is a single JSON file any LLM can consume, containing 237 tools with input schemas and endpoint mappings (v2.12.0 — bumped to 237 in May 2026 after adding 4 Trilobio operator helpers; previous bumps: 218 contributor-economics consolidation, 226 metadata, 233 hamilton + role flows).
 
 **Fetch it**:
 ```bash
@@ -1041,3 +1042,191 @@ linked above is the canonical place to record any new mapping decision.
 
 **Publish a contributor royalty schedule** (see §12):
 `publish schedule` (POST `/api/contributors/schedules`) -> `register profile` (POST `/api/contributors`) -> `mint ContributorNFT` (forge) -> earn on every job
+
+---
+
+## 14. Adapter-Specific Operator Helpers
+
+Some adapters ship a small TypeScript helper package alongside the kernel runtime adapter. These packages give operators type-safe config generation, options validation, and capability templates for one specific instrument family. The adapter implementation itself lives in `@pcc/kernel`; the helper package is configuration helpers + a published, stable shape for operator config.
+
+### 14.1 Trilobio (`@pcc/trilobio`)
+
+For operators with a [Trilobio](https://trilo.bio/) trilobot fleet controller. Trilobio's tcode-api Python SDK runs on the fleet controller and exercises commands like ASPIRATE, DISPENSE, ADD_LABWARE, CALIBRATE_LABWARE_HEIGHT, MOVE, HOME — see <https://tcode.trilo.bio/> for the full reference.
+
+#### Quick start (operator)
+
+```bash
+# 1. Install pcc-node (the operator daemon)
+pip install pcc-node
+
+# 2. Make sure tcode-api is installed on your fleet controller
+#    (Trilobio fleet controllers ship with tcode-api pre-installed; verify the version)
+uv add git+https://github.com/trilobio/tcode-api.git@v1.25.1
+
+# 3. Set environment for the gateway
+export PCC_BASE=https://capability.network
+
+# 4. Hand the daemon your Trilobio config — example below
+export KERNEL_CONFIG='{
+  "kernelId": "kernel_my_trilobio",
+  "devices": [{
+    "id": "trilobio-fleet-01",
+    "type": "machine",
+    "adapterType": "trilobio",
+    "config": {
+      "url": "http://192.168.1.50",
+      "apiKey": "your-trilobio-api-key",
+      "kernelId": "kernel_my_trilobio",
+      "tcodeApiVersion": "1.25.1",
+      "mockMode": false,
+      "pollIntervalMs": 3000,
+      "maxScriptTimeoutSec": 3600,
+      "allowArbitraryScripts": false
+    }
+  }]
+}'
+
+# 5. Start the daemon
+pcc-node start
+```
+
+That sequence provisions an API key, registers the kernel at `capability.network`, announces a `liquid-handler` capability with `tcode-script-execution`, and starts the kernel daemon — which connects to the trilobot fleet controller over the LAN, authenticates with an API key, and is ready to accept jobs from any customer on the network.
+
+#### Helper package
+
+`@pcc/trilobio` is a small, dependency-free TypeScript helper module. Four exports:
+
+```ts
+import {
+  buildTrilobioConfig,
+  validateTrilobioOptions,
+  validateTcodeScript,
+  TRILOBIO_CAPABILITY,
+} from "@pcc/trilobio";
+
+// Validate config before you submit
+const check = validateTrilobioOptions({
+  url: "http://192.168.1.50",
+  apiKey: process.env.TRILOBIO_API_KEY!,
+});
+if (!check.valid) throw new Error(check.errors.join(", "));
+if (check.warnings) check.warnings.forEach((w) => console.warn(w));
+
+// Generate a complete KERNEL_CONFIG
+const config = buildTrilobioConfig({
+  url: "http://192.168.1.50",
+  apiKey: process.env.TRILOBIO_API_KEY!,
+  tcodeApiVersion: "1.25.1",
+});
+
+// Pass to pcc-node via KERNEL_CONFIG env var
+process.env.KERNEL_CONFIG = JSON.stringify(config);
+
+// (Optional) Lint a tcode-api script before allowing it to run
+import { readFileSync } from "node:fs";
+const userScript = readFileSync("./protocols/transfer.py", "utf8");
+const lint = validateTcodeScript(userScript);
+if (!lint.valid) throw new Error(lint.errors.join(", "));
+```
+
+The Trilobio adapter implementation itself lives in `@pcc/kernel` — this helper package is configuration helpers + a published, stable shape for operator config.
+
+The same four helpers are surfaced as agent-package tools (see §8) so external LLMs can discover them: `pcc_trilobio_build_config`, `pcc_trilobio_validate_options`, `pcc_trilobio_validate_script`, `pcc_trilobio_capability_template`.
+
+#### Trilobio API specifics
+
+[`tcode-api`](https://github.com/trilobio/tcode-api) is a Python 3.11+ SDK pre-installed on Trilobio fleet controllers. Scripts written against it execute *on* the fleet controller and exercise commands at <https://tcode.trilo.bio/>:
+
+| Category | Commands |
+|----------|----------|
+| Entity registration | `ADD_LABWARE`, `ADD_PIPETTE_TIP_GROUP`, `ADD_ROBOT`, `ADD_TOOL` |
+| Fluid handling | `ASPIRATE`, `DISPENSE`, `MIX` |
+| Tip handling | `PICK_UP_TIP`, `DROP_TIP` |
+| Motion | `MOVE`, `HOME` |
+| Calibration | `CALIBRATE_LABWARE_HEIGHT`, `CALIBRATE_LABWARE_HOLDER`, `CALIBRATE_LABWARE_WELL_DEPTH` |
+
+The PCC adapter:
+
+- Authenticates via API key (default — `Authorization: ApiKey <key>` header) or basic-auth (legacy)
+- Submits a tcode script (or a curated protocol ID) to the fleet controller
+- Polls run state at `pollIntervalMs` cadence
+- Captures evidence: event log, run timing, calibration deltas, sensor data, optional camera frames
+- Surfaces stop / pause honestly — Trilobio's documented surface does not always expose remote abort, so the adapter returns failure for `stop` rather than pretending
+
+#### Two execution modes
+
+Trilobio's strength is that protocols are real Python — flexible, expressive, and also a security surface.
+
+**Curated mode** (`allowArbitraryScripts: false`, default): Customers can only submit jobs that reference protocol IDs from the operator's curated library. The fleet controller runs them. Safer default for shared-operator deployments.
+
+**Open mode** (`allowArbitraryScripts: true`): Customers ship a full tcode Python script as the protocol payload. Maximum flexibility, but operators take on responsibility for sandboxing. The adapter runs `validateTcodeScript()` defensively, but the fleet controller is the source of truth on safety. Recommended only for trusted-counterparty deployments or wallet-gated access.
+
+#### Mock mode for demos and CI
+
+For demos / development without touching a real instrument:
+
+```ts
+import { buildTrilobioConfig } from "@pcc/trilobio";
+
+const config = buildTrilobioConfig({
+  url: "http://192.0.2.1",     // any unreachable address; mock mode bypasses HTTP
+  apiKey: "demo",
+  mockMode: true,              // simulates the full lifecycle
+  mockRunDurationMs: 2000,     // run completes after 2s
+});
+```
+
+Mock mode emits the same lifecycle events (`script_received` / `execution_started` / `execution_completed`) as a real device. Customers submitting jobs to a mock-mode kernel see the full evidence flow, just with no actual liquid moving.
+
+#### Network requirements
+
+The kernel running on the operator's machine needs:
+
+- **Outbound HTTPS** to `https://capability.network` (gateway)
+- **Outbound HTTP/HTTPS** to the Trilobio fleet-controller's LAN IP (for the adapter ↔ device traffic)
+- **Outbound RPC** to Base Sepolia (for evidence anchoring; see `PCC_NETWORK` env var)
+- **Outbound IPFS / Storacha** (for evidence storage; see `EVIDENCE_STORAGE` env var)
+
+The trilobot fleet controller itself does not need any inbound internet — only the kernel's host machine does. Conference / hospital / corporate networks that block arbitrary outbound HTTP often need a firewall exception for `capability.network` and the Base Sepolia RPC endpoint.
+
+#### Capability declaration
+
+By default the package publishes a `liquid-handler / trilobio-trilobot` capability with these advertised features:
+
+```ts
+import { TRILOBIO_CAPABILITY } from "@pcc/trilobio";
+// {
+//   type: "liquid-handler",
+//   subType: "trilobio-trilobot",
+//   manufacturer: "Trilobio",
+//   model: "Trilobot fleet",
+//   materials: ["aqueous-buffer", "dna", "rna", "protein", "cells", "media", "reagent", "small-molecule"],
+//   capabilities: [
+//     "pipetting", "plate-reformat", "dilution", "normalization",
+//     "hit-picking", "serial-dilution",
+//     "custom-labware-calibration",
+//     "tcode-script-execution"  // unique to Trilobio, not in Hamilton
+//   ],
+//   assuranceTiers: [0, 1, 2]
+// }
+```
+
+Operators can override or extend any of these fields when calling `POST /api/capabilities` — the constant is a sensible baseline, not a constraint.
+
+#### Troubleshooting
+
+**`Trilobio auth failed: 401`** — apiKey is wrong, expired, or revoked. Test by curling `Authorization: ApiKey <key>` against `http://{fleet_ip}/api/v1/system-status` from the operator machine.
+
+**`fetch failed: ECONNREFUSED`** — operator's machine cannot reach the fleet-controller IP. Test with `curl http://{fleet_ip}/api/v1/system-status`. Check that the fleet controller is powered on, on the same VLAN, and that no firewall is blocking the operator's host.
+
+**`unknown adapter type 'trilobio'`** — the kernel runtime is older than this adapter. Update `@pcc/kernel` (or upgrade `pcc-node`) to a version that includes the Trilobio adapter (≥ the version published alongside the helper package).
+
+**`tcode_api: ImportError`** — the fleet controller's tcode-api version doesn't match the version your kernel config pinned. Either upgrade tcode-api on the controller, or update `tcodeApiVersion` in your config to match what's installed.
+
+**Job submitted but never completes** — check directly on the fleet controller's admin UI. If the run finished but the kernel didn't notice, lower `pollIntervalMs`. If the run is genuinely stuck, the fleet controller's emergency-stop on the device is the source of truth — operators may need to intervene physically.
+
+**`script contains <dangerous pattern> — review before allowing on shared hardware`** — `validateTcodeScript()` flagged a `subprocess`, `os.system`, `eval`, or similar in a customer-supplied script. With `allowArbitraryScripts: false` this is a non-issue (you're using protocol IDs, not arbitrary scripts). With `allowArbitraryScripts: true`, audit the flagged pattern — it may be legitimate, or it may be a tenant trying to escape the tcode-api boundary.
+
+#### License
+
+Apache-2.0. See the repo root `LICENSE`.
