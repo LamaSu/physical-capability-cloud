@@ -53,6 +53,7 @@ export type BuiltinCapabilityType =
   | "assay"
   | "chromatography"
   | "liquid-handler"
+  | "liquid-handling-prep"
   // Document services
   | "document-printing"
   | "large-format-printing"
