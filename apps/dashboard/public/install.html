@@ -24,6 +24,12 @@
   button:hover { background: #1d4ed8; }
   button.copy { position: absolute; top: 10px; right: 10px; padding: 6px 10px; font-size: 12px; background: #232830; }
   button.copy:hover { background: #2f3540; }
+  button.big-copy { display: block; width: 100%; padding: 16px 20px; font-size: 15px; font-weight: 600; margin-top: 10px; background: #2563eb; color: white; border: 0; border-radius: 10px; cursor: pointer; transition: background .15s; }
+  button.big-copy:hover { background: #1d4ed8; }
+  button.big-copy.ok { background: #10b981; }
+  button.big-copy:disabled { background: #2a3038; cursor: wait; }
+  .big-copy-hint { color: #8a93a3; font-size: 13px; margin-top: 12px; line-height: 1.5; }
+  .big-copy-hint code { background: #0a0c10; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
   .qr-card { display: flex; flex-direction: column; align-items: center; gap: 12px; }
   .qr-svg { width: 100%; max-width: 260px; aspect-ratio: 1 / 1; background: white; padding: 12px; border-radius: 8px; }
   .qr-cap { font-size: 12px; color: #9aa3b2; text-align: center; }
@@ -69,6 +75,13 @@
           <p style="margin-top:18px;color:#9aa3b2">When done, your kernel page will be at <code>capability.network/operator/&lt;your-kernel-id&gt;</code> and you'll be accepting jobs from any customer on the network.</p>
         </div>
       </div>
+
+      <div class="card" style="margin-top:24px">
+        <label>Or paste this into your LLM</label>
+        <p class="steps" style="margin:6px 0 14px;color:#c5cbd5">230+ tools, role-aware system prompt, install recipes baked in. Paste into Claude / ChatGPT / Cursor / any LLM with shell access — it bootstraps onboarding end-to-end.</p>
+        <button class="big-copy" id="copy-agent-pkg-btn">📋 Copy agent-package.json</button>
+        <p class="big-copy-hint">~207&nbsp;KB. Once copied, paste into the LLM and say something like <em>“I have a Hamilton ML Prep at <code>192.168.1.50</code>, user/pass <code>X/Y</code> — register it and start the kernel daemon.”</em> The LLM picks the OPERATOR role from the prompt and walks the rest.</p>
+      </div>
     </div>
     <div>
       <div class="card qr-card">
@@ -108,6 +121,26 @@ btn.addEventListener('click', async () => {
   } catch (e) { btn.textContent = 'Copy failed — select manually'; }
 });
 render();
+
+const pkgBtn = document.getElementById('copy-agent-pkg-btn');
+pkgBtn.addEventListener('click', async () => {
+  const orig = pkgBtn.textContent;
+  pkgBtn.disabled = true;
+  pkgBtn.textContent = 'Fetching agent-package.json…';
+  try {
+    const res = await fetch('/agent-package.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    await navigator.clipboard.writeText(text);
+    const kb = Math.round(text.length / 1024);
+    pkgBtn.textContent = '✓ Copied ' + kb + ' KB — paste into your LLM';
+    pkgBtn.classList.add('ok');
+    setTimeout(() => { pkgBtn.textContent = orig; pkgBtn.classList.remove('ok'); pkgBtn.disabled = false; }, 4000);
+  } catch (e) {
+    pkgBtn.textContent = '⚠ Copy failed — open agent-package.json directly';
+    pkgBtn.disabled = false;
+  }
+});
 </script>
 </body>
 </html>
