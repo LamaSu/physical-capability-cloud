@@ -12,6 +12,44 @@ interface FeedbackEntry {
   userAgent?: string;
   timestamp: string;
   walletAddress?: string;
+  email?: string;
+}
+
+// Discord webhook for live feedback notifications. Reuses the same env var
+// /api/operator/support uses so all feedback shows up in one channel.
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
+
+async function notifyDiscord(entry: FeedbackEntry): Promise<void> {
+  if (!DISCORD_WEBHOOK_URL) return;
+  try {
+    const fields: { name: string; value: string; inline?: boolean }[] = [
+      { name: "Type", value: entry.type, inline: true },
+      { name: "Page", value: entry.page ?? "—", inline: true },
+    ];
+    if (entry.email) fields.push({ name: "Email", value: entry.email, inline: true });
+    if (entry.walletAddress) fields.push({ name: "Wallet", value: entry.walletAddress, inline: true });
+    fields.push({ name: "Message", value: entry.message.slice(0, 1024) });
+    fields.push({ name: "ID", value: entry.id, inline: true });
+
+    const payload = {
+      username: "PCC Feedback",
+      embeds: [{
+        title: `New ${entry.type}`,
+        color: 0x2563eb,
+        fields,
+        footer: { text: (entry.userAgent ?? "").slice(0, 200) },
+        timestamp: entry.timestamp,
+      }],
+    };
+    const res = await fetch(DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.error(`Discord webhook failed: ${res.status}`);
+  } catch (err) {
+    console.error(`Discord webhook error: ${err}`);
+  }
 }
 
 function loadFeedback(): FeedbackEntry[] {
@@ -62,6 +100,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
       message?: string;
       page?: string;
       walletAddress?: string;
+      email?: string;
     };
 
     if (!body.message || body.message.trim().length === 0) {
@@ -70,6 +109,18 @@ export async function feedbackRoutes(app: FastifyInstance) {
 
     if (body.message.length > 5000) {
       return reply.status(400).send({ error: "Message too long (max 5000 chars)" });
+    }
+
+    let email: string | undefined;
+    if (body.email && body.email.trim().length > 0) {
+      const trimmed = body.email.trim();
+      if (trimmed.length > 256) {
+        return reply.status(400).send({ error: "Email too long" });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        return reply.status(400).send({ error: "Invalid email format" });
+      }
+      email = trimmed;
     }
 
     const entry: FeedbackEntry = {
@@ -82,11 +133,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
       userAgent: request.headers["user-agent"],
       timestamp: new Date().toISOString(),
       walletAddress: body.walletAddress,
+      email,
     };
 
     const entries = loadFeedback();
     entries.push(entry);
     saveFeedback(entries);
+
+    // Live-notify the team via Discord webhook (best-effort, non-blocking)
+    notifyDiscord(entry).catch(() => {});
 
     return reply.status(201).send({ id: entry.id, submitted: true });
   });
