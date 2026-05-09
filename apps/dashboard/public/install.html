@@ -30,6 +30,30 @@
   button.big-copy:disabled { background: #2a3038; cursor: wait; }
   .big-copy-hint { color: #8a93a3; font-size: 13px; margin-top: 12px; line-height: 1.5; }
   .big-copy-hint code { background: #0a0c10; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  .feedback { margin-top: 32px; padding: 28px; border: 2px solid #2a3038; border-radius: 14px; background: #15191f; }
+  .feedback h2 { font-size: 20px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .feedback .lede { color: #9aa3b2; font-size: 14px; margin-bottom: 18px; }
+  .feedback .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  @media (max-width: 600px) { .feedback .row { grid-template-columns: 1fr; } }
+  .feedback label.field { display: block; font-size: 12px; color: #9aa3b2; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .feedback input, .feedback select, .feedback textarea {
+    width: 100%; padding: 12px 14px; background: #0a0c10; color: #e6e9ef;
+    border: 1px solid #2a3038; border-radius: 8px; font-size: 15px;
+    font-family: inherit;
+  }
+  .feedback input:focus, .feedback select:focus, .feedback textarea:focus {
+    outline: 2px solid #2563eb; outline-offset: -1px;
+  }
+  .feedback textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
+  .feedback button.submit {
+    display: block; width: 100%; padding: 16px 20px; font-size: 15px;
+    font-weight: 600; margin-top: 14px; background: #2563eb; color: white;
+    border: 0; border-radius: 10px; cursor: pointer; transition: background .15s;
+  }
+  .feedback button.submit:hover { background: #1d4ed8; }
+  .feedback button.submit.ok { background: #10b981; }
+  .feedback button.submit:disabled { background: #2a3038; cursor: wait; }
+  .feedback .privacy { color: #5b6470; font-size: 11px; margin-top: 10px; line-height: 1.4; }
   .qr-card { display: flex; flex-direction: column; align-items: center; gap: 12px; }
   .qr-svg { width: 100%; max-width: 260px; aspect-ratio: 1 / 1; background: white; padding: 12px; border-radius: 8px; }
   .qr-cap { font-size: 12px; color: #9aa3b2; text-align: center; }
@@ -99,6 +123,32 @@
       </div>
     </div>
   </div>
+  <div class="feedback">
+    <h2>Stuck? Found a bug? Tell us.</h2>
+    <p class="lede">Goes straight to the team. Email is optional — leave it if you want a reply.</p>
+    <form id="feedback-form" novalidate>
+      <div class="row">
+        <div>
+          <label class="field" for="fb-email">Your email <span style="text-transform:none;color:#5b6470">(optional)</span></label>
+          <input type="email" id="fb-email" name="email" placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div>
+          <label class="field" for="fb-type">Type</label>
+          <select id="fb-type" name="type">
+            <option value="bug">Bug</option>
+            <option value="difficulty">Stuck / hard to use</option>
+            <option value="suggestion">Suggestion</option>
+            <option value="comment" selected>Comment / general</option>
+          </select>
+        </div>
+      </div>
+      <label class="field" for="fb-message">Message</label>
+      <textarea id="fb-message" name="message" placeholder="What's broken, what's confusing, what would help, what you wish worked, screenshot URLs welcome…" required maxlength="5000"></textarea>
+      <button type="submit" class="submit" id="fb-submit">Send to the team</button>
+      <p class="privacy">We log your message + (if provided) your email to deliver a reply. We capture user-agent + the page URL for debugging. Nothing else. Rate-limited to 10 submissions per hour per IP.</p>
+    </form>
+  </div>
+
   <div class="meta">
     <a href="https://capability.network">capability.network</a>
     <a href="https://github.com/LamaSu/physical-capability-cloud">github</a>
@@ -121,6 +171,70 @@ btn.addEventListener('click', async () => {
   } catch (e) { btn.textContent = 'Copy failed — select manually'; }
 });
 render();
+
+// Feedback form: POST to /api/feedback (server-side: file save + Discord webhook)
+// AND parallel POST to formsubmit.co for direct email-to-team delivery.
+// formsubmit.co requires one-time recipient verification (a single click in
+// the first email it sends to the recipient); after that, every submission
+// goes through to the inbox.
+const FEEDBACK_EMAIL = 'globalmysterysnailrevolution@gmail.com';
+const fbForm = document.getElementById('feedback-form');
+const fbBtn = document.getElementById('fb-submit');
+
+fbForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(fbForm);
+  const email = (fd.get('email') || '').toString().trim();
+  const message = (fd.get('message') || '').toString().trim();
+  const type = (fd.get('type') || 'comment').toString();
+  if (!message) return;
+
+  const orig = fbBtn.textContent;
+  fbBtn.disabled = true;
+  fbBtn.textContent = 'Sending…';
+
+  const apiPayload = { type, message, email: email || undefined, page: location.pathname };
+
+  // Fire both in parallel; success if either completes
+  const apiCall = fetch('/api/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(apiPayload),
+  });
+  const emailFD = new FormData();
+  emailFD.append('_subject', 'PCC feedback: ' + type + ' from ' + (email || 'anonymous'));
+  emailFD.append('_template', 'box');
+  emailFD.append('_captcha', 'false');
+  emailFD.append('email', email || 'anonymous');
+  emailFD.append('type', type);
+  emailFD.append('message', message);
+  emailFD.append('page', location.href);
+  emailFD.append('userAgent', navigator.userAgent);
+  const emailCall = fetch('https://formsubmit.co/ajax/' + FEEDBACK_EMAIL, {
+    method: 'POST',
+    body: emailFD,
+  }).catch(() => null);
+
+  try {
+    const apiRes = await apiCall;
+    await emailCall;
+    if (apiRes.ok) {
+      fbBtn.textContent = '✓ Sent — thank you';
+      fbBtn.classList.add('ok');
+      fbForm.reset();
+    } else {
+      const err = await apiRes.json().catch(() => ({}));
+      fbBtn.textContent = '⚠ ' + (err.error || ('HTTP ' + apiRes.status));
+    }
+  } catch (err) {
+    fbBtn.textContent = '⚠ Network error — try again';
+  }
+  setTimeout(() => {
+    fbBtn.textContent = orig;
+    fbBtn.classList.remove('ok');
+    fbBtn.disabled = false;
+  }, 4000);
+});
 
 const pkgBtn = document.getElementById('copy-agent-pkg-btn');
 pkgBtn.addEventListener('click', async () => {
