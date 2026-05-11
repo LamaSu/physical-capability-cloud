@@ -44,6 +44,7 @@ import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { feedbackRoutes } from "./routes/feedback.js";
+import { identifyDeviceRoutes } from "./routes/identify-device.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { traceRoutes } from "./routes/traces.js";
 import { jobSubmitRoutes } from "./routes/job-submit.js";
@@ -267,6 +268,7 @@ export async function createGateway(port = 3200) {
   await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
   await app.register(feedbackRoutes);
+  await app.register(identifyDeviceRoutes);
 
   // Health check
   app.get("/api/health", async () => ({
