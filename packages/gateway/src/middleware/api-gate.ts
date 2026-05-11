@@ -15,6 +15,7 @@ const PUBLIC_PREFIXES = [
   "/api/auth/provision",        // Key provisioning is public
   "/api/auth/validate",         // Key validation is public (checks key itself)
   "/api/feedback",
+  "/api/onboard/identify-device", // Device identification is public (install.html landing)
   "/api/onboard/check/",        // Invite code validation is public
   // REMOVED: "/api/onboard/registrations" — prefix match was too broad, exposed admin
   // endpoints (approve/reject/activate) without auth. Now uses exact match below.
