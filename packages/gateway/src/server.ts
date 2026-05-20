@@ -68,7 +68,10 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+<<<<<<< HEAD
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
 import { dhtWebSocketRoutes } from "./routes/dht-ws.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -376,6 +379,7 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+<<<<<<< HEAD
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -384,6 +388,8 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
 
@@ -456,7 +462,10 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+<<<<<<< HEAD
   await app.register(toolSearchRoutes);
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
