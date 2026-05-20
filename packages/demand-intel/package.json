@@ -1,0 +1,22 @@
+{
+  "name": "@pcc/demand-intel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Internal demand intelligence — sketches + aggregator over captured intent events. PCC consumes its own intelligence; this package is NOT a public oracle and produces NO signed snapshots.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/store": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
