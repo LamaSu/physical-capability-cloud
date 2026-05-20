@@ -14,8 +14,15 @@
 // All data access is through the repository layer — no ad-hoc SQL execution.
 
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { createHash, randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
 import { getIntentClassifier } from "../services/intent-classifier.js";
+import { getEventBus } from "../services/event-bus.js";
+import type { DemandEnvelope } from "@pcc/spec";
+import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
+
+/** Build-intent heuristic — matches verbs that imply a future capability need */
+const BUILD_INTENT_RE = /\b(build|make|find me|i need|order|buy|deliver|schedule|book)\b/i;
 
 // ── Local type aliases (avoid importing from @pcc/spec dist which may be stale) ─
 
@@ -299,6 +306,46 @@ export async function nlQueryRoutes(app: FastifyInstance) {
       }
 
       if (!template) {
+        // ── Demand-intel capture point C — synthetic query intent ────
+        // No template matched. If the raw query reads like a build/order
+        // intent, capture it as a synthetic envelope. We don't know the
+        // real capability composition — use "unknown_synthetic" so the
+        // aggregator can bucket and surface it.
+        if (BUILD_INTENT_RE.test(rawQuery)) {
+          try {
+            const compositionSignature = computeCompositionSignature(
+              ["unknown_synthetic"],
+              [],
+            );
+            const actor = body.operatorId ?? "anonymous";
+            const envelope: DemandEnvelope = {
+              id: `intent-syn-${randomUUID()}`,
+              source: "query_api_synthetic",
+              compositionSignature,
+              capabilityTypes: ["unknown_synthetic"],
+              summary: rawQuery.slice(0, 200),
+              budgetBand: budgetToBand(0),
+              urgencyBand: "standard",
+              requesterIdHash:
+                body.operatorId
+                  ? createHash("sha256").update(body.operatorId).digest("hex")
+                  : undefined,
+              createdAt: new Date().toISOString(),
+            };
+            getEventBus().publish({
+              eventType: "intent.synthetic_query",
+              category: "intent",
+              actorId: actor,
+              actorType: "requestor",
+              resourceType: "intent",
+              resourceId: envelope.id,
+              payload: envelope as unknown as Record<string, unknown>,
+            });
+          } catch {
+            // best-effort
+          }
+        }
+
         const response: NLQueryResponse = {
           answer:
             "I don't know how to answer that yet. Try asking about job status, network status, or capabilities.",
