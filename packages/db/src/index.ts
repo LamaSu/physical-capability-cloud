@@ -90,6 +90,11 @@ export type {
   RequestRow,
   RequestInsert,
   RequestsFilter,
+  IAnalyticsRepository,
+  AnalyticsEventRow,
+  AnalyticsEventInsert,
+  MaterializedViewRow,
+  MaterializedViewInsert,
 } from "./interfaces/index.js";
 export type {
   IOrchestratorSessionRepository,
