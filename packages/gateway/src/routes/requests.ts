@@ -1,51 +1,165 @@
 /**
- * Capability Request Routes
+ * Capability Request Routes — SQLite-backed
  *
  * High-level request decomposition system. Users submit natural language
  * requests that are automatically decomposed into a capability DAG with
  * dependencies, timelines, and budget allocation.
  *
- * POST /api/requests                          — submit + auto-decompose
- * GET  /api/requests                          — list (with status filter)
- * GET  /api/requests/:id                      — get with full DAG
- * POST /api/requests/:id/decompose            — re-trigger decomposition
- * POST /api/requests/:id/publish              — publish nodes as bounties
- * PUT  /api/requests/:id                      — update (title, budget, etc.)
- * DELETE /api/requests/:id                    — cancel request
- * GET  /api/requests/:id/dag                  — get the DAG only
- * GET  /api/requests/:id/critical-path        — get critical path
- * POST /api/requests/:id/nodes/:nodeId/assign — assign operator to node
- * PUT  /api/requests/:id/nodes/:nodeId/status — update node status
+ * POST /api/requests                          - submit + auto-decompose
+ * GET  /api/requests                          - list (with status filter)
+ * GET  /api/requests/:id                      - get with full DAG
+ * POST /api/requests/:id/decompose            - re-trigger decomposition
+ * POST /api/requests/:id/publish              - publish nodes as bounties
+ * PUT  /api/requests/:id                      - update (title, budget, etc.)
+ * DELETE /api/requests/:id                    - cancel request (soft-delete)
+ * GET  /api/requests/:id/dag                  - get the DAG only
+ * GET  /api/requests/:id/critical-path        - get critical path
+ * POST /api/requests/:id/nodes/:nodeId/assign - assign operator to node
+ * PUT  /api/requests/:id/nodes/:nodeId/status - update node status
+ *
+ * Persistence: backed by `capabilityRequests` table in @pcc/store. The
+ * `compositionSignature` column is indexed so the demand-intel aggregator
+ * can fold many envelopes that share the same composition shape efficiently.
+ *
+ * Demand capture: on each successful POST /api/requests, emits an
+ * `intent.composite_request` analytics event for internal demand-intel
+ * aggregation. Requester PII (email/wallet) is hashed before payload write.
  */
 
 import type { FastifyInstance } from "fastify";
+import { createHash } from "node:crypto";
 import type {
   CapabilityRequest,
   CapabilityNode,
   RequestStatus,
   CapabilityNodeStatus,
+  DemandEnvelope,
+  IntentSource,
 } from "@pcc/spec";
+import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { decomposeRequest } from "../services/request-decomposer.js";
+import { getRepos, getStore } from "../db.js";
+import { getEventBus } from "../services/event-bus.js";
+import { schema } from "@pcc/store";
 
 // ---------------------------------------------------------------------------
-// In-memory store
+// Helpers
 // ---------------------------------------------------------------------------
-
-const requestsStore = new Map<string, CapabilityRequest>();
 
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function sha256Hex(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+/**
+ * Row -> CapabilityRequest. The DB row's numeric fields come back as numbers
+ * already (better-sqlite3); JSON columns are deserialized by drizzle.
+ */
+function rowToRequest(row: Record<string, unknown>): CapabilityRequest {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    description: row.description as string,
+    requesterEmail: (row.requesterEmail as string | null) ?? undefined,
+    requesterWallet: (row.requesterWallet as string | null) ?? undefined,
+    budget: row.budget as number,
+    currency: row.currency as string,
+    deadline: row.deadline as string,
+    urgency: row.urgency as CapabilityRequest["urgency"],
+    status: row.status as RequestStatus,
+    capabilityDag: (row.capabilityDag as CapabilityNode[]) ?? [],
+    totalEstimatedCost: row.totalEstimatedCost as number,
+    totalEstimatedHours: row.totalEstimatedHours as number,
+    createdAt: row.createdAt as string,
+    updatedAt: row.updatedAt as string,
+  };
+}
+
+/** Compute composition signature from a request's DAG */
+function signatureFromDag(dag: CapabilityNode[]): string {
+  const capabilityTypes = dag.map((n) => n.capabilityType);
+  const edges: Array<{ from: string; to: string }> = [];
+  for (const node of dag) {
+    for (const dep of node.dependencies) {
+      edges.push({ from: dep, to: node.id });
+    }
+  }
+  return computeCompositionSignature(capabilityTypes, edges);
+}
+
+/** Build a DemandEnvelope from a fully-decomposed CapabilityRequest */
+function buildEnvelopeFromRequest(
+  request: CapabilityRequest,
+  source: IntentSource,
+): DemandEnvelope {
+  const capabilityTypes = request.capabilityDag.map((n) => n.capabilityType);
+  const edges: Array<{ from: string; to: string }> = [];
+  for (const node of request.capabilityDag) {
+    for (const dep of node.dependencies) {
+      edges.push({ from: dep, to: node.id });
+    }
+  }
+  const signature = computeCompositionSignature(capabilityTypes, edges);
+
+  const requesterRaw = request.requesterEmail ?? request.requesterWallet;
+  const requesterIdHash = requesterRaw ? sha256Hex(requesterRaw) : undefined;
+
+  // Summary: title + 1st line of description, trim to 200 chars
+  const summary = `${request.title}: ${request.description}`
+    .replace(/\s+/g, " ")
+    .slice(0, 200);
+
+  return {
+    id: `intent-${request.id}`,
+    source,
+    compositionSignature: signature,
+    capabilityTypes,
+    summary,
+    budgetBand: budgetToBand(request.budget),
+    urgencyBand: request.urgency,
+    requesterIdHash,
+    createdAt: request.createdAt,
+  };
+}
+
+function emitIntent(envelope: DemandEnvelope, actor: string, actorType: "requestor" | "agent") {
+  try {
+    getEventBus().publish({
+      eventType:
+        envelope.source === "requests_api"
+          ? "intent.composite_request"
+          : envelope.source === "negotiate_api"
+          ? "intent.atomic_session"
+          : "intent.synthetic_query",
+      category: "intent",
+      actorId: actor,
+      actorType,
+      resourceType: "intent",
+      resourceId: envelope.id,
+      payload: envelope as unknown as Record<string, unknown>,
+    });
+  } catch {
+    // Event-bus failures must NEVER break the original request. Telemetry is
+    // best-effort; demand-intel can replay from analytics_events as needed.
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Seed data — the moltpod example
+// Seed — moltpod example, persisted via the repo
 // ---------------------------------------------------------------------------
 
-function seedRequests() {
+const SEED_ID = "req-moltpod-001";
+
+function seedRequests(): void {
+  const repos = getRepos();
+  if (repos.requests.findById(SEED_ID)) return;
+
   const now = new Date().toISOString();
-
-  const seedReq: CapabilityRequest = {
-    id: "req-moltpod-001",
+  const seed: CapabilityRequest = {
+    id: SEED_ID,
     title: "Cute Animatronic Plush Desk Robot",
     description:
       "Design and build a friendly animatronic plush desk robot for moltpod (team@moltpod.com). Cute, interactive, head movement + arm wave + idle breathing animations. Needs to be a plush/soft exterior with internal servo mechanism. Rush: needed by end of day.",
@@ -62,24 +176,41 @@ function seedRequests() {
     updatedAt: now,
   };
 
-  // Run decomposition on seed
-  const result = decomposeRequest(seedReq);
-  seedReq.capabilityDag = result.nodes;
-  seedReq.totalEstimatedCost = result.totalEstimatedCost;
-  seedReq.totalEstimatedHours = result.totalEstimatedHours;
-  seedReq.status = "published";
+  const result = decomposeRequest(seed);
+  seed.capabilityDag = result.nodes;
+  seed.totalEstimatedCost = result.totalEstimatedCost;
+  seed.totalEstimatedHours = result.totalEstimatedHours;
+  seed.status = "published";
 
-  requestsStore.set(seedReq.id, seedReq);
+  const signature = signatureFromDag(seed.capabilityDag);
+
+  repos.requests.insert({
+    id: seed.id,
+    title: seed.title,
+    description: seed.description,
+    requesterEmail: seed.requesterEmail ?? null,
+    requesterWallet: seed.requesterWallet ?? null,
+    budget: seed.budget,
+    currency: seed.currency,
+    deadline: seed.deadline,
+    urgency: seed.urgency,
+    status: seed.status,
+    capabilityDag: seed.capabilityDag,
+    totalEstimatedCost: seed.totalEstimatedCost,
+    totalEstimatedHours: seed.totalEstimatedHours,
+    compositionSignature: signature,
+    createdAt: seed.createdAt,
+    updatedAt: seed.updatedAt,
+  });
 }
 
-seedRequests();
-
-// ---------------------------------------------------------------------------
-// Exported store reset (for tests)
-// ---------------------------------------------------------------------------
-
-export function resetRequestsStore() {
-  requestsStore.clear();
+/**
+ * Reset the requests store for tests. Wipes all rows and re-seeds the
+ * moltpod example. Idempotent.
+ */
+export function resetRequestsStore(): void {
+  const store = getStore();
+  (store.db as any).delete(schema.capabilityRequests).run();
   seedRequests();
 }
 
@@ -88,6 +219,15 @@ export function resetRequestsStore() {
 // ---------------------------------------------------------------------------
 
 export async function requestRoutes(app: FastifyInstance) {
+  // Ensure seed on registration (idempotent; safe if called repeatedly)
+  try {
+    seedRequests();
+  } catch (err) {
+    // If repos aren't initialized yet in some test paths, skip silently.
+    // The route handlers will fail loudly if the DB is truly missing.
+    app.log?.warn?.({ err }, "[requests] seed deferred");
+  }
+
   // ── POST /api/requests ────────────────────────────────────────────
   // Submit a new request and auto-decompose it
   app.post("/api/requests", async (req, reply) => {
@@ -126,14 +266,38 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     };
 
-    // Auto-decompose immediately
     const result = decomposeRequest(request);
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
     request.status = "published";
 
-    requestsStore.set(request.id, request);
+    const signature = signatureFromDag(request.capabilityDag);
+
+    const repos = getRepos();
+    repos.requests.insert({
+      id: request.id,
+      title: request.title,
+      description: request.description,
+      requesterEmail: request.requesterEmail ?? null,
+      requesterWallet: request.requesterWallet ?? null,
+      budget: request.budget,
+      currency: request.currency,
+      deadline: request.deadline,
+      urgency: request.urgency,
+      status: request.status,
+      capabilityDag: request.capabilityDag,
+      totalEstimatedCost: request.totalEstimatedCost,
+      totalEstimatedHours: request.totalEstimatedHours,
+      compositionSignature: signature,
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
+    });
+
+    // ── Demand-intel capture point A — composite request ───────────
+    const envelope = buildEnvelopeFromRequest(request, "requests_api");
+    const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
+    emitIntent(envelope, actor, "requestor");
 
     return reply.status(201).send({ request, decomposition: result });
   });
@@ -141,37 +305,34 @@ export async function requestRoutes(app: FastifyInstance) {
   // ── GET /api/requests ─────────────────────────────────────────────
   app.get("/api/requests", async (req) => {
     const q = req.query as Record<string, string>;
-    let results = [...requestsStore.values()];
-
-    if (q.status) {
-      results = results.filter((r) => r.status === q.status);
-    }
-    if (q.urgency) {
-      results = results.filter((r) => r.urgency === q.urgency);
-    }
-    if (q.requesterEmail) {
-      results = results.filter((r) => r.requesterEmail === q.requesterEmail);
-    }
-
+    const repos = getRepos();
+    const rows = repos.requests.findAll({
+      status: q.status,
+      urgency: q.urgency,
+      requesterEmail: q.requesterEmail,
+    });
+    const results = rows.map(rowToRequest);
     return { requests: results, count: results.length };
   });
 
   // ── GET /api/requests/:id ─────────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/requests/:id", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
-    return { request };
+    return { request: rowToRequest(row) };
   });
 
   // ── POST /api/requests/:id/decompose ──────────────────────────────
-  // Re-trigger decomposition (overwrites existing DAG)
   app.post<{ Params: { id: string } }>("/api/requests/:id/decompose", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
+    const request = rowToRequest(row);
 
     if (request.status === "cancelled") {
       return reply.status(409).send({ error: "conflict", message: "Cannot decompose a cancelled request" });
@@ -179,7 +340,6 @@ export async function requestRoutes(app: FastifyInstance) {
 
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
-    requestsStore.set(request.id, request);
 
     const result = decomposeRequest(request);
     request.capabilityDag = result.nodes;
@@ -187,18 +347,28 @@ export async function requestRoutes(app: FastifyInstance) {
     request.totalEstimatedHours = result.totalEstimatedHours;
     request.status = "published";
     request.updatedAt = new Date().toISOString();
-    requestsStore.set(request.id, request);
+
+    const signature = signatureFromDag(request.capabilityDag);
+    repos.requests.update(request.id, {
+      status: request.status,
+      capabilityDag: request.capabilityDag,
+      totalEstimatedCost: request.totalEstimatedCost,
+      totalEstimatedHours: request.totalEstimatedHours,
+      compositionSignature: signature,
+      updatedAt: request.updatedAt,
+    });
 
     return { request, decomposition: result };
   });
 
   // ── POST /api/requests/:id/publish ───────────────────────────────
-  // Publish all pending capability nodes as bounties
   app.post<{ Params: { id: string } }>("/api/requests/:id/publish", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
+    const request = rowToRequest(row);
 
     if (request.status === "cancelled") {
       return reply.status(409).send({ error: "conflict", message: "Cannot publish a cancelled request" });
@@ -225,68 +395,71 @@ export async function requestRoutes(app: FastifyInstance) {
 
     request.status = "in_progress";
     request.updatedAt = now;
-    requestsStore.set(request.id, request);
+
+    repos.requests.update(request.id, {
+      status: request.status,
+      capabilityDag: request.capabilityDag,
+      updatedAt: now,
+    });
 
     return { request, publishedBounties, publishedCount: publishedBounties.length };
   });
 
   // ── PUT /api/requests/:id ─────────────────────────────────────────
   app.put<{ Params: { id: string } }>("/api/requests/:id", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
+    const request = rowToRequest(row);
 
     if (request.status === "cancelled") {
       return reply.status(409).send({ error: "conflict", message: "Cannot update a cancelled request" });
     }
 
     const body = (req.body ?? {}) as Partial<CapabilityRequest>;
+    const updates: Record<string, unknown> = {};
     const allowed: Array<keyof CapabilityRequest> = [
       "title", "description", "budget", "deadline", "urgency",
       "requesterEmail", "requesterWallet", "currency",
     ];
-
-    const mutable = request as unknown as Record<string, unknown>;
     for (const key of allowed) {
       if (body[key] !== undefined) {
-        mutable[key] = body[key];
+        // drizzle column names match camelCase via $type, so direct map works
+        updates[key] = body[key];
       }
     }
 
-    request.updatedAt = new Date().toISOString();
-    requestsStore.set(request.id, request);
+    const updatedAt = new Date().toISOString();
+    updates.updatedAt = updatedAt;
+    repos.requests.update(request.id, updates);
 
-    return { request };
+    const refreshed = repos.requests.findById(request.id);
+    return { request: refreshed ? rowToRequest(refreshed) : request };
   });
 
   // ── DELETE /api/requests/:id ──────────────────────────────────────
   app.delete<{ Params: { id: string } }>("/api/requests/:id", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
-
-    request.status = "cancelled";
-    request.updatedAt = new Date().toISOString();
-    requestsStore.set(request.id, request);
-
+    repos.requests.softDelete(req.params.id);
     return { deleted: true, id: req.params.id };
   });
 
   // ── GET /api/requests/:id/dag ─────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/requests/:id/dag", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
-
-    // Build adjacency info for the DAG
+    const request = rowToRequest(row);
     const nodes = request.capabilityDag;
-    const edges = nodes.flatMap((n) =>
-      n.dependencies.map((dep) => ({ from: dep, to: n.id })),
-    );
-
+    const edges = nodes.flatMap((n) => n.dependencies.map((dep) => ({ from: dep, to: n.id })));
     return {
       requestId: request.id,
       nodes,
@@ -298,10 +471,12 @@ export async function requestRoutes(app: FastifyInstance) {
 
   // ── GET /api/requests/:id/critical-path ──────────────────────────
   app.get<{ Params: { id: string } }>("/api/requests/:id/critical-path", async (req, reply) => {
-    const request = requestsStore.get(req.params.id);
-    if (!request) {
+    const repos = getRepos();
+    const row = repos.requests.findById(req.params.id);
+    if (!row) {
       return reply.status(404).send({ error: "request_not_found" });
     }
+    const request = rowToRequest(row);
 
     if (request.capabilityDag.length === 0) {
       return { requestId: request.id, criticalPath: [], totalHours: 0 };
@@ -326,25 +501,23 @@ export async function requestRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string; nodeId: string } }>(
     "/api/requests/:id/nodes/:nodeId/assign",
     async (req, reply) => {
-      const request = requestsStore.get(req.params.id);
-      if (!request) {
+      const repos = getRepos();
+      const row = repos.requests.findById(req.params.id);
+      if (!row) {
         return reply.status(404).send({ error: "request_not_found" });
       }
+      const request = rowToRequest(row);
 
       const node = request.capabilityDag.find((n) => n.id === req.params.nodeId);
       if (!node) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
-      // Caller must be authenticated. By default they can only assign nodes
-      // to themselves; brokers/dispatchers (BROKER_OPERATORS env allowlist)
-      // can assign to any operator.
       const callerId = (req as any).operatorId ?? (req as any).userId;
       if (!callerId) {
         return reply.status(401).send({ error: "authentication_required" });
       }
 
-      // Rate limit: 30 assignments per caller per minute
       const { checkCallerRate, isBrokerOperator } = await import("../middleware/security-hardening.js");
       if (!checkCallerRate(callerId, "request_assign", 30, 60_000)) {
         return reply.status(429).send({ error: "rate_limited", message: "Too many node assignments" });
@@ -354,7 +527,6 @@ export async function requestRoutes(app: FastifyInstance) {
       let targetOperator: string;
 
       if (body.operatorId && body.operatorId !== callerId) {
-        // Cross-operator assignment requires broker role
         if (!isBrokerOperator(callerId)) {
           return reply.status(403).send({
             error: "forbidden",
@@ -367,14 +539,12 @@ export async function requestRoutes(app: FastifyInstance) {
         }
         targetOperator = body.operatorId;
       } else {
-        // Self-assign
         targetOperator = callerId;
       }
 
       node.assignedOperator = targetOperator;
       node.status = "assigned";
 
-      // Audit trail records both the caller (broker) and the target operator
       try {
         const { auditService } = await import("../services/audit-service.js");
         auditService.log({
@@ -387,8 +557,12 @@ export async function requestRoutes(app: FastifyInstance) {
           ip: req.ip,
         });
       } catch { /* non-fatal */ }
-      request.updatedAt = new Date().toISOString();
-      requestsStore.set(request.id, request);
+
+      const updatedAt = new Date().toISOString();
+      repos.requests.update(request.id, {
+        capabilityDag: request.capabilityDag,
+        updatedAt,
+      });
 
       return { node, requestId: request.id };
     },
@@ -398,25 +572,23 @@ export async function requestRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string; nodeId: string } }>(
     "/api/requests/:id/nodes/:nodeId/status",
     async (req, reply) => {
-      // Ownership check: only the assigned operator can update their node's status.
-      // Without this, any authenticated user can mark any node "completed" and
-      // trigger request settlement. (Red team round 5 NEW-01 CRITICAL)
       const callerId = (req as any).operatorId ?? (req as any).userId;
       if (!callerId) {
         return reply.status(401).send({ error: "authentication_required" });
       }
 
-      const request = requestsStore.get(req.params.id);
-      if (!request) {
+      const repos = getRepos();
+      const row = repos.requests.findById(req.params.id);
+      if (!row) {
         return reply.status(404).send({ error: "request_not_found" });
       }
+      const request = rowToRequest(row);
 
       const node = request.capabilityDag.find((n) => n.id === req.params.nodeId);
       if (!node) {
         return reply.status(404).send({ error: "node_not_found" });
       }
 
-      // Only the assigned operator (or a broker) can update status
       const { isBrokerOperator } = await import("../middleware/security-hardening.js");
       if (node.assignedOperator && node.assignedOperator !== callerId && !isBrokerOperator(callerId)) {
         return reply.status(403).send({
@@ -438,14 +610,19 @@ export async function requestRoutes(app: FastifyInstance) {
       }
 
       node.status = body.status;
-      request.updatedAt = new Date().toISOString();
 
-      // Check if all nodes completed — update request status
+      // Cascade: if all nodes completed, mark request completed
+      let newStatus: RequestStatus = request.status;
       if (request.capabilityDag.every((n) => n.status === "completed")) {
-        request.status = "completed";
+        newStatus = "completed";
       }
 
-      requestsStore.set(request.id, request);
+      const updatedAt = new Date().toISOString();
+      repos.requests.update(request.id, {
+        status: newStatus,
+        capabilityDag: request.capabilityDag,
+        updatedAt,
+      });
 
       return { node, requestId: request.id };
     },

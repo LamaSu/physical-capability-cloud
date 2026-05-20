@@ -17,10 +17,22 @@
  *   - Critical path calculation
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { requestRoutes, resetRequestsStore } from "../routes/requests.js";
 import { detectTemplateName } from "../services/request-decomposer.js";
+import { initStore, closeStore } from "../db.js";
+
+// Wave 5 — requests now live in SQLite. Boot an in-memory store once for
+// the whole test file; resetRequestsStore() truncates + re-seeds per test.
+beforeAll(() => {
+  process.env.PCC_DB_PATH = ":memory:";
+  initStore({ seed: true });
+});
+
+afterAll(() => {
+  closeStore();
+});
 
 // ---------------------------------------------------------------------------
 // App builder (no DB needed — in-memory store)
