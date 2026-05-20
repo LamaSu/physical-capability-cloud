@@ -86,6 +86,10 @@ export type {
   RatingRow,
   RatingInsert,
   RatingAggregate,
+  IRequestRepository,
+  RequestRow,
+  RequestInsert,
+  RequestsFilter,
 } from "./interfaces/index.js";
 export type {
   IOrchestratorSessionRepository,
@@ -118,5 +122,6 @@ export {
   OrchestratorSessionRepository,
   RatingRepository,
   ContributorRepository,
+  RequestRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

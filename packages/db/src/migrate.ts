@@ -1470,4 +1470,33 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_operator_ratings_job ON operator_ratings(job_id);
     CREATE INDEX IF NOT EXISTS idx_operator_ratings_buyer ON operator_ratings(buyer_id);
   `);
+
+  // Wave 5 — demand-intent capture: capability requests previously lived in
+  // an in-memory Map inside the gateway. Persist them and index the
+  // compositionSignature so @pcc/demand-intel can fold many envelopes that
+  // share the same composition shape efficiently.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS capability_requests (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      requester_email TEXT,
+      requester_wallet TEXT,
+      budget INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USDC',
+      deadline TEXT NOT NULL,
+      urgency TEXT NOT NULL,
+      status TEXT NOT NULL,
+      capability_dag TEXT NOT NULL,
+      total_estimated_cost INTEGER NOT NULL DEFAULT 0,
+      total_estimated_hours INTEGER NOT NULL DEFAULT 0,
+      composition_signature TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS requests_composition_sig_idx ON capability_requests(composition_signature);
+    CREATE INDEX IF NOT EXISTS requests_status_idx ON capability_requests(status);
+    CREATE INDEX IF NOT EXISTS requests_urgency_idx ON capability_requests(urgency);
+    CREATE INDEX IF NOT EXISTS requests_created_at_idx ON capability_requests(created_at);
+  `);
 }

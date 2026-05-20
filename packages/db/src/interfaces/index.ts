@@ -234,6 +234,7 @@ import type { IAnalyticsRepository } from "./IAnalyticsRepository.js";
 import type { IOrchestratorSessionRepository } from "./IOrchestratorSessionRepository.js";
 import type { IRatingRepository } from "./IRatingRepository.js";
 import type { IContributorRepository } from "./IContributorRepository.js";
+import type { IRequestRepository } from "./IRequestRepository.js";
 
 export type {
   IRatingRepository,
@@ -241,6 +242,13 @@ export type {
   RatingInsert,
   RatingAggregate,
 } from "./IRatingRepository.js";
+
+export type {
+  IRequestRepository,
+  RequestRow,
+  RequestInsert,
+  RequestsFilter,
+} from "./IRequestRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -280,4 +288,8 @@ export interface IRepositories {
   // /api/operators/:id/ratings surface plus the auth-gated /rate POST.
   ratings: IRatingRepository;
   contributors: IContributorRepository;
+  // Wave 5 — demand-intent capture; replaces the in-memory requestsStore in
+  // packages/gateway/src/routes/requests.ts. compositionSignature indexed for
+  // fast aggregation by the @pcc/demand-intel sketches.
+  requests: IRequestRepository;
 }
