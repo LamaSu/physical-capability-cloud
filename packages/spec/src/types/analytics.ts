@@ -21,6 +21,7 @@ export type AnalyticsEventCategory =
   | "template"      // template.published, template.forked, template.deprecated
   | "compliance"    // compliance.check, compliance.alert, compliance.report
   | "governance"    // ratelimit.exceeded, dlp.redaction, scope.denied
+  | "intent"        // intent.composite_request, intent.atomic_session, intent.synthetic_query
   | (string & {});
 
 /** A structured analytics event */
