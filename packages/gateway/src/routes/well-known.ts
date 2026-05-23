@@ -75,7 +75,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
 
   app.get("/.well-known/agent-card.json", async (_request, reply) => {
     const agentCard = {
-      protocolVersion: "0.3.0",
+      protocolVersion: "1.0",
       name: KERNEL_NAME,
       description: KERNEL_DESC,
       url: `${GATEWAY_URL}/a2a`,
