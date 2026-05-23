@@ -1,7 +1,68 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { getAllTemplates, getRegisteredTypes } from "@pcc/contract-builder";
-import type { Result } from "@pcc/spec";
+import { getAllTemplates, getRegisteredTypes, getTemplate } from "@pcc/contract-builder";
+import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
+
+// ── WoT Thing Description helpers ────────────────────────────────────────────
+//
+// Translates a CapabilityTemplate's ParamDef[] into a JSON-Schema-ish
+// object suitable for use as a WoT TD action `input` field.
+//
+function paramDefToJsonSchemaProp(p: ParamDef): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    title: p.label,
+    description: p.description,
+  };
+  if (p.type === "enum") {
+    return {
+      ...base,
+      type: "string",
+      enum: p.options.map((o) => o.value),
+      ...(p.defaultValue !== undefined ? { default: p.defaultValue } : {}),
+    };
+  }
+  if (p.type === "number") {
+    return {
+      ...base,
+      type: "number",
+      minimum: p.min,
+      maximum: p.max,
+      ...(p.unit ? { unit: p.unit } : {}),
+      ...(p.defaultValue !== undefined ? { default: p.defaultValue } : {}),
+    };
+  }
+  if (p.type === "boolean") {
+    return {
+      ...base,
+      type: "boolean",
+      ...(p.defaultValue !== undefined ? { default: p.defaultValue } : {}),
+    };
+  }
+  // string
+  return {
+    ...base,
+    type: "string",
+    ...(p.maxLength ? { maxLength: p.maxLength } : {}),
+    ...(p.defaultValue !== undefined ? { default: p.defaultValue } : {}),
+  };
+}
+
+function buildExecuteInputSchema(template: CapabilityTemplate | undefined): Record<string, unknown> {
+  if (!template) {
+    return { type: "object", properties: {}, additionalProperties: true };
+  }
+  const properties: Record<string, Record<string, unknown>> = {};
+  const required: string[] = [];
+  for (const p of template.params) {
+    properties[p.key] = paramDefToJsonSchemaProp(p);
+    if (p.required) required.push(p.key);
+  }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  };
+}
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 //
@@ -221,6 +282,177 @@ export async function capabilityRoutes(app: FastifyInstance) {
         html: htmlSnippet,
         embedScript: `<script src="https://unpkg.com/claudebuttons/dist/index.js"></script>`,
       };
+    },
+  );
+
+  /**
+   * W3C WoT Thing Description 2.0 for a capability.
+   *
+   * Returns a JSON-LD Thing Description document so any WoT-aware agent can
+   * discover the capability's executable actions, readable properties, and
+   * subscribable events without needing PCC-specific knowledge.
+   *
+   * Mapping:
+   *   Thing.id           = urn:pcc:capability:<capabilityId>
+   *   Thing.title        = capability.name
+   *   Thing.description  = capability.description
+   *   Thing.actions      = { execute: {input = template-derived JSON Schema, output = job-result schema, forms = POST /api/jobs/submit} }
+   *   Thing.properties   = { queueDepth, available, reputation } — read-only
+   *   Thing.events       = { jobStatusChanged } — linked to SSE
+   *   Thing.security     = ["apiKey"] — Bearer
+   *
+   * PUBLIC — CORS *, 5-minute cache.
+   */
+  app.get<{ Params: { id: string } }>(
+    "/api/capabilities/:id/td",
+    async (req, reply) => {
+      const result = await facade.getById(req.params.id);
+      if (!result.success) return sendResult(reply, result);
+      const cap = result.data;
+
+      const gatewayUrl =
+        process.env.PCC_GATEWAY_URL ?? "https://capability.network";
+      const template = getTemplate(cap.type);
+      const inputSchema = buildExecuteInputSchema(template);
+
+      // Minimal job-result output schema. The full JobDetailDTO is too large
+      // to inline; downstream clients fetch it via GET /api/jobs/:jobId.
+      const outputSchema = {
+        type: "object",
+        required: ["jobId", "status"],
+        properties: {
+          jobId: { type: "string", description: "ID of the submitted job" },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "completed", "failed", "cancelled"],
+          },
+          escrowId: { type: "string", description: "ID of the on-chain escrow (set after commit)" },
+        },
+      };
+
+      const td = {
+        "@context": [
+          "https://www.w3.org/2022/wot/td/v1.1",
+          { pcc: "https://capability.network/ns/td#" },
+        ],
+        "@type": "Thing",
+        id: `urn:pcc:capability:${cap.id}`,
+        title: cap.name ?? cap.type,
+        description:
+          cap.description ?? `PCC capability of type ${cap.type} on kernel ${cap.kernelId}.`,
+        version: { instance: "1.0.0" },
+        securityDefinitions: {
+          apiKey: {
+            scheme: "bearer",
+            in: "header",
+            name: "Authorization",
+            format: "jwt",
+            description:
+              "PCC API key (pcc_live_... or pcc_test_...). Provision at POST /api/auth/provision.",
+          },
+        },
+        security: ["apiKey"],
+
+        properties: {
+          queueDepth: {
+            type: "integer",
+            minimum: 0,
+            readOnly: true,
+            description: "Number of jobs currently waiting on this capability",
+            forms: [
+              {
+                href: `${gatewayUrl}/api/capabilities/${cap.id}`,
+                op: ["readproperty"],
+                contentType: "application/json",
+              },
+            ],
+          },
+          available: {
+            type: "boolean",
+            readOnly: true,
+            description: "Whether this capability is currently taking jobs",
+            forms: [
+              {
+                href: `${gatewayUrl}/api/capabilities/${cap.id}`,
+                op: ["readproperty"],
+                contentType: "application/json",
+              },
+            ],
+          },
+          reputation: {
+            type: "integer",
+            minimum: 0,
+            maximum: 1000,
+            readOnly: true,
+            description: "ERC-8004 reputation score for the operating kernel",
+            forms: [
+              {
+                href: `${gatewayUrl}/api/capabilities/${cap.id}`,
+                op: ["readproperty"],
+                contentType: "application/json",
+              },
+            ],
+          },
+        },
+
+        actions: {
+          execute: {
+            title: `Execute ${cap.name ?? cap.type}`,
+            description: `Submit a job to this capability. Maps to POST /api/jobs/submit with capabilityId=${cap.id}.`,
+            input: inputSchema,
+            output: outputSchema,
+            safe: false,
+            idempotent: false,
+            forms: [
+              {
+                href: `${gatewayUrl}/api/jobs/submit`,
+                op: ["invokeaction"],
+                "htv:methodName": "POST",
+                contentType: "application/json",
+                additionalResponses: [
+                  { contentType: "application/json", schema: "outputSchema", success: true },
+                ],
+                "pcc:capabilityId": cap.id,
+                "pcc:kernelId": cap.kernelId,
+              },
+            ],
+          },
+        },
+
+        events: {
+          jobStatusChanged: {
+            description: "Emitted on every status change for a job spawned from this capability",
+            data: {
+              type: "object",
+              properties: {
+                jobId: { type: "string" },
+                status: { type: "string" },
+                progress: { type: "number", minimum: 0, maximum: 100 },
+              },
+            },
+            forms: [
+              {
+                href: `${gatewayUrl}/sse/stream/job/{jobId}`,
+                op: ["subscribeevent"],
+                contentType: "text/event-stream",
+                subprotocol: "sse",
+              },
+            ],
+          },
+        },
+
+        "pcc:capabilityType": cap.type,
+        "pcc:kernelId": cap.kernelId,
+        "pcc:assuranceTiers": cap.assuranceTiers ?? [0, 1, 2, 3],
+        "pcc:pricing": cap.pricing,
+      };
+
+      reply
+        .header("content-type", "application/td+json")
+        .header("access-control-allow-origin", "*")
+        .header("cache-control", "public, max-age=300");
+
+      return td;
     },
   );
 
