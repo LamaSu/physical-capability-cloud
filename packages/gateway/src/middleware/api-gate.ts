@@ -36,12 +36,17 @@ const PUBLIC_EXACT = [
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
-// Covers: /api/capabilities/:id  AND  /api/capabilities/:id/button
-const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button)?$/;
+// Covers: /api/capabilities/:id, /api/capabilities/:id/button, /api/capabilities/:id/td
+const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/;
 
 // T2.7 — operator rating reads are public (reputation surface). The POST
 // /rate route remains auth-gated because it falls outside this regex.
 const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
+
+// Per-kernel A2A agent card is part of the federated discovery surface —
+// /.well-known/agent-descriptions lists it. Must be reachable unauthed by
+// any remote A2A agent.
+const PUBLIC_KERNEL_AGENT_CARD_RE = /^\/api\/kernels\/[^/]+\/agent-card\.json$/;
 
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
@@ -49,6 +54,7 @@ function isPublicRoute(url: string): boolean {
   if (PUBLIC_EXACT.includes(path)) return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
+  if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;
   return false;
 }
 

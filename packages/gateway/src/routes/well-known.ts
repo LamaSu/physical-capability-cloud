@@ -1,4 +1,6 @@
 import type { FastifyInstance } from "fastify";
+import { getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
 
 /**
  * /.well-known/ routes for discovery:
@@ -9,6 +11,16 @@ import type { FastifyInstance } from "fastify";
  * 2. /.well-known/agent-card.json — A2A Agent Card (Google A2A protocol).
  *    Declares PCC capabilities, payment support, and endpoint URLs for
  *    agent-to-agent discovery. See: https://google.github.io/A2A/
+ *
+ * 3. /.well-known/agent-descriptions — ANP CollectionPage (W3C ActivityStreams
+ *    2.0 + JSON-LD) listing every active agent card on this network: the
+ *    gateway's own card plus every active kernel's card. Lets a remote agent
+ *    enumerate the federation without scraping HTML.
+ *    See: https://www.w3.org/TR/activitystreams-core/#collections
+ *
+ * 4. /api/kernels/:kernelId/agent-card.json — Per-kernel A2A agent card,
+ *    synthesized from the kernel + its registered capabilities. Each active
+ *    kernel is its own A2A agent in the federation.
  */
 
 // Configuration — set via environment or defaults to demo values
@@ -226,4 +238,168 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       .header("cache-control", "public, max-age=300")
       .send(agentCard);
   });
+
+  // -----------------------------------------------------------------------
+  // ANP CollectionPage — list every active agent card in the federation
+  // -----------------------------------------------------------------------
+
+  app.get("/.well-known/agent-descriptions", async (_request, reply) => {
+    const { shopKernels } = schema;
+    let kernelItems: string[] = [];
+
+    try {
+      const { db } = getStore();
+      const rows = db
+        .select({ id: shopKernels.id, status: shopKernels.status })
+        .from(shopKernels)
+        .all();
+      // "active" = the operator is at least theoretically reachable
+      kernelItems = rows
+        .filter((r) => r.status === "online" || r.status === "maintenance")
+        .map((r) => `${GATEWAY_URL}/api/kernels/${r.id}/agent-card.json`);
+    } catch {
+      // DB may not be initialised in some test contexts; return only the
+      // network card. The endpoint must never fail just because the DB is
+      // empty.
+    }
+
+    const items = [
+      `${GATEWAY_URL}/.well-known/agent-card.json`,
+      ...kernelItems,
+    ];
+
+    const collection = {
+      "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        { agentCard: "https://google.github.io/A2A/ns#agentCard" },
+      ],
+      type: "CollectionPage",
+      id: `${GATEWAY_URL}/.well-known/agent-descriptions`,
+      partOf: `${GATEWAY_URL}/.well-known/agent-descriptions`,
+      summary: `${KERNEL_NAME} — federated A2A agent descriptions`,
+      totalItems: items.length,
+      items,
+    };
+
+    return reply
+      .header("content-type", "application/ld+json")
+      .header("access-control-allow-origin", "*")
+      .header("cache-control", "public, max-age=300")
+      .send(collection);
+  });
+
+  // -----------------------------------------------------------------------
+  // Per-kernel A2A agent card — every active kernel is its own agent
+  // -----------------------------------------------------------------------
+
+  app.get<{ Params: { kernelId: string } }>(
+    "/api/kernels/:kernelId/agent-card.json",
+    async (request, reply) => {
+      const { shopKernels, capabilities } = schema;
+      const { kernelId } = request.params;
+      let kernelRow:
+        | {
+            id: string;
+            name: string;
+            operatorAddress: string;
+            status: string;
+            version: string;
+          }
+        | undefined;
+      let capTypes: string[] = [];
+
+      try {
+        const { db } = getStore();
+        kernelRow = db
+          .select({
+            id: shopKernels.id,
+            name: shopKernels.name,
+            operatorAddress: shopKernels.operatorAddress,
+            status: shopKernels.status,
+            version: shopKernels.version,
+          })
+          .from(shopKernels)
+          .where(eq(shopKernels.id, kernelId))
+          .get() as typeof kernelRow;
+        if (!kernelRow) {
+          return reply.status(404).send({ error: "kernel_not_found" });
+        }
+        const caps = db
+          .select({ type: capabilities.type })
+          .from(capabilities)
+          .where(eq(capabilities.kernelId, kernelId))
+          .all();
+        capTypes = [...new Set(caps.map((c) => c.type as string))];
+      } catch {
+        return reply.status(500).send({ error: "kernel_lookup_failed" });
+      }
+
+      const cardUrl = `${GATEWAY_URL}/api/kernels/${kernelRow.id}/agent-card.json`;
+
+      const kernelCard = {
+        protocolVersion: "1.0",
+        name: kernelRow.name,
+        description: `Physical Capability Cloud kernel ${kernelRow.name}. ${capTypes.length} capability type(s).`,
+        url: cardUrl,
+        version: kernelRow.version,
+        preferredTransport: "http+sse",
+
+        provider: {
+          organization: "Physical Capability Cloud",
+          url: "https://capability.network",
+        },
+
+        capabilities: {
+          streaming: true,
+          pushNotifications: false,
+          stateTransitionHistory: false,
+        },
+
+        defaultInputModes: ["application/json"],
+        defaultOutputModes: ["application/json", "text/event-stream"],
+
+        securitySchemes: {
+          apiKey: {
+            type: "http",
+            scheme: "bearer",
+            description:
+              "PCC API key. Provision at POST /api/auth/provision.",
+          },
+        },
+
+        security: [{ apiKey: [] }],
+
+        skills: [
+          {
+            id: "pcc-discover",
+            name: "Capability Discovery",
+            description: `Discover capabilities offered by this kernel: ${capTypes.join(", ") || "(none registered)"}.`,
+            tags: ["discovery", "kernel", ...capTypes],
+            inputModes: ["application/json"],
+            outputModes: ["application/json"],
+          },
+          {
+            id: "pcc-submit",
+            name: "Submit Job",
+            description: `Submit a job to this kernel's capabilities. Maps to POST /api/jobs/submit with kernelId=${kernelRow.id}.`,
+            tags: ["job-submission", "kernel"],
+            inputModes: ["application/json"],
+            outputModes: ["application/json", "text/event-stream"],
+          },
+        ],
+
+        "x-pcc-kernel-id": kernelRow.id,
+        "x-pcc-kernel-status": kernelRow.status,
+        "x-pcc-kernel-operator": kernelRow.operatorAddress,
+        "x-pcc-capability-types": capTypes,
+        "x-pcc-agent-package": `${GATEWAY_URL}/api/kernels/${kernelRow.id}/agent-package`,
+      };
+
+      return reply
+        .header("content-type", "application/json")
+        .header("access-control-allow-origin", "*")
+        .header("cache-control", "public, max-age=300")
+        .send(kernelCard);
+    },
+  );
 }
