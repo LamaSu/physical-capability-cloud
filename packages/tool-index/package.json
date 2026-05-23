@@ -1,0 +1,21 @@
+{
+  "name": "@pcc/tool-index",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Embedding-based retrieval over large tool catalogs. Phase 1 indexes PCC's own 218-tool agent-package.json; Phase 3 will aggregate tools from any indexed MCP server. Framework-agnostic — no LangChain dep.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
