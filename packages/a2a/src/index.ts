@@ -25,3 +25,15 @@ export { EncryptedBus } from "./encrypted-bus.js";
 export type { BusLike } from "./encrypted-bus.js";
 export { PersistentMessageBus } from "./persistent-bus.js";
 export type { MessagePersistence, A2AMessagePersistedData, A2AConversationPersistedData } from "./persistence.js";
+// Backend abstraction
+export {
+  InMemoryBackend,
+  subjectFor,
+  ALL_A2A_SUBJECTS,
+  createBackendFromEnv,
+} from "./backends/index.js";
+export type {
+  MessageBusBackend,
+  BackendMessageHandler,
+  BackendSubscription,
+} from "./backends/index.js";
