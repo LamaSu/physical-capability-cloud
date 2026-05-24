@@ -1499,4 +1499,40 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS requests_urgency_idx ON capability_requests(urgency);
     CREATE INDEX IF NOT EXISTS requests_created_at_idx ON capability_requests(created_at);
   `);
+
+  // Universal aggregator (Phase 1) — invocation receipts. One row per
+  // proxied indexed-tool invocation, indexed by content-addressed CID for
+  // fast lookup and by tool id / caller / dcc class for ranking + auditing.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS invocation_receipts (
+      id TEXT PRIMARY KEY,
+      receipt_cid TEXT NOT NULL,
+      schema_version TEXT NOT NULL DEFAULT '1.0',
+      indexed_tool_id TEXT NOT NULL,
+      tool_cid TEXT NOT NULL,
+      tool_schema_hash_at_call TEXT NOT NULL,
+      requested_dcc_class TEXT NOT NULL,
+      effective_dcc_class TEXT NOT NULL,
+      downgrade_reason TEXT,
+      pcc_signature TEXT NOT NULL,
+      pcc_key_id TEXT NOT NULL,
+      upstream_signature TEXT,
+      upstream_key_id TEXT,
+      sigstore_bundle_ref TEXT,
+      tee_quote TEXT,
+      zk_proof TEXT,
+      caller_agent_id TEXT NOT NULL,
+      caller_session_id TEXT NOT NULL,
+      price_paid_usdc TEXT,
+      payment_tx_hash TEXT,
+      pcc_fee_bps INTEGER NOT NULL DEFAULT 0,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS invocation_receipts_cid_idx ON invocation_receipts(receipt_cid);
+    CREATE INDEX IF NOT EXISTS invocation_receipts_tool_idx ON invocation_receipts(indexed_tool_id);
+    CREATE INDEX IF NOT EXISTS invocation_receipts_caller_idx ON invocation_receipts(caller_agent_id);
+    CREATE INDEX IF NOT EXISTS invocation_receipts_dcc_idx ON invocation_receipts(effective_dcc_class);
+    CREATE INDEX IF NOT EXISTS invocation_receipts_created_idx ON invocation_receipts(created_at);
+  `);
 }

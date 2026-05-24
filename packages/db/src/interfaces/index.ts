@@ -235,6 +235,7 @@ import type { IOrchestratorSessionRepository } from "./IOrchestratorSessionRepos
 import type { IRatingRepository } from "./IRatingRepository.js";
 import type { IContributorRepository } from "./IContributorRepository.js";
 import type { IRequestRepository } from "./IRequestRepository.js";
+import type { IInvocationReceiptRepository } from "./IInvocationReceiptRepository.js";
 
 export type {
   IRatingRepository,
@@ -249,6 +250,13 @@ export type {
   RequestInsert,
   RequestsFilter,
 } from "./IRequestRepository.js";
+
+export type {
+  IInvocationReceiptRepository,
+  InvocationReceiptRow,
+  InvocationReceiptInsert,
+  InvocationReceiptFilter,
+} from "./IInvocationReceiptRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -292,4 +300,7 @@ export interface IRepositories {
   // packages/gateway/src/routes/requests.ts. compositionSignature indexed for
   // fast aggregation by the @pcc/demand-intel sketches.
   requests: IRequestRepository;
+  // Universal Aggregator (Phase 1) — per-invocation provenance receipts for
+  // indexed-tool calls proxied through /api/aggregator/invoke.
+  invocationReceipts: IInvocationReceiptRepository;
 }

@@ -90,6 +90,10 @@ export type {
   RequestRow,
   RequestInsert,
   RequestsFilter,
+  IInvocationReceiptRepository,
+  InvocationReceiptRow,
+  InvocationReceiptInsert,
+  InvocationReceiptFilter,
   IAnalyticsRepository,
   AnalyticsEventRow,
   AnalyticsEventInsert,
@@ -128,5 +132,6 @@ export {
   RatingRepository,
   ContributorRepository,
   RequestRepository,
+  InvocationReceiptRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";
