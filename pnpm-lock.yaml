@@ -669,6 +669,9 @@ importers:
       '@pcc/template-physical-operator':
         specifier: workspace:*
         version: link:../agent-onboarder
+      '@pcc/tool-index':
+        specifier: workspace:*
+        version: link:../tool-index
       '@pcc/touchstone':
         specifier: workspace:*
         version: link:../touchstone
