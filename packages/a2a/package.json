@@ -24,6 +24,7 @@
     "@pcc/spec": "workspace:*",
     "@sentry/node": "^10.45.0",
     "nanoid": "^5.0.0",
+    "nats": "^2.29.3",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
