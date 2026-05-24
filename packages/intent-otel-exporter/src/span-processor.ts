@@ -114,7 +114,9 @@ export class IntentSpanProcessor implements SpanProcessor {
       return;
     }
 
-    this.buffer.push(parsed.data);
+    // Zod typing collapses the branded compositionSignature back to plain
+    // string; the regex validation guarantees the shape so the cast is safe.
+    this.buffer.push(parsed.data as DemandEnvelope);
     this.exported++;
 
     if (this.flushIntervalMs === 0 || this.buffer.length >= this.batchSize) {

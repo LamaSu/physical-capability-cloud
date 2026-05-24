@@ -170,7 +170,10 @@ export function defaultMapper(span: MinimalSpan): DemandEnvelope | null {
   if (!isIntentShapedSpan(span)) return null;
   const envelope = spanToDemandEnvelope(span);
   const parsed = DemandEnvelopeSchema.safeParse(envelope);
-  return parsed.success ? parsed.data : null;
+  // Zod typing returns `string` for the composition signature; the runtime
+  // value has already been validated against the 0x[hex]{64} regex, so the
+  // branded-type narrowing is safe.
+  return parsed.success ? (parsed.data as DemandEnvelope) : null;
 }
 
 // ── HTTP forwarder ────────────────────────────────────────────────────────

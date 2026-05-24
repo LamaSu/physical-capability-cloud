@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^1.30.0",
     "@opentelemetry/sdk-trace-base": "^1.30.0",
     "@pcc/spec": "workspace:*"
   },
