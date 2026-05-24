@@ -14,6 +14,10 @@ import { accountingReconcileTemplate } from "./digital/accounting-reconcile.js";
 import { procurementRfqTemplate } from "./digital/procurement-rfq.js";
 import { legalReviewTemplate } from "./digital/legal-review.js";
 import { dataExtractionTemplate } from "./digital/data-extraction.js";
+import { injectionMoldingTemplate } from "./injection-molding.js";
+import { sheetMetalTemplate } from "./sheet-metal.js";
+import { cncTurningTemplate } from "./cnc-turning.js";
+import { cncSwissTemplate } from "./cnc-swiss.js";
 
 const registry = new Map<CapabilityType, CapabilityTemplate>();
 
@@ -49,3 +53,7 @@ registerTemplate(accountingReconcileTemplate);
 registerTemplate(procurementRfqTemplate);
 registerTemplate(legalReviewTemplate);
 registerTemplate(dataExtractionTemplate);
+registerTemplate(injectionMoldingTemplate);
+registerTemplate(sheetMetalTemplate);
+registerTemplate(cncTurningTemplate);
+registerTemplate(cncSwissTemplate);
