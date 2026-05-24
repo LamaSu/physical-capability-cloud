@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import { PricingCalculator } from "../pricing.js";
 import { TemplateResolver } from "../resolver.js";
 import { cncTurningTemplate } from "../templates/cnc-turning.js";
-import { cncSwissTemplate } from "../templates/cnc-swiss.js";
 import { getTemplate } from "../templates/index.js";
 
 const resolver = new TemplateResolver();
@@ -221,42 +220,4 @@ describe("cncTurningTemplate — constraints", () => {
   });
 });
 
-describe("cncSwissTemplate — scaffold", () => {
-  it("is registered under 'cnc-swiss' with v0.1", () => {
-    const t = getTemplate("cnc-swiss");
-    expect(t).toBeDefined();
-    expect(t?.version).toBe("0.1");
-  });
-
-  it("caps OD at 32mm (Swiss guide-bushing limit)", () => {
-    const od = cncSwissTemplate.params.find((p) => p.key === "outerDiameterMm");
-    expect((od as any).max).toBe(32);
-  });
-
-  it("defaults tolerance class to precision (Swiss baseline)", () => {
-    const t = cncSwissTemplate.params.find((p) => p.key === "toleranceClass");
-    expect((t as any).defaultValue).toBe("precision");
-    const opts = (t as any).options as Array<{ value: string }>;
-    const vals = opts.map((o) => o.value);
-    expect(vals).toEqual(["precision", "ultra-precision"]);
-  });
-
-  it("base price reflects Swiss premium ($120)", () => {
-    expect(cncSwissTemplate.basePricingHints?.basePrice).toBe("120.00");
-  });
-
-  it("scaffold renders without exceptions and prices basic config", () => {
-    const sel = {
-      material: "stainless-303",
-      outerDiameterMm: 8,
-      lengthMm: 30,
-      toleranceClass: "precision",
-      quantity: 100,
-    };
-    const options = resolver.resolve(cncSwissTemplate, sel);
-    const result = pricing.calculate(options, sel);
-    expect(result.basePrice).toBe(120);
-    // Per unit $120 × 100 = $12,000
-    expect(result.totalPrice).toBe(12000);
-  });
-});
+// Note: cnc-swiss tests moved to cnc-swiss.test.ts (full v1.0 surface).
