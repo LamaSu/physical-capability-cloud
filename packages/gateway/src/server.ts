@@ -98,6 +98,7 @@ import { getAnalyticsService } from "./services/analytics-service.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
+import { aggregatorRoutes } from "./routes/aggregator/index.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
 import { templateSessionRoutes } from "./routes/template-session.js";
@@ -429,6 +430,9 @@ export async function createGateway(port = 3200) {
   // Touchstone statistical enforcement + ephemeral session keys
   await app.register(touchstoneRoutes);
   await app.register(identitySessionRoutes);
+
+  // Universal Tool Aggregator (Phase 1) — ingest + search + invoke + receipts
+  await app.register(aggregatorRoutes);
 
   // Third-party digital kernel marketplace
   await app.register(kernelMarketplaceRoutes);
