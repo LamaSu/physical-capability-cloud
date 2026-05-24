@@ -53,6 +53,7 @@
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/store": "workspace:*",
+    "@pcc/tool-index": "workspace:*",
     "@pcc/touchstone": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "@sentry/node": "^10.45.0",
