@@ -28,26 +28,86 @@ export async function capabilityRoutes(app: FastifyInstance) {
   // They do not use the facade and do not need sendResult().
 
   /** List all registered capability type strings (e.g. "3d-printing", "cnc") */
-  app.get("/api/capabilities/types", async () => {
-    return { types: getRegisteredTypes() };
-  });
+  app.get(
+    "/api/capabilities/types",
+    {
+      schema: {
+        tags: ["discovery"],
+        summary: "List all registered capability types",
+        description:
+          "Returns the canonical set of capability type identifiers " +
+          "(e.g. 3d-printing, cnc, hplc, laser-cutting). PUBLIC — no auth required.",
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              types: { type: "array", items: { type: "string" } },
+            },
+            required: ["types"],
+          },
+        },
+      },
+    },
+    async () => {
+      return { types: getRegisteredTypes() };
+    },
+  );
 
   /** List all capability templates with pricing hints and parameter metadata */
-  app.get("/api/capabilities/templates", async () => {
-    const templates = getAllTemplates();
-    return {
-      templates: templates.map((t) => ({
-        capabilityType: t.capabilityType,
-        name: t.name,
-        version: t.version,
-        description: t.description,
-        paramCount: t.params.length,
-        groups: [...new Set(t.params.map((p) => p.group))],
-        basePrice: t.basePricingHints?.basePrice,
-        currency: t.basePricingHints?.currency,
-      })),
-    };
-  });
+  app.get(
+    "/api/capabilities/templates",
+    {
+      schema: {
+        tags: ["discovery"],
+        summary: "List capability templates with pricing hints",
+        description:
+          "Returns the structural template for each registered capability " +
+          "type, including parameter group counts and base pricing hints. " +
+          "Use this to build a UI selector before calling /api/build/options.",
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              templates: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: true,
+                  properties: {
+                    capabilityType: { type: "string" },
+                    name: { type: "string" },
+                    version: { type: "string" },
+                    description: { type: "string" },
+                    paramCount: { type: "integer" },
+                    groups: { type: "array", items: { type: "string" } },
+                    basePrice: { type: "number" },
+                    currency: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async () => {
+      const templates = getAllTemplates();
+      return {
+        templates: templates.map((t) => ({
+          capabilityType: t.capabilityType,
+          name: t.name,
+          version: t.version,
+          description: t.description,
+          paramCount: t.params.length,
+          groups: [...new Set(t.params.map((p) => p.group))],
+          basePrice: t.basePricingHints?.basePrice,
+          currency: t.basePricingHints?.currency,
+        })),
+      };
+    },
+  );
 
   // ── DB-backed routes (via CapabilityFacade) ─────────────────────────────
 
@@ -60,6 +120,38 @@ export async function capabilityRoutes(app: FastifyInstance) {
    */
   app.get<{ Querystring: { offset?: number; limit?: number } }>(
     "/api/capabilities",
+    {
+      schema: {
+        tags: ["discovery"],
+        summary: "List capability instances (paginated)",
+        description:
+          "Returns a paginated set of CapabilityDTO records spanning all " +
+          "registered kernels. Each record includes type, materials, " +
+          "tolerances, pricing, location, plus enrichment fields " +
+          "(reputation, queueDepth, available, kernelStatus). PUBLIC.",
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            offset: { type: "integer", minimum: 0, default: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              items: { type: "array", items: { type: "object", additionalProperties: true } },
+              total: { type: "integer" },
+              offset: { type: "integer" },
+              limit: { type: "integer" },
+              hasMore: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
     async (req, reply) => {
       const result = await facade.list({}, {
         offset: req.query.offset,

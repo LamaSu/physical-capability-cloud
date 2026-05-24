@@ -13,16 +13,52 @@ export async function buildRoutes(app: FastifyInstance) {
       selections?: Record<string, unknown>;
       profileId?: string;
     };
-  }>("/api/build/options", async (req) => {
-    const { type, selections = {}, profileId } = req.body;
-    const options = builder.getBuildOptions(
-      type as CapabilityType,
-      selections as Record<string, string | number | boolean | string[]>,
-      profileId,
-    );
-    pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/options", type } });
-    return { options };
-  });
+  }>(
+    "/api/build/options",
+    {
+      schema: {
+        tags: ["contract-builder"],
+        summary: "Get parameter options for a capability type",
+        description:
+          "Returns the parameter groups and allowed values for the given " +
+          "capability, optionally filtered by partial selections. Used to " +
+          "drive a multi-step configurator UI.",
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type"],
+          properties: {
+            type: { type: "string", description: "Capability type." },
+            selections: {
+              type: "object",
+              additionalProperties: true,
+              description: "Partial selections to narrow available options.",
+            },
+            profileId: { type: "string" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              options: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { type, selections = {}, profileId } = req.body;
+      const options = builder.getBuildOptions(
+        type as CapabilityType,
+        selections as Record<string, string | number | boolean | string[]>,
+        profileId,
+      );
+      pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/options", type } });
+      return { options };
+    },
+  );
 
   // Calculate price (synchronous)
   app.post<{
@@ -31,16 +67,51 @@ export async function buildRoutes(app: FastifyInstance) {
       selections: Record<string, unknown>;
       profileId?: string;
     };
-  }>("/api/build/price", async (req) => {
-    const { type, selections, profileId } = req.body;
-    const result = builder.calculatePrice(
-      type as CapabilityType,
-      selections as Record<string, string | number | boolean | string[]>,
-      profileId,
-    );
-    pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/price", type } });
-    return { pricing: result };
-  });
+  }>(
+    "/api/build/price",
+    {
+      schema: {
+        tags: ["contract-builder"],
+        summary: "Calculate price for a configured capability",
+        description:
+          "Returns the itemized price (base + adjustments + currency) " +
+          "for the given selections without committing to a contract.",
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "selections"],
+          properties: {
+            type: { type: "string", description: "Capability type." },
+            selections: {
+              type: "object",
+              additionalProperties: true,
+              description: "Complete parameter selections.",
+            },
+            profileId: { type: "string" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              pricing: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { type, selections, profileId } = req.body;
+      const result = builder.calculatePrice(
+        type as CapabilityType,
+        selections as Record<string, string | number | boolean | string[]>,
+        profileId,
+      );
+      pipelineTelemetry.emit("pipeline-" + Date.now(), "quote_request", "completed", { metadata: { endpoint: "/api/build/price", type } });
+      return { pricing: result };
+    },
+  );
 
   // Build contract (synchronous)
   app.post<{
@@ -50,15 +121,62 @@ export async function buildRoutes(app: FastifyInstance) {
       assuranceTier: number;
       profileId?: string;
     };
-  }>("/api/build/contract", async (req) => {
-    const { type, selections, assuranceTier, profileId } = req.body;
-    const contract = builder.buildContract(
-      type as CapabilityType,
-      selections as Record<string, string | number | boolean | string[]>,
-      assuranceTier as AssuranceTier,
-      profileId,
-    );
-    pipelineTelemetry.emit("pipeline-" + Date.now(), "contract_build", "completed", { metadata: { endpoint: "/api/build/contract", type, assuranceTier } });
-    return { contract };
-  });
+  }>(
+    "/api/build/contract",
+    {
+      schema: {
+        tags: ["contract-builder"],
+        summary: "Build a complete capability contract",
+        description:
+          "Synchronously builds a contract for the given capability type with " +
+          "the provided parameter selections and assurance tier (0-3). Returns " +
+          "an unsigned contract ready for escrow funding via /api/escrow/fund.",
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "selections", "assuranceTier"],
+          properties: {
+            type: {
+              type: "string",
+              description: "Capability type (e.g. '3d-printing', 'cnc', 'hplc').",
+            },
+            selections: {
+              type: "object",
+              additionalProperties: true,
+              description: "Parameter selections (material, infill, layerHeight...).",
+            },
+            assuranceTier: {
+              type: "integer",
+              enum: [0, 1, 2, 3],
+              description: "0=self-attested, 1=verified, 2=certified, 3=sovereign.",
+            },
+            profileId: {
+              type: "string",
+              description: "Optional pricing profile override.",
+            },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              contract: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { type, selections, assuranceTier, profileId } = req.body;
+      const contract = builder.buildContract(
+        type as CapabilityType,
+        selections as Record<string, string | number | boolean | string[]>,
+        assuranceTier as AssuranceTier,
+        profileId,
+      );
+      pipelineTelemetry.emit("pipeline-" + Date.now(), "contract_build", "completed", { metadata: { endpoint: "/api/build/contract", type, assuranceTier } });
+      return { contract };
+    },
+  );
 }

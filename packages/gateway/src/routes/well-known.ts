@@ -73,7 +73,40 @@ export async function wellKnownRoutes(app: FastifyInstance) {
   // MPP is the default; x402 is legacy opt-in via PCC_X402_LEGACY=true
   const mppEnabled = process.env.PCC_X402_LEGACY !== "true";
 
-  app.get("/.well-known/agent-card.json", async (_request, reply) => {
+  app.get(
+    "/.well-known/agent-card.json",
+    {
+      schema: {
+        tags: ["well-known"],
+        summary: "Google A2A Agent Card discovery document",
+        description:
+          "Returns the A2A protocol Agent Card declaring PCC's capabilities, " +
+          "skills (discover/quote/submit/verify/settle), payment support, " +
+          "and security schemes. Used by agent-to-agent discovery. " +
+          "See https://google.github.io/A2A/. PUBLIC.",
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              protocolVersion: { type: "string" },
+              name: { type: "string" },
+              description: { type: "string" },
+              url: { type: "string" },
+              version: { type: "string" },
+              preferredTransport: { type: "string" },
+              provider: { type: "object", additionalProperties: true },
+              capabilities: { type: "object", additionalProperties: true },
+              skills: {
+                type: "array",
+                items: { type: "object", additionalProperties: true },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
     const agentCard = {
       protocolVersion: "0.3.0",
       name: KERNEL_NAME,
@@ -225,5 +258,6 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       .header("access-control-allow-origin", "*")
       .header("cache-control", "public, max-age=300")
       .send(agentCard);
-  });
+    },
+  );
 }

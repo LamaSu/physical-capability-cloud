@@ -135,6 +135,59 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
    */
   app.post<{ Body: SubmitJobInput & { captureVerdictId?: string } }>(
     "/api/jobs/submit",
+    {
+      schema: {
+        tags: ["jobs"],
+        summary: "Submit a job for execution on a kernel",
+        description:
+          "Async fire-and-forget submission. Validates capability + " +
+          "capture-verification policy on the target kernel, persists the " +
+          "job, and routes to the kernel (local or external). Returns the " +
+          "newly-created job DTO.",
+        security: [{ bearer: [] }],
+        body: {
+          type: "object",
+          additionalProperties: true,
+          required: ["kernelId"],
+          properties: {
+            kernelId: { type: "string", description: "Target kernel ID." },
+            capabilityId: { type: "string", description: "Capability to invoke." },
+            capabilityType: {
+              type: "string",
+              description: "Type for fuzzy match if capabilityId omitted.",
+            },
+            params: {
+              type: "object",
+              additionalProperties: true,
+              description: "Job parameters (material, quantity, etc).",
+            },
+            assuranceTier: {
+              type: "integer",
+              enum: [0, 1, 2, 3],
+              description: "Required assurance tier for evidence.",
+            },
+            captureVerdictId: {
+              type: "string",
+              description:
+                "Optional CVP verdict satisfying the kernel's operator policy. " +
+                "Required when minCaptureClass or requireAnchor is set.",
+            },
+          },
+        },
+        response: {
+          200: { type: "object", additionalProperties: true },
+          403: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              error: { type: "string" },
+              message: { type: "string" },
+              kernelId: { type: "string" },
+            },
+          },
+        },
+      },
+    },
     async (req, reply) => {
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
 
