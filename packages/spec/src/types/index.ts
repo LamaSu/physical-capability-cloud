@@ -43,3 +43,5 @@ export * from "./composition-manifest.js";
 export * from "./training-manifest.js";
 // Universal Tool Aggregator (Phase 1)
 export * from "./dcc.js";
+export * from "./indexed-tool.js";
+export * from "./invocation-receipt.js";

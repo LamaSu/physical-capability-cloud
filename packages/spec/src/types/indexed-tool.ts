@@ -190,7 +190,7 @@ export interface DriftAlertSummary {
 // ---------------------------------------------------------------------------
 
 /** A peer that also carries this tool's index entry. Phase 5 federation. */
-export interface PeerEndpoint {
+export interface IndexedToolPeerEndpoint {
   /** Identifier per the federation peer registry. */
   peerId: string;
   /** Public endpoint where the peer serves /api/aggregator/. */
@@ -302,7 +302,7 @@ export interface IndexedTool {
 
   // ----- Federation ------------------------------------------------------
   /** Other peers carrying this tool's index entry. Phase 5 only. */
-  hostingPeers: PeerEndpoint[];
+  hostingPeers: IndexedToolPeerEndpoint[];
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +371,7 @@ const DriftAlertSummarySchema = z.object({
   toSchemaHash: SHA256Schema.optional(),
 });
 
-const PeerEndpointSchema = z.object({
+const IndexedToolPeerEndpointSchema = z.object({
   peerId: z.string().min(1),
   url: z.string().url(),
   lastSeenAt: z.string().datetime(),
@@ -428,5 +428,5 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   meanLatencyMs: z.number().nonnegative().optional(),
   driftAlerts: z.array(DriftAlertSummarySchema),
   schemaHashHistory: z.array(SHA256Schema),
-  hostingPeers: z.array(PeerEndpointSchema),
+  hostingPeers: z.array(IndexedToolPeerEndpointSchema),
 }) as unknown as z.ZodType<IndexedTool>;
