@@ -9,6 +9,8 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import fastifySwagger from "@fastify/swagger";
+import fastifySwaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
@@ -214,6 +216,50 @@ export async function createGateway(port = 3200) {
       : require("node:crypto").randomBytes(32).toString("hex"));
   await app.register(cookie, { secret: cookieSecret });
   await app.register(websocket);
+
+  // OpenAPI 3.x spec generator — MUST register BEFORE any route plugins so the
+  // onRoute hook captures their schema declarations. Spec exposed at
+  // GET /openapi.json (raw JSON) and GET /docs (Swagger UI). Required for
+  // APIs.guru / Smithery / mcp.so submission per docs/AGENT_NETWORK_RUNBOOK.md.
+  const gatewayUrlForOpenApi =
+    process.env.PCC_GATEWAY_URL ?? "https://capability.network";
+  await app.register(fastifySwagger, {
+    openapi: {
+      info: {
+        title: "Physical Capability Cloud Gateway",
+        version: process.env.npm_package_version ?? "0.1.0",
+        description:
+          "Agent-native API for discovering and invoking physical capabilities. " +
+          "See https://capability.network/agent-package.json for the 218-tool agent package.",
+      },
+      servers: [{ url: gatewayUrlForOpenApi }],
+      components: {
+        securitySchemes: {
+          bearer: {
+            type: "http",
+            scheme: "bearer",
+            description:
+              "PCC API key (pcc_live_...). Provision at POST /api/auth/provision.",
+          },
+        },
+      },
+    },
+  });
+  await app.register(fastifySwaggerUi, {
+    routePrefix: "/docs",
+    uiConfig: {
+      docExpansion: "list",
+      deepLinking: true,
+    },
+  });
+
+  // Expose the raw OpenAPI JSON document. PUBLIC — referenced by directory
+  // submissions and external tooling (APIs.guru, Smithery, mcp.so).
+  app.get("/openapi.json", async (_req, reply) => {
+    reply.header("Access-Control-Allow-Origin", "*");
+    reply.header("Cache-Control", "public, max-age=300");
+    return app.swagger();
+  });
 
   // Decorate request with userId (set by requireAuth / optionalAuth hooks)
   app.decorateRequest("userId", null);

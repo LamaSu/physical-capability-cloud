@@ -22,6 +22,7 @@ const PUBLIC_PREFIXES = [
   "/api/dht/",                  // DHT discovery is public (distributed capability queries)
   "/api/marketplace/",          // Marketplace browsing is public (see what's available)
   "/.well-known/",
+  "/docs",                      // Swagger UI (and its static assets) is public
 ];
 
 const PUBLIC_EXACT = [
@@ -33,6 +34,7 @@ const PUBLIC_EXACT = [
                                 // sub-paths like /approve, /reject, /activate require auth
   "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
   "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
+  "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
