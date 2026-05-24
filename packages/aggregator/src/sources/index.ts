@@ -8,3 +8,10 @@
 
 export { McpSourceAdapter, makeMcpSourceAdapter } from "./mcp.js";
 export { OpenApiSourceAdapter, makeOpenApiSourceAdapter } from "./openapi.js";
+export {
+  MCPRegistryCrawler,
+  makeMCPRegistryCrawler,
+  type SupportedRegistry,
+  type MCPRegistryCrawlerOptions,
+  type CrawlResult,
+} from "./mcp-registry-crawler.js";
