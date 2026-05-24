@@ -197,11 +197,17 @@ export const sheetMetalTemplate: CapabilityTemplate = {
     },
 
     // ── 5. Bend parameters ──
+    // NOTE: bendCount + bendTier are kept always-visible (rather than
+    // conditional on operations=form-bend) because the resolver's
+    // visibleWhen check uses strict equality (===), which doesn't match
+    // when 'operations' is a multi-select array. UI clients should hide
+    // these inputs when form-bend isn't in operations; backend pricing
+    // engages them only when the user supplies a value.
     {
       type: "number",
       key: "bendCount",
       label: "Bend Count",
-      description: "Number of bends in the part.",
+      description: "Number of bends in the part. (Only meaningful when 'form-bend' op is selected.)",
       required: false,
       order: 6,
       group: "Process",
@@ -209,18 +215,17 @@ export const sheetMetalTemplate: CapabilityTemplate = {
       max: 50,
       step: 1,
       defaultValue: 0,
-      visibleWhen: { param: "operations", equals: "form-bend" },
     },
     {
       type: "enum",
       key: "bendTier",
       label: "Bend Complexity Tier",
-      description: "Simple = 90° flange. Complex = hemming, joggling, multi-axis. Sharp-radius = ≤material thickness.",
+      description:
+        "Simple = 90° flange. Complex = hemming, joggling, multi-axis. Sharp-radius = ≤material thickness. (Only meaningful when 'form-bend' op is selected.)",
       required: false,
       order: 7,
       group: "Process",
       defaultValue: "simple",
-      visibleWhen: { param: "operations", equals: "form-bend" },
       options: [
         { value: "simple", label: "Simple (90° flange)" },
         {
@@ -246,12 +251,12 @@ export const sheetMetalTemplate: CapabilityTemplate = {
       type: "enum",
       key: "pemHardware",
       label: "PEM Hardware Type",
-      description: "PEM = Penn Engineering manufactured. Press-fit fasteners.",
+      description:
+        "PEM = Penn Engineering manufactured. Press-fit fasteners. (Only meaningful when 'pem-insert' op is selected.)",
       required: false,
       order: 8,
       group: "Process",
       multi: true,
-      visibleWhen: { param: "operations", equals: "pem-insert" },
       options: [
         { value: "pem-nut", label: "PEM Nut (S/SP/SS)" },
         { value: "pem-stud", label: "PEM Stud (FH/FHS/HFS)" },
@@ -266,12 +271,12 @@ export const sheetMetalTemplate: CapabilityTemplate = {
       type: "enum",
       key: "weldType",
       label: "Weld Type",
-      description: "Required when 'weld' is selected.",
+      description:
+        "(Only meaningful when 'weld' op is selected.) TIG/MIG/spot/robotic.",
       required: false,
       order: 9,
       group: "Process",
       defaultValue: "tig",
-      visibleWhen: { param: "operations", equals: "weld" },
       options: [
         { value: "tig", label: "TIG (cosmetic, slow)" },
         {
@@ -295,11 +300,11 @@ export const sheetMetalTemplate: CapabilityTemplate = {
       type: "enum",
       key: "weldCert",
       label: "Weld Certification",
-      description: "Welder qualification standard. Required for aerospace/defense.",
+      description:
+        "Welder qualification standard. Required for aerospace/defense. (Only meaningful when 'weld' op is selected.)",
       required: false,
       order: 10,
       group: "Process",
-      visibleWhen: { param: "operations", equals: "weld" },
       options: [
         { value: "none", label: "None (uncertified weld)" },
         {
