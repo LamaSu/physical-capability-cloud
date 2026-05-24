@@ -23,6 +23,8 @@ import { AnalyticsRepository } from "./analytics.js";
 import { RatingRepository } from "./ratings.js";
 import { OrchestratorSessionRepository } from "./orchestrator-sessions.js";
 import { ContributorRepository } from "./contributor.js";
+import { RequestRepository } from "./requests.js";
+import { InvocationReceiptRepository } from "./invocation-receipts.js";
 
 export {
   KernelRepository,
@@ -51,6 +53,8 @@ export {
   RatingRepository,
   OrchestratorSessionRepository,
   ContributorRepository,
+  RequestRepository,
+  InvocationReceiptRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -81,6 +85,8 @@ export function buildRepositories(db: StoreDB) {
     ratings: new RatingRepository(db),
     orchestratorSessions: new OrchestratorSessionRepository(db),
     contributors: new ContributorRepository(db),
+    requests: new RequestRepository(db),
+    invocationReceipts: new InvocationReceiptRepository(db),
   };
 }
 

@@ -1,0 +1,32 @@
+{
+  "name": "@pcc/aggregator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Universal tool aggregator — ingestion pipeline, IndexedTool registry, receipt signer",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.7.0",
+    "@pcc/spec": "workspace:*",
+    "@pcc/verifier": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

@@ -340,6 +340,28 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
 
+  packages/aggregator:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^1.7.0
+        version: 1.8.0
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
+      '@pcc/verifier':
+        specifier: workspace:*
+        version: link:../verifier
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
   packages/bundler:
     dependencies:
       '@pcc/contracts':
@@ -455,6 +477,19 @@ importers:
         specifier: ^1.6.1
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
 
+  packages/demand-intel:
+    dependencies:
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
+      '@pcc/store':
+        specifier: workspace:*
+        version: link:../db
+    devDependencies:
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
   packages/demo-video:
     dependencies:
       '@remotion/animation-utils':
@@ -544,6 +579,9 @@ importers:
       '@fastify/websocket':
         specifier: ^10.0.1
         version: 10.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+      '@noble/hashes':
+        specifier: ^1.7.0
+        version: 1.8.0
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.0
@@ -577,6 +615,9 @@ importers:
       '@pcc/agent-user':
         specifier: workspace:*
         version: link:../agent-user
+      '@pcc/aggregator':
+        specifier: workspace:*
+        version: link:../aggregator
       '@pcc/bundler':
         specifier: workspace:*
         version: link:../bundler
@@ -586,6 +627,9 @@ importers:
       '@pcc/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@pcc/demand-intel':
+        specifier: workspace:*
+        version: link:../demand-intel
       '@pcc/dht':
         specifier: workspace:*
         version: link:../dht

@@ -30,9 +30,11 @@ import type {
   SessionTransition,
   CreateSessionRequest,
   WorkflowChallenge,
+  DemandEnvelope,
 } from "@pcc/spec";
-import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
+import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { createJobFromSession } from "./paid-job-flow.js";
+import { getEventBus } from "../services/event-bus.js";
 
 const challengeService = new ChallengeService();
 
@@ -137,6 +139,39 @@ export async function negotiationRoutes(app: FastifyInstance) {
       }
 
       pipelineTelemetry.emit(sessionId, "negotiation", "started", { metadata: { kernelId: body.kernelId, capabilityType: body.capabilityType } });
+
+      // ── Demand-intel capture point B — atomic session intent ───────
+      // Single-capabilityType, atomic intent. Emit best-effort; failures
+      // must never break session creation.
+      try {
+        const compositionSignature = computeCompositionSignature(
+          [body.capabilityType],
+          [],
+        );
+        const envelope: DemandEnvelope = {
+          id: `intent-${sessionId}`,
+          source: "negotiate_api",
+          compositionSignature,
+          capabilityTypes: [body.capabilityType],
+          summary: `Negotiate atomic session for ${body.capabilityType}`.slice(0, 200),
+          budgetBand: budgetToBand(0),
+          urgencyBand: "standard",
+          originAgentId: body.userAgentId,
+          createdAt: now.toISOString(),
+        };
+        getEventBus().publish({
+          eventType: "intent.atomic_session",
+          category: "intent",
+          actorId: body.userAgentId,
+          actorType: "agent",
+          resourceType: "intent",
+          resourceId: envelope.id,
+          payload: envelope as unknown as Record<string, unknown>,
+        });
+      } catch {
+        // best-effort
+      }
+
       return {
         session,
         resolvedOptions,

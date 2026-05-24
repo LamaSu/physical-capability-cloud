@@ -86,6 +86,19 @@ export type {
   RatingRow,
   RatingInsert,
   RatingAggregate,
+  IRequestRepository,
+  RequestRow,
+  RequestInsert,
+  RequestsFilter,
+  IInvocationReceiptRepository,
+  InvocationReceiptRow,
+  InvocationReceiptInsert,
+  InvocationReceiptFilter,
+  IAnalyticsRepository,
+  AnalyticsEventRow,
+  AnalyticsEventInsert,
+  MaterializedViewRow,
+  MaterializedViewInsert,
 } from "./interfaces/index.js";
 export type {
   IOrchestratorSessionRepository,
@@ -118,5 +131,7 @@ export {
   OrchestratorSessionRepository,
   RatingRepository,
   ContributorRepository,
+  RequestRepository,
+  InvocationReceiptRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";
