@@ -1,0 +1,432 @@
+/**
+ * IndexedTool — canonical internal form for any tool the aggregator catalogues.
+ *
+ * Superset of OASF (AGNTCY), MCP `Tool` (Anthropic), and OpenAPI `Operation`
+ * (OAS 3.x). One IndexedTool entry represents one callable surface — whether
+ * that's an MCP tool, a REST endpoint, an A2A skill, or a registered Claude
+ * skill — normalized so the search index, ranking expression, and provenance
+ * layer all operate on a single shape.
+ *
+ * See: ai/research/universal-tool-aggregator-2026-05-23.md §2.3 + Appendix B
+ *
+ * Notes on field-set choices:
+ *
+ * - `cid` is sha256 of the canonical JSON projection of the IndexedTool's
+ *   *stable* fields (id, source, upstreamUrl, inputSchema, outputSchema,
+ *   description, skills, actionClass, schemaHashHistory[-1]). This is the
+ *   content-addressed identifier that propagates cleanly to IPFS/AGNTCY DHT.
+ *   Volatile fields like `lastInvokedAt` and `invocationCount` are deliberately
+ *   NOT part of the CID — otherwise the CID would change on every call.
+ *
+ * - `actionClass` reuses PCC's existing 5-class taxonomy from
+ *   `~/.claude/plugins/action-policy.json` so the per-agent allowlist
+ *   machinery already gates which agents may invoke which tools.
+ *
+ * - `assuranceCeiling` is a HARD CAP. A tool indexed from anonymous Common
+ *   Crawl can never be invoked above DCC1 even if the caller asks for DCC5.
+ *   This mirrors CVP's "ceiling" concept (capture.ts DetectionResult.ceiling).
+ *
+ * - `trustTier` is determined at ingest by the source + verification result.
+ *   Not user-configurable. Promotion path: claim via GitHub OAuth ->
+ *   federation agreement -> partner.
+ *
+ * - `cpFiveMcpScore` (0..13) carries the CP.5.MCP Security Profile result so
+ *   consumers can filter for "minimum 10/13 controls passed".
+ *
+ * - `schemaHashHistory` is APPEND-ONLY. Each successful re-fetch that yields
+ *   a different schema hash appends one entry. Used to detect drift (§10) and
+ *   to bind invocation receipts to the exact schema version that was live at
+ *   call time (`toolSchemaHashAtCall` in InvocationReceipt).
+ *
+ * Pure types + Zod schema; no runtime crypto, no fetch / IO.
+ */
+
+import { z } from "zod";
+import type { Id, Timestamp, SHA256 } from "./common.js";
+import { DigitalCaptureClass } from "./dcc.js";
+
+// ---------------------------------------------------------------------------
+// Trust tiers
+// ---------------------------------------------------------------------------
+
+/**
+ * Six trust tiers governing what an indexed tool may be invoked as.
+ *
+ * Numeric ordering matches spec §7 (-1 .. 4). `QUARANTINED` (-1) means the
+ * tool failed a critical Gate A check — still indexed for visibility, never
+ * callable.
+ */
+export enum TrustTier {
+  QUARANTINED = "QUARANTINED",
+  UNTRUSTED = "UNTRUSTED",
+  AUTO_INDEXED = "AUTO_INDEXED",
+  VERIFIED_PUBLISHER = "VERIFIED_PUBLISHER",
+  VERIFIED_PARTNER = "VERIFIED_PARTNER",
+  PCC_NATIVE = "PCC_NATIVE",
+}
+
+/** Numeric ordering: -1 (QUARANTINED) .. 4 (PCC_NATIVE) per spec §7. */
+export const TRUST_TIER_NUMERIC: Record<TrustTier, -1 | 0 | 1 | 2 | 3 | 4> = {
+  [TrustTier.QUARANTINED]: -1,
+  [TrustTier.UNTRUSTED]: 0,
+  [TrustTier.AUTO_INDEXED]: 1,
+  [TrustTier.VERIFIED_PUBLISHER]: 2,
+  [TrustTier.VERIFIED_PARTNER]: 3,
+  [TrustTier.PCC_NATIVE]: 4,
+};
+
+/**
+ * Max DCC class each tier is allowed to attest at. QUARANTINED maps to a
+ * sentinel (never invokable; consumer must check trustTier !== QUARANTINED
+ * before calling). UNTRUSTED is the lowest invokable tier and caps at DCC1.
+ */
+export const TRUST_TIER_DCC_CEILING: Record<TrustTier, DigitalCaptureClass> = {
+  [TrustTier.QUARANTINED]: DigitalCaptureClass.DCC0,
+  [TrustTier.UNTRUSTED]: DigitalCaptureClass.DCC1,
+  [TrustTier.AUTO_INDEXED]: DigitalCaptureClass.DCC2,
+  [TrustTier.VERIFIED_PUBLISHER]: DigitalCaptureClass.DCC3,
+  [TrustTier.VERIFIED_PARTNER]: DigitalCaptureClass.DCC4,
+  [TrustTier.PCC_NATIVE]: DigitalCaptureClass.DCC5,
+};
+
+// ---------------------------------------------------------------------------
+// Action class — PCC's existing 5-class taxonomy
+// ---------------------------------------------------------------------------
+
+/** Aligned with `~/.claude/plugins/action-policy.json`. */
+export type IndexedToolActionClass =
+  | "read"
+  | "write"
+  | "exec"
+  | "network"
+  | "credential";
+
+// ---------------------------------------------------------------------------
+// Source attribution
+// ---------------------------------------------------------------------------
+
+/** Which directory/feed/crawl this tool was discovered from. */
+export type ToolSourceType =
+  | "anthropic-registry"
+  | "glama"
+  | "mcp-so"
+  | "smithery"
+  | "pulsemcp"
+  | "mcp-directory"
+  | "apis-guru"
+  | "common-crawl"
+  | "agntcy-dht"
+  | "nanda-index"
+  | "well-known"
+  | "user-submission"
+  | "pcc-native"
+  | "openapi-doc";
+
+/** Attribution + ingest snapshot for a single tool source. */
+export interface ToolSource {
+  type: ToolSourceType;
+  /** URL the tool descriptor was fetched from. */
+  url: string;
+  /** ISO 8601 timestamp the descriptor was fetched. */
+  fetchedAt: Timestamp;
+  /** Source-specific signal snapshot (e.g. Glama scorecard) for reproducibility. */
+  scoreSnapshot?: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// Schema fragments (loose JSONSchema view)
+// ---------------------------------------------------------------------------
+
+/**
+ * A loose JSON Schema view. The aggregator does not validate JSONSchema
+ * structurally — it stores whatever the upstream returned and hashes it for
+ * drift detection. Downstream consumers use Ajv or similar to validate
+ * invocation arguments.
+ */
+export type JSONSchemaLoose = Record<string, unknown>;
+
+// ---------------------------------------------------------------------------
+// Verification / vetting subset
+// ---------------------------------------------------------------------------
+
+/** Compact view of a vetting outcome. Full report lives in `ai/supervisor/`. */
+export interface VetReportSummary {
+  /** Overall verdict from `harness vet`. */
+  verdict: "PASS" | "WARN" | "FAIL";
+  /** Path to the full report on disk, relative to project root. */
+  reportPath?: string;
+  /** Number of critical vulnerabilities found (0 ideal). */
+  critical: number;
+  /** Number of high vulnerabilities found. */
+  high: number;
+  /** Number of secret findings (0 ideal). */
+  secrets: number;
+  /** True iff malware scanner flagged the artifact. */
+  malware: boolean;
+  /** True iff prompt-injection scanner found suspicious patterns in description. */
+  promptInjection: boolean;
+}
+
+/** A drift alert raised when a tool's schema hash changes between fetches. */
+export interface DriftAlertSummary {
+  /** Detected drift type. */
+  type:
+    | "schema_changed"
+    | "endpoint_404"
+    | "auth_changed"
+    | "tools_list_changed";
+  severity: "low" | "medium" | "high" | "critical";
+  /** ISO 8601 detection timestamp. */
+  detectedAt: Timestamp;
+  /** Free-form context (e.g. "added 2 fields to inputSchema, removed 1"). */
+  message: string;
+  /** Schema hashes flanking the drift. */
+  fromSchemaHash?: SHA256;
+  toSchemaHash?: SHA256;
+}
+
+// ---------------------------------------------------------------------------
+// Federation hint (Phase 5)
+// ---------------------------------------------------------------------------
+
+/** A peer that also carries this tool's index entry. Phase 5 federation. */
+export interface PeerEndpoint {
+  /** Identifier per the federation peer registry. */
+  peerId: string;
+  /** Public endpoint where the peer serves /api/aggregator/. */
+  url: string;
+  /** Last successful sync with this peer (ISO 8601). */
+  lastSeenAt: Timestamp;
+}
+
+// ---------------------------------------------------------------------------
+// Pricing hint (scraped or vendor-provided)
+// ---------------------------------------------------------------------------
+
+/** Compact pricing hint surfaced in search results. Vendor's source-of-truth lives upstream. */
+export interface PricingHint {
+  /** Per-call cost in USDC. May be 0 for free tiers. */
+  perCallUsdc: string;
+  /** Per-1k-token cost where applicable (LLM-style tools). */
+  perKTokenUsdc?: string;
+  /** Vendor tier label (e.g. "free", "basic", "pro"). */
+  tierLabel?: string;
+  /** Whether the vendor has set a fixed price or accepts auctions. */
+  mode?: "fixed" | "auction";
+}
+
+// ---------------------------------------------------------------------------
+// IndexedTool — the canonical record
+// ---------------------------------------------------------------------------
+
+/**
+ * A single normalized, indexed tool record.
+ *
+ * One entry per callable surface. Aggregator pipelines write/update this;
+ * `/api/aggregator/tools/search` returns this; the invoke proxy reads
+ * this to enforce trust-tier ceilings before forwarding.
+ */
+export interface IndexedTool {
+  // ----- Identity --------------------------------------------------------
+  /** Internal id: `sha256:<canonical-name>`. Stable across re-fetches. */
+  id: Id;
+  /** Content-addressed identifier — sha256 over the stable-field canonical JSON. */
+  cid: SHA256;
+  /** Semver if available, else ingestion date in ISO 8601. */
+  version: string;
+
+  // ----- Source / provenance of the tool descriptor (not invocations) -----
+  source: ToolSource;
+  ingestedAt: Timestamp;
+  ingestionMethod:
+    | "mcp-list"
+    | "openapi"
+    | "a2a-card"
+    | "oasf"
+    | "manual"
+    | "wellknown";
+  /** OCI referrer ref if the upstream record is Sigstore-signed. */
+  sigstoreBundle?: string;
+
+  // ----- Upstream identity ----------------------------------------------
+  /** Upstream's own name for this tool (may collide across sources). */
+  upstreamId?: string;
+  /** Canonical URL to invoke the tool. */
+  upstreamUrl: string;
+  /** Org / maintainer string. */
+  upstreamVendor?: string;
+
+  // ----- OASF-compatible classification ---------------------------------
+  /** Dotted skill taxonomy: ["nlp.summarization.abstractive", ...]. */
+  skills: string[];
+  /** ["dev", "data", "creative", ...]. */
+  domains: string[];
+  /** Free-form capability descriptors. */
+  features: string[];
+
+  // ----- MCP-compatible tool shape ---------------------------------------
+  /** Loose JSON Schema for the input args. */
+  inputSchema: JSONSchemaLoose;
+  /** Optional output schema. */
+  outputSchema?: JSONSchemaLoose;
+  /** Auto-generated 2-3-line summary (NOT verbatim upstream — see §10 copyright). */
+  description: string;
+
+  // ----- PCC-specific augmentation ---------------------------------------
+  actionClass: IndexedToolActionClass;
+  /** Max DCC class this tool can be invoked at (hard cap). */
+  assuranceCeiling: DigitalCaptureClass;
+  trustTier: TrustTier;
+  pricing?: PricingHint;
+
+  // ----- Verification ----------------------------------------------------
+  vetReport?: VetReportSummary;
+  /** 0..13 of CP.5.MCP controls passed (postmark-mcp style supply-chain checks). */
+  cpFiveMcpScore?: number;
+  /** Known CVEs from Trivy / npm audit / pip audit etc. (just the IDs). */
+  knownVulns: string[];
+
+  // ----- Liveness --------------------------------------------------------
+  lastFetchedAt: Timestamp;
+  lastInvokedAt?: Timestamp;
+  invocationCount: number;
+  /** Success rate over the last 100 invocations, in [0,1]. */
+  successRate?: number;
+  /** Rolling mean latency in ms. */
+  meanLatencyMs?: number;
+
+  // ----- Drift -----------------------------------------------------------
+  driftAlerts: DriftAlertSummary[];
+  /** Append-only sequence of schema hashes — latest at end. */
+  schemaHashHistory: SHA256[];
+
+  // ----- Federation ------------------------------------------------------
+  /** Other peers carrying this tool's index entry. Phase 5 only. */
+  hostingPeers: PeerEndpoint[];
+}
+
+// ---------------------------------------------------------------------------
+// Zod schemas
+// ---------------------------------------------------------------------------
+
+const TrustTierSchema = z.nativeEnum(TrustTier);
+
+const IndexedToolActionClassSchema = z.enum([
+  "read",
+  "write",
+  "exec",
+  "network",
+  "credential",
+]);
+
+const ToolSourceTypeSchema = z.enum([
+  "anthropic-registry",
+  "glama",
+  "mcp-so",
+  "smithery",
+  "pulsemcp",
+  "mcp-directory",
+  "apis-guru",
+  "common-crawl",
+  "agntcy-dht",
+  "nanda-index",
+  "well-known",
+  "user-submission",
+  "pcc-native",
+  "openapi-doc",
+]);
+
+const ToolSourceSchema = z.object({
+  type: ToolSourceTypeSchema,
+  url: z.string().url(),
+  fetchedAt: z.string().datetime(),
+  scoreSnapshot: z.record(z.string(), z.number()).optional(),
+});
+
+const SHA256Schema = z
+  .string()
+  .regex(/^sha256:[a-f0-9]{64}$/, "Must be sha256:<64 hex chars>");
+
+const VetReportSummarySchema = z.object({
+  verdict: z.enum(["PASS", "WARN", "FAIL"]),
+  reportPath: z.string().optional(),
+  critical: z.number().int().nonnegative(),
+  high: z.number().int().nonnegative(),
+  secrets: z.number().int().nonnegative(),
+  malware: z.boolean(),
+  promptInjection: z.boolean(),
+});
+
+const DriftAlertSummarySchema = z.object({
+  type: z.enum([
+    "schema_changed",
+    "endpoint_404",
+    "auth_changed",
+    "tools_list_changed",
+  ]),
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  detectedAt: z.string().datetime(),
+  message: z.string().min(1),
+  fromSchemaHash: SHA256Schema.optional(),
+  toSchemaHash: SHA256Schema.optional(),
+});
+
+const PeerEndpointSchema = z.object({
+  peerId: z.string().min(1),
+  url: z.string().url(),
+  lastSeenAt: z.string().datetime(),
+});
+
+const PricingHintSchema = z.object({
+  perCallUsdc: z.string(),
+  perKTokenUsdc: z.string().optional(),
+  tierLabel: z.string().optional(),
+  mode: z.enum(["fixed", "auction"]).optional(),
+});
+
+/**
+ * Zod schema for IndexedTool at API boundaries.
+ *
+ * Loose on inputSchema/outputSchema (record of unknown) — full JSONSchema
+ * validation happens at invocation time against the caller's args, not here.
+ */
+export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
+  id: z.string().min(1),
+  cid: SHA256Schema,
+  version: z.string().min(1),
+  source: ToolSourceSchema,
+  ingestedAt: z.string().datetime(),
+  ingestionMethod: z.enum([
+    "mcp-list",
+    "openapi",
+    "a2a-card",
+    "oasf",
+    "manual",
+    "wellknown",
+  ]),
+  sigstoreBundle: z.string().optional(),
+  upstreamId: z.string().optional(),
+  upstreamUrl: z.string().url(),
+  upstreamVendor: z.string().optional(),
+  skills: z.array(z.string()),
+  domains: z.array(z.string()),
+  features: z.array(z.string()),
+  inputSchema: z.record(z.string(), z.unknown()),
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  description: z.string().min(1),
+  actionClass: IndexedToolActionClassSchema,
+  assuranceCeiling: z.nativeEnum(DigitalCaptureClass),
+  trustTier: TrustTierSchema,
+  pricing: PricingHintSchema.optional(),
+  vetReport: VetReportSummarySchema.optional(),
+  cpFiveMcpScore: z.number().int().min(0).max(13).optional(),
+  knownVulns: z.array(z.string()),
+  lastFetchedAt: z.string().datetime(),
+  lastInvokedAt: z.string().datetime().optional(),
+  invocationCount: z.number().int().nonnegative(),
+  successRate: z.number().min(0).max(1).optional(),
+  meanLatencyMs: z.number().nonnegative().optional(),
+  driftAlerts: z.array(DriftAlertSummarySchema),
+  schemaHashHistory: z.array(SHA256Schema),
+  hostingPeers: z.array(PeerEndpointSchema),
+}) as unknown as z.ZodType<IndexedTool>;
