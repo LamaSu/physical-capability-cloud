@@ -215,21 +215,88 @@ describe("sheetMetalTemplate — constraints", () => {
     expect(vals).toContain("waterjet"); // waterjet is still available
   });
 
-  it("bendCount stays always-visible (UI hides client-side based on operations)", () => {
-    // Rationale: resolver visibleWhen uses === equality, which doesn't match
-    // multi-select array conditions. Conditional visibility for ops-dependent
-    // fields is intentionally left to the client. See template comment.
+  it("bendCount hidden when operations does not include form-bend", () => {
+    // Post-resolver-fix: visibleWhen is array-aware, so bendCount/bendTier
+    // surface only when 'form-bend' is in the operations multi-select.
     const options = resolver.resolve(sheetMetalTemplate, { operations: ["laser-cut"] });
     const bend = options.allParams.find((p) => p.def.key === "bendCount");
-    expect(bend?.visible).toBe(true);
-    // It still has no pricing impact when bendCount=0 (default)
+    expect(bend?.visible).toBe(false);
+    // And it still emits no pricing line when no value is supplied.
     const result = pricing.calculate(options, { operations: ["laser-cut"] });
     expect(result.breakdown.find((b) => b.paramKey === "bendCount")).toBeUndefined();
   });
 
-  it("weldType stays always-visible (UI hides client-side based on operations)", () => {
+  it("weldType hidden when operations does not include weld", () => {
     const options = resolver.resolve(sheetMetalTemplate, { operations: ["laser-cut"] });
     const wt = options.allParams.find((p) => p.def.key === "weldType");
-    expect(wt?.visible).toBe(true);
+    expect(wt?.visible).toBe(false);
+  });
+});
+
+describe("sheetMetalTemplate — visibleWhen (array-aware resolver)", () => {
+  // These tests verify the resolver fix on lamasu/fix/resolver-visiblewhen-multiselect
+  // surfaces ops-dependent params correctly under a multi-select 'operations'.
+
+  it("operations=['laser-cut'] hides weldType, weldCert, bendCount, bendTier, pemHardware", () => {
+    const options = resolver.resolve(sheetMetalTemplate, { operations: ["laser-cut"] });
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("weldType")?.visible).toBe(false);
+    expect(byKey("weldCert")?.visible).toBe(false);
+    expect(byKey("bendCount")?.visible).toBe(false);
+    expect(byKey("bendTier")?.visible).toBe(false);
+    expect(byKey("pemHardware")?.visible).toBe(false);
+  });
+
+  it("operations=['laser-cut','weld'] reveals weldType and weldCert", () => {
+    const options = resolver.resolve(sheetMetalTemplate, {
+      operations: ["laser-cut", "weld"],
+    });
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("weldType")?.visible).toBe(true);
+    expect(byKey("weldCert")?.visible).toBe(true);
+    // bend + pem still hidden — not in operations
+    expect(byKey("bendCount")?.visible).toBe(false);
+    expect(byKey("pemHardware")?.visible).toBe(false);
+  });
+
+  it("operations=['form-bend'] reveals bendCount and bendTier", () => {
+    const options = resolver.resolve(sheetMetalTemplate, { operations: ["form-bend"] });
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("bendCount")?.visible).toBe(true);
+    expect(byKey("bendTier")?.visible).toBe(true);
+    expect(byKey("weldType")?.visible).toBe(false);
+    expect(byKey("pemHardware")?.visible).toBe(false);
+  });
+
+  it("operations=['pem-insert'] reveals pemHardware", () => {
+    const options = resolver.resolve(sheetMetalTemplate, { operations: ["pem-insert"] });
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("pemHardware")?.visible).toBe(true);
+    expect(byKey("bendCount")?.visible).toBe(false);
+    expect(byKey("weldType")?.visible).toBe(false);
+  });
+
+  it("operations=['laser-cut','form-bend','weld','pem-insert'] reveals all ops-dependent params", () => {
+    const options = resolver.resolve(sheetMetalTemplate, {
+      operations: ["laser-cut", "form-bend", "weld", "pem-insert"],
+    });
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("bendCount")?.visible).toBe(true);
+    expect(byKey("bendTier")?.visible).toBe(true);
+    expect(byKey("pemHardware")?.visible).toBe(true);
+    expect(byKey("weldType")?.visible).toBe(true);
+    expect(byKey("weldCert")?.visible).toBe(true);
+  });
+
+  it("ops-dependent params are always-visible when operations is undefined (no selection yet)", () => {
+    // visibleWhen has no source value to compare against. The resolver falls
+    // through to scalar comparison (undefined !== 'form-bend' → false) so the
+    // fields stay hidden. Verify this matches behavior expectations for an
+    // unfilled-form starting state.
+    const options = resolver.resolve(sheetMetalTemplate, {});
+    const byKey = (k: string) => options.allParams.find((p) => p.def.key === k);
+    expect(byKey("bendCount")?.visible).toBe(false);
+    expect(byKey("weldType")?.visible).toBe(false);
+    expect(byKey("pemHardware")?.visible).toBe(false);
   });
 });
