@@ -16,6 +16,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
+    "test:nats": "bash scripts/nats-integration.sh",
+    "test:nats:windows": "pwsh -NoProfile -File scripts/nats-integration.ps1",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
