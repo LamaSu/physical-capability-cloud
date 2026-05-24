@@ -56,8 +56,7 @@ import { createJobFromSession } from "./paid-job-flow.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
-const { negotiationSessions, operatorPolicies, evidenceBundles } =
-  schema as typeof schema & { evidenceBundles?: unknown };
+const { negotiationSessions, operatorPolicies, evidenceBundles, jobs, escrows, escrowMilestones } = schema;
 
 const resolver = new TemplateResolver();
 
@@ -498,17 +497,22 @@ async function handlePccVerify(params: PccVerifyParams): Promise<A2AArtifact[]> 
   if (!params.jobId) throw new Error("jobId required for pcc-verify");
   try {
     const { db } = getStore();
-    if (!evidenceBundles) {
-      throw new Error("evidence bundle store not available in this environment");
-    }
-    const rows = (db.select().from(evidenceBundles as any).all() as any[]).filter(
-      (r) => r.jobId === params.jobId,
-    );
+    const rows = db
+      .select()
+      .from(evidenceBundles)
+      .where(eq(evidenceBundles.jobId, params.jobId))
+      .all();
+    const jobRow = db.select().from(jobs).where(eq(jobs.id, params.jobId)).get();
     return [
       {
         type: "pcc.evidence",
         description: `Evidence bundles for job ${params.jobId}`,
-        data: rows,
+        data: {
+          jobId: params.jobId,
+          jobStatus: jobRow?.status ?? "unknown",
+          bundleCount: rows.length,
+          bundles: rows,
+        },
       },
     ];
   } catch (err) {
@@ -524,17 +528,62 @@ async function handlePccVerify(params: PccVerifyParams): Promise<A2AArtifact[]> 
 
 async function handlePccSettle(params: PccSettleParams): Promise<A2AArtifact[]> {
   if (!params.escrowId) throw new Error("escrowId required for pcc-settle");
+
   // Per Task 4 scope: post a settle intent. The real on-chain release
   // happens via the operator dashboard so the public A2A path never
-  // touches a wallet directly.
+  // touches a wallet directly. We DO look up the escrow + milestone so
+  // the agent learns immediately whether the ID is valid and what state
+  // the escrow is in (e.g. already funded vs already completed).
+  const milestoneIndex = params.milestoneIndex ?? 0;
+  let escrowState: string | null = null;
+  let milestoneState: string | null = null;
+  let escrowError: string | null = null;
+  try {
+    const { db } = getStore();
+    const escrowRow = db
+      .select()
+      .from(escrows)
+      .where(eq(escrows.id, params.escrowId))
+      .get();
+    if (!escrowRow) {
+      // Try lookup by contract address too — agents commonly hold an
+      // 0x… address from a prior pcc-submit artifact.
+      const byAddr = db
+        .select()
+        .from(escrows)
+        .where(eq(escrows.contractAddress, params.escrowId))
+        .get();
+      if (!byAddr) {
+        escrowError = `escrow ${params.escrowId} not found`;
+      } else {
+        escrowState = byAddr.status;
+      }
+    } else {
+      escrowState = escrowRow.status;
+      const milestones = db
+        .select()
+        .from(escrowMilestones)
+        .where(eq(escrowMilestones.escrowId, escrowRow.id))
+        .all();
+      milestoneState = milestones[milestoneIndex]?.status ?? null;
+    }
+  } catch (err) {
+    escrowError = err instanceof Error ? err.message : String(err);
+  }
+
   return [
     {
       type: "pcc.settle_intent",
-      description: "Settle intent posted — final on-chain release happens via the operator dashboard",
+      description: escrowError
+        ? `Settle intent rejected — ${escrowError}`
+        : "Settle intent posted — final on-chain release happens via the operator dashboard",
       data: {
         escrowId: params.escrowId,
-        milestoneIndex: params.milestoneIndex ?? 0,
-        status: "pending_operator_action",
+        milestoneIndex,
+        escrowState,
+        milestoneState,
+        status: escrowError ? "rejected" : "pending_operator_action",
+        ...(escrowError ? { error: escrowError } : {}),
       },
     },
   ];
@@ -625,12 +674,20 @@ async function dispatchTasksSend(
 
       case "pcc-settle": {
         const artifacts = await handlePccSettle(skillParams as PccSettleParams);
+        // If the settle artifact carries a rejection, surface as FAILED so
+        // the A2A caller doesn't keep polling tasks/get forever.
+        const settleArtifact = artifacts[0]?.data as { status?: string } | undefined;
+        const settleState: A2ATaskState =
+          settleArtifact?.status === "rejected" ? "FAILED" : "WORKING";
         const task: A2ATask = {
           ...baseTask,
-          state: "WORKING",
+          state: settleState,
           artifacts,
           pccEscrowId: (skillParams as PccSettleParams).escrowId,
           updatedAt: new Date().toISOString(),
+          ...(settleState === "FAILED"
+            ? { errorMessage: "Escrow lookup failed; settlement not posted" }
+            : {}),
         };
         a2aTasks.set(taskId, task);
         return rpcSuccess(rpcId, task);
