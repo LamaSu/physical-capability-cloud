@@ -41,3 +41,6 @@ export * from "./compliance-templates.js";
 export * from "./rate-schedule.js";
 export * from "./composition-manifest.js";
 export * from "./training-manifest.js";
+export * from "./materials.js";
+export * from "./finishes.js";
+export * from "./certifications.js";
