@@ -27,6 +27,7 @@ import { operatorRoutes } from "./routes/operator.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { captureRoutes } from "./routes/capture.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
+import { a2aTasksRoutes } from "./routes/a2a-tasks.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
 import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
@@ -427,6 +428,8 @@ export async function createGateway(port = 3200) {
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
+  // A2A v1.0 JSON-RPC adapter — POST /a2a/tasks/send
+  await app.register(a2aTasksRoutes);
   await app.register(kernelAgentPackageRoutes);
   await app.register(sdkRoutes);
 
