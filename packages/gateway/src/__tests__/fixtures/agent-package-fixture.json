@@ -1,0 +1,54 @@
+{
+  "schema": "pcc-agent-package/2.0",
+  "name": "PCC Test Fixture",
+  "version": "0.0.1-test",
+  "toolCount": 4,
+  "tools": [
+    {
+      "name": "list_jobs",
+      "description": "List all jobs across kernels. Optional filter by kernelId, status, pagination.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      },
+      "endpoint": { "method": "GET", "path": "/api/jobs" }
+    },
+    {
+      "name": "submit_job",
+      "description": "Submit a new job to a kernel for a specific capability.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kernelId": { "type": "string" },
+          "capabilityId": { "type": "string" }
+        },
+        "required": ["kernelId", "capabilityId"]
+      },
+      "endpoint": { "method": "POST", "path": "/api/jobs/submit" }
+    },
+    {
+      "name": "search_capabilities",
+      "description": "Search the PCC capability catalog by name, type, or materials.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "q": { "type": "string" } }
+      },
+      "endpoint": { "method": "GET", "path": "/api/capabilities/search" }
+    },
+    {
+      "name": "fund_escrow",
+      "description": "Fund a milestone escrow with USDC on Base Sepolia.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "escrowId": { "type": "string" },
+          "amount": { "type": "string" }
+        }
+      },
+      "endpoint": { "method": "POST", "path": "/api/escrow/fund" }
+    }
+  ]
+}
