@@ -44,7 +44,8 @@ export type IntentSource =
   | "query_api_synthetic" // POST /api/query, build-intent heuristic match
   | "sdk"                 // Phase 2 stub
   | "mcp_broker"          // Phase 2 stub
-  | "otel";               // Phase 2 stub
+  | "otel"                // Phase 2 stub
+  | "a2a_tasks_send";     // POST /a2a/tasks/send — A2A v1.0 atomic session
 
 /** How the captured intent ultimately got served (filled later by the fulfillment loop) */
 export type FulfillmentPath = "auto" | "concierge" | "unfulfilled";
@@ -186,6 +187,7 @@ export const IntentSourceSchema = z.enum([
   "sdk",
   "mcp_broker",
   "otel",
+  "a2a_tasks_send",
 ]);
 
 export const FulfillmentPathSchema = z.enum(["auto", "concierge", "unfulfilled"]);
