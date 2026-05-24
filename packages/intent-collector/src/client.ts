@@ -245,10 +245,14 @@ export class IntentCollectorClient {
    * flushes are coalesced. Returns the most recent submission outcome.
    */
   async flush(): Promise<SubmitResult> {
-    if (!this.cfg.enabled || this.queue.length === 0) {
+    if (!this.cfg.enabled) {
       return { submittedCount: 0, droppedCount: 0, attempts: 0 };
     }
+    // Coalesce concurrent flushes — return whatever submission is in flight.
     if (this.inFlight) return this.inFlight;
+    if (this.queue.length === 0) {
+      return { submittedCount: 0, droppedCount: 0, attempts: 0 };
+    }
 
     const batch = this.queue.splice(0, this.queue.length);
     if (this.flushTimer) {

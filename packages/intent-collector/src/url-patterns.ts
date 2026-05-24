@@ -202,7 +202,7 @@ export const URL_PATTERNS: UrlPattern[] = [
   },
   {
     name: "expedia-hotel",
-    regex: /^https?:\/\/(?:www\.)?expedia\.[a-z.]+\/(?:[a-z]+-)?(?:Hotel|Hotels)-/i,
+    regex: /^https?:\/\/(?:www\.)?expedia\.[a-z.]+\/(?:[a-z0-9]+-)*(?:Hotel|Hotels)\b/i,
     capabilityTypes: ["hotel-stay", "accommodation"],
     extract: fixedExtract(
       ["hotel-stay", "accommodation"],
