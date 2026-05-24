@@ -1,0 +1,91 @@
+name: NATS Integration Tests
+
+# Manual-only. The NATSJetStreamBackend integration suite needs a running
+# JetStream server and is gated behind NATS_INTEGRATION=1. We DO NOT want
+# every push/PR to spin a service container + run the suite — the unit suite
+# (`packages/a2a/src/__tests__/nats-backend.test.ts`, 27 tests with a fully
+# mocked nats.js client) is already exercised by the always-on CI matrix.
+#
+# Run when:
+#   - editing packages/a2a/src/backends/nats-jetstream-backend.ts
+#   - bumping the `nats` dependency
+#   - debugging a real-server-only failure
+#
+# Trigger: GitHub UI → Actions → "NATS Integration Tests" → Run workflow.
+#
+# Why a `docker compose` step instead of GitHub Actions `services:` block —
+# the `services:` schema runs an image with its default entrypoint and there
+# is no first-class field to override CMD with `nats-server -js`. Reusing the
+# same docker-compose.nats.yml the local runner uses keeps CI and local
+# behavior identical.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or SHA to test (default: current ref)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  nats-integration:
+    name: NATS JetStream integration suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @pcc/a2a (and prerequisites)
+        run: pnpm --filter @pcc/a2a... build --concurrency=1
+
+      - name: Start NATS JetStream container
+        run: docker compose -f packages/a2a/docker-compose.nats.yml up -d
+
+      - name: Wait for NATS JetStream
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:8222/healthz?js-enabled-only=true" >/dev/null; then
+              echo "NATS JetStream healthy (attempt $i)"
+              exit 0
+            fi
+            echo "attempt $i: not ready"
+            sleep 2
+          done
+          echo "NATS did not report JetStream-enabled within 60s"
+          curl -v http://localhost:8222/healthz || true
+          docker compose -f packages/a2a/docker-compose.nats.yml logs nats || true
+          exit 1
+
+      - name: Run NATS integration suite
+        env:
+          NATS_INTEGRATION: "1"
+        run: pnpm --filter @pcc/a2a test -- nats-backend
+
+      - name: Dump NATS logs on failure
+        if: failure()
+        run: docker compose -f packages/a2a/docker-compose.nats.yml logs --tail=500 nats || true
+
+      - name: Tear down NATS container
+        if: always()
+        run: docker compose -f packages/a2a/docker-compose.nats.yml down -v --remove-orphans || true
