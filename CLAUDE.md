@@ -828,7 +828,7 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 ---
 
-## 9. MCP Server (56 Tools)
+## 9. MCP Server (63 Tools)
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 

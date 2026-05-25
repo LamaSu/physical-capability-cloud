@@ -9,7 +9,7 @@ Full API reference, DTOs, MCP tools, operator onboarding, and environment variab
 - §4. Facades & How They Work
 - §5. Safety & Compliance
 - §6. Settlement & Payments
-- §7. MCP Server (56 Tools)
+- §7. MCP Server (63 Tools)
 - §8. Agent Package (218 Tools)
 - §9. Environment Variables
 - §10. SSE Streams (Real-Time Events)
@@ -665,7 +665,7 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 ---
 
-## 7. MCP Server (56 Tools)
+## 7. MCP Server (63 Tools)
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
