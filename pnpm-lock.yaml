@@ -345,6 +345,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.7.0
         version: 1.8.0
+      '@pcc/a2a':
+        specifier: workspace:*
+        version: link:../a2a
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec

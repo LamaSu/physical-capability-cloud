@@ -40,3 +40,8 @@ export {
   SSRFRejected,
 } from "./url-guard.js";
 export type { HostResolver, UrlGuardOptions } from "./url-guard.js";
+export {
+  sanitizeToolDescription,
+  sanitizeToolDescriptions,
+  isExternalSourceType,
+} from "./sanitize-descriptions.js";

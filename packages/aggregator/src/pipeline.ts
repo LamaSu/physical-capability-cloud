@@ -36,6 +36,7 @@ import type {
   SourceAdapter,
 } from "./types.js";
 import type { IndexedToolRegistry } from "./registry.js";
+import { sanitizeToolDescriptions } from "./sanitize-descriptions.js";
 
 /** Compute a stable CID over the IndexedTool's identity-determining fields. */
 export function computeToolCid(tool: IndexedTool): `sha256:${string}` {
@@ -222,14 +223,33 @@ export async function runPipeline(
     errors: enrichErrors,
   });
 
-  // Stage 5 — verify (Phase 1 stub)
+  // Stage 5 — verify
   //
-  // CRITICAL: do NOT emit `verdict: "PASS"` here. Until a real Gate A scan
-  // is wired in (Phase 2), every untouched tool stays UNVETTED so the
-  // invoke proxy can refuse to honor it as if it had passed.
-  // The `vetReport` is only set if absent, to preserve any verdict supplied
-  // upstream by an actual scan hook.
+  // Two passes run here:
+  //
+  //  (1) Description sanitization (ALWAYS — not gated on runVerify).
+  //      Every external-source IndexedTool's description is scanned for
+  //      prompt-injection patterns via @pcc/a2a's PatternScanner. On a
+  //      BLOCK or REVIEW verdict, the tool is QUARANTINED and vetReport
+  //      is forced to FAIL with promptInjection:true. The original
+  //      description is preserved for operator review.
+  //
+  //  (2) Default vetReport stub (when runVerify is true).
+  //      CRITICAL: do NOT emit `verdict: "PASS"` here. Until a real Gate
+  //      A scan is wired in (Phase 2), every untouched tool stays UNVETTED
+  //      so the invoke proxy can refuse to honor it as if it had passed.
+  //      The `vetReport` is only set if absent, to preserve any verdict
+  //      supplied upstream by an actual scan hook OR by the sanitizer
+  //      above.
   const verifyStart = new Date().toISOString();
+  const verifyErrors: Record<string, string> = {};
+  try {
+    drafts = await sanitizeToolDescriptions(drafts);
+  } catch (err) {
+    // Treat scanner failures as soft errors — keep the drafts so the
+    // pipeline can still publish them, but record the issue for telemetry.
+    verifyErrors[""] = err instanceof Error ? err.message : String(err);
+  }
   if (options.runVerify) {
     drafts = drafts.map((d) =>
       d.vetReport
@@ -252,8 +272,8 @@ export async function runPipeline(
     startedAt: verifyStart,
     endedAt: new Date().toISOString(),
     processed: drafts.length,
-    succeeded: drafts.length,
-    errors: {},
+    succeeded: drafts.length - Object.keys(verifyErrors).length,
+    errors: verifyErrors,
   });
 
   // Stage 6 — publish
