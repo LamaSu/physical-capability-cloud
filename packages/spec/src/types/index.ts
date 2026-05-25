@@ -45,3 +45,6 @@ export * from "./training-manifest.js";
 export * from "./dcc.js";
 export * from "./indexed-tool.js";
 export * from "./invocation-receipt.js";
+export * from "./materials.js";
+export * from "./finishes.js";
+export * from "./certifications.js";

@@ -231,10 +231,20 @@ describe("StoryDispute", () => {
 // ── Re-export check ───────────────────────────────────────────────────────────
 
 describe("Story types re-exported from @pcc/spec types/index", () => {
-  it("all Story type names are accessible via the barrel", async () => {
-    // The real check is that TypeScript compiled without errors.
-    // A runtime import confirms the barrel doesn't break at runtime.
-    const specTypes = await import("../types/index.js");
-    expect(specTypes).toBeDefined();
-  });
+  // Timeout bumped to 15s (default 5s) — the barrel transitively loads
+  // ~45 type modules, several of which run zod-validating registry seeds
+  // at module load (materials ~50 entries, finishes ~30, certifications
+  // ~11). On 16GB hardware the first cold import can take 4-8s. The test
+  // is a structural smoke test, not a perf gate, so the longer timeout
+  // is appropriate.
+  it(
+    "all Story type names are accessible via the barrel",
+    async () => {
+      // The real check is that TypeScript compiled without errors.
+      // A runtime import confirms the barrel doesn't break at runtime.
+      const specTypes = await import("../types/index.js");
+      expect(specTypes).toBeDefined();
+    },
+    15_000,
+  );
 });
