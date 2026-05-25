@@ -27,6 +27,7 @@ import { operatorRoutes } from "./routes/operator.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { captureRoutes } from "./routes/capture.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
+import { a2aTasksRoutes } from "./routes/a2a-tasks.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
 import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
@@ -68,7 +69,10 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+<<<<<<< HEAD
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
 import { dhtWebSocketRoutes } from "./routes/dht-ws.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -376,6 +380,7 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+<<<<<<< HEAD
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -384,6 +389,8 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
 
@@ -421,6 +428,8 @@ export async function createGateway(port = 3200) {
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
+  // A2A v1.0 JSON-RPC adapter — POST /a2a/tasks/send
+  await app.register(a2aTasksRoutes);
   await app.register(kernelAgentPackageRoutes);
   await app.register(sdkRoutes);
 
@@ -456,7 +465,10 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+<<<<<<< HEAD
   await app.register(toolSearchRoutes);
+=======
+>>>>>>> d8754bc (feat(gateway): implementer-bravo add /api/admin/demand/* endpoints (auth-gated) + snapshot cron)
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
