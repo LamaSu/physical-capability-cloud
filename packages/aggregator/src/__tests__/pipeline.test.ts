@@ -125,8 +125,26 @@ describe("runPipeline — happy path", () => {
     expect(reg.count()).toBe(0);
   });
 
-  it("runVerify:true adds a default PASS vetReport", async () => {
+  it("runVerify:true adds a default UNVETTED vetReport (real Gate A not yet wired)", async () => {
     const adapter = makeMockAdapter([makeDraft("t-1")]);
+    const res = await runPipeline(adapter, { url: "u" }, reg, {
+      runVerify: true,
+    });
+    expect(res.published[0]?.vetReport?.verdict).toBe("UNVETTED");
+  });
+
+  it("runVerify:true preserves upstream-supplied PASS verdicts (real scan hook)", async () => {
+    const draft = makeDraft("t-1", {
+      vetReport: {
+        verdict: "PASS",
+        critical: 0,
+        high: 0,
+        secrets: 0,
+        malware: false,
+        promptInjection: false,
+      },
+    });
+    const adapter = makeMockAdapter([draft]);
     const res = await runPipeline(adapter, { url: "u" }, reg, {
       runVerify: true,
     });

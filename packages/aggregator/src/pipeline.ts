@@ -223,16 +223,21 @@ export async function runPipeline(
   });
 
   // Stage 5 — verify (Phase 1 stub)
+  //
+  // CRITICAL: do NOT emit `verdict: "PASS"` here. Until a real Gate A scan
+  // is wired in (Phase 2), every untouched tool stays UNVETTED so the
+  // invoke proxy can refuse to honor it as if it had passed.
+  // The `vetReport` is only set if absent, to preserve any verdict supplied
+  // upstream by an actual scan hook.
   const verifyStart = new Date().toISOString();
   if (options.runVerify) {
-    // Phase 1: pass-through; full Gate A is deferred to Phase 2.
     drafts = drafts.map((d) =>
       d.vetReport
         ? d
         : ({
             ...d,
             vetReport: {
-              verdict: "PASS",
+              verdict: "UNVETTED",
               critical: 0,
               high: 0,
               secrets: 0,
