@@ -18,6 +18,7 @@ export type { EmbeddingProvider } from "./embeddings.js";
 export {
   HashFallbackProvider,
   OpenAIEmbeddingProvider,
+  maskSecrets,
   selectEmbeddingProvider,
 } from "./embeddings.js";
 

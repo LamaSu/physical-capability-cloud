@@ -86,8 +86,48 @@ const OPENAI_MODEL = "text-embedding-3-small";
 const OPENAI_DIM = 1536;
 
 /**
+ * Mask any credential material that may appear in an OpenAI error body
+ * before we throw it as part of an Error message. OpenAI error responses
+ * sometimes echo back the inbound request including the `Authorization`
+ * header, which leaks the API key into thrown exceptions and any log
+ * sink that captures Error.message.
+ *
+ * Strategy (defense in depth):
+ *   1. Replace the EXACT apiKey string (most precise).
+ *   2. Replace any `sk-…` shaped token (catches alternate key formats and
+ *      keys that don't match the configured one — e.g. multi-tenant).
+ *   3. Replace `authorization:` / `api-key:` / `api_key:` headers + values.
+ *   4. Replace `Bearer <token>` patterns wherever they appear.
+ *
+ * Exported for reuse and direct unit testing.
+ */
+export function maskSecrets(text: string, apiKey: string): string {
+  if (!text) return text;
+  let masked = text;
+  // 1. Mask the exact API key (must run before generic sk-* pattern so
+  //    we replace it even if the key shape is unusual).
+  if (apiKey) {
+    masked = masked.split(apiKey).join("sk-***REDACTED***");
+  }
+  // 2. Mask any sk-* token shape (20+ chars to avoid false positives).
+  masked = masked.replace(/sk-[A-Za-z0-9_-]{20,}/g, "sk-***REDACTED***");
+  // 3. Mask Authorization / api-key / api_key header values.
+  masked = masked.replace(
+    /(authorization|api[-_]?key)(\s*[:=]\s*)["']?[^"'\s,}]+/gi,
+    "$1$2***REDACTED***",
+  );
+  // 4. Mask Bearer tokens wherever they appear.
+  masked = masked.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***REDACTED***");
+  return masked;
+}
+
+/**
  * `text-embedding-3-small` adapter via the OpenAI REST API. Uses global
  * `fetch` (Node 20+); a fetch impl can be injected for testing.
+ *
+ * Error handling: OpenAI error bodies are run through `maskSecrets`
+ * before being included in thrown errors so that an echoed Authorization
+ * header (or any sk-* shape token) cannot leak out via Error.message.
  */
 export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   readonly dim = OPENAI_DIM;
@@ -116,7 +156,8 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       }),
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
+      const rawDetail = await res.text().catch(() => "");
+      const detail = maskSecrets(rawDetail, this.apiKey);
       throw new Error(
         `OpenAI embeddings failed: ${res.status} ${res.statusText} ${detail}`,
       );
