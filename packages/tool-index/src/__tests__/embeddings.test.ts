@@ -37,6 +37,16 @@ describe("maskSecrets", () => {
     const text = `oops: Authorization: Bearer ${FAKE_KEY}`;
     const masked = maskSecrets(text, FAKE_KEY);
     expect(masked).not.toContain(FAKE_KEY);
+    // Bearer-pattern pass collapses `Bearer sk-...` to `Bearer ***REDACTED***`
+    // before the exact-key pass runs, so the only surviving marker here is
+    // the Bearer redaction. Either marker is acceptable proof of masking.
+    expect(masked).toMatch(/(sk-\*\*\*REDACTED\*\*\*|Bearer \*\*\*REDACTED\*\*\*)/);
+  });
+
+  it("masks the exact API key when it appears outside a Bearer context", () => {
+    const text = `dumped config: configured_key=${FAKE_KEY}; thanks`;
+    const masked = maskSecrets(text, FAKE_KEY);
+    expect(masked).not.toContain(FAKE_KEY);
     expect(masked).toContain("sk-***REDACTED***");
   });
 

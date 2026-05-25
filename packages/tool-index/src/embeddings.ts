@@ -104,20 +104,31 @@ const OPENAI_DIM = 1536;
 export function maskSecrets(text: string, apiKey: string): string {
   if (!text) return text;
   let masked = text;
-  // 1. Mask the exact API key (must run before generic sk-* pattern so
-  //    we replace it even if the key shape is unusual).
+  // Order matters. Each pass must be safe to run over output that has
+  // already been touched by earlier passes (i.e. must not re-corrupt
+  // existing "***REDACTED***" markers).
+  //
+  // 1. Mask Bearer tokens first. This catches `Authorization: Bearer sk-xxx`
+  //    BEFORE we mask the bare sk-* shape, so the literal "Bearer" word
+  //    survives in the output.
+  masked = masked.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***REDACTED***");
+  // 2. Mask the exact API key (most precise; must run before generic sk-*
+  //    pattern so we replace it even if the key shape is unusual).
   if (apiKey) {
     masked = masked.split(apiKey).join("sk-***REDACTED***");
   }
-  // 2. Mask any sk-* token shape (20+ chars to avoid false positives).
+  // 3. Mask any sk-* token shape (20+ chars to avoid false positives).
   masked = masked.replace(/sk-[A-Za-z0-9_-]{20,}/g, "sk-***REDACTED***");
-  // 3. Mask Authorization / api-key / api_key header values.
+  // 4. Mask Authorization / api-key / api_key header values. The optional
+  //    closing quote `["']?` between key and `:`/`=` handles JSON-style
+  //    `"api_key": "value"`. The negative lookahead `(?!Bearer\b|\*)`
+  //    skips values that start with `Bearer ` (handled in step 1) or `*`
+  //    (already-redacted), so the literal "Bearer" word and existing
+  //    "***REDACTED***" markers survive in the output.
   masked = masked.replace(
-    /(authorization|api[-_]?key)(\s*[:=]\s*)["']?[^"'\s,}]+/gi,
+    /(authorization|api[-_]?key)["']?(\s*[:=]\s*)["']?(?!Bearer\b|\*)([^"'\s,}]+)/gi,
     "$1$2***REDACTED***",
   );
-  // 4. Mask Bearer tokens wherever they appear.
-  masked = masked.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***REDACTED***");
   return masked;
 }
 
