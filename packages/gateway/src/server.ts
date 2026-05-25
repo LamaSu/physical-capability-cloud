@@ -67,6 +67,7 @@ import { humanVerificationRoutes } from "./routes/human-verification.js";
 import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
+import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
 import { dhtWebSocketRoutes } from "./routes/dht-ws.js";
 import { siweAuthPlugin } from "./auth/siwe-auth.js";
 import { x402Gate } from "./middleware/x402-gate.js";
@@ -99,6 +100,7 @@ import { getAnalyticsService } from "./services/analytics-service.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { touchstoneRoutes } from "./routes/touchstone.js";
+import { aggregatorRoutes } from "./routes/aggregator/index.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
 import { templateSessionRoutes } from "./routes/template-session.js";
@@ -365,6 +367,14 @@ export async function createGateway(port = 3200) {
   startEventBusOtelBridge();
   app.log.info("orchestrator-sdk event-bus → OTel bridge: active");
 
+  // Wave 5 — internal demand-intel hourly/daily snapshot cron.
+  // Persists DemandSnapshots into materializedViews. Auth-gated read via
+  // /api/admin/demand/*. NOT a public oracle.
+  startDemandSnapshotCron({
+    info: (msg) => app.log.info(msg),
+    warn: (msg) => app.log.warn(msg),
+  });
+
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
   await app.register(scopeChecker);
 
@@ -436,6 +446,7 @@ export async function createGateway(port = 3200) {
   await app.register(humanVerificationRoutes);
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
+  await app.register(adminDemandRoutes);
   await app.register(swfRoutes);
   await app.register(subnetRoutes);
   await app.register(gaslessRoutes);
@@ -465,6 +476,9 @@ export async function createGateway(port = 3200) {
   // Touchstone statistical enforcement + ephemeral session keys
   await app.register(touchstoneRoutes);
   await app.register(identitySessionRoutes);
+
+  // Universal Tool Aggregator (Phase 1) — ingest + search + invoke + receipts
+  await app.register(aggregatorRoutes);
 
   // Third-party digital kernel marketplace
   await app.register(kernelMarketplaceRoutes);
