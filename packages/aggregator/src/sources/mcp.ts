@@ -22,6 +22,7 @@
 
 import type { IndexedTool, ToolSourceType } from "@pcc/spec";
 import type { SourceAdapter, AdapterInput } from "../types.js";
+import { assertSafeFetchUrl } from "../url-guard.js";
 
 /** Shape of one MCP Tool per the MCP spec. */
 interface McpTool {
@@ -61,6 +62,11 @@ export class McpSourceAdapter implements SourceAdapter {
   async fetch(input: AdapterInput): Promise<IndexedTool[]> {
     const fetchImpl = input.fetchImpl ?? fetch;
     const now = new Date().toISOString();
+
+    // SSRF guard — reject internal/private/loopback hosts BEFORE fetch.
+    // Errors bubble as SSRFRejected for telemetry to group on.
+    assertSafeFetchUrl(input.url);
+
     const body = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,

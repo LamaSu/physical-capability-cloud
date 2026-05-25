@@ -34,3 +34,9 @@ export type {
 export * from "./sources/index.js";
 export { signReceipt, verifyReceiptSignature } from "./receipt-signer.js";
 export type { ReceiptSignerKey } from "./receipt-signer.js";
+export {
+  assertSafeFetchUrl,
+  assertSafeFetchUrlWithDns,
+  SSRFRejected,
+} from "./url-guard.js";
+export type { HostResolver, UrlGuardOptions } from "./url-guard.js";
