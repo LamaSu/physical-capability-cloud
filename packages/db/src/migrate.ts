@@ -1499,6 +1499,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS requests_urgency_idx ON capability_requests(urgency);
     CREATE INDEX IF NOT EXISTS requests_created_at_idx ON capability_requests(created_at);
   `);
+<<<<<<< HEAD
 
   // Universal aggregator (Phase 1) — invocation receipts. One row per
   // proxied indexed-tool invocation, indexed by content-addressed CID for
@@ -1535,4 +1536,6 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS invocation_receipts_dcc_idx ON invocation_receipts(effective_dcc_class);
     CREATE INDEX IF NOT EXISTS invocation_receipts_created_idx ON invocation_receipts(created_at);
   `);
+=======
+>>>>>>> e4348f0 (feat(db): implementer-bravo add requests repo + persist CapabilityRequest with compositionSignature)
 }
