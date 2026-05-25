@@ -160,8 +160,19 @@ export class TemplateResolver {
     const value = selections[condition.param];
     if (value === undefined) return false;
 
-    if (condition.equals !== undefined) return value === condition.equals;
-    if (condition.in !== undefined) return (condition.in as unknown[]).includes(value);
+    if (condition.equals !== undefined) {
+      // Multi-select on the selection side: membership check instead of strict eq
+      if (Array.isArray(value)) return value.includes(condition.equals);
+      return value === condition.equals;
+    }
+    if (condition.in !== undefined) {
+      // Multi-select on the selection side: any-intersection with condition list
+      if (Array.isArray(value)) {
+        const allowed = new Set(condition.in as unknown[]);
+        return value.some((v) => allowed.has(v));
+      }
+      return (condition.in as unknown[]).includes(value);
+    }
     if (condition.gt !== undefined) return typeof value === "number" && value > condition.gt;
     if (condition.lt !== undefined) return typeof value === "number" && value < condition.lt;
 
@@ -170,7 +181,13 @@ export class TemplateResolver {
 
   private isVisible(def: ParamDef, selections: Record<string, unknown>): boolean {
     if (!def.visibleWhen) return true;
-    return selections[def.visibleWhen.param] === def.visibleWhen.equals;
+    const value = selections[def.visibleWhen.param];
+    const target = def.visibleWhen.equals;
+    // Multi-select on the selection side: dependent param becomes visible when
+    // the target value is among the selected array (e.g., weldCert visibleWhen
+    // operations equals "weld", where operations is ["laser","weld","brake"]).
+    if (Array.isArray(value)) return value.includes(target);
+    return value === target;
   }
 
   private isRestricted(def: ParamDef): boolean {
