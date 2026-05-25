@@ -1,0 +1,28 @@
+{
+  "name": "@pcc/intent-broker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that captures external demand-intent from any client agent and forwards it to PCC's /api/intents/ingest endpoint. Phase 2.1 of the intent-network-interception roadmap.",
+  "type": "module",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "bin": {
+    "intent-broker": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "@pcc/spec": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
