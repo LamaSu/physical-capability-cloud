@@ -15,7 +15,10 @@
  *   the unit suite only.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   NATSJetStreamBackend,
   type NatsConnectFn,
@@ -27,7 +30,10 @@ import {
   type JsMsgLike,
   type PubAckLike,
   type ConsumerAddConfig,
+  type NatsAuthHelpers,
+  type NatsConnectionOptions,
 } from "../backends/nats-jetstream-backend.js";
+import { createBackendFromEnv } from "../backends/index.js";
 import type { A2AMessage } from "../types.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -691,6 +697,388 @@ describe("NATSJetStreamBackend (unit, mocked nats.js)", () => {
       expect(callCount).toBe(2);
       await backend.close();
     });
+  });
+});
+
+// ── TLS option forwarding ───────────────────────────────────────────────────
+
+describe("NATSJetStreamBackend TLS options", () => {
+  let server: FakeServer;
+  let capturedOpts: NatsConnectionOptions | undefined;
+
+  beforeEach(() => {
+    server = makeFakeServer();
+    capturedOpts = undefined;
+    const orig = server.connectFn;
+    server.connectFn = async (opts) => {
+      capturedOpts = opts;
+      return orig(opts);
+    };
+  });
+
+  it("forwards `tls: true` as boolean", async () => {
+    const backend = new NATSJetStreamBackend({
+      url: "tls://nats.example:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      tls: true,
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.tls).toBe(true);
+    await backend.close();
+  });
+
+  it("reads caFile/certFile/keyFile from disk and forwards PEM contents", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pcc-nats-tls-"));
+    const caFile = join(dir, "ca.pem");
+    const certFile = join(dir, "cert.pem");
+    const keyFile = join(dir, "key.pem");
+    writeFileSync(caFile, "-----BEGIN CERTIFICATE-----\nFAKE_CA\n-----END CERTIFICATE-----\n");
+    writeFileSync(certFile, "-----BEGIN CERTIFICATE-----\nFAKE_CERT\n-----END CERTIFICATE-----\n");
+    writeFileSync(keyFile, "-----BEGIN PRIVATE KEY-----\nFAKE_KEY\n-----END PRIVATE KEY-----\n");
+    try {
+      const backend = new NATSJetStreamBackend({
+        url: "tls://nats.example:4222",
+        streamName: "PCC_A2A_TEST",
+        connectFn: server.connectFn,
+        tls: { caFile, certFile, keyFile, rejectUnauthorized: true, servername: "nats.example" },
+      });
+      await backend.publish("pcc.a2a.text_message", makeMessage());
+      const tls = capturedOpts?.tls;
+      expect(typeof tls).toBe("object");
+      if (typeof tls === "object") {
+        expect(tls.caCerts?.[0]).toContain("FAKE_CA");
+        expect(tls.certs?.[0]).toContain("FAKE_CERT");
+        expect(tls.keys?.[0]).toContain("FAKE_KEY");
+        expect(tls.rejectUnauthorized).toBe(true);
+        expect(tls.servername).toBe("nats.example");
+      }
+      await backend.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT set `tls` on the connect options when option is omitted", async () => {
+    const backend = new NATSJetStreamBackend({
+      url: "nats://localhost:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.tls).toBeUndefined();
+    await backend.close();
+  });
+
+  it("forwards rejectUnauthorized=false when explicitly disabled", async () => {
+    const backend = new NATSJetStreamBackend({
+      url: "tls://nats.example:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      tls: { rejectUnauthorized: false },
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    const tls = capturedOpts?.tls;
+    expect(typeof tls).toBe("object");
+    if (typeof tls === "object") {
+      expect(tls.rejectUnauthorized).toBe(false);
+    }
+    await backend.close();
+  });
+});
+
+// ── Auth option forwarding ──────────────────────────────────────────────────
+
+describe("NATSJetStreamBackend auth options", () => {
+  let server: FakeServer;
+  let capturedOpts: NatsConnectionOptions | undefined;
+
+  beforeEach(() => {
+    server = makeFakeServer();
+    capturedOpts = undefined;
+    const orig = server.connectFn;
+    server.connectFn = async (opts) => {
+      capturedOpts = opts;
+      return orig(opts);
+    };
+  });
+
+  it("forwards token auth", async () => {
+    const backend = new NATSJetStreamBackend({
+      url: "nats://localhost:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      auth: { kind: "token", token: "secret-token" },
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.token).toBe("secret-token");
+    expect(capturedOpts?.user).toBeUndefined();
+    await backend.close();
+  });
+
+  it("forwards userPass auth", async () => {
+    const backend = new NATSJetStreamBackend({
+      url: "nats://localhost:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      auth: { kind: "userPass", user: "alice", pass: "p@ss" },
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.user).toBe("alice");
+    expect(capturedOpts?.pass).toBe("p@ss");
+    expect(capturedOpts?.token).toBeUndefined();
+    await backend.close();
+  });
+
+  it("forwards nkey auth with injected helpers (no real nats module loaded)", async () => {
+    const fakeHelpers: NatsAuthHelpers = {
+      nkeys: {
+        fromSeed(_seed: Uint8Array) {
+          return {
+            sign: (_input: Uint8Array) => new Uint8Array([1, 2, 3]),
+            getPublicKey: () => "UABCDEFTESTPUBLICKEY",
+          };
+        },
+      },
+      credsAuthenticator: () => ({ kind: "creds-auth" }),
+      jwtAuthenticator: (_jwt: string, _seed?: Uint8Array) => ({ kind: "jwt-auth" }),
+    };
+    const backend = new NATSJetStreamBackend({
+      url: "nats://localhost:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      natsAuthHelpers: fakeHelpers,
+      auth: { kind: "nkey", nkeySeed: "SUAAFAKESEED" },
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.nkey).toBe("UABCDEFTESTPUBLICKEY");
+    expect(typeof capturedOpts?.authenticator).toBe("function");
+    await backend.close();
+  });
+
+  it("forwards jwt auth with injected helpers", async () => {
+    const fakeHelpers: NatsAuthHelpers = {
+      nkeys: { fromSeed: () => ({ sign: () => new Uint8Array(), getPublicKey: () => "" }) },
+      credsAuthenticator: () => ({ kind: "creds-auth" }),
+      jwtAuthenticator: vi.fn((_jwt: string, _seed?: Uint8Array) => ({ kind: "jwt-auth" })),
+    };
+    const backend = new NATSJetStreamBackend({
+      url: "nats://localhost:4222",
+      streamName: "PCC_A2A_TEST",
+      connectFn: server.connectFn,
+      natsAuthHelpers: fakeHelpers,
+      auth: { kind: "jwt", jwt: "eyJ.fakeJWT", nkeySeed: "SUAFAKESEED" },
+    });
+    await backend.publish("pcc.a2a.text_message", makeMessage());
+    expect(capturedOpts?.jwt).toBe("eyJ.fakeJWT");
+    expect(capturedOpts?.authenticator).toEqual({ kind: "jwt-auth" });
+    expect(fakeHelpers.jwtAuthenticator).toHaveBeenCalledOnce();
+    await backend.close();
+  });
+
+  it("forwards credsFile auth by reading the file and passing bytes to credsAuthenticator", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pcc-nats-creds-"));
+    const credsPath = join(dir, "user.creds");
+    writeFileSync(credsPath, "-----BEGIN NATS USER JWT-----\nFAKE_CREDS\n------END NATS USER JWT------\n");
+    try {
+      const credsCall = vi.fn((bytes: Uint8Array) => ({ kind: "creds-auth", size: bytes.length }));
+      const fakeHelpers: NatsAuthHelpers = {
+        nkeys: { fromSeed: () => ({ sign: () => new Uint8Array(), getPublicKey: () => "" }) },
+        credsAuthenticator: credsCall,
+        jwtAuthenticator: () => ({ kind: "jwt-auth" }),
+      };
+      const backend = new NATSJetStreamBackend({
+        url: "nats://localhost:4222",
+        streamName: "PCC_A2A_TEST",
+        connectFn: server.connectFn,
+        natsAuthHelpers: fakeHelpers,
+        auth: { kind: "credsFile", path: credsPath },
+      });
+      await backend.publish("pcc.a2a.text_message", makeMessage());
+      expect(credsCall).toHaveBeenCalledOnce();
+      const bytes = credsCall.mock.calls[0][0];
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes.length).toBeGreaterThan(0);
+      expect(capturedOpts?.authenticator).toMatchObject({ kind: "creds-auth" });
+      await backend.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe("validation", () => {
+    it("rejects empty token", () => {
+      expect(
+        () =>
+          new NATSJetStreamBackend({
+            url: "nats://localhost:4222",
+            streamName: "PCC_A2A_TEST",
+            connectFn: server.connectFn,
+            auth: { kind: "token", token: "" },
+          }),
+      ).toThrow(/non-empty token/);
+    });
+
+    it("rejects missing userPass fields", () => {
+      expect(
+        () =>
+          new NATSJetStreamBackend({
+            url: "nats://localhost:4222",
+            streamName: "PCC_A2A_TEST",
+            connectFn: server.connectFn,
+            // @ts-expect-error -- intentional: empty user
+            auth: { kind: "userPass", user: "", pass: "x" },
+          }),
+      ).toThrow(/requires user/);
+    });
+
+    it("rejects jwt without nkeySeed", () => {
+      expect(
+        () =>
+          new NATSJetStreamBackend({
+            url: "nats://localhost:4222",
+            streamName: "PCC_A2A_TEST",
+            connectFn: server.connectFn,
+            // @ts-expect-error -- intentional: missing seed
+            auth: { kind: "jwt", jwt: "eyJ.x", nkeySeed: "" },
+          }),
+      ).toThrow(/requires nkeySeed/);
+    });
+
+    it("rejects credsFile without path", () => {
+      expect(
+        () =>
+          new NATSJetStreamBackend({
+            url: "nats://localhost:4222",
+            streamName: "PCC_A2A_TEST",
+            connectFn: server.connectFn,
+            auth: { kind: "credsFile", path: "" },
+          }),
+      ).toThrow(/requires path/);
+    });
+  });
+});
+
+// ── Env-var → backend wiring (createBackendFromEnv) ─────────────────────────
+
+describe("createBackendFromEnv NATS env-var parsing", () => {
+  const origEnv: Record<string, string | undefined> = {};
+  const ENV_KEYS = [
+    "PCC_MESSAGE_BUS_BACKEND",
+    "NATS_URL",
+    "NATS_STREAM_NAME",
+    "NATS_DURABLE_NAME",
+    "NATS_TLS",
+    "NATS_TLS_CA_FILE",
+    "NATS_TLS_CERT_FILE",
+    "NATS_TLS_KEY_FILE",
+    "NATS_TLS_REJECT_UNAUTHORIZED",
+    "NATS_TLS_SERVERNAME",
+    "NATS_AUTH_KIND",
+    "NATS_TOKEN",
+    "NATS_USER",
+    "NATS_PASS",
+    "NATS_NKEY_SEED",
+    "NATS_JWT",
+    "NATS_CREDS_FILE",
+  ] as const;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) {
+      origEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (origEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = origEnv[k];
+    }
+  });
+
+  it("returns InMemoryBackend by default", async () => {
+    const backend = await createBackendFromEnv();
+    expect(backend.name).toBe("memory");
+    await backend.close();
+  });
+
+  it("returns NATSJetStreamBackend when PCC_MESSAGE_BUS_BACKEND=nats", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    const backend = await createBackendFromEnv();
+    expect(backend.name).toBe("nats");
+    await backend.close();
+  });
+
+  it("throws on unknown PCC_MESSAGE_BUS_BACKEND", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "kafka";
+    await expect(createBackendFromEnv()).rejects.toThrow(/not a known backend/);
+  });
+
+  it("warns when TLS env vars are set but URL uses nats:// scheme", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_URL = "nats://localhost:4222";
+    process.env.NATS_TLS = "1";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const backend = await createBackendFromEnv();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nats://"));
+    warnSpy.mockRestore();
+    await backend.close();
+  });
+
+  it("does NOT warn when URL uses tls:// scheme", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_URL = "tls://nats.example:4222";
+    process.env.NATS_TLS = "1";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const backend = await createBackendFromEnv();
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    await backend.close();
+  });
+
+  it("rejects NATS_AUTH_KIND=token without NATS_TOKEN", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "token";
+    await expect(createBackendFromEnv()).rejects.toThrow(/requires NATS_TOKEN/);
+  });
+
+  it("rejects NATS_AUTH_KIND=userPass missing NATS_PASS", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "userPass";
+    process.env.NATS_USER = "alice";
+    await expect(createBackendFromEnv()).rejects.toThrow(/requires NATS_USER and NATS_PASS/);
+  });
+
+  it("rejects NATS_AUTH_KIND=jwt missing NATS_NKEY_SEED", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "jwt";
+    process.env.NATS_JWT = "eyJ.x";
+    await expect(createBackendFromEnv()).rejects.toThrow(/requires NATS_JWT and NATS_NKEY_SEED/);
+  });
+
+  it("rejects unknown NATS_AUTH_KIND", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "kerberos";
+    await expect(createBackendFromEnv()).rejects.toThrow(/is not recognized/);
+  });
+
+  it("accepts NATS_AUTH_KIND=token with NATS_TOKEN set", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "token";
+    process.env.NATS_TOKEN = "secret";
+    const backend = await createBackendFromEnv();
+    expect(backend.name).toBe("nats");
+    await backend.close();
+  });
+
+  it("accepts NATS_AUTH_KIND=credsFile with NATS_CREDS_FILE set", async () => {
+    process.env.PCC_MESSAGE_BUS_BACKEND = "nats";
+    process.env.NATS_AUTH_KIND = "credsFile";
+    process.env.NATS_CREDS_FILE = "/etc/pcc/nats.creds";
+    const backend = await createBackendFromEnv();
+    expect(backend.name).toBe("nats");
+    await backend.close();
   });
 });
 
