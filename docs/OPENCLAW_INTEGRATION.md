@@ -80,7 +80,7 @@ investing in deeper coupling.
 ### Tier 2 — MCP integration (15 minutes)
 
 The middle path. Reuses OpenClaw's existing MCP machinery; PCC's full
-56-tool surface appears in OpenClaw's tool palette automatically.
+63-tool surface appears in OpenClaw's tool palette automatically.
 
 1. Add the PCC MCP server (`packages/mcp-server`) to OpenClaw's bound
    MCP servers list:
@@ -272,8 +272,9 @@ typical bps bands. There is **no OEM royalty class** by design — see
 - Stable agent-package surface at `https://capability.network/agent-package.json`.
   Tools are added; existing tools' input schemas and endpoint paths do
   not change without versioning.
-- Stable MCP tool names and shapes (`pcc_*`). 56 tools today, 7 of them
-  contributor-economics primitives shipped 2026-04. Tool numbering may
+- Stable MCP tool names and shapes (`pcc_*`). 63 tools today: 49 base + 7
+  contributor-economics primitives (shipped 2026-04) + 7 CVP capture
+  primitives. Tool numbering may
   shift; tool names are forever.
 - Apache-2.0 license on the core protocol, gateway, MCP server, and
   agent package. Adapters and examples land under the same license.

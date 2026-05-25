@@ -3,8 +3,9 @@
 /**
  * PCC CLI — command-line interface to the Physical Capability Cloud gateway.
  *
- * All 56 tools from the MCP server are available as subcommands. (49 base
- * + 7 contributor-economics tools added in feat/contributor-economics.)
+ * All 63 tools from the MCP server are available as subcommands. (49 base
+ * + 7 contributor-economics tools added in feat/contributor-economics
+ * + 7 CVP capture tools registered via registerCaptureTools.)
  * Output is JSON by default (for piping/jq). Use --pretty for human-readable.
  *
  * Usage:

@@ -42,7 +42,7 @@ Live at [capability.network](https://capability.network).
 - Shop Kernel is the sole interface to a physical site
 - Every capability has an assurance tier (0-3) with defined evidence requirements
 - Escrow settles only when evidence meets tier requirements
-- MCP server: `packages/mcp-server` (56 tools)
+- MCP server: `packages/mcp-server` (63 tools)
 - Agent package: `apps/dashboard/public/agent-package.json` (19 REST tools)
 - pcc-node: `pip install pcc-node` (Python operator CLI)
 
