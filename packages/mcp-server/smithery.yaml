@@ -1,0 +1,43 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+#
+# @pcc/mcp-server — Physical Capability Cloud MCP server (63 tools)
+# Drives the PCC gateway over stdio: discovery, contract building, jobs,
+# evidence, escrow, capture verification, IP royalties, fiat ramp.
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP server.
+    type: object
+    required: []
+    properties:
+      pccUrl:
+        type: string
+        title: PCC gateway URL
+        default: https://capability.network
+        description: >
+          Base URL of the PCC gateway. Production is
+          https://capability.network. For a self-hosted gateway, point this
+          at your own endpoint (e.g. http://localhost:3200).
+      pccApiKey:
+        type: string
+        title: PCC API key
+        description: >
+          Bearer token sent on every API call. Provision one at
+          https://capability.network/api/auth/provision. Required for
+          write operations (device registration, contract building, escrow
+          funding, royalty claims). Public read endpoints work without it.
+  commandFunction:
+    # A function that produces the CLI command to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: 'node',
+      args: ['dist/index.js'],
+      env: {
+        PCC_URL: config.pccUrl || 'https://capability.network',
+        PCC_API_KEY: config.pccApiKey || ''
+      }
+    })
+  exampleConfig:
+    pccUrl: https://capability.network
+    pccApiKey: pcc_live_REPLACE_ME
