@@ -1,16 +1,31 @@
 /**
- * DHTTransport — WebSocket server + client for DHT node communication.
+ * DHTTransport — gossip-flood transport for the capability DHT.
  *
- * Provides a bidirectional messaging layer: nodes connect to each other
- * over WebSocket and exchange DHTMessage objects (JSON serialised).
+ * Thin wrapper over @pcc/dht-core's CoreTransport, layering the
+ * capability-specific DHTMessage union on top of the protocol-agnostic
+ * envelope. Keeps the existing DHTNode + AnnouncementRegistry tests
+ * green while letting @pcc/federation share the same underlying
+ * WebSocket primitives.
+ *
+ * The protocol identifier is "/pcc/cap-gossip/1.0.0". Messages with a
+ * different protocol id are ignored (the federation runtime will use
+ * "/pcc/agg-kad/1.0.0" in Phase 2).
  */
 
-import { WebSocketServer, WebSocket } from "ws";
+import type { WebSocket } from "ws";
 import type { PeerEndpoint, CapabilityAnnouncement } from "@pcc/spec";
+import {
+  CoreTransport,
+  type CoreMessage,
+  type CoreTransportStats,
+} from "@pcc/dht-core";
 import type { CapabilityQuery } from "./query.js";
 import { dhtTelemetry } from "./telemetry.js";
 
 // ── DHT Protocol Messages ──────────────────────────────────────────
+
+/** Protocol id namespacing all gossip messages on the wire. */
+export const CAP_GOSSIP_PROTOCOL = "/pcc/cap-gossip/1.0.0";
 
 export type DHTMessage =
   | { type: "announce"; announcement: CapabilityAnnouncement; ttl: number }
@@ -25,48 +40,43 @@ export type DHTMessage =
 export type MessageHandler = (peerId: string, msg: DHTMessage) => void;
 export type PeerHandler = (peerId: string) => void;
 
+/**
+ * DHTTransport keeps its old API (listen / connect / send / broadcast /
+ * onMessage / onPeerConnect / onPeerDisconnect / getPeerIds / peerCount /
+ * close / addSocket) so DHTNode and its 26+ existing tests are unchanged.
+ * Internally it now defers to a shared CoreTransport instance.
+ */
 export class DHTTransport {
-  private server: WebSocketServer | null = null;
-  private clients = new Map<string, WebSocket>();
+  private readonly core: CoreTransport;
   private messageHandlers: MessageHandler[] = [];
-  private connectHandlers: PeerHandler[] = [];
-  private disconnectHandlers: PeerHandler[] = [];
-  private peerCounter = 0;
 
-  /** Start a WebSocket server on the given port */
-  async listen(port: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        this.server = new WebSocketServer({ port });
-        this.server.on("listening", () => resolve());
-        this.server.on("error", (err) => reject(err));
+  constructor(core?: CoreTransport) {
+    this.core = core ?? new CoreTransport({ label: "dht" });
 
-        this.server.on("connection", (ws) => {
-          const peerId = `peer_server_${++this.peerCounter}`;
-          this.registerSocket(peerId, ws);
-        });
-      } catch (err) {
-        reject(err);
-      }
+    // Translate incoming CoreMessages into the typed DHTMessage union
+    // and fan out to subscribers. Drop messages from foreign protocols
+    // so a shared connection can carry both gossip and Kademlia later.
+    this.core.onMessage((peerId, msg) => {
+      if (msg.protocol !== CAP_GOSSIP_PROTOCOL) return;
+      const payload = msg.payload as DHTMessage;
+      for (const h of this.messageHandlers) h(peerId, payload);
     });
+
+    // Re-emit telemetry hooks unchanged
+    this.core.onPeerConnect((peerId) => dhtTelemetry.peerConnected(peerId));
+    this.core.onPeerDisconnect((peerId) =>
+      dhtTelemetry.peerDisconnected(peerId, "close"),
+    );
   }
 
-  /** Connect to a remote peer by WebSocket URL */
-  async connect(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      try {
-        const ws = new WebSocket(url);
-        const peerId = `peer_client_${++this.peerCounter}`;
+  /** Start a WebSocket server on the given port. */
+  async listen(port: number): Promise<void> {
+    await this.core.listen(port);
+  }
 
-        ws.on("open", () => {
-          this.registerSocket(peerId, ws);
-          resolve(peerId);
-        });
-        ws.on("error", (err) => reject(err));
-      } catch (err) {
-        reject(err);
-      }
-    });
+  /** Connect to a remote peer by WebSocket URL. */
+  async connect(url: string): Promise<string> {
+    return this.core.connect(url);
   }
 
   /**
@@ -74,96 +84,61 @@ export class DHTTransport {
    * websocket route). Returns the assigned peer ID.
    */
   addSocket(ws: WebSocket, peerId?: string): string {
-    const id = peerId ?? `peer_external_${++this.peerCounter}`;
-    this.registerSocket(id, ws);
-    return id;
+    return this.core.adoptSocket(ws, peerId);
   }
 
-  /** Send a message to a specific peer */
+  /** Send a message to a specific peer. */
   send(peerId: string, message: DHTMessage): void {
-    const ws = this.clients.get(peerId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
-    }
+    this.core.send(peerId, {
+      protocol: CAP_GOSSIP_PROTOCOL,
+      payload: message,
+    });
   }
 
-  /** Broadcast a message to all connected peers, optionally excluding one */
+  /** Broadcast a message to all connected peers, optionally excluding one. */
   broadcast(message: DHTMessage, exclude?: string): void {
-    const data = JSON.stringify(message);
-    for (const [id, ws] of this.clients) {
-      if (id !== exclude && ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
-      }
-    }
+    this.core.broadcast(
+      { protocol: CAP_GOSSIP_PROTOCOL, payload: message },
+      exclude,
+    );
   }
 
-  /** Register a handler for incoming messages */
   onMessage(handler: MessageHandler): void {
     this.messageHandlers.push(handler);
   }
 
-  /** Register a handler for peer connections */
   onPeerConnect(handler: PeerHandler): void {
-    this.connectHandlers.push(handler);
+    this.core.onPeerConnect(handler);
   }
 
-  /** Register a handler for peer disconnections */
   onPeerDisconnect(handler: PeerHandler): void {
-    this.disconnectHandlers.push(handler);
+    this.core.onPeerDisconnect(handler);
   }
 
-  /** Get the IDs of all connected peers */
   getPeerIds(): string[] {
-    return Array.from(this.clients.keys());
+    return this.core.getPeerIds();
   }
 
-  /** Get the count of connected peers */
   get peerCount(): number {
-    return this.clients.size;
+    return this.core.peerCount;
   }
 
-  /** Shut down: close all connections and the server */
+  /** Stats from the underlying core transport (for diagnostics). */
+  getStats(): CoreTransportStats {
+    return this.core.getStats();
+  }
+
+  /** Shut down: close all connections and the server. */
   async close(): Promise<void> {
-    for (const [, ws] of this.clients) {
-      ws.close();
-    }
-    this.clients.clear();
-
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
-      });
-      this.server = null;
-    }
+    await this.core.close();
   }
 
-  // ── Internal ───────────────────────────────────────────────────────
-
-  private registerSocket(peerId: string, ws: WebSocket): void {
-    this.clients.set(peerId, ws);
-
-    dhtTelemetry.peerConnected(peerId);
-
-    for (const h of this.connectHandlers) h(peerId);
-
-    ws.on("message", (data) => {
-      try {
-        const msg: DHTMessage = JSON.parse(data.toString());
-        for (const h of this.messageHandlers) h(peerId, msg);
-      } catch {
-        // Ignore malformed messages
-      }
-    });
-
-    ws.on("close", () => {
-      this.clients.delete(peerId);
-      dhtTelemetry.peerDisconnected(peerId, "close");
-      for (const h of this.disconnectHandlers) h(peerId);
-    });
-
-    ws.on("error", () => {
-      this.clients.delete(peerId);
-      dhtTelemetry.peerDisconnected(peerId, "error");
-    });
+  /** Returns the underlying CoreTransport — for federation runtime co-mounting. */
+  getCore(): CoreTransport {
+    return this.core;
   }
 }
+
+// Re-export CoreMessage so downstreams that want to talk multi-protocol
+// over the same connection can do so without grabbing dht-core directly.
+export type { CoreMessage };

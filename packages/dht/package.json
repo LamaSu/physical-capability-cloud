@@ -20,6 +20,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@pcc/dht-core": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/a2a": "workspace:*",
     "ws": "^8.19.0"
