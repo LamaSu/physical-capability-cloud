@@ -45,3 +45,9 @@ export {
   sanitizeToolDescriptions,
   isExternalSourceType,
 } from "./sanitize-descriptions.js";
+export {
+  main as runCrawlerWorker,
+  parseCrawlerWorkerConfig,
+  runOneCrawl,
+  type CrawlerWorkerConfig,
+} from "./crawler-worker.js";
