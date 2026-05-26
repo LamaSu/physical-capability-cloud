@@ -133,6 +133,6 @@ export function parseStandbyNames(value: string): string[] {
 function splitCsv(s: string): string[] {
   return s
     .split(",")
-    .map((p) => p.trim().replace(/^["']|["']$/g, ""))
+    .map((p) => p.trim().replace(/^["']|["']$/g, "").trim())
     .filter((p) => p.length > 0);
 }
