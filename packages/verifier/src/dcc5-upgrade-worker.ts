@@ -220,12 +220,15 @@ export async function runOnce(
       jobId: job.boundlessJobId,
       err: reason,
     });
-    // Keep pending — transient error; retry next cycle.
+    // Keep pending — transient error; re-enqueue for retry next cycle.
+    await options.queue.updateStatus(job.baseReceiptCid, { status: "pending" });
     return job;
   }
 
   if (pollResult.status === "pending" || pollResult.status === "proving") {
-    // Still cooking — leave in queue.
+    // Still cooking — re-enqueue (pop removed the job from the order list,
+    // so explicit re-enqueue is required to revisit it next cycle).
+    await options.queue.updateStatus(job.baseReceiptCid, { status: "pending" });
     return job;
   }
 
