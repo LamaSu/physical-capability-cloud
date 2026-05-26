@@ -224,6 +224,81 @@ export interface PricingHint {
 }
 
 // ---------------------------------------------------------------------------
+// TEE profile (DCC4 capability declaration)
+// ---------------------------------------------------------------------------
+
+/**
+ * TEE platform vendors PCC understands at DCC4. See scope doc §1.1.
+ *
+ * Phase 1 ships `intel-tdx` + `phala-cloud` (Dstack wraps TDX) + `dstack` (raw).
+ * `intel-sgx` is kept for legacy. `amd-sev-snp` and `aws-nitro` are listed but
+ * Phase 1 only provides verifier shims (full adapter is Phase 2 per scope §1.4).
+ */
+export type TeeVendor =
+  | "intel-tdx"
+  | "intel-sgx"
+  | "amd-sev-snp"
+  | "aws-nitro"
+  | "phala-cloud"
+  | "dstack";
+
+/**
+ * Expected TEE measurement set a tool advertises at registration time.
+ *
+ * Set by the operator via POST /api/aggregator/indexed-tools/:id/claim-tee.
+ * Without a `teeProfile` an IndexedTool's `assuranceCeiling` cannot exceed
+ * DCC3 (scope §2.3). The profile is the allowlist PCC checks every observed
+ * quote against during invocation.
+ */
+export interface TeeProfile {
+  /** Vendor — drives which verifier shim handles the quote. */
+  vendor: TeeVendor;
+  /** Expected MRTD (TDX) / MRENCLAVE (SGX) / image-id (Nitro), hex 48-byte. */
+  expectedMeasurement: string;
+  /** Optional RTMR0..3 (TDX runtime measurements) for finer match. */
+  expectedRtmr?: [string, string, string, string];
+  /** Optional MRSIGNER (SGX only). */
+  expectedSigner?: string;
+  /** Nitro: expected PCR0..PCR4 set, 48-byte SHA384 each. */
+  expectedPcrs?: Record<string, string>;
+  /** Quote format version expected (e.g. "tdx-v4", "tdx-v5", "nitro-v1"). */
+  quoteFormat: string;
+  /** Where the operator-registered measurement set is sourced (URL to manifest). */
+  manifestUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Execution proof profile (DCC5 S1 — faithful execution declaration)
+// ---------------------------------------------------------------------------
+
+/** Supported zkSNARK / zkVM proving systems. See scope doc §3.7. */
+export type ZkSystem = "sp1" | "risc0" | "noir" | "halo2" | "plonky3";
+
+/**
+ * Operator-uploaded execution-proof profile (DCC5 Statement S1).
+ *
+ * S1 is "faithful proxy execution" — operator compiles their tool for a zkVM
+ * and uploads the ELF + verification key. PCC then proves on-the-fly using
+ * Boundless. S2 (TEE-wrap) does NOT use this profile — S2 is automatic once
+ * DCC4 (`teeProfile`) is claimed. See scope §3.4.
+ */
+export interface ExecutionProofProfile {
+  /** Proving system: "sp1" | "risc0" | "noir" | "halo2" | "plonky3". */
+  zkSystem: ZkSystem;
+  /** Content-addressed reference to the program (ELF for SP1/Risc0). */
+  programCid: string;
+  /** Verification key — published once at registration. */
+  verificationKey: string;
+  /** On-chain verifier address (EVM chain id + address). */
+  onchainVerifier?: { chainId: number; address: string };
+  /** Expected proving time at p50, in seconds (set by operator at registration). */
+  expectedProvingSeconds?: number;
+  /** Required input/output schema (must match IndexedTool's inputSchema/outputSchema). */
+  publicInputSchema: unknown;
+  publicOutputSchema: unknown;
+}
+
+// ---------------------------------------------------------------------------
 // IndexedTool — the canonical record
 // ---------------------------------------------------------------------------
 
@@ -286,6 +361,18 @@ export interface IndexedTool {
   assuranceCeiling: DigitalCaptureClass;
   trustTier: TrustTier;
   pricing?: PricingHint;
+  /**
+   * DCC4: operator-registered TEE measurement profile. Required for
+   * `assuranceCeiling >= DCC4`. Set via /claim-tee endpoint after a successful
+   * test-quote verification. See scope doc §2.3.
+   */
+  teeProfile?: TeeProfile;
+  /**
+   * DCC5 S1 (faithful execution): operator-uploaded execution-proof profile.
+   * Optional even for DCC5 — S2 (TEE-wrap) does not need this and is the
+   * default. See scope doc §3.4.
+   */
+  executionProof?: ExecutionProofProfile;
 
   // ----- Verification ----------------------------------------------------
   vetReport?: VetReportSummary;
@@ -392,6 +479,46 @@ const PricingHintSchema = z.object({
   mode: z.enum(["fixed", "auction"]).optional(),
 });
 
+const TeeVendorSchema = z.enum([
+  "intel-tdx",
+  "intel-sgx",
+  "amd-sev-snp",
+  "aws-nitro",
+  "phala-cloud",
+  "dstack",
+]);
+
+const TeeProfileSchema = z.object({
+  vendor: TeeVendorSchema,
+  expectedMeasurement: z.string().min(1),
+  expectedRtmr: z
+    .tuple([z.string(), z.string(), z.string(), z.string()])
+    .optional(),
+  expectedSigner: z.string().optional(),
+  expectedPcrs: z.record(z.string(), z.string()).optional(),
+  quoteFormat: z.string().min(1),
+  manifestUrl: z.string().url().optional(),
+});
+
+const ZkSystemSchema = z.enum(["sp1", "risc0", "noir", "halo2", "plonky3"]);
+
+const ExecutionProofProfileSchema = z.object({
+  zkSystem: ZkSystemSchema,
+  programCid: z.string().min(1),
+  verificationKey: z.string().min(1),
+  onchainVerifier: z
+    .object({
+      chainId: z.number().int().nonnegative(),
+      address: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be 0x-prefixed 20-byte EVM address"),
+    })
+    .optional(),
+  expectedProvingSeconds: z.number().nonnegative().optional(),
+  publicInputSchema: z.unknown(),
+  publicOutputSchema: z.unknown(),
+});
+
 /**
  * Zod schema for IndexedTool at API boundaries.
  *
@@ -426,6 +553,8 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   assuranceCeiling: z.nativeEnum(DigitalCaptureClass),
   trustTier: TrustTierSchema,
   pricing: PricingHintSchema.optional(),
+  teeProfile: TeeProfileSchema.optional(),
+  executionProof: ExecutionProofProfileSchema.optional(),
   vetReport: VetReportSummarySchema.optional(),
   cpFiveMcpScore: z.number().int().min(0).max(13).optional(),
   knownVulns: z.array(z.string()),
