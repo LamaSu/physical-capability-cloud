@@ -56,36 +56,43 @@ class Server:
     # ── server lifecycle ──────────────────────────────────────────────────
 
     async def serve(self) -> None:
-        """Run the stdio JSON-RPC loop until stdin EOFs."""
+        """Run the stdio JSON-RPC loop until stdin EOFs.
+
+        Cross-platform stdin reading: asyncio.connect_read_pipe(sys.stdin)
+        works cleanly on POSIX but the Windows ``ProactorEventLoop`` raises
+        ``OSError: [WinError 6] The handle is invalid`` on stdin pipes. We
+        read in a thread executor + push lines into an asyncio.Queue.
+        """
         self._loop = asyncio.get_running_loop()
         self.evidence.attach_loop(self._loop)
-        reader = await self._make_stdin_reader()
         await self.write_notification(
             "lifecycle",
             {"phase": "ready", "methods": self.dispatcher.methods()},
         )
-        try:
-            while True:
-                line = await reader.readline()
-                if not line:
-                    log.info("stdin EOF; shutting down")
-                    return
-                # Schedule the handler so we don't block subsequent reads on a
-                # slow handler. Concurrency is bounded by Python's asyncio
-                # scheduler — single-threaded co-op.
-                asyncio.create_task(self.handle_line(line.decode("utf-8", errors="replace")))
-        finally:
-            await self._shutdown_devices()
-
-    async def _make_stdin_reader(self) -> asyncio.StreamReader:
         if self._stdin is not None:
             # Test path: stdin is already an asyncio StreamReader.
-            return self._stdin
+            await self._serve_from_stream(self._stdin)
+        else:
+            await self._serve_from_blocking_stdin()
+        await self._shutdown_devices()
+
+    async def _serve_from_stream(self, reader: asyncio.StreamReader) -> None:
+        while True:
+            line = await reader.readline()
+            if not line:
+                log.info("stdin EOF; shutting down")
+                return
+            asyncio.create_task(self.handle_line(line.decode("utf-8", errors="replace")))
+
+    async def _serve_from_blocking_stdin(self) -> None:
+        """Read stdin via run_in_executor — works on Windows + POSIX."""
         loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-        return reader
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                log.info("stdin EOF; shutting down")
+                return
+            asyncio.create_task(self.handle_line(line))
 
     async def _shutdown_devices(self) -> None:
         for h in list(self.loader.list()):
