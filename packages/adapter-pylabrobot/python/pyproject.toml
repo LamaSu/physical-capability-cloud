@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcc-plr-sidecar"
+version = "0.1.0"
+description = "PCC PyLabRobot sidecar — JSON-RPC 2.0 stdio bridge for the Node TypeScript adapter"
+authors = [{name = "PCC Contributors"}]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    # PLR pin — Phase 1 targets the OT-2 + ChatterboxBackend code path.
+    # Pinned conservatively to avoid surprise breakage on minor version bumps.
+    "pylabrobot>=0.2.1,<0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+]
+# Optional vendor extras — operator installs only what they need.
+ot2 = ["opentrons>=7.0; python_version>='3.10'"]
+hamilton = ["pyusb>=1.2", "pyserial>=3.5"]
+tecan = ["pyserial>=3.5"]
+
+[project.scripts]
+pcc-plr-sidecar = "pcc_plr_sidecar.__main__:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pcc_plr_sidecar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
