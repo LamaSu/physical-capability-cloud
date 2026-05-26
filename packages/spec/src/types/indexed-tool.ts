@@ -151,8 +151,16 @@ export type JSONSchemaLoose = Record<string, unknown>;
 
 /** Compact view of a vetting outcome. Full report lives in `ai/supervisor/`. */
 export interface VetReportSummary {
-  /** Overall verdict from `harness vet`. */
-  verdict: "PASS" | "WARN" | "FAIL";
+  /**
+   * Overall verdict from `harness vet`.
+   *
+   * - `UNVETTED`: default placeholder. The aggregator's verify stage runs
+   *   without a real Gate A scan yet, so we MUST NOT emit a PASS until a
+   *   real scanner result is supplied. Consumers downstream should treat
+   *   UNVETTED as "not yet attestable" (i.e. cap at QUARANTINED / UNTRUSTED).
+   * - `PASS`/`WARN`/`FAIL`: emitted only when an actual Gate A scan completed.
+   */
+  verdict: "UNVETTED" | "PASS" | "WARN" | "FAIL";
   /** Path to the full report on disk, relative to project root. */
   reportPath?: string;
   /** Number of critical vulnerabilities found (0 ideal). */
@@ -348,7 +356,7 @@ const SHA256Schema = z
   .regex(/^sha256:[a-f0-9]{64}$/, "Must be sha256:<64 hex chars>");
 
 const VetReportSummarySchema = z.object({
-  verdict: z.enum(["PASS", "WARN", "FAIL"]),
+  verdict: z.enum(["UNVETTED", "PASS", "WARN", "FAIL"]),
   reportPath: z.string().optional(),
   critical: z.number().int().nonnegative(),
   high: z.number().int().nonnegative(),
