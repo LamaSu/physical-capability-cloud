@@ -30,14 +30,17 @@ interface IContributorNFT {
 
 /// @dev Minimal view-only interface to RateScheduleRegistry. The schedule
 ///      MUST be published BEFORE the backend can be registered.
-interface IRateScheduleRegistry {
+/// @dev Name suffixed `_PLR` to avoid clashing with the same-named interface
+///      declared in ContributorNFT.sol (Solidity disallows duplicate
+///      file-level identifiers in the same compilation unit).
+interface IRateScheduleRegistry_PLR {
     function exists(bytes32 scheduleHash) external view returns (bool);
 }
 
 /**
  * @title  PLRBackendRegistry
  * @notice On-chain authorship registry for PyLabRobot backends executed
- *         through @pcc/adapter-pylabrobot.
+ *         through the pcc/adapter-pylabrobot package.
  *
  *         Each entry maps a UTF-8 PLR module path (e.g.
  *         "pylabrobot.liquid_handling.backends.hamilton.STAR") to a
@@ -351,7 +354,7 @@ contract PLRBackendRegistry {
         if (claimed[modulePathKey]) revert AlreadyClaimed();
 
         // The schedule must be published before any backend can reference it.
-        if (!IRateScheduleRegistry(scheduleRegistry).exists(scheduleHash)) {
+        if (!IRateScheduleRegistry_PLR(scheduleRegistry).exists(scheduleHash)) {
             revert ScheduleNotRegistered();
         }
 
@@ -446,7 +449,7 @@ contract PLRBackendRegistry {
         if (!claimed[modulePathKey]) revert NotClaimed();
         BackendRecord storage r = records[modulePathKey];
         if (msg.sender != _currentAuthor(r)) revert UnauthorizedActor();
-        if (!IRateScheduleRegistry(scheduleRegistry).exists(newScheduleHash)) {
+        if (!IRateScheduleRegistry_PLR(scheduleRegistry).exists(newScheduleHash)) {
             revert ScheduleNotRegistered();
         }
         bytes32 oldScheduleHash = r.scheduleHash;
