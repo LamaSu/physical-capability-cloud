@@ -12,6 +12,24 @@ export { OctoPrintAdapter, type OctoPrintConfig } from "./octoprint-adapter.js";
 export { ModbusSensorAdapter, type ModbusConfig, type ModbusRegisterDef } from "./modbus-sensor-adapter.js";
 export { OPCUAAdapter, type OPCUAConfig, type OPCUANodeDef } from "./opcua-adapter.js";
 
+// PyLabRobot adapter — bridges to any PLR-supported lab instrument
+// (OT-2, Flex, Hamilton STAR/Vantage, Tecan EVO, plate readers,
+// thermocyclers, centrifuges, heater-shakers) via a long-running Python
+// sidecar over JSON-RPC 2.0 stdio.
+export {
+  PyLabRobotAdapter,
+  type PyLabRobotConfig,
+  type PlrBackend,
+  SidecarClient,
+  SidecarError,
+  type SidecarClientConfig,
+  EvidenceCollector,
+  type CameraHook,
+  type SensorHook,
+  RPC_ERROR_CODES,
+  RPC_METHODS,
+} from "./pylabrobot.js";
+
 // SiLA 2 lab instrument adapter
 export { SiLAAdapter, type SiLAAdapterConfig } from "./sila/index.js";
 export type {

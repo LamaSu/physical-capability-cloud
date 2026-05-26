@@ -22,6 +22,7 @@ import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
 import { IppAdapter } from "./adapters/ipp-adapter.js";
 import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
 import { HamiltonAdapter } from "./adapters/hamilton-adapter.js";
+import { PyLabRobotAdapter } from "./adapters/pylabrobot.js";
 
 // ---------------------------------------------------------------------------
 // Machine adapters
@@ -95,6 +96,32 @@ export function createMachineAdapter(
         refreshLeadSeconds: cfg.refreshLeadSeconds as number | undefined,
         mockRunDurationMs: cfg.mockRunDurationMs as number | undefined,
       });
+    }
+
+    case "pylabrobot": {
+      // adapterConfig holds per-instrument specifics: plrBackend selector,
+      // backendConfig (URL, credentials, deck file), python interpreter
+      // path, machineType override for non-liquid-handler instruments
+      // (plate readers, centrifuges, etc.).
+      const plrBackend = (cfg.plrBackend as string | undefined) ?? "chatterbox";
+      const backendConfig = (cfg.backendConfig as Record<string, unknown> | undefined) ?? cfg;
+      return new PyLabRobotAdapter({
+        deviceId: device.id,
+        kernelId,
+        plrBackend,
+        backendConfig,
+        machineType: cfg.machineType as string | undefined,
+        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+        rpcTimeoutMs: cfg.rpcTimeoutMs as number | undefined,
+        runTimeoutMs: cfg.runTimeoutMs as number | undefined,
+        restartAfterJobs: cfg.restartAfterJobs as number | undefined,
+        sidecarConfig: {
+          pythonPath: (cfg.pythonPath as string | undefined)
+            ?? process.env.PCC_PLR_PYTHON_PATH
+            ?? "python",
+          defaultTimeoutMs: cfg.defaultTimeoutMs as number | undefined,
+        },
+      }) as unknown as MachineAdapter;
     }
 
     case "mock":

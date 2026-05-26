@@ -183,9 +183,6 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     try {
       await this.ensureInitialized();
       switch (command.type) {
-        case "load_gcode":
-          // Unreachable — handled above before init.
-          return this.handleLoadGcode(command.payload);
         case "start":
           return await this.handleStart(command.payload);
         case "stop":
