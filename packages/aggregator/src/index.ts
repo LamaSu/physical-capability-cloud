@@ -51,3 +51,8 @@ export {
   runOneCrawl,
   type CrawlerWorkerConfig,
 } from "./crawler-worker.js";
+export {
+  PLRBackendGate,
+  type PLRBackendGateOptions,
+  type PLRRegistryReader,
+} from "./plr-backend-gate.js";
