@@ -5,6 +5,9 @@
 import type { MachineProfile, CapabilityType, Id } from "@pcc/spec";
 import { prusaMk4Profile } from "./prusa-mk4.js";
 import { haasVf2Profile } from "./haas-vf2.js";
+import { tornosDecoProfile } from "./tornos-deco.js";
+import { citizenCincomProfile } from "./citizen-cincom.js";
+import { starSb20Profile } from "./star-sb20.js";
 
 const registry = new Map<string, MachineProfile>();
 
@@ -36,3 +39,6 @@ export function getAllProfiles(): MachineProfile[] {
 // Register built-in profiles
 registerProfile(prusaMk4Profile);
 registerProfile(haasVf2Profile);
+registerProfile(tornosDecoProfile);
+registerProfile(citizenCincomProfile);
+registerProfile(starSb20Profile);
