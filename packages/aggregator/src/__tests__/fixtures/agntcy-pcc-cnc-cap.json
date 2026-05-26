@@ -1,0 +1,46 @@
+{
+  "name": "PCC CNC 5-Axis Capability",
+  "description": "5-axis CNC milling capability with probing and Tier-1 evidence",
+  "version": "2.0.0",
+  "schema_version": "1.0.0",
+  "authors": ["Physical Capability Cloud <noreply@capability.network>"],
+  "created_at": "2026-05-25T12:00:00.000Z",
+  "domains": [
+    { "name": "manufacturing/cnc", "id": 9011 }
+  ],
+  "skills": [
+    { "name": "manufacturing/cnc-5axis", "id": 9102 }
+  ],
+  "modules": [
+    {
+      "name": "tool-schema/v1",
+      "data": {
+        "input": { "type": "object", "properties": { "gcode": { "type": "string" } } },
+        "output": { "type": "object", "properties": { "evidenceCid": { "type": "string" } } },
+        "action_class": "exec"
+      }
+    },
+    {
+      "name": "physical-capability/v1",
+      "data": {
+        "capability_type": "cnc-5axis",
+        "materials": ["aluminum-6061", "steel-1018"],
+        "work_envelope": { "x": 600, "y": 400, "z": 400, "unit": "mm" },
+        "tolerances": { "linear": "±0.05mm", "surface": "Ra 1.6" },
+        "pcc_facets": {
+          "agent_card_url": "https://capability.network/.well-known/agent-card.json",
+          "mcp_url": "https://capability.network/mcp",
+          "erc8004_registry": "0xAaB3F94f000000000000000000000000000000A66",
+          "dcc_max": "DCC5",
+          "trust_tier": "PCC_NATIVE",
+          "cid_pcc": "sha256:abc123",
+          "action_class": "exec"
+        }
+      }
+    }
+  ],
+  "locators": [
+    { "type": "rest_endpoint", "urls": ["https://capability.network/api/capabilities/cap-cnc-001"] },
+    { "type": "mcp_server", "urls": ["https://capability.network/mcp"] }
+  ]
+}

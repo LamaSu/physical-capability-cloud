@@ -15,3 +15,11 @@ export {
   type MCPRegistryCrawlerOptions,
   type CrawlResult,
 } from "./mcp-registry-crawler.js";
+export {
+  AgntcyAdsSourceAdapter,
+  makeAgntcyAdsSourceAdapter,
+  oasfToIndexedTool,
+  inferActionClassFromSkills,
+  type AgntcyAdsAdapterOptions,
+  type OasfRecord,
+} from "./agntcy-ads.js";
