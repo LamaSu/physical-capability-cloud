@@ -1,0 +1,40 @@
+{
+  "name": "@pcc/intent-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lightweight SDK any agent app embeds to capture intent-shaped outbound HTTP calls and post DemandEnvelopes to PCC's /api/intents/ingest endpoint. Phase 2.2 of the intent-network-interception roadmap (complements @pcc/intent-broker MCP server and the OTel exporter).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./middleware/express": {
+      "types": "./dist/middleware/express.d.ts",
+      "import": "./dist/middleware/express.js",
+      "default": "./dist/middleware/express.js"
+    },
+    "./middleware/next": {
+      "types": "./dist/middleware/next.d.ts",
+      "import": "./dist/middleware/next.js",
+      "default": "./dist/middleware/next.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.7.0",
+    "@pcc/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
