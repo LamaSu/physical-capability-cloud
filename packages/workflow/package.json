@@ -1,0 +1,54 @@
+{
+  "name": "@pcc/workflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Durable execution primitives for PCC: idempotent activities, event-sourced workflows, federated data ports, CWL export, version markers. Embeddable in any TypeScript Fastify monolith — no separate workflow server required.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./activity": {
+      "types": "./dist/activity/index.d.ts",
+      "import": "./dist/activity/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
+    },
+    "./data-port": {
+      "types": "./dist/data-port/index.d.ts",
+      "import": "./dist/data-port/index.js"
+    },
+    "./cwl": {
+      "types": "./dist/cwl/index.d.ts",
+      "import": "./dist/cwl/index.js"
+    },
+    "./store-sqlite": {
+      "types": "./dist/store/sqlite.d.ts",
+      "import": "./dist/store/sqlite.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "better-sqlite3": "^11.8.1",
+    "yaml": "^2.6.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.1"
+  }
+}
