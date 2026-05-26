@@ -25,7 +25,7 @@ import {
 } from "@pcc/spec";
 import type { IndexedTool as LightweightIndexedTool } from "../types.js";
 
-const SHA_PLACEHOLDER = "sha256:" + "0".repeat(64);
+const SHA_PLACEHOLDER = `sha256:${"0".repeat(64)}` as `sha256:${string}`;
 
 /** Heuristic: HTTP method → actionClass mapping. Safe for PCC's own tools. */
 function actionClassFromMethod(method: string | undefined): IndexedToolActionClass {

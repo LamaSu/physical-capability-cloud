@@ -10,7 +10,7 @@ import {
   TrustTier,
 } from "@pcc/spec";
 
-const SHA = "sha256:" + "a".repeat(64);
+const SHA = `sha256:${"a".repeat(64)}` as `sha256:${string}`;
 
 /** Build a baseline IndexedTool with the supplied overrides. */
 export function makeTool(overrides: Partial<IndexedTool> = {}): IndexedTool {

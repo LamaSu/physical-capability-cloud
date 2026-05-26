@@ -104,7 +104,6 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
         const rankerHits = await bridge.rank({
           q: req.query.q,
           filter: {
-            actionClass: undefined,
             minTrustTier: req.query.minTrustTier,
             actionClassAllowlist: req.query.actionClass
               ? [req.query.actionClass]
