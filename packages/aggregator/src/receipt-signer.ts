@@ -22,6 +22,7 @@ import type { InvocationReceipt } from "@pcc/spec";
 import { hmac } from "@noble/hashes/hmac";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils";
+import type { AnchorOutcome, ReceiptAnchorClient } from "./receipt-anchor-client.js";
 
 /** A symmetric receipt-signing key. */
 export interface ReceiptSignerKey {
@@ -121,6 +122,36 @@ export function verifyReceiptSignature(
     sha256(new TextEncoder().encode(JSON.stringify(sortKeysDeep({ ...rest, pccSignature })))),
   )}`;
   return cidExpected === receiptCID;
+}
+
+/**
+ * Phase 2: sign-and-anchor in one call.
+ *
+ * Signs the receipt, then (if an anchor client is provided AND it's enabled)
+ * routes the signed receipt to the on-chain anchor pipeline. Returns the
+ * signed receipt plus the anchor outcome so the caller can surface the
+ * anchorStatus to its response payload.
+ *
+ * If `anchor` is omitted (or its client is disabled), this behaves identically
+ * to plain `signReceipt` — the caller still gets a usable signed receipt and
+ * an `{ mode: "disabled" }` anchor outcome they can ignore.
+ *
+ * Anchor errors do NOT bubble: a single-anchor RPC failure is surfaced via
+ * the `txHashPromise` on the outcome. The caller decides how to handle
+ * `pending` -> `failed` transitions.
+ */
+export function signAndAnchorReceipt(
+  body: Omit<InvocationReceipt, "pccSignature" | "receiptCID" | "pccKeyId">,
+  options: {
+    key?: ReceiptSignerKey;
+    anchor?: ReceiptAnchorClient;
+  } = {},
+): { receipt: InvocationReceipt; anchor: AnchorOutcome } {
+  const receipt = signReceipt(body, options.key);
+  const anchor = options.anchor
+    ? options.anchor.anchorReceipt(receipt)
+    : ({ mode: "disabled" } as AnchorOutcome);
+  return { receipt, anchor };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { InvocationReceipt } from "@pcc/spec";
 import { DigitalCaptureClass } from "@pcc/spec";
-import { signReceipt, verifyReceiptSignature } from "../receipt-signer.js";
+import { signReceipt, verifyReceiptSignature, signAndAnchorReceipt } from "../receipt-signer.js";
+import { createReceiptAnchorClient } from "../receipt-anchor-client.js";
 
 const SHA = "sha256:" + "a".repeat(64);
 
@@ -76,5 +77,43 @@ describe("signReceipt + verifyReceiptSignature", () => {
     const s2 = signReceipt(body, TEST_KEY);
     expect(s1.pccSignature).toBe(s2.pccSignature);
     expect(s1.receiptCID).toBe(s2.receiptCID);
+  });
+});
+
+describe("signAndAnchorReceipt", () => {
+  it("returns disabled outcome when no anchor client provided", () => {
+    const body = makeBody();
+    const { receipt, anchor } = signAndAnchorReceipt(body, { key: TEST_KEY });
+    expect(receipt.pccSignature).toMatch(/^[0-9a-f]{64}$/);
+    expect(anchor).toEqual({ mode: "disabled" });
+  });
+
+  it("returns disabled outcome when anchor client is disabled", () => {
+    const client = createReceiptAnchorClient({
+      enabled: false,
+      chainBackend: {
+        anchorOne: async () => "0x0",
+        anchorBatch: async () => "0x0",
+      },
+      manifestStorage: { publishManifest: async () => "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}` },
+    });
+    const body = makeBody();
+    const { anchor } = signAndAnchorReceipt(body, { key: TEST_KEY, anchor: client });
+    expect(anchor).toEqual({ mode: "disabled" });
+  });
+
+  it("routes signed receipt through enabled anchor client (batch path for DCC1)", () => {
+    const client = createReceiptAnchorClient({
+      enabled: true,
+      chainBackend: {
+        anchorOne: async () => "0x0",
+        anchorBatch: async () => "0xbatched",
+      },
+      manifestStorage: { publishManifest: async () => "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}` },
+    });
+    const body = makeBody();
+    const { receipt, anchor } = signAndAnchorReceipt(body, { key: TEST_KEY, anchor: client });
+    expect(receipt.pccSignature).toBeTruthy();
+    expect(anchor.mode).toBe("batched");
   });
 });

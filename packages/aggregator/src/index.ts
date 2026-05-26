@@ -32,8 +32,30 @@ export type {
   PipelineStageReport,
 } from "./types.js";
 export * from "./sources/index.js";
-export { signReceipt, verifyReceiptSignature } from "./receipt-signer.js";
+export { signReceipt, verifyReceiptSignature, signAndAnchorReceipt } from "./receipt-signer.js";
 export type { ReceiptSignerKey } from "./receipt-signer.js";
+export {
+  ReceiptAnchorClient,
+  createReceiptAnchorClient,
+  buildAnchorRequest,
+} from "./receipt-anchor-client.js";
+export type {
+  AnchorOutcome,
+  AnchorRequest,
+  BatchFlushResult,
+  BatchManifest,
+  BatchManifestStorage,
+  ChainBackend,
+  ReceiptAnchorClientConfig,
+} from "./receipt-anchor-client.js";
+export {
+  buildMerkleTree,
+  getMerkleProof,
+  verifyMerkleProof,
+  cidToBytes32,
+  hashPairSorted,
+} from "./merkle.js";
+export type { Bytes32Hex, MerkleTree } from "./merkle.js";
 export {
   assertSafeFetchUrl,
   assertSafeFetchUrlWithDns,
