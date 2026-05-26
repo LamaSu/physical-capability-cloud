@@ -10,11 +10,56 @@
  *     hooks.
  *   - Protocol constants + types for the JSON-RPC contract.
  *
- * The kernel registers this adapter via
- *   `packages/kernel/src/adapters/pylabrobot.ts`
- * which is a thin re-export to keep the kernel package's adapter index
- * file unchanged in shape.
+ * Side effect: registers itself with the kernel's plugin registry at
+ * module-load time. Importing `@pcc/adapter-pylabrobot` makes
+ * `adapterType: 'pylabrobot'` resolvable via `createMachineAdapter`.
+ *
+ * Operators register a PLR-backed device via KERNEL_CONFIG with:
+ *
+ *   {
+ *     "deviceId": "dev-ot2-001",
+ *     "type": "machine",
+ *     "adapterType": "pylabrobot",
+ *     "config": {
+ *       "plrBackend": "ot2",
+ *       "backendConfig": {
+ *         "ot2Url": "http://192.168.1.50:31950",
+ *         "ot2ApiKey": "..."
+ *       },
+ *       "pythonPath": "auto"
+ *     },
+ *     "capabilities": ["liquid-handling-plr"]
+ *   }
  */
+
+import { registerMachineAdapter } from "@pcc/kernel";
+import { PyLabRobotAdapter } from "./adapter.js";
+
+// Auto-register at module load. Mirrors the SiLA / Hamilton / Opentrons
+// pattern of having one entry-point per adapter that the host application
+// imports for its side effect.
+registerMachineAdapter("pylabrobot", (device, cfg, kernelId) => {
+  const plrBackend = (cfg.plrBackend as string | undefined) ?? "chatterbox";
+  const backendConfig =
+    (cfg.backendConfig as Record<string, unknown> | undefined) ?? cfg;
+  return new PyLabRobotAdapter({
+    deviceId: device.id,
+    kernelId,
+    plrBackend: plrBackend as import("./adapter.js").PlrBackend,
+    backendConfig,
+    machineType: cfg.machineType as string | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+    rpcTimeoutMs: cfg.rpcTimeoutMs as number | undefined,
+    runTimeoutMs: cfg.runTimeoutMs as number | undefined,
+    restartAfterJobs: cfg.restartAfterJobs as number | undefined,
+    sidecarConfig: {
+      pythonPath:
+        (cfg.pythonPath as string | undefined) ??
+        process.env.PCC_PLR_PYTHON_PATH ??
+        "python",
+    },
+  });
+});
 
 export { PyLabRobotAdapter } from "./adapter.js";
 export type { PyLabRobotConfig, PlrBackend } from "./adapter.js";
