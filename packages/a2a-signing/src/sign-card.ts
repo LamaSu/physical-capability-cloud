@@ -19,8 +19,15 @@
  * The `protected` header (decoded) contains `{alg, kid, typ, jwk-set-url}`.
  */
 
-import canonicalize from "canonicalize";
+import * as canonicalizeModule from "canonicalize";
 import { CompactSign, type KeyLike } from "jose";
+
+// `canonicalize` is a CJS module with a single default export. Under
+// NodeNext + esModuleInterop, the safest cross-build form is namespace +
+// explicit .default access.
+const canonicalize = (canonicalizeModule as unknown as {
+  default: (input: unknown) => string | undefined;
+}).default;
 
 /** Generic agent card shape — accept any object. */
 export type AgentCard = Record<string, unknown>;

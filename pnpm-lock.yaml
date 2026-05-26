@@ -174,6 +174,19 @@ importers:
         specifier: ^8.19.0
         version: 8.19.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
 
+  packages/a2a-signing:
+    dependencies:
+      canonicalize:
+        specifier: ^2.0.0
+        version: 2.1.0
+      jose:
+        specifier: ^5.6.0
+        version: 5.10.0
+    devDependencies:
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
   packages/agent-broker:
     dependencies:
       '@pcc/a2a':
@@ -348,6 +361,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.7.0
         version: 1.8.0
+      '@pcc/a2a':
+        specifier: workspace:*
+        version: link:../a2a
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
@@ -579,6 +595,12 @@ importers:
       '@fastify/static':
         specifier: ^7.0.4
         version: 7.0.4
+      '@fastify/swagger':
+        specifier: ^8.15.0
+        version: 8.15.0
+      '@fastify/swagger-ui':
+        specifier: ^4.2.0
+        version: 4.2.0
       '@fastify/websocket':
         specifier: ^10.0.1
         version: 10.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)
@@ -666,6 +688,9 @@ importers:
       '@pcc/template-physical-operator':
         specifier: workspace:*
         version: link:../agent-onboarder
+      '@pcc/tool-index':
+        specifier: workspace:*
+        version: link:../tool-index
       '@pcc/touchstone':
         specifier: workspace:*
         version: link:../touchstone
@@ -734,6 +759,22 @@ importers:
       zod:
         specifier: ^3.23.0
         version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
+  packages/intent-collector:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^1.7.0
+        version: 1.8.0
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
     devDependencies:
       typescript:
         specifier: ^5.4.0
@@ -991,6 +1032,16 @@ importers:
       '@pcc/orchestrator-sdk':
         specifier: workspace:*
         version: link:../orchestrator-sdk
+    devDependencies:
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
+  packages/tool-index:
+    dependencies:
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
     devDependencies:
       vitest:
         specifier: ^1.6.0
@@ -1593,6 +1644,12 @@ packages:
 
   '@fastify/static@7.0.4':
     resolution: {integrity: sha512-p2uKtaf8BMOZWLs6wu+Ihg7bWNBdjNgCwDza4MJtTqg+5ovKmcbgbR9Xs5/smZ1YISfzKOCNYmZV8LaCj+eJ1Q==}
+
+  '@fastify/swagger-ui@4.2.0':
+    resolution: {integrity: sha512-pVutmTm49Pn98FS01E2m+eUH0WGhsHlImowWr9PXQt3rQPArSsocON8qF/8mm0dNLmilwtJZJqdsvFTnCUcapw==}
+
+  '@fastify/swagger@8.15.0':
+    resolution: {integrity: sha512-zy+HEEKFqPMS2sFUsQU5X0MHplhKJvWeohBwTCkBAJA/GDYGLGUWQaETEhptiqxK7Hs0fQB9B4MDb3pbwIiCwA==}
 
   '@fastify/websocket@10.0.1':
     resolution: {integrity: sha512-8/pQIxTPRD8U94aILTeJ+2O3el/r19+Ej5z1O1mXlqplsUH7KzCjAI0sgd5DM/NoPjAi5qLFNIjgM5+9/rGSNw==}
@@ -4477,6 +4534,10 @@ packages:
   caniuse-lite@1.0.30001776:
     resolution: {integrity: sha512-sg01JDPzZ9jGshqKSckOQthXnYwOEP50jeVFhaSFbZcOy05TiuuaffDOfcwtCisJ9kNQuLBFibYywv2Bgm9osw==}
 
+  canonicalize@2.1.0:
+    resolution: {integrity: sha512-F705O3xrsUtgt98j7leetNhTWPe+5S72rlL5O4jA1pKqBVQ/dT1O1D6PFxmSXvc0SUOinWS57DKx0I3CHrXJHQ==}
+    hasBin: true
+
   cardinal@2.1.1:
     resolution: {integrity: sha512-JSr5eOgoEymtYHBjNWyjrMqet9Am2miJhlfKNdqLp6zoeAh0KN5dRAcxlecj5mAJrmQomgiOBj35xHLrFjqBpw==}
     hasBin: true
@@ -5998,6 +6059,9 @@ packages:
     resolution: {integrity: sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ==}
     hasBin: true
 
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
+
   jose@6.2.1:
     resolution: {integrity: sha512-jUaKr1yrbfaImV7R2TN/b3IcZzsw38/chqMpo2XJ7i2F8AfM/lA4G1goC3JVEwg0H7UldTmSt3P68nt31W7/mw==}
 
@@ -6040,6 +6104,10 @@ packages:
 
   json-schema-ref-resolver@1.0.1:
     resolution: {integrity: sha512-EJAj1pgHc1hxF6vo2Z3s69fMjO1INq6eGHXZ8Z6wCQeldCuwxGK9Sxf4/cScGn3FZubCVUehfWtcDM/PLteCQw==}
+
+  json-schema-resolver@2.0.0:
+    resolution: {integrity: sha512-pJ4XLQP4Q9HTxl6RVDLJ8Cyh1uitSs0CzDBAz1uoJ4sRD/Bk7cFSXL1FUXDW3zJ7YnfliJx6eu8Jn283bpZ4Yg==}
+    engines: {node: '>=10'}
 
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
@@ -7953,6 +8021,9 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
+  uri-js@4.4.1:
+    resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
+
   url-parse@1.5.10:
     resolution: {integrity: sha512-WypcfiRhfeUP9vvF0j6rw0J3hrWrw6iZv3+22h6iRMJ/8z1Tj6XfLP4DsUix5MhMPnXpiHDoKyoZ/bdCkwBCiQ==}
 
@@ -9001,6 +9072,24 @@ snapshots:
       fastify-plugin: 4.5.1
       fastq: 1.20.1
       glob: 10.5.0
+
+  '@fastify/swagger-ui@4.2.0':
+    dependencies:
+      '@fastify/static': 7.0.4
+      fastify-plugin: 4.5.1
+      openapi-types: 12.1.3
+      rfdc: 1.4.1
+      yaml: 2.8.2
+
+  '@fastify/swagger@8.15.0':
+    dependencies:
+      fastify-plugin: 4.5.1
+      json-schema-resolver: 2.0.0
+      openapi-types: 12.1.3
+      rfdc: 1.4.1
+      yaml: 2.8.2
+    transitivePeerDependencies:
+      - supports-color
 
   '@fastify/websocket@10.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)':
     dependencies:
@@ -13478,6 +13567,8 @@ snapshots:
 
   caniuse-lite@1.0.30001776: {}
 
+  canonicalize@2.1.0: {}
+
   cardinal@2.1.1:
     dependencies:
       ansicolors: 0.3.2
@@ -15180,6 +15271,8 @@ snapshots:
 
   jiti@2.6.1: {}
 
+  jose@5.10.0: {}
+
   jose@6.2.1: {}
 
   js-tokens@4.0.0: {}
@@ -15237,6 +15330,14 @@ snapshots:
   json-schema-ref-resolver@1.0.1:
     dependencies:
       fast-deep-equal: 3.1.3
+
+  json-schema-resolver@2.0.0:
+    dependencies:
+      debug: 4.4.3
+      rfdc: 1.4.1
+      uri-js: 4.4.1
+    transitivePeerDependencies:
+      - supports-color
 
   json-schema-traverse@1.0.0: {}
 
@@ -17332,6 +17433,10 @@ snapshots:
       browserslist: 4.28.1
       escalade: 3.2.0
       picocolors: 1.1.1
+
+  uri-js@4.4.1:
+    dependencies:
+      punycode: 2.3.1
 
   url-parse@1.5.10:
     dependencies:

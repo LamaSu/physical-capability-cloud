@@ -13,7 +13,7 @@
  * PEM contents go into Railway env vars; never on disk in prod.
  */
 
-import { importPKCS8, importSPKI, exportJWK, type KeyLike } from "jose";
+import { importPKCS8, importJWK, exportJWK, type JWK, type KeyLike } from "jose";
 
 export const DEFAULT_KID = "pcc-2026-q2";
 export const DEFAULT_ALG = "ES256";
@@ -69,14 +69,13 @@ export async function loadSigningKey(): Promise<LoadedSigningKey | null> {
   }
 
   // Derive the public key by exporting the private key as JWK, stripping
-  // the private component `d`, then re-importing as SPKI. This avoids
-  // requiring the operator to supply a separate public key env var.
+  // the private component `d`, then re-importing as a public-only JWK.
+  // This avoids requiring the operator to supply a separate public key
+  // env var. exportJWK on a private key returns the curve params (x, y,
+  // crv, kty) which is exactly what we need for the public key.
   const privJwk = await exportJWK(privateKey);
-  const pubJwk = { ...privJwk };
-  delete (pubJwk as Record<string, unknown>).d;
-  // exportJWK on a private key returns the curve params (x, y, crv, kty)
-  // which is exactly what we need for the public key.
-  const { importJWK } = await import("jose");
+  const pubJwk: JWK = { ...privJwk };
+  delete (pubJwk as unknown as Record<string, unknown>).d;
   const publicKey = (await importJWK(pubJwk, DEFAULT_ALG)) as KeyLike;
 
   return { privateKey, publicKey, kid, alg: DEFAULT_ALG };

@@ -12,9 +12,13 @@
  * `signatures` stripped). `error` carries a short reason on failure.
  */
 
-import canonicalize from "canonicalize";
-import { compactVerify, importJWK, type KeyLike } from "jose";
+import * as canonicalizeModule from "canonicalize";
+import { compactVerify, importJWK, type JWK, type KeyLike } from "jose";
 import type { SignedAgentCard } from "./sign-card.js";
+
+const canonicalize = (canonicalizeModule as unknown as {
+  default: (input: unknown) => string | undefined;
+}).default;
 
 export interface VerifyResult {
   valid: boolean;
@@ -152,7 +156,7 @@ async function resolveKey(
   }
 
   try {
-    const key = (await importJWK(match, "ES256")) as KeyLike;
+    const key = (await importJWK(match as unknown as JWK, "ES256")) as KeyLike;
     return { ok: true, key };
   } catch (err) {
     return { ok: false, error: `jwk_import_failed: ${(err as Error).message}` };
