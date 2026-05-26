@@ -36,3 +36,10 @@ export * from "./region/index.js";
 export * from "./server.js";
 export * from "./namespace.js";
 export * from "./vector-clock.js";
+
+// Phase 1 replicator stub — see Phase 2 for the real CDC + DHT pipeline.
+export {
+  PhaseOneReplicator,
+  type ToolCrdtSlot,
+  type PhaseOneReplicatorStats,
+} from "./replicator-stub.js";
