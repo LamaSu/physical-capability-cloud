@@ -1,0 +1,30 @@
+{
+  "name": "@pcc/adapter-pylabrobot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PyLabRobot adapter for PCC — bridges JSON-RPC over stdio to a long-running Python sidecar that drives any PLR-supported lab instrument (OT-2, Flex, Hamilton STAR/Vantage, Tecan EVO, plate readers, thermocyclers, centrifuges, heater-shakers)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "rimraf": "^5.0.0"
+  }
+}
