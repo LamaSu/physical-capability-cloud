@@ -69,3 +69,16 @@ export type {
   GeoLocation,
   ShadowTelemetryEvent,
 } from "./ranker/types.js";
+
+// ── Shadow-mode telemetry (PCC_RANKER_MODE=shadow) ───────────────────────
+export {
+  appendShadowEvent,
+  buildShadowEvent,
+  resolveShadowLogPath,
+} from "./ranker/shadow-telemetry.js";
+
+// ── Lightweight → spec adapter (for PCC's own 218-tool catalog) ──────────
+export {
+  liftLightweightTool,
+  liftLightweightTools,
+} from "./ranker/lift-to-spec.js";

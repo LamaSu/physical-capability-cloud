@@ -51,3 +51,7 @@ export {
   runOneCrawl,
   type CrawlerWorkerConfig,
 } from "./crawler-worker.js";
+export {
+  RegistryRankerBridge,
+  createRegistryRanker,
+} from "./ranking-bridge.js";

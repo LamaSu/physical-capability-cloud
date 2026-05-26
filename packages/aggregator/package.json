@@ -23,6 +23,7 @@
     "@noble/hashes": "^1.7.0",
     "@pcc/a2a": "workspace:*",
     "@pcc/spec": "workspace:*",
+    "@pcc/tool-index": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "zod": "^3.23.0"
   },
