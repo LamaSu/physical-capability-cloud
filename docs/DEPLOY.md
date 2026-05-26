@@ -27,6 +27,10 @@ The pipeline is **wired but not yet running end-to-end**. Remaining steps, in or
 - [ ] If a reviewer-gated environment becomes worth $4/mo: upgrade to GH Pro, add required-reviewer rule to `production`, move `deploy-prod` job back into `ci.yml` with `environment: production`.
 - [ ] First merged feature/fix commit on master after lockfile is green → verify release-please opens a "chore: release 0.1.0" PR with auto-generated CHANGELOG.
 
+### Pending follow-ups (block consumer adoption)
+
+- [ ] **Configure Railway volume + `WORKFLOW_DB_PATH` before any consumer of `@pcc/workflow` ships.** The new `@pcc/workflow` package (branch `feat/workflow-runtime`) writes to a SQLite file. Railway's default filesystem is ephemeral — every redeploy wipes it and we lose in-flight workflow state, idempotency dedup, and the ALCOA+ audit log. Mount a volume at `/app/data` (or wherever you choose) on `pcc-gateway` in **both** `staging` and `production` environments, then set `WORKFLOW_DB_PATH=/app/data/workflow.sqlite` alongside the existing `PCC_DB_PATH`. Until this is done, do NOT merge the Phase 1 escrow-as-Activity migration PR — it will work locally and silently lose data on Railway. See `docs/WORKFLOW_RUNTIME.md` §5.1 for the rationale.
+
 ## Pipeline at a glance
 
 ```
@@ -119,6 +123,53 @@ docker buildx imagetools create \
 ```
 
 Railway sees the manifest digest change and redeploys in seconds. No git revert, no rebuild.
+
+## Workflow runtime SQLite path
+
+The `@pcc/workflow` package (`packages/workflow/`, branch `feat/workflow-runtime`) embeds a SQLite-backed durable execution runtime inside the Fastify monolith. It writes idempotency rows, the ALCOA+ event log, step memoization cache, workflow run state, and data-port lineage to **one SQLite file**. The package itself reads no env vars — the consuming service decides where the file lives.
+
+### Required env var (gateway)
+
+`WORKFLOW_DB_PATH` — absolute path passed to `openSqliteStore({ path })` in `packages/gateway/src/bootstrap.ts` (or wherever the gateway constructs its store handle). Recommended default:
+
+```
+WORKFLOW_DB_PATH=/app/data/workflow.sqlite
+```
+
+Sit it alongside the existing `PCC_DB_PATH` so both DBs share the same persistent volume.
+
+### Railway volume mount (REQUIRED before any `@pcc/workflow` consumer ships)
+
+Railway's default filesystem is ephemeral — every redeploy mints a fresh container with an empty disk. If `WORKFLOW_DB_PATH` points anywhere outside a mounted volume:
+
+- in-flight workflow runs are lost on every deploy,
+- the idempotency dedup cache is wiped (operator retries can double-spend),
+- the hash-chained ALCOA+ event log is lost (compliance evidence: gone).
+
+**Required setup**, both `staging` and `production` services:
+
+1. Railway UI → project `diplomatic-compassion` → environment `<env>` → service `pcc-gateway` → Settings → Volumes → **Add volume**.
+2. Mount path: `/app/data` (or any path that does NOT collide with the build output).
+3. Set env var `WORKFLOW_DB_PATH=/app/data/workflow.sqlite`.
+4. Optionally set `PCC_DB_PATH=/app/data/pcc.sqlite` to share the same volume (no functional change to PCC's existing DB; just consolidates persistent state).
+5. Redeploy — confirm the file appears via `railway run ls /app/data`.
+
+**Until both Railway volumes are mounted, do NOT merge the Phase 1 escrow-as-Activity migration PR** (or any other PR that adds a consumer of `@pcc/workflow`). The package works locally with ephemeral disk, so the failure is silent — no log line, no error — and we'd lose every in-flight workflow on the next redeploy.
+
+### Backup
+
+Treat `workflow.sqlite` as production data:
+
+```bash
+# Hot backup (consistent with WAL mode, no process pause)
+sqlite3 /app/data/workflow.sqlite ".backup '/tmp/workflow.sqlite.bak'"
+```
+
+Ship to S3/Storacha on a daily cron. Whole-file size stays under 100 MB even with months of history (typical PCC workload: 10k runs/month × ~15 events × ~1 KB ≈ 150 MB/month of `events` growth — see `docs/WORKFLOW_RUNTIME.md` §5.3).
+
+### Reference
+
+Full rationale, growth math, vacuum guidance, and recovery semantics: [`docs/WORKFLOW_RUNTIME.md`](./WORKFLOW_RUNTIME.md) §5 (Operational notes). Public API: [`packages/workflow/README.md`](../packages/workflow/README.md).
 
 ## What this does NOT yet include
 

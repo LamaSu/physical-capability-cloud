@@ -54,6 +54,7 @@
     "@pcc/payments": "workspace:*",
     "@pcc/template-data-product": "workspace:*",
     "@pcc/template-physical-operator": "workspace:*",
+    "@pcc/workflow": "workspace:*",
     "@pcc/scheduler": "workspace:*",
     "@pcc/spec": "workspace:*",
     "@pcc/store": "workspace:*",
