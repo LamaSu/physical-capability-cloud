@@ -1,0 +1,46 @@
+# Single-service NATS JetStream container for @pcc/a2a integration tests.
+#
+# Why this file exists:
+#   `packages/a2a/src/__tests__/nats-backend.test.ts` has an integration suite
+#   gated on `NATS_INTEGRATION=1` that round-trips a real message through
+#   NATS JetStream. The runner script `scripts/nats-integration.sh` (and its
+#   PowerShell sibling) brings this stack up, runs the suite, tears it down.
+#
+# Usage (preferred):
+#   pnpm --filter @pcc/a2a test:nats
+#
+# Manual:
+#   docker compose -f packages/a2a/docker-compose.nats.yml up -d
+#   NATS_INTEGRATION=1 pnpm --filter @pcc/a2a test nats-backend
+#   docker compose -f packages/a2a/docker-compose.nats.yml down -v
+#
+# Storage is ephemeral: JetStream `--store_dir` lives inside a tmpfs mount so
+# stream/consumer state is wiped between runs. Streams used by the test are
+# uniquely-suffixed per-process (PCC_A2A_INT_<random>) so even a leaked stream
+# from a crashed run never collides with a new one.
+#
+# Port 4222 is the NATS client protocol. 8222 is HTTP monitoring (used by the
+# runner script's wait-for-healthy probe — `/healthz` returns 200 once
+# JetStream is initialized).
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: pcc-a2a-nats-test
+    command:
+      - "-js"
+      - "--store_dir=/tmp/nats-jetstream"
+      - "--http_port=8222"
+    ports:
+      - "4222:4222"   # NATS client protocol
+      - "8222:8222"   # HTTP monitoring (used for healthcheck)
+    tmpfs:
+      - /tmp/nats-jetstream
+    healthcheck:
+      # `/healthz?js-enabled-only=true` returns 200 once JetStream is up.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: "no"

@@ -16,6 +16,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
+    "test:nats": "bash scripts/nats-integration.sh",
+    "test:nats:windows": "pwsh -NoProfile -File scripts/nats-integration.ps1",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
@@ -24,6 +26,7 @@
     "@pcc/spec": "workspace:*",
     "@sentry/node": "^10.45.0",
     "nanoid": "^5.0.0",
+    "nats": "^2.29.3",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
