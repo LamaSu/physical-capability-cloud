@@ -108,7 +108,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   private readonly config: PyLabRobotConfig;
   private sidecar: SidecarClient | null;
-  private listeners: EvidenceCallback[] = [];
+  private evidenceListeners: EvidenceCallback[] = [];
   private currentCollector: EvidenceCollector | null = null;
   private currentJobId: string | null = null;
   private mockStatus: MachineStatus = "idle";
@@ -116,6 +116,8 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   /** Lazy-init guard so we only initialise the sidecar+backend once */
   private initialized = false;
   private disposed = false;
+  /** Have we wired crash/notification/stderr handlers to the current sidecar? */
+  private sidecarHandlersWired = false;
 
   constructor(config: PyLabRobotConfig) {
     super();
@@ -172,10 +174,17 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     if (this.config.mockMode) {
       return this.executeMock(command);
     }
+    // load_gcode is metadata-only — we stash protocol metadata on the
+    // adapter without contacting the sidecar. The subsequent start()
+    // triggers `ensureInitialized()` + `backend.init` + the actual run.
+    if (command.type === "load_gcode") {
+      return this.handleLoadGcode(command.payload);
+    }
     try {
       await this.ensureInitialized();
       switch (command.type) {
         case "load_gcode":
+          // Unreachable — handled above before init.
           return this.handleLoadGcode(command.payload);
         case "start":
           return await this.handleStart(command.payload);
@@ -207,7 +216,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   }
 
   onEvidence(callback: EvidenceCallback): void {
-    this.listeners.push(callback);
+    this.evidenceListeners.push(callback);
   }
 
   async dispose(): Promise<void> {
@@ -229,7 +238,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         // ignore
       }
     }
-    this.listeners = [];
+    this.evidenceListeners = [];
     this.currentCollector = null;
     this.sidecar = null;
   }
@@ -442,8 +451,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     if (!this.sidecar) {
       this.sidecar = new SidecarClient(this.config.sidecarConfig);
     }
-    if (!this.sidecar.isAlive()) {
-      // Wire crash handler so we can re-initialize on the next call
+    // Wire handlers exactly once per sidecar instance — covers both
+    // "we constructed it" and "test injected an already-started one".
+    if (!this.sidecarHandlersWired) {
       this.sidecar.on("crash", () => {
         this.initialized = false;
         this.forwardEvent({
@@ -460,8 +470,6 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         this.handleEvidenceNotification(params as unknown as EvidenceNotificationParams);
       });
       this.sidecar.on("stderr", (msg: string) => {
-        // Surface PLR sidecar logs as low-priority process_log_summary events
-        // only when we're actively recording (avoid flooding outside a job).
         if (!this.currentCollector || !msg.trim()) return;
         this.currentCollector.emit({
           type: "process_log_summary",
@@ -470,6 +478,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
           payload: { stderr: msg.trim() },
         });
       });
+      this.sidecarHandlersWired = true;
+    }
+    if (!this.sidecar.isAlive()) {
       await this.sidecar.start();
     }
     if (!this.initialized) {
@@ -511,6 +522,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     }
     this.sidecar = null;
     this.initialized = false;
+    this.sidecarHandlersWired = false;
   }
 
   private makeCollector(): EvidenceCollector {
@@ -544,7 +556,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   }
 
   private forwardEvent(event: Omit<EvidenceEvent, "id" | "hash">): void {
-    for (const cb of this.listeners) {
+    for (const cb of this.evidenceListeners) {
       try {
         cb(event);
       } catch {
