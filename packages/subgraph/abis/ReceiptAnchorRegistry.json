@@ -1,0 +1,64 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [{ "name": "_gatewayOracle", "type": "address", "internalType": "address" }],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "AnchorEmitted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cidHash", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "toolIdHash", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "callerHash", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "dccClass", "type": "uint8", "indexed": false, "internalType": "uint8" },
+      { "name": "receiptTimestamp", "type": "uint64", "indexed": false, "internalType": "uint64" },
+      { "name": "toolCID", "type": "bytes32", "indexed": false, "internalType": "bytes32" },
+      { "name": "upstreamKeyHash", "type": "bytes32", "indexed": false, "internalType": "bytes32" }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "BatchAnchorEmitted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "merkleRoot", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "count", "type": "uint32", "indexed": false, "internalType": "uint32" },
+      { "name": "minDccClass", "type": "uint8", "indexed": false, "internalType": "uint8" },
+      { "name": "maxDccClass", "type": "uint8", "indexed": false, "internalType": "uint8" },
+      { "name": "batchMetadataCID", "type": "bytes32", "indexed": false, "internalType": "bytes32" }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "DisputeRaised",
+    "anonymous": false,
+    "inputs": [
+      { "name": "cidHash", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "disputer", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "reason", "type": "string", "indexed": false, "internalType": "string" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "gatewayOracle",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address", "internalType": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "exists",
+    "stateMutability": "view",
+    "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+    "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }]
+  },
+  {
+    "type": "function",
+    "name": "batchExists",
+    "stateMutability": "view",
+    "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+    "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }]
+  }
+]

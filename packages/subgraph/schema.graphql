@@ -1,0 +1,101 @@
+# PCC ReceiptAnchorRegistry subgraph schema
+#
+# 5 entities: ReceiptAnchor, BatchAnchor, Tool, Caller, Dispute
+# Design doc: ai/scoping/onchain-receipt-anchoring-2026-05-23.md §5
+
+# ----------------------------------------------------------------------------
+# ReceiptAnchor — one per AnchorEmitted event (single-anchored receipt).
+# Immutable: anchor records never mutate after emission.
+# ----------------------------------------------------------------------------
+type ReceiptAnchor @entity(immutable: true) {
+  "cidHash (sha256 of canonical receipt JSON), 0x-prefixed hex string"
+  id: ID!
+  cidHash: Bytes!
+  toolIdHash: Bytes!
+  callerHash: Bytes!
+  toolCID: Bytes!
+  upstreamKeyHash: Bytes
+  dccClass: Int!
+  receiptTimestamp: BigInt!
+  anchoredAtBlock: BigInt!
+  anchoredAtTimestamp: BigInt!
+  txHash: Bytes!
+  anchorMode: AnchorMode!
+  "Always SINGLE for the on-chain path; batch leaves are indexed via the BatchAnchor manifest only"
+  batch: BatchAnchor
+  "Disputes targeting this receipt"
+  disputes: [Dispute!]! @derivedFrom(field: "receipt")
+  "Backlinks for tool / caller dashboards"
+  tool: Tool!
+  caller: Caller!
+}
+
+enum AnchorMode {
+  SINGLE
+  BATCH
+}
+
+# ----------------------------------------------------------------------------
+# BatchAnchor — one per BatchAnchorEmitted event (Merkle-rooted batch).
+# Per-leaf linkability requires fetching batchMetadataCID from IPFS.
+# ----------------------------------------------------------------------------
+type BatchAnchor @entity(immutable: true) {
+  "merkleRoot, 0x-prefixed hex"
+  id: ID!
+  merkleRoot: Bytes!
+  count: Int!
+  minDccClass: Int!
+  maxDccClass: Int!
+  batchMetadataCID: Bytes!
+  anchoredAtBlock: BigInt!
+  anchoredAtTimestamp: BigInt!
+  txHash: Bytes!
+  "Reverse: any ReceiptAnchor entities (none for pure batch leaves) that link to this batch"
+  receipts: [ReceiptAnchor!]! @derivedFrom(field: "batch")
+}
+
+# ----------------------------------------------------------------------------
+# Tool — derived aggregate, one per unique toolIdHash. Mutable counters.
+# ----------------------------------------------------------------------------
+type Tool @entity {
+  "toolIdHash, 0x-prefixed hex"
+  id: ID!
+  totalReceipts: BigInt!
+  firstSeenBlock: BigInt!
+  lastSeenBlock: BigInt!
+  dcc0Count: BigInt!
+  dcc1Count: BigInt!
+  dcc2Count: BigInt!
+  dcc3Count: BigInt!
+  dcc4Count: BigInt!
+  dcc5Count: BigInt!
+  receipts: [ReceiptAnchor!]! @derivedFrom(field: "tool")
+}
+
+# ----------------------------------------------------------------------------
+# Caller — derived aggregate, one per unique callerHash. Mutable counters.
+# ----------------------------------------------------------------------------
+type Caller @entity {
+  "callerHash, 0x-prefixed hex"
+  id: ID!
+  totalReceipts: BigInt!
+  firstSeenBlock: BigInt!
+  lastSeenBlock: BigInt!
+  receipts: [ReceiptAnchor!]! @derivedFrom(field: "caller")
+}
+
+# ----------------------------------------------------------------------------
+# Dispute — one per DisputeRaised event. Immutable.
+# ----------------------------------------------------------------------------
+type Dispute @entity(immutable: true) {
+  "txHash + logIndex"
+  id: ID!
+  cidHash: Bytes!
+  disputer: Bytes!
+  reason: String!
+  raisedAtBlock: BigInt!
+  raisedAtTimestamp: BigInt!
+  txHash: Bytes!
+  "Set when the disputed cidHash matches a known ReceiptAnchor (single-anchored). Batch-anchored disputes have receipt == null until the off-chain Merkle proof resolves the leaf."
+  receipt: ReceiptAnchor
+}
