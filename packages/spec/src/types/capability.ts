@@ -54,6 +54,7 @@ export type BuiltinCapabilityType =
   | "chromatography"
   | "liquid-handler"
   | "liquid-handling-prep"
+  | "liquid-handling-plr"
   // Document services
   | "document-printing"
   | "large-format-printing"
