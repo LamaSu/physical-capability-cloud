@@ -1,123 +1,126 @@
-# @pcc/a2a
+# @pcc/a2a — Agent-to-Agent Protocol
 
-Agent-to-Agent protocol: discovery, negotiation, and messaging between PCC
-agents. Crypto, persistence, encrypted bus, networked transport, and a
-pluggable `MessageBusBackend` (in-memory by default; NATS JetStream opt-in).
+Discovery, negotiation, and messaging between PCC agents. Pluggable transport
+backends (in-memory for tests, NATS JetStream for cross-process / cross-host).
 
-## Backends
+## Backend selection
 
-The message bus is pluggable through `MessageBusBackend`
-(`src/backends/backend.ts`):
+`createBackendFromEnv()` reads `PCC_MESSAGE_BUS_BACKEND` to pick a backend:
 
-| Backend | Source | Default? | When to use |
-|---|---|---|---|
-| In-memory | `src/backends/in-memory-backend.ts` | yes | tests, single-process, dev |
-| NATS JetStream | `src/backends/nats-jetstream-backend.ts` | no | multi-process, multi-host, durable |
+| Value | Backend | Use case |
+|-------|---------|----------|
+| `memory` (default) | `InMemoryBackend` | Single-process tests, dev mode |
+| `nats` | `NATSJetStreamBackend` | Production, multi-host, durable delivery |
 
-Switch via env: `PCC_MESSAGE_BUS_BACKEND=nats`. The default remains `memory`
-so existing deployments are unaffected.
-
-## Running tests
-
-Always-on unit suite (no external services):
-
-```bash
-pnpm --filter @pcc/a2a test
+```ts
+import { createBackendFromEnv } from "@pcc/a2a";
+const backend = await createBackendFromEnv();
+await backend.publish("pcc.a2a.text_message", msg);
 ```
-
-This runs every test under `src/__tests__/*` including the 27 NATS unit
-tests that use a fully mocked `nats.js` client via the backend's
-`connectFn` option. No NATS server is required and the real `nats` module
-is not loaded.
 
 ## Running NATS integration tests
 
-The NATS suite has one additional test gated behind `NATS_INTEGRATION=1`
-that round-trips a real message through a live JetStream server. The
-harness brings the container up, waits for healthy, runs the suite, tears
-the container down — pass or fail.
-
-**Prerequisites:** Docker with `docker compose` v2.
-
-### Option A — one command (recommended)
-
-POSIX / Git Bash:
+Integration tests are gated behind `NATS_INTEGRATION=1` and require a local
+NATS server with JetStream:
 
 ```bash
-pnpm --filter @pcc/a2a test:nats
+docker run --rm -p 4222:4222 nats:latest -js
+NATS_INTEGRATION=1 pnpm --filter @pcc/a2a test nats-backend
 ```
 
-Windows PowerShell 7+:
+CI runs unit tests only (no NATS server needed; the backend uses a
+structural mock via the `connectFn` option).
 
-```powershell
-pnpm --filter @pcc/a2a test:nats:windows
+## Production NATS deployment — TLS + auth
+
+The `NATSJetStreamBackend` accepts TLS and authentication options. In
+production, **always** enable TLS and at least one authentication kind.
+
+### Programmatic options
+
+```ts
+import { NATSJetStreamBackend } from "@pcc/a2a";
+
+const backend = new NATSJetStreamBackend({
+  url: "tls://nats.prod.example.com:4222",
+  streamName: "PCC_A2A",
+  tls: {
+    caFile: "/etc/pcc/nats/ca.pem",
+    certFile: "/etc/pcc/nats/client.pem",
+    keyFile: "/etc/pcc/nats/client.key",
+    rejectUnauthorized: true,
+    servername: "nats.prod.example.com",
+  },
+  auth: {
+    kind: "credsFile",
+    path: "/etc/pcc/nats/agent.creds",
+  },
+});
 ```
 
-Both invoke `scripts/nats-integration.{sh,ps1}`, which:
+### TLS options
 
-1. `docker compose -f packages/a2a/docker-compose.nats.yml up -d`
-2. Polls `http://localhost:8222/healthz?js-enabled-only=true` for up to 60s
-   (override with `NATS_WAIT_TIMEOUT` env var)
-3. Runs `NATS_INTEGRATION=1 pnpm test -- nats-backend` from the package dir
-4. `docker compose ... down -v --remove-orphans` (trap / `finally` — runs
-   even on Ctrl-C or test failure)
+| Field | Type | Notes |
+|-------|------|-------|
+| `tls: true` | boolean | Enable TLS with system defaults (no client cert, verify server). |
+| `tls.caFile` | string | Path to PEM CA bundle. Read at connect time. |
+| `tls.certFile` | string | Path to PEM client certificate. |
+| `tls.keyFile` | string | Path to PEM client private key. |
+| `tls.rejectUnauthorized` | boolean | Default `true`. Set `false` only for self-signed dev clusters. |
+| `tls.servername` | string | SNI override. |
 
-Exit code is the test runner's exit code.
+NATS supports TLS-upgrade on the `nats://` scheme; the backend still applies
+TLS in that case but logs a warning so the operator can switch to `tls://`.
 
-### Option B — manual
+### Authentication kinds
+
+Pick exactly one. Mixing kinds is rejected at construction.
+
+| Kind | Required fields | Notes |
+|------|------------------|-------|
+| `token` | `token` | Opaque bearer token. |
+| `userPass` | `user`, `pass` | Username + password. |
+| `nkey` | `nkeySeed` | Raw nkey seed string (e.g. `SUAA…`). Lazy-loads `nats.nkeys`. |
+| `jwt` | `jwt`, `nkeySeed` | User JWT plus the nkey signing seed. Lazy-loads `nats.jwtAuthenticator`. |
+| `credsFile` | `path` | Path to a `.creds` file from `nsc generate creds`. Lazy-loads `nats.credsAuthenticator`. |
+
+### Environment variables (used by `createBackendFromEnv()`)
 
 ```bash
-# 1. start NATS
-docker compose -f packages/a2a/docker-compose.nats.yml up -d
+export PCC_MESSAGE_BUS_BACKEND=nats
+export NATS_URL=tls://nats.prod.example.com:4222
+export NATS_STREAM_NAME=PCC_A2A           # default PCC_A2A
+export NATS_DURABLE_NAME=pcc-a2a-bus      # optional override
 
-# 2. wait for healthy
-curl -fsS http://localhost:8222/healthz?js-enabled-only=true
+# TLS — any of these enables TLS
+export NATS_TLS=1                          # enable with defaults
+export NATS_TLS_CA_FILE=/etc/pcc/nats/ca.pem
+export NATS_TLS_CERT_FILE=/etc/pcc/nats/client.pem
+export NATS_TLS_KEY_FILE=/etc/pcc/nats/client.key
+export NATS_TLS_REJECT_UNAUTHORIZED=1      # default 1; 0/false to disable
+export NATS_TLS_SERVERNAME=nats.prod.example.com
 
-# 3. run the gated test(s)
-NATS_INTEGRATION=1 pnpm --filter @pcc/a2a test -- nats-backend
-
-# 4. tear down
-docker compose -f packages/a2a/docker-compose.nats.yml down -v
+# Auth — pick one kind via NATS_AUTH_KIND
+export NATS_AUTH_KIND=credsFile            # token|userPass|nkey|jwt|credsFile
+# Per-kind:
+#   token:     NATS_TOKEN
+#   userPass:  NATS_USER, NATS_PASS
+#   nkey:      NATS_NKEY_SEED
+#   jwt:       NATS_JWT, NATS_NKEY_SEED
+#   credsFile: NATS_CREDS_FILE
+export NATS_CREDS_FILE=/etc/pcc/nats/agent.creds
 ```
 
-### Running in CI
+If `NATS_AUTH_KIND` is set but the required per-kind env vars are missing,
+`createBackendFromEnv()` throws at construction. This is intentional — a
+production deployment should fail fast at boot rather than reconnect-loop
+against a server that will reject every handshake.
 
-The integration suite is **not** in the default CI matrix — it requires a
-service container and adds time that's wasted on the 99% of PRs that don't
-touch the NATS backend. It's wired as a manual-dispatch workflow:
+### Hardening checklist
 
-GitHub UI → **Actions** → **NATS Integration Tests** → **Run workflow**
-
-The workflow at `.github/workflows/nats-integration.yml`:
-
-- Uses the same `docker-compose.nats.yml` as the local runner (single source
-  of truth — CI behavior matches local behavior).
-- Optional `ref` input lets you test arbitrary branches/SHAs.
-- Streams NATS container logs on failure for inline diagnostics.
-- Tears down with `if: always()`.
-
-Run it when:
-
-- Editing `src/backends/nats-jetstream-backend.ts`
-- Bumping the `nats` dependency
-- Investigating an integration-only failure
-
-### What the integration test does
-
-`src/__tests__/nats-backend.test.ts` has one `describe.skipIf(!runIntegration)`
-block that:
-
-1. Constructs a `NATSJetStreamBackend` against `nats://localhost:4222` with
-   a uniquely-suffixed stream name `PCC_A2A_INT_<random>` (no cross-run
-   collisions).
-2. Subscribes to `pcc.a2a.text_message`.
-3. Publishes one message and polls for delivery (up to 2s — JetStream
-   delivery is async).
-4. Asserts the round-tripped message id matches the publish.
-5. Unsubscribes and closes the backend (drains the connection and deletes
-   the durable consumer).
-
-This is intentionally minimal — the 27 unit tests already cover encoding,
-ack/nak, reconnect, idempotent stream creation, close idempotency, etc.
-The integration test exists to catch contract drift between our mocked
-client and the real `nats.js` API.
+- [ ] Use `tls://` URL scheme (not `nats://`) to make TLS explicit.
+- [ ] `rejectUnauthorized: true` (the default) — never disable in production.
+- [ ] Prefer `credsFile` or `jwt` auth over `token`/`userPass` in production
+      (NATS account-scoped JWT is the modern recommendation).
+- [ ] Mount creds files via secret manager / orchestrator, not env vars.
+- [ ] Rotate creds at least every 90 days.

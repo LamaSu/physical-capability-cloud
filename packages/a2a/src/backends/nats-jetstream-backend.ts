@@ -20,13 +20,25 @@
  *     running. The returned unsubscribe() stops the loop and deletes the
  *     ephemeral durable.
  *
+ * Security:
+ *   - TLS: pass `options.tls = true` (defaults) or an object with
+ *     `caFile|certFile|keyFile|rejectUnauthorized|servername` (paths are
+ *     read from disk and forwarded as PEM strings to nats.js).
+ *   - Auth: pass `options.auth = { kind: ... }` for one of {token, userPass,
+ *     nkey, jwt, credsFile}. Mixing kinds throws at connect time.
+ *   - Env-var fallback: see `createBackendFromEnv()` in `./index.ts`.
+ *
  * Test mode:
  *   - The constructor accepts an injected `connectFn` so unit tests can pass
  *     a mocked nats.js client without requiring a running NATS server.
+ *   - When `connectFn` is supplied, TLS/auth options are still forwarded
+ *     into the connect args so tests can assert on the shape.
  *
  * To run against a real NATS server, see the integration suite in
  * `__tests__/nats-backend.test.ts`.
  */
+
+import { readFileSync } from "node:fs";
 
 import type { A2AMessage } from "../types.js";
 import type {
@@ -55,13 +67,92 @@ export interface NATSJetStreamBackendOptions {
   reconnectBaseDelayMs?: number;
   /** Cap on the exponential reconnect delay in ms. Default 30000. */
   reconnectMaxDelayMs?: number;
+
+  /**
+   * TLS options forwarded to nats.js `ConnectionOptions.tls`.
+   *
+   * - `true` — enable TLS with system defaults (no client cert, verify server).
+   * - Object — explicit configuration. `caFile/certFile/keyFile` are file
+   *   paths; their PEM contents are read at connect time and forwarded as
+   *   strings (matching nats.js's `caCerts/certs/keys` shape).
+   *
+   * Note: NATS supports TLS-upgrade on the `nats://` scheme; if a TLS option
+   * is set but the URL uses `nats://`, the connection is still upgraded —
+   * `createBackendFromEnv()` emits a warning in that case.
+   */
+  tls?: NatsTlsOptions | boolean;
+
+  /**
+   * Authentication. Pick exactly one kind.
+   *
+   * - `token` — opaque bearer token.
+   * - `userPass` — user + password.
+   * - `nkey` — raw nkey seed string (e.g. "SUAA...").
+   * - `jwt` — user JWT plus the nkey signing seed.
+   * - `credsFile` — path to a `.creds` file produced by `nsc generate creds`.
+   *
+   * Mixing kinds (e.g. supplying both `token` and `userPass`) is rejected at
+   * connect time.
+   */
+  auth?: NatsAuthOptions;
+
   /**
    * Optional injection for tests: a function with the same signature as
    * nats.js `connect()`. When supplied, the backend uses this instead of
    * loading the real `nats` module. Production code SHOULD NOT pass this.
    */
   connectFn?: NatsConnectFn;
+
+  /**
+   * Optional injection for tests: helpers from the nats.js `nkeys` namespace
+   * and the `credsAuthenticator` factory. When unset, the backend lazy-loads
+   * them from the `nats` module the first time an nkey/jwt/credsFile auth
+   * kind is used. Production code SHOULD NOT pass this.
+   */
+  natsAuthHelpers?: NatsAuthHelpers;
 }
+
+// ── TLS + auth option shapes ────────────────────────────────────────────────
+
+export interface NatsTlsOptions {
+  /** Path to a PEM CA bundle. Read at connect time. */
+  caFile?: string;
+  /** Path to a PEM client certificate. Read at connect time. */
+  certFile?: string;
+  /** Path to a PEM client private key. Read at connect time. */
+  keyFile?: string;
+  /** Reject self-signed / untrusted certs. Default true. */
+  rejectUnauthorized?: boolean;
+  /** SNI server name override. */
+  servername?: string;
+}
+
+export type NatsAuthOptions =
+  | { kind: "token"; token: string }
+  | { kind: "userPass"; user: string; pass: string }
+  | { kind: "nkey"; nkeySeed: string }
+  | { kind: "jwt"; jwt: string; nkeySeed: string }
+  | { kind: "credsFile"; path: string };
+
+/** Subset of the nats.js auth helpers we need. */
+export interface NatsAuthHelpers {
+  nkeys: {
+    fromSeed(seed: Uint8Array): NatsKeyPair;
+  };
+  credsAuthenticator(creds: Uint8Array): NatsAuthenticator;
+  jwtAuthenticator(jwt: string, seed?: Uint8Array): NatsAuthenticator;
+}
+
+export interface NatsKeyPair {
+  sign(input: Uint8Array): Uint8Array;
+  getPublicKey(): string;
+}
+
+/**
+ * Opaque authenticator object passed to nats.js. We don't introspect it; we
+ * just hand it back via `ConnectionOptions.authenticator`.
+ */
+export type NatsAuthenticator = unknown;
 
 // ── Minimal type surface we depend on (covers nats.js 2.x) ──────────────────
 // Defined as a local structural type so tests can mock without importing
@@ -78,6 +169,29 @@ export interface NatsConnectionOptions {
   reconnectDelayHandler?: () => number;
   name?: string;
   timeout?: number;
+  /**
+   * TLS config forwarded as-is to nats.js. The shape matches nats.js v2:
+   * `caCerts/certs/keys` are PEM strings (NOT file paths — the backend
+   * reads files itself before forwarding).
+   */
+  tls?: NatsConnectionTlsOptions | boolean;
+  // ── Auth (only one of these is set per-connection) ─────────────────────
+  token?: string;
+  user?: string;
+  pass?: string;
+  nkey?: string;
+  /** Opaque authenticator object (see NatsAuthHelpers above). */
+  authenticator?: NatsAuthenticator;
+  /** User JWT (only used with the `jwt` auth kind together with `authenticator`). */
+  jwt?: string;
+}
+
+export interface NatsConnectionTlsOptions {
+  caCerts?: string[];
+  certs?: string[];
+  keys?: string[];
+  rejectUnauthorized?: boolean;
+  servername?: string;
 }
 
 export interface NatsConnectionLike {
@@ -149,11 +263,18 @@ const DEFAULT_DURABLE_PREFIX = "pcc-a2a-bus";
 export class NATSJetStreamBackend implements MessageBusBackend {
   readonly name = "nats";
 
-  private readonly opts: Required<
-    Omit<NATSJetStreamBackendOptions, "durableName" | "connectFn">
-  > & {
+  private readonly opts: {
+    url: string;
+    streamName: string;
     durableName: string;
+    streamSubject: string;
+    maxReconnectAttempts: number;
+    reconnectBaseDelayMs: number;
+    reconnectMaxDelayMs: number;
+    tls?: NatsTlsOptions | boolean;
+    auth?: NatsAuthOptions;
     connectFn?: NatsConnectFn;
+    natsAuthHelpers?: NatsAuthHelpers;
   };
 
   /** Resolved on the first connect(); reused after that. */
@@ -174,6 +295,10 @@ export class NATSJetStreamBackend implements MessageBusBackend {
   private nextSubId = 1;
 
   constructor(opts: NATSJetStreamBackendOptions) {
+    // Reject conflicting auth shapes up-front so a misconfig fails fast at
+    // construction, not 30s into a reconnect storm.
+    if (opts.auth) validateAuthOptions(opts.auth);
+
     this.opts = {
       url: opts.url,
       streamName: opts.streamName,
@@ -182,7 +307,10 @@ export class NATSJetStreamBackend implements MessageBusBackend {
       maxReconnectAttempts: opts.maxReconnectAttempts ?? 10,
       reconnectBaseDelayMs: opts.reconnectBaseDelayMs ?? 500,
       reconnectMaxDelayMs: opts.reconnectMaxDelayMs ?? 30_000,
+      tls: opts.tls,
+      auth: opts.auth,
       connectFn: opts.connectFn,
+      natsAuthHelpers: opts.natsAuthHelpers,
     };
   }
 
@@ -317,13 +445,29 @@ export class NATSJetStreamBackend implements MessageBusBackend {
   private async doConnect(): Promise<void> {
     const connect = this.opts.connectFn ?? (await loadRealConnect());
 
-    const nc = await connect({
+    const connOpts: NatsConnectionOptions = {
       servers: this.opts.url,
       maxReconnectAttempts: this.opts.maxReconnectAttempts,
       reconnect: true,
       reconnectDelayHandler: () => this.computeReconnectDelay(),
       name: "pcc-a2a-bus",
-    });
+    };
+
+    if (this.opts.tls !== undefined) {
+      connOpts.tls = resolveTlsOptions(this.opts.tls);
+    }
+
+    if (this.opts.auth) {
+      const helpers =
+        this.opts.auth.kind === "nkey" ||
+        this.opts.auth.kind === "jwt" ||
+        this.opts.auth.kind === "credsFile"
+          ? this.opts.natsAuthHelpers ?? (await loadAuthHelpers())
+          : undefined;
+      applyAuthOptions(connOpts, this.opts.auth, helpers);
+    }
+
+    const nc = await connect(connOpts);
     this.nc = nc;
     this.js = nc.jetstream();
     this.jsm = await nc.jetstreamManager();
@@ -467,4 +611,136 @@ async function loadRealConnect(): Promise<NatsConnectFn> {
   // upstream type surface is larger than our structural minimum.
   const mod = (await import("nats")) as unknown as { connect: NatsConnectFn };
   return mod.connect;
+}
+
+/**
+ * Lazy-load nats.js auth helpers (`nkeys`, `credsAuthenticator`,
+ * `jwtAuthenticator`). Only invoked when the caller actually selects an
+ * auth kind that needs them.
+ */
+async function loadAuthHelpers(): Promise<NatsAuthHelpers> {
+  const mod = (await import("nats")) as unknown as NatsAuthHelpers;
+  return {
+    nkeys: mod.nkeys,
+    credsAuthenticator: mod.credsAuthenticator,
+    jwtAuthenticator: mod.jwtAuthenticator,
+  };
+}
+
+/**
+ * Validate that the auth shape is internally consistent. Each discriminated
+ * variant has its own required fields; missing or empty fields throw.
+ *
+ * Mixing kinds is structurally impossible in TypeScript (the discriminator
+ * forces one shape), but we also reject empty values to fail fast on
+ * misconfigured env vars at construction time.
+ */
+function validateAuthOptions(auth: NatsAuthOptions): void {
+  switch (auth.kind) {
+    case "token":
+      if (!auth.token) throw new Error("NATS auth: 'token' kind requires non-empty token");
+      return;
+    case "userPass":
+      if (!auth.user) throw new Error("NATS auth: 'userPass' kind requires user");
+      if (!auth.pass) throw new Error("NATS auth: 'userPass' kind requires pass");
+      return;
+    case "nkey":
+      if (!auth.nkeySeed) throw new Error("NATS auth: 'nkey' kind requires nkeySeed");
+      return;
+    case "jwt":
+      if (!auth.jwt) throw new Error("NATS auth: 'jwt' kind requires jwt");
+      if (!auth.nkeySeed) throw new Error("NATS auth: 'jwt' kind requires nkeySeed");
+      return;
+    case "credsFile":
+      if (!auth.path) throw new Error("NATS auth: 'credsFile' kind requires path");
+      return;
+    default: {
+      // Exhaustiveness check — TS will flag unhandled variants here.
+      const _unreachable: never = auth;
+      throw new Error(
+        `NATS auth: unknown kind '${(_unreachable as { kind: string }).kind}'`,
+      );
+    }
+  }
+}
+
+/**
+ * Translate `NatsTlsOptions` into the nats.js wire shape, reading PEM files
+ * from disk when paths are supplied. Boolean `true` enables TLS with system
+ * defaults.
+ */
+function resolveTlsOptions(
+  tls: NatsTlsOptions | boolean,
+): NatsConnectionTlsOptions | boolean {
+  if (typeof tls === "boolean") return tls;
+  const out: NatsConnectionTlsOptions = {};
+  if (tls.caFile) out.caCerts = [readFileSync(tls.caFile, "utf8")];
+  if (tls.certFile) out.certs = [readFileSync(tls.certFile, "utf8")];
+  if (tls.keyFile) out.keys = [readFileSync(tls.keyFile, "utf8")];
+  if (tls.rejectUnauthorized !== undefined) {
+    out.rejectUnauthorized = tls.rejectUnauthorized;
+  }
+  if (tls.servername) out.servername = tls.servername;
+  return out;
+}
+
+/**
+ * Apply the parsed auth options onto the connect options object. Helpers are
+ * only required for kinds that need them (nkey/jwt/credsFile).
+ */
+function applyAuthOptions(
+  connOpts: NatsConnectionOptions,
+  auth: NatsAuthOptions,
+  helpers: NatsAuthHelpers | undefined,
+): void {
+  switch (auth.kind) {
+    case "token":
+      connOpts.token = auth.token;
+      return;
+    case "userPass":
+      connOpts.user = auth.user;
+      connOpts.pass = auth.pass;
+      return;
+    case "nkey": {
+      if (!helpers) throw new Error("NATS auth: nkey kind requires natsAuthHelpers");
+      const seed = new TextEncoder().encode(auth.nkeySeed);
+      // For 'nkey' kind, expose the public key as nats.js expects it.
+      const kp = helpers.nkeys.fromSeed(seed);
+      connOpts.nkey = kp.getPublicKey();
+      connOpts.authenticator = makeNkeySignerAuthenticator(kp);
+      return;
+    }
+    case "jwt": {
+      if (!helpers) throw new Error("NATS auth: jwt kind requires natsAuthHelpers");
+      const seed = new TextEncoder().encode(auth.nkeySeed);
+      connOpts.jwt = auth.jwt;
+      connOpts.authenticator = helpers.jwtAuthenticator(auth.jwt, seed);
+      return;
+    }
+    case "credsFile": {
+      if (!helpers) throw new Error("NATS auth: credsFile kind requires natsAuthHelpers");
+      const credsBytes = new TextEncoder().encode(readFileSync(auth.path, "utf8"));
+      connOpts.authenticator = helpers.credsAuthenticator(credsBytes);
+      return;
+    }
+    default: {
+      const _unreachable: never = auth;
+      throw new Error(
+        `NATS auth: unknown kind '${(_unreachable as { kind: string }).kind}'`,
+      );
+    }
+  }
+}
+
+/**
+ * Build a minimal authenticator that signs the server's nonce with an nkey.
+ * nats.js v2 accepts an authenticator function returning `{ nkey, sig }`.
+ */
+function makeNkeySignerAuthenticator(kp: NatsKeyPair): NatsAuthenticator {
+  return (nonce?: string): { nkey: string; sig: string } => {
+    const sig = nonce
+      ? Buffer.from(kp.sign(new TextEncoder().encode(nonce))).toString("base64url")
+      : "";
+    return { nkey: kp.getPublicKey(), sig };
+  };
 }
