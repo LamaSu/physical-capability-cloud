@@ -36,6 +36,7 @@ COPY packages/dht/package.json packages/dht/
 COPY packages/evidence-embeddings/package.json packages/evidence-embeddings/
 COPY packages/touchstone/package.json packages/touchstone/
 COPY packages/kernel-sdk/package.json packages/kernel-sdk/
+COPY packages/workflow/package.json packages/workflow/
 COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 # Wave 2.5 SDK + first templates (don't rely on `COPY . .` fallback for these)
 COPY packages/orchestrator-sdk/package.json packages/orchestrator-sdk/
