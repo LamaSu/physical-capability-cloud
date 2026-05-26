@@ -39,6 +39,16 @@ proposal to add such a role must clear the bar in
 | `curator` | Organizes/audits a collection of contributions | 0-500 bps | A reviewer maintaining a verified-CSD index |
 | `assembler` | Composed multiple capabilities into a workflow | 0-50 bps | Author of a multi-step PCB-fab DAG |
 | `network-treasury` | Per-network treasury (0% allowed) | 0-300 bps | Network operator |
+| `backend-author` | Wrote a PyLabRobot backend module called by a PCC adapter | 0-200 bps (default 10) | Author of `pylabrobot.liquid_handling.backends.hamilton.STAR` |
+
+> **`backend-author` is the upstream-OSS sibling of `integrator`.** Where
+> `integrator` pays the author of the PCC-side adapter (e.g.,
+> `@pcc/adapter-pylabrobot`), `backend-author` pays the OSS contributors
+> one layer down — the PyLabRobot driver authors whose code the adapter
+> actually calls. Both roles can fire on the same job. Distinct work,
+> distinct people, distinct bps. The on-chain registry that gates this
+> role is `PLRBackendRegistry.sol`; see `docs/PLR_BACKEND_AUTHORS.md` for
+> the author-facing onboarding guide. ADR-PLR-1 (2026-05-25).
 
 Operator residual = `10000 - sum(other_roles_bps)`. The market discovers
 adoption: contributors who over-price aren't included in payout maps.
