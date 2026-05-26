@@ -36,6 +36,7 @@ const CONTRIBUTOR_ROLES = [
   "protocol-author",
   "model-author",
   "dataset-contributor",
+  "backend-author",
   "curator",
   "assembler",
   "network-treasury",

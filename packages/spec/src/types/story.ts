@@ -57,6 +57,15 @@ export type ContributorRole =
   | "protocol-author"
   | "model-author"
   | "dataset-contributor"
+  /**
+   * PyLabRobot backend author. Earns when a PCC job runs through a PLR
+   * backend module (e.g., pylabrobot.liquid_handling.backends.hamilton.STAR)
+   * that they've registered with the on-chain PLRBackendRegistry. Distinct
+   * from `integrator` (PCC adapter author) — backend-author is the upstream
+   * OSS driver author one layer below the adapter.
+   * Added by ADR-PLR-1 (2026-05-25).
+   */
+  | "backend-author"
   // Coordination (unchanged from legacy enum)
   | "curator"
   | "assembler"

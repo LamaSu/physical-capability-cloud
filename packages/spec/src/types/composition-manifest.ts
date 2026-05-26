@@ -37,6 +37,11 @@ export const CompositionRoleSchema = z.enum([
   "curator",
   "assembler",
   "network-treasury",
+  // ADR-PLR-1 (2026-05-25): PyLabRobot backend authors. Earns when a PCC
+  // job runs through a registered PLR backend module. The aggregator
+  // appends one CompositionEntry per author resolved off-chain from the
+  // PLRBackendRegistry manifest. See packages/spec/src/types/plr-backend-registry.ts.
+  "backend-author",
 ] as const);
 export type CompositionRole = z.infer<typeof CompositionRoleSchema>;
 
