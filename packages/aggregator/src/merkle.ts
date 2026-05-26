@@ -49,8 +49,15 @@ export function buildMerkleTree(leaves: Bytes32Hex[]): MerkleTree {
     const next: Bytes32Hex[] = [];
     for (let i = 0; i < current.length; i += 2) {
       const left = current[i];
-      const right = i + 1 < current.length ? current[i + 1] : current[i];
-      next.push(hashPairSorted(left, right));
+      if (i + 1 < current.length) {
+        // Standard pair: hash left + right.
+        next.push(hashPairSorted(left, current[i + 1]));
+      } else {
+        // Odd-length layer: last node carries forward unchanged (OZ-style).
+        // Verification mirror: `getMerkleProof` emits no sibling for this
+        // layer, and the on-chain `verifyInBatch` simply skips the layer.
+        next.push(left);
+      }
     }
     layers.push(next);
     current = next;

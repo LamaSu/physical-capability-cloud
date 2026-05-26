@@ -316,8 +316,8 @@ describe("buildAnchorRequest — receipt → on-chain projection", () => {
   it("receiptTimestamp is seconds, not ms", () => {
     const r = makeReceipt({ dcc: DigitalCaptureClass.DCC1 });
     const req = buildAnchorRequest(r);
-    // 2026-05-23T00:00:00.000Z = 1779840000 seconds
-    expect(req.receiptTimestamp).toBe(1779840000n);
+    // 2026-05-23T00:00:00.000Z = 1779494400 seconds
+    expect(req.receiptTimestamp).toBe(1779494400n);
   });
 });
 

@@ -26,9 +26,40 @@
  */
 
 import type { InvocationReceipt } from "@pcc/spec";
+import { DigitalCaptureClass } from "@pcc/spec";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
 import { buildMerkleTree, cidToBytes32, getMerkleProof, type Bytes32Hex } from "./merkle.js";
+
+/**
+ * Map the string-enum DigitalCaptureClass to the numeric on-chain encoding
+ * the ReceiptAnchorRegistry contract expects (uint8 0..5).
+ *
+ * The off-chain DCC is "DCC0".."DCC5" (string enum for JSON stability);
+ * the on-chain DCC is 0..5 (uint8 for storage efficiency). This is the only
+ * place the conversion lives.
+ *
+ * Throws on unrecognized values — defensive against future enum additions
+ * that haven't yet been mapped on-chain.
+ */
+export function dccClassToNumber(cls: DigitalCaptureClass): number {
+  switch (cls) {
+    case DigitalCaptureClass.DCC0:
+      return 0;
+    case DigitalCaptureClass.DCC1:
+      return 1;
+    case DigitalCaptureClass.DCC2:
+      return 2;
+    case DigitalCaptureClass.DCC3:
+      return 3;
+    case DigitalCaptureClass.DCC4:
+      return 4;
+    case DigitalCaptureClass.DCC5:
+      return 5;
+    default:
+      throw new Error(`dccClassToNumber: unknown class ${cls}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -362,7 +393,7 @@ export function buildAnchorRequest(receipt: InvocationReceipt): AnchorRequest {
     cidHash,
     toolIdHash,
     callerHash,
-    dccClass: receipt.effectiveDccClass,
+    dccClass: dccClassToNumber(receipt.effectiveDccClass),
     receiptTimestamp,
     toolCID,
     upstreamKeyHash,
