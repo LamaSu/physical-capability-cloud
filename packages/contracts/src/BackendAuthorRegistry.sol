@@ -395,7 +395,7 @@ contract BackendAuthorRegistry {
      *         "pylabrobot." or "venus.") is NOT validated on-chain. The
      *         per-vendor `modulePathPattern` storage slot documents the
      *         expected shape for off-chain validators; the off-chain client
-     *         (`@pcc/backend-author-registry-client`) calls
+     *         (the pcc backend-author-registry-client package) calls
      *         `validateModulePath()` before submitting tx.
      */
     function register(
