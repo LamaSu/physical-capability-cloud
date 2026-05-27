@@ -341,7 +341,8 @@ describe("OffChainSigner / OffChainVerifier roundtrip", () => {
       chainId: 8453,
       privateKey: TEST_PRIVKEY,
     });
-    const recipient = "0xCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCc" as `0x${string}`;
+    // Use all-lowercase (viem's typed-data validation requires correct EIP-55 checksum or all-lowercase)
+    const recipient = "0xcccccccccccccccccccccccccccccccccccccccc" as `0x${string}`;
     const parent = ("0x" + "fe".repeat(32)) as `0x${string}`;
     const att = await signer.attest({
       schema: ("0x" + "0a".repeat(32)) as `0x${string}`,
