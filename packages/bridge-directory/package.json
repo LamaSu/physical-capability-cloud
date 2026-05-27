@@ -1,0 +1,30 @@
+{
+  "name": "@pcc/bridge-directory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Directory of vendor bridge repositories that integrate with PCC. Phase 1 = JSON-served from capability.network; Phase 2 = on-chain BridgeDirectory.sol. Mirrors Uniswap token-list envelope.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}
