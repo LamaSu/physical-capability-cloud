@@ -8,8 +8,9 @@
  * Drift between this file and RoleTags.sol is a bug. CI must verify
  * they match (see `packages/contracts/test/RoleTagsCodegen.t.sol`).
  *
- * The `CONTRIBUTOR_ROLES` array is the canonical 10-value enum from
- * ADR-12 (2026-04-23). The off-chain TS keccak256 hashes here MUST
+ * The `CONTRIBUTOR_ROLES` array is the canonical 11-value enum from
+ * ADR-12 (2026-04-23, extended 2026-05-27 with `backend-author`). The
+ * off-chain TS keccak256 hashes here MUST
  * equal the on-chain `bytes32` constants exposed by `RoleTags.sol`.
  *
  * Note: the legacy `designer` member of `ContributorRole` is intentionally
