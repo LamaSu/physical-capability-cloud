@@ -123,10 +123,13 @@ function safeNormalize(name: string, did: string): string {
 }
 
 function makePublicClient(chain: "mainnet" | "base", options: ResolverOptions): PublicClient {
+  // Cast to PublicClient — Base and mainnet PublicClient types are structurally
+  // incompatible due to Base's `deposit` transaction type, but the ENS surface
+  // we use (getEnsAddress) is the same.
   if (chain === "mainnet") {
     const rpc = options.ensRpcUrl ?? "https://cloudflare-eth.com";
-    return createPublicClient({ chain: mainnet, transport: http(rpc) });
+    return createPublicClient({ chain: mainnet, transport: http(rpc) }) as unknown as PublicClient;
   }
   const rpc = options.baseRpcUrl ?? "https://mainnet.base.org";
-  return createPublicClient({ chain: base, transport: http(rpc) });
+  return createPublicClient({ chain: base, transport: http(rpc) }) as unknown as PublicClient;
 }
