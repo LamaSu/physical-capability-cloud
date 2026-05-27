@@ -1,0 +1,32 @@
+{
+  "name": "@pcc/kernel-automata-linq",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PCC kernel for Automata LINQ — wraps LINQ Cloud REST API (Workcell/Instrument/Workflow/Task/Labware) as a PCC kernel. ENTERPRISE GATED: needs LINQ API credentials.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/adapter-madsci": "workspace:*",
+    "@pcc/kernel-sdk": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
