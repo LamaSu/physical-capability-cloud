@@ -16,6 +16,7 @@ library RoleTags {
     bytes32 internal constant PROTOCOL_AUTHOR = 0x95de062b85e2e98a62a61651461fd82c56077c29fbcef37dea8220c3107deb73;  // keccak256("protocol-author")
     bytes32 internal constant MODEL_AUTHOR = 0xa61eb7616be58c63a0e71aba4b17c674cafbfb620390674cee37039ab87937e5;  // keccak256("model-author")
     bytes32 internal constant DATASET_CONTRIBUTOR = 0xf3304bcfb6261b2e829765765ae916cf25dddf25c8a6f448dcba3ac9b1494597;  // keccak256("dataset-contributor")
+    bytes32 internal constant BACKEND_AUTHOR = 0xd9a41d6d4d0b8fda8fdbbd0883f5f6bdf52a8e1e02746a5621ca7a85d12ce9f1;  // keccak256("backend-author")
     bytes32 internal constant CURATOR = 0x8b8b3fd2ff17638092aa002125df632689f3f241d0a395d3601646fb8c9ed982;  // keccak256("curator")
     bytes32 internal constant ASSEMBLER = 0x3e0c16759b6b7ab14470ec3e86e85f014269e3f25733036443ab3bf25f2088a2;  // keccak256("assembler")
     bytes32 internal constant NETWORK_TREASURY = 0x863dda834f3fb3b3471c2480ce1a1291284cd22c28f7da25137fe859f0fe075a;  // keccak256("network-treasury")
