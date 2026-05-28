@@ -8,6 +8,8 @@ import "./mocks/MockUSDT.sol";
 import "./mocks/MockDAI.sol";
 import "./mocks/MockFeeOnTransfer.sol";
 import "./mocks/MockReturnFalseERC20.sol";
+import {IPCCOracle} from "../src/interfaces/IPCCOracle.sol";
+import {MockPCCOracle} from "./mocks/MockPCCOracle.sol";
 
 /**
  * @title MilestoneEscrowMultiStableTest
@@ -79,6 +81,29 @@ contract MilestoneEscrowMultiStableTest is Test {
         escrow.addVerifier(verifier);
         escrow.addVerifier(address(this));
         vm.stopPrank();
+    }
+
+    /// @dev Build a stub attestation pinned to a given escrow. In standalone
+    ///      mode (protocolRoot == 0) the oracle is never consulted, so values
+    ///      are cosmetic — only the escrowAddress field is checked by
+    ///      submitAttestation.
+    function _makeAttestation(address escrowAddr)
+        internal
+        view
+        returns (IPCCOracle.Attestation memory)
+    {
+        return IPCCOracle.Attestation({
+            version: 1,
+            escrowAddress: escrowAddr,
+            jobId: "job-multistable",
+            evidenceHash: keccak256("multistable-evidence"),
+            tier: 1,
+            verified: true,
+            timestamp: block.timestamp,
+            nonce: keccak256(abi.encode("ms-nonce", block.timestamp)),
+            extraData: hex"",
+            signature: hex""
+        });
     }
 
     // ── Allowlist Management ────────────────────────────────────────
@@ -305,10 +330,11 @@ contract MilestoneEscrowMultiStableTest is Test {
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("dai-evidence"));
 
-        escrow.submitAttestation(0, keccak256("dai-attest"));
+        IPCCOracle.Attestation memory att = _makeAttestation(address(escrow));
+        escrow.submitAttestation(0, att);
 
         vm.warp(block.timestamp + 3601);
-        escrow.release(0);
+        escrow.release(0, att);
 
         assertEq(uint8(escrow.getMilestone(0).status), 5); // Released
         // Operator started with 10_000 DAI, receives 100 → 10_100 DAI
@@ -330,9 +356,10 @@ contract MilestoneEscrowMultiStableTest is Test {
         escrow.submitEvidence(0, keccak256("dai-evidence"));
         vm.stopPrank();
 
-        escrow.submitAttestation(0, keccak256("dai-attest"));
+        IPCCOracle.Attestation memory att = _makeAttestation(address(escrow));
+        escrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
-        escrow.release(0);
+        escrow.release(0, att);
 
         // Operator paid 10 bond, received 100 + 10 back → 10_100
         assertEq(dai.balanceOf(operator), 10_100e18);
@@ -356,9 +383,10 @@ contract MilestoneEscrowMultiStableTest is Test {
         escrow.submitEvidence(0, keccak256("usdt-evidence"));
         vm.stopPrank();
 
-        escrow.submitAttestation(0, keccak256("usdt-attest"));
+        IPCCOracle.Attestation memory att = _makeAttestation(address(escrow));
+        escrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
-        escrow.release(0);
+        escrow.release(0, att);
 
         // Operator started 10_000, deposited 25 bond, got 250 + 25 back → 10_250
         assertEq(usdt.balanceOf(operator), 10_250e6);
@@ -383,9 +411,10 @@ contract MilestoneEscrowMultiStableTest is Test {
 
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("ev"));
-        escrow.submitAttestation(0, keccak256("at"));
+        IPCCOracle.Attestation memory att = _makeAttestation(address(escrow));
+        escrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
-        escrow.release(0);
+        escrow.release(0, att);
 
         assertEq(dai.balanceOf(operator), 10_100e18);
     }
@@ -405,7 +434,7 @@ contract MilestoneEscrowMultiStableTest is Test {
         escrow.depositBond(0);
         escrow.submitEvidence(0, keccak256("ev"));
         vm.stopPrank();
-        escrow.submitAttestation(0, keccak256("at"));
+        escrow.submitAttestation(0, _makeAttestation(address(escrow)));
 
         vm.startPrank(challenger);
         dai.approve(address(escrow), 5e18);
@@ -426,8 +455,10 @@ contract MilestoneEscrowMultiStableTest is Test {
     // ── Protocol Fee Integration (spotcheck) ───────────────────────
 
     function test_release_feeTakenInMilestoneToken() public {
-        // Use a fake protocol root that charges 2% (200 bps)
-        FakeProtocol fakeProtocol = new FakeProtocol(200, address(0xFEE));
+        // Use a fake protocol root wired to an accepting MockPCCOracle so
+        // submitAttestation's oracle re-check passes.
+        MockPCCOracle oracle = new MockPCCOracle(address(0xABCD), true);
+        FakeProtocol fakeProtocol = new FakeProtocol(200, address(0xFEE), address(oracle));
 
         MilestoneEscrow feeEscrow = new MilestoneEscrow(
             payer, arbiter, address(usdc), keccak256("with-fee"), address(fakeProtocol)
@@ -445,11 +476,12 @@ contract MilestoneEscrowMultiStableTest is Test {
         feeEscrow.fund();
         vm.stopPrank();
 
+        IPCCOracle.Attestation memory att = _makeAttestation(address(feeEscrow));
         vm.prank(operator);
         feeEscrow.submitEvidence(0, keccak256("ev"));
-        feeEscrow.submitAttestation(0, keccak256("at"));
+        feeEscrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
-        feeEscrow.release(0);
+        feeEscrow.release(0, att);
 
         // 2% of 100 = 2 DAI to fee recipient; operator gets 98
         assertEq(dai.balanceOf(address(0xFEE)), 2e18);
@@ -474,16 +506,21 @@ contract MilestoneEscrowMultiStableTest is Test {
 
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("ev"));
-        escrow.submitAttestation(0, keccak256("at"));
+        IPCCOracle.Attestation memory att = _makeAttestation(address(escrow));
+        escrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
 
-        // Point the reentrant token at the escrow so it tries to re-enter on `transfer`
+        // Point the reentrant token at the escrow so it tries to re-enter on `transfer`.
+        // The token re-enters via the OLD release(uint256) signature; that selector
+        // no longer exists, so the low-level call returns success=false (no matching
+        // function). The token records this as a reverted reentrancy attempt — same
+        // outcome (protection holds), different revert reason.
         rtoken.setTarget(address(escrow), 0);
 
         // Release should still succeed (payout goes through), but the reentrancy attempt
         // inside the callback must revert. The outer call still completes because the
         // callback is wrapped in a try/catch inside the malicious token.
-        escrow.release(0);
+        escrow.release(0, att);
 
         // Milestone is Released exactly once
         assertEq(uint8(escrow.getMilestone(0).status), 5);
@@ -497,20 +534,26 @@ contract MilestoneEscrowMultiStableTest is Test {
 contract FakeProtocol {
     uint256 public protocolFeeBps;
     address public feeRecipient;
+    address public oracleVerifier;
 
     mapping(address => uint256) public feesCollectedByToken;
     mapping(address => bool) public isProtocolEscrow;
 
-    constructor(uint256 _feeBps, address _recipient) {
+    constructor(uint256 _feeBps, address _recipient, address _oracleVerifier) {
         protocolFeeBps = _feeBps;
         feeRecipient = _recipient;
+        oracleVerifier = _oracleVerifier;
     }
 
     function markProtocolEscrow(address escrow_) external {
         isProtocolEscrow[escrow_] = true;
     }
 
-    function collectFee(address token, uint256 fee) external {
+    function collectFeeWithAttestation(
+        address token,
+        uint256 fee,
+        IPCCOracle.Attestation calldata /* attestation */
+    ) external {
         require(isProtocolEscrow[msg.sender], "Not a protocol escrow");
         feesCollectedByToken[token] += fee;
     }

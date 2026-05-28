@@ -5,6 +5,8 @@ import "forge-std/Test.sol";
 import "../src/MilestoneEscrow.sol";
 import "../src/MockUSDC.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
+import {IPCCOracle} from "../src/interfaces/IPCCOracle.sol";
+import {MockPCCOracle} from "./mocks/MockPCCOracle.sol";
 
 /**
  * @title MilestoneEscrowSplitPayoutTest
@@ -64,6 +66,28 @@ contract MilestoneEscrowSplitPayoutTest is Test {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
+    /// @dev Build a stub attestation. In standalone mode (protocolRoot == 0)
+    ///      the oracle is never consulted, so values are cosmetic — only the
+    ///      escrowAddress is checked by submitAttestation.
+    function _makeAttestation(address escrowAddr)
+        internal
+        view
+        returns (IPCCOracle.Attestation memory)
+    {
+        return IPCCOracle.Attestation({
+            version: 1,
+            escrowAddress: escrowAddr,
+            jobId: "job-split",
+            evidenceHash: keccak256("evidence"),
+            tier: 1,
+            verified: true,
+            timestamp: block.timestamp,
+            nonce: keccak256(abi.encode("split-nonce", block.timestamp)),
+            extraData: hex"",
+            signature: hex""
+        });
+    }
+
     function _addMilestoneOnly(uint256 amount, uint256 bond) internal {
         vm.prank(payer);
         escrow.addMilestone(stepId1, operator, amount, bond, 3600);
@@ -88,7 +112,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
             vm.prank(operator);
             escrow.submitEvidence(0, keccak256("evidence"));
         }
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(address(escrow)));
         // Silence unused warning
         amount;
     }
@@ -260,7 +284,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         uint256 preProtocol = usdc.balanceOf(protocolAuthor);
         uint256 preOperator = usdc.balanceOf(operator);
 
-        escrow.release(0);
+        escrow.release(0, _makeAttestation(address(escrow)));
 
         // distributable = 100 USDC (no protocol fee in standalone mode)
         // recipient amounts: 20%, 15%, 5%, operator residual 60%
@@ -296,7 +320,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         uint256 preOperator = usdc.balanceOf(operator);
         assertEq(preOperator, 10_000e6 - bond);
 
-        escrow.release(0);
+        escrow.release(0, _makeAttestation(address(escrow)));
 
         // residual = 60e6 + bond returned 10e6 = 70e6 net into operator
         uint256 expectedResidual = 60e6 + bond;
@@ -314,12 +338,12 @@ contract MilestoneEscrowSplitPayoutTest is Test {
 
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("evidence"));
-        escrow.submitAttestation(0, keccak256("attestation"));
+        escrow.submitAttestation(0, _makeAttestation(address(escrow)));
         vm.warp(block.timestamp + 3601);
 
         assertFalse(escrow.payoutMapSet(0));
 
-        escrow.release(0);
+        escrow.release(0, _makeAttestation(address(escrow)));
 
         assertEq(uint8(escrow.getMilestone(0).status), 5); // Released
         // Operator received exactly the full amount + bond (bond=0)
@@ -338,8 +362,12 @@ contract MilestoneEscrowSplitPayoutTest is Test {
     // ──────────────────────────────────────────────────────────────────────
 
     function test_release_worksWithProtocolFeeRoot() public {
-        // Deploy a fresh escrow with a protocol root that charges 250 bps fee.
-        MockProtocolRoot root = new MockProtocolRoot(treasuryRecipient, 250);
+        // Deploy a MockPCCOracle that accepts all (verified=true) attestations,
+        // then a MockProtocolRoot wired to it. submitAttestation reads
+        // oracleVerifier() from the root and re-verifies on-chain — without a
+        // non-zero oracle it would revert "Oracle verifier not set".
+        MockPCCOracle oracle = new MockPCCOracle(address(0xABCD), true);
+        MockProtocolRoot root = new MockProtocolRoot(treasuryRecipient, 250, address(oracle));
         MilestoneEscrow rootEscrow =
             new MilestoneEscrow(payer, arbiter, address(usdc), cwmId, address(root));
 
@@ -358,9 +386,10 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         rootEscrow.fund();
         vm.stopPrank();
 
+        IPCCOracle.Attestation memory att = _makeAttestation(address(rootEscrow));
         vm.prank(operator);
         rootEscrow.submitEvidence(0, keccak256("evidence"));
-        rootEscrow.submitAttestation(0, keccak256("attestation"));
+        rootEscrow.submitAttestation(0, att);
         vm.warp(block.timestamp + 3601);
 
         uint256 preIntegrator = usdc.balanceOf(integrator);
@@ -369,7 +398,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         uint256 preOperator = usdc.balanceOf(operator);
         uint256 preTreasury = usdc.balanceOf(treasuryRecipient);
 
-        rootEscrow.release(0);
+        rootEscrow.release(0, att);
 
         // protocolFee = 100e6 * 250 / 10000 = 2.5e6
         // distributable = 100e6 - 2.5e6 = 97.5e6
@@ -416,7 +445,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         vm.expectEmit(true, true, true, true);
         emit MilestoneEscrow.SplitPayoutExecuted(0, protocolAuthor, ROLE_PROTOCOL_AUTHOR, bytes32(uint256(0xCC)), address(usdc), 5e6);
 
-        escrow.release(0);
+        escrow.release(0, _makeAttestation(address(escrow)));
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -452,7 +481,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
 
         vm.prank(operator);
         badEscrow.submitEvidence(0, keccak256("evidence"));
-        badEscrow.submitAttestation(0, keccak256("attestation"));
+        badEscrow.submitAttestation(0, _makeAttestation(address(badEscrow)));
         vm.warp(block.timestamp + 3601);
 
         // Snapshot all recipients
@@ -467,7 +496,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         // (Migrated from raw `require(token.transfer(...))` to safeTransfer for
         // multi-stablecoin compatibility — USDT does not return a bool.)
         vm.expectRevert();
-        badEscrow.release(0);
+        badEscrow.release(0, _makeAttestation(address(badEscrow)));
 
         // No state mutated (revert rolled everything back)
         assertEq(bad.balanceOf(integrator), preIntegrator);
@@ -516,11 +545,15 @@ contract MilestoneEscrowSplitPayoutTest is Test {
 
         vm.prank(operator);
         reentEscrow.submitEvidence(0, keccak256("evidence"));
-        reentEscrow.submitAttestation(0, keccak256("attestation"));
+        reentEscrow.submitAttestation(0, _makeAttestation(address(reentEscrow)));
         vm.warp(block.timestamp + 3601);
 
-        // Wire the attacker to call release(0) again from its onReceive.
-        attacker.armWithEscrow(address(reentEscrow), 0);
+        // Wire the attacker to call release(0, attestation) again from its
+        // onReceive callback. We pre-arm with an attestation pinned to this
+        // escrow — content does not matter because nonReentrant runs FIRST
+        // on the release() function, so the re-entry reverts before any
+        // attestation hash check would run.
+        attacker.armWithEscrow(address(reentEscrow), 0, _makeAttestation(address(reentEscrow)));
 
         // Two failure modes both prove protection:
         //   (a) nonReentrant guard catches re-entry → "Reentrant call"
@@ -532,7 +565,7 @@ contract MilestoneEscrowSplitPayoutTest is Test {
         // The token's transfer() bubbles the inner revert back as the outer
         // revert reason.
         vm.expectRevert("Reentrant call");
-        reentEscrow.release(0);
+        reentEscrow.release(0, _makeAttestation(address(reentEscrow)));
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -561,17 +594,26 @@ contract MilestoneEscrowSplitPayoutTest is Test {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// @dev Minimal IPCCProtocol stub for testing the protocol-fee path under splitPayout.
+///      Mirrors the post-v10 escrow contract: exposes oracleVerifier() so
+///      MilestoneEscrow.submitAttestation can re-check the attestation on-chain,
+///      and replaces collectFee with collectFeeWithAttestation.
 contract MockProtocolRoot {
     address public immutable feeRecipient;
     uint256 public immutable protocolFeeBps;
+    address public immutable oracleVerifier;
     mapping(address => uint256) public feesCollected;
 
-    constructor(address _feeRecipient, uint256 _protocolFeeBps) {
+    constructor(address _feeRecipient, uint256 _protocolFeeBps, address _oracleVerifier) {
         feeRecipient = _feeRecipient;
         protocolFeeBps = _protocolFeeBps;
+        oracleVerifier = _oracleVerifier;
     }
 
-    function collectFee(address tokenAddr, uint256 fee) external {
+    function collectFeeWithAttestation(
+        address tokenAddr,
+        uint256 fee,
+        IPCCOracle.Attestation calldata /* attestation */
+    ) external {
         feesCollected[tokenAddr] += fee;
     }
 }
@@ -700,23 +742,33 @@ contract ReentrancyToken is IERC20 {
 }
 
 interface IReleasable {
-    function release(uint256 milestoneIndex) external;
+    function release(uint256 milestoneIndex, IPCCOracle.Attestation calldata attestation) external;
 }
 
 /// @dev Recipient contract that attempts to call release() on the escrow
 ///      from within its onTokenReceived callback. nonReentrant guard or
-///      status-check should catch this.
+///      status-check should catch this. The attestation is pre-armed by
+///      the test — content does not matter because nonReentrant runs FIRST
+///      on the release() function modifier.
 contract ReentrantAttacker {
     address public escrow;
     uint256 public milestoneIdx;
+    // Internal: Solidity cannot auto-generate a public getter for structs
+    // containing string/bytes (dynamic) fields.
+    IPCCOracle.Attestation internal attestation;
 
-    function armWithEscrow(address _escrow, uint256 _idx) external {
+    function armWithEscrow(
+        address _escrow,
+        uint256 _idx,
+        IPCCOracle.Attestation memory _attestation
+    ) external {
         escrow = _escrow;
         milestoneIdx = _idx;
+        attestation = _attestation;
     }
 
     function onTokenReceived() external {
-        // Re-enter release() on the escrow.
-        IReleasable(escrow).release(milestoneIdx);
+        // Re-enter release() on the escrow with the pre-armed attestation.
+        IReleasable(escrow).release(milestoneIdx, attestation);
     }
 }
