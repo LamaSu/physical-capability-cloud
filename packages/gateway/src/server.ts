@@ -4,6 +4,7 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
+import { randomBytes } from "node:crypto";
 
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
@@ -218,7 +219,7 @@ export async function createGateway(port = 3200) {
           app.log.error("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed.");
           return "insecure-default-do-not-use";
         })()
-      : require("node:crypto").randomBytes(32).toString("hex"));
+      : randomBytes(32).toString("hex"));
   await app.register(cookie, { secret: cookieSecret });
   await app.register(websocket);
 
