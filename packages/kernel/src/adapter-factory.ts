@@ -1,9 +1,42 @@
 /**
- * Adapter factory.
+ * Adapter factory (plugin registry).
  *
- * Instantiates the correct adapter class based on a DeviceConfig.
+ * Instantiates the correct adapter class based on a DeviceConfig. Adapters
+ * are registered at module load time and can also be registered dynamically
+ * by external packages (bridges, plugins).
+ *
  * When KernelConfig.mockMode is true, all devices fall back to mock adapters
  * regardless of their declared adapterType.
+ *
+ * # Registry model
+ *
+ * There are three independent registries — one per adapter category
+ * (machine / sensor / camera) — because each category has a distinct
+ * interface and constructor signature.
+ *
+ * Each registry maps `adapterType` (string) -> factory function. The
+ * factory function receives `(device, cfg, kernelId)` and returns an
+ * adapter instance. This is more flexible than registering raw
+ * constructors because every adapter pulls a different shape out of
+ * `cfg` (URLs, API keys, register maps, etc.).
+ *
+ * # Backward compatibility
+ *
+ * All existing adapterType strings (`octoprint`, `opcua`, `ipp`,
+ * `opentrons`, `hamilton`, `modbus`, `sila`, `mock`, `generic-http`) keep
+ * working transparently — they are pre-registered in this file at module
+ * load.
+ *
+ * # Adding a new adapter from another package
+ *
+ * ```ts
+ * import { registerMachineAdapter } from "@pcc/kernel";
+ * import { MyAdapter } from "./my-adapter.js";
+ *
+ * registerMachineAdapter("my-type", (device, cfg, kernelId) =>
+ *   new MyAdapter(device.id, { ...cfg, kernelId }),
+ * );
+ * ```
  */
 
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
@@ -24,13 +57,125 @@ import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
 import { HamiltonAdapter } from "./adapters/hamilton-adapter.js";
 
 // ---------------------------------------------------------------------------
+// Factory function types
+// ---------------------------------------------------------------------------
+
+/**
+ * A factory function that builds a MachineAdapter from a DeviceConfig.
+ *
+ * @param device   - The full DeviceConfig (id, type, adapterType, config)
+ * @param cfg      - Shortcut for `device.config` (the adapter-specific config blob)
+ * @param kernelId - Resolved kernel ID (falls back to "kernel_dev_001")
+ */
+export type MachineAdapterFactory = (
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+) => MachineAdapter;
+
+export type SensorAdapterFactory = (
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+) => SensorAdapter;
+
+export type CameraAdapterFactory = (
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+) => CameraAdapter;
+
+// ---------------------------------------------------------------------------
+// Registries (one per category)
+// ---------------------------------------------------------------------------
+
+const machineRegistry = new Map<string, MachineAdapterFactory>();
+const sensorRegistry = new Map<string, SensorAdapterFactory>();
+const cameraRegistry = new Map<string, CameraAdapterFactory>();
+
+// ---------------------------------------------------------------------------
+// Public registration API
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a machine-adapter factory under `adapterType`.
+ * Throws if `adapterType` is already registered — call
+ * `unregisterMachineAdapter` first if you want to replace an existing
+ * registration.
+ */
+export function registerMachineAdapter(
+  adapterType: string,
+  factory: MachineAdapterFactory,
+): void {
+  if (machineRegistry.has(adapterType)) {
+    throw new Error(
+      `Machine adapter "${adapterType}" is already registered. ` +
+        `Call unregisterMachineAdapter("${adapterType}") first if you want to replace it.`,
+    );
+  }
+  machineRegistry.set(adapterType, factory);
+}
+
+export function registerSensorAdapter(
+  adapterType: string,
+  factory: SensorAdapterFactory,
+): void {
+  if (sensorRegistry.has(adapterType)) {
+    throw new Error(
+      `Sensor adapter "${adapterType}" is already registered. ` +
+        `Call unregisterSensorAdapter("${adapterType}") first if you want to replace it.`,
+    );
+  }
+  sensorRegistry.set(adapterType, factory);
+}
+
+export function registerCameraAdapter(
+  adapterType: string,
+  factory: CameraAdapterFactory,
+): void {
+  if (cameraRegistry.has(adapterType)) {
+    throw new Error(
+      `Camera adapter "${adapterType}" is already registered. ` +
+        `Call unregisterCameraAdapter("${adapterType}") first if you want to replace it.`,
+    );
+  }
+  cameraRegistry.set(adapterType, factory);
+}
+
+/** Remove a machine-adapter factory. No-op if not registered. */
+export function unregisterMachineAdapter(adapterType: string): void {
+  machineRegistry.delete(adapterType);
+}
+
+export function unregisterSensorAdapter(adapterType: string): void {
+  sensorRegistry.delete(adapterType);
+}
+
+export function unregisterCameraAdapter(adapterType: string): void {
+  cameraRegistry.delete(adapterType);
+}
+
+/** Return the sorted list of registered machine-adapter types. */
+export function listRegisteredMachineAdapters(): string[] {
+  return [...machineRegistry.keys()].sort();
+}
+
+export function listRegisteredSensorAdapters(): string[] {
+  return [...sensorRegistry.keys()].sort();
+}
+
+export function listRegisteredCameraAdapters(): string[] {
+  return [...cameraRegistry.keys()].sort();
+}
+
+// ---------------------------------------------------------------------------
 // Machine adapters
 // ---------------------------------------------------------------------------
 
 /**
  * Create a MachineAdapter from a DeviceConfig.
  *
- * @param device - Device config with adapterType "octoprint" | "opcua" | "mock"
+ * @param device         - Device config with a registered adapterType
  * @param globalMockMode - If true, force mock mode regardless of adapterType
  */
 export function createMachineAdapter(
@@ -41,72 +186,14 @@ export function createMachineAdapter(
   const cfg = device.config;
   const kernelId = (cfg.kernelId as string | undefined) ?? "kernel_dev_001";
 
-  switch (effectiveType) {
-    case "octoprint": {
-      return new OctoPrintAdapter(device.id, {
-        url: (cfg.url as string | undefined) ?? "http://localhost:5000",
-        apiKey: (cfg.apiKey as string | undefined) ?? "",
-        kernelId,
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
-      });
-    }
-
-    case "opcua": {
-      return new OPCUAAdapter(device.id, {
-        endpoint: (cfg.endpoint as string | undefined) ?? "opc.tcp://localhost:4840",
-        kernelId,
-        machineType: (cfg.machineType as "cnc-3axis" | "cnc-5axis" | "lathe" | "laser-cut" | undefined) ?? "cnc-3axis",
-        nodeMap: (cfg.nodeMap as import("./adapters/opcua-adapter.js").OPCUANodeDef[] | undefined) ?? [],
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        securityMode: cfg.securityMode as "none" | "sign" | "signAndEncrypt" | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
-      });
-    }
-
-    case "ipp": {
-      return new IppAdapter(device.id, {
-        uri: (cfg.uri as string | undefined) ?? "ipp://localhost:631/ipp/print",
-        name: cfg.name as string | undefined,
-        kernelId,
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? true,
-      });
-    }
-
-    case "opentrons": {
-      return new OpentronsMachineAdapter(device.id, {
-        url: (cfg.url as string | undefined) ?? "http://localhost:31950",
-        apiVersion: (cfg.apiVersion as string | undefined) ?? "2.18",
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
-        maxQueueDepth: cfg.maxQueueDepth as number | undefined,
-      });
-    }
-
-    case "hamilton": {
-      return new HamiltonAdapter(device.id, {
-        url: (cfg.url as string | undefined) ?? "http://localhost",
-        username: (cfg.username as string | undefined) ?? "",
-        password: (cfg.password as string | undefined) ?? "",
-        kernelId,
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? false,
-        refreshLeadSeconds: cfg.refreshLeadSeconds as number | undefined,
-        mockRunDurationMs: cfg.mockRunDurationMs as number | undefined,
-      });
-    }
-
-    case "mock":
-    case "generic-http":
-    default: {
-      return new MockFDMAdapter(
-        device.id,
-        kernelId,
-        (cfg.jobDurationMs as number | undefined) ?? 5000,
-      );
-    }
+  const factory = machineRegistry.get(effectiveType);
+  if (factory) {
+    return factory(device, cfg, kernelId);
   }
+
+  // Backward-compat fallback: unknown adapterType -> mock FDM adapter.
+  // Preserves the prior behavior of the default switch arm.
+  return buildMockMachine(device, cfg, kernelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +203,7 @@ export function createMachineAdapter(
 /**
  * Create a SensorAdapter from a DeviceConfig.
  *
- * @param device - Device config with adapterType "modbus" | "mock"
+ * @param device         - Device config with a registered adapterType
  * @param globalMockMode - If true, force mock mode
  */
 export function createSensorAdapter(
@@ -127,34 +214,12 @@ export function createSensorAdapter(
   const cfg = device.config;
   const kernelId = (cfg.kernelId as string | undefined) ?? "kernel_dev_001";
 
-  switch (effectiveType) {
-    case "modbus": {
-      return new ModbusSensorAdapter(device.id, {
-        host: (cfg.host as string | undefined) ?? "localhost",
-        port: cfg.port as number | undefined,
-        unitId: cfg.unitId as number | undefined,
-        kernelId,
-        registerMap: (cfg.registerMap as import("./adapters/modbus-sensor-adapter.js").ModbusRegisterDef[] | undefined) ?? [],
-        pollIntervalMs: cfg.pollIntervalMs as number | undefined,
-        mockMode: (cfg.mockMode as boolean | undefined) ?? true,
-      });
-    }
-
-    case "sila": {
-      // SiLAAdapter implements a richer interface but satisfies SensorAdapter
-      // via startRecording / stopRecording / getCurrentReading / onEvidence / dispose
-      return createSiLASensorAdapter(device.id, cfg, kernelId);
-    }
-
-    case "mock":
-    case "generic-http":
-    default: {
-      return new MockPowerMonitorAdapter(device.id, kernelId, {
-        idleWatts: cfg.idleWatts as number | undefined,
-        activeWatts: cfg.activeWatts as number | undefined,
-      });
-    }
+  const factory = sensorRegistry.get(effectiveType);
+  if (factory) {
+    return factory(device, cfg, kernelId);
   }
+
+  return buildMockSensor(device, cfg, kernelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +229,7 @@ export function createSensorAdapter(
 /**
  * Create a CameraAdapter from a DeviceConfig.
  *
- * @param device - Device config with adapterType "mock" (only mock cameras exist today)
+ * @param device         - Device config with a registered adapterType
  * @param globalMockMode - If true, force mock mode
  */
 export function createCameraAdapter(
@@ -175,18 +240,12 @@ export function createCameraAdapter(
   const cfg = device.config;
   const kernelId = (cfg.kernelId as string | undefined) ?? "kernel_dev_001";
 
-  switch (effectiveType) {
-    // When real camera adapters are added (e.g. RTSP, OpenCV) add cases here
-    case "mock":
-    case "generic-http":
-    default: {
-      return new MockCameraAdapter(
-        device.id,
-        kernelId,
-        (cfg.passRate as number | undefined) ?? 0.95,
-      );
-    }
+  const factory = cameraRegistry.get(effectiveType);
+  if (factory) {
+    return factory(device, cfg, kernelId);
   }
+
+  return buildMockCamera(device, cfg, kernelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +290,173 @@ export function createAdaptersFromConfig(kernelConfig: KernelConfig): AdapterSet
 
   return { machines, sensors, cameras };
 }
+
+// ---------------------------------------------------------------------------
+// Built-in factories (module-level functions, reused by registry + fallbacks)
+// ---------------------------------------------------------------------------
+
+function buildMockMachine(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new MockFDMAdapter(
+    device.id,
+    kernelId,
+    (cfg.jobDurationMs as number | undefined) ?? 5000,
+  );
+}
+
+function buildMockSensor(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): SensorAdapter {
+  return new MockPowerMonitorAdapter(device.id, kernelId, {
+    idleWatts: cfg.idleWatts as number | undefined,
+    activeWatts: cfg.activeWatts as number | undefined,
+  });
+}
+
+function buildMockCamera(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): CameraAdapter {
+  return new MockCameraAdapter(
+    device.id,
+    kernelId,
+    (cfg.passRate as number | undefined) ?? 0.95,
+  );
+}
+
+function buildOctoPrint(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new OctoPrintAdapter(device.id, {
+    url: (cfg.url as string | undefined) ?? "http://localhost:5000",
+    apiKey: (cfg.apiKey as string | undefined) ?? "",
+    kernelId,
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+  });
+}
+
+function buildOPCUA(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new OPCUAAdapter(device.id, {
+    endpoint: (cfg.endpoint as string | undefined) ?? "opc.tcp://localhost:4840",
+    kernelId,
+    machineType:
+      (cfg.machineType as "cnc-3axis" | "cnc-5axis" | "lathe" | "laser-cut" | undefined) ??
+      "cnc-3axis",
+    nodeMap:
+      (cfg.nodeMap as import("./adapters/opcua-adapter.js").OPCUANodeDef[] | undefined) ?? [],
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    securityMode: cfg.securityMode as "none" | "sign" | "signAndEncrypt" | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+  });
+}
+
+function buildIpp(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new IppAdapter(device.id, {
+    uri: (cfg.uri as string | undefined) ?? "ipp://localhost:631/ipp/print",
+    name: cfg.name as string | undefined,
+    kernelId,
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? true,
+  });
+}
+
+function buildOpentrons(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  _kernelId: string,
+): MachineAdapter {
+  return new OpentronsMachineAdapter(device.id, {
+    url: (cfg.url as string | undefined) ?? "http://localhost:31950",
+    apiVersion: (cfg.apiVersion as string | undefined) ?? "2.18",
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+    maxQueueDepth: cfg.maxQueueDepth as number | undefined,
+  });
+}
+
+function buildHamilton(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new HamiltonAdapter(device.id, {
+    url: (cfg.url as string | undefined) ?? "http://localhost",
+    username: (cfg.username as string | undefined) ?? "",
+    password: (cfg.password as string | undefined) ?? "",
+    kernelId,
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+    refreshLeadSeconds: cfg.refreshLeadSeconds as number | undefined,
+    mockRunDurationMs: cfg.mockRunDurationMs as number | undefined,
+  });
+}
+
+function buildModbus(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): SensorAdapter {
+  return new ModbusSensorAdapter(device.id, {
+    host: (cfg.host as string | undefined) ?? "localhost",
+    port: cfg.port as number | undefined,
+    unitId: cfg.unitId as number | undefined,
+    kernelId,
+    registerMap:
+      (cfg.registerMap as
+        | import("./adapters/modbus-sensor-adapter.js").ModbusRegisterDef[]
+        | undefined) ?? [],
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? true,
+  });
+}
+
+function buildSiLA(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): SensorAdapter {
+  return createSiLASensorAdapter(device.id, cfg, kernelId);
+}
+
+// ---------------------------------------------------------------------------
+// Built-in registrations (auto-register at module load for backward-compat)
+// ---------------------------------------------------------------------------
+
+// Machine adapters
+registerMachineAdapter("mock", buildMockMachine);
+registerMachineAdapter("generic-http", buildMockMachine);
+registerMachineAdapter("octoprint", buildOctoPrint);
+registerMachineAdapter("opcua", buildOPCUA);
+registerMachineAdapter("ipp", buildIpp);
+registerMachineAdapter("opentrons", buildOpentrons);
+registerMachineAdapter("hamilton", buildHamilton);
+
+// Sensor adapters
+registerSensorAdapter("mock", buildMockSensor);
+registerSensorAdapter("generic-http", buildMockSensor);
+registerSensorAdapter("modbus", buildModbus);
+registerSensorAdapter("sila", buildSiLA);
+
+// Camera adapters
+registerCameraAdapter("mock", buildMockCamera);
+registerCameraAdapter("generic-http", buildMockCamera);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
