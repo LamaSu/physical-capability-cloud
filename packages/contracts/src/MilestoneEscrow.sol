@@ -881,23 +881,9 @@ contract MilestoneEscrow {
         IERC20 tok,
         IPCCOracle.Attestation calldata attestation
     ) internal {
-        // 1. Protocol fee on gross (in the milestone's token)
-        uint256 protocolFee = 0;
-        address tokenAddr = address(tok);
-        if (protocolRoot != address(0)) {
-            IPCCProtocol root = IPCCProtocol(protocolRoot);
-            uint256 feeBps = root.protocolFeeBps();
-            protocolFee = (amount * feeBps) / 10000;
-            if (protocolFee > 0) {
-                tok.safeTransfer(root.feeRecipient(), protocolFee);
-            }
-            // Oracle-gated accounting hook fires regardless (root may want to
-            // record zero-fee event). Re-verifies the attestation on-chain via
-            // PCCProtocol.requiresOracle so split-payout escrows cannot bypass
-            // the oracle gate.
-            root.collectFeeWithAttestation(tokenAddr, protocolFee, attestation);
-        }
-
+        // 1. Protocol fee on gross (in the milestone's token). Extracted to a
+        //    helper so the outer function stays under the 16-local stack cap.
+        uint256 protocolFee = _settleProtocolFee(amount, tok, attestation);
         uint256 distributable = amount - protocolFee;
 
         // 2. Per-recipient distribution (in the milestone's token)
@@ -916,7 +902,7 @@ contract MilestoneEscrow {
                 p.recipient,
                 p.roleTag,
                 p.ipId,
-                tokenAddr,
+                address(tok),
                 share
             );
         }
@@ -928,6 +914,38 @@ contract MilestoneEscrow {
         if (operatorAmount > 0) {
             tok.safeTransfer(operator, operatorAmount);
         }
+    }
+
+    /**
+     * @dev Extracted protocol-fee settlement helper. Keeps the outer
+     *      `_distributeWithMap` under Solidity's 16-local stack cap when the
+     *      `attestation` calldata parameter is added.
+     *
+     *      Computes the gross fee, transfers it to the protocol's fee
+     *      recipient, then calls `collectFeeWithAttestation` (oracle-gated)
+     *      so the protocol re-runs `verifyAttestation` via requiresOracle.
+     *      Returns the deducted fee so the caller can compute `distributable`.
+     *
+     *      When `protocolRoot == address(0)` (standalone mode) the helper
+     *      returns 0 without touching the token.
+     */
+    function _settleProtocolFee(
+        uint256 amount,
+        IERC20 tok,
+        IPCCOracle.Attestation calldata attestation
+    ) internal returns (uint256 protocolFee) {
+        if (protocolRoot == address(0)) {
+            return 0;
+        }
+        IPCCProtocol root = IPCCProtocol(protocolRoot);
+        protocolFee = (amount * root.protocolFeeBps()) / 10000;
+        if (protocolFee > 0) {
+            tok.safeTransfer(root.feeRecipient(), protocolFee);
+        }
+        // Oracle-gated accounting hook fires regardless of fee size — the
+        // root may want to record a zero-fee event, and the requiresOracle
+        // modifier still gates so split-payout escrows cannot bypass it.
+        root.collectFeeWithAttestation(address(tok), protocolFee, attestation);
     }
 
     // ── Disputes ─────────────────────────────────────────────────────────
