@@ -18,6 +18,8 @@ import { injectionMoldingTemplate } from "./injection-molding.js";
 import { sheetMetalTemplate } from "./sheet-metal.js";
 import { cncTurningTemplate } from "./cnc-turning.js";
 import { cncSwissTemplate } from "./cnc-swiss.js";
+import { dmlsTemplate } from "./dmls.js";
+import { urethaneCastingTemplate } from "./urethane-casting.js";
 
 const registry = new Map<CapabilityType, CapabilityTemplate>();
 
@@ -57,3 +59,5 @@ registerTemplate(injectionMoldingTemplate);
 registerTemplate(sheetMetalTemplate);
 registerTemplate(cncTurningTemplate);
 registerTemplate(cncSwissTemplate);
+registerTemplate(dmlsTemplate);
+registerTemplate(urethaneCastingTemplate);
