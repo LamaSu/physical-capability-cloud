@@ -208,6 +208,26 @@ export interface IndexedToolPeerEndpoint {
 }
 
 // ---------------------------------------------------------------------------
+// OASF round-trip (AGNTCY ADS bridge)
+// ---------------------------------------------------------------------------
+
+/**
+ * One OASF module fragment, preserved verbatim for AGNTCY round-trip.
+ *
+ * OASF's `modules[]` is its extension mechanism — each module is a
+ * `{name, data}` pair where `name` is the module slug (e.g.
+ * `physical-capability/v1`) and `data` is the module-specific payload.
+ *
+ * Consumers that don't know the module slug safely ignore the data.
+ *
+ * See: ai/scoping/agntcy-ads-oasf-bridge-2026-05-23.md §3.4
+ */
+export interface OasfModule {
+  name: string;
+  data: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Pricing hint (scraped or vendor-provided)
 // ---------------------------------------------------------------------------
 
@@ -311,6 +331,26 @@ export interface IndexedTool {
   // ----- Federation ------------------------------------------------------
   /** Other peers carrying this tool's index entry. Phase 5 only. */
   hostingPeers: IndexedToolPeerEndpoint[];
+
+  // ----- OASF round-trip (AGNTCY ADS bridge) ----------------------------
+  /**
+   * OASF locator mirror URLs (`locators[].urls` supports multiple mirrors
+   * per locator type). Preserved on inbound for round-trip fidelity.
+   * Phase 1 of the bridge — see ai/scoping/agntcy-ads-oasf-bridge-2026-05-23.md.
+   */
+  locatorUrls?: string[];
+  /**
+   * OASF modules preserved verbatim for AGNTCY round-trip. On inbound from
+   * AGNTCY, the source-adapter populates this so the publisher can
+   * re-emit the record losslessly. The PCC-specific module slugs
+   * (`physical-capability/v1`, `tool-schema/v1`) ride here.
+   */
+  oasfModules?: OasfModule[];
+  /**
+   * If ingested from AGNTCY ADS, the AGNTCY-side CID for re-publish /
+   * diff detection. Empty for tools sourced from non-AGNTCY adapters.
+   */
+  agntcyRecordCid?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +425,12 @@ const IndexedToolPeerEndpointSchema = z.object({
   lastSeenAt: z.string().datetime(),
 });
 
+/** OASF module Zod schema. */
+const OasfModuleSchema = z.object({
+  name: z.string().min(1),
+  data: z.record(z.string(), z.unknown()),
+});
+
 const PricingHintSchema = z.object({
   perCallUsdc: z.string(),
   perKTokenUsdc: z.string().optional(),
@@ -437,4 +483,8 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   driftAlerts: z.array(DriftAlertSummarySchema),
   schemaHashHistory: z.array(SHA256Schema),
   hostingPeers: z.array(IndexedToolPeerEndpointSchema),
+  // OASF round-trip fields (additive, optional, backward-compatible):
+  locatorUrls: z.array(z.string()).optional(),
+  oasfModules: z.array(OasfModuleSchema).optional(),
+  agntcyRecordCid: z.string().optional(),
 }) as unknown as z.ZodType<IndexedTool>;
