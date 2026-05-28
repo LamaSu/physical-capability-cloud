@@ -86,10 +86,12 @@ contract MilestoneEscrowMultiStableTest is Test {
     /// @dev Build a stub attestation pinned to a given escrow. In standalone
     ///      mode (protocolRoot == 0) the oracle is never consulted, so values
     ///      are cosmetic — only the escrowAddress field is checked by
-    ///      submitAttestation.
+    ///      submitAttestation. DETERMINISTIC (no block.timestamp) so callers
+    ///      can rebuild the same struct at release time and still match
+    ///      `verifierAttestationHash`.
     function _makeAttestation(address escrowAddr)
         internal
-        view
+        pure
         returns (IPCCOracle.Attestation memory)
     {
         return IPCCOracle.Attestation({
@@ -99,8 +101,8 @@ contract MilestoneEscrowMultiStableTest is Test {
             evidenceHash: keccak256("multistable-evidence"),
             tier: 1,
             verified: true,
-            timestamp: block.timestamp,
-            nonce: keccak256(abi.encode("ms-nonce", block.timestamp)),
+            timestamp: 1_700_000_000,
+            nonce: keccak256(abi.encode("ms-nonce", escrowAddr)),
             extraData: hex"",
             signature: hex""
         });

@@ -69,9 +69,15 @@ contract MilestoneEscrowSplitPayoutTest is Test {
     /// @dev Build a stub attestation. In standalone mode (protocolRoot == 0)
     ///      the oracle is never consulted, so values are cosmetic — only the
     ///      escrowAddress is checked by submitAttestation.
+    ///
+    ///      DETERMINISTIC by design: callers may invoke `_makeAttestation`
+    ///      separately at submit and at release; both calls must produce the
+    ///      same struct so `keccak256(abi.encode(att))` matches the stored
+    ///      `verifierAttestationHash`. We therefore use a fixed timestamp +
+    ///      nonce derived only from the escrow address — NOT `block.timestamp`.
     function _makeAttestation(address escrowAddr)
         internal
-        view
+        pure
         returns (IPCCOracle.Attestation memory)
     {
         return IPCCOracle.Attestation({
@@ -81,8 +87,8 @@ contract MilestoneEscrowSplitPayoutTest is Test {
             evidenceHash: keccak256("evidence"),
             tier: 1,
             verified: true,
-            timestamp: block.timestamp,
-            nonce: keccak256(abi.encode("split-nonce", block.timestamp)),
+            timestamp: 1_700_000_000,
+            nonce: keccak256(abi.encode("split-nonce", escrowAddr)),
             extraData: hex"",
             signature: hex""
         });

@@ -107,6 +107,7 @@ contract EndToEndContributorEconomicsTest is Test {
     /// @dev Build a stub attestation pinned to the test escrow. In standalone
     ///      mode (protocolRoot == 0) only escrowAddress is checked by
     ///      submitAttestation, so the other fields are cosmetic.
+    ///      DETERMINISTIC so submit+release rebuild the same struct.
     function _makeAttestation() internal view returns (IPCCOracle.Attestation memory) {
         return IPCCOracle.Attestation({
             version: 1,
@@ -115,8 +116,8 @@ contract EndToEndContributorEconomicsTest is Test {
             evidenceHash: keccak256("e2e-evidence"),
             tier: 1,
             verified: true,
-            timestamp: block.timestamp,
-            nonce: keccak256(abi.encode("e2e-nonce", block.timestamp)),
+            timestamp: 1_700_000_000,
+            nonce: keccak256(abi.encode("e2e-nonce", address(escrow))),
             extraData: hex"",
             signature: hex""
         });

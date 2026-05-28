@@ -93,7 +93,8 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
 
     /// @dev Build a stub attestation pinned to the test escrow. MockPCCOracle
     ///      accepts everything with verified=true and non-zero escrowAddress
-    ///      so the oracle gate at submitAttestation passes.
+    ///      so the oracle gate at submitAttestation passes. DETERMINISTIC so
+    ///      submit+release rebuild the same struct (matches stored hash).
     function _makeAttestation() internal view returns (IPCCOracle.Attestation memory) {
         return IPCCOracle.Attestation({
             version: 1,
@@ -102,8 +103,8 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
             evidenceHash: keccak256("integ-evidence"),
             tier: 1,
             verified: true,
-            timestamp: block.timestamp,
-            nonce: keccak256(abi.encode("integ-nonce", block.timestamp)),
+            timestamp: 1_700_000_000,
+            nonce: keccak256(abi.encode("integ-nonce", address(escrow))),
             extraData: hex"",
             signature: hex""
         });
