@@ -1,0 +1,20 @@
+{
+  "kernelId": "kernel_lab_west_01",
+  "devices": [
+    {
+      "id": "trilobio-fleet-bench-A",
+      "type": "machine",
+      "adapterType": "trilobio",
+      "config": {
+        "url": "http://192.168.1.50",
+        "apiKey": "REPLACE_WITH_TRILOBIO_API_KEY",
+        "kernelId": "kernel_lab_west_01",
+        "tcodeApiVersion": "1.25.1",
+        "mockMode": false,
+        "pollIntervalMs": 3000,
+        "maxScriptTimeoutSec": 3600,
+        "allowArbitraryScripts": false
+      }
+    }
+  ]
+}

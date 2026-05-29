@@ -1,0 +1,19 @@
+{
+  "kernelId": "kernel_demo_trilobio_mock",
+  "devices": [
+    {
+      "id": "trilobio-fleet-mock-01",
+      "type": "machine",
+      "adapterType": "trilobio",
+      "config": {
+        "url": "http://192.0.2.1",
+        "apiKey": "demo",
+        "kernelId": "kernel_demo_trilobio_mock",
+        "tcodeApiVersion": "latest",
+        "mockMode": true,
+        "mockRunDurationMs": 2000,
+        "allowArbitraryScripts": false
+      }
+    }
+  ]
+}
