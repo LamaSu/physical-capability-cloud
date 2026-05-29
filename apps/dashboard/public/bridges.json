@@ -1,0 +1,43 @@
+{
+  "name": "PCC Bridge Directory",
+  "timestamp": "2026-05-27T00:00:00Z",
+  "version": { "major": 0, "minor": 1, "patch": 0 },
+  "bridges": [
+    {
+      "namespace": "hamilton",
+      "name": "Hamilton ML Prep / STAR / Vantage",
+      "repoUrl": "https://github.com/LamaSu/hamilton-pcc-bridge",
+      "maintainerAddress": "0x0000000000000000000000000000000000000000",
+      "adapterPackage": "@pcc/hamilton",
+      "version": "0.1.0",
+      "status": "active",
+      "trustTier": 2,
+      "capabilityTypes": ["liquid-handling-prep"],
+      "description": "Hamilton liquid handlers — Microlab Prep, STAR, Vantage. JWT-auth REST."
+    },
+    {
+      "namespace": "trilobio",
+      "name": "Trilobio Trilobot fleet controller",
+      "repoUrl": "https://github.com/LamaSu/trilobio-pcc-bridge",
+      "maintainerAddress": "0x0000000000000000000000000000000000000000",
+      "adapterPackage": "@pcc/trilobio",
+      "version": "0.1.0",
+      "status": "experimental",
+      "trustTier": 1,
+      "capabilityTypes": ["liquid-handling-trilobio", "tcode-script-execution"],
+      "description": "Trilobio fleet controller via tcode-api Python SDK."
+    },
+    {
+      "namespace": "pylabrobot",
+      "name": "PyLabRobot",
+      "repoUrl": "https://github.com/LamaSu/pylabrobot-pcc-bridge",
+      "maintainerAddress": "0x0000000000000000000000000000000000000000",
+      "adapterPackage": "@pcc/adapter-pylabrobot",
+      "version": "0.1.0",
+      "status": "experimental",
+      "trustTier": 1,
+      "capabilityTypes": ["liquid-handling-plr"],
+      "description": "PyLabRobot Python framework — supports OT-2/Flex, Hamilton STAR/Vantage, Tecan EVO."
+    }
+  ]
+}
