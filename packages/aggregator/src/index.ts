@@ -62,6 +62,7 @@ export {
   hashPairSorted,
 } from "./merkle.js";
 export type { Bytes32Hex, MerkleTree } from "./merkle.js";
+export {
   toAtomicUsdc,
   decimalUsdc,
   isPaidPrice,
