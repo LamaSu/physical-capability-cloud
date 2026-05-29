@@ -41,6 +41,29 @@ export * from "./publishers/index.js";
 export { signReceipt, verifyReceiptSignature } from "./receipt-signer.js";
 export type { ReceiptSignerKey } from "./receipt-signer.js";
 export {
+  toAtomicUsdc,
+  decimalUsdc,
+  isPaidPrice,
+  priceTagHmac,
+  verifyPriceTag,
+} from "./pricing.js";
+export type { PriceTagFields } from "./pricing.js";
+export {
+  verifyWithFacilitator,
+  settleWithFacilitator,
+  FacilitatorNetworkError,
+} from "./x402-facilitator.js";
+export type { X402FacilitatorConfig } from "./x402-facilitator.js";
+export { NonceCache } from "./x402-nonce-cache.js";
+export type { NonceCacheEntry, NonceCacheOptions } from "./x402-nonce-cache.js";
+export { requirePayment, recordSettlement } from "./x402-gate.js";
+export type {
+  X402GateConfig,
+  GateRequestContext,
+  GateVerdict,
+  SettleOutcome,
+} from "./x402-gate.js";
+export {
   assertSafeFetchUrl,
   assertSafeFetchUrlWithDns,
   SSRFRejected,
