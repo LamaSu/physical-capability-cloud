@@ -1,0 +1,32 @@
+{
+  "name": "@pcc/adapter-madsci",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PCC adapter for MADSci (Modular Autonomous Discovery for Science) — ingest MADSci workflow YAML, translate to PCC capabilities, talk to MADSci Workcell Manager REST API. Argonne AD-SDL, MIT.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/kernel-sdk": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "yaml": "^2.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
