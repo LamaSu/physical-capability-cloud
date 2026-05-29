@@ -17,7 +17,13 @@
 export {
   IndexedToolRegistry,
   type RegistryQuery,
+  type RegistryRegionContext,
+  type IndexedToolRegistryOpts,
 } from "./registry.js";
+export {
+  NoOpReplicator,
+  type ReplicatorAdapter,
+} from "./replicator.js";
 export {
   runPipeline,
   computeToolCid,

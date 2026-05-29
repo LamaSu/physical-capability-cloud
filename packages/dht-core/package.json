@@ -1,8 +1,8 @@
 {
-  "name": "@pcc/dht",
+  "name": "@pcc/dht-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Distributed capability discovery — WebSocket gossip DHT for the Physical Capability Cloud",
+  "description": "Shared transport + identity + peer management primitives for PCC DHT family — used by @pcc/dht (gossip flood) and @pcc/federation (Kademlia, Phase 2)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,13 +20,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@pcc/dht-core": "workspace:*",
     "@pcc/spec": "workspace:*",
-    "@pcc/a2a": "workspace:*",
     "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",
+    "typescript": "^5.4.0",
     "vitest": "^1.6.0"
   }
 }

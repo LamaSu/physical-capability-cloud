@@ -244,6 +244,35 @@ export interface PricingHint {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 1 federation extension (optional, additive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-region content-addressed reference for volatile CRDT state.
+ *
+ * Phase 1 (this commit): optional field on IndexedTool. When present,
+ * the federation runtime materialises the actual CRDT state from the
+ * referenced CIDs and merges them on read.
+ *
+ * The four CRDT slots map 1:1 to the volatile-field set per scope §7.3:
+ *
+ *   - invocationCountCid → G-Counter (grow-only per region/mesh)
+ *   - successRateCid     → Tagged-Fraction (success/total per replica)
+ *   - meanLatencyMsCid   → Tagged-Fraction (latency sum/count)
+ *   - lastInvokedAtCid   → LWW-Register (timestamp + replica)
+ *
+ * Phase 2 wires the CRDT cross-region pull; Phase 1 leaves these
+ * undefined and the gateway falls back to the scalar fields on
+ * IndexedTool (invocationCount, successRate, ...).
+ */
+export interface IndexedToolVolatileRefs {
+  invocationCountCid?: SHA256;
+  successRateCid?: SHA256;
+  meanLatencyMsCid?: SHA256;
+  lastInvokedAtCid?: SHA256;
+}
+
+// ---------------------------------------------------------------------------
 // TEE profile (DCC4 capability declaration)
 // ---------------------------------------------------------------------------
 
@@ -419,6 +448,32 @@ export interface IndexedTool {
   /** Other peers carrying this tool's index entry. Phase 5 only. */
   hostingPeers: IndexedToolPeerEndpoint[];
 
+  // ----- Phase 1 federation extension (optional, additive) ---------------
+  /**
+   * Region that ingested this record. Defaults to "us-east-1" when not
+   * explicitly set; the federation runtime populates it on upsert.
+   * Per scope §11.1. OPTIONAL — present only when the federation
+   * runtime is engaged.
+   */
+  regionId?: string;
+  /**
+   * Mesh (within the region) that ingested this record. Defaults to
+   * "us-east-1-mesh-a" when the federation runtime is single-region.
+   * Per scope §11.1.
+   */
+  meshId?: string;
+  /**
+   * Namespace this tool belongs to. PCC's default is "pcc-public".
+   * Per scope §3.4 + §11.4. OPTIONAL — when undefined, the aggregator
+   * treats the tool as belonging to the default public namespace.
+   */
+  namespaceId?: string;
+  /**
+   * Phase 1 federation extension: per-region CRDT state refs for the
+   * four volatile fields. Per scope §11.2. OPTIONAL — when undefined,
+   * the gateway reads the scalar volatile fields above directly.
+   */
+  volatileRefs?: IndexedToolVolatileRefs;
   // ----- OASF round-trip (AGNTCY ADS bridge) ----------------------------
   /**
    * OASF locator mirror URLs (`locators[].urls` supports multiple mirrors
@@ -612,6 +667,18 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   driftAlerts: z.array(DriftAlertSummarySchema),
   schemaHashHistory: z.array(SHA256Schema),
   hostingPeers: z.array(IndexedToolPeerEndpointSchema),
+  // Phase 1 federation extension — optional, additive
+  regionId: z.string().min(1).optional(),
+  meshId: z.string().min(1).optional(),
+  namespaceId: z.string().min(1).optional(),
+  volatileRefs: z
+    .object({
+      invocationCountCid: SHA256Schema.optional(),
+      successRateCid: SHA256Schema.optional(),
+      meanLatencyMsCid: SHA256Schema.optional(),
+      lastInvokedAtCid: SHA256Schema.optional(),
+    })
+    .optional(),
   // OASF round-trip fields (additive, optional, backward-compatible):
   locatorUrls: z.array(z.string()).optional(),
   oasfModules: z.array(OasfModuleSchema).optional(),
