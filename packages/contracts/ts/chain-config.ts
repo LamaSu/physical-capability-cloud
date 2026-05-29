@@ -73,6 +73,10 @@ export interface ChainDeployment {
     verifierRegistry?: Address;
     /** CaptureClassRegistry — on-chain CVP anchors (deployed 2026-04-22) */
     captureClassRegistry?: Address;
+    /** ReceiptAnchorRegistry — Phase-2 InvocationReceipt anchors (anchorOne + anchorBatch).
+     *  Address filled in after deploying via script/DeployReceiptAnchorRegistry.s.sol.
+     *  Design doc: ai/scoping/onchain-receipt-anchoring-2026-05-23.md */
+    receiptAnchorRegistry?: Address;
     /** ERC-8004 registries */
     identityRegistry?: Address;
     reputationRegistry?: Address;

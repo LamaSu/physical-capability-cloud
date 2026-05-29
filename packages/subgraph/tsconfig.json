@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["tests/**/*", "vitest.config.ts"],
+  "exclude": ["src/**", "node_modules", "build", "abis"]
+}

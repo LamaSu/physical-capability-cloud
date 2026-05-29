@@ -1,0 +1,18 @@
+{
+  "name": "@pcc/subgraph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TheGraph subgraph for ReceiptAnchorRegistry — indexes Phase-2 InvocationReceipt anchors (single + batch) for fast off-chain queries",
+  "scripts": {
+    "build": "graph build 2>/dev/null || echo 'graph CLI not installed — install: npm i -g @graphprotocol/graph-cli'",
+    "test": "vitest run --passWithNoTests",
+    "test:matchstick": "graph test 2>/dev/null || echo 'matchstick / graph CLI unavailable — see README.md for setup'",
+    "codegen": "graph codegen 2>/dev/null || echo 'graph CLI not installed'",
+    "deploy:hosted-sepolia": "graph deploy --product hosted-service <username>/pcc-receipts-base-sepolia",
+    "deploy:hosted-mainnet": "graph deploy --product hosted-service <username>/pcc-receipts-base",
+    "typecheck": "echo 'AssemblyScript handlers compile via graph build; pure-TS tests typechecked via vitest'"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

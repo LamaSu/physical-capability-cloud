@@ -1,0 +1,38 @@
+specVersion: 0.0.5
+description: PCC ReceiptAnchorRegistry — indexes Phase-2 InvocationReceipt anchors (anchorOne + anchorBatch) for fast off-chain queries by tool, caller, dccClass, and time. See ai/scoping/onchain-receipt-anchoring-2026-05-23.md.
+repository: https://github.com/LamaSu/physical-capability-cloud
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: ReceiptAnchorRegistry
+    # Change network: base-sepolia for testnet, base for mainnet
+    network: base-sepolia
+    source:
+      # Replace with deployed address from
+      # deployments/base-sepolia/ReceiptAnchorRegistry.json after running
+      # script/DeployReceiptAnchorRegistry.s.sol.
+      address: "0x0000000000000000000000000000000000000000"
+      abi: ReceiptAnchorRegistry
+      # startBlock: <block of deploy tx>  # fill in after deployment for faster sync
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      file: ./src/mapping.ts
+      entities:
+        - ReceiptAnchor
+        - BatchAnchor
+        - Tool
+        - Caller
+        - Dispute
+      abis:
+        - name: ReceiptAnchorRegistry
+          file: ./abis/ReceiptAnchorRegistry.json
+      eventHandlers:
+        - event: AnchorEmitted(indexed bytes32,indexed bytes32,indexed bytes32,uint8,uint64,bytes32,bytes32)
+          handler: handleAnchorEmitted
+        - event: BatchAnchorEmitted(indexed bytes32,uint32,uint8,uint8,bytes32)
+          handler: handleBatchAnchorEmitted
+        - event: DisputeRaised(indexed bytes32,indexed address,string)
+          handler: handleDisputeRaised
