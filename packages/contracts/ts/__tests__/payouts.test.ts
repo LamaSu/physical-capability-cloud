@@ -10,7 +10,7 @@ describe("ROLE_TAGS", () => {
     expect(ROLE_TAGS).toBe(SPEC_ROLE_TAGS);
   });
 
-  it("exposes all 10 ContributorRole tags", () => {
+  it("exposes all 11 ContributorRole tags", () => {
     const expected = [
       "operator",
       "verifier",
@@ -19,6 +19,7 @@ describe("ROLE_TAGS", () => {
       "protocol-author",
       "model-author",
       "dataset-contributor",
+      "backend-author",
       "curator",
       "assembler",
       "network-treasury",

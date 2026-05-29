@@ -39,7 +39,7 @@ export async function receiptsRoutes(app: FastifyInstance): Promise<void> {
       if (!row) return reply.status(404).send({ error: "receipt_not_found" });
       const receipt = row.body as unknown as InvocationReceipt;
       const tool = getAggregatorRegistry().get(receipt.indexedToolId);
-      const evaluation = evaluateReceipt(receipt, tool);
+      const evaluation = await evaluateReceipt(receipt, tool);
       return reply.send({
         receipt,
         evaluation: {

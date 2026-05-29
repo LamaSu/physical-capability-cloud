@@ -3,12 +3,26 @@
  * createCameraAdapter, createAdaptersFromConfig.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   createMachineAdapter,
   createSensorAdapter,
   createCameraAdapter,
   createAdaptersFromConfig,
+  registerMachineAdapter,
+  registerSensorAdapter,
+  registerCameraAdapter,
+  unregisterMachineAdapter,
+  unregisterSensorAdapter,
+  unregisterCameraAdapter,
+  listRegisteredMachineAdapters,
+  listRegisteredSensorAdapters,
+  listRegisteredCameraAdapters,
+} from "../adapter-factory.js";
+import type {
+  MachineAdapterFactory,
+  SensorAdapterFactory,
+  CameraAdapterFactory,
 } from "../adapter-factory.js";
 import type { KernelConfig, DeviceConfig } from "../kernel-config.js";
 
@@ -342,5 +356,395 @@ describe("backward compatibility", () => {
       if (savedKernelConfig !== undefined) process.env.KERNEL_CONFIG = savedKernelConfig;
       if (savedKernelConfigFile !== undefined) process.env.KERNEL_CONFIG_FILE = savedKernelConfigFile;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugin registry API
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal MachineAdapter stub for registry tests. Avoids pulling in
+ * a real adapter implementation — we only need to verify the registry calls
+ * the factory we registered.
+ */
+function makeMachineStub(id: string): import("../adapters/types.js").MachineAdapter {
+  return {
+    id,
+    type: "fdm" as const,
+    source: { deviceId: id, deviceType: "printer", kernelId: "kernel_test" },
+    getStatus: async () => "idle" as const,
+    execute: async () => ({ success: true }),
+    getProgress: async () => 0,
+    onEvidence: () => {},
+    dispose: async () => {},
+  };
+}
+
+function makeSensorStub(id: string): import("../adapters/types.js").SensorAdapter {
+  return {
+    id,
+    type: "power_monitor" as const,
+    source: { deviceId: id, deviceType: "sensor", kernelId: "kernel_test" },
+    startRecording: async () => {},
+    stopRecording: async () => ({
+      type: "sensor_data_summary" as const,
+      timestamp: new Date().toISOString(),
+      source: { deviceId: id, deviceType: "sensor", kernelId: "kernel_test" },
+      payload: {},
+    }),
+    getCurrentReading: async () => ({}),
+    onEvidence: () => {},
+    dispose: async () => {},
+  };
+}
+
+function makeCameraStub(id: string): import("../adapters/types.js").CameraAdapter {
+  return {
+    id,
+    source: { deviceId: id, deviceType: "camera", kernelId: "kernel_test" },
+    captureSnapshot: async () => ({ imageHash: "hash", storageRef: "ref" }),
+    runInspection: async () => ({ passed: true, confidence: 1, findings: [], imageHash: "hash" }),
+    onEvidence: () => {},
+    dispose: async () => {},
+  };
+}
+
+describe("registerMachineAdapter / unregisterMachineAdapter", () => {
+  // Clean up any test registrations between tests so cross-pollution doesn't happen
+  const TEST_TYPE = "test_machine_only";
+  afterEach(() => {
+    unregisterMachineAdapter(TEST_TYPE);
+  });
+
+  it("registers a new machine adapter and createMachineAdapter uses it", () => {
+    let called = false;
+    const factory: MachineAdapterFactory = (device) => {
+      called = true;
+      return makeMachineStub(device.id);
+    };
+    registerMachineAdapter(TEST_TYPE, factory);
+
+    const adapter = createMachineAdapter({
+      id: "stub_id_42",
+      type: "machine",
+      adapterType: TEST_TYPE,
+      config: { kernelId: "kernel_test" },
+    });
+
+    expect(called).toBe(true);
+    expect(adapter.id).toBe("stub_id_42");
+  });
+
+  it("throws when registering a duplicate adapter type", () => {
+    registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id));
+
+    expect(() =>
+      registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id)),
+    ).toThrow(/already registered/);
+  });
+
+  it("error message mentions the offending type and unregister hint", () => {
+    registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id));
+
+    expect(() =>
+      registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id)),
+    ).toThrow(/test_machine_only/);
+    expect(() =>
+      registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id)),
+    ).toThrow(/unregisterMachineAdapter/);
+  });
+
+  it("unregisterMachineAdapter allows re-registration", () => {
+    registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id));
+    unregisterMachineAdapter(TEST_TYPE);
+
+    // Re-register: should NOT throw
+    expect(() =>
+      registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id)),
+    ).not.toThrow();
+  });
+
+  it("unregisterMachineAdapter is a no-op when type was never registered", () => {
+    expect(() => unregisterMachineAdapter("never_registered_xyz")).not.toThrow();
+  });
+
+  it("after unregistering, createMachineAdapter falls back to mock", () => {
+    // Note: this type was NEVER registered, so it should hit the fallback path
+    const adapter = createMachineAdapter({
+      id: "fallback_id",
+      type: "machine",
+      adapterType: "never_registered_xyz",
+      config: { kernelId: "kernel_test" },
+    });
+    expect(adapter).toBeDefined();
+    // Mock FDM adapter
+    expect(adapter.type).toBe("fdm");
+  });
+
+  it("listRegisteredMachineAdapters includes built-ins", () => {
+    const list = listRegisteredMachineAdapters();
+    expect(list).toContain("mock");
+    expect(list).toContain("octoprint");
+    expect(list).toContain("opcua");
+    expect(list).toContain("ipp");
+    expect(list).toContain("opentrons");
+    expect(list).toContain("hamilton");
+    expect(list).toContain("generic-http");
+  });
+
+  it("listRegisteredMachineAdapters returns a sorted list", () => {
+    const list = listRegisteredMachineAdapters();
+    const sorted = [...list].sort();
+    expect(list).toEqual(sorted);
+  });
+
+  it("listRegisteredMachineAdapters reflects new registrations", () => {
+    const before = listRegisteredMachineAdapters();
+    expect(before).not.toContain(TEST_TYPE);
+
+    registerMachineAdapter(TEST_TYPE, (d) => makeMachineStub(d.id));
+
+    const after = listRegisteredMachineAdapters();
+    expect(after).toContain(TEST_TYPE);
+    expect(after.length).toBe(before.length + 1);
+  });
+
+  it("factory receives device, cfg, and kernelId arguments", () => {
+    let capturedDevice: DeviceConfig | undefined;
+    let capturedCfg: Record<string, unknown> | undefined;
+    let capturedKernelId: string | undefined;
+    const factory: MachineAdapterFactory = (device, cfg, kernelId) => {
+      capturedDevice = device;
+      capturedCfg = cfg;
+      capturedKernelId = kernelId;
+      return makeMachineStub(device.id);
+    };
+    registerMachineAdapter(TEST_TYPE, factory);
+
+    createMachineAdapter({
+      id: "arg_check",
+      type: "machine",
+      adapterType: TEST_TYPE,
+      config: { kernelId: "kernel_alpha", customField: 99 },
+    });
+
+    expect(capturedDevice?.id).toBe("arg_check");
+    expect(capturedDevice?.adapterType).toBe(TEST_TYPE);
+    expect(capturedCfg?.customField).toBe(99);
+    expect(capturedKernelId).toBe("kernel_alpha");
+  });
+
+  it("kernelId falls back to 'kernel_dev_001' when not set in config", () => {
+    let capturedKernelId: string | undefined;
+    registerMachineAdapter(TEST_TYPE, (device, _cfg, kernelId) => {
+      capturedKernelId = kernelId;
+      return makeMachineStub(device.id);
+    });
+
+    createMachineAdapter({
+      id: "no_kernel",
+      type: "machine",
+      adapterType: TEST_TYPE,
+      config: {},
+    });
+
+    expect(capturedKernelId).toBe("kernel_dev_001");
+  });
+});
+
+describe("registerSensorAdapter / unregisterSensorAdapter", () => {
+  const TEST_TYPE = "test_sensor_only";
+  afterEach(() => {
+    unregisterSensorAdapter(TEST_TYPE);
+  });
+
+  it("registers a new sensor adapter and createSensorAdapter uses it", () => {
+    let called = false;
+    const factory: SensorAdapterFactory = (device) => {
+      called = true;
+      return makeSensorStub(device.id);
+    };
+    registerSensorAdapter(TEST_TYPE, factory);
+
+    const adapter = createSensorAdapter({
+      id: "sensor_99",
+      type: "sensor",
+      adapterType: TEST_TYPE,
+      config: { kernelId: "kernel_test" },
+    });
+
+    expect(called).toBe(true);
+    expect(adapter.id).toBe("sensor_99");
+  });
+
+  it("throws when registering a duplicate sensor type", () => {
+    registerSensorAdapter(TEST_TYPE, (d) => makeSensorStub(d.id));
+    expect(() =>
+      registerSensorAdapter(TEST_TYPE, (d) => makeSensorStub(d.id)),
+    ).toThrow(/already registered/);
+  });
+
+  it("unregisterSensorAdapter allows re-registration", () => {
+    registerSensorAdapter(TEST_TYPE, (d) => makeSensorStub(d.id));
+    unregisterSensorAdapter(TEST_TYPE);
+    expect(() =>
+      registerSensorAdapter(TEST_TYPE, (d) => makeSensorStub(d.id)),
+    ).not.toThrow();
+  });
+
+  it("listRegisteredSensorAdapters includes built-ins", () => {
+    const list = listRegisteredSensorAdapters();
+    expect(list).toContain("mock");
+    expect(list).toContain("modbus");
+    expect(list).toContain("sila");
+    expect(list).toContain("generic-http");
+  });
+
+  it("listRegisteredSensorAdapters returns a sorted list", () => {
+    const list = listRegisteredSensorAdapters();
+    const sorted = [...list].sort();
+    expect(list).toEqual(sorted);
+  });
+
+  it("unknown sensor adapterType falls back to mock", () => {
+    const adapter = createSensorAdapter({
+      id: "fallback_sensor",
+      type: "sensor",
+      adapterType: "unknown_sensor_type",
+      config: { kernelId: "kernel_test" },
+    });
+    expect(adapter).toBeDefined();
+    expect(adapter.type).toBe("power_monitor");
+  });
+});
+
+describe("registerCameraAdapter / unregisterCameraAdapter", () => {
+  const TEST_TYPE = "test_camera_only";
+  afterEach(() => {
+    unregisterCameraAdapter(TEST_TYPE);
+  });
+
+  it("registers a new camera adapter and createCameraAdapter uses it", () => {
+    let called = false;
+    const factory: CameraAdapterFactory = (device) => {
+      called = true;
+      return makeCameraStub(device.id);
+    };
+    registerCameraAdapter(TEST_TYPE, factory);
+
+    const adapter = createCameraAdapter({
+      id: "cam_55",
+      type: "camera",
+      adapterType: TEST_TYPE,
+      config: { kernelId: "kernel_test" },
+    });
+
+    expect(called).toBe(true);
+    expect(adapter.id).toBe("cam_55");
+  });
+
+  it("throws when registering a duplicate camera type", () => {
+    registerCameraAdapter(TEST_TYPE, (d) => makeCameraStub(d.id));
+    expect(() =>
+      registerCameraAdapter(TEST_TYPE, (d) => makeCameraStub(d.id)),
+    ).toThrow(/already registered/);
+  });
+
+  it("unregisterCameraAdapter allows re-registration", () => {
+    registerCameraAdapter(TEST_TYPE, (d) => makeCameraStub(d.id));
+    unregisterCameraAdapter(TEST_TYPE);
+    expect(() =>
+      registerCameraAdapter(TEST_TYPE, (d) => makeCameraStub(d.id)),
+    ).not.toThrow();
+  });
+
+  it("listRegisteredCameraAdapters includes built-ins", () => {
+    const list = listRegisteredCameraAdapters();
+    expect(list).toContain("mock");
+    expect(list).toContain("generic-http");
+  });
+
+  it("listRegisteredCameraAdapters returns a sorted list", () => {
+    const list = listRegisteredCameraAdapters();
+    const sorted = [...list].sort();
+    expect(list).toEqual(sorted);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Smoke test: end-to-end via createAdaptersFromConfig with registered types
+// ---------------------------------------------------------------------------
+
+describe("plugin registry — end-to-end smoke", () => {
+  const TEST_TYPE = "smoke_test_machine";
+  afterEach(() => {
+    unregisterMachineAdapter(TEST_TYPE);
+  });
+
+  it("createAdaptersFromConfig picks up newly registered machine types", () => {
+    registerMachineAdapter(TEST_TYPE, (device) => makeMachineStub(device.id));
+
+    const config: KernelConfig = {
+      kernelId: "kernel_smoke",
+      devices: [
+        {
+          id: "smoke_machine",
+          type: "machine",
+          adapterType: TEST_TYPE as DeviceConfig["adapterType"],
+          config: { kernelId: "kernel_smoke" },
+        },
+      ],
+    };
+
+    const result = createAdaptersFromConfig(config);
+    expect(result.machines).toHaveLength(1);
+    expect(result.machines[0].id).toBe("smoke_machine");
+  });
+
+  it("mockMode override still wins over a custom-registered adapter", () => {
+    let customCalled = false;
+    registerMachineAdapter(TEST_TYPE, (device) => {
+      customCalled = true;
+      return makeMachineStub(device.id);
+    });
+
+    const config: KernelConfig = {
+      kernelId: "kernel_smoke",
+      mockMode: true, // forces mock regardless of declared adapterType
+      devices: [
+        {
+          id: "smoke_machine",
+          type: "machine",
+          adapterType: TEST_TYPE as DeviceConfig["adapterType"],
+          config: { kernelId: "kernel_smoke" },
+        },
+      ],
+    };
+
+    const result = createAdaptersFromConfig(config);
+    expect(result.machines).toHaveLength(1);
+    // Should be the mock FDM adapter, NOT the custom one
+    expect(customCalled).toBe(false);
+    expect(result.machines[0].type).toBe("fdm");
+  });
+
+  it("backward-compat: mock adapterType creates a working machine via registry", async () => {
+    const config: KernelConfig = {
+      kernelId: "kernel_compat",
+      devices: [
+        {
+          id: "compat_machine",
+          type: "machine",
+          adapterType: "mock",
+          config: { kernelId: "kernel_compat", jobDurationMs: 1000 },
+        },
+      ],
+    };
+
+    const result = createAdaptersFromConfig(config);
+    expect(result.machines).toHaveLength(1);
+    const status = await result.machines[0].getStatus();
+    expect(["idle", "busy", "error", "offline", "maintenance"]).toContain(status);
   });
 });

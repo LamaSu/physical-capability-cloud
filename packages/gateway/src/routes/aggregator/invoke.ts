@@ -188,7 +188,7 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     };
 
     const signed = signReceipt(receiptBody);
-    const evaluation = evaluateReceipt(signed, tool);
+    const evaluation = await evaluateReceipt(signed, tool);
 
     // Persist the receipt (best-effort; failures do NOT block the caller).
     try {

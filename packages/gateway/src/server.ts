@@ -4,6 +4,7 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
+import { randomBytes } from "node:crypto";
 
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
@@ -46,6 +47,8 @@ import { settlementRoutes } from "./routes/settlement.js";
 import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
+import { jwksRoutes } from "./routes/jwks.js";
+import { initSigningKey } from "./signing-key.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { identifyDeviceRoutes } from "./routes/identify-device.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
@@ -218,7 +221,7 @@ export async function createGateway(port = 3200) {
           app.log.error("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed.");
           return "insecure-default-do-not-use";
         })()
-      : require("node:crypto").randomBytes(32).toString("hex"));
+      : randomBytes(32).toString("hex"));
   await app.register(cookie, { secret: cookieSecret });
   await app.register(websocket);
 
@@ -313,8 +316,15 @@ export async function createGateway(port = 3200) {
     (req as unknown as { pccSession: unknown }).pccSession = getOrCreateSession(sessionId);
   });
 
-  // ERC-8004 domain verification (public, before auth)
+  // A2A v1.0 §8.4 — load the agent-card signing key at boot. No-op if
+  // PCC_AGENT_CARD_SIGNING_KEY is unset (gateway falls back to unsigned).
+  await initSigningKey();
+
+  // ERC-8004 domain verification + A2A agent card (public, before auth)
   await app.register(wellKnownRoutes);
+  // A2A v1.0 JWKS endpoint (public, before auth, serves the verification
+  // key for the agent card's JWS signature)
+  await app.register(jwksRoutes);
   // Agent context pack (public, before auth — this is the primary product)
   await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
