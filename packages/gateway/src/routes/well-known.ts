@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { signAgentCard, type AgentCard } from "@pcc/a2a-signing";
+import { getActiveSigningKey } from "../signing-key.js";
 
 /**
  * /.well-known/ routes for discovery:
@@ -265,11 +267,22 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       "x-pcc-agent-package": `${GATEWAY_URL}/agent-package.json`,
     };
 
+    // A2A v1.0 §8.4 — if a signing key is loaded, sign the card in flight.
+    // Backwards compat: when no key is configured, serve the unsigned card.
+    const signingKey = getActiveSigningKey();
+    const responseBody = signingKey
+      ? await signAgentCard(agentCard as AgentCard, {
+          privateKey: signingKey.privateKey,
+          kid: signingKey.kid,
+          jwksUrl: `${GATEWAY_URL}/.well-known/jwks.json`,
+        })
+      : agentCard;
+
     return reply
       .header("content-type", "application/json")
       .header("access-control-allow-origin", "*")
       .header("cache-control", "public, max-age=300")
-      .send(agentCard);
+      .send(responseBody);
   });
 
   // -----------------------------------------------------------------------
@@ -428,11 +441,21 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         "x-pcc-agent-package": `${GATEWAY_URL}/api/kernels/${kernelRow.id}/agent-package`,
       };
 
+      // A2A v1.0 §8.4 — sign per-kernel card too when a key is loaded.
+      const signingKey = getActiveSigningKey();
+      const responseBody = signingKey
+        ? await signAgentCard(kernelCard as AgentCard, {
+            privateKey: signingKey.privateKey,
+            kid: signingKey.kid,
+            jwksUrl: `${GATEWAY_URL}/.well-known/jwks.json`,
+          })
+        : kernelCard;
+
       return reply
         .header("content-type", "application/json")
         .header("access-control-allow-origin", "*")
         .header("cache-control", "public, max-age=300")
-        .send(kernelCard);
+        .send(responseBody);
     },
   );
 }

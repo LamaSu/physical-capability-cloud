@@ -331,7 +331,7 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     };
 
     const signed = signReceipt(receiptBody);
-    const evaluation = evaluateReceipt(signed, tool);
+    const evaluation = await evaluateReceipt(signed, tool);
 
     // Record settlement for idempotent replay BEFORE persistence — if the
     // DB write fails, the cache entry still protects against duplicate

@@ -104,3 +104,83 @@ export interface PipelineRunResult {
   /** Top-level errors not bound to any stage (e.g. adapter throw). */
   errors: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Publisher (outbound) — mirror of SourceAdapter on the push side
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-call input given to a publisher.
+ *
+ * Auth tokens, endpoint overrides, and the cosign injection seam live
+ * here. The pipeline supplies these per-tool; tests inject stubs.
+ */
+export interface PublisherInput {
+  /** Auth token (e.g. OIDC bearer for AGNTCY). */
+  authToken?: string;
+  /** Endpoint override (defaults to publisher's configured endpoint). */
+  endpoint?: string;
+  /** Whether to also announce on the DHT after pushing OCI. Default true. */
+  announce?: boolean;
+  /** Test injection seam — replaces global fetch in unit tests. */
+  fetchImpl?: typeof fetch;
+  /** Shell-out impl for cosign (Phase 1) — injectable for tests. */
+  cosignSpawn?: CosignSpawn;
+}
+
+/**
+ * Cosign shell-out shape — Phase 1 uses `cosign sign-blob --new-bundle-format`
+ * via child_process; Phase 2 swaps in `@sigstore/sign` in-process.
+ *
+ * Returns the signature bundle as a string (typically a JSON blob with
+ * Rekor inclusion proof + Fulcio cert chain).
+ */
+export interface CosignSpawn {
+  (input: CosignInput): Promise<string>;
+}
+
+export interface CosignInput {
+  /** Bytes to sign. Pass the canonical OASF record JSON. */
+  payload: Uint8Array;
+  /** Path to cosign binary (default: lookup on PATH). */
+  cosignBinary?: string;
+  /** OIDC issuer URL (default Sigstore public Fulcio). */
+  oidcIssuer?: string;
+  /** OIDC client id (default "sigstore"). */
+  oidcClientId?: string;
+  /** OIDC bearer token (allows non-interactive flow). */
+  identityToken?: string;
+}
+
+/** Outcome of a single publish attempt. */
+export interface PublishResult {
+  /** External CID assigned by the target registry. Empty on hard failure. */
+  externalCid: string;
+  /** Whether the DHT-announce step succeeded. */
+  announced: boolean;
+  /** Sigstore bundle reference (e.g. "rekor:<index>"). */
+  sigstoreBundle?: string;
+  /** Errors collected during publish. Empty on full success. */
+  errors: string[];
+}
+
+/**
+ * A Publisher pushes one IndexedTool to an external registry. Mirror of
+ * SourceAdapter on the outbound side.
+ *
+ * Publishers MUST be idempotent: republishing the same IndexedTool MUST
+ * yield the same externalCid and MUST NOT create duplicate index entries
+ * at the target. The pipeline relies on this for safe re-emit on
+ * recovery.
+ */
+export interface Publisher {
+  /** Stable publisher ID (e.g. "agntcy-ads"). */
+  readonly id: string;
+  /** Which IndexedTool.source.type the publisher writes to. */
+  readonly targetType: ToolSourceType;
+  /**
+   * Push one IndexedTool. Returns the external CID/ID and any
+   * non-fatal errors. Hard failures throw.
+   */
+  publish(tool: IndexedTool, opts: PublisherInput): Promise<PublishResult>;
+}
