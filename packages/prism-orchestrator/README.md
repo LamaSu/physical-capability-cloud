@@ -1,6 +1,7 @@
 # @pcc/prism-orchestrator
 
-End-to-end PRISM-style pipeline on PCC. Models [github.com/ramanathanlab/PRISM](https://github.com/ramanathanlab/PRISM) (Argonne, MIT) as a 5-stage state machine wired against PCC primitives.
+End-to-end PRISM-style pipeline on PCC. The canonical upstream PRISM
+([github.com/ramanathanlab/PRISM](https://github.com/ramanathanlab/PRISM), Argonne, MIT) is a **3-stage** planner-critique-validation loop. This package wires that loop into a **5-stage on-chain state machine** by adding escrow + execute + settle stages around it.
 
 ## Pipeline
 

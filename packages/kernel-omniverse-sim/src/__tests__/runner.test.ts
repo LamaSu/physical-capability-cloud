@@ -25,6 +25,7 @@ const WORKFLOW: MadsciWorkflow = {
 describe("runner (stub mode)", () => {
   it("detectCapabilities returns a structured probe", async () => {
     const caps = await detectCapabilities({
+      python: "python3",
       helperPath: HELPER,
       env: { OMNIVERSE_AVAILABLE: "0" },
     });
@@ -33,6 +34,7 @@ describe("runner (stub mode)", () => {
 
   it("runSim in stub mode returns deterministic pass with one trace per step", async () => {
     const result = await runSim(WORKFLOW, {
+      python: "python3",
       helperPath: HELPER,
       env: { OMNIVERSE_AVAILABLE: "0" },
     });

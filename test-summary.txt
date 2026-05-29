@@ -1,0 +1,71 @@
+=== test @pcc/adapter-madsci ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/adapter-madsci@0.1.0 test /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/adapter-madsci
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/adapter-madsci
+
+ ✓ src/__tests__/client.test.ts  (4 tests) 6ms
+ ✓ src/__tests__/translator.test.ts  (3 tests) 4ms
+ ✓ src/__tests__/parser.test.ts  (4 tests) 11ms
+
+ Test Files  3 passed (3)
+      Tests  11 passed (11)
+   Start at  18:06:39
+   Duration  593ms (transform 154ms, setup 0ms, collect 248ms, tests 21ms, environment 0ms, prepare 212ms)
+
+=== test @pcc/kernel-omniverse-sim ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/kernel-omniverse-sim@0.1.0 test /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim
+
+ ✓ src/__tests__/attestation.test.ts  (5 tests) 93ms
+ ✓ src/__tests__/runner.test.ts  (2 tests) 131ms
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  18:06:40
+   Duration  722ms (transform 102ms, setup 0ms, collect 134ms, tests 224ms, environment 0ms, prepare 137ms)
+
+=== test @pcc/prism-orchestrator ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/prism-orchestrator@0.1.0 test /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/prism-orchestrator
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/prism-orchestrator
+
+ ✓ src/__tests__/stage2-translate.test.ts  (2 tests) 5ms
+ ❯ src/__tests__/orchestrator.test.ts  (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/orchestrator.test.ts [ src/__tests__/orchestrator.test.ts ]
+Error: Failed to resolve entry for package "@pcc/kernel-sdk". The package may have incorrect main/module/exports specified in its package.json.
+ ❯ packageEntryFailure ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:46638:15
+ ❯ resolvePackageEntry ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:46635:3
+ ❯ tryNodeResolve ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:46451:16
+ ❯ ResolveIdContext.resolveId ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:46201:19
+ ❯ PluginContainer.resolveId ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49018:17
+ ❯ TransformPluginContext.resolve ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49178:15
+ ❯ normalizeUrl ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64300:26
+ ❯ async file:/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+ ❯ TransformPluginContext.transform ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  2 passed (2)
+   Start at  18:06:42
+   Duration  707ms (transform 173ms, setup 0ms, collect 67ms, tests 5ms, environment 0ms, prepare 139ms)
+
+/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/prism-orchestrator:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @pcc/prism-orchestrator@0.1.0 test: `vitest run --passWithNoTests`
+Exit status 1

@@ -1,0 +1,117 @@
+
+=== [01:06:21] INIT ===
+
+=== [01:06:21] A2 — patch kernel-omniverse-sim kernel.ts ===
+PATCHED kernel.ts
+
+=== [01:06:21] A3 — patch runner.test.ts to use python3 ===
+PATCHED runner.test.ts (2 sites)
+
+=== [01:06:21] A4 — add tweetnacl + @types/node to prism-orchestrator devDeps ===
+ADDED devDeps
+
+=== [01:06:21] A5 — patch prism-orchestrator README (3 stages upstream / 5 stages on PCC) ===
+PATCHED README
+
+=== [01:06:21] pnpm install ===
+
+packages/kernel
+└─┬ react-native 0.84.1
+  └─┬ ws 7.5.10
+    └── ✕ unmet peer utf-8-validate@^5.0.2: found 6.0.6
+
+packages/payments
+└─┬ @solana/spl-token 0.4.14
+  └─┬ @solana/buffer-layout-utils 0.2.0
+    └─┬ @solana/web3.js 1.98.4
+      └─┬ jayson 4.3.0
+        └─┬ ws 7.5.10
+          └── ✕ unmet peer utf-8-validate@^5.0.2: found 6.0.6 in rpc-websockets
+
+Done in 10.2s
+install exit: 0
+
+=== [01:06:33] pnpm build (adapter-madsci → kernel-omniverse-sim → prism-orchestrator) ===
+--- build @pcc/adapter-madsci ---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/adapter-madsci@0.1.0 build /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/adapter-madsci
+> tsc
+
+  exit=0
+--- build @pcc/kernel-omniverse-sim ---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/kernel-omniverse-sim@0.1.0 build /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim
+> tsc
+
+src/kernel.ts(9,58): error TS2307: Cannot find module '@pcc/kernel-sdk' or its corresponding type declarations.
+src/kernel.ts(10,44): error TS2307: Cannot find module '@pcc/spec' or its corresponding type declarations.
+/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @pcc/kernel-omniverse-sim@0.1.0 build: `tsc`
+Exit status 2
+  exit=2
+--- build @pcc/prism-orchestrator ---
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/prism-orchestrator@0.1.0 build /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/prism-orchestrator
+> tsc
+
+  exit=0
+build: 2 ok / 1 fail
+
+=== [01:06:38] pnpm test ===
+=== test @pcc/adapter-madsci ===
+> @pcc/adapter-madsci@0.1.0 test /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/adapter-madsci
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/adapter-madsci
+
+ ✓ src/__tests__/client.test.ts  (4 tests) 6ms
+ ✓ src/__tests__/translator.test.ts  (3 tests) 4ms
+ ✓ src/__tests__/parser.test.ts  (4 tests) 11ms
+
+ Test Files  3 passed (3)
+      Tests  11 passed (11)
+   Start at  18:06:39
+   Duration  593ms (transform 154ms, setup 0ms, collect 248ms, tests 21ms, environment 0ms, prepare 212ms)
+
+  exit=0 OK
+=== test @pcc/kernel-omniverse-sim ===
+
+> @pcc/kernel-omniverse-sim@0.1.0 test /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/kernel-omniverse-sim
+
+ ✓ src/__tests__/attestation.test.ts  (5 tests) 93ms
+ ✓ src/__tests__/runner.test.ts  (2 tests) 131ms
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  18:06:40
+   Duration  722ms (transform 102ms, setup 0ms, collect 134ms, tests 224ms, environment 0ms, prepare 137ms)
+
+  exit=0 OK
+=== test @pcc/prism-orchestrator ===
+ ❯ TransformPluginContext.resolve ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:49178:15
+ ❯ normalizeUrl ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64300:26
+ ❯ async file:/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64439:39
+ ❯ TransformPluginContext.transform ../../node_modules/.pnpm/vite@5.4.21_@types+node@20.19.35_lightningcss@1.31.1_terser@5.46.0/node_modules/vite/dist/node/chunks/dep-BK3b2jBa.js:64366:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  2 passed (2)
+   Start at  18:06:42
+   Duration  707ms (transform 173ms, setup 0ms, collect 67ms, tests 5ms, environment 0ms, prepare 139ms)
+
+/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/packages/prism-orchestrator:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @pcc/prism-orchestrator@0.1.0 test: `vitest run --passWithNoTests`
+Exit status 1
+  exit=1 FAIL
+test: 2 ok / 1 fail
+
+=== [01:06:43] git commit ===

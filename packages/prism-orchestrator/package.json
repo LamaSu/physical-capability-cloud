@@ -2,7 +2,7 @@
   "name": "@pcc/prism-orchestrator",
   "version": "0.1.0",
   "private": true,
-  "description": "End-to-end PRISM-style orchestrator: web procedure → structured steps (LLM) → MADSci YAML → sim-attest → PCC escrow → execute → settle. Models github.com/ramanathanlab/PRISM pipeline.",
+  "description": "End-to-end PRISM-style orchestrator: web procedure \u2192 structured steps (LLM) \u2192 MADSci YAML \u2192 sim-attest \u2192 PCC escrow \u2192 execute \u2192 settle. Models github.com/ramanathanlab/PRISM pipeline.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -28,6 +28,8 @@
   },
   "devDependencies": {
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^1.6.0",
+    "tweetnacl": "^1.0.3",
+    "@types/node": "^20.0.0"
   }
 }

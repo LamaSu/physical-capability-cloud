@@ -36,9 +36,10 @@ export function buildSimKernelManifest(
     workflowSteps: [
       {
         stepId: "sim-attest",
-        name: "Simulate workflow",
+        stepType: "validate",
         description:
-          "Replay MADSci workflow against a USD scene in headless Omniverse Kit",
+          "Simulate workflow — replay MADSci workflow against a USD scene in headless Omniverse Kit",
+        dependsOn: [],
       },
     ],
     maxAssuranceTier: opts.maxAssuranceTier ?? 1,
