@@ -292,6 +292,9 @@ importers:
       '@pcc/a2a':
         specifier: workspace:*
         version: link:../a2a
+      '@pcc/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec

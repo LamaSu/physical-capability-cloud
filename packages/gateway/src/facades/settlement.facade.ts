@@ -16,6 +16,7 @@
 
 import { type Result, ok, err, Errors } from "@pcc/spec";
 import { isAddress, type Address, type Hex } from "viem";
+import type { OracleAttestation } from "@pcc/contracts";
 import { BaseFacade } from "./base.facade.js";
 import type {
   EscrowSummaryDTO,
@@ -82,7 +83,8 @@ export interface BatchIntentInput {
     type: string;
     milestoneIndex?: number;
     evidenceHash?: string;
-    attestationHash?: string;
+    /** Oracle attestation struct (required for submitAttestation + release) */
+    attestation?: OracleAttestation;
     bond?: string;
     reason?: string;
   };
@@ -312,10 +314,16 @@ export class SettlementFacade extends BaseFacade {
   /**
    * Release a milestone (challenge window must have expired).
    * Replaces: POST /api/escrow/chain/:address/release/:milestoneIndex
+   *
+   * Requires the oracle-signed Attestation struct that was submitted via
+   * submitAttestation — the contract rebinds release to the exact same
+   * attestation and re-verifies it on-chain via
+   * PCCProtocol.collectFeeWithAttestation.
    */
   async releaseMilestone(
     address: Address,
     milestoneIndex: number,
+    attestation: OracleAttestation,
     actorId?: string,
     ip?: string,
     userAgent?: string,
@@ -324,7 +332,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
-      const result = await chainReleaseMilestone(milestoneIndex, address);
+      const result = await chainReleaseMilestone(milestoneIndex, attestation, address);
       pipelineTelemetry.emit(address, "settlement_complete", "completed", {
         metadata: { escrow: address, milestoneIndex, released: true },
       });
@@ -334,7 +342,7 @@ export class SettlementFacade extends BaseFacade {
         resourceType: "escrow",
         resourceId: address,
         action: "release",
-        metadata: { milestoneIndex },
+        metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash },
         ip,
         userAgent,
       });
@@ -463,13 +471,18 @@ export class SettlementFacade extends BaseFacade {
   }
 
   /**
-   * Submit verifier attestation for a milestone.
+   * Submit an oracle-signed attestation for a milestone.
    * Replaces: POST /api/escrow/chain/:address/attestation/:milestoneIndex
+   *
+   * The caller must supply the full IPCCOracle.Attestation struct
+   * returned by the oracle client (see packages/verifier/src/oracle).
+   * The on-chain contract re-verifies the attestation via the protocol
+   * oracle verifier before the challenge window opens.
    */
   async submitAttestation(
     address: Address,
     milestoneIndex: number,
-    attestationHash: string,
+    attestation: OracleAttestation,
     actorId?: string,
     ip?: string,
     userAgent?: string,
@@ -478,16 +491,21 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
-      if (!attestationHash) {
-        throw Object.assign(new Error("attestationHash is required"), { name: "BadRequestError" });
+      if (!attestation || !attestation.escrowAddress) {
+        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
       }
       const result = await chainSubmitAttestation(
         milestoneIndex,
-        attestationHash as `0x${string}`,
+        attestation,
         address,
       );
       pipelineTelemetry.emit(address, "verification_result", "completed", {
-        metadata: { escrow: address, milestoneIndex, attestationHash },
+        metadata: {
+          escrow: address,
+          milestoneIndex,
+          evidenceHash: attestation.evidenceHash,
+          tier: attestation.tier,
+        },
       });
       auditService.log({
         eventType: "escrow.attestation_submitted",
@@ -495,7 +513,12 @@ export class SettlementFacade extends BaseFacade {
         resourceType: "escrow",
         resourceId: address,
         action: "submit_attestation",
-        metadata: { milestoneIndex, attestationHash },
+        metadata: {
+          milestoneIndex,
+          evidenceHash: attestation.evidenceHash,
+          tier: attestation.tier,
+          jobId: attestation.jobId,
+        },
         ip,
         userAgent,
       });
@@ -586,20 +609,27 @@ export class SettlementFacade extends BaseFacade {
   /**
    * Manually release a milestone for a job via the SettlementService.
    * Replaces: POST /api/settlement/release
+   *
+   * Requires the oracle-signed Attestation struct previously submitted
+   * via submitAttestation. See SettlementService.releaseMilestone.
    */
   async releaseMilestoneForJob(
     jobId: string,
-    milestoneIndex?: number,
+    milestoneIndex: number | undefined,
+    attestation: OracleAttestation,
     contractAddress?: string,
   ): Promise<Result<SettlementResultDTO>> {
     return this.execute("releaseMilestoneForJob", async () => {
       if (!jobId) {
         throw Object.assign(new Error("jobId is required"), { name: "BadRequestError" });
       }
+      if (!attestation || !attestation.escrowAddress) {
+        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
+      }
 
       const idx = milestoneIndex ?? 0;
       const service = getSettlementService();
-      const result = await service.releaseMilestone(jobId, idx, contractAddress);
+      const result = await service.releaseMilestone(jobId, idx, attestation, contractAddress);
 
       if (result.status === "failed") {
         throw new Error(result.error ?? "Release failed");
@@ -754,7 +784,12 @@ function parseOperation(op: Record<string, unknown>) {
   switch (op.type) {
     case "release":
       if (op.milestoneIndex == null) throw new Error("milestoneIndex required for release");
-      return { type: "release" as const, milestoneIndex: Number(op.milestoneIndex) };
+      if (!op.attestation) throw new Error("attestation required for release");
+      return {
+        type: "release" as const,
+        milestoneIndex: Number(op.milestoneIndex),
+        attestation: op.attestation as OracleAttestation,
+      };
 
     case "submitEvidence":
       if (op.milestoneIndex == null || !op.evidenceHash)
@@ -766,12 +801,12 @@ function parseOperation(op: Record<string, unknown>) {
       };
 
     case "submitAttestation":
-      if (op.milestoneIndex == null || !op.attestationHash)
-        throw new Error("milestoneIndex and attestationHash required for submitAttestation");
+      if (op.milestoneIndex == null || !op.attestation)
+        throw new Error("milestoneIndex and attestation struct required for submitAttestation");
       return {
         type: "submitAttestation" as const,
         milestoneIndex: Number(op.milestoneIndex),
-        attestationHash: op.attestationHash as Hex,
+        attestation: op.attestation as OracleAttestation,
       };
 
     case "depositBond":

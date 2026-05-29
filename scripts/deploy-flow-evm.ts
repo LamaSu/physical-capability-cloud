@@ -134,16 +134,18 @@ async function main() {
   console.log(`   Minted. TX: ${mintHash}`);
   console.log("");
 
-  // ── Deploy PCCProtocol (fee factory) ──────────────────────────────
-  console.log("3. Deploying PCCProtocol (fee factory, 2.35%)...");
-  console.log(`   feeRecipient: ${account.address}`);
-  console.log(`   feeBps: 235 (2.35%)`);
-  console.log(`   governor: ${account.address}`);
+  // ── Deploy PCCProtocol (fee factory, oracle-gated) ─────────────────
+  console.log("3. Deploying PCCProtocol (fee factory, 2.35%, oracle-gated)...");
+  const oracleVerifier = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as `0x${string}`;
+  console.log(`   feeRecipient:  ${account.address}`);
+  console.log(`   feeBps:        235 (2.35%)`);
+  console.log(`   governor:      ${account.address}`);
+  console.log(`   oracleVerifier: ${oracleVerifier}`);
 
   const protocolHash = await walletClient.deployContract({
     abi: protocolArtifact.abi,
     bytecode: protocolArtifact.bytecode.object as `0x${string}`,
-    args: [account.address, 235n, account.address],
+    args: [account.address, 235n, account.address, oracleVerifier],
   });
   console.log(`   TX: ${protocolHash}`);
   console.log(`   Explorer: https://evm-testnet.flowscan.io/tx/${protocolHash}`);

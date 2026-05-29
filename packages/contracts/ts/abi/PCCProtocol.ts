@@ -34,6 +34,13 @@ export const PCCProtocolABI = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+  {
+    name: "SUPPORTED_ATTESTATION_VERSION",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
 
   // ── Immutable State ────────────────────────────────────────────────
 
@@ -173,16 +180,6 @@ export const PCCProtocolABI = [
     outputs: [{ name: "escrow", type: "address" }],
   },
   {
-    name: "collectFee",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "token", type: "address" },
-      { name: "fee", type: "uint256" },
-    ],
-    outputs: [],
-  },
-  {
     name: "setProtocolFeeBps",
     type: "function",
     stateMutability: "nonpayable",
@@ -220,6 +217,7 @@ export const PCCProtocolABI = [
         name: "attestation",
         type: "tuple",
         components: [
+          { name: "version", type: "uint8" },
           { name: "escrowAddress", type: "address" },
           { name: "jobId", type: "string" },
           { name: "evidenceHash", type: "bytes32" },
@@ -227,6 +225,7 @@ export const PCCProtocolABI = [
           { name: "verified", type: "bool" },
           { name: "timestamp", type: "uint256" },
           { name: "nonce", type: "bytes32" },
+          { name: "extraData", type: "bytes" },
           { name: "signature", type: "bytes" },
         ],
       },
@@ -244,6 +243,7 @@ export const PCCProtocolABI = [
         name: "attestation",
         type: "tuple",
         components: [
+          { name: "version", type: "uint8" },
           { name: "escrowAddress", type: "address" },
           { name: "jobId", type: "string" },
           { name: "evidenceHash", type: "bytes32" },
@@ -251,6 +251,7 @@ export const PCCProtocolABI = [
           { name: "verified", type: "bool" },
           { name: "timestamp", type: "uint256" },
           { name: "nonce", type: "bytes32" },
+          { name: "extraData", type: "bytes" },
           { name: "signature", type: "bytes" },
         ],
       },
@@ -319,3 +320,20 @@ export const PCC_FEE_BPS_MIN = 10n;
 
 /** Maximum protocol fee in basis points (5%) */
 export const PCC_FEE_BPS_MAX = 500n;
+
+/**
+ * Current IPCCOracle.Attestation schema version.
+ *
+ * Every Attestation produced by the TypeScript side MUST carry
+ * `version: ATTESTATION_SCHEMA_VERSION`. The protocol's
+ * `requiresOracle` modifier rejects anything else (defense-in-depth),
+ * and the oracle's `verifyAttestation` also rejects unsupported
+ * versions. Bumping this is a deliberate, coordinated migration:
+ * deploy a new PCCVerificationOracle, wire a new PCCProtocol to it,
+ * and update this constant. Old in-flight attestations signed against
+ * the old schema will no longer verify.
+ */
+export const ATTESTATION_SCHEMA_VERSION = 1 as const;
+
+/** Empty extraData payload for v1 attestations (no extension fields defined). */
+export const ATTESTATION_V1_EMPTY_EXTRA_DATA = "0x" as const;

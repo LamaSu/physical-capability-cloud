@@ -19,15 +19,24 @@ import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
  * Every settlement must pass through the PCC Verification Oracle before
  * funds can be released. The oracle verifier address is IMMUTABLE.
  *
- * Only escrows deployed by this factory can call collectFee(). This makes
- * it structurally impossible for PCC activity to bypass the fee without
- * leaving the protocol entirely.
+ * Only escrows deployed by this factory can call collectFeeWithAttestation().
+ * This makes it structurally impossible for PCC activity to bypass the fee
+ * without leaving the protocol entirely, and the oracle gate makes it
+ * structurally impossible to record a fee without a valid oracle attestation.
  */
 contract PCCProtocol {
     // ── Constants ────────────────────────────────────────────────────
 
     uint256 public constant FEE_BPS_MIN = 10;   // 0.1% floor
     uint256 public constant FEE_BPS_MAX = 500;  // 5% ceiling
+
+    /// @notice The attestation schema version currently supported by this
+    ///         protocol. The oracle verifier also validates this, but we
+    ///         keep defense-in-depth here so a compromised verifier
+    ///         cannot silently accept v2 attestations on a v1 protocol.
+    /// @dev When bumping: add a new constant and migrate the guard, do not
+    ///      edit this value in place. Changing it breaks live attestations.
+    uint8 public constant SUPPORTED_ATTESTATION_VERSION = 1;
 
     // ── Immutable State ──────────────────────────────────────────────
 
@@ -106,6 +115,10 @@ contract PCCProtocol {
             "PCC: oracle verifier not set"
         );
         require(
+            attestation.version == SUPPORTED_ATTESTATION_VERSION,
+            "PCC: unsupported attestation version"
+        );
+        require(
             IPCCOracle(oracleVerifier).verifyAttestation(attestation),
             "PCC: invalid oracle attestation"
         );
@@ -166,22 +179,6 @@ contract PCCProtocol {
         emit EscrowCreated(escrow, payer, arbiter, token, cwmId);
     }
 
-    // ── Fee Collection ───────────────────────────────────────────────
-
-    /**
-     * @notice Called by child escrows during settlement to record fee accounting.
-     * @dev The escrow transfers the fee directly to feeRecipient. This function
-     *      is called after the transfer for accounting purposes. Only callable
-     *      by factory-deployed escrows.
-     * @param token The ERC-20 token in which the fee was collected.
-     * @param fee The fee amount collected.
-     */
-    function collectFee(address token, uint256 fee) external onlyProtocolEscrow {
-        feesFromEscrow[msg.sender] += fee;
-        totalFeesCollectedByToken[token] += fee;
-        emit FeeCollected(msg.sender, token, fee);
-    }
-
     // ── Governance ───────────────────────────────────────────────────
 
     /**
@@ -238,6 +235,9 @@ contract PCCProtocol {
         IPCCOracle.Attestation calldata attestation
     ) external view returns (bool valid) {
         if (oracleVerifier == address(0)) {
+            return false;
+        }
+        if (attestation.version != SUPPORTED_ATTESTATION_VERSION) {
             return false;
         }
         return IPCCOracle(oracleVerifier).verifyAttestation(attestation);

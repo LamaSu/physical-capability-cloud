@@ -24,6 +24,8 @@ export interface OracleVerifyRequest {
 }
 
 export interface OracleAttestation {
+  /** Schema version. Current: 1. Bumped only during coordinated migration. */
+  version: number;
   escrowAddress: string;
   jobId: string;
   evidenceHash: string;
@@ -31,6 +33,8 @@ export interface OracleAttestation {
   verified: boolean;
   timestamp: number;
   nonce: string;
+  /** Versioned extension payload. v1 default: "0x" (empty). */
+  extraData: string;
   signature: string;
 }
 
@@ -115,6 +119,7 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
       },
     },
     attestation: {
+      version: 1,
       escrowAddress: request.escrowAddress,
       jobId: request.jobId,
       evidenceHash: request.evidenceHash,
@@ -122,6 +127,7 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
       verified: true,
       timestamp: Math.floor(Date.now() / 1000),
       nonce: "0x" + "0".repeat(64),
+      extraData: "0x",
       signature: "0x" + "0".repeat(130),
     },
     oracle: "0x0000000000000000000000000000000000000000",

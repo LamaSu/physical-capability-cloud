@@ -16,6 +16,7 @@
  */
 
 import type { AgentWallet } from "./wallet.js";
+import { attestationToTuple, type OracleAttestation } from "@pcc/contracts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,16 +91,25 @@ export class SettlementClient {
     );
   }
 
-  /** Submit verifier attestation for a milestone */
+  /**
+   * Submit an oracle-signed attestation for a milestone.
+   *
+   * The attestation must come from the verifier oracle (UMA / Chainlink /
+   * EigenLayer adapter) and be bound to this escrow's address. The gateway
+   * (or direct fallback) passes the full struct through to
+   * MilestoneEscrow.submitAttestation(uint256, Attestation), which
+   * re-verifies it on-chain against the protocol oracle verifier before
+   * opening the challenge window.
+   */
   async submitAttestation(
     escrowAddress: Address,
     milestoneIndex: number,
-    attestationHash: Hex,
+    attestation: OracleAttestation,
   ): Promise<SettlementResult> {
     return this.submit(escrowAddress, {
       type: "submitAttestation",
       milestoneIndex,
-      attestationHash,
+      attestation,
     });
   }
 
@@ -111,15 +121,22 @@ export class SettlementClient {
     return this.submit(escrowAddress, { type: "depositBond", milestoneIndex });
   }
 
-  /** Release funds for a milestone (challenge window must have expired) */
+  /**
+   * Release funds for a milestone (challenge window must have expired).
+   *
+   * Requires the SAME oracle-signed Attestation struct that was submitted
+   * via submitAttestation. The escrow contract rebinds release to the
+   * exact hash keccak256(abi.encode(attestation)).
+   */
   async release(
     escrowAddress: Address,
     milestoneIndex: number,
+    attestation: OracleAttestation,
     usdcValue?: bigint,
   ): Promise<SettlementResult> {
     return this.submit(
       escrowAddress,
-      { type: "release", milestoneIndex },
+      { type: "release", milestoneIndex, attestation },
       usdcValue,
     );
   }
@@ -234,7 +251,10 @@ export class SettlementClient {
     const response = await this.gatewayFetch("/api/settlement/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      // The attestation struct has a bigint timestamp — encode via a
+      // replacer that emits bigints as decimal strings. The gateway is
+      // expected to coerce them back to uint256 when calling viem.
+      body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)),
     });
 
     if (!response.ok) {
@@ -284,7 +304,10 @@ export class SettlementClient {
       case "submitAttestation":
         return {
           functionName: "submitAttestation",
-          args: [BigInt(op.milestoneIndex as number), op.attestationHash],
+          args: [
+            BigInt(op.milestoneIndex as number),
+            attestationToTuple(op.attestation as OracleAttestation),
+          ],
         };
       case "depositBond":
         return {
@@ -294,7 +317,10 @@ export class SettlementClient {
       case "release":
         return {
           functionName: "release",
-          args: [BigInt(op.milestoneIndex as number)],
+          args: [
+            BigInt(op.milestoneIndex as number),
+            attestationToTuple(op.attestation as OracleAttestation),
+          ],
         };
       case "fileDispute":
         return {
