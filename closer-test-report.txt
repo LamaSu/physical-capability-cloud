@@ -1,0 +1,74 @@
+=== test @pcc/adapter-madsci ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/adapter-madsci@0.1.0 test /home/ryangeorge/projects/pcc-integrated-7/packages/adapter-madsci
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-integrated-7/packages/adapter-madsci
+
+ ✓ src/__tests__/translator.test.ts  (3 tests) 3ms
+ ✓ src/__tests__/client.test.ts  (4 tests) 8ms
+ ✓ src/__tests__/parser.test.ts  (4 tests) 12ms
+
+ Test Files  3 passed (3)
+      Tests  11 passed (11)
+   Start at  18:15:53
+   Duration  648ms (transform 235ms, setup 0ms, collect 312ms, tests 23ms, environment 0ms, prepare 173ms)
+
+  exit=0 OK
+=== test @pcc/kernel-automata-linq ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/kernel-automata-linq@0.1.0 test /home/ryangeorge/projects/pcc-integrated-7/packages/kernel-automata-linq
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-integrated-7/packages/kernel-automata-linq
+
+ ✓ src/__tests__/translator.test.ts  (3 tests) 4ms
+ ✓ src/__tests__/hooks.test.ts  (9 tests) 5ms
+ ✓ src/__tests__/client.test.ts  (12 tests) 15ms
+
+ Test Files  3 passed (3)
+      Tests  24 passed (24)
+   Start at  18:15:55
+   Duration  731ms (transform 326ms, setup 0ms, collect 439ms, tests 24ms, environment 0ms, prepare 228ms)
+
+  exit=0 OK
+=== test @pcc/kernel-omniverse-sim ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/kernel-omniverse-sim@0.1.0 test /home/ryangeorge/projects/pcc-integrated-7/packages/kernel-omniverse-sim
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-integrated-7/packages/kernel-omniverse-sim
+
+ ✓ src/__tests__/attestation.test.ts  (5 tests) 87ms
+ ✓ src/__tests__/runner.test.ts  (2 tests) 118ms
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  18:15:57
+   Duration  810ms (transform 133ms, setup 0ms, collect 189ms, tests 205ms, environment 0ms, prepare 235ms)
+
+  exit=0 OK
+=== test @pcc/prism-orchestrator ===
+[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides". See https://pnpm.io/settings for the new home of each setting.
+
+> @pcc/prism-orchestrator@0.1.0 test /home/ryangeorge/projects/pcc-integrated-7/packages/prism-orchestrator
+> vitest run --passWithNoTests
+
+
+ RUN  v1.6.1 /home/ryangeorge/projects/pcc-integrated-7/packages/prism-orchestrator
+
+ ✓ src/__tests__/stage2-translate.test.ts  (2 tests) 3ms
+ ✓ src/__tests__/orchestrator.test.ts  (3 tests) 141ms
+
+ Test Files  2 passed (2)
+      Tests  5 passed (5)
+   Start at  18:16:00
+   Duration  1.76s (transform 614ms, setup 0ms, collect 1.00s, tests 144ms, environment 0ms, prepare 188ms)
+
+  exit=0 OK
