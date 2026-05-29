@@ -270,6 +270,9 @@ export interface IndexedToolVolatileRefs {
   successRateCid?: SHA256;
   meanLatencyMsCid?: SHA256;
   lastInvokedAtCid?: SHA256;
+}
+
+// ---------------------------------------------------------------------------
 // TEE profile (DCC4 capability declaration)
 // ---------------------------------------------------------------------------
 
