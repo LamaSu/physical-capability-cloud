@@ -1,1 +1,1 @@
-{"started":"2026-05-29T01:06:21Z","updated":"2026-05-29T01:06:38Z","phase":"test","status":"running","note":"pnpm test (3 packages)","log":"/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/run.log"}
+{"started":"2026-05-29T01:06:21Z","updated":"2026-05-29T01:06:44Z","phase":"done","status":"partial","note":"build_ok=2 build_fail=1 test_ok=2 test_fail=1 — see run.log","log":"/home/ryangeorge/projects/pcc-fix-bash-2026-05-29/run.log"}

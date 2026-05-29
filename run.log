@@ -115,3 +115,8 @@ Exit status 1
 test: 2 ok / 1 fail
 
 === [01:06:43] git commit ===
+ create mode 100644 run.log
+ create mode 100644 test-summary.txt
+ create mode 100755 worker.sh
+
+=== [01:06:44] FINISHED — STATUS at /home/ryangeorge/projects/pcc-fix-bash-2026-05-29/STATUS.json ===

@@ -43,7 +43,7 @@ export interface RunnerOptions {
 export async function detectCapabilities(
   opts: RunnerOptions = {},
 ): Promise<SimRunnerCapabilities> {
-  const python = opts.python ?? "python";
+  const python = opts.python ?? "python3";
   const helperPath = opts.helperPath ?? PYTHON_HELPER;
 
   try {
@@ -98,7 +98,7 @@ export async function runSim(
   workflow: MadsciWorkflow,
   opts: RunnerOptions = {},
 ): Promise<SimRunResult> {
-  const python = opts.python ?? "python";
+  const python = opts.python ?? "python3";
   const helperPath = opts.helperPath ?? PYTHON_HELPER;
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
 
