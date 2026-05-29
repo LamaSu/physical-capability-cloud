@@ -1,0 +1,17 @@
+
+=== [01:13:24] INIT ===
+fatal: refusing to fetch into branch 'refs/heads/fix/bash-mechanical-2026-05-29' checked out at '/home/ryangeorge/projects/pcc-fix-bash-2026-05-29'
+
+=== [01:13:24] create merge branch off bash-mechanical (smaller set of changes) ===
+	pnpm-lock.yaml
+Please commit your changes or stash them before you switch branches.
+Aborting
+
+=== [01:13:24] merge llm-linq-rewrite (LINQ rewrite is large but in disjoint files) ===
+error: Your local changes to the following files would be overwritten by merge:
+	pnpm-lock.yaml
+Please commit your changes or stash them before you merge.
+Aborting
+Updating 743c3d2..a48e94b
+merge has conflicts — listing:
+fatal: There is no merge to abort (MERGE_HEAD missing).

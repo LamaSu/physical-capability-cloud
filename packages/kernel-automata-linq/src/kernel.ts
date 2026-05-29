@@ -4,7 +4,7 @@
  * Builds a DigitalKernelManifest that registers a LINQ lab as a PCC kernel.
  * The PCC kernel announces each LINQ workflow as a capability. Job
  * submissions arriving at the kernel are forwarded to LINQ Cloud via
- * LinqClient.startRun.
+ * LinqClient.start_workflow.
  */
 
 import { buildManifest, type ManifestBuilderInput } from "@pcc/kernel-sdk";
@@ -48,8 +48,9 @@ export function buildLinqKernelManifest(
     capabilityType: opts.capabilityType,
     workflowSteps: opts.workflows.map((wf) => ({
       stepId: wf.id,
-      name: wf.name,
-      ...(wf.description ? { description: wf.description } : {}),
+      stepType: "api_call" as const,
+      description: wf.name + (wf.description ? " — " + wf.description : ""),
+      dependsOn: [],
     })),
     maxAssuranceTier: opts.maxAssuranceTier,
     touchstoneLibraryId: opts.touchstoneLibraryId,
@@ -66,7 +67,7 @@ export interface LinqKernelRunHandle {
  * Forward a PCC job submission to LINQ. The job's params are expected to
  * carry either a `linq_workflow_id` (run an existing LINQ workflow) or
  * a `madsci_workflow` (compile to LINQ first — TODO once LINQ create-
- * workflow surface is documented).
+ * workflow surface is verified).
  */
 export async function forwardJobToLinq(
   client: LinqClient,
@@ -78,7 +79,7 @@ export async function forwardJobToLinq(
       "forwardJobToLinq: params.linq_workflow_id is required (MADSci-source not yet supported on LINQ — needs LINQ create-workflow API)",
     );
   }
-  const run = await client.startRun(linqWorkflowId);
+  const run = await client.start_workflow(linqWorkflowId);
   return { pccJobId: job.id, linqRunId: run.id };
 }
 
@@ -91,6 +92,6 @@ export async function exportLinqWorkflowsAsMadsci(
   client: LinqClient,
   workcellId: string,
 ) {
-  const workflows = await client.listWorkflows(workcellId);
+  const workflows = await client.get_workflows(workcellId);
   return workflows.map(linqWorkflowToMadsci);
 }
