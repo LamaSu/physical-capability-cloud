@@ -27,6 +27,7 @@
 import { z } from "zod";
 import type { Id, Timestamp, SHA256 } from "./common.js";
 import { DigitalCaptureClass } from "./dcc.js";
+import type { TeeVendor, ZkSystem } from "./indexed-tool.js";
 
 // ---------------------------------------------------------------------------
 // Request / response projections
@@ -84,6 +85,69 @@ export interface ResponseProjection {
 // Receipt
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// DCC4 — parsed TEE measurements (alongside raw teeQuote)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parsed view of a TEE remote-attestation quote (DCC4).
+ *
+ * The raw `teeQuote` bytes stay as the auditable artifact; this struct is the
+ * decoded view downstream consumers use without re-parsing. PCC writes both
+ * when DCC4 verification succeeds. See scope doc §2.4.
+ */
+export interface TeeMeasurements {
+  /** Vendor — matches IndexedTool.teeProfile.vendor at call time. */
+  vendor: TeeVendor;
+  /** MRTD / MRENCLAVE / imageId actually observed in the quote. */
+  observedMeasurement: string;
+  /** RTMR0..3 actually observed (TDX only). */
+  observedRtmr?: [string, string, string, string];
+  /** Quote format version observed (e.g. "tdx-v4"). */
+  quoteFormat: string;
+  /** report_data bytes (64 bytes). */
+  reportData: string;
+  /** Recomputed expected report_data — equal to reportData on success. */
+  expectedReportData: string;
+  /** True iff observed measurement matched IndexedTool.teeProfile. */
+  measurementMatch: boolean;
+  /** True iff Intel / AMD / AWS root cert chain validated. */
+  certChainValid: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// DCC5 — parsed zk-proof metadata (alongside raw zkProof)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parsed metadata for a DCC5 zk-proof. See scope doc §3.5.
+ *
+ * `statement` discriminates the S1 vs S2 path:
+ *   - "tee-wrap" (S2, default): proof asserts a DCC4 TDX quote verifies under
+ *     Intel's PKI. Automatically generated once DCC4 is claimed.
+ *   - "faithful-execution" (S1, opt-in): proof asserts O = L(I) for the tool's
+ *     declared logic L. Requires operator to register `executionProof`.
+ */
+export interface ZkProofMetadata {
+  zkSystem: ZkSystem;
+  /** Statement under proof: "tee-wrap" (S2) or "faithful-execution" (S1). */
+  statement: "tee-wrap" | "faithful-execution";
+  /** Reference to the program / circuit CID used. */
+  programCid: string;
+  /** Public inputs hash (commits to what was proven). */
+  publicInputsHash: string;
+  /** Public outputs hash. */
+  publicOutputsHash: string;
+  /** Verifier-key digest. */
+  verificationKeyHash: string;
+  /** On-chain verifier address if applicable. */
+  onchainVerifier?: { chainId: number; address: string };
+  /** Proving cost in USDC (operator pays the prover network). */
+  provingCostUsdc?: string;
+  /** Time to prove in seconds (observed). */
+  provingSeconds?: number;
+}
+
 /**
  * One InvocationReceipt per call.
  *
@@ -135,10 +199,24 @@ export interface InvocationReceipt {
   upstreamKeyId?: string;
   /** DCC3+: OCI referrer ref to the Sigstore bundle. */
   sigstoreBundleRef?: string;
-  /** DCC4: opaque TEE remote-attestation quote. */
+  /** DCC4: opaque TEE remote-attestation quote (raw bytes, base64url). */
   teeQuote?: string;
+  /** DCC4: parsed view of `teeQuote` (vendor, MRTD/RTMR, report_data). */
+  teeMeasurements?: TeeMeasurements;
   /** DCC5: base64url-encoded zkSNARK proof bytes. */
   zkProof?: string;
+  /** DCC5: parsed metadata for `zkProof` (system, statement, vk hash, ...). */
+  zkProofMetadata?: ZkProofMetadata;
+  /**
+   * DCC5: top-level convenience copy of `zkProofMetadata.zkSystem`. Allows
+   * persistence/indexing to filter by system without parsing JSON metadata.
+   */
+  zkSystem?: ZkSystem;
+  /**
+   * DCC5: top-level on-chain verifier address (chainId + EVM addr) for the
+   * `zkProof`. Convenience copy of `zkProofMetadata.onchainVerifier`.
+   */
+  zkProofVerifierAddress?: { chainId: number; address: string };
 
   // ----- Caller binding -------------------------------------------------
   /** PCC operator id that initiated the invocation. */
@@ -183,6 +261,55 @@ const ResponseProjectionSchema = z.object({
   streamCommit: SHA256Schema.optional(),
 });
 
+const TeeVendorSchemaLocal = z.enum([
+  "intel-tdx",
+  "intel-sgx",
+  "amd-sev-snp",
+  "aws-nitro",
+  "phala-cloud",
+  "dstack",
+]);
+
+const TeeMeasurementsSchema = z.object({
+  vendor: TeeVendorSchemaLocal,
+  observedMeasurement: z.string().min(1),
+  observedRtmr: z
+    .tuple([z.string(), z.string(), z.string(), z.string()])
+    .optional(),
+  quoteFormat: z.string().min(1),
+  reportData: z.string().min(1),
+  expectedReportData: z.string().min(1),
+  measurementMatch: z.boolean(),
+  certChainValid: z.boolean(),
+});
+
+const ZkSystemSchemaLocal = z.enum([
+  "sp1",
+  "risc0",
+  "noir",
+  "halo2",
+  "plonky3",
+]);
+
+const ZkProofMetadataSchema = z.object({
+  zkSystem: ZkSystemSchemaLocal,
+  statement: z.enum(["tee-wrap", "faithful-execution"]),
+  programCid: z.string().min(1),
+  publicInputsHash: z.string().min(1),
+  publicOutputsHash: z.string().min(1),
+  verificationKeyHash: z.string().min(1),
+  onchainVerifier: z
+    .object({
+      chainId: z.number().int().nonnegative(),
+      address: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be 0x-prefixed 20-byte EVM address"),
+    })
+    .optional(),
+  provingCostUsdc: z.string().optional(),
+  provingSeconds: z.number().nonnegative().optional(),
+});
+
 /**
  * Zod schema for InvocationReceipt at API boundaries.
  *
@@ -207,7 +334,18 @@ export const InvocationReceiptSchema: z.ZodType<InvocationReceipt> = z.object({
   upstreamKeyId: z.string().optional(),
   sigstoreBundleRef: z.string().optional(),
   teeQuote: z.string().optional(),
+  teeMeasurements: TeeMeasurementsSchema.optional(),
   zkProof: z.string().optional(),
+  zkProofMetadata: ZkProofMetadataSchema.optional(),
+  zkSystem: ZkSystemSchemaLocal.optional(),
+  zkProofVerifierAddress: z
+    .object({
+      chainId: z.number().int().nonnegative(),
+      address: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be 0x-prefixed 20-byte EVM address"),
+    })
+    .optional(),
   callerAgentId: z.string().min(1),
   callerSessionId: z.string().min(1),
   callerSiweMessage: z.string().optional(),

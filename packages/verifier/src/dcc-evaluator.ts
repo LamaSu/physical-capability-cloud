@@ -15,10 +15,14 @@
  * caller already paid the price of their downgrade choice via the lower
  * multiplier, no additional penalty applied.
  *
- * Pure synchronous evaluation. No crypto verification here — that's the
- * receipt-signer's domain (HMAC for DCC1, JWS for DCC2, Sigstore for DCC3,
- * etc.). This evaluator only verifies the SHAPE of the receipt and that
- * required fields for the claimed DCC class are present.
+ * Async evaluation as of the DCC4/DCC5 auto-flow scope (scope §4.1).
+ * Reason: DCC4 calls into the TDX/Nitro/SGX quote verifiers (cert chain
+ * walks Intel PCCS), and DCC5 calls into the SP1/Risc0 SDK verifiers
+ * (zkSNARK pairing math). DCC0..DCC3 paths remain near-sync.
+ *
+ * Crypto verification for DCC1/2/3 (HMAC, JWS, Sigstore) stays in the
+ * receipt-signer's domain; this evaluator drives DCC4/DCC5 directly through
+ * the per-class verifier modules.
  *
  * Used by:
  *   - /api/aggregator/invoke route (immediately after signing the receipt)
@@ -38,6 +42,8 @@ import {
   TRUST_TIER_DCC_CEILING,
   TRUST_TIER_NUMERIC,
 } from "@pcc/spec";
+import { verifyDcc4, type Dcc4VerifyOptions } from "./dcc4-tee-verifier.js";
+import { verifyDcc5, type Dcc5VerifyOptions } from "./dcc5-zk-verifier.js";
 
 // ---------------------------------------------------------------------------
 // Finding / result types
@@ -92,20 +98,41 @@ export interface DccEvaluationResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * Options for `evaluateReceipt`. Threaded through to DCC4/DCC5 verifier
+ * shims. `expectedReportData` is REQUIRED for DCC4 verification (the
+ * sha256 PCC recomputed over nonce ‖ args ‖ response). The evaluator
+ * derives it from the receipt's request/response projections when absent
+ * (best-effort fallback for tests).
+ */
+export interface EvaluateOptions {
+  /** DCC4-specific options (dcap-qvl hooks etc.). */
+  dcc4?: Dcc4VerifyOptions;
+  /** DCC5-specific options (sp1/risc0 hooks). */
+  dcc5?: Dcc5VerifyOptions;
+  /**
+   * PCC-recomputed expected report_data for DCC4 verification. If absent,
+   * the evaluator pulls it from `receipt.teeMeasurements.expectedReportData`
+   * (set by the invoke route when the receipt was issued).
+   */
+  expectedReportData?: string;
+}
+
+/**
  * Evaluate an InvocationReceipt against an optional IndexedTool context.
  *
  * If `tool` is provided, the trust-tier ceiling check runs. Otherwise the
  * evaluator assumes the receipt's effectiveDccClass was already computed
  * correctly by the receipt-signer.
  *
- * The function is intentionally pure / synchronous — no IO, no crypto. Crypto
- * verification (HMAC for DCC1, JWS for DCC2, Sigstore for DCC3, TEE quote
- * for DCC4, zkProof for DCC5) is the receipt-signer's responsibility.
+ * Async (was sync pre-scope-2026-05-23). DCC0..DCC3 checks are still
+ * synchronous-equivalent; DCC4 calls the TEE verifier shim; DCC5 calls
+ * the zk verifier shim. Both shims are pluggable per scope §2.5 / §3.8.
  */
-export function evaluateReceipt(
+export async function evaluateReceipt(
   receipt: InvocationReceipt,
   tool?: IndexedTool,
-): DccEvaluationResult {
+  options: EvaluateOptions = {},
+): Promise<DccEvaluationResult> {
   const findings: DccEvaluationFinding[] = [];
 
   // 1. schemaVersion check
@@ -169,7 +196,12 @@ export function evaluateReceipt(
 
   // 6. DCC-class-specific attestation presence
   const effective = receipt.effectiveDccClass;
-  const dccChecks = checkDccAttestation(receipt, effective);
+  const dccChecks = await checkDccAttestation(
+    receipt,
+    effective,
+    tool,
+    options,
+  );
   findings.push(...dccChecks);
 
   // 7. If a tool is provided, verify the effective class respects ceilings
@@ -280,15 +312,20 @@ export function evaluateReceipt(
  * Return the findings for required attestations at a given DCC class.
  *
  * - DCC0 / DCC1: PCC signature already checked above; nothing extra here.
- * - DCC2: upstream signature + key id required.
- * - DCC3: sigstoreBundleRef required.
- * - DCC4: teeQuote required.
- * - DCC5: zkProof required.
+ * - DCC2: upstream signature + key id required (presence-only at this layer;
+ *         JWS validation is the receipt-signer's domain).
+ * - DCC3: sigstoreBundleRef required (presence-only at this layer).
+ * - DCC4: teeQuote PRESENT and VERIFIES against tool.teeProfile via the
+ *         vendor TEE verifier shim. Async per scope §2.6.
+ * - DCC5: zkProof PRESENT and VERIFIES against zkProofMetadata via the
+ *         per-system zk verifier shim. Async per scope §3.9.
  */
-function checkDccAttestation(
+async function checkDccAttestation(
   receipt: InvocationReceipt,
   effective: DigitalCaptureClass,
-): DccEvaluationFinding[] {
+  tool: IndexedTool | undefined,
+  options: EvaluateOptions,
+): Promise<DccEvaluationFinding[]> {
   const findings: DccEvaluationFinding[] = [];
   switch (effective) {
     case DigitalCaptureClass.DCC0:
@@ -336,26 +373,82 @@ function checkDccAttestation(
         severity: receipt.sigstoreBundleRef ? undefined : "critical",
       });
       break;
-    case DigitalCaptureClass.DCC4:
+    case DigitalCaptureClass.DCC4: {
+      // Presence check first — keeps backward compat with pre-scope tests.
+      const present = !!receipt.teeQuote;
       findings.push({
         check: "dcc4_tee_quote",
-        passed: !!receipt.teeQuote,
-        details: receipt.teeQuote
-          ? "DCC4: TEE quote present"
-          : "DCC4: teeQuote missing",
-        severity: receipt.teeQuote ? undefined : "critical",
+        passed: present,
+        details: present ? "DCC4: TEE quote present" : "DCC4: teeQuote missing",
+        severity: present ? undefined : "critical",
+      });
+      if (!present) break;
+
+      // Real verification path. Skip when the caller declined to supply a
+      // tool (matches DCC4 behaviour at presence-only era — receipt audit
+      // without registry access). Skip when no expectedReportData is
+      // resolvable (DCC4 requires it per scope §6 Q6, replay mitigation).
+      if (!tool) {
+        findings.push({
+          check: "dcc4_tee_quote_verified",
+          passed: false,
+          details: "DCC4: tool context missing — cannot verify by vendor",
+          severity: "warning",
+        });
+        break;
+      }
+      const expected =
+        options.expectedReportData ??
+        receipt.teeMeasurements?.expectedReportData ??
+        "";
+      if (!expected) {
+        findings.push({
+          check: "dcc4_tee_quote_verified",
+          passed: false,
+          details:
+            "DCC4: expectedReportData unavailable — cannot verify quote binding",
+          severity: "warning",
+        });
+        break;
+      }
+      const verdict = await verifyDcc4(receipt, tool, expected, options.dcc4);
+      findings.push({
+        check: "dcc4_tee_quote_verified",
+        passed: verdict.valid,
+        details: verdict.details,
+        severity: verdict.valid ? undefined : "critical",
       });
       break;
-    case DigitalCaptureClass.DCC5:
+    }
+    case DigitalCaptureClass.DCC5: {
+      const present = !!receipt.zkProof;
       findings.push({
         check: "dcc5_zk_proof",
-        passed: !!receipt.zkProof,
-        details: receipt.zkProof
-          ? "DCC5: zkProof present"
-          : "DCC5: zkProof missing",
-        severity: receipt.zkProof ? undefined : "critical",
+        passed: present,
+        details: present ? "DCC5: zkProof present" : "DCC5: zkProof missing",
+        severity: present ? undefined : "critical",
+      });
+      if (!present) break;
+
+      if (!receipt.zkProofMetadata) {
+        findings.push({
+          check: "dcc5_zk_proof_verified",
+          passed: false,
+          details:
+            "DCC5: zkProofMetadata missing — cannot dispatch by system",
+          severity: "critical",
+        });
+        break;
+      }
+      const verdict = await verifyDcc5(receipt, options.dcc5);
+      findings.push({
+        check: "dcc5_zk_proof_verified",
+        passed: verdict.valid,
+        details: verdict.details,
+        severity: verdict.valid ? undefined : "critical",
       });
       break;
+    }
   }
   return findings;
 }

@@ -3,6 +3,23 @@ import { BatchSettler } from "../batch-settler.js";
 import { UserOpQueue } from "../user-op-queue.js";
 import type { Address, Hex } from "viem";
 import type { SettlementIntent } from "../batch-settler.js";
+import type { OracleAttestation } from "@pcc/contracts";
+
+/** Deterministic test attestation bound to a given escrow. */
+function mkAttestation(escrowAddress: Address, evidenceHash: Hex = "0xdead" as Hex): OracleAttestation {
+  return {
+    version: 1,
+    escrowAddress,
+    jobId: "job-test",
+    evidenceHash: ("0x" + evidenceHash.replace(/^0x/, "").padStart(64, "0")) as Hex,
+    tier: 1,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "a".repeat(64)) as Hex,
+    extraData: "0x" as Hex,
+    signature: "0x" as Hex,
+  };
+}
 
 // Mock UserOpQueue
 const mockFlush = vi.fn();
@@ -36,11 +53,13 @@ describe("BatchSettler", () => {
   });
 
   it("submits settlement intents to the queue", () => {
+    const escrow = "0x1111111111111111111111111111111111111111" as Address;
+    const attestation = mkAttestation(escrow);
     const intent: SettlementIntent = {
       intentId: "intent-1",
       agentId: "agent-user-1",
-      escrowAddress: "0x1111111111111111111111111111111111111111" as Address,
-      operation: { type: "release", milestoneIndex: 0 },
+      escrowAddress: escrow,
+      operation: { type: "release", milestoneIndex: 0, attestation },
       usdcValue: 100_000_000n,
     };
 
@@ -50,7 +69,21 @@ describe("BatchSettler", () => {
       "0x1111111111111111111111111111111111111111",
       MOCK_ABI,
       "release",
-      [0n],
+      [
+        0n,
+        [
+          attestation.version,
+          attestation.escrowAddress,
+          attestation.jobId,
+          attestation.evidenceHash,
+          attestation.tier,
+          attestation.verified,
+          attestation.timestamp,
+          attestation.nonce,
+          attestation.extraData,
+          attestation.signature,
+        ],
+      ],
       { usdcValue: 100_000_000n },
     );
     expect(settler.pendingCount).toBe(1);
@@ -65,22 +98,25 @@ describe("BatchSettler", () => {
       trigger: "manual",
     });
 
+    const escrowA = "0x1111111111111111111111111111111111111111" as Address;
+    const escrowB = "0x2222222222222222222222222222222222222222" as Address;
+
     settler.submit({
       intentId: "i1",
       agentId: "agent-user",
-      escrowAddress: "0x1111111111111111111111111111111111111111" as Address,
-      operation: { type: "release", milestoneIndex: 0 },
+      escrowAddress: escrowA,
+      operation: { type: "release", milestoneIndex: 0, attestation: mkAttestation(escrowA) },
     });
     settler.submit({
       intentId: "i2",
       agentId: "agent-user",
-      escrowAddress: "0x1111111111111111111111111111111111111111" as Address,
-      operation: { type: "release", milestoneIndex: 1 },
+      escrowAddress: escrowA,
+      operation: { type: "release", milestoneIndex: 1, attestation: mkAttestation(escrowA) },
     });
     settler.submit({
       intentId: "i3",
       agentId: "agent-kernel",
-      escrowAddress: "0x2222222222222222222222222222222222222222" as Address,
+      escrowAddress: escrowB,
       operation: { type: "submitEvidence", milestoneIndex: 0, evidenceHash: "0xabc" as Hex },
     });
 

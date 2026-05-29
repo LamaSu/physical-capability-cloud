@@ -13,6 +13,14 @@ export interface NetworkTransportConfig {
   relayUrl: string;
   /** This agent's ID */
   agentId: string;
+  /**
+   * API key used to authenticate HTTP POST and WebSocket handshake with the
+   * relay. Required in production — the relay's `requireA2AAuth` preHandler
+   * will 401 any request that lacks `Authorization: Bearer pcc_...` or
+   * `?apiKey=pcc_...`. Optional here so in-memory / bypass contexts
+   * (e.g. legacy tests that predate auth hardening) still type-check.
+   */
+  apiKey?: string;
   /** Reconnect interval in ms (default: 3000) */
   reconnectInterval?: number;
   /** Maximum reconnect attempts before giving up (default: Infinity) */
@@ -22,8 +30,9 @@ export interface NetworkTransportConfig {
 type MessageHandler = (message: A2AMessage) => void | Promise<void>;
 
 export class NetworkTransport {
-  private readonly config: Required<Omit<NetworkTransportConfig, "maxReconnectAttempts">> & {
+  private readonly config: Required<Omit<NetworkTransportConfig, "maxReconnectAttempts" | "apiKey">> & {
     maxReconnectAttempts: number;
+    apiKey: string | undefined;
   };
   private ws: WebSocket | null = null;
   private handlers: MessageHandler[] = [];
@@ -36,6 +45,7 @@ export class NetworkTransport {
     this.config = {
       relayUrl: config.relayUrl,
       agentId: config.agentId,
+      apiKey: config.apiKey,
       reconnectInterval: config.reconnectInterval ?? 3000,
       maxReconnectAttempts: config.maxReconnectAttempts ?? Infinity,
     };
@@ -53,7 +63,12 @@ export class NetworkTransport {
       const wsUrl = this.config.relayUrl
         .replace(/^http/, "ws")
         .replace(/\/$/, "");
-      const url = `${wsUrl}/ws/a2a?agentId=${encodeURIComponent(this.config.agentId)}`;
+      // Auth on the WS handshake: browsers cannot set headers on `new WebSocket`,
+      // so we pass the API key as a query param (the relay accepts either form).
+      const authParam = this.config.apiKey
+        ? `&apiKey=${encodeURIComponent(this.config.apiKey)}`
+        : "";
+      const url = `${wsUrl}/ws/a2a?agentId=${encodeURIComponent(this.config.agentId)}${authParam}`;
 
       try {
         this.ws = new WebSocket(url);
@@ -96,9 +111,13 @@ export class NetworkTransport {
   /** Send a message via REST POST to the relay */
   async send(message: A2AMessage): Promise<void> {
     const url = `${this.config.relayUrl.replace(/\/$/, "")}/api/a2a/send`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.config.apiKey) {
+      headers.Authorization = `Bearer ${this.config.apiKey}`;
+    }
     const resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(message),
     });
     if (!resp.ok) {

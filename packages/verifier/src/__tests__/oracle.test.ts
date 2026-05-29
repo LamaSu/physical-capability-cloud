@@ -213,6 +213,55 @@ describe("UMAOracleAdapter (mock mode)", () => {
     const result = await strictAdapter.submitForVerification(VALID_HASH, VALID_DATA, 2);
     expect(result.passed).toBe(false); // score can never reach 1.1
   });
+
+  // ── Attestation binding ────────────────────────────────────────────
+
+  it("returns no attestation when no binding is provided", async () => {
+    const result = await adapter.submitForVerification(VALID_HASH, VALID_DATA, 2);
+    expect(result.attestation).toBeUndefined();
+  });
+
+  it("populates attestation when binding is provided", async () => {
+    const escrowAddress = "0x1234567890abcdef1234567890abcdef12345678" as const;
+    const result = await adapter.submitForVerification(VALID_HASH, VALID_DATA, 2, {
+      escrowAddress,
+      jobId: "job-abc-123",
+    });
+    expect(result.attestation).toBeDefined();
+    expect(result.attestation!.escrowAddress).toBe(escrowAddress);
+    expect(result.attestation!.jobId).toBe("job-abc-123");
+    expect(result.attestation!.tier).toBe(2);
+    expect(result.attestation!.verified).toBe(result.passed);
+    expect(result.attestation!.evidenceHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(result.attestation!.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(typeof result.attestation!.timestamp).toBe("bigint");
+  });
+
+  it("attestation.verified matches passed flag for both accept/reject", async () => {
+    const binding = { escrowAddress: "0x1234567890abcdef1234567890abcdef12345678" as const, jobId: "j1" };
+    const valid = await adapter.submitForVerification(VALID_HASH, VALID_DATA, 2, binding);
+    const invalid = await adapter.submitForVerification("sha256:wronghash", VALID_DATA, 2, binding);
+    expect(valid.attestation!.verified).toBe(true);
+    expect(invalid.attestation!.verified).toBe(false);
+  });
+
+  it("attestation evidenceHash normalizes sha256: prefix", async () => {
+    const binding = { escrowAddress: "0x1234567890abcdef1234567890abcdef12345678" as const, jobId: "j1" };
+    const result = await adapter.submitForVerification(
+      "sha256:" + "a".repeat(64),
+      VALID_DATA,
+      2,
+      binding,
+    );
+    expect(result.attestation!.evidenceHash).toBe(("0x" + "a".repeat(64)) as `0x${string}`);
+  });
+
+  it("nonce differs across calls for same evidence (no replay collisions)", async () => {
+    const binding = { escrowAddress: "0x1234567890abcdef1234567890abcdef12345678" as const, jobId: "j1" };
+    const r1 = await adapter.submitForVerification(VALID_HASH, VALID_DATA, 2, binding);
+    const r2 = await adapter.submitForVerification(VALID_HASH, VALID_DATA, 2, binding);
+    expect(r1.attestation!.nonce).not.toBe(r2.attestation!.nonce);
+  });
 });
 
 // ── ChainlinkOracleAdapter Tests ──────────────────────────────────────

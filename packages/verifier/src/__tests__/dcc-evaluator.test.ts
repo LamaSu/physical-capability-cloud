@@ -84,9 +84,9 @@ function makeTool(overrides: Partial<IndexedTool> = {}): IndexedTool {
 }
 
 describe("evaluateReceipt — happy path", () => {
-  it("DCC1 receipt with PCC signature scores high", () => {
+  it("DCC1 receipt with PCC signature scores high", async () => {
     const r = makeReceipt();
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("valid");
     expect(res.finalScore).toBeCloseTo(100 * DCC_MULTIPLIERS.DCC1, 2);
     expect(res.effectiveDccClass).toBe(DigitalCaptureClass.DCC1);
@@ -94,29 +94,29 @@ describe("evaluateReceipt — happy path", () => {
     expect(res.confidence).toBeGreaterThanOrEqual(90);
   });
 
-  it("DCC0 unsigned acknowledged as valid", () => {
+  it("DCC0 unsigned acknowledged as valid", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC0,
       effectiveDccClass: DigitalCaptureClass.DCC0,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("valid");
     expect(res.multiplier).toBe(DCC_MULTIPLIERS.DCC0);
   });
 
-  it("DCC2 with upstream signature passes", () => {
+  it("DCC2 with upstream signature passes", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC2,
       effectiveDccClass: DigitalCaptureClass.DCC2,
       upstreamSignature: "upstream-sig",
       upstreamKeyId: "upstream-key",
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("valid");
     expect(res.finalScore).toBeCloseTo(100 * DCC_MULTIPLIERS.DCC2, 2);
   });
 
-  it("DCC3 with Sigstore bundle passes", () => {
+  it("DCC3 with Sigstore bundle passes", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC3,
       effectiveDccClass: DigitalCaptureClass.DCC3,
@@ -124,68 +124,68 @@ describe("evaluateReceipt — happy path", () => {
       upstreamKeyId: "u-key",
       sigstoreBundleRef: "oci://ghcr.io/foo:bar",
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("valid");
     expect(res.finalScore).toBe(100); // DCC3 = 1.00 multiplier
   });
 });
 
 describe("evaluateReceipt — failures", () => {
-  it("missing PCC signature is critical", () => {
+  it("missing PCC signature is critical", async () => {
     const r = makeReceipt({ pccSignature: "", pccKeyId: "" });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("invalid");
     expect(res.findings.find((f) => f.check === "pcc_signature_present")?.passed).toBe(false);
     expect(res.confidence).toBeLessThan(50);
   });
 
-  it("DCC2 without upstream signature is invalid", () => {
+  it("DCC2 without upstream signature is invalid", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC2,
       effectiveDccClass: DigitalCaptureClass.DCC2,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("invalid");
     expect(
       res.findings.find((f) => f.check === "dcc2_upstream_signature")?.passed,
     ).toBe(false);
   });
 
-  it("DCC3 without sigstore bundle is invalid", () => {
+  it("DCC3 without sigstore bundle is invalid", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC3,
       effectiveDccClass: DigitalCaptureClass.DCC3,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("invalid");
     expect(
       res.findings.find((f) => f.check === "dcc3_sigstore_bundle_ref")?.passed,
     ).toBe(false);
   });
 
-  it("DCC4 requires TEE quote", () => {
+  it("DCC4 requires TEE quote", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC4,
       effectiveDccClass: DigitalCaptureClass.DCC4,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(
       res.findings.find((f) => f.check === "dcc4_tee_quote")?.passed,
     ).toBe(false);
   });
 
-  it("DCC5 requires zkProof", () => {
+  it("DCC5 requires zkProof", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC5,
       effectiveDccClass: DigitalCaptureClass.DCC5,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(
       res.findings.find((f) => f.check === "dcc5_zk_proof")?.passed,
     ).toBe(false);
   });
 
-  it("missing request body hash is critical", () => {
+  it("missing request body hash is critical", async () => {
     const r = makeReceipt({
       requestProjection: {
         method: "POST",
@@ -196,30 +196,30 @@ describe("evaluateReceipt — failures", () => {
         timestamp: "2026-05-23T00:00:00.000Z",
       },
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.verdict).toBe("invalid");
   });
 });
 
 describe("evaluateReceipt — downgrade rules", () => {
-  it("downgrade present and explained marks valid", () => {
+  it("downgrade present and explained marks valid", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC3,
       effectiveDccClass: DigitalCaptureClass.DCC1,
       downgradeReason: "trust tier ceiling AUTO_INDEXED",
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.downgraded).toBe(true);
     expect(res.multiplier).toBe(DCC_MULTIPLIERS.DCC1);
     expect(res.verdict).toBe("valid");
   });
 
-  it("downgrade without reason adds a warning", () => {
+  it("downgrade without reason adds a warning", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC3,
       effectiveDccClass: DigitalCaptureClass.DCC1,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.downgraded).toBe(true);
     const dr = res.findings.find((f) => f.check === "downgrade_reason_present");
     expect(dr?.passed).toBe(false);
@@ -228,7 +228,7 @@ describe("evaluateReceipt — downgrade rules", () => {
 });
 
 describe("evaluateReceipt — with tool ceiling checks", () => {
-  it("effective class within tool ceiling is valid", () => {
+  it("effective class within tool ceiling is valid", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC2,
       effectiveDccClass: DigitalCaptureClass.DCC2,
@@ -239,11 +239,11 @@ describe("evaluateReceipt — with tool ceiling checks", () => {
       trustTier: TrustTier.AUTO_INDEXED,
       assuranceCeiling: DigitalCaptureClass.DCC3,
     });
-    const res = evaluateReceipt(r, tool);
+    const res = await evaluateReceipt(r, tool);
     expect(res.verdict).toBe("valid");
   });
 
-  it("effective class above trust-tier ceiling is critical", () => {
+  it("effective class above trust-tier ceiling is critical", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC5,
       effectiveDccClass: DigitalCaptureClass.DCC5,
@@ -253,17 +253,17 @@ describe("evaluateReceipt — with tool ceiling checks", () => {
       trustTier: TrustTier.UNTRUSTED, // ceiling DCC1
       assuranceCeiling: DigitalCaptureClass.DCC5,
     });
-    const res = evaluateReceipt(r, tool);
+    const res = await evaluateReceipt(r, tool);
     expect(res.verdict).toBe("invalid");
     expect(
       res.findings.find((f) => f.check === "effective_dcc_within_ceilings")?.passed,
     ).toBe(false);
   });
 
-  it("quarantined tool is rejected even with valid receipt", () => {
+  it("quarantined tool is rejected even with valid receipt", async () => {
     const r = makeReceipt();
     const tool = makeTool({ trustTier: TrustTier.QUARANTINED });
-    const res = evaluateReceipt(r, tool);
+    const res = await evaluateReceipt(r, tool);
     expect(res.verdict).toBe("invalid");
     expect(
       res.findings.find((f) => f.check === "tool_not_quarantined")?.passed,
@@ -272,18 +272,18 @@ describe("evaluateReceipt — with tool ceiling checks", () => {
 });
 
 describe("evaluateReceipt — score math", () => {
-  it("final score = base * multiplier", () => {
+  it("final score = base * multiplier", async () => {
     const r = makeReceipt({
       requestedDccClass: DigitalCaptureClass.DCC0,
       effectiveDccClass: DigitalCaptureClass.DCC0,
     });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     expect(res.finalScore).toBeCloseTo(res.baseScore * res.multiplier, 1);
   });
 
-  it("each critical failure reduces base by 20", () => {
+  it("each critical failure reduces base by 20", async () => {
     const r = makeReceipt({ pccSignature: "", pccKeyId: "" });
-    const res = evaluateReceipt(r);
+    const res = await evaluateReceipt(r);
     // baseScore should be 100 - 20*N where N is the count of criticals
     const criticals = res.findings.filter(
       (f) => !f.passed && f.severity === "critical",

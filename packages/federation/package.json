@@ -1,0 +1,45 @@
+{
+  "name": "@pcc/federation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 1 of the 4-level federation runtime: CRDT primitives + mesh-level Postgres sync replication helpers + Server/Namespace/Region scaffolding. Kademlia DHT for cross-region deferred to Phase 2.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./crdts": {
+      "types": "./dist/crdts/index.d.ts",
+      "import": "./dist/crdts/index.js",
+      "default": "./dist/crdts/index.js"
+    },
+    "./mesh": {
+      "types": "./dist/mesh/index.d.ts",
+      "import": "./dist/mesh/index.js",
+      "default": "./dist/mesh/index.js"
+    },
+    "./region": {
+      "types": "./dist/region/index.d.ts",
+      "import": "./dist/region/index.js",
+      "default": "./dist/region/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/dht-core": "workspace:*",
+    "@pcc/spec": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

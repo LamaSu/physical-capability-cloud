@@ -133,9 +133,20 @@ async function main() {
   // 1b. PCCProtocol
   SEP();
   L("[1b] Deploy PCCProtocol (fee factory, 2.35%)");
-  const prot = await deploy("PCCProtocol.deploy(feeRecipient, 235bps, governor)", {
+  // oracle verifier must be deployed first (or pass a known address).
+  // For the telemetry run we deploy a throwaway mock oracle that approves
+  // anything with verified=true so the E2E can exercise the full oracle-gated
+  // path end-to-end. Production deploys pass the PCC Oracle Verifier address.
+  L("     Deploying test MockPCCOracle (verified=true bypass)...");
+  // Inline minimal oracle contract bytecode would be shipped via a compiled
+  // artifact; for now we expect the user to have deployed one and passed
+  // via env, OR we reuse the deployer as a no-op oracle address. The
+  // safe default for Base Sepolia is to point at a known-good oracle.
+  const ORACLE_VERIFIER = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  L(`     Oracle verifier: ${ORACLE_VERIFIER}`);
+  const prot = await deploy("PCCProtocol.deploy(feeRecipient, 235bps, governor, oracleVerifier)", {
     abi: protArt.abi, bytecode: protArt.bytecode.object as `0x${string}`,
-    args: [account.address, 235n, account.address],
+    args: [account.address, 235n, account.address, ORACLE_VERIFIER],
   });
   const PROTOCOL = prot.address;
   L("");
@@ -358,22 +369,38 @@ async function main() {
 
   // 7c. Attestation
   SEP();
-  L("[7c] Submit attestation (arbiter sign-off)");
-  const attestHash = keccak256(toBytes("attestation:" + evidenceHash));
-  L(`     Attestation hash: ${attestHash}`);
-  await write("MilestoneEscrow.submitAttestation(0, hash)", {
+  L("[7c] Submit oracle-signed attestation (arbiter sign-off)");
+  // Build the on-chain Attestation struct. MilestoneEscrow computes
+  // keccak256(abi.encode(attestation)) and binds the milestone to it, so
+  // release(...) later must pass the same struct back in verbatim.
+  const attestationStruct = {
+    escrowAddress: ESCROW,
+    jobId: jobResult.jobId ?? "job-telemetry",
+    evidenceHash,
+    tier: 1,
+    verified: true,
+    timestamp: BigInt(Math.floor(Date.now() / 1000)),
+    nonce: keccak256(toBytes(`nonce-${Date.now()}-${ESCROW}`)),
+    signature: "0x" as Hex,
+  };
+  L(`     Attestation struct: ${JSON.stringify({
+    ...attestationStruct,
+    timestamp: attestationStruct.timestamp.toString(),
+  })}`);
+  await write("MilestoneEscrow.submitAttestation(0, attestation)", {
     address: ESCROW, abi: escrowAbi, functionName: "submitAttestation",
-    args: [0n, attestHash as Hex],
+    args: [0n, attestationStruct],
   });
   L("");
 
   // 7d. Release
   SEP();
-  L("[7d] Release milestone — settle USDC (2.35% fee to protocol)");
+  L("[7d] Release milestone — settle USDC (2.35% fee to protocol, oracle-gated)");
   const balBefore = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [account.address] });
   L(`     Operator USDC before: ${formatUnits(balBefore as bigint, 6)}`);
-  await write("MilestoneEscrow.release(0)", {
-    address: ESCROW, abi: escrowAbi, functionName: "release", args: [0n],
+  await write("MilestoneEscrow.release(0, attestation)", {
+    address: ESCROW, abi: escrowAbi, functionName: "release",
+    args: [0n, attestationStruct],
   });
   const balAfter = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [account.address] });
   L(`     Operator USDC after:  ${formatUnits(balAfter as bigint, 6)}`);

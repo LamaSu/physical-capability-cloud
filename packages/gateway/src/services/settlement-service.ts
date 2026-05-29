@@ -13,6 +13,7 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import type { Address } from "viem";
+import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 import {
   submitEvidence as onChainSubmitEvidence,
@@ -49,6 +50,12 @@ export interface ProcessEvidenceOptions {
   milestoneIndex?: number;
   contractAddress?: string;
   autoRelease?: boolean; // true = immediately release after submitting evidence (tier 0)
+  /**
+   * Oracle attestation required for on-chain auto-release. Without it,
+   * auto-release is skipped (release still callable manually later once
+   * the attestation is available from the oracle client).
+   */
+  attestation?: OracleAttestation;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +75,7 @@ export class SettlementService {
     jobId: string,
     options: ProcessEvidenceOptions = {},
   ): Promise<SettlementResult> {
-    const { milestoneIndex = 0, contractAddress, autoRelease = false } = options;
+    const { milestoneIndex = 0, contractAddress, autoRelease = false, attestation } = options;
 
     const result: SettlementResult = {
       jobId,
@@ -326,9 +333,14 @@ export class SettlementService {
               },
             },
             async () => {
-              if (autoRelease && isWriteEnabled() && contractAddress) {
+              if (autoRelease && isWriteEnabled() && contractAddress && attestation) {
                 try {
-                  const releaseResult = await this.releaseMilestone(jobId, milestoneIndex, contractAddress);
+                  const releaseResult = await this.releaseMilestone(
+                    jobId,
+                    milestoneIndex,
+                    attestation,
+                    contractAddress,
+                  );
                   if (releaseResult.status === "released") {
                     result.releaseTxHash = releaseResult.txHash;
                     result.settled = true;
@@ -380,10 +392,18 @@ export class SettlementService {
 
   /**
    * Release a milestone's escrow after the challenge window has closed (or immediately for tier 0).
+   *
+   * Requires the oracle-signed Attestation struct that was used in
+   * submitAttestation. PCCProtocol.collectFeeWithAttestation re-runs
+   * IPCCOracle.verifyAttestation on-chain at settlement time, so a bad
+   * attestation fails the release even if the challenge window trivially
+   * expires. Caller is responsible for retaining the attestation returned
+   * by the oracle client between submitAttestation and releaseMilestone.
    */
   async releaseMilestone(
     jobId: string,
     milestoneIndex: number,
+    attestation: OracleAttestation,
     contractAddress?: string,
   ): Promise<ReleaseResult> {
     if (!isWriteEnabled()) {
@@ -411,6 +431,7 @@ export class SettlementService {
     try {
       const writeResult = await onChainReleaseMilestone(
         milestoneIndex,
+        attestation,
         contractAddress as Address,
       );
 

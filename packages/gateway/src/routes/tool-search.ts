@@ -37,12 +37,19 @@ import { existsSync } from "node:fs";
 import { resolve as resolvePath, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  HybridRanker,
   ToolIndex,
+  appendShadowEvent,
+  buildShadowEvent,
+  liftLightweightTools,
   loadAgentPackage,
+  presetNames,
   selectEmbeddingProvider,
   type IndexedTool,
+  type RankerProfile,
   type ToolSource,
 } from "@pcc/tool-index";
+import { isHybridActive, isHybridServed, readRankerMode } from "../ranker-config.js";
 
 // ── Allowlist for /reload ────────────────────────────────────────────────
 
@@ -88,11 +95,20 @@ function requireToolIndexAdmin(
 
 interface IndexState {
   index: ToolIndex;
+  /** Hybrid ranker (initialized lazily when PCC_RANKER_MODE is shadow|hybrid). */
+  hybrid?: HybridRanker;
   lastReload: string; // ISO timestamp
   loadedFromPath: string | null;
 }
 
 let state: IndexState | null = null;
+
+/** Pick a profile from the request body; defaults to agent-default. */
+function pickProfile(raw: unknown): RankerProfile {
+  if (typeof raw !== "string") return "agent-default";
+  const valid = presetNames();
+  return (valid as string[]).includes(raw) ? (raw as RankerProfile) : "agent-default";
+}
 
 /**
  * Locate the agent-package.json file. Honors PCC_AGENT_PACKAGE_PATH, then
@@ -141,29 +157,45 @@ function resolveAgentPackagePath(): string | null {
  */
 function buildIndex(
   logger?: { info?: (msg: string) => void; warn?: (msg: string) => void },
-): { index: ToolIndex; path: string | null; tools: IndexedTool[] } {
+): {
+  index: ToolIndex;
+  hybrid?: HybridRanker;
+  path: string | null;
+  tools: IndexedTool[];
+} {
   const provider = selectEmbeddingProvider(process.env);
   const index = new ToolIndex(provider);
   const path = resolveAgentPackagePath();
+  const mode = readRankerMode();
   let tools: IndexedTool[] = [];
   if (!path) {
     logger?.warn?.(
       "[tool-search] agent-package.json not found at PCC_AGENT_PACKAGE_PATH or canonical locations; index is empty.",
     );
-    return { index, path: null, tools };
+    // Even with no tools, surface the hybrid ranker so /status reports it.
+    const hybrid = isHybridActive(mode) ? new HybridRanker(provider) : undefined;
+    return { index, hybrid, path: null, tools };
   }
   try {
     tools = loadAgentPackage(path);
     index.add(tools);
     logger?.info?.(
-      `[tool-search] indexed ${tools.length} tools from ${path} (provider=${provider.name})`,
+      `[tool-search] indexed ${tools.length} tools from ${path} (provider=${provider.name}, ranker_mode=${mode})`,
     );
   } catch (err) {
     logger?.warn?.(
       `[tool-search] failed to load ${path}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  return { index, path, tools };
+  // Build the hybrid ranker side-by-side when PCC_RANKER_MODE is shadow|hybrid.
+  let hybrid: HybridRanker | undefined;
+  if (isHybridActive(mode)) {
+    hybrid = new HybridRanker(provider);
+    const lifted = liftLightweightTools(tools);
+    // Fire-and-forget — reset is synchronous-effective for the in-memory backend.
+    void hybrid.reset(lifted);
+  }
+  return { index, hybrid, path, tools };
 }
 
 /**
@@ -178,6 +210,7 @@ function getIndex(logger?: {
   const built = buildIndex(logger);
   state = {
     index: built.index,
+    hybrid: built.hybrid,
     lastReload: new Date().toISOString(),
     loadedFromPath: built.path,
   };
@@ -226,6 +259,8 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       query?: unknown;
       topK?: unknown;
       source?: unknown;
+      profile?: unknown;
+      explain?: unknown;
     };
   }>("/api/tools/search", async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -244,15 +279,81 @@ export async function toolSearchRoutes(app: FastifyInstance) {
     const sourceFilter: ToolSourceFilter = isToolSource(body.source)
       ? body.source
       : undefined;
+    const profile = pickProfile(body.profile);
+    const explain = body.explain === true;
 
+    const mode = readRankerMode();
     const st = getIndex({
       info: (m) => app.log.info(m),
       warn: (m) => app.log.warn(m),
     });
-    const hits = await st.index.search(query, {
-      topK,
-      source: sourceFilter,
-    });
+
+    // Legacy ranker (always evaluated for legacy + shadow modes).
+    const legacyHits =
+      mode === "hybrid" && st.hybrid
+        ? null
+        : await st.index.search(query, {
+            topK,
+            source: sourceFilter,
+          });
+
+    // Hybrid ranker (shadow + hybrid modes).
+    let hybridHits = null;
+    if (st.hybrid && isHybridActive(mode)) {
+      hybridHits = await st.hybrid.rank({
+        q: query,
+        topK,
+        profile,
+        explain,
+      });
+    }
+
+    // Shadow telemetry — fire-and-forget JSONL append.
+    if (mode === "shadow" && legacyHits && hybridHits) {
+      const event = buildShadowEvent({
+        query,
+        legacyTop5: legacyHits.slice(0, 5).map((h) => ({
+          id: h.tool.id,
+          score: h.score,
+        })),
+        hybridTop5: hybridHits.slice(0, 5).map((h) => ({
+          id: h.tool.id,
+          score: h.score,
+        })),
+      });
+      void appendShadowEvent(event, {
+        onError: (e) =>
+          app.log.warn(
+            `[tool-search] shadow log append failed: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          ),
+      });
+    }
+
+    // Serve hybrid in hybrid mode, legacy otherwise.
+    if (isHybridServed(mode) && hybridHits) {
+      return reply.send({
+        tools: hybridHits.map((h) => ({
+          id: h.tool.id,
+          name: h.tool.id,
+          description: h.tool.description,
+          source: h.tool.source.type,
+          score: h.score,
+          rank: h.rank,
+          endpoint: null,
+          ...(explain && h.signals ? { signals: h.signals, phase1Score: h.phase1Score } : {}),
+        })),
+        query,
+        topK,
+        source: sourceFilter ?? null,
+        profile,
+        ranker: "hybrid",
+        total: hybridHits.length,
+      });
+    }
+
+    const hits = legacyHits!;
     return reply.send({
       tools: hits.map((h) => ({
         id: h.tool.id,
@@ -265,6 +366,7 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       query,
       topK,
       source: sourceFilter ?? null,
+      ranker: mode === "shadow" ? "legacy-shadow" : "legacy",
       total: hits.length,
     });
   });
@@ -275,11 +377,17 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       info: (m) => app.log.info(m),
       warn: (m) => app.log.warn(m),
     });
+    const mode = readRankerMode();
     return reply.send({
       indexed: st.index.size(),
       providers: {
         embedding: st.index.providerName,
         dim: st.index.dim,
+      },
+      ranker: {
+        mode,
+        hybridIndexed: st.hybrid?.size() ?? 0,
+        profiles: presetNames(),
       },
       lastReload: st.lastReload,
       loadedFromPath: st.loadedFromPath,
@@ -296,6 +404,7 @@ export async function toolSearchRoutes(app: FastifyInstance) {
     });
     state = {
       index: built.index,
+      hybrid: built.hybrid,
       lastReload: new Date().toISOString(),
       loadedFromPath: built.path,
     };
@@ -305,6 +414,11 @@ export async function toolSearchRoutes(app: FastifyInstance) {
       providers: {
         embedding: state.index.providerName,
         dim: state.index.dim,
+      },
+      ranker: {
+        mode: readRankerMode(),
+        hybridIndexed: state.hybrid?.size() ?? 0,
+        profiles: presetNames(),
       },
       lastReload: state.lastReload,
       loadedFromPath: state.loadedFromPath,

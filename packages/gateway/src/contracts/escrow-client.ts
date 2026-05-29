@@ -42,6 +42,7 @@ import {
   milestoneStatusName,
   getDeployment,
   getContractAddress,
+  type OracleAttestation,
 } from "@pcc/contracts";
 
 // ---------------------------------------------------------------------------
@@ -378,22 +379,32 @@ export async function approveToken(
 
 /**
  * Release funds for a milestone after the challenge window has expired.
- * Anyone can call this — the contract enforces that the challenge window is closed.
+ *
+ * Requires the SAME oracle attestation that was submitted via
+ * submitAttestation. The contract recomputes
+ * keccak256(abi.encode(attestation)) and rejects release if it doesn't
+ * match the stored hash. When a protocol root is configured, the
+ * attestation is also re-verified on-chain at settlement time.
  */
 export async function releaseMilestone(
   milestoneIndex: number,
+  attestation: OracleAttestation,
   contractAddress?: Address,
 ): Promise<WriteResult> {
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
+  // viem encodes the attestation struct from the OracleAttestation object
+  // (fields map to the tuple components named in the ABI). The contract
+  // binds release to keccak256(abi.encode(attestation)), so the SAME struct
+  // that was submitted via submitAttestation must be passed here.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "release",
-    args: [BigInt(milestoneIndex)],
+    args: [BigInt(milestoneIndex), attestation],
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -480,24 +491,34 @@ export async function submitEvidence(
 }
 
 /**
- * Submit verifier attestation hash for a milestone.
- * Opens the challenge window.
+ * Submit an oracle-signed attestation for a milestone.
+ * Opens the challenge window. When a protocol root is configured, the
+ * attestation is re-verified on-chain by the oracle verifier before the
+ * challenge window opens; invalid attestations fail closed.
+ *
+ * The caller must retain the exact same attestation struct to pass back
+ * into releaseMilestone when settling — the stored hash is
+ * keccak256(abi.encode(attestation)).
  */
 export async function submitAttestation(
   milestoneIndex: number,
-  attestationHash: `0x${string}`,
+  attestation: OracleAttestation,
   contractAddress?: Address,
 ): Promise<WriteResult> {
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
+  // viem encodes the attestation struct from the OracleAttestation object.
+  // The contract stores keccak256(abi.encode(attestation)) and release()
+  // will require the exact same struct, so the struct shape must be
+  // deterministic across submit + release.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "submitAttestation",
-    args: [BigInt(milestoneIndex), attestationHash],
+    args: [BigInt(milestoneIndex), attestation],
   });
 
   return { transactionHash: hash, status: "submitted" };
