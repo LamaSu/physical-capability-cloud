@@ -140,14 +140,27 @@ const HumanAttestationSchema = z.object({
 });
 
 // Logical composition — recursive via z.lazy
-type VerificationRuleInput = z.input<typeof VerificationRuleSchema>;
-type VerificationRuleOutput = z.output<typeof VerificationRuleSchema>;
+// Manual type declaration breaks the circular reference between the type and
+// the schema (TS2456: VerificationRuleOutput circularly references itself).
+type LeafRule =
+  | z.infer<typeof EventPresenceSchema>
+  | z.infer<typeof FieldThresholdSchema>
+  | z.infer<typeof AggregateThresholdSchema>
+  | z.infer<typeof EventSequenceSchema>
+  | z.infer<typeof GeofenceSchema>
+  | z.infer<typeof TraceCoverageSchema>
+  | z.infer<typeof RegistryMembershipSchema>
+  | z.infer<typeof PhotoAuthenticSchema>
+  | z.infer<typeof WorkProductRequiredSchema>
+  | z.infer<typeof HumanAttestationSchema>;
 
-export const VerificationRuleSchema: z.ZodType<
-  VerificationRuleOutput,
-  z.ZodTypeDef,
-  VerificationRuleInput
-> = z.lazy(() =>
+export type VerificationRule =
+  | LeafRule
+  | { kind: "and"; children: VerificationRule[] }
+  | { kind: "or"; children: VerificationRule[] }
+  | { kind: "not"; child: VerificationRule };
+
+export const VerificationRuleSchema: z.ZodType<VerificationRule> = z.lazy(() =>
   z.discriminatedUnion("kind", [
     EventPresenceSchema,
     FieldThresholdSchema,
@@ -173,7 +186,6 @@ export const VerificationRuleSchema: z.ZodType<
     }),
   ]),
 );
-export type VerificationRule = VerificationRuleOutput;
 
 // ---------------------------------------------------------------------------
 // Stage

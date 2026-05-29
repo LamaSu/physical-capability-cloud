@@ -182,7 +182,13 @@ function stripCounterpartySignature(
   if (product.kind !== "bilateral") {
     return product.details as Record<string, unknown>;
   }
-  const { counterpartySignature: _omit, ...rest } = product.details;
+  // TS doesn't narrow Omit<WorkProduct, ...> to BilateralWorkProduct here
+  // because the discriminant narrowing only fires on the WorkProduct branch
+  // of the input union. Cast explicitly.
+  const details = product.details as z.infer<
+    typeof BilateralWorkProductSchema
+  >["details"];
+  const { counterpartySignature: _omit, ...rest } = details;
   return rest;
 }
 
