@@ -57,6 +57,18 @@ export type ContributorRole =
   | "protocol-author"
   | "model-author"
   | "dataset-contributor"
+  /**
+   * Vendor backend author. Earns when a PCC job runs through a vendor
+   * backend module (e.g., pylabrobot.liquid_handling.backends.hamilton.STAR
+   * or venus.devices.STARlet) that they've registered with a vendor-specific
+   * on-chain BackendAuthorRegistry instance. Distinct from `integrator`
+   * (PCC adapter author) — backend-author is the upstream OSS driver author
+   * one layer below the adapter.
+   * Added by ADR-PLR-1 (2026-05-25), generalized by PR #55 refactor
+   * (2026-05-26) so any vendor (PyLabRobot, Hamilton, Trilobio, future)
+   * deploys their own registry instance with their own namespace.
+   */
+  | "backend-author"
   // Coordination (unchanged from legacy enum)
   | "curator"
   | "assembler"

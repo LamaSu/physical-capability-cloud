@@ -58,8 +58,22 @@ export {
   createSensorAdapter,
   createCameraAdapter,
   createAdaptersFromConfig,
+  registerMachineAdapter,
+  registerSensorAdapter,
+  registerCameraAdapter,
+  unregisterMachineAdapter,
+  unregisterSensorAdapter,
+  unregisterCameraAdapter,
+  listRegisteredMachineAdapters,
+  listRegisteredSensorAdapters,
+  listRegisteredCameraAdapters,
 } from "./adapter-factory.js";
-export type { AdapterSet } from "./adapter-factory.js";
+export type {
+  AdapterSet,
+  MachineAdapterFactory,
+  SensorAdapterFactory,
+  CameraAdapterFactory,
+} from "./adapter-factory.js";
 export { JobRunner } from "./job-runner.js";
 export type { JobConfig, JobResult } from "./job-runner.js";
 export { buildServer } from "./server.js";

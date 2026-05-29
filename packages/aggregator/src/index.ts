@@ -36,8 +36,14 @@ export type {
   PipelineRunResult,
   PipelineStage,
   PipelineStageReport,
+  Publisher,
+  PublisherInput,
+  PublishResult,
+  CosignSpawn,
+  CosignInput,
 } from "./types.js";
 export * from "./sources/index.js";
+export * from "./publishers/index.js";
 export { signReceipt, verifyReceiptSignature } from "./receipt-signer.js";
 export type { ReceiptSignerKey } from "./receipt-signer.js";
 export {
