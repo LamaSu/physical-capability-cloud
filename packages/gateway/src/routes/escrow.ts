@@ -4,8 +4,27 @@ import { isAddress, type Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
+import {
+  fundEscrowActivity,
+  releaseMilestoneActivity,
+  fileDisputeActivity,
+  depositBondActivity,
+  submitEvidenceActivity,
+  FacadeError,
+} from "../activities/escrow.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
+
+function sendActivityError(reply: FastifyReply, error: Error): unknown {
+  if (error instanceof FacadeError) {
+    return reply.status(error.httpStatus).send({
+      error: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    });
+  }
+  return reply.status(502).send({ error: error.message });
+}
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -161,14 +180,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!isAddress(address)) {
         return reply.status(400).send({ error: "Invalid address" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.fundEscrow(
-        address as Address,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await fundEscrowActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `fund:${address}`,
+        input: [address as Address, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/fund`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -244,16 +269,27 @@ export async function escrowRoutes(app: FastifyInstance) {
             "An oracle-signed attestation struct is required in the request body.",
         });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.releaseMilestone(
-        address as Address,
-        idx,
-        body.attestation,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await releaseMilestoneActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `release:${address}:${idx}`,
+        input: [
+          address as Address,
+          idx,
+          body.attestation,
+          actorId,
+          req.ip,
+          req.headers["user-agent"],
+        ] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/release/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -275,16 +311,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.fileDispute(
-        address as Address,
-        idx,
-        req.body,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await fileDisputeActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `dispute:${address}:${idx}`,
+        input: [address as Address, idx, req.body, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/dispute/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -303,15 +343,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.depositBond(
-        address as Address,
-        idx,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await depositBondActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `depositBond:${address}:${idx}`,
+        input: [address as Address, idx, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/deposit-bond/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -337,16 +382,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.submitEvidenceHash(
-        address as Address,
-        idx,
-        body.evidenceBundleHash,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await submitEvidenceActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `submitEvidence:${address}:${idx}`,
+        input: [address as Address, idx, body.evidenceBundleHash, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/evidence/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
