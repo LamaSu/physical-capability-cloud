@@ -1,18 +1,24 @@
 /**
  * @pcc/kernel-automata-linq — Automata LINQ → PCC kernel binding.
  *
- * ENTERPRISE GATED. The LINQ REST surface is documented at a conceptual
- * level (docs.automata.tech) but the authoritative endpoint paths +
- * auth scheme require a LINQ Cloud account. Paths in this module follow
- * SaaS-CRUD conventions; verify before production.
+ * ENTERPRISE GATED. LINQ Cloud configuration values (`api_domain`,
+ * `auth0_domain`, `client_id`) are provided only by an Automata
+ * Customer Success Manager. The method surface here mirrors the
+ * documented Python SDK (`linq.client.Linq`) verb methods.
  *
  * Public surface:
- *   LinqClient                       — REST client (auth: Bearer API key)
+ *   LinqClient                       — Auth0 client-credentials client
  *   linqWorkflowToMadsci(wf)         — LINQ → MADSci (one-way collapse)
  *   madsciWorkflowToLinq(wf, wc)     — MADSci → LINQ (round-trip)
  *   buildLinqKernelManifest(opts)    — DigitalKernelManifest for PCC
  *   forwardJobToLinq(client, job)    — PCC job → LINQ run
  *   exportLinqWorkflowsAsMadsci(...) — bulk LINQ → MADSci dump
+ *   RunStateChangeHook,
+ *   TaskStateChangeHook,
+ *   SafetyStateChangeHook,
+ *   LabwareMovementHook,
+ *   NewPlanHook,
+ *   parseHook(event, payload)        — typed webhook dispatch
  */
 
 export { LinqClient, LinqAuthError } from "./client.js";
@@ -40,15 +46,33 @@ export type {
   LinqLabware,
   LinqRun,
 } from "./types.js";
+export {
+  RunStateChangeHook,
+  TaskStateChangeHook,
+  SafetyStateChangeHook,
+  LabwareMovementHook,
+  NewPlanHook,
+  RunStateChangeHookSchema,
+  TaskStateChangeHookSchema,
+  SafetyStateChangeHookSchema,
+  LabwareMovementHookSchema,
+  NewPlanHookSchema,
+  parseHook,
+} from "./hooks.js";
+export type { LinqHook, LinqHookEventType } from "./hooks.js";
 
 /**
- * Status of this package's coupling to the upstream LINQ API.
- * Update once a sandbox account is obtained and live shapes are verified.
+ * Status of this package's coupling to the upstream LINQ API. Verified
+ * against the Automata dossier (2026-05-28) — auth + method surface
+ * now match the documented Python SDK contract. REST paths underneath
+ * the verb methods remain unverified against a live sandbox.
  */
 export const LINQ_COUPLING_STATUS = {
-  resourceModel: "documented",
-  endpointPaths: "best-guess (SaaS-CRUD convention)",
-  authScheme: "assumed Bearer API key",
+  resourceModel: "verified-against-dossier",
+  methodSurface: "verified-against-dossier (snake_case verb methods)",
+  endpointPaths: "unverified (REST layer not authoritative; SDK is the contract)",
+  authScheme: "verified-against-dossier (Auth0 client-credentials)",
+  webhookSurface: "verified-against-dossier (5 per-Workflow Hook classes)",
   sandboxAccess: "needs enterprise contact",
-  contact: "support@automata.tech",
+  contact: "hello@automata.tech",
 } as const;
