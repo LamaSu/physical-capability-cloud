@@ -174,19 +174,6 @@ importers:
         specifier: ^8.19.0
         version: 8.19.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
 
-  packages/a2a-signing:
-    dependencies:
-      canonicalize:
-        specifier: ^2.0.0
-        version: 2.1.0
-      jose:
-        specifier: ^5.6.0
-        version: 5.10.0
-    devDependencies:
-      vitest:
-        specifier: ^1.6.0
-        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
   packages/agent-broker:
     dependencies:
       '@pcc/a2a':
@@ -292,9 +279,6 @@ importers:
       '@pcc/a2a':
         specifier: workspace:*
         version: link:../a2a
-      '@pcc/contracts':
-        specifier: workspace:*
-        version: link:../contracts
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
@@ -370,9 +354,6 @@ importers:
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
-      '@pcc/tool-index':
-        specifier: workspace:*
-        version: link:../tool-index
       '@pcc/verifier':
         specifier: workspace:*
         version: link:../verifier
@@ -386,22 +367,6 @@ importers:
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
-  packages/attestations:
-    dependencies:
-      viem:
-        specifier: ^2.21.0
-        version: 2.46.3(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@3.25.76)
-      zod:
-        specifier: ^3.23.0
-        version: 3.25.76
-    devDependencies:
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.4(@types/node@20.19.35)(jiti@2.6.1)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
   packages/bundler:
     dependencies:
@@ -579,9 +544,6 @@ importers:
       '@pcc/a2a':
         specifier: workspace:*
         version: link:../a2a
-      '@pcc/dht-core':
-        specifier: workspace:*
-        version: link:../dht-core
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec
@@ -592,25 +554,6 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
-      vitest:
-        specifier: ^1.6.0
-        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
-  packages/dht-core:
-    dependencies:
-      '@pcc/spec':
-        specifier: workspace:*
-        version: link:../spec
-      ws:
-        specifier: ^8.19.0
-        version: 8.19.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
-    devDependencies:
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
@@ -621,22 +564,6 @@ importers:
         specifier: ^3.23.0
         version: 3.25.76
     devDependencies:
-      vitest:
-        specifier: ^1.6.0
-        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
-  packages/federation:
-    dependencies:
-      '@pcc/dht-core':
-        specifier: workspace:*
-        version: link:../dht-core
-      '@pcc/spec':
-        specifier: workspace:*
-        version: link:../spec
-    devDependencies:
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
@@ -688,9 +615,6 @@ importers:
       '@pcc/a2a':
         specifier: workspace:*
         version: link:../a2a
-      '@pcc/a2a-signing':
-        specifier: workspace:*
-        version: link:../a2a-signing
       '@pcc/agent-broker':
         specifier: workspace:*
         version: link:../agent-broker
@@ -760,6 +684,9 @@ importers:
       '@pcc/verifier':
         specifier: workspace:*
         version: link:../verifier
+      '@pcc/workflow':
+        specifier: workspace:*
+        version: link:../workflow
       '@sentry/node':
         specifier: ^10.45.0
         version: 10.45.0
@@ -785,9 +712,6 @@ importers:
       '@types/uuid':
         specifier: ^9.0.0
         version: 9.0.8
-      jose:
-        specifier: ^5.6.0
-        version: 5.10.0
       tsx:
         specifier: ^4.11.0
         version: 4.21.0
@@ -797,22 +721,6 @@ importers:
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
-  packages/identity:
-    dependencies:
-      viem:
-        specifier: ^2.21.0
-        version: 2.46.3(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)(zod@3.25.76)
-      zod:
-        specifier: ^3.23.0
-        version: 3.25.76
-    devDependencies:
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.4(@types/node@20.19.35)(jiti@2.6.1)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
   packages/identity-8004:
     dependencies:
@@ -1139,12 +1047,6 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
 
-  packages/trilobio:
-    devDependencies:
-      vitest:
-        specifier: ^1.6.0
-        version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
-
   packages/ui:
     dependencies:
       '@contentauth/c2pa-web':
@@ -1242,6 +1144,34 @@ importers:
       vitest:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@20.19.35)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
+  packages/workflow:
+    dependencies:
+      '@pcc/spec':
+        specifier: workspace:*
+        version: link:../spec
+      better-sqlite3:
+        specifier: ^11.8.1
+        version: 11.10.0
+      yaml:
+        specifier: ^2.6.0
+        version: 2.8.2
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.1
+        version: 1.6.1(@types/node@22.19.19)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
 
 packages:
 
@@ -3903,6 +3833,9 @@ packages:
   '@types/node@20.19.35':
     resolution: {integrity: sha512-Uarfe6J91b9HAUXxjvSOdiO2UPOKLm07Q1oh0JHxoZ1y8HoqxDAu3gVrsrOHeiio0kSsoVBt4wFrKOm0dKxVPQ==}
 
+  '@types/node@22.19.19':
+    resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
+
   '@types/pg-pool@2.0.7':
     resolution: {integrity: sha512-U4CwmGVQcbEuqpyju8/ptOKg6gEC+Tqsvj2xS9o1g71bUh8twxnC6ZL5rZKCsGN0iyH0CwgUyc9VR5owNQF9Ng==}
 
@@ -4628,10 +4561,6 @@ packages:
 
   caniuse-lite@1.0.30001776:
     resolution: {integrity: sha512-sg01JDPzZ9jGshqKSckOQthXnYwOEP50jeVFhaSFbZcOy05TiuuaffDOfcwtCisJ9kNQuLBFibYywv2Bgm9osw==}
-
-  canonicalize@2.1.0:
-    resolution: {integrity: sha512-F705O3xrsUtgt98j7leetNhTWPe+5S72rlL5O4jA1pKqBVQ/dT1O1D6PFxmSXvc0SUOinWS57DKx0I3CHrXJHQ==}
-    hasBin: true
 
   cardinal@2.1.1:
     resolution: {integrity: sha512-JSr5eOgoEymtYHBjNWyjrMqet9Am2miJhlfKNdqLp6zoeAh0KN5dRAcxlecj5mAJrmQomgiOBj35xHLrFjqBpw==}
@@ -6153,9 +6082,6 @@ packages:
   jiti@2.6.1:
     resolution: {integrity: sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ==}
     hasBin: true
-
-  jose@5.10.0:
-    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   jose@6.2.1:
     resolution: {integrity: sha512-jUaKr1yrbfaImV7R2TN/b3IcZzsw38/chqMpo2XJ7i2F8AfM/lA4G1goC3JVEwg0H7UldTmSt3P68nt31W7/mw==}
@@ -12488,6 +12414,10 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/node@22.19.19':
+    dependencies:
+      undici-types: 6.21.0
+
   '@types/pg-pool@2.0.7':
     dependencies:
       '@types/pg': 8.15.6
@@ -13665,8 +13595,6 @@ snapshots:
   camelcase@6.3.0: {}
 
   caniuse-lite@1.0.30001776: {}
-
-  canonicalize@2.1.0: {}
 
   cardinal@2.1.1:
     dependencies:
@@ -15369,8 +15297,6 @@ snapshots:
       supports-color: 8.1.1
 
   jiti@2.6.1: {}
-
-  jose@5.10.0: {}
 
   jose@6.2.1: {}
 
@@ -17658,6 +17584,24 @@ snapshots:
       - supports-color
       - terser
 
+  vite-node@1.6.1(@types/node@22.19.19)(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      cac: 6.7.14
+      debug: 4.4.3
+      pathe: 1.1.2
+      picocolors: 1.1.1
+      vite: 5.4.21(@types/node@22.19.19)(lightningcss@1.31.1)(terser@5.46.0)
+    transitivePeerDependencies:
+      - '@types/node'
+      - less
+      - lightningcss
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - supports-color
+      - terser
+
   vite-node@3.2.4(@types/node@20.19.35)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2):
     dependencies:
       cac: 6.7.14
@@ -17686,6 +17630,17 @@ snapshots:
       rollup: 4.59.0
     optionalDependencies:
       '@types/node': 20.19.35
+      fsevents: 2.3.3
+      lightningcss: 1.31.1
+      terser: 5.46.0
+
+  vite@5.4.21(@types/node@22.19.19)(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      esbuild: 0.27.3
+      postcss: 8.5.8
+      rollup: 4.59.0
+    optionalDependencies:
+      '@types/node': 22.19.19
       fsevents: 2.3.3
       lightningcss: 1.31.1
       terser: 5.46.0
@@ -17731,6 +17686,41 @@ snapshots:
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 20.19.35
+      jsdom: 24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+    transitivePeerDependencies:
+      - less
+      - lightningcss
+      - sass
+      - sass-embedded
+      - stylus
+      - sugarss
+      - supports-color
+      - terser
+
+  vitest@1.6.1(@types/node@22.19.19)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0):
+    dependencies:
+      '@vitest/expect': 1.6.1
+      '@vitest/runner': 1.6.1
+      '@vitest/snapshot': 1.6.1
+      '@vitest/spy': 1.6.1
+      '@vitest/utils': 1.6.1
+      acorn-walk: 8.3.5
+      chai: 4.5.0
+      debug: 4.4.3
+      execa: 8.0.1
+      local-pkg: 0.5.1
+      magic-string: 0.30.21
+      pathe: 1.1.2
+      picocolors: 1.1.1
+      std-env: 3.10.0
+      strip-literal: 2.1.1
+      tinybench: 2.9.0
+      tinypool: 0.8.4
+      vite: 5.4.21(@types/node@22.19.19)(lightningcss@1.31.1)(terser@5.46.0)
+      vite-node: 1.6.1(@types/node@22.19.19)(lightningcss@1.31.1)(terser@5.46.0)
+      why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@types/node': 22.19.19
       jsdom: 24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6)
     transitivePeerDependencies:
       - less
