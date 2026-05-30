@@ -809,14 +809,22 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           const hexPart = bundleHash.startsWith("sha256:") ? bundleHash.slice(7) : bundleHash;
           const evidenceBundleHash = (hexPart.startsWith("0x") ? hexPart : `0x${hexPart}`) as `0x${string}`;
           const kernelIdBytes = keccak256(toBytes(job.kernelId));
+          // SECURITY (review C2b): bind the attestation to THIS milestone via stepId.
+          // Canonical derivation — keccak256(toBytes(stepIdString)) — is byte-identical to
+          // Solidity keccak256(bytes(stepIdString)). This MUST equal the milestone's on-chain
+          // m.stepId; when on-chain addMilestone is wired, set _stepId = keccak256(toBytes(job.stepId))
+          // with the SAME string so the escrow's require(stepId == m.stepId) holds.
+          const stepIdBytes = keccak256(toBytes(job.stepId));
 
-          // 1) oracle makes the on-chain EAS attestation, returns the UID
+          // 1) oracle makes the on-chain EAS attestation, returns the UID.
+          //    recipient = the ESCROW address (review C2a) — NOT the gateway account.
           const { uid } = await attestEvidenceOnChain({
             jobId,
             kernelId: kernelIdBytes,
             evidenceBundleHash,
             ipfsCid: ipfsCid ?? "",
             assuranceTier: oracleResponse.result.tier,
+            stepId: stepIdBytes,
             recipient: (escrowAddress as `0x${string}`),
           });
           easAttestationUid = uid;

@@ -148,7 +148,7 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
  * Any drift here poisons every downstream `submitAttestation` check.
  */
 export const PCC_EVIDENCE_SCHEMA_STRING =
-  "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified";
+  "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId";
 
 export interface AttestEvidenceInput {
   /** PCC job id (matches the escrow's milestone jobIdHash lineage). */
@@ -161,7 +161,20 @@ export interface AttestEvidenceInput {
   ipfsCid: string;
   /** 0-3 tier actually achieved (must be >= milestone requiredTier). */
   assuranceTier: number;
-  /** Attestation recipient (the operator/payee address). */
+  /**
+   * Per-milestone stepId as bytes32 (security review C2b). MUST equal the milestone's on-chain
+   * `m.stepId`. Canonical derivation from the string stepId: `keccak256(toBytes(stepIdString))`
+   * (viem) — identical to Solidity `keccak256(bytes(stepIdString))`. The on-chain
+   * `require(stepId == m.stepId)` fails on any mismatch, so the producer here and whatever sets
+   * `m.stepId` at milestone creation MUST use this exact derivation.
+   */
+  stepId: `0x${string}`;
+  /**
+   * Attestation recipient. SECURITY (review C2a): this MUST be the ESCROW contract address,
+   * NOT the operator/gateway account. MilestoneEscrowV2.submitAttestation requires
+   * `a.recipient == address(this)`, binding the attestation to this specific escrow and
+   * blocking cross-escrow replay.
+   */
   recipient: `0x${string}`;
 }
 
@@ -170,6 +183,10 @@ export interface AttestEvidenceInput {
  * its UID. The gateway signer (== the oracle, == MilestoneEscrowV2.authorizedOracle)
  * pays gas and attests. MilestoneEscrowV2.submitAttestation(milestoneIndex, uid)
  * then reads `IEAS.getAttestation(uid)` and validates provenance + payload.
+ *
+ * The caller MUST pass `recipient = escrowAddress` and a `stepId` matching the milestone's
+ * on-chain `m.stepId` (security review C2a/C2b) — the escrow rejects any attestation whose
+ * recipient is not itself or whose stepId does not match.
  *
  * Requires env: PCC_RPC_URL, PCC_GATEWAY_PRIVATE_KEY, PCC_EVIDENCE_SCHEMA_UID.
  * Gated by the caller behind `!isMockSettlement() && isWriteEnabled()`.
@@ -197,6 +214,7 @@ export async function attestEvidenceOnChain(
     { name: "ipfsCid", value: input.ipfsCid, type: "string" },
     { name: "assuranceTier", value: input.assuranceTier, type: "uint8" },
     { name: "oracleVerified", value: true, type: "bool" },
+    { name: "stepId", value: input.stepId, type: "bytes32" },
   ]);
 
   const tx = await eas.attest({
