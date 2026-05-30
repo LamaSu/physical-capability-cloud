@@ -9,6 +9,24 @@ import type { Address, Chain } from "viem";
 import { defineChain } from "viem";
 import { baseSepolia, base, localhost, sepolia } from "viem/chains";
 
+// ── Ethereum Attestation Service (EAS) addresses ──────────────────────────────
+
+/**
+ * EAS contract — Base Sepolia (84532) + OP-Stack predeploy. Threaded into
+ * MilestoneEscrowV2 as the `eas` immutable.
+ * WARNING: Base MAINNET (8453) EAS is NOT this predeploy address — verify against
+ * eas-contracts deployments/ before any mainnet use.
+ */
+export const EAS_ADDRESS = "0x4200000000000000000000000000000000000021" as const;
+
+/**
+ * EAS SchemaRegistry — Base Sepolia (84532) + OP-Stack predeploy. Used by
+ * RegisterEASSchema.s.sol to register the `pcc.evidence.v1` schema (gate G1).
+ * WARNING: Base MAINNET (8453) EAS is NOT this predeploy address — verify against
+ * eas-contracts deployments/ before any mainnet use.
+ */
+export const EAS_SCHEMA_REGISTRY = "0x4200000000000000000000000000000000000020" as const;
+
 // ── Story Protocol chains ─────────────────────────────────────────────────────
 
 /** Story Network Mainnet (chain 1514) */
@@ -60,8 +78,22 @@ export const flowEVMTestnet = defineChain({
 export interface ChainDeployment {
   chain: Chain;
   rpcUrl?: string;
+  /**
+   * EAS `pcc.evidence.v1` schema UID for this network. Undefined until the schema
+   * is registered on-chain (migration gate G1). keccak256(abi.encodePacked(schemaString,
+   * address(0), true)) — the SAME UID resolves on Base Sepolia and Base mainnet only if
+   * the exact same (string, resolver, revocable) triple is used. Threaded into
+   * MilestoneEscrowV2 as the PCC_EVIDENCE_SCHEMA_UID immutable.
+   */
+  pccEvidenceSchemaUid?: `0x${string}`;
   contracts: {
     milestoneEscrowFactory?: Address;
+    /**
+     * PCCProtocolV2 factory — deploys EAS-gated MilestoneEscrowV2 instances.
+     * Undefined until the V2 factory is deployed (migration gate G3). Address must be
+     * hand-added here after `forge script DeployProtocolV2.s.sol` (no automated ingestion).
+     */
+    milestoneEscrowFactoryV2?: Address;
     mockUSDC?: Address;
     /** Real USDC on base-sepolia (Circle-deployed) */
     usdc?: Address;

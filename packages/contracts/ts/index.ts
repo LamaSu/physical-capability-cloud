@@ -3,6 +3,9 @@ export {
   MilestoneEscrowABI,
   MilestoneStatus,
   milestoneStatusName,
+  MilestoneEscrowV2ABI,
+  MilestoneStatusV2,
+  milestoneStatusV2Name,
   MockUSDCABI,
   PCCForwarderABI,
   IdentityRegistryABI,
@@ -21,13 +24,15 @@ export {
   RateScheduleRegistryABI,
   ContributorNFTABI,
 } from "./abi/index.js";
-export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
+export type { MilestoneStatusName, MilestoneStatusV2Name, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
 // Chain config
 export {
   deployments,
   getDeployment,
   getContractAddress,
+  EAS_ADDRESS,
+  EAS_SCHEMA_REGISTRY,
 } from "./chain-config.js";
 export type { ChainDeployment } from "./chain-config.js";
 
