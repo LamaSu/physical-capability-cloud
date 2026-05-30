@@ -5,7 +5,7 @@
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const PRINTER_IP = "192.168.108.60";
+const PRINTER_IP = process.env.PRINTER_IP ?? "127.0.0.1";
 const REPORT = "C:\\tmp\\pcc-e2e-report.txt";
 
 // Read the report

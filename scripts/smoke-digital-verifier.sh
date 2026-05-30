@@ -16,7 +16,7 @@ REPO="global-mysterysnailrevolution/physical-capability-cloud"
 BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
-ORACLE_DIRECT="http://192.168.108.72:4100"
+ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
 ORACLE_KEY="pcc_oracle_024094b05dbf797b202f23798cd54d2519c264abd727c830c8f1fc75fad911aa"
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
 
