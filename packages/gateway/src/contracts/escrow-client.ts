@@ -37,6 +37,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import {
   MilestoneEscrowABI,
+  MilestoneEscrowV2ABI,
   MockUSDCABI,
   MilestoneStatus,
   milestoneStatusName,
@@ -498,6 +499,35 @@ export async function submitAttestation(
     abi: MilestoneEscrowABI,
     functionName: "submitAttestation",
     args: [BigInt(milestoneIndex), attestationHash],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Submit an EAS attestation UID for a milestone on a MilestoneEscrowV2 contract.
+ * Opens the challenge window. (implementer-bravo, eas-migration-design §4.2.)
+ *
+ * The wire signature is identical to V1 `submitAttestation(uint256,bytes32)`,
+ * but this binds to MilestoneEscrowV2ABI and the bytes32 is the EAS attestation
+ * UID — the contract reads `IEAS.getAttestation(easUid)` and validates the
+ * oracle's provenance + payload on-chain before opening the window.
+ */
+export async function submitAttestationV2(
+  milestoneIndex: number,
+  easUid: `0x${string}`,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "submitAttestation",
+    args: [BigInt(milestoneIndex), easUid],
   });
 
   return { transactionHash: hash, status: "submitted" };
