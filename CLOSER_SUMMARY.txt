@@ -1,0 +1,4 @@
+BRANCH: fix/lab-automation-trio-unified
+HEAD:   ab98e1c verify(trio): build 4/4 | test 4/4
+BUILD:  4/4
+TEST:   4/4

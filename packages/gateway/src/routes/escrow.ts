@@ -1,10 +1,30 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { isAddress, type Address } from "viem";
+import type { OracleAttestation } from "@pcc/contracts";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
+import {
+  fundEscrowActivity,
+  releaseMilestoneActivity,
+  fileDisputeActivity,
+  depositBondActivity,
+  submitEvidenceActivity,
+  FacadeError,
+} from "../activities/escrow.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
+
+function sendActivityError(reply: FastifyReply, error: Error): unknown {
+  if (error instanceof FacadeError) {
+    return reply.status(error.httpStatus).send({
+      error: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    });
+  }
+  return reply.status(502).send({ error: error.message });
+}
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -160,14 +180,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!isAddress(address)) {
         return reply.status(400).send({ error: "Invalid address" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.fundEscrow(
-        address as Address,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await fundEscrowActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `fund:${address}`,
+        input: [address as Address, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/fund`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -189,6 +215,24 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.amount) {
         return reply.status(400).send({ error: "amount is required" });
       }
+
+      // Bound approval to MAX_ESCROW_AMOUNT (default 1M USDC, 6 decimals)
+      const maxEscrowAmount = BigInt(
+        Math.floor(parseFloat(process.env.MAX_ESCROW_AMOUNT ?? "1000000") * 1_000_000),
+      );
+      let amountUnits: bigint;
+      try {
+        amountUnits = BigInt(Math.floor(parseFloat(body.amount) * 1_000_000));
+      } catch {
+        return reply.status(400).send({ error: "invalid_amount", message: "amount must be numeric" });
+      }
+      if (amountUnits <= 0n || amountUnits > maxEscrowAmount) {
+        return reply.status(400).send({
+          error: "amount_out_of_bounds",
+          message: `Amount must be between 0 and ${process.env.MAX_ESCROW_AMOUNT ?? "1000000"} USDC`,
+        });
+      }
+
       const tokenAddr =
         body.tokenAddress && isAddress(body.tokenAddress)
           ? (body.tokenAddress as Address)
@@ -200,9 +244,13 @@ export async function escrowRoutes(app: FastifyInstance) {
 
   /**
    * Release a milestone (challenge window must have expired).
-   * Returns 503 if write is disabled.
+   * Requires the same oracle-signed attestation struct used in
+   * submitAttestation. Returns 503 if write is disabled.
    */
-  app.post<{ Params: { address: string; milestoneIndex: string } }>(
+  app.post<{
+    Params: { address: string; milestoneIndex: string };
+    Body: { attestation: OracleAttestation };
+  }>(
     "/api/escrow/chain/:address/release/:milestoneIndex",
     async (req, reply) => {
       const { address, milestoneIndex } = req.params;
@@ -213,15 +261,35 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.releaseMilestone(
-        address as Address,
-        idx,
+      const body = req.body as { attestation?: OracleAttestation } | undefined;
+      if (!body?.attestation || !body.attestation.escrowAddress) {
+        return reply.status(400).send({
+          error: "attestation_required",
+          message:
+            "An oracle-signed attestation struct is required in the request body.",
+        });
+      }
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await releaseMilestoneActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `release:${address}:${idx}`,
+        input: [
+          address as Address,
+          idx,
+          body.attestation,
+          actorId,
+          req.ip,
+          req.headers["user-agent"],
+        ] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/release/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -243,16 +311,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.fileDispute(
-        address as Address,
-        idx,
-        req.body,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await fileDisputeActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `dispute:${address}:${idx}`,
+        input: [address as Address, idx, req.body, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/dispute/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -271,15 +343,20 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.depositBond(
-        address as Address,
-        idx,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await depositBondActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `depositBond:${address}:${idx}`,
+        input: [address as Address, idx, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/deposit-bond/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
@@ -305,26 +382,32 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
-      const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
-      const result = await facade.submitEvidenceHash(
-        address as Address,
-        idx,
-        body.evidenceBundleHash,
+      const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
+      const activityResult = await submitEvidenceActivity.invoke({
+        workflowRunId: `escrow:${address}`,
+        activityId: `submitEvidence:${address}:${idx}`,
+        input: [address as Address, idx, body.evidenceBundleHash, actorId, req.ip, req.headers["user-agent"]] as const,
         actorId,
-        req.ip,
-        req.headers["user-agent"],
-      );
-      return sendResult(reply, result);
+        clientKey: req.headers["idempotency-key"] as string | undefined,
+        httpMethod: "POST",
+        httpPath: `/api/escrow/chain/${address}/evidence/${idx}`,
+      });
+      if (!activityResult.ok) {
+        return sendActivityError(reply, activityResult.error);
+      }
+      return activityResult.value;
     },
   );
 
   /**
-   * Submit verifier attestation for a milestone.
-   * Returns 503 if write is disabled.
+   * Submit an oracle-signed attestation for a milestone.
+   * Body: { attestation: IPCCOracle.Attestation } — the full struct from
+   * the oracle client. The on-chain contract re-verifies the signature
+   * against the protocol oracle verifier before opening the challenge window.
    */
   app.post<{
     Params: { address: string; milestoneIndex: string };
-    Body: { attestationHash: string };
+    Body: { attestation: OracleAttestation };
   }>(
     "/api/escrow/chain/:address/attestation/:milestoneIndex",
     async (req, reply) => {
@@ -336,15 +419,19 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
-      const body = req.body as { attestationHash?: string } | undefined;
-      if (!body?.attestationHash) {
-        return reply.status(400).send({ error: "attestationHash is required" });
+      const body = req.body as { attestation?: OracleAttestation } | undefined;
+      if (!body?.attestation || !body.attestation.escrowAddress) {
+        return reply.status(400).send({
+          error: "attestation_required",
+          message:
+            "An oracle-signed attestation struct is required in the request body.",
+        });
       }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
       const result = await facade.submitAttestation(
         address as Address,
         idx,
-        body.attestationHash,
+        body.attestation,
         actorId,
         req.ip,
         req.headers["user-agent"],

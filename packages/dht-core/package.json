@@ -1,0 +1,31 @@
+{
+  "name": "@pcc/dht-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared transport + identity + peer management primitives for PCC DHT family — used by @pcc/dht (gossip flood) and @pcc/federation (Kademlia, Phase 2)",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

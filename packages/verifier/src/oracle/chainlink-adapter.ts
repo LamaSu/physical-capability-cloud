@@ -20,14 +20,28 @@
  */
 
 import { randomBytes } from "crypto";
+import type { Hex } from "viem";
 import type {
   VerificationOracle,
   OracleVerificationResult,
   OracleMetrics,
   OracleConfig,
+  AttestationBinding,
 } from "./types.js";
-import { DEFAULT_ORACLE_CONFIG } from "./types.js";
+import { DEFAULT_ORACLE_CONFIG, buildOnChainAttestation } from "./types.js";
 import { evaluateEvidence } from "./evidence-evaluator.js";
+
+/** Mirror of uma-adapter.normalizeEvidenceHash */
+function normalizeEvidenceHash(bundleHash: string): Hex {
+  if (bundleHash.startsWith("0x") && bundleHash.length === 66) {
+    return bundleHash as Hex;
+  }
+  const stripped = bundleHash.replace(/^sha256:/, "").replace(/^0x/, "");
+  if (stripped.length >= 64) {
+    return (`0x${stripped.slice(0, 64)}`) as Hex;
+  }
+  return (`0x${stripped.padStart(64, "0")}`) as Hex;
+}
 
 /**
  * JavaScript source executed by Chainlink DON nodes.
@@ -139,14 +153,15 @@ export class ChainlinkOracleAdapter implements VerificationOracle {
     bundleHash: string,
     bundleData: string,
     requiredTier: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     const startTime = Date.now();
 
     if (this.config.mock) {
-      return this.submitMock(bundleHash, bundleData, requiredTier, startTime);
+      return this.submitMock(bundleHash, bundleData, requiredTier, startTime, binding);
     }
 
-    return this.submitLive(bundleHash, bundleData, requiredTier, startTime);
+    return this.submitLive(bundleHash, bundleData, requiredTier, startTime, binding);
   }
 
   private async submitMock(
@@ -154,6 +169,7 @@ export class ChainlinkOracleAdapter implements VerificationOracle {
     bundleData: string,
     requiredTier: number,
     startTime: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     // Evaluate evidence locally using shared evaluator
     const evaluation = evaluateEvidence(bundleHash, bundleData, requiredTier);
@@ -186,6 +202,15 @@ export class ChainlinkOracleAdapter implements VerificationOracle {
       ],
       totalTimeMs: Date.now() - startTime,
       requestId,
+      attestation: binding
+        ? buildOnChainAttestation({
+            binding,
+            evidenceHash: normalizeEvidenceHash(bundleHash),
+            tier: requiredTier,
+            verified: passed,
+            nonce: (`0x${randomBytes(32).toString("hex")}`) as Hex,
+          })
+        : undefined,
     };
 
     this.recordResult(result);
@@ -197,6 +222,7 @@ export class ChainlinkOracleAdapter implements VerificationOracle {
     bundleData: string,
     requiredTier: number,
     startTime: number,
+    binding?: AttestationBinding,
   ): Promise<OracleVerificationResult> {
     const { createPublicClient, createWalletClient, http, toBytes, pad } = await import("viem");
     const { baseSepolia } = await import("viem/chains");
@@ -312,6 +338,15 @@ export class ChainlinkOracleAdapter implements VerificationOracle {
       ],
       totalTimeMs: Date.now() - startTime,
       requestId,
+      attestation: binding
+        ? buildOnChainAttestation({
+            binding,
+            evidenceHash: normalizeEvidenceHash(bundleHash),
+            tier: requiredTier,
+            verified: passed,
+            signature: "0x",
+          })
+        : undefined,
     };
 
     this.recordResult(result);

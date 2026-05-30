@@ -79,6 +79,16 @@ let server: FastifyInstance;
 let relayUrl: string;
 let serverPort: number;
 
+// Any string starting with `pcc_` passes the relay's requireA2AAuth preHandler.
+// See packages/a2a/src/relay-routes.ts#requireA2AAuth (added in 351433c —
+// "security: comprehensive hardening"). Real deployments use
+// `pcc_live_<uuid>`; tests can use any non-empty `pcc_` prefixed string.
+const TEST_API_KEY = "pcc_test_networked_bus";
+const AUTH_HEADERS = {
+  "Content-Type": "application/json",
+  Authorization: `Bearer ${TEST_API_KEY}`,
+};
+
 beforeAll(async () => {
   server = Fastify({ logger: false });
   await server.register(websocket);
@@ -146,7 +156,7 @@ describe("Relay REST Routes", () => {
   it("POST /api/a2a/send returns 400 for invalid message", async () => {
     const resp = await fetch(`${relayUrl}/api/a2a/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: AUTH_HEADERS,
       body: JSON.stringify({ bad: "data" }),
     });
     expect(resp.status).toBe(400);
@@ -156,7 +166,7 @@ describe("Relay REST Routes", () => {
     const msg = makeMessage({ to: "agent_not_here" });
     const resp = await fetch(`${relayUrl}/api/a2a/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: AUTH_HEADERS,
       body: JSON.stringify(msg),
     });
     expect(resp.ok).toBe(true);
@@ -165,7 +175,9 @@ describe("Relay REST Routes", () => {
   });
 
   it("GET /api/a2a/agents returns connected agents", async () => {
-    const resp = await fetch(`${relayUrl}/api/a2a/agents`);
+    const resp = await fetch(`${relayUrl}/api/a2a/agents`, {
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
     expect(resp.ok).toBe(true);
     const data = await resp.json();
     expect(data.agents).toBeInstanceOf(Array);
@@ -176,11 +188,13 @@ describe("Relay REST Routes", () => {
     const msg = makeMessage({ from: "agent_conv_test", to: "agent_conv_recv", conversationId: "conv_rest_test" });
     await fetch(`${relayUrl}/api/a2a/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: AUTH_HEADERS,
       body: JSON.stringify(msg),
     });
 
-    const resp = await fetch(`${relayUrl}/api/a2a/conversations/agent_conv_test`);
+    const resp = await fetch(`${relayUrl}/api/a2a/conversations/agent_conv_test`, {
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
     expect(resp.ok).toBe(true);
     const data = await resp.json();
     expect(data.conversations).toBeInstanceOf(Array);
@@ -195,6 +209,7 @@ describe("NetworkTransport", () => {
     const transport = new NetworkTransport({
       relayUrl,
       agentId: "transport_test_1",
+      apiKey: TEST_API_KEY,
     });
     await transport.connect();
     expect(transport.connected).toBe(true);
@@ -206,6 +221,7 @@ describe("NetworkTransport", () => {
     const transport = new NetworkTransport({
       relayUrl,
       agentId: "transport_sender",
+      apiKey: TEST_API_KEY,
     });
     await transport.connect();
 
@@ -229,6 +245,7 @@ describe("NetworkTransport", () => {
     const transportB = new NetworkTransport({
       relayUrl,
       agentId: "transport_recv_b",
+      apiKey: TEST_API_KEY,
     });
     transportB.onMessage((msg) => { received.push(msg); });
     await transportB.connect();
@@ -237,7 +254,7 @@ describe("NetworkTransport", () => {
     const msg = makeMessage({ from: "transport_send_a", to: "transport_recv_b" });
     const resp = await fetch(`${relayUrl}/api/a2a/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: AUTH_HEADERS,
       body: JSON.stringify(msg),
     });
     expect(resp.ok).toBe(true);
@@ -255,6 +272,7 @@ describe("NetworkTransport", () => {
     const transport = new NetworkTransport({
       relayUrl,
       agentId: "transport_disconnect",
+      apiKey: TEST_API_KEY,
     });
     await transport.connect();
     expect(transport.connected).toBe(true);
@@ -345,8 +363,8 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("sends messages to remote agents via relay", async () => {
-    const busA = new NetworkedBus({ relayUrl });
-    const busB = new NetworkedBus({ relayUrl });
+    const busA = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const busB = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
 
     const cardA = makeCard({ id: "nb_remote_a" });
     const cardB = makeCard({ id: "nb_remote_b" });
@@ -371,9 +389,9 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("delivers broadcast to all connected agents", async () => {
-    const busA = new NetworkedBus({ relayUrl });
-    const busB = new NetworkedBus({ relayUrl });
-    const busC = new NetworkedBus({ relayUrl });
+    const busA = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const busB = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const busC = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
 
     const cardA = makeCard({ id: "nb_bc_a" });
     const cardB = makeCard({ id: "nb_bc_b" });
@@ -411,12 +429,12 @@ describe.skip("NetworkedBus", () => {
     });
     await fetch(`${relayUrl}/api/a2a/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: AUTH_HEADERS,
       body: JSON.stringify(msg),
     });
 
     // Now the recipient connects — should receive the queued message
-    const bus = new NetworkedBus({ relayUrl });
+    const bus = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
     const card = makeCard({ id: "nb_queue_recv" });
     bus.register(card);
 
@@ -432,7 +450,7 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("falls back to in-memory when relay is unreachable", async () => {
-    const bus = new NetworkedBus({ relayUrl: "http://127.0.0.1:19999" });
+    const bus = new NetworkedBus({ relayUrl: "http://127.0.0.1:19999", apiKey: TEST_API_KEY });
     const card = makeCard({ id: "nb_fallback" });
     bus.register(card);
 
@@ -452,9 +470,9 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("multiple agents can subscribe simultaneously", async () => {
-    const bus1 = new NetworkedBus({ relayUrl });
-    const bus2 = new NetworkedBus({ relayUrl });
-    const bus3 = new NetworkedBus({ relayUrl });
+    const bus1 = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const bus2 = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const bus3 = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
 
     bus1.register(makeCard({ id: "nb_multi_1" }));
     bus2.register(makeCard({ id: "nb_multi_2" }));
@@ -489,8 +507,8 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("message ordering is preserved", async () => {
-    const busA = new NetworkedBus({ relayUrl });
-    const busB = new NetworkedBus({ relayUrl });
+    const busA = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
+    const busB = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
 
     busA.register(makeCard({ id: "nb_order_a" }));
     busB.register(makeCard({ id: "nb_order_b" }));
@@ -520,7 +538,7 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("getConversationsFromRelay returns conversations from relay", async () => {
-    const bus = new NetworkedBus({ relayUrl });
+    const bus = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
     const card = makeCard({ id: "nb_relay_conv" });
     bus.register(card);
     bus.subscribe("nb_relay_conv", () => {});
@@ -547,7 +565,7 @@ describe.skip("NetworkedBus", () => {
   });
 
   it("connected property reflects transport state", async () => {
-    const bus = new NetworkedBus({ relayUrl });
+    const bus = new NetworkedBus({ relayUrl, apiKey: TEST_API_KEY });
     expect(bus.connected).toBe(false);
 
     const card = makeCard({ id: "nb_connected_check" });

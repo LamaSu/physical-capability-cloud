@@ -48,3 +48,11 @@ export * from "./invocation-receipt.js";
 export * from "./materials.js";
 export * from "./finishes.js";
 export * from "./certifications.js";
+// RFC-001 work primitives (dependency-ordered):
+export * from "./work-schema.js";
+export * from "./work-product.js";
+export * from "./registry.js";
+export * from "./attestation.js";
+export * from "./verification-program.js";
+export * from "./dispute-resolver.js";
+export * from "./job-spec.js";

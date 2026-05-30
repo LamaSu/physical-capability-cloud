@@ -17,7 +17,13 @@
 export {
   IndexedToolRegistry,
   type RegistryQuery,
+  type RegistryRegionContext,
+  type IndexedToolRegistryOpts,
 } from "./registry.js";
+export {
+  NoOpReplicator,
+  type ReplicatorAdapter,
+} from "./replicator.js";
 export {
   runPipeline,
   computeToolCid,
@@ -30,10 +36,61 @@ export type {
   PipelineRunResult,
   PipelineStage,
   PipelineStageReport,
+  Publisher,
+  PublisherInput,
+  PublishResult,
+  CosignSpawn,
+  CosignInput,
 } from "./types.js";
 export * from "./sources/index.js";
-export { signReceipt, verifyReceiptSignature } from "./receipt-signer.js";
+export * from "./publishers/index.js";
+export { signReceipt, verifyReceiptSignature, signAndAnchorReceipt } from "./receipt-signer.js";
 export type { ReceiptSignerKey } from "./receipt-signer.js";
+export {
+  ReceiptAnchorClient,
+  createReceiptAnchorClient,
+  buildAnchorRequest,
+} from "./receipt-anchor-client.js";
+export type {
+  AnchorOutcome,
+  AnchorRequest,
+  BatchFlushResult,
+  BatchManifest,
+  BatchManifestStorage,
+  ChainBackend,
+  ReceiptAnchorClientConfig,
+} from "./receipt-anchor-client.js";
+export {
+  buildMerkleTree,
+  getMerkleProof,
+  verifyMerkleProof,
+  cidToBytes32,
+  hashPairSorted,
+} from "./merkle.js";
+export type { Bytes32Hex, MerkleTree } from "./merkle.js";
+export {
+  toAtomicUsdc,
+  decimalUsdc,
+  isPaidPrice,
+  priceTagHmac,
+  verifyPriceTag,
+} from "./pricing.js";
+export type { PriceTagFields } from "./pricing.js";
+export {
+  verifyWithFacilitator,
+  settleWithFacilitator,
+  FacilitatorNetworkError,
+} from "./x402-facilitator.js";
+export type { X402FacilitatorConfig } from "./x402-facilitator.js";
+export { NonceCache } from "./x402-nonce-cache.js";
+export type { NonceCacheEntry, NonceCacheOptions } from "./x402-nonce-cache.js";
+export { requirePayment, recordSettlement } from "./x402-gate.js";
+export type {
+  X402GateConfig,
+  GateRequestContext,
+  GateVerdict,
+  SettleOutcome,
+} from "./x402-gate.js";
 export {
   assertSafeFetchUrl,
   assertSafeFetchUrlWithDns,
@@ -51,3 +108,7 @@ export {
   runOneCrawl,
   type CrawlerWorkerConfig,
 } from "./crawler-worker.js";
+export {
+  RegistryRankerBridge,
+  createRegistryRanker,
+} from "./ranking-bridge.js";

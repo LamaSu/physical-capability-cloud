@@ -208,6 +208,26 @@ export interface IndexedToolPeerEndpoint {
 }
 
 // ---------------------------------------------------------------------------
+// OASF round-trip (AGNTCY ADS bridge)
+// ---------------------------------------------------------------------------
+
+/**
+ * One OASF module fragment, preserved verbatim for AGNTCY round-trip.
+ *
+ * OASF's `modules[]` is its extension mechanism — each module is a
+ * `{name, data}` pair where `name` is the module slug (e.g.
+ * `physical-capability/v1`) and `data` is the module-specific payload.
+ *
+ * Consumers that don't know the module slug safely ignore the data.
+ *
+ * See: ai/scoping/agntcy-ads-oasf-bridge-2026-05-23.md §3.4
+ */
+export interface OasfModule {
+  name: string;
+  data: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Pricing hint (scraped or vendor-provided)
 // ---------------------------------------------------------------------------
 
@@ -221,6 +241,110 @@ export interface PricingHint {
   tierLabel?: string;
   /** Whether the vendor has set a fixed price or accepts auctions. */
   mode?: "fixed" | "auction";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 federation extension (optional, additive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-region content-addressed reference for volatile CRDT state.
+ *
+ * Phase 1 (this commit): optional field on IndexedTool. When present,
+ * the federation runtime materialises the actual CRDT state from the
+ * referenced CIDs and merges them on read.
+ *
+ * The four CRDT slots map 1:1 to the volatile-field set per scope §7.3:
+ *
+ *   - invocationCountCid → G-Counter (grow-only per region/mesh)
+ *   - successRateCid     → Tagged-Fraction (success/total per replica)
+ *   - meanLatencyMsCid   → Tagged-Fraction (latency sum/count)
+ *   - lastInvokedAtCid   → LWW-Register (timestamp + replica)
+ *
+ * Phase 2 wires the CRDT cross-region pull; Phase 1 leaves these
+ * undefined and the gateway falls back to the scalar fields on
+ * IndexedTool (invocationCount, successRate, ...).
+ */
+export interface IndexedToolVolatileRefs {
+  invocationCountCid?: SHA256;
+  successRateCid?: SHA256;
+  meanLatencyMsCid?: SHA256;
+  lastInvokedAtCid?: SHA256;
+}
+
+// ---------------------------------------------------------------------------
+// TEE profile (DCC4 capability declaration)
+// ---------------------------------------------------------------------------
+
+/**
+ * TEE platform vendors PCC understands at DCC4. See scope doc §1.1.
+ *
+ * Phase 1 ships `intel-tdx` + `phala-cloud` (Dstack wraps TDX) + `dstack` (raw).
+ * `intel-sgx` is kept for legacy. `amd-sev-snp` and `aws-nitro` are listed but
+ * Phase 1 only provides verifier shims (full adapter is Phase 2 per scope §1.4).
+ */
+export type TeeVendor =
+  | "intel-tdx"
+  | "intel-sgx"
+  | "amd-sev-snp"
+  | "aws-nitro"
+  | "phala-cloud"
+  | "dstack";
+
+/**
+ * Expected TEE measurement set a tool advertises at registration time.
+ *
+ * Set by the operator via POST /api/aggregator/indexed-tools/:id/claim-tee.
+ * Without a `teeProfile` an IndexedTool's `assuranceCeiling` cannot exceed
+ * DCC3 (scope §2.3). The profile is the allowlist PCC checks every observed
+ * quote against during invocation.
+ */
+export interface TeeProfile {
+  /** Vendor — drives which verifier shim handles the quote. */
+  vendor: TeeVendor;
+  /** Expected MRTD (TDX) / MRENCLAVE (SGX) / image-id (Nitro), hex 48-byte. */
+  expectedMeasurement: string;
+  /** Optional RTMR0..3 (TDX runtime measurements) for finer match. */
+  expectedRtmr?: [string, string, string, string];
+  /** Optional MRSIGNER (SGX only). */
+  expectedSigner?: string;
+  /** Nitro: expected PCR0..PCR4 set, 48-byte SHA384 each. */
+  expectedPcrs?: Record<string, string>;
+  /** Quote format version expected (e.g. "tdx-v4", "tdx-v5", "nitro-v1"). */
+  quoteFormat: string;
+  /** Where the operator-registered measurement set is sourced (URL to manifest). */
+  manifestUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Execution proof profile (DCC5 S1 — faithful execution declaration)
+// ---------------------------------------------------------------------------
+
+/** Supported zkSNARK / zkVM proving systems. See scope doc §3.7. */
+export type ZkSystem = "sp1" | "risc0" | "noir" | "halo2" | "plonky3";
+
+/**
+ * Operator-uploaded execution-proof profile (DCC5 Statement S1).
+ *
+ * S1 is "faithful proxy execution" — operator compiles their tool for a zkVM
+ * and uploads the ELF + verification key. PCC then proves on-the-fly using
+ * Boundless. S2 (TEE-wrap) does NOT use this profile — S2 is automatic once
+ * DCC4 (`teeProfile`) is claimed. See scope §3.4.
+ */
+export interface ExecutionProofProfile {
+  /** Proving system: "sp1" | "risc0" | "noir" | "halo2" | "plonky3". */
+  zkSystem: ZkSystem;
+  /** Content-addressed reference to the program (ELF for SP1/Risc0). */
+  programCid: string;
+  /** Verification key — published once at registration. */
+  verificationKey: string;
+  /** On-chain verifier address (EVM chain id + address). */
+  onchainVerifier?: { chainId: number; address: string };
+  /** Expected proving time at p50, in seconds (set by operator at registration). */
+  expectedProvingSeconds?: number;
+  /** Required input/output schema (must match IndexedTool's inputSchema/outputSchema). */
+  publicInputSchema: unknown;
+  publicOutputSchema: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +410,18 @@ export interface IndexedTool {
   assuranceCeiling: DigitalCaptureClass;
   trustTier: TrustTier;
   pricing?: PricingHint;
+  /**
+   * DCC4: operator-registered TEE measurement profile. Required for
+   * `assuranceCeiling >= DCC4`. Set via /claim-tee endpoint after a successful
+   * test-quote verification. See scope doc §2.3.
+   */
+  teeProfile?: TeeProfile;
+  /**
+   * DCC5 S1 (faithful execution): operator-uploaded execution-proof profile.
+   * Optional even for DCC5 — S2 (TEE-wrap) does not need this and is the
+   * default. See scope doc §3.4.
+   */
+  executionProof?: ExecutionProofProfile;
 
   // ----- Verification ----------------------------------------------------
   vetReport?: VetReportSummary;
@@ -311,6 +447,52 @@ export interface IndexedTool {
   // ----- Federation ------------------------------------------------------
   /** Other peers carrying this tool's index entry. Phase 5 only. */
   hostingPeers: IndexedToolPeerEndpoint[];
+
+  // ----- Phase 1 federation extension (optional, additive) ---------------
+  /**
+   * Region that ingested this record. Defaults to "us-east-1" when not
+   * explicitly set; the federation runtime populates it on upsert.
+   * Per scope §11.1. OPTIONAL — present only when the federation
+   * runtime is engaged.
+   */
+  regionId?: string;
+  /**
+   * Mesh (within the region) that ingested this record. Defaults to
+   * "us-east-1-mesh-a" when the federation runtime is single-region.
+   * Per scope §11.1.
+   */
+  meshId?: string;
+  /**
+   * Namespace this tool belongs to. PCC's default is "pcc-public".
+   * Per scope §3.4 + §11.4. OPTIONAL — when undefined, the aggregator
+   * treats the tool as belonging to the default public namespace.
+   */
+  namespaceId?: string;
+  /**
+   * Phase 1 federation extension: per-region CRDT state refs for the
+   * four volatile fields. Per scope §11.2. OPTIONAL — when undefined,
+   * the gateway reads the scalar volatile fields above directly.
+   */
+  volatileRefs?: IndexedToolVolatileRefs;
+  // ----- OASF round-trip (AGNTCY ADS bridge) ----------------------------
+  /**
+   * OASF locator mirror URLs (`locators[].urls` supports multiple mirrors
+   * per locator type). Preserved on inbound for round-trip fidelity.
+   * Phase 1 of the bridge — see ai/scoping/agntcy-ads-oasf-bridge-2026-05-23.md.
+   */
+  locatorUrls?: string[];
+  /**
+   * OASF modules preserved verbatim for AGNTCY round-trip. On inbound from
+   * AGNTCY, the source-adapter populates this so the publisher can
+   * re-emit the record losslessly. The PCC-specific module slugs
+   * (`physical-capability/v1`, `tool-schema/v1`) ride here.
+   */
+  oasfModules?: OasfModule[];
+  /**
+   * If ingested from AGNTCY ADS, the AGNTCY-side CID for re-publish /
+   * diff detection. Empty for tools sourced from non-AGNTCY adapters.
+   */
+  agntcyRecordCid?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,11 +567,57 @@ const IndexedToolPeerEndpointSchema = z.object({
   lastSeenAt: z.string().datetime(),
 });
 
+/** OASF module Zod schema. */
+const OasfModuleSchema = z.object({
+  name: z.string().min(1),
+  data: z.record(z.string(), z.unknown()),
+});
+
 const PricingHintSchema = z.object({
   perCallUsdc: z.string(),
   perKTokenUsdc: z.string().optional(),
   tierLabel: z.string().optional(),
   mode: z.enum(["fixed", "auction"]).optional(),
+});
+
+const TeeVendorSchema = z.enum([
+  "intel-tdx",
+  "intel-sgx",
+  "amd-sev-snp",
+  "aws-nitro",
+  "phala-cloud",
+  "dstack",
+]);
+
+const TeeProfileSchema = z.object({
+  vendor: TeeVendorSchema,
+  expectedMeasurement: z.string().min(1),
+  expectedRtmr: z
+    .tuple([z.string(), z.string(), z.string(), z.string()])
+    .optional(),
+  expectedSigner: z.string().optional(),
+  expectedPcrs: z.record(z.string(), z.string()).optional(),
+  quoteFormat: z.string().min(1),
+  manifestUrl: z.string().url().optional(),
+});
+
+const ZkSystemSchema = z.enum(["sp1", "risc0", "noir", "halo2", "plonky3"]);
+
+const ExecutionProofProfileSchema = z.object({
+  zkSystem: ZkSystemSchema,
+  programCid: z.string().min(1),
+  verificationKey: z.string().min(1),
+  onchainVerifier: z
+    .object({
+      chainId: z.number().int().nonnegative(),
+      address: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be 0x-prefixed 20-byte EVM address"),
+    })
+    .optional(),
+  expectedProvingSeconds: z.number().nonnegative().optional(),
+  publicInputSchema: z.unknown(),
+  publicOutputSchema: z.unknown(),
 });
 
 /**
@@ -426,6 +654,8 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   assuranceCeiling: z.nativeEnum(DigitalCaptureClass),
   trustTier: TrustTierSchema,
   pricing: PricingHintSchema.optional(),
+  teeProfile: TeeProfileSchema.optional(),
+  executionProof: ExecutionProofProfileSchema.optional(),
   vetReport: VetReportSummarySchema.optional(),
   cpFiveMcpScore: z.number().int().min(0).max(13).optional(),
   knownVulns: z.array(z.string()),
@@ -437,4 +667,20 @@ export const IndexedToolSchema: z.ZodType<IndexedTool> = z.object({
   driftAlerts: z.array(DriftAlertSummarySchema),
   schemaHashHistory: z.array(SHA256Schema),
   hostingPeers: z.array(IndexedToolPeerEndpointSchema),
+  // Phase 1 federation extension — optional, additive
+  regionId: z.string().min(1).optional(),
+  meshId: z.string().min(1).optional(),
+  namespaceId: z.string().min(1).optional(),
+  volatileRefs: z
+    .object({
+      invocationCountCid: SHA256Schema.optional(),
+      successRateCid: SHA256Schema.optional(),
+      meanLatencyMsCid: SHA256Schema.optional(),
+      lastInvokedAtCid: SHA256Schema.optional(),
+    })
+    .optional(),
+  // OASF round-trip fields (additive, optional, backward-compatible):
+  locatorUrls: z.array(z.string()).optional(),
+  oasfModules: z.array(OasfModuleSchema).optional(),
+  agntcyRecordCid: z.string().optional(),
 }) as unknown as z.ZodType<IndexedTool>;

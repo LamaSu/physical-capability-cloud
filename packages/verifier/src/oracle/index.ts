@@ -20,6 +20,12 @@ export type {
   OracleMetrics,
   OracleConfig,
   VerificationResult as OracleVerificationResultCompat,
+  OnChainOracleAttestation,
+  AttestationBinding,
 } from "./types.js";
 
-export { DEFAULT_ORACLE_CONFIG, configFromEnv } from "./types.js";
+export {
+  DEFAULT_ORACLE_CONFIG,
+  configFromEnv,
+  buildOnChainAttestation,
+} from "./types.js";
