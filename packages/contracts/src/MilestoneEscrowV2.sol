@@ -39,10 +39,14 @@ import {SafeERC20} from "./libraries/SafeERC20.sol";
  *     `authorizedOracle`, is not revoked, and is not expired
  *   - decodes the schema payload and requires `oracleVerified == true`, the achieved tier
  *     meets the milestone's `requiredTier`, the attested `jobId` matches the milestone's
- *     `jobIdHash`, and the attested `evidenceBundleHash` matches the on-chain evidence
- * The old `authorizedVerifiers` allowlist + `addVerifier`/`removeVerifier` are RETAINED for
- * ABI/back-compat (the arbiter may still manage the set) but are NO LONGER consulted by
- * `submitAttestation`; the EAS `attester` field is the provenance gate. The old
+ *     `jobIdHash`, the attested `stepId` matches the milestone's `stepId`, and the attested
+ *     `evidenceBundleHash` matches the on-chain evidence
+ *   - binds the attestation to THIS escrow (`recipient == address(this)`) and consumes each
+ *     UID at most once (single-use guard) — closing the cross-escrow / cross-milestone /
+ *     UID-replay defects (security review C1/C2)
+ * The old `authorizedVerifiers` allowlist + `addVerifier`/`removeVerifier` are REMOVED in V2
+ * (security review L2): they were never consulted by `submitAttestation` and only created a
+ * misleading-authority surface. The EAS `attester` field is the sole provenance gate. The old
  * "operator cannot self-attest" guard is subsumed: an operator cannot forge an attestation
  * whose `attester == authorizedOracle`, so relaying the UID is permissionless.
  *
@@ -179,6 +183,12 @@ contract MilestoneEscrowV2 {
     Milestone[] public milestones;
     mapping(uint256 => Dispute) public disputes;
 
+    /// @notice Tracks every EAS UID already consumed by a successful submitAttestation.
+    /// @dev SECURITY (review C1): without this, one oracle attestation could release N
+    ///      milestones (cross-milestone replay). Set true the first time a UID releases a
+    ///      milestone; any subsequent submitAttestation with the same UID reverts.
+    mapping(bytes32 => bool) private _attestationUsed;
+
     bool public funded;
     uint256 public totalAmount;
 
@@ -197,6 +207,10 @@ contract MilestoneEscrowV2 {
 
     /// @notice Per-payout basis-point ceiling. Sanity floor: no single recipient takes >50%.
     uint256 public constant MAX_SINGLE_BPS = 5000;
+
+    /// @notice Highest assurance tier the oracle ever emits (0-3). Used to range-validate
+    ///         a milestone's requiredTier at creation (review L4).
+    uint8 public constant MAX_ASSURANCE_TIER = 3;
 
     // ── Multi-Stablecoin Storage ────────────────────────────────────────
 
@@ -217,14 +231,6 @@ contract MilestoneEscrowV2 {
     // ── Reentrancy Guard ─────────────────────────────────────────────────
 
     uint256 private _locked = 1;
-
-    // ── Access Control ───────────────────────────────────────────────────
-
-    /// @notice Addresses authorized to submit verifier attestations.
-    /// @dev RETAINED for ABI/back-compat. In V2 this map is NO LONGER consulted by
-    ///      `submitAttestation` — the EAS `attester` field is the provenance gate. The
-    ///      arbiter may still manage the set; it is informational in V2.
-    mapping(address => bool) public authorizedVerifiers;
 
     // ── PGTR Trusted Forwarders ─────────────────────────────────────────
 
@@ -343,6 +349,10 @@ contract MilestoneEscrowV2 {
     ) {
         require(_eas != address(0), "Zero EAS");
         require(_oracle != address(0), "Zero oracle");
+        // SECURITY (review H1): a zero schema UID silently breaks the release gate
+        // (a.schema == 0 never matches a real registry-derived UID) and permanently
+        // locks every milestone's funds. The value is immutable — reject at construction.
+        require(_schemaUid != bytes32(0), "Schema UID unset");
 
         payer = _payer;
         arbiter = _arbiter;
@@ -389,28 +399,6 @@ contract MilestoneEscrowV2 {
             return sender;
         }
         return msg.sender;
-    }
-
-    // ── Verifier Management ──────────────────────────────────────────────
-
-    /**
-     * @notice Authorize an address to submit attestations. Only the arbiter can manage verifiers.
-     * @dev RETAINED for ABI/back-compat. In V2 the `authorizedVerifiers` map is informational
-     *      and is NOT consulted by `submitAttestation` (the EAS attester field is the gate).
-     * @param verifier Address to authorize as a verifier.
-     */
-    function addVerifier(address verifier) external onlyArbiter {
-        require(verifier != address(0), "Zero address");
-        authorizedVerifiers[verifier] = true;
-    }
-
-    /**
-     * @notice Remove an authorized verifier. Only the arbiter can manage verifiers.
-     * @dev RETAINED for ABI/back-compat. See `addVerifier`.
-     * @param verifier Address to deauthorize.
-     */
-    function removeVerifier(address verifier) external onlyArbiter {
-        authorizedVerifiers[verifier] = false;
     }
 
     // ── Stablecoin Allowlist ─────────────────────────────────────────────
@@ -565,6 +553,10 @@ contract MilestoneEscrowV2 {
         require(!funded, "Already funded");
         require(_token != address(0), "Zero token");
         require(isStablecoinAllowed(_token), "Token not allowed");
+        // SECURITY (review L4): requiredTier must be in the oracle's 0-3 domain.
+        // tier 0 silently disables tier gating; tier 4..255 can never release (oracle
+        // only emits 0-3), permanently locking the milestone. Reject out-of-range.
+        require(_requiredTier <= MAX_ASSURANCE_TIER, "Invalid tier");
 
         uint256 idx = milestones.length;
         milestones.push(Milestone({
@@ -771,15 +763,22 @@ contract MilestoneEscrowV2 {
      *
      *      Checks (in order):
      *        1. milestone is Evidenced
-     *        2. attestation exists (uid != 0)
-     *        3. attestation uses the PCC evidence schema
-     *        4. attester == authorizedOracle (provenance — replaces the allowlist gate)
-     *        5. not revoked
-     *        6. not expired
-     *        7. decoded `oracleVerified` is true
-     *        8. decoded `assuranceTier` >= milestone.requiredTier
-     *        9. keccak256(bytes(decoded jobId)) == milestone.jobIdHash
-     *       10. decoded `evidenceBundleHash` == milestone.evidenceBundleHash (binds to on-chain evidence)
+     *        2. UID not already consumed (single-use guard — review C1)
+     *        3. attestation exists (uid != 0)
+     *        4. attestation uses the PCC evidence schema
+     *        5. attester == authorizedOracle (provenance — replaces the allowlist gate)
+     *        6. recipient == address(this) (binds the attestation to THIS escrow — review C2a)
+     *        7. not revoked
+     *        8. not expired
+     *        9. decoded `oracleVerified` is true
+     *       10. decoded `assuranceTier` >= milestone.requiredTier
+     *       11. keccak256(bytes(decoded jobId)) == milestone.jobIdHash
+     *       12. decoded `stepId` == milestone.stepId (binds to THIS milestone — review C2b)
+     *       13. decoded `evidenceBundleHash` == milestone.evidenceBundleHash (binds to on-chain evidence)
+     *
+     *      Together checks 2/6/12 close the attestation-replay defects: 6 stops cross-escrow
+     *      replay (a UID minted for escrow A names A as recipient, so escrow B rejects it), 12
+     *      stops cross-milestone replay within an escrow, and 2 stops re-use of the same UID.
      *
      *      `submitAttestation` is PERMISSIONLESS to relay: anyone may submit the UID; only a
      *      real oracle attestation passes. The operator cannot forge `attester == authorizedOracle`,
@@ -794,11 +793,16 @@ contract MilestoneEscrowV2 {
     {
         Milestone storage m = milestones[milestoneIndex];
         require(m.status == MilestoneStatus.Evidenced, "Evidence not submitted");
+        // SECURITY (review C1): one UID may release at most one milestone, ever.
+        require(!_attestationUsed[easUid], "Attestation already used");
 
         EASAttestation memory a = eas.getAttestation(easUid);
         require(a.uid != bytes32(0),                 "Attestation not found");
         require(a.schema == PCC_EVIDENCE_SCHEMA_UID, "Wrong schema");
         require(a.attester == authorizedOracle,      "Wrong attester");
+        // SECURITY (review C2a): the oracle mints each attestation with recipient = the
+        // escrow address. A UID minted for escrow A (recipient == A) cannot satisfy escrow B.
+        require(a.recipient == address(this),        "Wrong recipient");
         require(a.revocationTime == 0,               "Revoked");
         require(a.expirationTime == 0 || block.timestamp <= a.expirationTime, "Expired");
 
@@ -808,8 +812,9 @@ contract MilestoneEscrowV2 {
             bytes32 evidenceBundleHash,
             string memory ipfsCid,
             uint8 assuranceTier,
-            bool oracleVerified
-        ) = abi.decode(a.data, (string, bytes32, bytes32, string, uint8, bool));
+            bool oracleVerified,
+            bytes32 stepId
+        ) = abi.decode(a.data, (string, bytes32, bytes32, string, uint8, bool, bytes32));
         // kernelId / ipfsCid are carried in the schema for off-chain consumers; not gated on-chain.
         kernelId;
         ipfsCid;
@@ -817,13 +822,28 @@ contract MilestoneEscrowV2 {
         require(oracleVerified,                             "Oracle did not verify");
         require(assuranceTier >= m.requiredTier,            "Tier too low");
         require(keccak256(bytes(jobId)) == m.jobIdHash,     "jobId mismatch");
+        // SECURITY (review C2b): bind the attestation to THIS milestone, not just its job.
+        // m.stepId is the bytes32 bound at creation. The off-chain producer derives the same
+        // value as keccak256(utf8(stepIdString)) — see oracle-client.ts AttestEvidenceInput.stepId.
+        require(stepId == m.stepId,                         "stepId mismatch");
         require(evidenceBundleHash == m.evidenceBundleHash, "Evidence mismatch");
 
+        // Effects: mark the UID spent BEFORE the status transition (C1 single-use).
+        _attestationUsed[easUid] = true;
         m.verifierAttestationUid  = easUid;
         m.verifierAttestationHash = evidenceBundleHash; // back-compat field (V1 consumers)
         m.challengeWindowEnd      = block.timestamp + m.challengeWindowSeconds;
         m.status                  = MilestoneStatus.Attested;
         emit AttestationSubmitted(milestoneIndex, easUid, m.challengeWindowEnd);
+    }
+
+    /**
+     * @notice True if the given EAS UID has already released a milestone in this escrow.
+     * @dev Exposed for off-chain tooling / tests (review C1). A consumed UID can never be
+     *      reused by `submitAttestation`.
+     */
+    function attestationUsed(bytes32 easUid) external view returns (bool) {
+        return _attestationUsed[easUid];
     }
 
     /**

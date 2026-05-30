@@ -162,6 +162,10 @@ contract PCCProtocolV2 {
         require(_oracleVerifier != address(0), "Zero oracle verifier");
         require(_eas != address(0), "Zero EAS");
         require(_easOracle != address(0), "Zero EAS oracle");
+        // SECURITY (review H1): a zero schema UID threads into every child escrow and
+        // silently breaks its release gate (a.schema == 0 never matches) → permanent
+        // fund-lock. The value is immutable here and in the children — reject at construction.
+        require(_pccEvidenceSchemaUid != bytes32(0), "Schema UID unset");
 
         feeRecipient = _feeRecipient;
         protocolFeeBps = _initialFeeBps;

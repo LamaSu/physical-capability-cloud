@@ -101,6 +101,23 @@ contract DeployProtocolV2 is Script {
 
         vm.stopBroadcast();
 
+        // ── SECURITY (review H1): deploy-time read-back of the schema UID ──
+        // Confirm the factory baked in the EXACT env-provided schema UID. A mismatch (or a
+        // zero UID slipping past the constructor) would silently break every child escrow's
+        // release gate — fail the script here, before any funds flow.
+        bytes32 deployedSchemaUid = protocolV2.pccEvidenceSchemaUid();
+        console2.log("Read-back pccEvidenceSchemaUid:");
+        console2.logBytes32(deployedSchemaUid);
+        require(deployedSchemaUid == schemaUid, "Schema UID read-back mismatch");
+        require(deployedSchemaUid != bytes32(0), "Schema UID is zero");
+
+        // If a sample escrow was deployed, assert it inherited the same schema UID.
+        if (deploySample && sampleEscrow != address(0)) {
+            bytes32 escrowSchemaUid = MilestoneEscrowV2(sampleEscrow).PCC_EVIDENCE_SCHEMA_UID();
+            require(escrowSchemaUid == schemaUid, "Sample escrow schema UID mismatch");
+            console2.log("Sample escrow schema UID matches factory.");
+        }
+
         // Output for chain-config.ts
         console2.log("\n--- Add to chain-config.ts ---");
         console2.log("milestoneEscrowFactoryV2:", address(protocolV2));
