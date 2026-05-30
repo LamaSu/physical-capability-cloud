@@ -12,7 +12,10 @@
  *   - getMilestone() tuple gains 3 fields: requiredTier (uint8), jobIdHash (bytes32),
  *     verifierAttestationUid (bytes32)
  *   - NEW getters: eas() -> address, authorizedOracle() -> address,
- *     PCC_EVIDENCE_SCHEMA_UID() -> bytes32
+ *     PCC_EVIDENCE_SCHEMA_UID() -> bytes32, attestationUsed(bytes32) -> bool (single-use UID
+ *     guard, security review C1), MAX_ASSURANCE_TIER() -> uint8
+ *   - REMOVED (security review L2): authorizedVerifiers / addVerifier / removeVerifier
+ *     (dead in V2 — the EAS attester field is the provenance gate)
  *   - addMilestone / addMilestoneWithToken gain (_requiredTier uint8, _jobId string)
  *   - submitAttestation(uint256 milestoneIndex, bytes32 easUid) — same wire signature as V1
  *     (uint256,bytes32) but the bytes32 is now the EAS UID, not a free-form hash
@@ -102,6 +105,21 @@ export const MilestoneEscrowV2ABI = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "bytes32" }],
+  },
+  {
+    // SECURITY (review C1): true once an EAS UID has released a milestone in this escrow.
+    name: "attestationUsed",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "easUid", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "MAX_ASSURANCE_TIER",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
   },
 
   {
@@ -260,30 +278,6 @@ export const MilestoneEscrowV2ABI = [
     type: "function",
     stateMutability: "nonpayable",
     inputs: [{ name: "milestoneIndex", type: "uint256" }],
-    outputs: [],
-  },
-
-  // ── Verifier management (retained for ABI/back-compat) ─────────────
-
-  {
-    name: "authorizedVerifiers",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "", type: "address" }],
-    outputs: [{ name: "", type: "bool" }],
-  },
-  {
-    name: "addVerifier",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "verifier", type: "address" }],
-    outputs: [],
-  },
-  {
-    name: "removeVerifier",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "verifier", type: "address" }],
     outputs: [],
   },
 

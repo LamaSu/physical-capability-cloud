@@ -16,7 +16,7 @@ import {console2} from "forge-std/console2.sol";
  * oracle-client. A wrong string here poisons every downstream check.
  *
  * Schema:
- *   string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified
+ *   string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId
  *
  * Resolver: address(0) (no resolver — trusted-attester enforcement is in the escrow read).
  * Revocable: true (oracle can revoke a bad attestation; escrow checks revocationTime == 0).
@@ -45,8 +45,12 @@ contract RegisterEASSchema is Script {
     address constant SCHEMA_REGISTRY = 0x4200000000000000000000000000000000000020;
 
     /// @notice The `pcc.evidence.v1` schema string. MUST match the V2 decode tuple + gateway encoder.
+    /// @dev 7 fields. The trailing `bytes32 stepId` binds an attestation to a specific milestone
+    ///      on-chain (security review C2b). This string's keccak determines the on-chain UID, so it
+    ///      MUST be byte-identical to MilestoneEscrowV2.submitAttestation's decode and the gateway's
+    ///      PCC_EVIDENCE_SCHEMA_STRING / SchemaEncoder array.
     string constant SCHEMA_STRING =
-        "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified";
+        "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId";
 
     function run() external {
         uint256 signerKey = vm.envUint("PCC_GATEWAY_PRIVATE_KEY");
