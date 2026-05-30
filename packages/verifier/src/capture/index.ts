@@ -46,3 +46,13 @@ export {
   PlayIntegrityAdapter,
   mockPlayIntegrityAdapter,
 } from "./adapters/playintegrity.js";
+
+// LingBot-Map streaming-3D adapter (operator-capture wave)
+export {
+  runLingBotInference,
+  setLingBotSpawnerForTests,
+  LingBotAdapterError,
+  type LingBotAdapterInput,
+  type LingBotAdapterResult,
+  type LingBotSpawner,
+} from "./lingbot-adapter.js";

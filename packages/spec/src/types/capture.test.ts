@@ -13,12 +13,60 @@ import {
   CaptureClass,
   CAPTURE_CLASS_MULTIPLIERS,
   CaptureManifestSchema,
+  PointMap3DTraceSchemaExport,
   type CaptureManifest,
+  type PointMap3DTrace,
 } from "./capture.js";
 
 const GOOD_HASH = `sha256:${"a".repeat(64)}` as const;
+const VIDEO_HASH = `sha256:${"b".repeat(64)}` as const;
 const NOW = "2026-04-21T00:00:00.000Z";
 const LATER = "2026-04-21T00:00:05.000Z";
+
+const SAMPLE_3D_TRACE: PointMap3DTrace = {
+  deviceId: "kernel-3d-1",
+  startedAt: NOW,
+  endedAt: LATER,
+  videoHash: VIDEO_HASH,
+  mode: "streaming",
+  fps: 10,
+  frameCount: 2,
+  frames: [
+    {
+      frameIndex: 0,
+      timestampSec: 0.0,
+      pose: {
+        matrix: [
+          1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+        ],
+        intrinsic: [
+          500, 0, 256,
+          0, 500, 256,
+          0, 0, 1,
+        ],
+      },
+      points: [{ x: 0.1, y: 0.2, z: 0.3, conf: 0.9 }],
+      meanConfidence: 0.88,
+    },
+    {
+      frameIndex: 1,
+      timestampSec: 0.1,
+      pose: {
+        matrix: [
+          1, 0, 0, 0.01,
+          0, 1, 0, 0.0,
+          0, 0, 1, 0.0,
+        ],
+      },
+      points: [{ x: 0.11, y: 0.21, z: 0.30 }],
+    },
+  ],
+  model: "lingbot-map-stage1",
+  adapterVersion: "0.1.0",
+  stubbed: false,
+};
 
 describe("CaptureClass enum", () => {
   it("contains exactly the 6 CVP classes CC0..CC5", () => {
@@ -268,5 +316,73 @@ describe("CaptureManifestSchema — accepts valid payloads for all 6 classes", (
     };
     const parsed = CaptureManifestSchema.safeParse(good);
     expect(parsed.success).toBe(true);
+  });
+});
+
+describe("PointMap3DTrace — LingBot adapter evidence", () => {
+  it("accepts the sample streaming-3D trace standalone", () => {
+    const parsed = PointMap3DTraceSchemaExport.safeParse(SAMPLE_3D_TRACE);
+    expect(parsed.success).toBe(true);
+  });
+
+  it("rejects a trace with a malformed pose matrix (wrong length)", () => {
+    const bad = {
+      ...SAMPLE_3D_TRACE,
+      frames: [
+        {
+          ...SAMPLE_3D_TRACE.frames[0]!,
+          pose: { matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1] }, // 9 elements, not 12
+        },
+      ],
+    };
+    expect(PointMap3DTraceSchemaExport.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects a trace with a non-sha256 videoHash", () => {
+    const bad = { ...SAMPLE_3D_TRACE, videoHash: "not-a-hash" };
+    expect(PointMap3DTraceSchemaExport.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects a trace with an out-of-range confidence (>1)", () => {
+    const bad = {
+      ...SAMPLE_3D_TRACE,
+      frames: [
+        {
+          ...SAMPLE_3D_TRACE.frames[0]!,
+          points: [{ x: 0, y: 0, z: 0, conf: 1.5 }],
+        },
+      ],
+    };
+    expect(PointMap3DTraceSchemaExport.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects a trace with an unknown mode", () => {
+    const bad = { ...SAMPLE_3D_TRACE, mode: "rolling" as unknown as "streaming" };
+    expect(PointMap3DTraceSchemaExport.safeParse(bad).success).toBe(false);
+  });
+
+  it("accepts a CaptureManifest that carries a pointMaps3D trace alongside photo", () => {
+    const good: CaptureManifest = {
+      class: CaptureClass.CC1,
+      declaredAt: NOW,
+      deviceFingerprint: "fp-3d",
+      mediaHash: GOOD_HASH,
+      sensorFusion: {
+        deviceId: "device-3d",
+        startedAt: NOW,
+        endedAt: LATER,
+        samples: [
+          { ts: 0, accel: [0, 0, 9.81], gyro: [0, 0, 0] },
+        ],
+      },
+      pointMaps3D: SAMPLE_3D_TRACE,
+    };
+    const parsed = CaptureManifestSchema.safeParse(good);
+    expect(parsed.success).toBe(true);
+  });
+
+  it("accepts a stubbed trace (random weights, test path)", () => {
+    const stubbed: PointMap3DTrace = { ...SAMPLE_3D_TRACE, stubbed: true };
+    expect(PointMap3DTraceSchemaExport.safeParse(stubbed).success).toBe(true);
   });
 });

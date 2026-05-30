@@ -130,4 +130,10 @@ export {
   type PlatformAttestationResult,
   type CameraAttestationAdapter,
   type DePINAttestationAdapter,
+  runLingBotInference,
+  setLingBotSpawnerForTests,
+  LingBotAdapterError,
+  type LingBotAdapterInput,
+  type LingBotAdapterResult,
+  type LingBotSpawner,
 } from "./capture/index.js";

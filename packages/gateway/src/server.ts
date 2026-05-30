@@ -26,6 +26,7 @@ import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { captureRoutes } from "./routes/capture.js";
+import { capture3dRoutes } from "./routes/capture-3d.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
 import { a2aTasksRoutes } from "./routes/a2a-tasks.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
@@ -428,6 +429,7 @@ export async function createGateway(port = 3200) {
   await app.register(operatorRoutes);
   await app.register(operatorsPublicRoutes);
   await app.register(captureRoutes);
+  await app.register(capture3dRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
