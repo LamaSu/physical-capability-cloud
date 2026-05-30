@@ -11,7 +11,7 @@
  *   Act 1: Agent Discovery     -- UserAgent asks BrokerAgent to find capabilities across 3 domains
  *   Act 2: Workflow Compilation -- BrokerAgent compiles a 5-step DAG with dependencies
  *   Act 3: Price Negotiation   -- BrokerAgent negotiates volume discounts with KernelAgents
- *   Act 4: Contract Lock-in    -- Escrow locked for each milestone via NativeEscrowService
+ *   Act 4: Contract Lock-in    -- Escrow locked for each milestone (in-memory demo shim)
  *   Act 5: Execution Preview   -- Visualization of how the DAG would execute
  *
  * Complements investor-demo.ts (which shows settlement per domain) by showing
@@ -33,7 +33,6 @@ import type {
 import { UserAgent } from "@pcc/agent-user";
 import { BrokerAgent } from "@pcc/agent-broker";
 import { KernelAgent } from "@pcc/agent-kernel";
-import { NativeEscrowService } from "@pcc/payments";
 import type { Capability, BondConfig } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 
@@ -642,9 +641,13 @@ async function main() {
 
   phase(4, "CONTRACT LOCK-IN + ESCROW");
   console.log("    UserAgent approves the workflow. BrokerAgent creates contracts");
-  console.log("    and locks escrow for each milestone via NativeEscrowService.\n");
+  console.log("    and locks escrow for each milestone (in-memory demo shim).\n");
 
-  const escrowService = new NativeEscrowService();
+  // NOTE: the demo-only NativeEscrowService was removed in the EAS
+  // attestation-bridge migration (eas-migration-design §4.3). Real settlement
+  // now runs on-chain via MilestoneEscrowV2 + EAS through the gateway. This
+  // orchestration demo locks escrow in-memory to keep the workflow narrative
+  // coherent without the deleted service.
   const escrowId = `esc-agent-demo-${Date.now().toString(16)}`;
   const obligations: Array<{ step: WorkflowStep; obligationId: string; amount: string; price: number }> = [];
 
@@ -662,33 +665,23 @@ async function main() {
       };
 
       const price = qr.negotiatedPrice;
-
-      const obligation = await escrowService.lockMilestone({
-        escrowId,
-        milestone: {
-          stepId: qr.step.id,
-          amount: price.toFixed(2),
-          status: "funded",
-          bondAmount: (price * 0.1).toFixed(2),
-        },
-        buyer: userAgent.wallet.address,
-        seller: `0x${"2".repeat(40)}` as `0x${string}`,
-        bondConfig,
-      });
+      // amount = price + operator bond (matches the prior lockMilestone semantics)
+      const amount = (price * (1 + bondConfig.operatorBondPercent / 100)).toFixed(2);
+      const obligationId = `obl-${qr.step.id}-${ids.job().slice(0, 8)}`;
 
       const kernelLabel = kernelLabels[qr.step.kernelId];
       arrow("BrokerAgent", kernelLabel, "BuildContract", `step=${qr.step.shortName}, $${price.toFixed(2)}, Tier ${qr.step.assuranceTier}`);
-      arrow(kernelLabel, "BrokerAgent", "ContractBuiltResponse", `obligation=${obligation.id}`);
-      log("ESCROW", `  Locked: ${obligation.id} | $${parseFloat(obligation.amount).toFixed(2)} (incl. 10% bond) | ${qr.step.name}`);
+      arrow(kernelLabel, "BrokerAgent", "ContractBuiltResponse", `obligation=${obligationId}`);
+      log("ESCROW", `  Locked: ${obligationId} | $${parseFloat(amount).toFixed(2)} (incl. 10% bond) | ${qr.step.name}`);
 
       obligations.push({
         step: qr.step,
-        obligationId: obligation.id,
-        amount: obligation.amount,
+        obligationId,
+        amount,
         price,
       });
 
-      return obligation;
+      return obligationId;
     });
   }
 

@@ -30,7 +30,7 @@ import { EvidenceEmitter, EncryptionService } from "@pcc/kernel";
 import { CommitmentService, ZKProofService, BittensorSubnetBridge } from "@pcc/verifier";
 import { UnifiedKeychain, SolanaAgentWallet } from "@pcc/agent-runtime";
 import { CapabilityCertificateService, RewardEngine } from "@pcc/contracts";
-import { CapabilityPoolManager, NativeEscrowService } from "@pcc/payments";
+import { CapabilityPoolManager } from "@pcc/payments";
 import { MessageBus } from "@pcc/a2a";
 import type { A2AMessage, Intent, CapabilitiesResponseIntent, QuoteResponseIntent, NegotiationResponseIntent, RequestQuoteIntent, NegotiateIntent } from "@pcc/a2a";
 import { UserAgent } from "@pcc/agent-user";
@@ -610,7 +610,33 @@ async function main() {
   ok("5 soulbound capability certificates minted (PermanentFreezeDelegate)");
 
   // --- Milestone escrow ---
-  const escrowService = new NativeEscrowService();
+  // NOTE: the demo-only NativeEscrowService was removed in the EAS
+  // attestation-bridge migration (eas-migration-design §4.3). Real settlement
+  // now runs on-chain via MilestoneEscrowV2 + EAS through the gateway. This
+  // investor demo uses an in-memory escrow shim to keep the lock/fulfill/collect
+  // narrative coherent without the deleted service.
+  const escrowService = {
+    async lockMilestone(input: {
+      escrowId: string;
+      milestone: { stepId: string; amount: string; status: string };
+      buyer: string;
+      seller: string;
+      bondConfig: BondConfig;
+    }): Promise<{ id: string; amount: string; status: string }> {
+      const price = parseFloat(input.milestone.amount);
+      const amount = (price * (1 + input.bondConfig.operatorBondPercent / 100)).toFixed(2);
+      return { id: `obl-${input.milestone.stepId}-${ids.job().slice(0, 8)}`, amount, status: "locked" };
+    },
+    async fulfillMilestone(_input: {
+      obligationId: string;
+      proof: Record<string, unknown>;
+    }): Promise<{ status: string }> {
+      return { status: "fulfilled" };
+    },
+    async collectEscrow(_obligationId: string): Promise<{ status: string; settleTxHash: string }> {
+      return { status: "collected", settleTxHash: `0x${Date.now().toString(16)}${"0".repeat(24)}` };
+    },
+  };
   const escrowId = `esc-peptide-demo-${Date.now().toString(16)}`;
   const obligations: Array<{ step: WorkflowStep; obligationId: string; amount: string }> = [];
 

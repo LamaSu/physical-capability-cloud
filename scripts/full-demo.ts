@@ -23,8 +23,8 @@ import { EvidenceEmitter, EncryptionService } from "@pcc/kernel";
 import { CommitmentService, ZKProofService, EvidenceVerifier, BittensorSubnetBridge } from "@pcc/verifier";
 import { UnifiedKeychain, SolanaAgentWallet, SpendingTracker, createBrokerAgentPolicy } from "@pcc/agent-runtime";
 import { CapabilityCertificateService, RewardEngine } from "@pcc/contracts";
-import { CapabilityPoolManager, AlkahestEscrowBridge } from "@pcc/payments";
-import type { SHA256, BondConfig } from "@pcc/spec";
+import { CapabilityPoolManager } from "@pcc/payments";
+import type { SHA256 } from "@pcc/spec";
 import { ids, sha256 } from "@pcc/spec";
 
 const DIV = "═".repeat(70);
@@ -341,49 +341,13 @@ async function main() {
   });
 
   // ══════════════════════════════════════════════════════════════
-  // Phase 11: Alkahest (Arkhai) Escrow Settlement
+  // Phase 11: Escrow Settlement — REMOVED
   // ══════════════════════════════════════════════════════════════
-
-  phase(11, "Alkahest (Arkhai) — Escrow Settlement");
-
-  const alkahest = new AlkahestEscrowBridge({ mock: true });
-
-  const bondConfig: BondConfig = {
-    tier: 2,
-    operatorBondPercent: 15,
-    challengerBondPercent: 15,
-    challengeWindowSeconds: 86400,
-    slashPercent: 100,
-  };
-
-  await run("Lock Milestone Escrow", async () => {
-    const obligation = await alkahest.lockMilestone({
-      pccEscrowId: "esc-demo-001",
-      milestone: { stepId: "step-hplc-run", amount: "65.00", status: "funded", bondAmount: "9.75" },
-      buyer: keys!.evm.address,
-      seller: "0x2222222222222222222222222222222222222222",
-      bondConfig,
-    });
-    log("ESCROW", `UID: ${obligation.uid.slice(0, 18)}... | Status: ${obligation.status}`);
-    log("ESCROW", `Amount: $${obligation.amount} (includes ${bondConfig.operatorBondPercent}% bond)`);
-    log("ESCROW", `Arbiter demand: tier≥2, verifiers≥3, consensus≥0.7`);
-
-    // Fulfill with evidence
-    const fulfilled = await alkahest.fulfillMilestone({
-      obligationUid: obligation.uid,
-      result: {
-        bundleHash: sha256(JSON.stringify(evidenceBundle)),
-        ipfsCid: ipfsCid ?? "bafybeig_demo",
-        consensusScore,
-        verifierCount: 5,
-      },
-    });
-    log("FULFILL", `Status: ${fulfilled.status} | Attestation: ${fulfilled.fulfillmentUid?.slice(0, 18)}...`);
-
-    // Collect
-    const collected = await alkahest.collectEscrow(obligation.uid);
-    log("COLLECT", `Status: ${collected.status} | Tx: ${collected.settleTxHash?.slice(0, 20)}...`);
-  });
+  // The Alkahest (Arkhai) mock escrow bridge was removed in the EAS
+  // attestation-bridge migration (eas-migration-design §4.3). Real settlement
+  // now flows through MilestoneEscrowV2 + on-chain EAS attestations via the
+  // gateway (packages/gateway/src/routes/paid-job-flow.ts). This standalone
+  // demo no longer exercises a settlement step.
 
   // ══════════════════════════════════════════════════════════════
   // Phase 12: DePIN Reward Distribution
