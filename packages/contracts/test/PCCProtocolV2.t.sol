@@ -56,15 +56,19 @@ contract PCCProtocolV2Test is Test {
     bytes32 internal constant CWM_ID     = keccak256("cwm-factory-001");
 
     // ── Contracts ────────────────────────────────────────────────────────────
-    PCCProtocolV2 internal factory;
-    MockUSDC      internal usdc;
-    MockEAS       internal mockEAS;
+    PCCProtocolV2     internal factory;
+    MockUSDC          internal usdc;
+    MockEAS           internal mockEAS;
+    MilestoneEscrowV2 internal escrowImpl; // shared, locked implementation cloned by the factory
 
     // ── Setup ────────────────────────────────────────────────────────────────
 
     function setUp() public {
         usdc    = new MockUSDC(1_000_000e6);
         mockEAS = new MockEAS();
+
+        // Deploy the shared MilestoneEscrowV2 implementation (locked) the factory clones.
+        escrowImpl = new MilestoneEscrowV2(address(mockEAS), SCHEMA_UID, easOracle);
 
         factory = new PCCProtocolV2(
             feeRecipient,
@@ -73,7 +77,8 @@ contract PCCProtocolV2Test is Test {
             oracleVerifier,
             address(mockEAS),
             SCHEMA_UID,
-            easOracle
+            easOracle,
+            address(escrowImpl)
         );
     }
 
@@ -111,7 +116,24 @@ contract PCCProtocolV2Test is Test {
             oracleVerifier,
             address(mockEAS),
             bytes32(0),  // zero pccEvidenceSchemaUid → must revert
-            easOracle
+            easOracle,
+            address(escrowImpl)
+        );
+    }
+
+    // ── Test 2b: factory rejects a zero implementation address ───────────────
+
+    function test_revert_zeroEscrowImplementation() public {
+        vm.expectRevert("Zero escrow implementation");
+        new PCCProtocolV2(
+            feeRecipient,
+            235,
+            governor,
+            oracleVerifier,
+            address(mockEAS),
+            SCHEMA_UID,
+            easOracle,
+            address(0)  // zero implementation → must revert
         );
     }
 
@@ -132,6 +154,26 @@ contract PCCProtocolV2Test is Test {
         assertTrue(factory.isProtocolEscrow(a0), "escrow 0 registered");
         assertTrue(factory.isProtocolEscrow(a1), "escrow 1 registered");
         assertTrue(a0 != a1, "Distinct addresses");
+    }
+
+    // ── Test 3b: created escrows are EIP-1167 clones (45-byte minimal proxies) ─
+
+    function test_createEscrowV2_deploysMinimalProxyClone() public {
+        address escrowAddr = factory.createEscrowV2(payer, arbiter, address(usdc), CWM_ID);
+
+        // A minimal proxy has 45 bytes of runtime code — far smaller than a full
+        // MilestoneEscrowV2 (~17.5KB). This is the gas + fault-isolation win.
+        assertEq(escrowAddr.code.length, 45, "clone runtime must be the 45-byte EIP-1167 proxy");
+        assertTrue(address(escrowImpl).code.length > 1000, "implementation is the full contract");
+    }
+
+    // ── Test 3c: predictEscrowAddress matches the deployed clone address ──────
+
+    function test_predictEscrowAddress_matchesDeployed() public {
+        // The next escrow will occupy index 0 (getEscrowCount() == 0 before the call).
+        address predicted = factory.predictEscrowAddress(CWM_ID, factory.getEscrowCount());
+        address actual    = factory.createEscrowV2(payer, arbiter, address(usdc), CWM_ID);
+        assertEq(actual, predicted, "predicted clone address must match the deployed one");
     }
 
     // ── Test 4: EscrowCreated event emitted ─────────────────────────────────

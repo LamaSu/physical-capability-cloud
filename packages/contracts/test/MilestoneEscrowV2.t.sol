@@ -4,13 +4,15 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../src/MilestoneEscrowV2.sol";
 import "../src/MockUSDC.sol";
+import {Clones} from "../src/libraries/Clones.sol";
 import "./mocks/MockEAS.sol";
 
 /**
  * @title MilestoneEscrowV2Test
- * @notice Foundry tests for MilestoneEscrowV2's EAS-gated submitAttestation.
+ * @notice Foundry tests for MilestoneEscrowV2's EAS-gated submitAttestation AND the
+ *         EIP-1167 clone/initialize fault-isolation refactor.
  *
- * Cases covered (14 total — per eas-migration-design.md §5.1):
+ * EAS-gating cases (ported from the pre-clone suite — behaviour UNCHANGED):
  *   1  test_happyPath_releasesOnValidAttestation        — full valid flow, status Released
  *   2  test_revert_wrongAttester                        — attester != oracle
  *   3  test_revert_wrongSchema                          — schema != PCC_EVIDENCE_SCHEMA_UID
@@ -25,13 +27,19 @@ import "./mocks/MockEAS.sol";
  *  12  test_revert_wrongRecipient (C2a)                 — attestation.recipient != address(escrow)
  *  13  test_revert_stepIdMismatch (C2b)                 — data stepId != m.stepId
  *  14  test_revert_invalidTier (L4)                     — addMilestone with requiredTier > 3
- *      test_revert_zeroSchemaUidConstructor (H1)        — constructor with schemaUid == bytes32(0)
+ *      test_revert_zeroSchemaUidConstructor (H1)        — impl constructor with schemaUid == 0
  *      test_revert_evidenceNotSubmitted                 — submitAttestation before submitEvidence
  *
- * Style mirrors MilestoneEscrow.multistable.t.sol:
- *   - forge-std/Test.sol, named actors, setUp(), vm.prank/expectRevert
+ * Clone / fault-isolation cases (NEW — the hard requirement):
+ *      test_isolation_exploitOnAcannotTouchB            — drain/early-release attempt on A
+ *                                                         leaves B's balance + state untouched
+ *      test_revert_doubleInitialize                     — second initialize() on a clone reverts
+ *      test_revert_initializeImplementationDirectly     — initialize() on the locked impl reverts
+ *      test_clone_hasOwnAddress_recipientBindingHolds   — two clones have distinct addresses;
+ *                                                         an attestation bound to cloneA is
+ *                                                         rejected by cloneB ("Wrong recipient")
  *
- * Authored by: test-writer-echo
+ * Authored by: test-writer-echo; clone refactor by implementer-india.
  */
 contract MilestoneEscrowV2Test is Test {
     // ── Events (mirror contract — required by vm.expectEmit) ────────────────
@@ -69,7 +77,8 @@ contract MilestoneEscrowV2Test is Test {
     uint8   internal constant REQUIRED_TIER    = 1;
 
     // ── Contracts ────────────────────────────────────────────────────────────
-    MilestoneEscrowV2 internal escrow;
+    MilestoneEscrowV2 internal escrowImpl; // shared, locked implementation
+    MilestoneEscrowV2 internal escrow;     // an initialized clone
     MockUSDC          internal usdc;
     MockEAS           internal mockEAS;
 
@@ -86,16 +95,10 @@ contract MilestoneEscrowV2Test is Test {
         usdc    = new MockUSDC(1_000_000e6);
         mockEAS = new MockEAS();
 
-        escrow = new MilestoneEscrowV2(
-            payer,
-            arbiter,
-            address(usdc),
-            CWM_ID,
-            address(0),   // no protocol root (standalone)
-            address(mockEAS),
-            SCHEMA_UID,
-            oracle
-        );
+        // Deploy the shared implementation (carries EAS wiring as immutables, locked),
+        // then clone + initialize a standalone escrow (protocolRoot = 0).
+        escrowImpl = _deployImpl(address(mockEAS), SCHEMA_UID, oracle);
+        escrow     = _cloneAndInit(escrowImpl, payer, arbiter, address(usdc), CWM_ID, address(0));
 
         // Distribute tokens
         usdc.mint(payer,     500_000e6);
@@ -125,6 +128,30 @@ contract MilestoneEscrowV2Test is Test {
         escrow.depositBond(0);
         escrow.submitEvidence(0, EVIDENCE_HASH);
         vm.stopPrank();
+    }
+
+    // ── Deployment helpers (clone/initialize) ─────────────────────────────────
+
+    /// @dev Deploy a locked MilestoneEscrowV2 implementation carrying the EAS wiring.
+    function _deployImpl(address eas_, bytes32 schema_, address oracle_)
+        internal
+        returns (MilestoneEscrowV2 impl)
+    {
+        impl = new MilestoneEscrowV2(eas_, schema_, oracle_);
+    }
+
+    /// @dev Clone `impl` and initialize the clone with per-escrow config. Mirrors the
+    ///      old constructor's per-escrow params so ported test bodies barely change.
+    function _cloneAndInit(
+        MilestoneEscrowV2 impl,
+        address payer_,
+        address arbiter_,
+        address token_,
+        bytes32 cwmId_,
+        address protocolRoot_
+    ) internal returns (MilestoneEscrowV2 clone_) {
+        clone_ = MilestoneEscrowV2(Clones.clone(address(impl)));
+        clone_.initialize(payer_, arbiter_, token_, cwmId_, protocolRoot_);
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -381,10 +408,8 @@ contract MilestoneEscrowV2Test is Test {
         // Build a fresh two-milestone escrow (setUp escrow is already funded/bonded/evidenced)
         MockUSDC usdc2    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS2 = new MockEAS();
-        MilestoneEscrowV2 escrow2 = new MilestoneEscrowV2(
-            payer, arbiter, address(usdc2), CWM_ID, address(0),
-            address(mockEAS2), SCHEMA_UID, oracle
-        );
+        MilestoneEscrowV2 impl2    = _deployImpl(address(mockEAS2), SCHEMA_UID, oracle);
+        MilestoneEscrowV2 escrow2  = _cloneAndInit(impl2, payer, arbiter, address(usdc2), CWM_ID, address(0));
 
         usdc2.mint(payer,    500_000e6);
         usdc2.mint(operator,  50_000e6);
@@ -477,10 +502,8 @@ contract MilestoneEscrowV2Test is Test {
         // requiredTier = 4 exceeds MAX_ASSURANCE_TIER (3) → "Invalid tier"
         MockUSDC usdc3    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS3 = new MockEAS();
-        MilestoneEscrowV2 escrow3 = new MilestoneEscrowV2(
-            payer, arbiter, address(usdc3), CWM_ID, address(0),
-            address(mockEAS3), SCHEMA_UID, oracle
-        );
+        MilestoneEscrowV2 impl3   = _deployImpl(address(mockEAS3), SCHEMA_UID, oracle);
+        MilestoneEscrowV2 escrow3 = _cloneAndInit(impl3, payer, arbiter, address(usdc3), CWM_ID, address(0));
 
         vm.prank(payer);
         vm.expectRevert("Invalid tier");
@@ -488,14 +511,15 @@ contract MilestoneEscrowV2Test is Test {
     }
 
     // ── Test 14b: Zero schema UID constructor (security review H1) ───────────
+    //
+    // The H1 require now lives in the IMPLEMENTATION constructor. Deploying an impl
+    // with schemaUid == 0 must revert before any clone could be made.
 
     function test_revert_zeroSchemaUidConstructor() public {
-        MockUSDC usdc4    = new MockUSDC(1_000_000e6);
-        MockEAS  mockEAS4 = new MockEAS();
+        MockEAS mockEAS4 = new MockEAS();
 
         vm.expectRevert("Schema UID unset");
         new MilestoneEscrowV2(
-            payer, arbiter, address(usdc4), CWM_ID, address(0),
             address(mockEAS4),
             bytes32(0), // zero schemaUid — must revert (H1)
             oracle
@@ -508,10 +532,8 @@ contract MilestoneEscrowV2Test is Test {
         // Fresh escrow where submitEvidence was NOT called
         MockUSDC usdc5    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS5 = new MockEAS();
-        MilestoneEscrowV2 escrow5 = new MilestoneEscrowV2(
-            payer, arbiter, address(usdc5), CWM_ID, address(0),
-            address(mockEAS5), SCHEMA_UID, oracle
-        );
+        MilestoneEscrowV2 impl5   = _deployImpl(address(mockEAS5), SCHEMA_UID, oracle);
+        MilestoneEscrowV2 escrow5 = _cloneAndInit(impl5, payer, arbiter, address(usdc5), CWM_ID, address(0));
         usdc5.mint(payer, 500_000e6);
 
         vm.prank(payer);
@@ -541,5 +563,183 @@ contract MilestoneEscrowV2Test is Test {
         // submitAttestation before submitEvidence → "Evidence not submitted"
         vm.expectRevert("Evidence not submitted");
         escrow5.submitAttestation(0, VALID_UID);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  CLONE / FAULT-ISOLATION TESTS (the hard requirement)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Isolation: an exploit on clone A cannot touch clone B ─────────────────
+    //
+    // Build two fully-independent clones A and B from ONE implementation, each funded
+    // with its own USDC. Then attack A: (1) an early release() before the challenge
+    // window, and (2) a release() by a non-payer / before attestation — anything that
+    // would, in a shared-contract design, risk cross-escrow state. Assert that B's
+    // token balance and milestone state are byte-for-byte untouched throughout, and
+    // that A's funds never leave A toward B.
+
+    function test_isolation_exploitOnAcannotTouchB() public {
+        // Two clones of the SAME implementation, separate USDC pots.
+        MockUSDC usdcA = new MockUSDC(1_000_000e6);
+        MockUSDC usdcB = new MockUSDC(1_000_000e6);
+
+        MilestoneEscrowV2 escrowA = _cloneAndInit(escrowImpl, payer, arbiter, address(usdcA), keccak256("cwm-A"), address(0));
+        MilestoneEscrowV2 escrowB = _cloneAndInit(escrowImpl, payer, arbiter, address(usdcB), keccak256("cwm-B"), address(0));
+
+        // Distinct addresses → distinct storage → distinct balances.
+        assertTrue(address(escrowA) != address(escrowB), "clones must have distinct addresses");
+
+        usdcA.mint(payer, 500_000e6);
+        usdcB.mint(payer, 500_000e6);
+        usdcA.mint(operator, 50_000e6);
+        usdcB.mint(operator, 50_000e6);
+
+        // Fund BOTH escrows with one milestone each.
+        vm.startPrank(payer);
+        escrowA.addMilestone(STEP_ID, operator, AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
+        usdcA.approve(address(escrowA), AMOUNT);
+        escrowA.fund();
+        escrowB.addMilestone(STEP_ID, operator, AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
+        usdcB.approve(address(escrowB), AMOUNT);
+        escrowB.fund();
+        vm.stopPrank();
+
+        // Operators bond + evidence on BOTH.
+        vm.startPrank(operator);
+        usdcA.approve(address(escrowA), OPERATOR_BOND);
+        escrowA.depositBond(0);
+        escrowA.submitEvidence(0, EVIDENCE_HASH);
+        usdcB.approve(address(escrowB), OPERATOR_BOND);
+        escrowB.depositBond(0);
+        escrowB.submitEvidence(0, EVIDENCE_HASH);
+        vm.stopPrank();
+
+        // Snapshot B's full state BEFORE attacking A.
+        uint256 bTokenBefore   = usdcB.balanceOf(address(escrowB));
+        uint8   bStatusBefore  = uint8(escrowB.getMilestone(0).status);
+        uint256 aTokenBefore   = usdcA.balanceOf(address(escrowA));
+        assertEq(bTokenBefore, AMOUNT + OPERATOR_BOND, "B holds its own funds");
+        assertEq(aTokenBefore, AMOUNT + OPERATOR_BOND, "A holds its own funds");
+
+        // ── ATTACK A #1: release before the challenge window even opens (not attested). ──
+        vm.expectRevert("Not attested");
+        escrowA.release(0);
+
+        // ── ATTACK A #2: attest A, then try to release A BEFORE the window closes. ──
+        bytes memory dataA = mockEAS.encodeData(
+            JOB_ID, keccak256("kernel-001"), EVIDENCE_HASH, "", REQUIRED_TIER, true, STEP_ID
+        );
+        mockEAS.setAttestation(VALID_UID, EASAttestation({
+            uid:            VALID_UID,
+            schema:         SCHEMA_UID,
+            time:           uint64(block.timestamp),
+            expirationTime: 0,
+            revocationTime: 0,
+            refUID:         bytes32(0),
+            recipient:      address(escrowA),
+            attester:       oracle,
+            revocable:      true,
+            data:           dataA
+        }));
+        escrowA.submitAttestation(0, VALID_UID);
+        vm.expectRevert("Challenge window open");
+        escrowA.release(0);
+
+        // ── ATTACK A #3: try to reuse A's UID against B (cross-escrow replay). ──
+        // The UID names escrowA as recipient, so B rejects it: "Wrong recipient".
+        vm.expectRevert("Wrong recipient");
+        escrowB.submitAttestation(0, VALID_UID);
+
+        // ── After all attacks on A, B is byte-for-byte unchanged. ──
+        assertEq(usdcB.balanceOf(address(escrowB)), bTokenBefore, "B balance untouched by attacks on A");
+        assertEq(uint8(escrowB.getMilestone(0).status), bStatusBefore, "B milestone status untouched");
+
+        // ── Sanity: a LEGITIMATE release of A pays out of A's pot only; B is still untouched. ──
+        vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
+        uint256 opBefore = usdcA.balanceOf(operator);
+        escrowA.release(0);
+        assertEq(usdcA.balanceOf(operator) - opBefore, AMOUNT + OPERATOR_BOND, "A pays its operator from A's pot");
+        assertEq(usdcA.balanceOf(address(escrowA)), 0, "A's pot fully drained by its own release");
+
+        // B's funds and state STILL untouched after A fully settled.
+        assertEq(usdcB.balanceOf(address(escrowB)), bTokenBefore, "B balance untouched after A settles");
+        assertEq(uint8(escrowB.getMilestone(0).status), bStatusBefore, "B status untouched after A settles");
+    }
+
+    // ── Re-init guard: a clone can be initialized exactly once ────────────────
+
+    function test_revert_doubleInitialize() public {
+        // `escrow` (from setUp) is already initialized. A second initialize must revert.
+        vm.expectRevert("Already initialized");
+        escrow.initialize(payer, arbiter, address(usdc), CWM_ID, address(0));
+    }
+
+    // ── Impl lock: the implementation itself can never be initialized ─────────
+
+    function test_revert_initializeImplementationDirectly() public {
+        // escrowImpl's constructor set _initialized = true, so initialize() reverts.
+        vm.expectRevert("Already initialized");
+        escrowImpl.initialize(payer, arbiter, address(usdc), CWM_ID, address(0));
+    }
+
+    // ── Recipient binding survives the clone refactor across two clones ───────
+    //
+    // Two clones have distinct addresses. An attestation minted with recipient = cloneA
+    // is rejected by cloneB with "Wrong recipient" — the per-escrow binding (C2a) holds
+    // precisely BECAUSE each clone has its own address.
+
+    function test_clone_hasOwnAddress_recipientBindingHolds() public {
+        MockUSDC usdcA = new MockUSDC(1_000_000e6);
+        MockUSDC usdcB = new MockUSDC(1_000_000e6);
+        MockEAS  meas  = new MockEAS();
+
+        // Both clones share ONE implementation that points at `meas`.
+        MilestoneEscrowV2 impl = _deployImpl(address(meas), SCHEMA_UID, oracle);
+        MilestoneEscrowV2 cloneA = _cloneAndInit(impl, payer, arbiter, address(usdcA), keccak256("cwm-clone-A"), address(0));
+        MilestoneEscrowV2 cloneB = _cloneAndInit(impl, payer, arbiter, address(usdcB), keccak256("cwm-clone-B"), address(0));
+
+        assertTrue(address(cloneA) != address(cloneB), "distinct clone addresses");
+        // Both read the SAME shared immutables from the implementation code.
+        assertEq(address(cloneA.eas()), address(meas), "cloneA reads shared eas immutable");
+        assertEq(address(cloneB.eas()), address(meas), "cloneB reads shared eas immutable");
+        assertEq(cloneA.PCC_EVIDENCE_SCHEMA_UID(), SCHEMA_UID, "cloneA shared schema");
+        assertEq(cloneB.PCC_EVIDENCE_SCHEMA_UID(), SCHEMA_UID, "cloneB shared schema");
+        assertEq(cloneA.authorizedOracle(), oracle, "cloneA shared oracle");
+        assertEq(cloneB.authorizedOracle(), oracle, "cloneB shared oracle");
+
+        // Fund + evidence cloneB's milestone 0 so it reaches the recipient check.
+        usdcB.mint(payer, 500_000e6);
+        usdcB.mint(operator, 50_000e6);
+        vm.startPrank(payer);
+        cloneB.addMilestone(STEP_ID, operator, AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
+        usdcB.approve(address(cloneB), AMOUNT);
+        cloneB.fund();
+        vm.stopPrank();
+        vm.startPrank(operator);
+        usdcB.approve(address(cloneB), OPERATOR_BOND);
+        cloneB.depositBond(0);
+        cloneB.submitEvidence(0, EVIDENCE_HASH);
+        vm.stopPrank();
+
+        // Mint an attestation whose recipient is cloneA (NOT cloneB).
+        bytes memory data = meas.encodeData(
+            JOB_ID, keccak256("kernel-001"), EVIDENCE_HASH, "", REQUIRED_TIER, true, STEP_ID
+        );
+        meas.setAttestation(VALID_UID, EASAttestation({
+            uid:            VALID_UID,
+            schema:         SCHEMA_UID,
+            time:           uint64(block.timestamp),
+            expirationTime: 0,
+            revocationTime: 0,
+            refUID:         bytes32(0),
+            recipient:      address(cloneA), // bound to A
+            attester:       oracle,
+            revocable:      true,
+            data:           data
+        }));
+
+        // cloneB rejects an attestation bound to cloneA.
+        vm.expectRevert("Wrong recipient");
+        cloneB.submitAttestation(0, VALID_UID);
     }
 }
