@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {MilestoneEscrowV2} from "./MilestoneEscrowV2.sol";
 import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
+import {Clones} from "./libraries/Clones.sol";
 
 /**
  * @title PCCProtocolV2
@@ -13,9 +14,23 @@ import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
  *
  * PCCProtocolV2 mirrors `PCCProtocol` (same immutable fee recipient, the same fee
  * bounds + governance machinery, the same `isProtocolEscrow` / `collectFee` accounting)
- * but its factory method `createEscrowV2` deploys `MilestoneEscrowV2` instances and
- * threads the EAS wiring (EAS address + `pcc.evidence.v1` schema UID + authorized oracle)
- * through to each child as construction immutables.
+ * but its factory method `createEscrowV2` deploys each `MilestoneEscrowV2` as an
+ * EIP-1167 minimal-proxy CLONE of a single shared implementation, then `initialize`s
+ * the clone with its per-escrow config.
+ *
+ * FAULT ISOLATION (the reason for the clone refactor): every escrow is its own
+ * address with its own storage and its own USDC balance. A bug or exploit that drains
+ * or bricks escrow A delegatecalls into the shared logic but operates ONLY on A's
+ * storage/balance — it physically cannot reach escrow B's funds. The shared EAS wiring
+ * (EAS address + `pcc.evidence.v1` schema UID + authorized oracle) lives in the
+ * implementation's code as immutables and is read identically by every clone; the
+ * per-escrow config (payer/arbiter/token/cwmId) is written to each clone's own storage
+ * by `initialize`.
+ *
+ * GAS: the prior design deployed a full ~17.5KB MilestoneEscrowV2 per escrow (~4M gas).
+ * A clone is ~45 bytes of init code, so `createEscrowV2` now costs tens-of-thousands of
+ * gas. The factory NO LONGER embeds the child initcode, so its own runtime is far under
+ * the 24,576-byte EIP-170 limit.
  *
  * WHY A NEW FACTORY: `PCCProtocol.createEscrow` does `new MilestoneEscrow(...)` against
  * the compile-time-bound concrete V1 type — there is no implementation pointer or proxy to
@@ -60,6 +75,16 @@ contract PCCProtocolV2 {
 
     /// @notice The authorized oracle signer (EAS attester) threaded to every child escrow.
     address public immutable easOracle;
+
+    // ── Clone Implementation ─────────────────────────────────────────
+
+    /// @notice The shared MilestoneEscrowV2 implementation that every escrow clones.
+    /// @dev Deployed once (off-factory) and passed in at construction. `createEscrowV2`
+    ///      deploys EIP-1167 minimal proxies of this address — each its own isolated
+    ///      storage/balance — so a bug in one escrow cannot reach another's funds.
+    ///      The implementation is LOCKED (its constructor set `_initialized = true`), so
+    ///      it can never be initialized or used directly; only clones are usable.
+    address public immutable escrowImplementation;
 
     // ── Governance-Adjustable State ──────────────────────────────────
 
@@ -146,6 +171,9 @@ contract PCCProtocolV2 {
      * @param _eas                 The EAS contract threaded to children (Base + Base Sepolia: 0x42...0021).
      * @param _pccEvidenceSchemaUid The `pcc.evidence.v1` schema UID threaded to children.
      * @param _easOracle           The authorized oracle signer (EAS attester) threaded to children.
+     * @param _escrowImplementation The shared MilestoneEscrowV2 implementation every escrow clones.
+     *                             MUST be a locked implementation (deployed with the SAME eas /
+     *                             schemaUid / oracle this factory advertises). Cannot be zero.
      */
     constructor(
         address _feeRecipient,
@@ -154,7 +182,8 @@ contract PCCProtocolV2 {
         address _oracleVerifier,
         address _eas,
         bytes32 _pccEvidenceSchemaUid,
-        address _easOracle
+        address _easOracle,
+        address _escrowImplementation
     ) {
         require(_feeRecipient != address(0), "Zero fee recipient");
         require(_governor != address(0), "Zero governor");
@@ -162,6 +191,7 @@ contract PCCProtocolV2 {
         require(_oracleVerifier != address(0), "Zero oracle verifier");
         require(_eas != address(0), "Zero EAS");
         require(_easOracle != address(0), "Zero EAS oracle");
+        require(_escrowImplementation != address(0), "Zero escrow implementation");
         // SECURITY (review H1): a zero schema UID threads into every child escrow and
         // silently breaks its release gate (a.schema == 0 never matches) → permanent
         // fund-lock. The value is immutable here and in the children — reject at construction.
@@ -175,18 +205,30 @@ contract PCCProtocolV2 {
         eas = _eas;
         pccEvidenceSchemaUid = _pccEvidenceSchemaUid;
         easOracle = _easOracle;
+        escrowImplementation = _escrowImplementation;
     }
 
     // ── Factory ──────────────────────────────────────────────────────
 
     /**
-     * @notice Deploy a new MilestoneEscrowV2 with this protocol as the root and the
-     *         factory's EAS wiring threaded through as child immutables.
+     * @notice Deploy a new MilestoneEscrowV2 as an EIP-1167 clone of the shared
+     *         implementation, then initialize it with this protocol as root and the
+     *         caller-supplied per-escrow config. The EAS wiring is inherited from the
+     *         implementation's immutables (identical for every escrow).
+     *
+     * @dev FAULT ISOLATION: the clone has its own address, storage, and token balance.
+     *      An exploit on this escrow cannot reach any other escrow's funds.
+     *
+     *      The clone is deployed via CREATE2 (deterministic) so its address is
+     *      predictable off-chain via `predictEscrowAddress(cwmId, getEscrowCount())`.
+     *      The salt mixes `cwmId` with the current escrow count so a repeated `cwmId`
+     *      can never cause a CREATE2 address collision (which would revert the call).
+     *
      * @param payer The payer address (funds the escrow).
      * @param arbiter The arbiter address (resolves disputes).
      * @param token The ERC-20 token for payments (e.g. USDC).
      * @param cwmId Canonical Workflow Model ID.
-     * @return escrow The address of the newly deployed MilestoneEscrowV2.
+     * @return escrow The address of the newly deployed MilestoneEscrowV2 clone.
      */
     function createEscrowV2(
         address payer,
@@ -197,22 +239,32 @@ contract PCCProtocolV2 {
         require(payer != address(0), "Zero payer");
         require(token != address(0), "Zero token");
 
-        MilestoneEscrowV2 newEscrow = new MilestoneEscrowV2(
-            payer,
-            arbiter,
-            token,
-            cwmId,
-            address(this),
-            eas,
-            pccEvidenceSchemaUid,
-            easOracle
-        );
-        escrow = address(newEscrow);
+        // Salt = cwmId mixed with the escrow index → unique per clone, collision-free,
+        // and predictable off-chain (the index is getEscrowCount() before this call).
+        bytes32 salt = keccak256(abi.encode(cwmId, allEscrows.length));
+        escrow = Clones.cloneDeterministic(escrowImplementation, salt);
+
+        // Per-escrow config is written to the clone's OWN storage (including protocolRoot =
+        // this factory, so release() routes fees here). The shared EAS wiring
+        // (eas / schemaUid / oracle) is read from the implementation code.
+        MilestoneEscrowV2(escrow).initialize(payer, arbiter, token, cwmId, address(this));
 
         isProtocolEscrow[escrow] = true;
         allEscrows.push(escrow);
 
         emit EscrowCreated(escrow, payer, arbiter, token, cwmId);
+    }
+
+    /**
+     * @notice Predict the deterministic address a clone will be deployed at, given the
+     *         `cwmId` and the escrow index it will occupy (== `getEscrowCount()` at the
+     *         moment `createEscrowV2` is called).
+     * @dev Pure off-chain helper for callers that want the escrow address before the tx
+     *      lands. Uses the same salt derivation as `createEscrowV2`.
+     */
+    function predictEscrowAddress(bytes32 cwmId, uint256 escrowIndex) external view returns (address) {
+        bytes32 salt = keccak256(abi.encode(cwmId, escrowIndex));
+        return Clones.predictDeterministicAddress(escrowImplementation, salt, address(this));
     }
 
     // ── Fee Collection ───────────────────────────────────────────────

@@ -18,12 +18,19 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  * Sibling of DeployProtocol.s.sol. The fee recipient is HARDCODED to the same address as
  * V1 (0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B) and cannot change after deployment.
  *
+ * EIP-1167 CLONE ARCHITECTURE: this script deploys ONE shared MilestoneEscrowV2
+ * implementation (carrying the EAS wiring as immutables, locked so it can never be
+ * used directly), then deploys PCCProtocolV2 pointing at that implementation. Every
+ * escrow created via `createEscrowV2` is a ~45-byte minimal-proxy clone of it — its
+ * own address/storage/balance, so a bug in one escrow cannot drain another.
+ *
  * The factory bakes in (immutable):
  *   - EAS = 0x4200000000000000000000000000000000000021 (Base + Base Sepolia predeploy)
  *   - pccEvidenceSchemaUid = PCC_EVIDENCE_SCHEMA_UID env (from gate G1 / RegisterEASSchema)
  *   - easOracle = the authorized oracle signer (EAS attester); defaults to ORACLE_VERIFIER_ADDRESS,
  *     overridable via EAS_ORACLE_ADDRESS
  *   - oracleVerifier = ORACLE_VERIFIER_ADDRESS (V1 parity; not consulted by the EAS release gate)
+ *   - escrowImplementation = the shared MilestoneEscrowV2 implementation deployed first below
  *
  * After deploy, hand-add the printed PCCProtocolV2 address to chain-config.ts as
  * `milestoneEscrowFactoryV2` for the target network (no automated ingestion).
@@ -70,16 +77,28 @@ contract DeployProtocolV2 is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // 1. Deploy PCCProtocolV2 factory.
+        // 1. Deploy the SHARED MilestoneEscrowV2 implementation. It carries the EAS wiring
+        //    as immutables and is LOCKED by its constructor (_initialized = true) so it can
+        //    never be initialized or used directly — only cloned. The per-escrow config
+        //    (payer/arbiter/token/cwmId) is intentionally NOT set here.
+        MilestoneEscrowV2 escrowImpl = new MilestoneEscrowV2(
+            EAS,         // EAS contract (immutable, shared by every clone)
+            schemaUid,   // pcc.evidence.v1 schema UID (immutable, shared by every clone)
+            easOracle    // authorized oracle / EAS attester (immutable, shared by every clone)
+        );
+        console2.log("MilestoneEscrowV2 implementation deployed at:", address(escrowImpl));
+
+        // 2. Deploy PCCProtocolV2 factory pointing at the implementation.
         //    Governor = deployer (can be transferred to a multisig later).
         PCCProtocolV2 protocolV2 = new PCCProtocolV2(
             FEE_RECIPIENT,
             INITIAL_FEE_BPS,
-            deployer,        // governor
-            oracleVerifier,  // oracle verifier (immutable, V1 parity)
-            EAS,             // EAS contract (immutable, threaded to children)
-            schemaUid,       // pcc.evidence.v1 schema UID (immutable, threaded to children)
-            easOracle        // authorized oracle / EAS attester (immutable, threaded to children)
+            deployer,            // governor
+            oracleVerifier,      // oracle verifier (immutable, V1 parity)
+            EAS,                 // EAS contract (immutable, threaded to children)
+            schemaUid,           // pcc.evidence.v1 schema UID (immutable, threaded to children)
+            easOracle,           // authorized oracle / EAS attester (immutable, threaded to children)
+            address(escrowImpl)  // shared implementation every escrow clones
         );
         console2.log("PCCProtocolV2 deployed at:", address(protocolV2));
 
