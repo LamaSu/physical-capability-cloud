@@ -1,0 +1,33 @@
+{
+  "name": "@pcc/prism-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end PRISM-style orchestrator: web procedure → structured steps (LLM) → MADSci YAML → sim-attest → PCC escrow → execute → settle. Models github.com/ramanathanlab/PRISM pipeline.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/adapter-madsci": "workspace:*",
+    "@pcc/kernel-automata-linq": "workspace:*",
+    "@pcc/kernel-omniverse-sim": "workspace:*",
+    "@pcc/spec": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
