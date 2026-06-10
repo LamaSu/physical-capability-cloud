@@ -4,42 +4,61 @@ pragma solidity ^0.8.24;
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IPGTRForwarder} from "./interfaces/IPGTRForwarder.sol";
 import {IPCCProtocol} from "./interfaces/IPCCProtocol.sol";
+import {IEAS, EASAttestation} from "./interfaces/IEAS.sol";
 import {SafeERC20} from "./libraries/SafeERC20.sol";
 
 /**
- * @title MilestoneEscrow
- * @notice Escrow contract for Physical Capability Cloud workflows.
+ * @title MilestoneEscrowV2
+ * @notice EAS-gated milestone escrow for Physical Capability Cloud workflows.
  *
- * Each workflow (CWM) gets a MilestoneEscrow instance. The escrow holds funds
+ * V2 is a duplicate of `MilestoneEscrow` (V1) with ONE behavioral change: the
+ * release-gating attestation step now reads a REAL on-chain Ethereum Attestation
+ * Service (EAS) record by UID and validates its provenance + payload, instead of
+ * accepting a bare bytes32 from an allowlisted EOA.
+ *
+ * Authored by implementer-alpha — EAS attestation-bridge migration (deliverable 2).
+ * See ai/research/eas-migration-design.md §3.3 for the authoritative spec.
+ *
+ * Each workflow (CWM) gets a MilestoneEscrowV2 instance. The escrow holds funds
  * for each step (milestone) and releases them to operators after:
  *   1. Evidence bundle hash is submitted by the kernel
- *   2. Verifier attestation is submitted
+ *   2. A valid EAS attestation (produced by the authorized oracle) is bound by UID
  *   3. Challenge window expires without dispute
  *
  * If disputed, an arbiter resolves. Bonds are slashed for proven fraud.
  *
- * Flow: fund → submitEvidence → submitAttestation → [challenge window] → release
+ * Flow: fund → submitEvidence → submitAttestation(easUid) → [challenge window] → release
+ *
+ * EAS gating (vs V1)
+ * -----------------------------------------------------------------------------
+ * V1 `submitAttestation(uint256, bytes32)` accepted any bytes32 from any allowlisted
+ * verifier — the oracle's verdict never touched the chain and was never validated by it.
+ * V2 `submitAttestation(uint256, bytes32 easUid)` instead:
+ *   - reads `IEAS.getAttestation(easUid)`
+ *   - requires the attestation exists, uses the PCC evidence schema, was produced by the
+ *     `authorizedOracle`, is not revoked, and is not expired
+ *   - decodes the schema payload and requires `oracleVerified == true`, the achieved tier
+ *     meets the milestone's `requiredTier`, the attested `jobId` matches the milestone's
+ *     `jobIdHash`, the attested `stepId` matches the milestone's `stepId`, and the attested
+ *     `evidenceBundleHash` matches the on-chain evidence
+ *   - binds the attestation to THIS escrow (`recipient == address(this)`) and consumes each
+ *     UID at most once (single-use guard) — closing the cross-escrow / cross-milestone /
+ *     UID-replay defects (security review C1/C2)
+ * The old `authorizedVerifiers` allowlist + `addVerifier`/`removeVerifier` are REMOVED in V2
+ * (security review L2): they were never consulted by `submitAttestation` and only created a
+ * misleading-authority surface. The EAS `attester` field is the sole provenance gate. The old
+ * "operator cannot self-attest" guard is subsumed: an operator cannot forge an attestation
+ * whose `attester == authorizedOracle`, so relaying the UID is permissionless.
  *
  * Multi-stablecoin support
  * -----------------------------------------------------------------------------
- * The escrow has a DEFAULT token (set at construction) for backward compatibility.
- * It also maintains an owner-curated allowlist of approved stablecoins, each
- * with an on-chain `ReserveAttestation` pointer to a vetted reserve report
- * (maintained off-chain). Milestones added via `addMilestoneWithToken(..., token)`
- * may use any allowlisted stablecoin instead of the default.
- *
- * The default token is always considered implicitly "allowed" for backward
- * compatibility with escrows deployed before multi-stablecoin support existed.
- * Explicit attestations for the default token can still be added via
- * `allowStablecoin` and are recommended in new deployments.
- *
- * SafeERC20 is used for all transfers so the escrow is compatible with
- * tokens such as USDT that do NOT return a boolean from transfer/transferFrom.
- * Fee-on-transfer tokens are rejected: every inbound transfer is verified by
- * balance delta and reverts if the received amount does not equal the claimed
- * amount.
+ * Identical to V1: a DEFAULT token (set at construction) plus an owner-curated allowlist
+ * of approved stablecoins, each with an on-chain `ReserveAttestation` pointer to a vetted
+ * reserve report (maintained off-chain). Milestones added via `addMilestoneWithToken`
+ * may use any allowlisted stablecoin instead of the default. SafeERC20 is used for all
+ * transfers; fee-on-transfer tokens are rejected by balance-delta checks.
  */
-contract MilestoneEscrow {
+contract MilestoneEscrowV2 {
     using SafeERC20 for IERC20;
 
     // ── Types ────────────────────────────────────────────────────────────
@@ -84,6 +103,16 @@ contract MilestoneEscrow {
         Slashed       // 8 - Operator bond slashed
     }
 
+    /**
+     * @notice Per-milestone state.
+     * @dev V2 appends three fields to the V1 layout (existing fields unchanged):
+     *      - `requiredTier`            : minimum assurance tier the attestation must report.
+     *      - `jobIdHash`               : keccak256(bytes(jobId)) bound at creation; the EAS
+     *                                    attestation's jobId must hash to this.
+     *      - `verifierAttestationUid`  : the EAS UID that released the milestone (0 until attested).
+     *      `verifierAttestationHash` is RETAINED (set to evidenceBundleHash on success) for
+     *      ABI/back-compat with V1 consumers reading the struct.
+     */
     struct Milestone {
         bytes32 stepId;
         address operator;
@@ -94,6 +123,10 @@ contract MilestoneEscrow {
         bytes32 verifierAttestationHash;
         uint256 challengeWindowEnd;
         uint256 challengeWindowSeconds;
+        // ── V2 additions ──
+        uint8   requiredTier;
+        bytes32 jobIdHash;
+        bytes32 verifierAttestationUid;
     }
 
     struct Dispute {
@@ -134,8 +167,27 @@ contract MilestoneEscrow {
     /// @dev Zero address means no protocol root (standalone / legacy deployment).
     address public immutable protocolRoot;
 
+    // ── EAS Wiring (immutables) ──────────────────────────────────────────
+
+    /// @notice The Ethereum Attestation Service contract.
+    /// @dev Base + Base Sepolia predeploy 0x4200000000000000000000000000000000000021.
+    IEAS public immutable eas;
+
+    /// @notice The UID of the `pcc.evidence.v1` EAS schema this escrow gates on.
+    /// @dev keccak256(abi.encodePacked(schemaString, address(0), true)) — registered out-of-band (G1).
+    bytes32 public immutable PCC_EVIDENCE_SCHEMA_UID;
+
+    /// @notice The PCC gateway oracle signer. Must equal the EAS attestation's `attester`.
+    address public immutable authorizedOracle;
+
     Milestone[] public milestones;
     mapping(uint256 => Dispute) public disputes;
+
+    /// @notice Tracks every EAS UID already consumed by a successful submitAttestation.
+    /// @dev SECURITY (review C1): without this, one oracle attestation could release N
+    ///      milestones (cross-milestone replay). Set true the first time a UID releases a
+    ///      milestone; any subsequent submitAttestation with the same UID reverts.
+    mapping(bytes32 => bool) private _attestationUsed;
 
     bool public funded;
     uint256 public totalAmount;
@@ -155,6 +207,10 @@ contract MilestoneEscrow {
 
     /// @notice Per-payout basis-point ceiling. Sanity floor: no single recipient takes >50%.
     uint256 public constant MAX_SINGLE_BPS = 5000;
+
+    /// @notice Highest assurance tier the oracle ever emits (0-3). Used to range-validate
+    ///         a milestone's requiredTier at creation (review L4).
+    uint8 public constant MAX_ASSURANCE_TIER = 3;
 
     // ── Multi-Stablecoin Storage ────────────────────────────────────────
 
@@ -176,11 +232,6 @@ contract MilestoneEscrow {
 
     uint256 private _locked = 1;
 
-    // ── Access Control ───────────────────────────────────────────────────
-
-    /// @notice Addresses authorized to submit verifier attestations.
-    mapping(address => bool) public authorizedVerifiers;
-
     // ── PGTR Trusted Forwarders ─────────────────────────────────────────
 
     /// @notice Trusted PGTR forwarder contracts that can relay calls on behalf of users.
@@ -194,7 +245,9 @@ contract MilestoneEscrow {
     event EscrowFunded(bytes32 indexed cwmId, uint256 totalAmount);
     event MilestoneLocked(uint256 indexed milestoneIndex, bytes32 stepId);
     event EvidenceSubmitted(uint256 indexed milestoneIndex, bytes32 evidenceBundleHash);
-    event AttestationSubmitted(uint256 indexed milestoneIndex, bytes32 attestationHash, uint256 challengeWindowEnd);
+    /// @notice Emitted when a milestone is attested.
+    /// @dev In V2 the second arg carries the EAS UID (was the raw attestation hash in V1).
+    event AttestationSubmitted(uint256 indexed milestoneIndex, bytes32 attestationUid, uint256 challengeWindowEnd);
     event MilestoneReleased(uint256 indexed milestoneIndex, address operator, uint256 amount);
     event DisputeFiled(uint256 indexed milestoneIndex, address challenger, uint256 bond);
     event DisputeResolved(uint256 indexed milestoneIndex, bool challengerWon);
@@ -274,25 +327,42 @@ contract MilestoneEscrow {
     // ── Constructor ──────────────────────────────────────────────────────
 
     /**
-     * @param _payer      Address that funds the escrow and can add milestones.
-     * @param _arbiter    Address that resolves disputes.
-     * @param _token      ERC-20 token used for payments.
-     * @param _cwmId      Canonical Workflow Model identifier.
+     * @param _payer        Address that funds the escrow and can add milestones.
+     * @param _arbiter      Address that resolves disputes.
+     * @param _token        ERC-20 token used for payments.
+     * @param _cwmId        Canonical Workflow Model identifier.
      * @param _protocolRoot PCCProtocol root address. Set to address(0) for standalone/legacy use.
-     *                    When non-zero, a 1.5% (configurable) fee is deducted on release().
+     *                      When non-zero, a fee is deducted on release().
+     * @param _eas          The EAS contract (Base + Base Sepolia: 0x42...0021).
+     * @param _schemaUid    The `pcc.evidence.v1` schema UID this escrow gates on.
+     * @param _oracle       The PCC gateway oracle signer (== EAS attester). Must be non-zero.
      */
     constructor(
         address _payer,
         address _arbiter,
         address _token,
         bytes32 _cwmId,
-        address _protocolRoot
+        address _protocolRoot,
+        address _eas,
+        bytes32 _schemaUid,
+        address _oracle
     ) {
+        require(_eas != address(0), "Zero EAS");
+        require(_oracle != address(0), "Zero oracle");
+        // SECURITY (review H1): a zero schema UID silently breaks the release gate
+        // (a.schema == 0 never matches a real registry-derived UID) and permanently
+        // locks every milestone's funds. The value is immutable — reject at construction.
+        require(_schemaUid != bytes32(0), "Schema UID unset");
+
         payer = _payer;
         arbiter = _arbiter;
         token = IERC20(_token);
         cwmId = _cwmId;
         protocolRoot = _protocolRoot;
+
+        eas = IEAS(_eas);
+        PCC_EVIDENCE_SCHEMA_UID = _schemaUid;
+        authorizedOracle = _oracle;
     }
 
     // ── PGTR Forwarder Management ──────────────────────────────────────
@@ -329,25 +399,6 @@ contract MilestoneEscrow {
             return sender;
         }
         return msg.sender;
-    }
-
-    // ── Verifier Management ──────────────────────────────────────────────
-
-    /**
-     * @notice Authorize an address to submit attestations. Only the arbiter can manage verifiers.
-     * @param verifier Address to authorize as a verifier.
-     */
-    function addVerifier(address verifier) external onlyArbiter {
-        require(verifier != address(0), "Zero address");
-        authorizedVerifiers[verifier] = true;
-    }
-
-    /**
-     * @notice Remove an authorized verifier. Only the arbiter can manage verifiers.
-     * @param verifier Address to deauthorize.
-     */
-    function removeVerifier(address verifier) external onlyArbiter {
-        authorizedVerifiers[verifier] = false;
     }
 
     // ── Stablecoin Allowlist ─────────────────────────────────────────────
@@ -422,17 +473,23 @@ contract MilestoneEscrow {
 
     /**
      * @notice Add a milestone denominated in the escrow's DEFAULT token.
-     *         This preserves the original single-stablecoin ABI.
+     *         This preserves the original single-stablecoin ABI shape, EXTENDED with the
+     *         V2 `_requiredTier` and `_jobId` params required for EAS gating.
      *
      * @dev Equivalent to `addMilestoneWithToken(_stepId, _operator, _amount,
-     *      _operatorBond, _challengeWindowSeconds, address(token))`.
+     *      _operatorBond, _challengeWindowSeconds, _requiredTier, _jobId, address(token))`.
+     *
+     * @param _requiredTier Minimum assurance tier the EAS attestation must report.
+     * @param _jobId        The PCC job id; bound on-chain as keccak256(bytes(_jobId)).
      */
     function addMilestone(
         bytes32 _stepId,
         address _operator,
         uint256 _amount,
         uint256 _operatorBond,
-        uint256 _challengeWindowSeconds
+        uint256 _challengeWindowSeconds,
+        uint8 _requiredTier,
+        string calldata _jobId
     ) external onlyPayer {
         _addMilestone(
             _stepId,
@@ -440,6 +497,8 @@ contract MilestoneEscrow {
             _amount,
             _operatorBond,
             _challengeWindowSeconds,
+            _requiredTier,
+            _jobId,
             address(token)
         );
     }
@@ -453,6 +512,8 @@ contract MilestoneEscrow {
      * @param _amount                 Payment amount in the chosen token's decimals.
      * @param _operatorBond           Bond the operator must deposit before evidence.
      * @param _challengeWindowSeconds Seconds the challenge window stays open after attestation.
+     * @param _requiredTier           Minimum assurance tier the EAS attestation must report.
+     * @param _jobId                  The PCC job id; bound on-chain as keccak256(bytes(_jobId)).
      * @param _token                  ERC-20 token to denominate this milestone in.
      *                                MUST be `isStablecoinAllowed`.
      */
@@ -462,6 +523,8 @@ contract MilestoneEscrow {
         uint256 _amount,
         uint256 _operatorBond,
         uint256 _challengeWindowSeconds,
+        uint8 _requiredTier,
+        string calldata _jobId,
         address _token
     ) external onlyPayer {
         _addMilestone(
@@ -470,6 +533,8 @@ contract MilestoneEscrow {
             _amount,
             _operatorBond,
             _challengeWindowSeconds,
+            _requiredTier,
+            _jobId,
             _token
         );
     }
@@ -481,11 +546,17 @@ contract MilestoneEscrow {
         uint256 _amount,
         uint256 _operatorBond,
         uint256 _challengeWindowSeconds,
+        uint8 _requiredTier,
+        string calldata _jobId,
         address _token
     ) internal {
         require(!funded, "Already funded");
         require(_token != address(0), "Zero token");
         require(isStablecoinAllowed(_token), "Token not allowed");
+        // SECURITY (review L4): requiredTier must be in the oracle's 0-3 domain.
+        // tier 0 silently disables tier gating; tier 4..255 can never release (oracle
+        // only emits 0-3), permanently locking the milestone. Reject out-of-range.
+        require(_requiredTier <= MAX_ASSURANCE_TIER, "Invalid tier");
 
         uint256 idx = milestones.length;
         milestones.push(Milestone({
@@ -497,7 +568,11 @@ contract MilestoneEscrow {
             evidenceBundleHash: bytes32(0),
             verifierAttestationHash: bytes32(0),
             challengeWindowEnd: 0,
-            challengeWindowSeconds: _challengeWindowSeconds
+            challengeWindowSeconds: _challengeWindowSeconds,
+            // ── V2 additions ──
+            requiredTier: _requiredTier,
+            jobIdHash: keccak256(bytes(_jobId)),
+            verifierAttestationUid: bytes32(0)
         }));
 
         // Only persist an override when it differs from the default; keeps storage clean
@@ -681,23 +756,94 @@ contract MilestoneEscrow {
     }
 
     /**
-     * @notice Verifier submits attestation hash. Opens challenge window.
-     * @dev Only authorized verifiers may call this. The milestone's operator is
-     *      explicitly blocked from self-attesting their own evidence.
+     * @notice Bind a valid EAS attestation (by UID) to a milestone and open the challenge window.
+     *
+     * @dev V2 replaces V1's bare-bytes32 `submitAttestation`. The UID is resolved against EAS
+     *      and validated for provenance + payload. See ai/research/eas-migration-design.md §3.3.
+     *
+     *      Checks (in order):
+     *        1. milestone is Evidenced
+     *        2. UID not already consumed (single-use guard — review C1)
+     *        3. attestation exists (uid != 0)
+     *        4. attestation uses the PCC evidence schema
+     *        5. attester == authorizedOracle (provenance — replaces the allowlist gate)
+     *        6. recipient == address(this) (binds the attestation to THIS escrow — review C2a)
+     *        7. not revoked
+     *        8. not expired
+     *        9. decoded `oracleVerified` is true
+     *       10. decoded `assuranceTier` >= milestone.requiredTier
+     *       11. keccak256(bytes(decoded jobId)) == milestone.jobIdHash
+     *       12. decoded `stepId` == milestone.stepId (binds to THIS milestone — review C2b)
+     *       13. decoded `evidenceBundleHash` == milestone.evidenceBundleHash (binds to on-chain evidence)
+     *
+     *      Together checks 2/6/12 close the attestation-replay defects: 6 stops cross-escrow
+     *      replay (a UID minted for escrow A names A as recipient, so escrow B rejects it), 12
+     *      stops cross-milestone replay within an escrow, and 2 stops re-use of the same UID.
+     *
+     *      `submitAttestation` is PERMISSIONLESS to relay: anyone may submit the UID; only a
+     *      real oracle attestation passes. The operator cannot forge `attester == authorizedOracle`,
+     *      so the V1 "operator cannot self-attest" guard is intrinsic.
+     *
+     * @param milestoneIndex Index of the milestone in milestones[].
+     * @param easUid         The EAS attestation UID produced by the authorized oracle.
      */
-    function submitAttestation(uint256 milestoneIndex, bytes32 _attestationHash)
+    function submitAttestation(uint256 milestoneIndex, bytes32 easUid)
         external
         milestoneExists(milestoneIndex)
     {
         Milestone storage m = milestones[milestoneIndex];
-        require(authorizedVerifiers[msg.sender], "Not an authorized verifier");
-        require(msg.sender != m.operator, "Operator cannot self-attest");
         require(m.status == MilestoneStatus.Evidenced, "Evidence not submitted");
+        // SECURITY (review C1): one UID may release at most one milestone, ever.
+        require(!_attestationUsed[easUid], "Attestation already used");
 
-        m.verifierAttestationHash = _attestationHash;
-        m.challengeWindowEnd = block.timestamp + m.challengeWindowSeconds;
-        m.status = MilestoneStatus.Attested;
-        emit AttestationSubmitted(milestoneIndex, _attestationHash, m.challengeWindowEnd);
+        EASAttestation memory a = eas.getAttestation(easUid);
+        require(a.uid != bytes32(0),                 "Attestation not found");
+        require(a.schema == PCC_EVIDENCE_SCHEMA_UID, "Wrong schema");
+        require(a.attester == authorizedOracle,      "Wrong attester");
+        // SECURITY (review C2a): the oracle mints each attestation with recipient = the
+        // escrow address. A UID minted for escrow A (recipient == A) cannot satisfy escrow B.
+        require(a.recipient == address(this),        "Wrong recipient");
+        require(a.revocationTime == 0,               "Revoked");
+        require(a.expirationTime == 0 || block.timestamp <= a.expirationTime, "Expired");
+
+        (
+            string memory jobId,
+            bytes32 kernelId,
+            bytes32 evidenceBundleHash,
+            string memory ipfsCid,
+            uint8 assuranceTier,
+            bool oracleVerified,
+            bytes32 stepId
+        ) = abi.decode(a.data, (string, bytes32, bytes32, string, uint8, bool, bytes32));
+        // kernelId / ipfsCid are carried in the schema for off-chain consumers; not gated on-chain.
+        kernelId;
+        ipfsCid;
+
+        require(oracleVerified,                             "Oracle did not verify");
+        require(assuranceTier >= m.requiredTier,            "Tier too low");
+        require(keccak256(bytes(jobId)) == m.jobIdHash,     "jobId mismatch");
+        // SECURITY (review C2b): bind the attestation to THIS milestone, not just its job.
+        // m.stepId is the bytes32 bound at creation. The off-chain producer derives the same
+        // value as keccak256(utf8(stepIdString)) — see oracle-client.ts AttestEvidenceInput.stepId.
+        require(stepId == m.stepId,                         "stepId mismatch");
+        require(evidenceBundleHash == m.evidenceBundleHash, "Evidence mismatch");
+
+        // Effects: mark the UID spent BEFORE the status transition (C1 single-use).
+        _attestationUsed[easUid] = true;
+        m.verifierAttestationUid  = easUid;
+        m.verifierAttestationHash = evidenceBundleHash; // back-compat field (V1 consumers)
+        m.challengeWindowEnd      = block.timestamp + m.challengeWindowSeconds;
+        m.status                  = MilestoneStatus.Attested;
+        emit AttestationSubmitted(milestoneIndex, easUid, m.challengeWindowEnd);
+    }
+
+    /**
+     * @notice True if the given EAS UID has already released a milestone in this escrow.
+     * @dev Exposed for off-chain tooling / tests (review C1). A consumed UID can never be
+     *      reused by `submitAttestation`.
+     */
+    function attestationUsed(bytes32 easUid) external view returns (bool) {
+        return _attestationUsed[easUid];
     }
 
     /**

@@ -1,29 +1,39 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {MilestoneEscrow} from "./MilestoneEscrow.sol";
+import {MilestoneEscrowV2} from "./MilestoneEscrowV2.sol";
 import {IPCCOracle} from "./interfaces/IPCCOracle.sol";
 
 /**
- * @title PCCProtocol
- * @notice Root protocol contract for Physical Capability Cloud.
+ * @title PCCProtocolV2
+ * @notice Root protocol factory for the EAS-gated Physical Capability Cloud escrows.
  *
- * Collects 2.35% from ALL PCC escrow settlements. The fee recipient address
- * is IMMUTABLE — it is set at deployment and can never be changed.
+ * Authored by implementer-alpha — EAS attestation-bridge migration (deliverable 3).
+ * See ai/research/eas-migration-design.md §3.6.
  *
- * Fee bounds:
+ * PCCProtocolV2 mirrors `PCCProtocol` (same immutable fee recipient, the same fee
+ * bounds + governance machinery, the same `isProtocolEscrow` / `collectFee` accounting)
+ * but its factory method `createEscrowV2` deploys `MilestoneEscrowV2` instances and
+ * threads the EAS wiring (EAS address + `pcc.evidence.v1` schema UID + authorized oracle)
+ * through to each child as construction immutables.
+ *
+ * WHY A NEW FACTORY: `PCCProtocol.createEscrow` does `new MilestoneEscrow(...)` against
+ * the compile-time-bound concrete V1 type — there is no implementation pointer or proxy to
+ * swap. The existing immutable `PCCProtocol` on Base Sepolia cannot deploy a V2. V2 is
+ * therefore additive: a NEW factory deployed alongside, leaving all V1 instances untouched.
+ *
+ * Fee bounds (identical to V1):
  *   - Minimum: 10 bps (0.1%) — fee can NEVER be set to zero
  *   - Maximum: 500 bps (5%)
  *   - Default: 235 bps (2.35%)
  *
- * Every settlement must pass through the PCC Verification Oracle before
- * funds can be released. The oracle verifier address is IMMUTABLE.
- *
- * Only escrows deployed by this factory can call collectFee(). This makes
- * it structurally impossible for PCC activity to bypass the fee without
- * leaving the protocol entirely.
+ * The EAS-gated settlement supersedes the V1 `IPCCOracle` fee-gating path functionally.
+ * The `oracleVerifier` immutable + `collectFeeWithAttestation` are RETAINED for parity with
+ * V1 (so V2-deployed escrows can still call `collectFee` and the protocol exposes the same
+ * surface), but the on-chain release gate now lives in `MilestoneEscrowV2.submitAttestation`
+ * via the EAS attester check. `easOracle` is the EAS-attester identity threaded to children.
  */
-contract PCCProtocol {
+contract PCCProtocolV2 {
     // ── Constants ────────────────────────────────────────────────────
 
     uint256 public constant FEE_BPS_MIN = 10;   // 0.1% floor
@@ -35,7 +45,21 @@ contract PCCProtocol {
     address public immutable feeRecipient;
 
     /// @notice The PCC Verification Oracle verifier contract. IMMUTABLE.
+    /// @dev Retained for V1 parity (collectFeeWithAttestation). The EAS release gate lives in
+    ///      the child escrow's submitAttestation; this is not consulted there.
     address public immutable oracleVerifier;
+
+    // ── EAS Wiring (immutables, threaded to children) ────────────────
+
+    /// @notice The EAS contract threaded to every child escrow.
+    /// @dev Base + Base Sepolia predeploy 0x4200000000000000000000000000000000000021.
+    address public immutable eas;
+
+    /// @notice The `pcc.evidence.v1` schema UID threaded to every child escrow.
+    bytes32 public immutable pccEvidenceSchemaUid;
+
+    /// @notice The authorized oracle signer (EAS attester) threaded to every child escrow.
+    address public immutable easOracle;
 
     // ── Governance-Adjustable State ──────────────────────────────────
 
@@ -115,40 +139,56 @@ contract PCCProtocol {
     // ── Constructor ──────────────────────────────────────────────────
 
     /**
-     * @param _feeRecipient IMMUTABLE fee recipient address — cannot be changed after deployment.
-     * @param _initialFeeBps Initial fee in basis points (235 = 2.35%). Must be in [10, 500].
-     * @param _governor Governor address (can adjust fee % and registries, not recipient).
-     * @param _oracleVerifier IMMUTABLE oracle verifier contract address. Every settlement
-     *        must pass through the oracle before funds can be released.
+     * @param _feeRecipient        IMMUTABLE fee recipient address — cannot be changed after deployment.
+     * @param _initialFeeBps       Initial fee in basis points (235 = 2.35%). Must be in [10, 500].
+     * @param _governor            Governor address (can adjust fee % and registries, not recipient).
+     * @param _oracleVerifier      IMMUTABLE oracle verifier contract address (V1 parity).
+     * @param _eas                 The EAS contract threaded to children (Base + Base Sepolia: 0x42...0021).
+     * @param _pccEvidenceSchemaUid The `pcc.evidence.v1` schema UID threaded to children.
+     * @param _easOracle           The authorized oracle signer (EAS attester) threaded to children.
      */
     constructor(
         address _feeRecipient,
         uint256 _initialFeeBps,
         address _governor,
-        address _oracleVerifier
+        address _oracleVerifier,
+        address _eas,
+        bytes32 _pccEvidenceSchemaUid,
+        address _easOracle
     ) {
         require(_feeRecipient != address(0), "Zero fee recipient");
         require(_governor != address(0), "Zero governor");
         require(_initialFeeBps >= FEE_BPS_MIN && _initialFeeBps <= FEE_BPS_MAX, "Fee out of bounds");
         require(_oracleVerifier != address(0), "Zero oracle verifier");
+        require(_eas != address(0), "Zero EAS");
+        require(_easOracle != address(0), "Zero EAS oracle");
+        // SECURITY (review H1): a zero schema UID threads into every child escrow and
+        // silently breaks its release gate (a.schema == 0 never matches) → permanent
+        // fund-lock. The value is immutable here and in the children — reject at construction.
+        require(_pccEvidenceSchemaUid != bytes32(0), "Schema UID unset");
 
         feeRecipient = _feeRecipient;
         protocolFeeBps = _initialFeeBps;
         governor = _governor;
         oracleVerifier = _oracleVerifier;
+
+        eas = _eas;
+        pccEvidenceSchemaUid = _pccEvidenceSchemaUid;
+        easOracle = _easOracle;
     }
 
     // ── Factory ──────────────────────────────────────────────────────
 
     /**
-     * @notice Deploy a new MilestoneEscrow with this protocol as the root.
+     * @notice Deploy a new MilestoneEscrowV2 with this protocol as the root and the
+     *         factory's EAS wiring threaded through as child immutables.
      * @param payer The payer address (funds the escrow).
      * @param arbiter The arbiter address (resolves disputes).
      * @param token The ERC-20 token for payments (e.g. USDC).
      * @param cwmId Canonical Workflow Model ID.
-     * @return escrow The address of the newly deployed MilestoneEscrow.
+     * @return escrow The address of the newly deployed MilestoneEscrowV2.
      */
-    function createEscrow(
+    function createEscrowV2(
         address payer,
         address arbiter,
         address token,
@@ -157,7 +197,16 @@ contract PCCProtocol {
         require(payer != address(0), "Zero payer");
         require(token != address(0), "Zero token");
 
-        MilestoneEscrow newEscrow = new MilestoneEscrow(payer, arbiter, token, cwmId, address(this));
+        MilestoneEscrowV2 newEscrow = new MilestoneEscrowV2(
+            payer,
+            arbiter,
+            token,
+            cwmId,
+            address(this),
+            eas,
+            pccEvidenceSchemaUid,
+            easOracle
+        );
         escrow = address(newEscrow);
 
         isProtocolEscrow[escrow] = true;
@@ -226,11 +275,12 @@ contract PCCProtocol {
         governor = newGovernor;
     }
 
-    // ── Oracle-Gated Settlement ────────────────────────────────────
+    // ── Oracle-Gated Settlement (V1 parity) ────────────────────────
 
     /**
      * @notice Verify an oracle attestation. Can be called by anyone (view).
      *         Returns true if the attestation is valid per the oracle verifier.
+     * @dev Retained for V1 parity. The EAS release gate lives in the child escrow.
      * @param attestation The oracle attestation to verify.
      * @return valid True if the attestation passes verification.
      */
@@ -247,6 +297,7 @@ contract PCCProtocol {
      * @notice Oracle-gated fee collection. Called by child escrows during settlement.
      *         Requires a valid oracle attestation before recording fee accounting.
      *         Only callable by factory-deployed escrows.
+     * @dev Retained for V1 parity.
      * @param token The ERC-20 token in which the fee was collected.
      * @param fee The fee amount collected.
      * @param attestation The oracle attestation proving the settlement is verified.

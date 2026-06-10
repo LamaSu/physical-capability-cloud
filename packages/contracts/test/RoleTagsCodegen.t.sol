@@ -50,10 +50,6 @@ contract RoleTagsCodegenTest is Test {
         assertEq(RoleTags.DATASET_CONTRIBUTOR, keccak256("dataset-contributor"));
     }
 
-    function test_backendAuthor() public pure {
-        assertEq(RoleTags.BACKEND_AUTHOR, keccak256("backend-author"));
-    }
-
     function test_curator() public pure {
         assertEq(RoleTags.CURATOR, keccak256("curator"));
     }

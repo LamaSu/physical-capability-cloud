@@ -15,9 +15,7 @@ fuzz = { runs = 1000 }
 
 [rpc_endpoints]
 base_sepolia = "https://sepolia.base.org"
-base = "https://mainnet.base.org"
 localhost = "http://127.0.0.1:8545"
 
 [etherscan]
 base_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api", chain = 84532 }
-base = { key = "${ETHERSCAN_API_KEY}", url = "https://api.basescan.org/api", chain = 8453 }

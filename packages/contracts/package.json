@@ -16,11 +16,6 @@
       "types": "./dist/abi/index.d.ts",
       "import": "./dist/abi/index.js",
       "default": "./dist/abi/index.js"
-    },
-    "./testing": {
-      "types": "./dist/testing.d.ts",
-      "import": "./dist/testing.js",
-      "default": "./dist/testing.js"
     }
   },
   "scripts": {

@@ -4,8 +4,6 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../src/MilestoneEscrow.sol";
 import "../src/MockUSDC.sol";
-import {IPCCOracle} from "../src/interfaces/IPCCOracle.sol";
-import {MockPCCOracle} from "./mocks/MockPCCOracle.sol";
 
 /**
  * @title MilestoneEscrowContributorEconomicsIntegrationTest
@@ -89,31 +87,9 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
     uint256 constant OPERATOR_BOND = 5_000_000;       // 5 USDC
     uint256 constant CHALLENGE_WINDOW = 3600;          // 1 hour
 
-    MockPCCOracle mockOracle;
-
-    /// @dev Build a stub attestation pinned to the test escrow. MockPCCOracle
-    ///      accepts everything with verified=true and non-zero escrowAddress
-    ///      so the oracle gate at submitAttestation passes. DETERMINISTIC so
-    ///      submit+release rebuild the same struct (matches stored hash).
-    function _makeAttestation() internal view returns (IPCCOracle.Attestation memory) {
-        return IPCCOracle.Attestation({
-            version: 1,
-            escrowAddress: address(escrow),
-            jobId: "job-integ",
-            evidenceHash: keccak256("integ-evidence"),
-            tier: 1,
-            verified: true,
-            timestamp: 1_700_000_000,
-            nonce: keccak256(abi.encode("integ-nonce", address(escrow))),
-            extraData: hex"",
-            signature: hex""
-        });
-    }
-
     function setUp() public {
         usdc = new MockUSDC(0);
-        mockOracle = new MockPCCOracle(address(0xABCD), true);
-        protocolRootImpl = new MockProtocolRoot(protocolFeeRecipient, PROTOCOL_FEE_BPS, address(mockOracle));
+        protocolRootImpl = new MockProtocolRoot(protocolFeeRecipient, PROTOCOL_FEE_BPS);
 
         escrow = new MilestoneEscrow(
             payer,
@@ -200,9 +176,9 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         assertEq(uint8(escrow.getMilestone(0).status), 3, "milestone Evidenced");
 
         // ── Phase 5: verifier oracle attests, opening challenge window ───
-        IPCCOracle.Attestation memory att = _makeAttestation();
+        bytes32 attestationHash = keccak256("attestation-integration-001");
         vm.prank(verifierOracle);
-        escrow.submitAttestation(0, att);
+        escrow.submitAttestation(0, attestationHash);
         assertEq(uint8(escrow.getMilestone(0).status), 4, "milestone Attested");
 
         // ── Phase 6: warp past challenge window, capture pre-balances ────
@@ -251,7 +227,7 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         );
 
         // ── Phase 8: anyone calls release ────────────────────────────────
-        escrow.release(0, att);
+        escrow.release(0);
 
         // ── Assertions: each recipient has the expected exact balance ────
         assertEq(usdc.balanceOf(protocolFeeRecipient), 1_500_000, "fee recipient post");
@@ -379,9 +355,8 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         escrow.submitEvidence(0, keccak256("evidence-tm-001"));
         vm.stopPrank();
 
-        IPCCOracle.Attestation memory att = _makeAttestation();
         vm.prank(verifierOracle);
-        escrow.submitAttestation(0, att);
+        escrow.submitAttestation(0, keccak256("attestation-tm-001"));
 
         vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
 
@@ -423,7 +398,7 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         );
 
         // ── Phase 5: release ─────────────────────────────────────────────
-        escrow.release(0, att);
+        escrow.release(0);
 
         // ── Assertions: each post-balance ────────────────────────────────
         assertEq(usdc.balanceOf(protocolFeeRecipient), 1_500_000, "fee recipient");
@@ -528,7 +503,7 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
         vm.stopPrank();
 
         vm.prank(verifierOracle);
-        escrow.submitAttestation(0, _makeAttestation());
+        escrow.submitAttestation(0, keccak256("attestation-dispute-001"));
         assertEq(uint8(escrow.getMilestone(0).status), 4, "milestone Attested");
 
         // ── Phase 3: challenger files dispute INSIDE challenge window ────
@@ -727,25 +702,17 @@ contract MilestoneEscrowContributorEconomicsIntegrationTest is Test {
 /// @dev Minimal IPCCProtocol stub. Same shape as the one in
 ///      MilestoneEscrow.splitPayout.t.sol. Records the fee accounting
 ///      callback so we can assert on it from the integration test.
-///      Post-v10: exposes oracleVerifier() and accepts the attestation
-///      via collectFeeWithAttestation.
 contract MockProtocolRoot {
     address public immutable feeRecipient;
     uint256 public immutable protocolFeeBps;
-    address public immutable oracleVerifier;
     mapping(address => uint256) public feesCollected;
 
-    constructor(address _feeRecipient, uint256 _protocolFeeBps, address _oracleVerifier) {
+    constructor(address _feeRecipient, uint256 _protocolFeeBps) {
         feeRecipient = _feeRecipient;
         protocolFeeBps = _protocolFeeBps;
-        oracleVerifier = _oracleVerifier;
     }
 
-    function collectFeeWithAttestation(
-        address tokenAddr,
-        uint256 fee,
-        IPCCOracle.Attestation calldata /* attestation */
-    ) external {
+    function collectFee(address tokenAddr, uint256 fee) external {
         feesCollected[tokenAddr] += fee;
     }
 }

@@ -9,7 +9,6 @@ import "../src/ContributorNFT.sol";
 import {RoleTags} from "../src/RoleTags.sol";
 import {CanonicalBytes} from "./helpers/CanonicalBytes.sol";
 import "./mocks/MockUSDT.sol";
-import {IPCCOracle} from "../src/interfaces/IPCCOracle.sol";
 
 /**
  * @title EndToEndContributorEconomicsTest
@@ -102,25 +101,6 @@ contract EndToEndContributorEconomicsTest is Test {
         vm.startPrank(arbiter);
         escrow.addVerifier(verifierOracle);
         vm.stopPrank();
-    }
-
-    /// @dev Build a stub attestation pinned to the test escrow. In standalone
-    ///      mode (protocolRoot == 0) only escrowAddress is checked by
-    ///      submitAttestation, so the other fields are cosmetic.
-    ///      DETERMINISTIC so submit+release rebuild the same struct.
-    function _makeAttestation() internal view returns (IPCCOracle.Attestation memory) {
-        return IPCCOracle.Attestation({
-            version: 1,
-            escrowAddress: address(escrow),
-            jobId: "job-e2e",
-            evidenceHash: keccak256("e2e-evidence"),
-            tier: 1,
-            verified: true,
-            timestamp: 1_700_000_000,
-            nonce: keccak256(abi.encode("e2e-nonce", address(escrow))),
-            extraData: hex"",
-            signature: hex""
-        });
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -255,9 +235,8 @@ contract EndToEndContributorEconomicsTest is Test {
         escrow.submitEvidence(0, keccak256("evidence-e2e-single"));
         assertEq(uint8(escrow.getMilestone(0).status), 3, "milestone Evidenced");
 
-        IPCCOracle.Attestation memory att = _makeAttestation();
         vm.prank(verifierOracle);
-        escrow.submitAttestation(0, att);
+        escrow.submitAttestation(0, keccak256("attestation-e2e-single"));
         assertEq(uint8(escrow.getMilestone(0).status), 4, "milestone Attested");
 
         vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
@@ -287,7 +266,7 @@ contract EndToEndContributorEconomicsTest is Test {
             0, modelAuthor, RoleTags.MODEL_AUTHOR, bytes32(uint256(0xF00D)), address(usdc), 200_000_000
         );
 
-        escrow.release(0, att);
+        escrow.release(0);
 
         // ── Post-release balance assertions ──────────────────────────────
         assertEq(usdc.balanceOf(integrator), 250_000_000, "integrator: 250 USDC");
@@ -414,9 +393,8 @@ contract EndToEndContributorEconomicsTest is Test {
         // ── (vi) submitEvidence + submitAttestation + warp ──────────────
         vm.prank(operator);
         escrow.submitEvidence(0, keccak256("evidence-e2e-multi"));
-        IPCCOracle.Attestation memory att = _makeAttestation();
         vm.prank(verifierOracle);
-        escrow.submitAttestation(0, att);
+        escrow.submitAttestation(0, keccak256("attestation-e2e-multi"));
         vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
 
         // ── Pre-release: USDT recipients all zero, USDC unchanged from setUp
@@ -441,7 +419,7 @@ contract EndToEndContributorEconomicsTest is Test {
             0, modelAuthor, RoleTags.MODEL_AUTHOR, bytes32(uint256(0xF00D)), address(usdt), 200_000_000
         );
 
-        escrow.release(0, att);
+        escrow.release(0);
 
         // ── (viii) Post-release: every recipient holds USDT, no USDC moved
         assertEq(usdt.balanceOf(integrator), 250_000_000, "integrator: 250 USDT");

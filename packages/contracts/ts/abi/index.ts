@@ -1,5 +1,7 @@
 export { MilestoneEscrowABI, MilestoneStatus, milestoneStatusName } from "./MilestoneEscrow.js";
 export type { MilestoneStatusName } from "./MilestoneEscrow.js";
+export { MilestoneEscrowV2ABI, MilestoneStatusV2, milestoneStatusV2Name } from "./MilestoneEscrowV2.js";
+export type { MilestoneStatusV2Name } from "./MilestoneEscrowV2.js";
 export { MockUSDCABI } from "./MockUSDC.js";
 export { PCCForwarderABI } from "./PCCForwarder.js";
 export { IdentityRegistryABI, EntityType, EntityStatus, entityTypeName, entityStatusName } from "./IdentityRegistry.js";
@@ -13,8 +15,6 @@ export {
   PCC_DEFAULT_FEE_BPS,
   PCC_FEE_BPS_MIN,
   PCC_FEE_BPS_MAX,
-  ATTESTATION_SCHEMA_VERSION,
-  ATTESTATION_V1_EMPTY_EXTRA_DATA,
 } from "./PCCProtocol.js";
 
 // Contributor economics

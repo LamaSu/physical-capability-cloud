@@ -1,10 +1,27 @@
 /**
- * MilestoneEscrow ABI — generated from MilestoneEscrow.sol
+ * MilestoneEscrowV2 ABI — hand-authored from MilestoneEscrowV2.sol
  *
- * Escrow contract for PCC workflows. Holds funds per milestone,
- * releases after evidence + attestation + challenge window.
+ * Authored by implementer-alpha — EAS attestation-bridge migration (deliverable 4).
+ *
+ * V2 of the PCC milestone escrow. Identical to MilestoneEscrow except the
+ * release-gating attestation step reads a REAL on-chain EAS attestation by UID
+ * and validates its provenance + payload (see MilestoneEscrowV2.sol §submitAttestation).
+ *
+ * Differences from MilestoneEscrowABI (relevant to gateway/escrow-client wiring):
+ *   - constructor takes 3 extra args: _eas (address), _schemaUid (bytes32), _oracle (address)
+ *   - getMilestone() tuple gains 3 fields: requiredTier (uint8), jobIdHash (bytes32),
+ *     verifierAttestationUid (bytes32)
+ *   - NEW getters: eas() -> address, authorizedOracle() -> address,
+ *     PCC_EVIDENCE_SCHEMA_UID() -> bytes32, attestationUsed(bytes32) -> bool (single-use UID
+ *     guard, security review C1), MAX_ASSURANCE_TIER() -> uint8
+ *   - REMOVED (security review L2): authorizedVerifiers / addVerifier / removeVerifier
+ *     (dead in V2 — the EAS attester field is the provenance gate)
+ *   - addMilestone / addMilestoneWithToken gain (_requiredTier uint8, _jobId string)
+ *   - submitAttestation(uint256 milestoneIndex, bytes32 easUid) — same wire signature as V1
+ *     (uint256,bytes32) but the bytes32 is now the EAS UID, not a free-form hash
+ *   - AttestationSubmitted event's 2nd arg is named `attestationUid` (was `attestationHash`)
  */
-export const MilestoneEscrowABI = [
+export const MilestoneEscrowV2ABI = [
   // Constructor
   {
     type: "constructor",
@@ -14,6 +31,9 @@ export const MilestoneEscrowABI = [
       { name: "_token", type: "address" },
       { name: "_cwmId", type: "bytes32" },
       { name: "_protocolRoot", type: "address" },
+      { name: "_eas", type: "address" },
+      { name: "_schemaUid", type: "bytes32" },
+      { name: "_oracle", type: "address" },
     ],
     stateMutability: "nonpayable",
   },
@@ -62,6 +82,46 @@ export const MilestoneEscrowABI = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+
+  // ── EAS wiring getters (NEW in V2) ─────────────────────────────────
+
+  {
+    name: "eas",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    name: "authorizedOracle",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    name: "PCC_EVIDENCE_SCHEMA_UID",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bytes32" }],
+  },
+  {
+    // SECURITY (review C1): true once an EAS UID has released a milestone in this escrow.
+    name: "attestationUsed",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "easUid", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "MAX_ASSURANCE_TIER",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+
   {
     name: "getMilestoneCount",
     type: "function",
@@ -88,6 +148,10 @@ export const MilestoneEscrowABI = [
           { name: "verifierAttestationHash", type: "bytes32" },
           { name: "challengeWindowEnd", type: "uint256" },
           { name: "challengeWindowSeconds", type: "uint256" },
+          // ── V2 additions ──
+          { name: "requiredTier", type: "uint8" },
+          { name: "jobIdHash", type: "bytes32" },
+          { name: "verifierAttestationUid", type: "bytes32" },
         ],
       },
     ],
@@ -152,6 +216,24 @@ export const MilestoneEscrowABI = [
       { name: "_amount", type: "uint256" },
       { name: "_operatorBond", type: "uint256" },
       { name: "_challengeWindowSeconds", type: "uint256" },
+      { name: "_requiredTier", type: "uint8" },
+      { name: "_jobId", type: "string" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "addMilestoneWithToken",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "_stepId", type: "bytes32" },
+      { name: "_operator", type: "address" },
+      { name: "_amount", type: "uint256" },
+      { name: "_operatorBond", type: "uint256" },
+      { name: "_challengeWindowSeconds", type: "uint256" },
+      { name: "_requiredTier", type: "uint8" },
+      { name: "_jobId", type: "string" },
+      { name: "_token", type: "address" },
     ],
     outputs: [],
   },
@@ -180,12 +262,14 @@ export const MilestoneEscrowABI = [
     outputs: [],
   },
   {
+    // V2: the bytes32 arg is the EAS attestation UID (validated on-chain against EAS).
+    // Wire signature is unchanged from V1 — submitAttestation(uint256,bytes32).
     name: "submitAttestation",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
       { name: "milestoneIndex", type: "uint256" },
-      { name: "_attestationHash", type: "bytes32" },
+      { name: "easUid", type: "bytes32" },
     ],
     outputs: [],
   },
@@ -329,11 +413,12 @@ export const MilestoneEscrowABI = [
     ],
   },
   {
+    // V2: 2nd arg carries the EAS attestation UID (was the raw attestation hash in V1).
     name: "AttestationSubmitted",
     type: "event",
     inputs: [
       { name: "milestoneIndex", type: "uint256", indexed: true },
-      { name: "attestationHash", type: "bytes32", indexed: false },
+      { name: "attestationUid", type: "bytes32", indexed: false },
       { name: "challengeWindowEnd", type: "uint256", indexed: false },
     ],
   },
@@ -404,10 +489,42 @@ export const MilestoneEscrowABI = [
       { name: "amount", type: "uint256", indexed: false },
     ],
   },
+
+  // ── Multi-stablecoin events ──────────────────────────────────────
+
+  {
+    name: "StablecoinAllowed",
+    type: "event",
+    inputs: [
+      { name: "token", type: "address", indexed: true },
+      { name: "attestor", type: "address", indexed: true },
+      { name: "reportUri", type: "string", indexed: false },
+      { name: "maxDeviationBps", type: "uint16", indexed: false },
+    ],
+  },
+  {
+    name: "StablecoinRevoked",
+    type: "event",
+    inputs: [
+      { name: "token", type: "address", indexed: true },
+    ],
+  },
+  {
+    name: "MilestoneAdded",
+    type: "event",
+    inputs: [
+      { name: "milestoneIndex", type: "uint256", indexed: true },
+      { name: "stepId", type: "bytes32", indexed: false },
+      { name: "operator", type: "address", indexed: true },
+      { name: "token", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "operatorBond", type: "uint256", indexed: false },
+    ],
+  },
 ] as const;
 
-/** Milestone status enum matching Solidity */
-export const MilestoneStatus = {
+/** Milestone status enum matching Solidity (identical to V1). */
+export const MilestoneStatusV2 = {
   Unfunded: 0,
   Funded: 1,
   Locked: 2,
@@ -419,10 +536,10 @@ export const MilestoneStatus = {
   Slashed: 8,
 } as const;
 
-export type MilestoneStatusName = keyof typeof MilestoneStatus;
+export type MilestoneStatusV2Name = keyof typeof MilestoneStatusV2;
 
-export function milestoneStatusName(status: number): MilestoneStatusName {
-  const names = Object.entries(MilestoneStatus);
+export function milestoneStatusV2Name(status: number): MilestoneStatusV2Name {
+  const names = Object.entries(MilestoneStatusV2);
   const match = names.find(([, v]) => v === status);
-  return match ? (match[0] as MilestoneStatusName) : "Unfunded";
+  return match ? (match[0] as MilestoneStatusV2Name) : "Unfunded";
 }
