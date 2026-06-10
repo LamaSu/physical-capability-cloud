@@ -108,7 +108,7 @@ export function pickMimeType(preferred?: string): string {
   const supportsCheck =
     typeof MediaRecorder !== "undefined" &&
     typeof (MediaRecorder as { isTypeSupported?: (m: string) => boolean }).isTypeSupported === "function";
-  if (!supportsCheck) return preferred ?? "";
+  if (!supportsCheck) return "";
   const isTypeSupported =
     (MediaRecorder as { isTypeSupported: (m: string) => boolean }).isTypeSupported;
   if (preferred && isTypeSupported(preferred)) return preferred;
