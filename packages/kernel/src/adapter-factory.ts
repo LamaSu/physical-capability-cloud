@@ -55,6 +55,7 @@ import { SiLAAdapter } from "./adapters/sila/sila-adapter.js";
 import { IppAdapter } from "./adapters/ipp-adapter.js";
 import { OpentronsMachineAdapter } from "./opentrons/adapter.js";
 import { HamiltonAdapter } from "./adapters/hamilton-adapter.js";
+import { TrilobioAdapter } from "./adapters/trilobio-adapter.js";
 
 // ---------------------------------------------------------------------------
 // Factory function types
@@ -408,6 +409,26 @@ function buildHamilton(
   });
 }
 
+function buildTrilobio(
+  device: DeviceConfig,
+  cfg: Record<string, unknown>,
+  kernelId: string,
+): MachineAdapter {
+  return new TrilobioAdapter(device.id, {
+    url: (cfg.url as string | undefined) ?? "http://localhost",
+    apiKey: cfg.apiKey as string | undefined,
+    username: cfg.username as string | undefined,
+    password: cfg.password as string | undefined,
+    kernelId,
+    tcodeApiVersion: cfg.tcodeApiVersion as string | undefined,
+    pollIntervalMs: cfg.pollIntervalMs as number | undefined,
+    maxScriptTimeoutSec: cfg.maxScriptTimeoutSec as number | undefined,
+    mockMode: (cfg.mockMode as boolean | undefined) ?? false,
+    mockRunDurationMs: cfg.mockRunDurationMs as number | undefined,
+    allowArbitraryScripts: (cfg.allowArbitraryScripts as boolean | undefined) ?? false,
+  });
+}
+
 function buildModbus(
   device: DeviceConfig,
   cfg: Record<string, unknown>,
@@ -447,6 +468,7 @@ registerMachineAdapter("opcua", buildOPCUA);
 registerMachineAdapter("ipp", buildIpp);
 registerMachineAdapter("opentrons", buildOpentrons);
 registerMachineAdapter("hamilton", buildHamilton);
+registerMachineAdapter("trilobio", buildTrilobio);
 
 // Sensor adapters
 registerSensorAdapter("mock", buildMockSensor);

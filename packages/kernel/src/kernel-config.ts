@@ -24,6 +24,7 @@ export type AdapterType =
   | "ipp"
   | "opentrons"
   | "hamilton"
+  | "trilobio"
   | "generic-http"
   | "mock";
 
