@@ -491,7 +491,7 @@ server.tool(
     devices: Array<{
       name: string;
       type: "machine" | "sensor" | "camera";
-      adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "mock";
+      adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "ipp" | "opentrons" | "hamilton" | "trilobio" | "generic-http" | "mock";
       url?: string;
       apiKey?: string;
       host?: string;
