@@ -50,6 +50,20 @@ export type {
   WebAuthnClientOptions,
 } from "./WebAuthnClient.js";
 
+// LingBot-Map streaming-3D adapter (per-frame point maps + camera poses)
+export {
+  StreamingThreeD,
+  recordVideo,
+  uploadAndInfer,
+  sha256Blob,
+  pickMimeType,
+} from "./StreamingThreeD.js";
+export type {
+  StreamingThreeDOptions,
+  StreamingThreeDFromBlobOptions,
+  StreamingThreeDResult,
+} from "./StreamingThreeD.js";
+
 // --- Re-export the shared browser/server types --------------------
 export type {
   FaceLandmarkerResult,
