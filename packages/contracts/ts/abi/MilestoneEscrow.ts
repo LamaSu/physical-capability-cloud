@@ -185,7 +185,20 @@ export const MilestoneEscrowABI = [
     stateMutability: "nonpayable",
     inputs: [
       { name: "milestoneIndex", type: "uint256" },
-      { name: "_attestationHash", type: "bytes32" },
+      {
+        name: "attestation",
+        type: "tuple",
+        components: [
+          { name: "escrowAddress", type: "address" },
+          { name: "jobId", type: "string" },
+          { name: "evidenceHash", type: "bytes32" },
+          { name: "tier", type: "uint8" },
+          { name: "verified", type: "bool" },
+          { name: "timestamp", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+          { name: "signature", type: "bytes" },
+        ],
+      },
     ],
     outputs: [],
   },
@@ -193,7 +206,23 @@ export const MilestoneEscrowABI = [
     name: "release",
     type: "function",
     stateMutability: "nonpayable",
-    inputs: [{ name: "milestoneIndex", type: "uint256" }],
+    inputs: [
+      { name: "milestoneIndex", type: "uint256" },
+      {
+        name: "attestation",
+        type: "tuple",
+        components: [
+          { name: "escrowAddress", type: "address" },
+          { name: "jobId", type: "string" },
+          { name: "evidenceHash", type: "bytes32" },
+          { name: "tier", type: "uint8" },
+          { name: "verified", type: "bool" },
+          { name: "timestamp", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+          { name: "signature", type: "bytes" },
+        ],
+      },
+    ],
     outputs: [],
   },
 
