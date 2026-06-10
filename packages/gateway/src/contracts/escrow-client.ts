@@ -37,12 +37,12 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import {
   MilestoneEscrowABI,
+  MilestoneEscrowV2ABI,
   MockUSDCABI,
   MilestoneStatus,
   milestoneStatusName,
   getDeployment,
   getContractAddress,
-  type OracleAttestation,
 } from "@pcc/contracts";
 
 // ---------------------------------------------------------------------------
@@ -379,32 +379,22 @@ export async function approveToken(
 
 /**
  * Release funds for a milestone after the challenge window has expired.
- *
- * Requires the SAME oracle attestation that was submitted via
- * submitAttestation. The contract recomputes
- * keccak256(abi.encode(attestation)) and rejects release if it doesn't
- * match the stored hash. When a protocol root is configured, the
- * attestation is also re-verified on-chain at settlement time.
+ * Anyone can call this — the contract enforces that the challenge window is closed.
  */
 export async function releaseMilestone(
   milestoneIndex: number,
-  attestation: OracleAttestation,
   contractAddress?: Address,
 ): Promise<WriteResult> {
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
-  // viem encodes the attestation struct from the OracleAttestation object
-  // (fields map to the tuple components named in the ABI). The contract
-  // binds release to keccak256(abi.encode(attestation)), so the SAME struct
-  // that was submitted via submitAttestation must be passed here.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "release",
-    args: [BigInt(milestoneIndex), attestation],
+    args: [BigInt(milestoneIndex)],
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -491,34 +481,53 @@ export async function submitEvidence(
 }
 
 /**
- * Submit an oracle-signed attestation for a milestone.
- * Opens the challenge window. When a protocol root is configured, the
- * attestation is re-verified on-chain by the oracle verifier before the
- * challenge window opens; invalid attestations fail closed.
- *
- * The caller must retain the exact same attestation struct to pass back
- * into releaseMilestone when settling — the stored hash is
- * keccak256(abi.encode(attestation)).
+ * Submit verifier attestation hash for a milestone.
+ * Opens the challenge window.
  */
 export async function submitAttestation(
   milestoneIndex: number,
-  attestation: OracleAttestation,
+  attestationHash: `0x${string}`,
   contractAddress?: Address,
 ): Promise<WriteResult> {
   const address = resolveAddress(contractAddress);
   const wallet = getWalletClient();
 
-  // viem encodes the attestation struct from the OracleAttestation object.
-  // The contract stores keccak256(abi.encode(attestation)) and release()
-  // will require the exact same struct, so the struct shape must be
-  // deterministic across submit + release.
   const hash = await wallet.writeContract({
     chain: resolveChainConfig().chain,
     account: getAccount(),
     address,
     abi: MilestoneEscrowABI,
     functionName: "submitAttestation",
-    args: [BigInt(milestoneIndex), attestation],
+    args: [BigInt(milestoneIndex), attestationHash],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Submit an EAS attestation UID for a milestone on a MilestoneEscrowV2 contract.
+ * Opens the challenge window. (implementer-bravo, eas-migration-design §4.2.)
+ *
+ * The wire signature is identical to V1 `submitAttestation(uint256,bytes32)`,
+ * but this binds to MilestoneEscrowV2ABI and the bytes32 is the EAS attestation
+ * UID — the contract reads `IEAS.getAttestation(easUid)` and validates the
+ * oracle's provenance + payload on-chain before opening the window.
+ */
+export async function submitAttestationV2(
+  milestoneIndex: number,
+  easUid: `0x${string}`,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "submitAttestation",
+    args: [BigInt(milestoneIndex), easUid],
   });
 
   return { transactionHash: hash, status: "submitted" };

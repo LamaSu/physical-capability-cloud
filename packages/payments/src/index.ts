@@ -20,24 +20,9 @@ export {
   type AddLiquidityParams,
   type RemoveLiquidityParams,
 } from "./meteora/index.js";
-export {
-  AlkahestEscrowBridge,
-  type AlkahestObligation,
-  type AlkahestBridgeConfig,
-  type PCCEvidenceDemand,
-  type PCCEvidenceResult,
-} from "./alkahest/index.js";
-export {
-  NativeEscrowService,
-  AttestationService,
-  type EscrowObligation,
-  type EscrowDispute,
-  type DemandSpec,
-  type FulfillmentProof,
-  type EscrowConfig,
-  type ObligationStatus,
-  type Attestation,
-} from "./native-escrow/index.js";
+// Removed (implementer-bravo, eas-migration-design §4.3): the Alkahest mock
+// bridge and the demo/test-only NativeEscrowService / AttestationService /
+// YieldEscrowService are superseded by the on-chain EAS attestation path.
 export {
   BountyService,
   type DemandSignal,

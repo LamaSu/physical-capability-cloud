@@ -38,10 +38,10 @@ import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { verifyWithOracle } from "../services/oracle-client.js";
+import { verifyWithOracle, attestEvidenceOnChain } from "../services/oracle-client.js";
+import { submitEvidence, submitAttestationV2, isWriteEnabled } from "../contracts/escrow-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
-import { AlkahestEscrowBridge } from "@pcc/payments";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -151,13 +151,21 @@ export async function createJobFromSession(
     escrowAddress = `mock-escrow-${Date.now().toString(36)}`;
     escrowStatus = "funded";
   } else {
-    // Real on-chain escrow via PCCProtocol factory
+    // Real on-chain escrow via the PCC protocol factory.
+    //
+    // V2 EAS path (eas-migration-design §4.2): when the network has a
+    // milestoneEscrowFactoryV2 configured, deploy a MilestoneEscrowV2 via
+    // createEscrowV2 so the escrow binds the EAS oracle + schema at creation.
+    //
+    // V2 on-chain creation is INERT until G3 deploys milestoneEscrowFactoryV2
+    // (chain-config slot is `undefined` today) and G5 sets MOCK_SETTLEMENT=false.
+    // Until then this branch falls through to the V1 createEscrow factory — it
+    // MUST NOT throw on a missing V2 factory.
     const network = process.env.PCC_NETWORK ?? "base-sepolia";
     const pk = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
     if (!pk) throw new Error("PCC_GATEWAY_PRIVATE_KEY required for real settlement");
 
     const deployment = getDeployment(network);
-    const protocolAddr = getContractAddress(network, "pccProtocol");
     const tokenAddr = getContractAddress(network, "mockUSDC");
     const account = privateKeyToAccount(pk);
     const walletClient = createWalletClient({
@@ -171,12 +179,51 @@ export async function createJobFromSession(
     });
 
     const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
-    const txHash = await walletClient.writeContract({
-      address: protocolAddr,
-      abi: PCCProtocolABI,
-      functionName: "createEscrow",
-      args: [account.address, account.address, tokenAddr, cwmIdBytes],
-    });
+
+    // The V2 assurance tier this session demands (bound per-milestone on-chain).
+    const sessionTier = Number((contractTerms?.assuranceTier as number | undefined) ?? 0);
+
+    const factoryV2 = deployment.contracts.milestoneEscrowFactoryV2;
+    let txHash: `0x${string}`;
+    if (factoryV2) {
+      // ── V2: deploy a MilestoneEscrowV2 (EAS-gated) ──
+      // Minimal createEscrowV2 ABI fragment (hand-authored — PCCProtocolV2 has
+      // no generated TS ABI; mirrors PCCProtocolV2.sol::createEscrowV2).
+      const createEscrowV2Abi = [
+        {
+          name: "createEscrowV2",
+          type: "function",
+          stateMutability: "nonpayable",
+          inputs: [
+            { name: "payer", type: "address" },
+            { name: "arbiter", type: "address" },
+            { name: "token", type: "address" },
+            { name: "cwmId", type: "bytes32" },
+          ],
+          outputs: [{ name: "escrow", type: "address" }],
+        },
+      ] as const;
+      // sessionTier is bound when V2 milestones are added on-chain (addMilestone
+      // takes _requiredTier + _jobId); the current flow records milestones in the
+      // DB, so the tier travels via the EAS attestation at completion time.
+      void sessionTier;
+      txHash = await walletClient.writeContract({
+        address: factoryV2,
+        abi: createEscrowV2Abi,
+        functionName: "createEscrowV2",
+        args: [account.address, account.address, tokenAddr, cwmIdBytes],
+      });
+      console.log(`[paid-job] Creating on-chain V2 (EAS) escrow via factory ${factoryV2}`);
+    } else {
+      // ── V1 fallback: factory not yet deployed (pre-G3) ──
+      const protocolAddr = getContractAddress(network, "pccProtocol");
+      txHash = await walletClient.writeContract({
+        address: protocolAddr,
+        abi: PCCProtocolABI,
+        functionName: "createEscrow",
+        args: [account.address, account.address, tokenAddr, cwmIdBytes],
+      });
+    }
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
     const escrowLog = receipt.logs.find((l) => l.topics.length >= 2);
@@ -741,59 +788,63 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         });
       }
 
-      // Store the attestation for potential on-chain submission
       const oracleAttestation = oracleResponse.attestation;
 
-      // ── 4c. Alkahest (Arkhai) escrow — lock, fulfill, collect ────────
-      let alkahestObligation: Record<string, unknown> | null = null;
-      try {
-        const alkahest = new AlkahestEscrowBridge({ mock: true });
+      // ── 4c. On-chain EAS attestation + escrow submit (eas-migration-design §4.2) ──
+      // Replaces the deleted Alkahest mock block. Gated by real settlement +
+      // a write-enabled gateway signer + a real 0x escrow address. When mock
+      // settlement is on (dev/test default) this is skipped entirely and the
+      // mock-settlement branch below auto-settles in the DB.
+      //
+      // INERT until G5 (MOCK_SETTLEMENT=false) against a deployed V2 escrow.
+      let easAttestationUid: string | null = null;
+      if (!isMockSettlement() && isWriteEnabled() && escrowAddress?.startsWith("0x")) {
+        try {
+          // On-chain milestone index: the first (and currently only) milestone.
+          const milestoneIndex = 0;
+          // Convert the sha256:<hex> bundle hash to a bytes32 (0x<hex>). The SAME
+          // bytes32 is written via submitEvidence AND embedded in the EAS payload,
+          // so MilestoneEscrowV2's `evidenceBundleHash == m.evidenceBundleHash`
+          // check holds.
+          const hexPart = bundleHash.startsWith("sha256:") ? bundleHash.slice(7) : bundleHash;
+          const evidenceBundleHash = (hexPart.startsWith("0x") ? hexPart : `0x${hexPart}`) as `0x${string}`;
+          const kernelIdBytes = keccak256(toBytes(job.kernelId));
+          // SECURITY (review C2b): bind the attestation to THIS milestone via stepId.
+          // Canonical derivation — keccak256(toBytes(stepIdString)) — is byte-identical to
+          // Solidity keccak256(bytes(stepIdString)). This MUST equal the milestone's on-chain
+          // m.stepId; when on-chain addMilestone is wired, set _stepId = keccak256(toBytes(job.stepId))
+          // with the SAME string so the escrow's require(stepId == m.stepId) holds.
+          const stepIdBytes = keccak256(toBytes(job.stepId));
 
-        // Lock: buyer creates escrow obligation for this milestone
-        const locked = await alkahest.lockMilestone({
-          pccEscrowId: escrowId ?? `esc-${jobId}`,
-          milestone: {
-            stepId: job.stepId,
-            amount: "11.00",
-            status: "evidence_submitted",
-            bondAmount: "0.00",
-          } as any,
-          buyer: sessionRow?.userAgentId ?? "0x0000000000000000000000000000000000000000",
-          seller: "0x0000000000000000000000000000000000000000",
-          bondConfig: { tier: 0, operatorBondPercent: 0 } as any,
-        });
-
-        // Fulfill: operator submits evidence result
-        const fulfilled = await alkahest.fulfillMilestone({
-          obligationUid: locked.uid,
-          result: {
-            bundleHash,
+          // 1) oracle makes the on-chain EAS attestation, returns the UID.
+          //    recipient = the ESCROW address (review C2a) — NOT the gateway account.
+          const { uid } = await attestEvidenceOnChain({
+            jobId,
+            kernelId: kernelIdBytes,
+            evidenceBundleHash,
             ipfsCid: ipfsCid ?? "",
-            consensusScore: 0.95,
-            verifierCount: 3,
-            zkProofId: starknetTxHash ?? undefined,
-          },
-        });
+            assuranceTier: oracleResponse.result.tier,
+            stepId: stepIdBytes,
+            recipient: (escrowAddress as `0x${string}`),
+          });
+          easAttestationUid = uid;
 
-        // Collect: operator collects escrowed funds
-        const collected = await alkahest.collectEscrow(fulfilled.uid);
+          // 2) ensure the evidence hash is on-chain first, then attest by UID
+          await submitEvidence(milestoneIndex, evidenceBundleHash, escrowAddress as `0x${string}`);
+          await submitAttestationV2(milestoneIndex, uid as `0x${string}`, escrowAddress as `0x${string}`);
 
-        alkahestObligation = {
-          uid: collected.uid,
-          status: collected.status,
-          lockTxHash: collected.lockTxHash,
-          settleTxHash: collected.settleTxHash,
-          fulfillmentUid: collected.fulfillmentUid,
-          amount: collected.amount,
-          arbiter: collected.arbiter,
-          expiration: collected.expiration,
-        };
+          // 3) leave release to the challenge-window poke (release() is permissionless)
+          repos.jobs.updateStatus(jobId, "evidence_submitted");
 
-        pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-          metadata: { alkahestUid: collected.uid, alkahestStatus: collected.status },
-        });
-      } catch (alkErr) {
-        console.warn("[complete] Alkahest escrow failed (best-effort):", alkErr instanceof Error ? alkErr.message : alkErr);
+          pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+            metadata: { easAttestationUid: uid, escrowAddress },
+          });
+        } catch (attestErr) {
+          console.warn(
+            "[complete] On-chain EAS attestation failed (best-effort):",
+            attestErr instanceof Error ? attestErr.message : attestErr,
+          );
+        }
       }
 
       // ── 5. Settlement ──────────────────────────────────────────────
@@ -842,7 +893,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt,
         ipfsCid,
         starknetAnchorTxHash: starknetTxHash,
-        alkahest: alkahestObligation,
+        alkahest: null, // removed: Alkahest mock bridge replaced by on-chain EAS path
+        easAttestationUid,
         scopesRevoked: 0,
         toolCallsRecorded: auditTrail.length,
         oracleVerified: oracleResponse.result.verified,
