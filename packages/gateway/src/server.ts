@@ -15,6 +15,7 @@ import fastifySwaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
+import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { kernelRoutes } from "./routes/kernels.js";
@@ -422,6 +423,11 @@ export async function createGateway(port = 3200) {
 
   // REST routes
   await app.register(capabilityRoutes);
+  // Capability graph search — Dijkstra over the capability graph (under
+  // /api/capabilities/*). Registered right after capabilityRoutes so the
+  // static graph-search/graph-stats paths sit alongside the capability
+  // discovery routes.
+  await app.register(graphSearchRoutes);
   await app.register(buildRoutes);
   await app.register(jobRoutes);
   await app.register(kernelRoutes);

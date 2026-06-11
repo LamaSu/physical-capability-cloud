@@ -66,3 +66,5 @@ export * from "./asset-outbound.js";
 export * from "./skill-capability.js";
 // Reputation propagation through compositions
 export * from "./reputation.js";
+// Capability graph search
+export * from "./graph-search.js";
