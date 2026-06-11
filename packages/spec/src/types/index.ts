@@ -62,3 +62,5 @@ export * from "./tool-catalog.js";
 export * from "./composition.js";
 // Asset-as-agent outbound demand
 export * from "./asset-outbound.js";
+// Human-node skill capabilities
+export * from "./skill-capability.js";
