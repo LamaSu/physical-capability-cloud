@@ -188,10 +188,11 @@ describe("POST /api/capture/3d-stream — input validation", () => {
   });
 
   it("rejects an over-size video (>32 MB)", async () => {
-    // 33 MB of zeros -> base64 ~44 MB. We don't actually allocate; just
-    // craft a base64 string of the right size by repeating a chunk.
-    const chunk = Buffer.alloc(1024 * 1024, 0).toString("base64"); // ~1.36 MB base64
-    const big = chunk.repeat(40); // ~54 MB base64 -> ~40 MB decoded
+    // Allocate one contiguous 33 MB buffer and base64 it. Repeating smaller
+    // chunks doesn't work because each chunk's base64 ends with '=' padding
+    // (1MB / 3 has remainder 1), and Buffer.from terminates decoding at the
+    // first padding — so chunk.repeat(N) decodes to only the first chunk.
+    const big = Buffer.alloc(33 * 1024 * 1024, 0).toString("base64"); // 33 MB > 32 MB cap
     const res = await app.inject({
       method: "POST",
       url: "/api/capture/3d-stream",
