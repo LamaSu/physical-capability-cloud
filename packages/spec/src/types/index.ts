@@ -56,3 +56,5 @@ export * from "./attestation.js";
 export * from "./verification-program.js";
 export * from "./dispute-resolver.js";
 export * from "./job-spec.js";
+// Tool catalog — registry of adapter/kernel packages independent of live operators
+export * from "./tool-catalog.js";
