@@ -1,7 +1,11 @@
 {
   "name": "@pcc/spec",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "description": "Schemas, types, and validation — single source of truth for the Physical Capability Cloud",
   "type": "module",
   "main": "dist/index.js",
@@ -28,6 +32,11 @@
       "default": "./dist/tool-manifests/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
