@@ -60,3 +60,5 @@ export * from "./job-spec.js";
 export * from "./tool-catalog.js";
 // Composition engine — agentic-composition keystone
 export * from "./composition.js";
+// Asset-as-agent outbound demand
+export * from "./asset-outbound.js";

@@ -74,6 +74,7 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+import { assetOutboundRoutes } from "./routes/asset-outbound.js";
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
 import { intentIngestRoutes } from "./routes/intent-ingest.js";
 import { dhtWebSocketRoutes } from "./routes/dht-ws.js";
@@ -474,6 +475,7 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);
   await app.register(intentIngestRoutes);
   await app.register(swfRoutes);
