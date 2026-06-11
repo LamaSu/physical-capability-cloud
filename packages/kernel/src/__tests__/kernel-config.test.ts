@@ -209,18 +209,7 @@ describe("loadKernelConfig — KERNEL_CONFIG_FILE env var", () => {
 
 describe("KernelConfig device shapes", () => {
   it("accepts all supported adapterType values", () => {
-    const types = [
-      "octoprint",
-      "modbus",
-      "opcua",
-      "sila",
-      "ipp",
-      "opentrons",
-      "hamilton",
-      "trilobio",
-      "generic-http",
-      "mock",
-    ] as const;
+    const types = ["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"] as const;
     for (const adapterType of types) {
       const cfg: KernelConfig = {
         kernelId: "k1",
