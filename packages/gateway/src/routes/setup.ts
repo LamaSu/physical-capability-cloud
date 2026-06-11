@@ -28,9 +28,6 @@ const VALID_ADAPTER_TYPES: AdapterType[] = [
   "opcua",
   "sila",
   "ipp",
-  "opentrons",
-  "hamilton",
-  "trilobio",
   "generic-http",
   "mock",
 ];

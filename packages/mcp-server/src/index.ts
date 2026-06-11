@@ -458,18 +458,7 @@ server.tool(
         z.object({
           name: z.string().describe("Human-readable device name"),
           type: z.enum(["machine", "sensor", "camera"]),
-          adapterType: z.enum([
-            "octoprint",
-            "modbus",
-            "opcua",
-            "sila",
-            "ipp",
-            "opentrons",
-            "hamilton",
-            "trilobio",
-            "generic-http",
-            "mock",
-          ]),
+          adapterType: z.enum(["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"]),
           url: z.string().optional().describe("Device API URL (OctoPrint, SiLA, generic-http)"),
           apiKey: z.string().optional().describe("API key (OctoPrint)"),
           host: z.string().optional().describe("Host IP (Modbus, OPC-UA)"),
@@ -491,7 +480,7 @@ server.tool(
     devices: Array<{
       name: string;
       type: "machine" | "sensor" | "camera";
-      adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "ipp" | "opentrons" | "hamilton" | "trilobio" | "generic-http" | "mock";
+      adapterType: "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "mock";
       url?: string;
       apiKey?: string;
       host?: string;
