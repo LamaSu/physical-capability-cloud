@@ -113,6 +113,7 @@ import { touchstoneRoutes } from "./routes/touchstone.js";
 import { aggregatorRoutes } from "./routes/aggregator/index.js";
 import { identitySessionRoutes } from "./routes/identity-session.js";
 import { kernelMarketplaceRoutes } from "./routes/kernel-marketplace.js";
+import { reputationRoutes } from "./routes/reputation.js";
 import { templateSessionRoutes } from "./routes/template-session.js";
 import { orchestratorTemplatesRoutes } from "./routes/orchestrator-templates.js";
 import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-agents.js";
@@ -515,6 +516,10 @@ export async function createGateway(port = 3200) {
 
   // Third-party digital kernel marketplace
   await app.register(kernelMarketplaceRoutes);
+
+  // Reputation propagation through compositions — per-step attribution +
+  // dispute layer that gates payment in agentic-composition workflows.
+  await app.register(reputationRoutes);
 
   // ── Tier-0 orchestrator routes ────────────────────────────────────────────
   // Repair-tier0-routes wired the eight backend routes the orchestrator chat

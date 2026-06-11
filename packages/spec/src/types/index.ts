@@ -64,3 +64,5 @@ export * from "./composition.js";
 export * from "./asset-outbound.js";
 // Human-node skill capabilities
 export * from "./skill-capability.js";
+// Reputation propagation through compositions
+export * from "./reputation.js";
