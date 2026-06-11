@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MockBackend, CLIPBackend, normalize } from "../embedder.js";
 import type { EmbedInput } from "../types.js";
 
+// Test fixtures previously hardcoded the Spark LAN IP; we now route through
+// example.com so tests stay deterministic without leaking private network
+// topology. Override with TEST_CLIP_ENDPOINT for local end-to-end runs.
+const CLIP_ENDPOINT =
+  process.env.TEST_CLIP_ENDPOINT ?? "http://clip.example.com:8090/v1/embeddings";
+
 // ── MockBackend ───────────────────────────────────────────────────────
 
 describe("MockBackend", () => {
@@ -107,7 +113,7 @@ describe("CLIPBackend", () => {
     });
 
     const clip = new CLIPBackend({
-      endpoint: "http://192.168.108.72:8090/v1/embeddings",
+      endpoint: CLIP_ENDPOINT,
       apiKey: "test-key",
       model: "clip-vit-large",
     });
@@ -116,7 +122,7 @@ describe("CLIPBackend", () => {
     expect(globalThis.fetch).toHaveBeenCalledOnce();
     const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
       .calls[0] as [string, RequestInit];
-    expect(url).toBe("http://192.168.108.72:8090/v1/embeddings");
+    expect(url).toBe(CLIP_ENDPOINT);
     expect(opts.method).toBe("POST");
     expect((opts.headers as Record<string, string>)["Authorization"]).toBe(
       "Bearer test-key",
@@ -201,7 +207,7 @@ describe("CLIPBackend", () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
 
     const clip = new CLIPBackend({
-      endpoint: "http://192.168.108.72:8090/v1/embeddings",
+      endpoint: CLIP_ENDPOINT,
       dimensions: 128,
     });
     const result = await clip.embed({ type: "text", data: "network error" });

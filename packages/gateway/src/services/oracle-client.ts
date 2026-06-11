@@ -2,12 +2,12 @@
  * PCC Oracle Client — calls the proprietary verification oracle
  * before allowing settlement.
  *
- * The oracle runs on Spark at http://192.168.108.72:4100 by default.
+ * Configure the oracle endpoint via the PCC_ORACLE_URL env var.
  * When PCC_ORACLE_KEY is not set, falls back to mock verification
  * so dev/test environments work without the oracle running.
  */
 
-const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://192.168.108.72:4100";
+const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://localhost:4100";
 const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
 
 // ---------------------------------------------------------------------------
