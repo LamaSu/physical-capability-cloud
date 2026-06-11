@@ -21,7 +21,15 @@ import {
   _seedBudgetForTests,
   _seedDemandForTests,
 } from "../routes/asset-outbound.js";
-import type { AssetAgentBudget, OutboundDemandResponse } from "@pcc/spec";
+import {
+  _registerCandidateForTests,
+  _clearComposeForTests,
+} from "../routes/compose.js";
+import type {
+  AssetAgentBudget,
+  CompositionCandidate,
+  OutboundDemandResponse,
+} from "@pcc/spec";
 
 // -----------------------------------------------------------------------------
 // Fixtures
@@ -82,6 +90,30 @@ function demandReq(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Seed-able composition candidate for the in-memory compose provider. The
+ * outbound-demand `proposed` path now calls the real planner, so any test that
+ * expects a composed solution must register at least one matching candidate.
+ * Defaults line up with `demandReq()` (type "3d-printing", tier 1).
+ */
+function makeComposeCandidate(
+  partial: Partial<CompositionCandidate> & { capabilityId: string },
+): CompositionCandidate {
+  return {
+    capabilityId: partial.capabilityId,
+    kernelId: partial.kernelId ?? `k_${partial.capabilityId}`,
+    operatorAddress:
+      partial.operatorAddress ?? `op_${partial.capabilityId}@example.com`,
+    capabilityType: partial.capabilityType ?? "3d-printing",
+    estimatedPriceUSD: partial.estimatedPriceUSD ?? 25,
+    estimatedDurationMs: partial.estimatedDurationMs ?? 60_000,
+    assuranceTier: partial.assuranceTier ?? 1,
+    reputation: partial.reputation,
+    location: partial.location,
+    available: partial.available ?? true,
+  };
+}
+
 // -----------------------------------------------------------------------------
 // App bootstrap
 // -----------------------------------------------------------------------------
@@ -100,6 +132,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   _clearAssetOutboundForTests();
+  _clearComposeForTests();
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -274,6 +307,11 @@ describe("POST /api/assets/:id/outbound-demand", () => {
 
   it("→ proposed with a composed solution and charges the budget", async () => {
     _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    // The planner now drives the price: a single $120 candidate of the demanded
+    // type, within the $120 max → totalPriceUSD 120, one step.
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "prop_cap", estimatedPriceUSD: 120 }),
+    );
     const res = await app.inject({
       method: "POST",
       url: `/api/assets/${ASSET}/outbound-demand`,
@@ -284,7 +322,7 @@ describe("POST /api/assets/:id/outbound-demand", () => {
     expect(body.status).toBe("proposed");
     expect(body.composedSolution).toBeDefined();
     expect(body.composedSolution.compositionId).toMatch(/^cmp_/);
-    expect(body.composedSolution.totalPriceUSD).toBe(120); // min(120, cap 1000)
+    expect(body.composedSolution.totalPriceUSD).toBe(120); // candidate price
     expect(body.composedSolution.stepCount).toBe(1);
     expect(body.budgetSnapshot.spentTodayUSD).toBe(120);
     expect(body.budgetSnapshot.remainingDailyUSD).toBe(380);
@@ -360,6 +398,9 @@ describe("POST /api/assets/:id/outbound-demand/:demandId/approve", () => {
 
   it("returns 409 when the demand is not awaiting approval", async () => {
     _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "approve_409_cap", estimatedPriceUSD: 40 }),
+    );
     const created = await app.inject({
       method: "POST",
       url: `/api/assets/${ASSET}/outbound-demand`,
@@ -478,6 +519,10 @@ describe("daily cap auto-reset", () => {
         lastResetAt: yesterday,
       }),
     );
+    // A $50 candidate so the proposed path charges exactly the $50 we assert on.
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "reset_cap", estimatedPriceUSD: 50 }),
+    );
 
     // maxPrice 50 > 5 (pre-reset remaining) but ≤ 100 (post-reset) → proposed.
     const res = await app.inject({
@@ -504,5 +549,137 @@ describe("daily cap auto-reset", () => {
     expect(
       isNewUtcDay("2026-06-02T00:00:00.000Z", new Date("2026-06-02T23:00:00.000Z")),
     ).toBe(false);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Section 6 — composition-engine wiring (mock synthesis → real /api/compose)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The proposed branch of POST /outbound-demand now calls the composition
+// planner instead of fabricating a solution. These cases drive each of the
+// planner's three terminal statuses through the demand state machine and
+// assert the spend counters move ONLY on a real `proposed` plan.
+
+describe("composition-engine wiring", () => {
+  it("proposed: composes a real solution from a seeded candidate", async () => {
+    _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    _registerCandidateForTests(
+      makeComposeCandidate({
+        capabilityId: "wire_happy",
+        capabilityType: "3d-printing",
+        estimatedPriceUSD: 30,
+        assuranceTier: 1,
+      }),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/assets/${ASSET}/outbound-demand`,
+      payload: demandReq({ maxPriceUSD: 100 }),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.composedSolution.compositionId).toMatch(/^cmp_/);
+    // Charged the ACTUAL composed price ($30), not the $100 ceiling.
+    expect(body.composedSolution.totalPriceUSD).toBe(30);
+    expect(body.composedSolution.stepCount).toBe(1);
+    expect(body.budgetSnapshot.spentTodayUSD).toBe(30);
+    expect(body.budgetSnapshot.remainingDailyUSD).toBe(470);
+
+    const budgetRes = await app.inject({
+      method: "GET",
+      url: `/api/assets/${ASSET}/budget`,
+    });
+    expect(budgetRes.json().spentLifetimeUSD).toBe(30);
+  });
+
+  it("proposed: optimizeFor=price picks the cheapest matching candidate", async () => {
+    _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "pricey", estimatedPriceUSD: 80 }),
+    );
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "cheapest", estimatedPriceUSD: 15 }),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/assets/${ASSET}/outbound-demand`,
+      payload: demandReq({ maxPriceUSD: 100, preferredOptimization: "price" }),
+    });
+    expect(res.json().status).toBe("proposed");
+    expect(res.json().composedSolution.totalPriceUSD).toBe(15);
+
+    const budgetRes = await app.inject({
+      method: "GET",
+      url: `/api/assets/${ASSET}/budget`,
+    });
+    expect(budgetRes.json().spentLifetimeUSD).toBe(15);
+  });
+
+  it("rejected (no_path_found): no candidate seeded → no spend", async () => {
+    _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    // Deliberately seed NO compose candidates.
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/assets/${ASSET}/outbound-demand`,
+      payload: demandReq({ maxPriceUSD: 100 }),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("rejected");
+    expect(body.composedSolution).toBeUndefined();
+    expect(body.rejectionReason).toBeTruthy();
+
+    const budgetRes = await app.inject({
+      method: "GET",
+      url: `/api/assets/${ASSET}/budget`,
+    });
+    expect(budgetRes.json().spentTodayUSD).toBe(0);
+    expect(budgetRes.json().spentLifetimeUSD).toBe(0);
+  });
+
+  it("budget_exceeded (over_budget): cheapest path above maxPriceUSD → no spend", async () => {
+    // Caps are generous so the pre-budget gate passes; the planner itself
+    // rejects because the only candidate costs more than the $50 max.
+    _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    _registerCandidateForTests(
+      makeComposeCandidate({ capabilityId: "too_dear", estimatedPriceUSD: 60 }),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/assets/${ASSET}/outbound-demand`,
+      payload: demandReq({ maxPriceUSD: 50 }),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("budget_exceeded");
+    expect(body.composedSolution).toBeUndefined();
+
+    const budgetRes = await app.inject({
+      method: "GET",
+      url: `/api/assets/${ASSET}/budget`,
+    });
+    expect(budgetRes.json().spentTodayUSD).toBe(0);
+    expect(budgetRes.json().spentLifetimeUSD).toBe(0);
+  });
+
+  it("rejected demand carries the planner's rejectionReason", async () => {
+    _seedBudgetForTests(makeBudget({ dailyCapUSD: 500, budgetCapUSD: 1000 }));
+    // A demand for a type with no seeded candidate; whitelist is open so the
+    // request reaches the planner, which fails to find a path.
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/assets/${ASSET}/outbound-demand`,
+      payload: demandReq({
+        requiredCapabilityType: "laser-cutting",
+        maxPriceUSD: 100,
+      }),
+    });
+    expect(res.json().status).toBe("rejected");
+    expect(res.json().rejectionReason).toContain("laser-cutting");
   });
 });

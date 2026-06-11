@@ -199,6 +199,28 @@ function summarize(
 }
 
 // ---------------------------------------------------------------------------
+// Public planner entrypoint — in-process composition without an HTTP round-trip
+// ---------------------------------------------------------------------------
+
+/**
+ * Plan + summarize a composition using the in-memory candidate provider — the
+ * exact logic `POST /api/compose` runs, exposed for in-process callers that
+ * need a composition object directly (e.g. the asset-outbound demand route).
+ *
+ * Persists the result to the same store as the HTTP route, so the returned
+ * `compositionId` remains retrievable via `GET /api/compose/:id`.
+ *
+ * Returns a full {@link ComposeResponse}; inspect `.status` to distinguish
+ * `proposed` (plan ready) from `over_budget` / `no_path_found` (rejections).
+ */
+export function planComposition(req: ComposeRequest): ComposeResponse {
+  const result = plan(req, inMemoryProvider);
+  const response = summarize(req, result.steps, result.status, result.rejection);
+  compositions.set(response.compositionId, response);
+  return response;
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -214,16 +236,8 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const result = plan(parsed.data, inMemoryProvider);
-    const response = summarize(
-      parsed.data,
-      result.steps,
-      result.status,
-      result.rejection,
-    );
-    compositions.set(response.compositionId, response);
-
-    return reply.code(result.status === "proposed" ? 201 : 200).send(response);
+    const response = planComposition(parsed.data);
+    return reply.code(response.status === "proposed" ? 201 : 200).send(response);
   });
 
   // GET /api/compose/:id — retrieve a previously-proposed composition
