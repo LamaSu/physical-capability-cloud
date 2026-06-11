@@ -87,7 +87,9 @@ function cannedTrace(videoHash: string, overrides: Partial<PointMap3DTrace> = {}
 let app: FastifyInstance;
 
 beforeAll(async () => {
-  app = Fastify({ logger: false });
+  // bodyLimit raised to 80 MB so the route's MAX_VIDEO_BYTES check (32 MB) can fire
+  // on the over-size test instead of Fastify's framework-level rejection.
+  app = Fastify({ logger: false, bodyLimit: 80 * 1024 * 1024 });
   app.decorateRequest("userId", null);
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
