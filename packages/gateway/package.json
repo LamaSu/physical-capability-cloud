@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
+    "@ethereum-attestation-service/eas-sdk": "^2.7.0",
     "@noble/hashes": "^1.7.0",
     "@fastify/cookie": "^9.4.0",
     "@fastify/cors": "^9.0.0",
@@ -63,6 +64,7 @@
     "@pcc/touchstone": "workspace:*",
     "@pcc/verifier": "workspace:*",
     "@sentry/node": "^10.45.0",
+    "ethers": "^6.13.0",
     "fastify": "^4.26.0",
     "posthog-node": "^4.2.0",
     "tweetnacl": "^1.0.3",

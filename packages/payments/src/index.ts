@@ -20,24 +20,11 @@ export {
   type AddLiquidityParams,
   type RemoveLiquidityParams,
 } from "./meteora/index.js";
-export {
-  AlkahestEscrowBridge,
-  type AlkahestObligation,
-  type AlkahestBridgeConfig,
-  type PCCEvidenceDemand,
-  type PCCEvidenceResult,
-} from "./alkahest/index.js";
-export {
-  NativeEscrowService,
-  AttestationService,
-  type EscrowObligation,
-  type EscrowDispute,
-  type DemandSpec,
-  type FulfillmentProof,
-  type EscrowConfig,
-  type ObligationStatus,
-  type Attestation,
-} from "./native-escrow/index.js";
+// NOTE: `alkahest` (EAS-bridge prototype) and `native-escrow` were removed in
+// the EAS v2 migration. Settlement now flows through MilestoneEscrowV2 via
+// @pcc/gateway's paid-job-flow (PCC_USE_EAS_V2). See the contracts package for
+// the on-chain stack and packages/gateway/src/contracts/escrow-client.ts for
+// the V2 client.
 export {
   BountyService,
   type DemandSignal,
