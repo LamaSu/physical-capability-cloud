@@ -49,3 +49,48 @@ jobs:
           docker buildx imagetools create \
             --tag "${IMG}:${{ needs.release-please.outputs.tag_name }}" \
             "${IMG}:${{ needs.release-please.outputs.sha }}"
+
+  # Publish @pcc/spec to npm. Runs only when release-please cut a release
+  # that includes packages/spec. @pcc/spec has no @pcc/* dep, so it
+  # publishes independently and BEFORE kernel-sdk (kernel-sdk has a
+  # workspace:* dep on @pcc/spec which becomes a semver pin at publish).
+  publish-spec:
+    runs-on: ubuntu-latest
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' && contains(needs.release-please.outputs.paths_released, 'packages/spec') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pcc/spec build
+      - run: pnpm --filter @pcc/spec publish --no-git-checks --access=public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Publish @pcc/kernel-sdk to npm. Needs publish-spec because kernel-sdk
+  # depends on @pcc/spec — at publish time the workspace:* dep is rewritten
+  # to a real semver range, so spec must exist on the registry first.
+  publish-kernel-sdk:
+    runs-on: ubuntu-latest
+    needs: [release-please, publish-spec]
+    if: ${{ always() && needs.release-please.outputs.releases_created == 'true' && contains(needs.release-please.outputs.paths_released, 'packages/kernel-sdk') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @pcc/kernel-sdk build
+      - run: pnpm --filter @pcc/kernel-sdk publish --no-git-checks --access=public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

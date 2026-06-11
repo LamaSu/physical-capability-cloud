@@ -1,7 +1,11 @@
 {
   "name": "@pcc/kernel-sdk",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "description": "SDK for building third-party digital kernels on the PCC marketplace (manifest, job handler, registration)",
   "type": "module",
   "main": "dist/index.js",
@@ -13,6 +17,11 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
