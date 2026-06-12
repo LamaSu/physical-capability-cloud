@@ -28,7 +28,12 @@ import {
   type CompositionStatus,
   type ExecuteCompositionResponse,
   type LocationConstraint,
+  type GraphSearchRequest,
+  type GraphSearchResponse,
+  type GraphPathStep,
+  type GraphSearchOptimization,
 } from "@pcc/spec";
+import { searchGraph } from "./graph-search.js";
 
 // ---------------------------------------------------------------------------
 // In-memory store (scaffold-only; production swaps to facades + SQLite)
@@ -199,22 +204,143 @@ function summarize(
 }
 
 // ---------------------------------------------------------------------------
+// Graph-search fallback — multi-step planning via Dijkstra (PR #92)
+// ---------------------------------------------------------------------------
+
+type PlanResult = {
+  steps: CompositionStep[];
+  status: CompositionStatus;
+  rejection?: string;
+};
+
+/**
+ * Map a compose optimization target onto the graph-search vocabulary. Compose
+ * targets (`price` | `speed` | `quality`) are a strict subset of graph-search's
+ * (which adds `reputation`), so the mapping is identity with a `price` default.
+ */
+function toGraphOptimization(
+  o: CompositionOptimization | undefined,
+): GraphSearchOptimization {
+  return o ?? "price";
+}
+
+/** One graph path step → one linear composition step (dependsOn = previous). */
+function graphStepToCompositionStep(
+  s: GraphPathStep,
+  index: number,
+): CompositionStep {
+  return {
+    index,
+    capabilityType: s.capabilityType,
+    capabilityId: s.capabilityId,
+    kernelId: s.kernelId,
+    // GraphPathStep carries no operator binding — graph search works at the
+    // capability-instance granularity, not the operator. Leave empty for the
+    // scaffold; the execute follow-on resolves the operator at submission.
+    operatorAddress: "",
+    estimatedPriceUSD: s.estimatedPriceUSD,
+    estimatedDurationMs: s.estimatedDurationMs,
+    assuranceTier: s.assuranceTier,
+    dependsOn: index === 0 ? [] : [index - 1],
+    reputation: s.reputation,
+  };
+}
+
+/**
+ * Plan a composition by delegating to graph-search's Dijkstra traversal, then
+ * fold the cheapest returned path into composition steps. Used for explicit
+ * `outcomeChain` requests and as the fallback when no direct single-step
+ * provider matches.
+ *
+ * Status mapping — graph-search has no status field (it returns `options` +
+ * `searchStats`), so we derive the compose status:
+ *   - options non-empty             → `proposed`      (a path was found)
+ *   - empty + cappedAtBudget        → `over_budget`   (a path existed but priced out)
+ *   - empty + not capped            → `no_path_found`
+ */
+function planViaGraphSearch(req: ComposeRequest, outcomeType: string): PlanResult {
+  const gsReq: GraphSearchRequest = {
+    outcomeType,
+    budgetUSD: req.budgetUSD,
+    minAssuranceTier: req.minAssuranceTier,
+    location: req.location,
+    optimizeFor: toGraphOptimization(req.optimizeFor),
+    requester: req.requester ? { agentId: req.requester.agentId } : undefined,
+  };
+
+  const result: GraphSearchResponse = searchGraph(gsReq);
+  const best = result.options[0]; // already sorted cheapest/best-first
+
+  if (!best) {
+    if (result.searchStats.cappedAtBudget) {
+      return {
+        steps: [],
+        status: "over_budget",
+        rejection: `No graph path to "${outcomeType}" within budget $${req.budgetUSD.toFixed(2)}`,
+      };
+    }
+    return {
+      steps: [],
+      status: "no_path_found",
+      rejection: `No graph path produces "${outcomeType}" at minAssuranceTier=${req.minAssuranceTier}`,
+    };
+  }
+
+  return {
+    steps: best.steps.map((s, i) => graphStepToCompositionStep(s, i)),
+    status: "proposed",
+  };
+}
+
+/**
+ * Resolve a {@link ComposeRequest} to a step list + status, choosing between
+ * the direct in-memory provider and graph-search:
+ *   1. An explicit `outcomeChain` always routes to graph-search (targets the
+ *      chain's final element).
+ *   2. Otherwise the direct provider runs first (single-step / explicit
+ *      `steps`); a `proposed` or `over_budget` result is honoured as-is.
+ *   3. Only when the direct provider finds NO candidate does graph-search take
+ *      over, searching for a multi-step path to `outcomeType`.
+ */
+function planSteps(req: ComposeRequest): PlanResult {
+  // (1) Explicit chain → graph-search on the final outcome type.
+  if (req.outcomeChain && req.outcomeChain.length > 0) {
+    const finalType = req.outcomeChain[req.outcomeChain.length - 1]!;
+    return planViaGraphSearch(req, finalType);
+  }
+
+  // (2) Direct provider first — preserves the backwards-compatible 1-step
+  //     (and explicit `steps`) behaviour exactly.
+  const direct = plan(req, inMemoryProvider);
+  if (direct.status !== "no_path_found") {
+    return direct;
+  }
+
+  // (3) No direct provider matched → fall back to a graph path to the outcome.
+  return planViaGraphSearch(req, req.outcomeType);
+}
+
+// ---------------------------------------------------------------------------
 // Public planner entrypoint — in-process composition without an HTTP round-trip
 // ---------------------------------------------------------------------------
 
 /**
- * Plan + summarize a composition using the in-memory candidate provider — the
- * exact logic `POST /api/compose` runs, exposed for in-process callers that
- * need a composition object directly (e.g. the asset-outbound demand route).
+ * Plan + summarize a composition — the exact logic `POST /api/compose` runs,
+ * exposed for in-process callers that need a composition object directly (e.g.
+ * the asset-outbound demand route).
  *
- * Persists the result to the same store as the HTTP route, so the returned
- * `compositionId` remains retrievable via `GET /api/compose/:id`.
+ * Picks one of two planners (see {@link planSteps}): the in-memory candidate
+ * provider for direct single-step / `steps` requests, or graph-search's
+ * Dijkstra traversal for an explicit `outcomeChain` or when no direct provider
+ * matches. Either way the result is summarized identically and persisted to the
+ * same store as the HTTP route, so the returned `compositionId` remains
+ * retrievable via `GET /api/compose/:id`.
  *
  * Returns a full {@link ComposeResponse}; inspect `.status` to distinguish
  * `proposed` (plan ready) from `over_budget` / `no_path_found` (rejections).
  */
 export function planComposition(req: ComposeRequest): ComposeResponse {
-  const result = plan(req, inMemoryProvider);
+  const result = planSteps(req);
   const response = summarize(req, result.steps, result.status, result.rejection);
   compositions.set(response.compositionId, response);
   return response;

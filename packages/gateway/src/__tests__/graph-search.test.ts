@@ -20,9 +20,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   graphSearchRoutes,
+  searchGraph,
   _clearGraphSearchForTests,
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
+import type { GraphSearchRequest } from "@pcc/spec";
 
 // -----------------------------------------------------------------------------
 // App bootstrap
@@ -441,5 +443,42 @@ describe("graph-stats + _dev registration", () => {
     const after = await doSearch({ outcomeType: "final", budgetUSD: 1000, minAssuranceTier: 0 });
     expect(after.json().options).toHaveLength(1);
     expect(ids(after.json().options[0].steps)).toEqual(["A", "B"]);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 21. Exported searchGraph helper (in-process, mirrors the POST handler)
+// -----------------------------------------------------------------------------
+
+describe("searchGraph (exported in-process helper)", () => {
+  // 21.
+  it("returns the same shape as POST /api/capabilities/graph-search", async () => {
+    await regNode({
+      capabilityId: "direct",
+      capabilityType: "printer",
+      outputTypes: ["finalX"],
+    });
+
+    const req: GraphSearchRequest = {
+      outcomeType: "finalX",
+      budgetUSD: 1000,
+      minAssuranceTier: 0,
+    };
+    const direct = searchGraph(req);
+    const httpBody = (
+      await doSearch({ outcomeType: "finalX", budgetUSD: 1000, minAssuranceTier: 0 })
+    ).json();
+
+    // Identical top-level structure (searchId/timestamps differ in value, but
+    // the key set and the discovered options must match).
+    expect(Object.keys(direct).sort()).toEqual(Object.keys(httpBody).sort());
+    expect(direct.outcomeType).toBe(httpBody.outcomeType);
+    expect(direct.optimizedFor).toBe(httpBody.optimizedFor);
+    expect(direct.options).toHaveLength(httpBody.options.length);
+    expect(direct.options).toHaveLength(1);
+    expect(direct.options[0].steps[0].capabilityId).toBe("direct");
+    expect(httpBody.options[0].steps[0].capabilityId).toBe("direct");
+    // The helper also persists a retrievable proposal (like the HTTP route).
+    expect(direct.searchId).toBeTruthy();
   });
 });

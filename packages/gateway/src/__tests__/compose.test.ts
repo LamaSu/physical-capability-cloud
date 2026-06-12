@@ -18,7 +18,11 @@ import {
   _clearComposeForTests,
   _registerCandidateForTests,
 } from "../routes/compose.js";
-import type { CompositionCandidate } from "@pcc/spec";
+import {
+  _clearGraphSearchForTests,
+  _seedGraphSearchForTests,
+} from "../routes/graph-search.js";
+import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
 
 function makeApp() {
   const app = Fastify({ logger: false });
@@ -43,6 +47,32 @@ function makeCandidate(
     available: partial.available ?? true,
   };
 }
+
+/** Build a graph-search node-registration input with sensible defaults. */
+function gnode(
+  over: Partial<RegisterGraphNodeInput> & { capabilityId: string },
+): RegisterGraphNodeInput {
+  return {
+    capabilityId: over.capabilityId,
+    capabilityType: over.capabilityType ?? over.capabilityId,
+    kernelId: over.kernelId ?? `k_${over.capabilityId}`,
+    estimatedPriceUSD: over.estimatedPriceUSD ?? 10,
+    estimatedDurationMs: over.estimatedDurationMs ?? 1_000,
+    assuranceTier: over.assuranceTier ?? 1,
+    reputation: over.reputation ?? 500,
+    available: over.available ?? true,
+    inputTypes: over.inputTypes ?? [],
+    outputTypes: over.outputTypes ?? [],
+  };
+}
+
+// compose now reads graph-search's module state when it falls back to Dijkstra,
+// so the shared graph must be reset alongside the candidate store before every
+// test — otherwise stale nodes/edges leak across cases.
+beforeEach(() => {
+  _clearComposeForTests();
+  _clearGraphSearchForTests();
+});
 
 describe("POST /api/compose — no_path_found", () => {
   beforeEach(() => _clearComposeForTests());
@@ -433,5 +463,173 @@ describe("POST /api/compose/_dev/register-candidate", () => {
       payload: { outcomeType: "3d-printing", budgetUSD: 100, minAssuranceTier: 1 },
     });
     expect(prop.json().steps[0].capabilityId).toBe("viaApi");
+  });
+});
+
+describe("POST /api/compose — graph-search integration (PR #92 wiring)", () => {
+  it("uses the direct 1-step provider when one matches (graph ignored)", async () => {
+    // A direct compose candidate for the outcome...
+    _registerCandidateForTests(
+      makeCandidate({
+        capabilityId: "direct",
+        capabilityType: "widget",
+        estimatedPriceUSD: 7,
+      }),
+    );
+    // ...and a graph path that ALSO produces "widget" — must NOT be chosen,
+    // because the direct single-step provider takes precedence.
+    _seedGraphSearchForTests({
+      nodes: [
+        gnode({ capabilityId: "gSeed", outputTypes: ["seed"] }),
+        gnode({
+          capabilityId: "gWidget",
+          inputTypes: ["seed"],
+          outputTypes: ["widget"],
+          estimatedPriceUSD: 99,
+        }),
+      ],
+      edges: [
+        { fromCapabilityId: "gSeed", toCapabilityId: "gWidget", capabilityTypeFlow: "seed" },
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "widget", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(1);
+    expect(body.steps[0].capabilityId).toBe("direct"); // not "gWidget"
+    expect(body.totalPriceUSD).toBe(7);
+  });
+
+  it("plans a 3-step path from an outcomeChain via graph-search (totalPriceUSD = sum)", async () => {
+    // synth → purify → assay, each a distinct operator bridged by graph edges.
+    _seedGraphSearchForTests({
+      nodes: [
+        gnode({ capabilityId: "A", capabilityType: "synth", outputTypes: ["A"], estimatedPriceUSD: 5 }),
+        gnode({ capabilityId: "B", capabilityType: "purify", inputTypes: ["A"], outputTypes: ["B"], estimatedPriceUSD: 8 }),
+        gnode({ capabilityId: "C", capabilityType: "assay", inputTypes: ["B"], outputTypes: ["C"], estimatedPriceUSD: 12 }),
+      ],
+      edges: [
+        { fromCapabilityId: "A", toCapabilityId: "B", capabilityTypeFlow: "A" },
+        { fromCapabilityId: "B", toCapabilityId: "C", capabilityTypeFlow: "B" },
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "C",
+        outcomeChain: ["A", "B", "C"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(3);
+    expect(body.steps.map((s: { capabilityId: string }) => s.capabilityId)).toEqual([
+      "A",
+      "B",
+      "C",
+    ]);
+    // Linear dependsOn wiring preserved through the conversion.
+    expect(body.steps[0].dependsOn).toEqual([]);
+    expect(body.steps[1].dependsOn).toEqual([0]);
+    expect(body.steps[2].dependsOn).toEqual([1]);
+    // totalPriceUSD is the sum of the chosen step prices (5 + 8 + 12).
+    expect(body.totalPriceUSD).toBe(25);
+    // capabilityType is carried through from each graph node.
+    expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
+      "synth",
+      "purify",
+      "assay",
+    ]);
+  });
+
+  it("returns no_path_found when the outcomeChain has a gap (no B→C edge)", async () => {
+    _seedGraphSearchForTests({
+      nodes: [
+        gnode({ capabilityId: "A", outputTypes: ["A"] }),
+        gnode({ capabilityId: "B", inputTypes: ["A"], outputTypes: ["B"] }),
+        gnode({ capabilityId: "C", inputTypes: ["B"], outputTypes: ["C"] }),
+      ],
+      edges: [
+        { fromCapabilityId: "A", toCapabilityId: "B", capabilityTypeFlow: "A" },
+        // no B→C edge → C is unreachable from any source
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "C",
+        outcomeChain: ["A", "B", "C"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe("no_path_found");
+    expect(body.steps).toEqual([]);
+  });
+
+  it("falls back to a graph path when no direct provider matches the outcome", async () => {
+    // No compose candidate registered for "gadget" — only a 2-node graph path
+    // produces it, so the planner must fall through to graph-search.
+    _seedGraphSearchForTests({
+      nodes: [
+        gnode({ capabilityId: "raw", outputTypes: ["mid"], estimatedPriceUSD: 4 }),
+        gnode({ capabilityId: "fin", inputTypes: ["mid"], outputTypes: ["gadget"], estimatedPriceUSD: 6 }),
+      ],
+      edges: [
+        { fromCapabilityId: "raw", toCapabilityId: "fin", capabilityTypeFlow: "mid" },
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "gadget", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(2);
+    expect(body.steps.map((s: { capabilityId: string }) => s.capabilityId)).toEqual([
+      "raw",
+      "fin",
+    ]);
+    expect(body.totalPriceUSD).toBe(10);
+  });
+
+  it("maps a budget-priced-out graph fallback to over_budget", async () => {
+    // The only producer of "pricey" costs 80; budget is 50 → priced out.
+    _seedGraphSearchForTests({
+      nodes: [gnode({ capabilityId: "x1", outputTypes: ["pricey"], estimatedPriceUSD: 80 })],
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "pricey", budgetUSD: 50, minAssuranceTier: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe("over_budget");
+    expect(body.steps).toEqual([]);
   });
 });
