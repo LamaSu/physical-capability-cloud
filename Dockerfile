@@ -43,6 +43,31 @@ COPY packages/pcc-node/pyproject.toml packages/pcc-node/
 COPY packages/orchestrator-sdk/package.json packages/orchestrator-sdk/
 COPY packages/agent-onboarder/package.json packages/agent-onboarder/
 COPY packages/template-data-product/package.json packages/template-data-product/
+# Full workspace coverage — every package.json must be present at install time,
+# or pnpm never links that package's deps and the in-image turbo build fails on
+# unresolved imports (kernel-sdk 2d9b4b6, then bridge-directory/zod broke every
+# master image build since #64).
+COPY packages/a2a-signing/package.json packages/a2a-signing/
+COPY packages/adapter-pylabrobot/package.json packages/adapter-pylabrobot/
+COPY packages/aggregator/package.json packages/aggregator/
+COPY packages/bridge-directory/package.json packages/bridge-directory/
+COPY packages/connectors-airbyte-bridge/package.json packages/connectors-airbyte-bridge/
+COPY packages/connectors-csv/package.json packages/connectors-csv/
+COPY packages/connectors-postgres/package.json packages/connectors-postgres/
+COPY packages/connectors-salesforce/package.json packages/connectors-salesforce/
+COPY packages/connectors-sap/package.json packages/connectors-sap/
+COPY packages/connectors-sharepoint/package.json packages/connectors-sharepoint/
+COPY packages/demand-intel/package.json packages/demand-intel/
+COPY packages/demo-video/package.json packages/demo-video/
+COPY packages/dht-core/package.json packages/dht-core/
+COPY packages/federation/package.json packages/federation/
+COPY packages/identity/package.json packages/identity/
+COPY packages/intent-broker/package.json packages/intent-broker/
+COPY packages/intent-collector/package.json packages/intent-collector/
+COPY packages/intent-otel-exporter/package.json packages/intent-otel-exporter/
+COPY packages/subgraph/package.json packages/subgraph/
+COPY packages/tool-index/package.json packages/tool-index/
+COPY packages/trilobio/package.json packages/trilobio/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # Cache-bust: change this value to force pnpm install to re-run
