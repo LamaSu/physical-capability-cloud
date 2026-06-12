@@ -25,6 +25,8 @@ import {
   reputationRoutes,
   applyDelta,
   getOrInitReputation,
+  recordStepOutcome,
+  finalizeReputation,
   _clearReputationForTests,
   _seedReputationForTests,
 } from "../routes/reputation.js";
@@ -576,5 +578,102 @@ describe("Reputation propagation through compositions", () => {
     expect(body.count).toBe(1);
     expect(body.disputes[0].compositionId).toBe("comp-list");
     expect(body.disputes[0].status).toBe("pending");
+  });
+
+  // ── Exported helpers (recordStepOutcome / finalizeReputation) ──────────
+
+  it("23. recordStepOutcome + finalizeReputation helpers match their HTTP routes", async () => {
+    // ── direct helper path ──
+    recordStepOutcome({
+      compositionId: "comp-direct",
+      stepIndex: 0,
+      capabilityId: "cap-a",
+      agentId: "agent-direct-0",
+      status: "success",
+      startedAt: "2026-06-11T10:00:00.000Z",
+    });
+    recordStepOutcome({
+      compositionId: "comp-direct",
+      stepIndex: 1,
+      capabilityId: "cap-b",
+      agentId: "agent-direct-1",
+      status: "failed",
+      startedAt: "2026-06-11T10:00:00.000Z",
+    });
+    const directDeltas = finalizeReputation("comp-direct", "engine-direct");
+
+    // ── equivalent HTTP path ──
+    await app.inject({
+      method: "POST",
+      url: "/api/compositions/comp-http/step-outcome",
+      payload: stepOutcomePayload({
+        compositionId: "comp-http",
+        stepIndex: 0,
+        capabilityId: "cap-a",
+        agentId: "agent-http-0",
+        status: "success",
+      }),
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/compositions/comp-http/step-outcome",
+      payload: stepOutcomePayload({
+        compositionId: "comp-http",
+        stepIndex: 1,
+        capabilityId: "cap-b",
+        agentId: "agent-http-1",
+        status: "failed",
+      }),
+    });
+    const httpResp = await app.inject({
+      method: "POST",
+      url: "/api/compositions/comp-http/finalize-reputation",
+      payload: { finalizerId: "engine-http" },
+    });
+    const httpBody = httpResp.json();
+
+    // identical delta reasons + step accounting (success +10 / failed -15, no bonus)
+    expect(directDeltas.map((d) => d.reason).sort()).toEqual(
+      httpBody.deltasApplied.map((d: { reason: string }) => d.reason).sort(),
+    );
+    expect(directDeltas.filter((d) => d.reason === "step_completed")).toHaveLength(1);
+    expect(directDeltas.filter((d) => d.reason === "step_failed")).toHaveLength(1);
+    expect(httpBody.stepsFinalized).toBe(2);
+
+    // identical resulting scores
+    expect(getOrInitReputation("agent-direct-0").score).toBe(510);
+    expect(getOrInitReputation("agent-direct-1").score).toBe(485);
+    expect(getOrInitReputation("agent-http-0").score).toBe(510);
+    expect(getOrInitReputation("agent-http-1").score).toBe(485);
+  });
+
+  it("24. helper-applied state is consistent when read back through HTTP GETs", async () => {
+    recordStepOutcome({
+      compositionId: "comp-cross",
+      stepIndex: 0,
+      capabilityId: "cap-x",
+      agentId: "agent-cross",
+      status: "success",
+      startedAt: "2026-06-11T10:00:00.000Z",
+    });
+    const deltas = finalizeReputation("comp-cross", "engine-cross");
+    expect(deltas.length).toBeGreaterThan(0);
+
+    // reputation visible via HTTP — single all-success step: +10 + +5 bonus
+    const rep = await app.inject({ method: "GET", url: "/api/reputation/agent-cross" });
+    expect(rep.statusCode).toBe(200);
+    expect(rep.json().reputation.score).toBe(515);
+    expect(
+      rep.json().recentDeltas.map((d: { reason: string }) => d.reason).sort(),
+    ).toEqual(["composition_completed", "step_completed"]);
+
+    // the helper-created outcome is now finalized + visible via HTTP
+    const outc = await app.inject({
+      method: "GET",
+      url: "/api/compositions/comp-cross/step-outcomes",
+    });
+    expect(outc.json().count).toBe(1);
+    expect(outc.json().outcomes[0].agentId).toBe("agent-cross");
+    expect(outc.json().outcomes[0].finalReputationApplied).toBe(true);
   });
 });

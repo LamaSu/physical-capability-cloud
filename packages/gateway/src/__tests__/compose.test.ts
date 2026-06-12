@@ -12,21 +12,34 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import {
   composeRoutes,
+  executeComposition,
   _clearComposeForTests,
   _registerCandidateForTests,
+  _setStepRunnerForTests,
 } from "../routes/compose.js";
 import {
   _clearGraphSearchForTests,
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
+import { reputationRoutes, _clearReputationForTests } from "../routes/reputation.js";
 import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
 
 function makeApp() {
   const app = Fastify({ logger: false });
   void app.register(composeRoutes);
+  return app;
+}
+
+/** App with both compose + reputation routes — lets execute tests read back
+ *  reputation/outcome state over HTTP (the two route modules share in-memory
+ *  reputation stores). */
+function makeAppWithReputation(): FastifyInstance {
+  const app = Fastify({ logger: false });
+  void app.register(composeRoutes);
+  void app.register(reputationRoutes);
   return app;
 }
 
@@ -381,9 +394,12 @@ describe("GET /api/compose/:id", () => {
 });
 
 describe("POST /api/compose/:id/execute", () => {
-  beforeEach(() => _clearComposeForTests());
+  beforeEach(() => {
+    _clearComposeForTests();
+    _clearReputationForTests();
+  });
 
-  it("queues a proposed composition (stub workflow id)", async () => {
+  it("executes a proposed composition and reports completion", async () => {
     _registerCandidateForTests(makeCandidate({ capabilityId: "c1" }));
     const app = makeApp();
     const prop = await app.inject({
@@ -402,7 +418,7 @@ describe("POST /api/compose/:id/execute", () => {
     const body = exec.json();
     expect(body.compositionId).toBe(id);
     expect(body.workflowId).toMatch(/^wf_/);
-    expect(body.status).toBe("queued");
+    expect(body.status).toBe("completed");
   });
 
   it("rejects executing an over_budget composition", async () => {
@@ -468,7 +484,6 @@ describe("POST /api/compose/_dev/register-candidate", () => {
 
 describe("POST /api/compose — graph-search integration (PR #92 wiring)", () => {
   it("uses the direct 1-step provider when one matches (graph ignored)", async () => {
-    // A direct compose candidate for the outcome...
     _registerCandidateForTests(
       makeCandidate({
         capabilityId: "direct",
@@ -476,8 +491,6 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
         estimatedPriceUSD: 7,
       }),
     );
-    // ...and a graph path that ALSO produces "widget" — must NOT be chosen,
-    // because the direct single-step provider takes precedence.
     _seedGraphSearchForTests({
       nodes: [
         gnode({ capabilityId: "gSeed", outputTypes: ["seed"] }),
@@ -503,12 +516,11 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
     const body = res.json();
     expect(body.status).toBe("proposed");
     expect(body.steps).toHaveLength(1);
-    expect(body.steps[0].capabilityId).toBe("direct"); // not "gWidget"
+    expect(body.steps[0].capabilityId).toBe("direct");
     expect(body.totalPriceUSD).toBe(7);
   });
 
   it("plans a 3-step path from an outcomeChain via graph-search (totalPriceUSD = sum)", async () => {
-    // synth → purify → assay, each a distinct operator bridged by graph edges.
     _seedGraphSearchForTests({
       nodes: [
         gnode({ capabilityId: "A", capabilityType: "synth", outputTypes: ["A"], estimatedPriceUSD: 5 }),
@@ -541,13 +553,10 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
       "B",
       "C",
     ]);
-    // Linear dependsOn wiring preserved through the conversion.
     expect(body.steps[0].dependsOn).toEqual([]);
     expect(body.steps[1].dependsOn).toEqual([0]);
     expect(body.steps[2].dependsOn).toEqual([1]);
-    // totalPriceUSD is the sum of the chosen step prices (5 + 8 + 12).
     expect(body.totalPriceUSD).toBe(25);
-    // capabilityType is carried through from each graph node.
     expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
       "synth",
       "purify",
@@ -564,7 +573,6 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
       ],
       edges: [
         { fromCapabilityId: "A", toCapabilityId: "B", capabilityTypeFlow: "A" },
-        // no B→C edge → C is unreachable from any source
       ],
     });
 
@@ -586,8 +594,6 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
   });
 
   it("falls back to a graph path when no direct provider matches the outcome", async () => {
-    // No compose candidate registered for "gadget" — only a 2-node graph path
-    // produces it, so the planner must fall through to graph-search.
     _seedGraphSearchForTests({
       nodes: [
         gnode({ capabilityId: "raw", outputTypes: ["mid"], estimatedPriceUSD: 4 }),
@@ -616,7 +622,6 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
   });
 
   it("maps a budget-priced-out graph fallback to over_budget", async () => {
-    // The only producer of "pricey" costs 80; budget is 50 → priced out.
     _seedGraphSearchForTests({
       nodes: [gnode({ capabilityId: "x1", outputTypes: ["pricey"], estimatedPriceUSD: 80 })],
     });
@@ -631,5 +636,211 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
     const body = res.json();
     expect(body.status).toBe("over_budget");
     expect(body.steps).toEqual([]);
+  });
+});
+
+describe("POST /api/compose/:id/execute — reputation wiring", () => {
+  beforeEach(() => {
+    _clearComposeForTests();
+    _clearReputationForTests();
+  });
+
+  function registerSteps(
+    specs: {
+      capabilityType: string;
+      capabilityId: string;
+      operatorAddress: string;
+      price?: number;
+    }[],
+  ): void {
+    for (const s of specs) {
+      _registerCandidateForTests(
+        makeCandidate({
+          capabilityId: s.capabilityId,
+          capabilityType: s.capabilityType,
+          operatorAddress: s.operatorAddress,
+          estimatedPriceUSD: s.price ?? 10,
+        }),
+      );
+    }
+  }
+
+  async function proposeTwoStep(app: FastifyInstance): Promise<string> {
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "print",
+        steps: ["prep", "print"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    expect(prop.json().status).toBe("proposed");
+    return prop.json().compositionId;
+  }
+
+  it("all-success execute records success outcomes, finalizes, and bumps each participant +15", async () => {
+    registerSteps([
+      { capabilityType: "prep", capabilityId: "cap-prep", operatorAddress: "op-prep" },
+      { capabilityType: "print", capabilityId: "cap-print", operatorAddress: "op-print" },
+    ]);
+    const app = makeAppWithReputation();
+    const id = await proposeTwoStep(app);
+
+    const exec = await app.inject({
+      method: "POST",
+      url: `/api/compose/${id}/execute`,
+      payload: {},
+    });
+    expect(exec.statusCode).toBe(202);
+    expect(exec.json().status).toBe("completed");
+    expect(exec.json().workflowId).toMatch(/^wf_/);
+
+    const outc = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${id}/step-outcomes`,
+    });
+    expect(outc.json().count).toBe(2);
+    expect(
+      outc.json().outcomes.every((o: { status: string }) => o.status === "success"),
+    ).toBe(true);
+    expect(
+      outc
+        .json()
+        .outcomes.every((o: { finalReputationApplied: boolean }) => o.finalReputationApplied),
+    ).toBe(true);
+
+    const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
+    expect(prep.json().reputation.score).toBe(515);
+    const print = await app.inject({ method: "GET", url: "/api/reputation/op-print" });
+    expect(print.json().reputation.score).toBe(515);
+  });
+
+  it("a mid-stream failure debits -15, short-circuits downstream steps, and skips the bonus", async () => {
+    registerSteps([
+      { capabilityType: "prep", capabilityId: "cap-prep", operatorAddress: "op-prep" },
+      { capabilityType: "print", capabilityId: "cap-print", operatorAddress: "op-print" },
+      { capabilityType: "inspect", capabilityId: "cap-inspect", operatorAddress: "op-inspect" },
+    ]);
+    const app = makeAppWithReputation();
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "inspect",
+        steps: ["prep", "print", "inspect"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    const id = prop.json().compositionId;
+
+    _setStepRunnerForTests((step) => {
+      if (step.index === 1) throw new Error("evidence verification failed");
+    });
+
+    const exec = await app.inject({
+      method: "POST",
+      url: `/api/compose/${id}/execute`,
+      payload: {},
+    });
+    expect(exec.statusCode).toBe(202);
+    expect(exec.json().status).toBe("failed");
+
+    const outc = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${id}/step-outcomes`,
+    });
+    expect(outc.json().count).toBe(2);
+    expect(outc.json().outcomes.map((o: { status: string }) => o.status)).toEqual([
+      "success",
+      "failed",
+    ]);
+
+    const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
+    expect(prep.json().reputation.score).toBe(510);
+    const print = await app.inject({ method: "GET", url: "/api/reputation/op-print" });
+    expect(print.json().reputation.score).toBe(485);
+    const inspect = await app.inject({ method: "GET", url: "/api/reputation/op-inspect" });
+    expect(inspect.json().reputation.score).toBe(500);
+  });
+
+  it("exposes the post-execute reputation (with deltas) via GET /api/reputation/:agentId", async () => {
+    registerSteps([
+      { capabilityType: "print", capabilityId: "cap-solo", operatorAddress: "op-solo" },
+    ]);
+    const app = makeAppWithReputation();
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "print", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+    const id = prop.json().compositionId;
+
+    await app.inject({ method: "POST", url: `/api/compose/${id}/execute`, payload: {} });
+
+    const rep = await app.inject({ method: "GET", url: "/api/reputation/op-solo" });
+    expect(rep.statusCode).toBe(200);
+    expect(rep.json().reputation.score).toBe(515);
+    expect(
+      rep.json().recentDeltas.map((d: { reason: string }) => d.reason).sort(),
+    ).toEqual(["composition_completed", "step_completed"]);
+  });
+
+  it("is idempotent: re-executing a completed composition replays the result and applies no new deltas", async () => {
+    registerSteps([
+      { capabilityType: "print", capabilityId: "cap-idem", operatorAddress: "op-idem" },
+    ]);
+    const app = makeAppWithReputation();
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "print", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+    const id = prop.json().compositionId;
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/compose/${id}/execute`,
+      payload: {},
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: `/api/compose/${id}/execute`,
+      payload: {},
+    });
+
+    expect(second.statusCode).toBe(202);
+    expect(second.json().workflowId).toBe(first.json().workflowId);
+    expect(second.json().status).toBe("completed");
+
+    const rep = await app.inject({ method: "GET", url: "/api/reputation/op-idem" });
+    expect(rep.json().reputation.score).toBe(515);
+    const deltas = await app.inject({
+      method: "GET",
+      url: "/api/reputation/op-idem/deltas",
+    });
+    expect(deltas.json().total).toBe(2);
+  });
+
+  it("executeComposition runs in-process and returns a structured result", async () => {
+    registerSteps([
+      { capabilityType: "prep", capabilityId: "cap-prep", operatorAddress: "op-prep" },
+      { capabilityType: "print", capabilityId: "cap-print", operatorAddress: "op-print" },
+    ]);
+    const app = makeAppWithReputation();
+    const id = await proposeTwoStep(app);
+
+    const got = await app.inject({ method: "GET", url: `/api/compose/${id}` });
+    const result = executeComposition(got.json());
+
+    expect(result.status).toBe("completed");
+    expect(result.stepsExecuted).toBe(2);
+    expect(result.failedStepIndex).toBeNull();
+    expect(result.deltasApplied).toHaveLength(4);
+
+    const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
+    expect(prep.json().reputation.score).toBe(515);
   });
 });

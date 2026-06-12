@@ -32,8 +32,11 @@ import {
   type GraphSearchResponse,
   type GraphPathStep,
   type GraphSearchOptimization,
+  type ReputationDelta,
+  type StepOutcomeStatus,
 } from "@pcc/spec";
 import { searchGraph } from "./graph-search.js";
+import { recordStepOutcome, finalizeReputation } from "./reputation.js";
 
 // ---------------------------------------------------------------------------
 // In-memory store (scaffold-only; production swaps to facades + SQLite)
@@ -41,6 +44,8 @@ import { searchGraph } from "./graph-search.js";
 
 const candidates = new Map<string, CompositionCandidate>();
 const compositions = new Map<string, ComposeResponse>();
+/** Execute results keyed by compositionId — replayed for idempotent re-execute. */
+const executions = new Map<string, ExecuteCompositionResponse>();
 
 const COMPOSITION_TTL_MS = 30 * 60 * 1000; // 30 min
 
@@ -347,6 +352,119 @@ export function planComposition(req: ComposeRequest): ComposeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Execution — drives reputation propagation per step + finalize
+// ---------------------------------------------------------------------------
+
+/**
+ * Binds a proposed composition's steps to the agents that execute them and the
+ * routine that "runs" each step. The scaffold's default runner is a no-op
+ * (every step is assumed to succeed); production swaps it for real evidence
+ * verification. A runner signals step failure by THROWING.
+ */
+export interface ExecutorBinding {
+  /** Which agent is credited/debited for a step. Default: the step's operator. */
+  resolveExecutor?: (step: CompositionStep) => string;
+  /** Runs one step; throw to mark it failed. Default: no-op (stub success). */
+  runStep?: (step: CompositionStep) => void;
+}
+
+/** Structured result of {@link executeComposition}. */
+export interface CompositionExecutionResult {
+  compositionId: string;
+  workflowId: string;
+  status: "completed" | "failed";
+  startedAt: string;
+  completedAt: string;
+  /** How many steps actually ran (≤ steps.length; short-circuits on failure). */
+  stepsExecuted: number;
+  /** Index of the step that failed, or null when every step succeeded. */
+  failedStepIndex: number | null;
+  /** Reputation deltas applied by the post-run finalize. */
+  deltasApplied: ReputationDelta[];
+}
+
+/** Default step runner — the scaffold assumes every step succeeds. */
+const NOOP_RUNNER = (_step: CompositionStep): void => {};
+
+/**
+ * Module-level runner the HTTP execute endpoint uses when no explicit binding
+ * is supplied. Tests override it via {@link _setStepRunnerForTests} to inject a
+ * mid-stream failure; reset by {@link _clearComposeForTests}.
+ */
+let stepRunner: (step: CompositionStep) => void = NOOP_RUNNER;
+
+/**
+ * Execute a proposed composition, propagating reputation as it goes: record a
+ * step-outcome per step (`success`, or `failed` when the runner throws), then
+ * finalize the composition's reputation once the loop ends.
+ *
+ * A failed step SHORT-CIRCUITS the rest of the DAG: subsequent steps are not
+ * executed, no outcomes are recorded for them, and finalize therefore skips the
+ * `composition_completed` bonus (not every step succeeded). Successful steps up
+ * to the failure are still credited +10 each; the failed step's executor takes
+ * -15.
+ *
+ * Exported so other routes (e.g. asset-outbound demand fulfilment) can execute
+ * an in-process composition without an HTTP round-trip. Reputation deltas land
+ * in the shared reputation store and are queryable via `/api/reputation/*`.
+ */
+export function executeComposition(
+  composition: ComposeResponse,
+  binding: ExecutorBinding = {},
+): CompositionExecutionResult {
+  const compositionId = composition.compositionId;
+  const startedAt = nowISO();
+  const resolveExecutor =
+    binding.resolveExecutor ?? ((s: CompositionStep) => s.operatorAddress);
+  const runStep = binding.runStep ?? stepRunner;
+
+  let failedStepIndex: number | null = null;
+  let stepsExecuted = 0;
+
+  for (const step of composition.steps) {
+    const executorAgentId = resolveExecutor(step);
+    let status: StepOutcomeStatus = "success";
+    try {
+      // Stub: a no-op "succeeds". Production verifies real evidence here.
+      runStep(step);
+    } catch {
+      status = "failed";
+    }
+
+    recordStepOutcome({
+      compositionId,
+      stepIndex: step.index,
+      capabilityId: step.capabilityId,
+      agentId: executorAgentId,
+      status,
+      startedAt,
+      completedAt: nowISO(),
+    });
+    stepsExecuted += 1;
+
+    if (status === "failed") {
+      failedStepIndex = step.index;
+      break; // short-circuit — do not execute downstream steps
+    }
+  }
+
+  // Settle reputation: +10 per success, -15 on the failed step, +5 bonus to all
+  // participants when every step succeeded. Idempotent if already finalized.
+  const deltasApplied = finalizeReputation(compositionId, "compose-engine");
+
+  return {
+    compositionId,
+    workflowId: `wf_${randomUUID()}`,
+    status: failedStepIndex === null ? "completed" : "failed",
+    startedAt,
+    completedAt: nowISO(),
+    stepsExecuted,
+    failedStepIndex,
+    deltasApplied,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -388,10 +506,15 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /api/compose/:id/execute — commit composition → workflow run
+  // POST /api/compose/:id/execute — commit composition → run + propagate reputation
   //
-  // SCAFFOLD: returns a synthetic workflow id without queueing actual jobs.
-  // Follow-on PR wires this to @pcc/workflow + /api/jobs/submit + /api/escrow/fund.
+  // Drives the composition through `executeComposition`: each step records a
+  // reputation step-outcome, and the composition's reputation is finalized when
+  // the run ends. Synchronous in the scaffold (the stub assumes each step
+  // succeeds; production wires per-step jobs + real evidence verification). The
+  // response keeps the ExecuteCompositionResponse shape — `status` now reflects
+  // the real outcome ("completed" | "failed"). Re-executing an already-run
+  // composition replays its stored result without re-applying any deltas.
   app.post<{ Params: { id: string } }>(
     "/api/compose/:id/execute",
     async (req, reply) => {
@@ -414,6 +537,14 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
           message: `No composition with id ${req.params.id}`,
         });
       }
+
+      // Idempotency: a composition that already executed replays its stored
+      // result — reputation deltas were applied exactly once on the first run.
+      const prior = executions.get(req.params.id);
+      if (prior) {
+        return reply.code(202).send(prior);
+      }
+
       if (c.status !== "proposed") {
         return reply.code(409).send({
           error: "not_executable",
@@ -427,12 +558,14 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      const result = executeComposition(c);
       const response: ExecuteCompositionResponse = {
-        compositionId: c.compositionId,
-        workflowId: `wf_${randomUUID()}`,
-        status: "queued",
-        startedAt: nowISO(),
+        compositionId: result.compositionId,
+        workflowId: result.workflowId,
+        status: result.status,
+        startedAt: result.startedAt,
       };
+      executions.set(req.params.id, response);
       return reply.code(202).send(response);
     },
   );
@@ -467,9 +600,23 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
 export function _clearComposeForTests(): void {
   candidates.clear();
   compositions.clear();
+  executions.clear();
+  stepRunner = NOOP_RUNNER;
 }
 
 /** Direct candidate injection for tests (bypass the dev endpoint) */
 export function _registerCandidateForTests(c: CompositionCandidate): void {
   candidates.set(c.capabilityId, c);
+}
+
+/**
+ * Override the default step runner so the HTTP execute endpoint can be driven
+ * into a mid-stream failure (the runner THROWS for the step it should fail).
+ * Pass `null` to restore the no-op (all-success) runner. Auto-reset by
+ * {@link _clearComposeForTests}.
+ */
+export function _setStepRunnerForTests(
+  fn: ((step: CompositionStep) => void) | null,
+): void {
+  stepRunner = fn ?? NOOP_RUNNER;
 }

@@ -39,6 +39,7 @@ import {
   type AgentReputation,
   type ReputationAgentKind,
   type ReputationDelta,
+  type RecordStepOutcomeRequest,
   type CompositionStepOutcome,
   type CompositionStepDispute,
   type FinalizeCompositionReputationResponse,
@@ -190,6 +191,131 @@ function getOutcomeByStep(
 }
 
 // ---------------------------------------------------------------------------
+// Composition lifecycle helpers (callable in-process; HTTP routes delegate here)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of {@link recordStepOutcome}. `ok: false` means the step's reputation
+ * was already settled by a prior finalize and the recorded outcome is immutable
+ * — the HTTP route maps this to a 409.
+ */
+export type RecordStepOutcomeResult =
+  | { ok: true; outcome: CompositionStepOutcome }
+  | { ok: false; reason: "outcome_finalized"; outcome: CompositionStepOutcome };
+
+/**
+ * Record (or idempotently replace) a single step's outcome — the callable form
+ * of `POST /api/compositions/:id/step-outcome`. Identical logic: refuse to
+ * overwrite a finalized outcome, otherwise upsert keyed on
+ * `(compositionId, stepIndex)` and leave the reputation delta un-applied until
+ * {@link finalizeReputation} settles it.
+ *
+ * Used in-process by the composition engine's `executeComposition` so a running
+ * composition drives the same per-step bookkeeping as the HTTP API.
+ */
+export function recordStepOutcome(
+  input: RecordStepOutcomeRequest,
+): RecordStepOutcomeResult {
+  const { compositionId, stepIndex } = input;
+
+  const existing = getOutcomeByStep(compositionId, stepIndex);
+  if (existing && existing.finalReputationApplied) {
+    // Reputation already settled for this step — refuse to overwrite.
+    return { ok: false, reason: "outcome_finalized", outcome: existing };
+  }
+
+  // Idempotent on (compositionId, stepIndex): replace in place if a
+  // non-finalized outcome already exists, otherwise create a new one.
+  const outcome: CompositionStepOutcome = {
+    outcomeId: existing?.outcomeId ?? randomUUID(),
+    compositionId,
+    stepIndex,
+    capabilityId: input.capabilityId,
+    agentId: input.agentId,
+    status: input.status,
+    evidenceBundleId: input.evidenceBundleId,
+    startedAt: input.startedAt,
+    completedAt: input.completedAt,
+    reputationDelta: undefined,
+    finalReputationApplied: false,
+  };
+  outcomes.set(outcome.outcomeId, outcome);
+  outcomeByStep.set(stepKey(compositionId, stepIndex), outcome.outcomeId);
+  return { ok: true, outcome };
+}
+
+/**
+ * Settle every not-yet-finalized step of a composition — the callable form of
+ * `POST /api/compositions/:id/finalize-reputation`. Applies `step_completed`
+ * (+10) / `step_failed` (-15) per step, then a one-time `composition_completed`
+ * (+5) bonus to each participant when EVERY step succeeded.
+ *
+ * Idempotent: outcomes carry `finalReputationApplied` and the bonus is guarded
+ * by `completionBonusApplied`, so a second call applies nothing. Returns the
+ * deltas applied during this call (empty array on a no-op re-finalize).
+ */
+export function finalizeReputation(
+  compositionId: string,
+  finalizerId?: string,
+): ReputationDelta[] {
+  const compOutcomes = outcomesForComposition(compositionId);
+  const deltasApplied: ReputationDelta[] = [];
+
+  for (const outcome of compOutcomes) {
+    if (outcome.finalReputationApplied) continue;
+
+    if (outcome.status === "success") {
+      deltasApplied.push(
+        applyDelta(outcome.agentId, STEP_COMPLETED_DELTA, "step_completed", {
+          compositionId,
+          stepIndex: outcome.stepIndex,
+          evidenceBundleId: outcome.evidenceBundleId,
+          appliedBy: finalizerId,
+        }),
+      );
+      outcome.reputationDelta = STEP_COMPLETED_DELTA;
+      outcome.finalReputationApplied = true;
+    } else if (outcome.status === "failed") {
+      deltasApplied.push(
+        applyDelta(outcome.agentId, STEP_FAILED_DELTA, "step_failed", {
+          compositionId,
+          stepIndex: outcome.stepIndex,
+          evidenceBundleId: outcome.evidenceBundleId,
+          appliedBy: finalizerId,
+        }),
+      );
+      outcome.reputationDelta = STEP_FAILED_DELTA;
+      outcome.finalReputationApplied = true;
+    }
+    // 'disputed' / 'abandoned' steps get no immediate delta — they wait for
+    // dispute resolution and are intentionally left un-finalized.
+  }
+
+  // Bonus: when EVERY step succeeded (and the bonus has not already been paid
+  // for this composition), credit every participant once.
+  if (
+    compOutcomes.length > 0 &&
+    compOutcomes.every((o) => o.status === "success") &&
+    !completionBonusApplied.has(compositionId)
+  ) {
+    const participants = [...new Set(compOutcomes.map((o) => o.agentId))];
+    for (const agentId of participants) {
+      deltasApplied.push(
+        applyDelta(
+          agentId,
+          COMPOSITION_COMPLETED_DELTA,
+          "composition_completed",
+          { compositionId, appliedBy: finalizerId },
+        ),
+      );
+    }
+    completionBonusApplied.add(compositionId);
+  }
+
+  return deltasApplied;
+}
+
+// ---------------------------------------------------------------------------
 // Query schemas
 // ---------------------------------------------------------------------------
 
@@ -302,35 +428,16 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
       const compositionId = req.params.compositionId;
       const data = parsed.data;
 
-      const existing = getOutcomeByStep(compositionId, data.stepIndex);
-      if (existing && existing.finalReputationApplied) {
-        // Reputation already settled for this step — refuse to overwrite.
+      const result = recordStepOutcome({ ...data, compositionId });
+      if (!result.ok) {
         return reply.status(409).send({
           error: "outcome_finalized",
           message: `Step ${data.stepIndex} of composition ${compositionId} has already been finalized`,
-          outcomeId: existing.outcomeId,
+          outcomeId: result.outcome.outcomeId,
         });
       }
 
-      // Idempotent on (compositionId, stepIndex): replace in place if a
-      // non-finalized outcome already exists, otherwise create a new one.
-      const outcome: CompositionStepOutcome = {
-        outcomeId: existing?.outcomeId ?? randomUUID(),
-        compositionId,
-        stepIndex: data.stepIndex,
-        capabilityId: data.capabilityId,
-        agentId: data.agentId,
-        status: data.status,
-        evidenceBundleId: data.evidenceBundleId,
-        startedAt: data.startedAt,
-        completedAt: data.completedAt,
-        reputationDelta: undefined,
-        finalReputationApplied: false,
-      };
-      outcomes.set(outcome.outcomeId, outcome);
-      outcomeByStep.set(stepKey(compositionId, data.stepIndex), outcome.outcomeId);
-
-      return reply.status(201).send({ outcome });
+      return reply.status(201).send({ outcome: result.outcome });
     },
   );
 
@@ -533,64 +640,15 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
       const compositionId = req.params.compositionId;
       const { finalizerId } = parsed.data;
 
-      const compOutcomes = outcomesForComposition(compositionId);
-      const deltasApplied: ReputationDelta[] = [];
-      let stepsFinalized = 0;
-
-      for (const outcome of compOutcomes) {
-        if (outcome.finalReputationApplied) continue;
-
-        if (outcome.status === "success") {
-          deltasApplied.push(
-            applyDelta(outcome.agentId, STEP_COMPLETED_DELTA, "step_completed", {
-              compositionId,
-              stepIndex: outcome.stepIndex,
-              evidenceBundleId: outcome.evidenceBundleId,
-              appliedBy: finalizerId,
-            }),
-          );
-          outcome.reputationDelta = STEP_COMPLETED_DELTA;
-          outcome.finalReputationApplied = true;
-          stepsFinalized += 1;
-        } else if (outcome.status === "failed") {
-          deltasApplied.push(
-            applyDelta(outcome.agentId, STEP_FAILED_DELTA, "step_failed", {
-              compositionId,
-              stepIndex: outcome.stepIndex,
-              evidenceBundleId: outcome.evidenceBundleId,
-              appliedBy: finalizerId,
-            }),
-          );
-          outcome.reputationDelta = STEP_FAILED_DELTA;
-          outcome.finalReputationApplied = true;
-          stepsFinalized += 1;
-        }
-        // 'disputed' / 'abandoned' steps get no immediate delta — they wait for
-        // dispute resolution and are intentionally left un-finalized.
-      }
-
-      // Bonus: when EVERY step succeeded (and the bonus has not already been
-      // paid for this composition), credit every participant once.
-      if (
-        compOutcomes.length > 0 &&
-        compOutcomes.every((o) => o.status === "success") &&
-        !completionBonusApplied.has(compositionId)
-      ) {
-        const participants = [...new Set(compOutcomes.map((o) => o.agentId))];
-        for (const agentId of participants) {
-          deltasApplied.push(
-            applyDelta(
-              agentId,
-              COMPOSITION_COMPLETED_DELTA,
-              "composition_completed",
-              { compositionId, appliedBy: finalizerId },
-            ),
-          );
-        }
-        completionBonusApplied.add(compositionId);
-      }
-
+      const deltasApplied = finalizeReputation(compositionId, finalizerId);
+      // Exactly one step delta (step_completed | step_failed) is pushed per
+      // finalized step; composition_completed bonus deltas don't count toward
+      // stepsFinalized.
+      const stepsFinalized = deltasApplied.filter(
+        (d) => d.reason === "step_completed" || d.reason === "step_failed",
+      ).length;
       const affectedAgents = [...new Set(deltasApplied.map((d) => d.agentId))];
+
       const response: FinalizeCompositionReputationResponse = {
         compositionId,
         stepsFinalized,
