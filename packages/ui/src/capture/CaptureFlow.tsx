@@ -40,6 +40,7 @@ import {
   type FaceLandmarkerLoader,
 } from "./FaceLandmarker.js";
 import { SensorFusion } from "./SensorFusion.js";
+import { StreamingThreeD, type StreamingThreeDResult } from "./StreamingThreeD.js";
 import { VisualNonceRenderer } from "./VisualNonceRenderer.js";
 import {
   WebAuthnClient,
@@ -120,6 +121,27 @@ export interface CaptureFlowProps {
    * detector will cap at CC0 absent a signature).
    */
   webauthnOptions?: WebAuthnClientOptions;
+  /**
+   * Optional streaming-3D capture (LingBot-Map adapter). When enabled, the
+   * flow records a short phone-video clip alongside the still photo and
+   * POSTs it to `/api/capture/3d-stream` to receive a `PointMap3DTrace`.
+   * The trace is merged into the parent `CaptureManifest.pointMaps3D` field
+   * before the upload step.
+   *
+   * Pass `{ enabled: true }` to opt in with defaults, or override `recordMs`,
+   * `maxFrames`, etc. The adapter will gracefully fail (warning, no abort)
+   * if MediaRecorder is unavailable or the gateway returns an error — the
+   * photo + sensor evidence still proceeds.
+   */
+  streaming3D?: {
+    enabled: boolean;
+    recordMs?: number;
+    fps?: number;
+    maxFrames?: number;
+    downsamplePoints?: number;
+    mode?: "streaming" | "windowed";
+    deviceId?: string;
+  };
   /** Optional className for the outer container. */
   className?: string;
 }
@@ -148,6 +170,7 @@ export function CaptureFlow({
   c2paLoader,
   faceLandmarkerLoader,
   webauthnOptions,
+  streaming3D,
   className,
 }: CaptureFlowProps): React.JSX.Element {
   const apiBase = apiBaseUrl ?? DEFAULT_API_BASE;
@@ -302,12 +325,35 @@ export function CaptureFlow({
         ? new WebAuthnClient(webauthnOptions)
         : null;
       const sensorFusion = new SensorFusion();
+      const streamingThreeDEnabled = streaming3D?.enabled === true;
+
+      // Streaming-3D is opt-in and non-fatal — a recorder failure on, say,
+      // a desktop without a webcam should not abort the photo capture flow.
+      const streaming3DPromise: Promise<StreamingThreeDResult | null> = streamingThreeDEnabled
+        ? StreamingThreeD.recordAndInfer({
+            apiBaseUrl: apiBase,
+            bearerToken,
+            jobId,
+            deviceId: streaming3D?.deviceId,
+            recordMs: streaming3D?.recordMs,
+            fps: streaming3D?.fps,
+            maxFrames: streaming3D?.maxFrames,
+            downsamplePoints: streaming3D?.downsamplePoints,
+            mode: streaming3D?.mode,
+          }).catch((err) => {
+            // Soft-fail: surface to console; manifest will omit pointMaps3D.
+            // The verifier downgrades gracefully when the trace is absent.
+            console.warn("StreamingThreeD: capture/inference failed", err);
+            return null;
+          })
+        : Promise.resolve(null);
 
       const [
         parsedC2PA,
         faceResult,
         webauthnAssertion,
         sensorResult,
+        streaming3DResult,
       ] = await Promise.all([
         c2paReader ? c2paReader.readManifest(blob) : Promise.resolve(null),
         faceAdapter ? faceAdapter.detectFace(bytes) : Promise.resolve(null),
@@ -321,6 +367,7 @@ export function CaptureFlow({
           durationMs: 5000,
           sampleRateHz: 10,
         }),
+        streaming3DPromise,
       ]);
 
       // 3. Compose the CaptureManifest.
@@ -336,6 +383,9 @@ export function CaptureFlow({
       };
       if (webauthnAssertion) {
         manifest.webAuthnAssertion = webauthnAssertion;
+      }
+      if (streaming3DResult) {
+        manifest.pointMaps3D = streaming3DResult.trace;
       }
 
       // The c2paManifest field on CaptureManifest is the structured view
@@ -396,8 +446,10 @@ export function CaptureFlow({
     challenge,
     declaredClass,
     faceLandmarkerLoader,
+    jobId,
     onComplete,
     onError,
+    streaming3D,
     webauthnOptions,
   ]);
 

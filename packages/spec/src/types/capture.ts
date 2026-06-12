@@ -282,6 +282,100 @@ export interface DePINAttestation {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming-3D point maps + camera poses (LingBot-Map adapter, all classes)
+// ---------------------------------------------------------------------------
+
+/**
+ * 6-DoF camera pose for a single frame.
+ *
+ * `matrix` is the camera-to-world (c2w) extrinsic as a row-major 3x4 matrix
+ * `[R | t]` flattened to 12 numbers — matches LingBot-Map's post-processed
+ * extrinsic convention (see vendor/lingbot-map/demo.py:postprocess). The
+ * optional `intrinsic` is a row-major 3x3 `[fx,0,cx, 0,fy,cy, 0,0,1]`
+ * flattened to 9 numbers.
+ *
+ * The adapter version that produced the trace records the projection
+ * conventions (right-handed vs left-handed, OpenCV vs OpenGL) — clients MUST
+ * NOT re-interpret these matrices without consulting `PointMap3DTrace.model`.
+ */
+export interface CameraPose {
+  /** Row-major 3x4 c2w extrinsic flattened (length 12) */
+  matrix: number[];
+  /** Optional row-major 3x3 intrinsic flattened (length 9) */
+  intrinsic?: number[];
+}
+
+/**
+ * A single 3D point with optional model confidence.
+ *
+ * Coordinates are in the world frame implied by the trace's camera poses.
+ * `conf` is in [0, 1], higher = more confident.
+ */
+export interface Point3D {
+  x: number;
+  y: number;
+  z: number;
+  conf?: number;
+}
+
+/**
+ * Per-frame point-map + pose derived from streaming 3D reconstruction.
+ *
+ * `points` is intentionally a small down-sampled set (default ~256 points)
+ * so the trace fits inside a single manifest. The full dense point cloud
+ * stays off-chain and is referenced via `cid` when persisted to durable
+ * storage (IPFS / Storacha).
+ */
+export interface PointMap3DFrame {
+  /** Zero-based index of this frame in the source video */
+  frameIndex: number;
+  /** Seconds since recording start */
+  timestampSec: number;
+  /** 6-DoF camera pose for this frame */
+  pose: CameraPose;
+  /** Down-sampled sparse 3D points (manifest-sized) */
+  points: Point3D[];
+  /** Optional CID of the full dense cloud (NPZ blob in durable storage) */
+  cid?: string;
+  /** Optional mean confidence over the dense cloud, [0, 1] */
+  meanConfidence?: number;
+}
+
+/**
+ * Streaming-3D evidence trace produced by the LingBot adapter.
+ *
+ * Augments — does NOT replace — the existing capture media. The trace covers
+ * a phone-video capture window and ships alongside the photo + `mediaHash`
+ * inside the manifest. The verifier hashes the manifest including this
+ * trace, so any 3D-data tampering downstream invalidates the on-chain
+ * `manifestHash` anchor.
+ */
+export interface PointMap3DTrace {
+  /** Identifier for the recording device (kernel id / browser fingerprint) */
+  deviceId: string;
+  /** ISO 8601 timestamp when video recording started */
+  startedAt: Timestamp;
+  /** ISO 8601 timestamp when video recording ended */
+  endedAt: Timestamp;
+  /** SHA-256 of the source video bytes — distinct from photo `mediaHash` */
+  videoHash: SHA256;
+  /** Inference mode used (matches LingBot-Map --mode) */
+  mode: "streaming" | "windowed";
+  /** Video FPS the model sampled at (LingBot --fps) */
+  fps: number;
+  /** Total frames the model processed */
+  frameCount: number;
+  /** Per-frame poses + sparse points (subset; full cloud may be off-chain) */
+  frames: PointMap3DFrame[];
+  /** Model identifier (e.g. "lingbot-map-stage1", "lingbot-map") */
+  model: string;
+  /** Adapter version that produced this trace (semver of PCC LingBot adapter) */
+  adapterVersion: string;
+  /** True iff inference ran in stub mode (random weights, no real reconstruction) */
+  stubbed?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Capture manifest
 // ---------------------------------------------------------------------------
 
@@ -313,6 +407,13 @@ export interface CaptureManifest {
   camera?: CameraAttestation;
   /** CC5 — DePIN-chain attestation */
   depin?: DePINAttestation;
+  /**
+   * Optional streaming-3D evidence (per-frame point maps + camera poses)
+   * produced by the LingBot-Map adapter. Tier-orthogonal: present iff the
+   * operator ran video capture in addition to the photo, and adds geometric
+   * scene context the verifier can re-project against `mediaHash`.
+   */
+  pointMaps3D?: PointMap3DTrace;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +606,41 @@ const DePINAttestationSchema = z.object({
   payload: z.record(z.string(), z.unknown()),
 });
 
+const CameraPoseSchema = z.object({
+  matrix: z.array(z.number()).length(12),
+  intrinsic: z.array(z.number()).length(9).optional(),
+});
+
+const Point3DSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  z: z.number(),
+  conf: z.number().min(0).max(1).optional(),
+});
+
+const PointMap3DFrameSchema = z.object({
+  frameIndex: z.number().int().nonnegative(),
+  timestampSec: z.number().nonnegative(),
+  pose: CameraPoseSchema,
+  points: z.array(Point3DSchema),
+  cid: z.string().min(1).optional(),
+  meanConfidence: z.number().min(0).max(1).optional(),
+});
+
+const PointMap3DTraceSchema = z.object({
+  deviceId: z.string().min(1),
+  startedAt: z.string().datetime(),
+  endedAt: z.string().datetime(),
+  videoHash: SHA256Schema,
+  mode: z.enum(["streaming", "windowed"]),
+  fps: z.number().positive(),
+  frameCount: z.number().int().nonnegative(),
+  frames: z.array(PointMap3DFrameSchema),
+  model: z.string().min(1),
+  adapterVersion: z.string().min(1),
+  stubbed: z.boolean().optional(),
+});
+
 /**
  * Zod schema validating a `CaptureManifest` payload at the API boundary.
  *
@@ -528,4 +664,14 @@ export const CaptureManifestSchema: z.ZodType<CaptureManifest> = z.object({
   c2paManifest: C2PAManifestSchema.optional(),
   camera: CameraAttestationSchema.optional(),
   depin: DePINAttestationSchema.optional(),
+  pointMaps3D: PointMap3DTraceSchema.optional(),
 }) as unknown as z.ZodType<CaptureManifest>;
+
+/**
+ * Standalone Zod schema for `PointMap3DTrace`.
+ *
+ * Exported so the gateway's `/api/capture/3d-stream` route can validate the
+ * adapter's response before merging it into the parent `CaptureManifest`.
+ */
+export const PointMap3DTraceSchemaExport: z.ZodType<PointMap3DTrace> =
+  PointMap3DTraceSchema as unknown as z.ZodType<PointMap3DTrace>;

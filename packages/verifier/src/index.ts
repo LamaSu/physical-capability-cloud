@@ -4,89 +4,7 @@ export {
   evaluateReceipt,
   type DccEvaluationFinding,
   type DccEvaluationResult,
-  type EvaluateOptions,
 } from "./dcc-evaluator.js";
-export {
-  verifyDcc4,
-  type Dcc4Verdict,
-  type Dcc4VerifyOptions,
-} from "./dcc4-tee-verifier.js";
-export {
-  verifyDcc5,
-  type Dcc5Verdict,
-  type Dcc5VerifyOptions,
-} from "./dcc5-zk-verifier.js";
-export {
-  verifyTeeQuote,
-  type TeeVerifyResult,
-  type TeeVerifyOptions,
-} from "./tee/index.js";
-export {
-  parseTdxQuote,
-  verifyTdxQuote,
-  type TdxVerifyOptions,
-  type DcapQvlVerifyFn,
-  type DcapQvlCollateral,
-  type DcapQvlResult,
-  type ParsedTdxQuote,
-} from "./tee/tdx-verifier.js";
-export {
-  verifyNitroAttestation,
-  type NitroVerifyOptions,
-  type NitroCoseVerifyFn,
-  type NitroCoseResult,
-} from "./tee/nitro-verifier.js";
-export {
-  parseSgxQuote,
-  verifySgxQuote,
-  type SgxVerifyOptions,
-  type ParsedSgxQuote,
-} from "./tee/sgx-verifier.js";
-export {
-  fetchPhalaManifest,
-  crossCheckPhalaManifest,
-  type PhalaDstackManifest,
-  type PhalaCrossCheck,
-} from "./tee/phala.js";
-export {
-  verifyZkProof,
-  type ZkVerifyResult,
-  type ZkVerifyOptions,
-} from "./zk/index.js";
-export {
-  verifySp1Proof,
-  type Sp1VerifyOptions,
-  type Sp1VerifyFn,
-  type OnchainVerifierRpcFn,
-} from "./zk/sp1-verifier.js";
-export {
-  verifyRisc0Proof,
-  type Risc0VerifyOptions,
-  type Risc0VerifyFn,
-} from "./zk/risc0-verifier.js";
-export {
-  submitTeeWrapJob,
-  pollTeeWrapJob,
-  buildTeeWrapMetadata,
-  createMockBoundlessClient,
-  type BoundlessClient,
-  type BoundlessSubmitOptions,
-  type BoundlessJobStatus,
-  type TeeWrapSubmitOptions,
-  type TeeWrapPollOptions,
-} from "./zk/automata-tee-wrap.js";
-export {
-  runOnce as runDcc5UpgradeOnce,
-  runLoop as runDcc5UpgradeLoop,
-  createUpgradeJob,
-  createInMemoryUpgradeQueue,
-  type UpgradeJob,
-  type UpgradeJobInput,
-  type JobQueue,
-  type ReceiptStore,
-  type AutomataConfig,
-  type RunUpgradeWorkerOptions,
-} from "./dcc5-upgrade-worker.js";
 export { CommitmentService } from "./commitment-service.js";
 export { ZKProofService } from "./zk-proof-service.js";
 export { NoirProofService } from "./noir-proof-service.js";
@@ -212,4 +130,10 @@ export {
   type PlatformAttestationResult,
   type CameraAttestationAdapter,
   type DePINAttestationAdapter,
+  runLingBotInference,
+  setLingBotSpawnerForTests,
+  LingBotAdapterError,
+  type LingBotAdapterInput,
+  type LingBotAdapterResult,
+  type LingBotSpawner,
 } from "./capture/index.js";
