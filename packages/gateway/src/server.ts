@@ -262,7 +262,7 @@ export async function createGateway(port = 3200) {
     },
   });
   await app.register(fastifySwaggerUi, {
-    routePrefix: "/docs",
+    routePrefix: "/docs/api",
     uiConfig: {
       docExpansion: "list",
       deepLinking: true,
