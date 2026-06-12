@@ -50,7 +50,7 @@ import type {
   SessionTransition,
   DemandEnvelope,
 } from "@pcc/spec";
-import { getCapabilityFacade } from "../facades/index.js";
+import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
@@ -591,6 +591,82 @@ async function handlePccSettle(params: PccSettleParams): Promise<A2AArtifact[]> 
 
 // ── tasks/send dispatch ──────────────────────────────────────────────────────
 
+// ── pcc-author-integration: operator onboarding in one A2A skill ─────────────
+
+interface PccAuthorIntegrationParams {
+  lane?: "machine" | "human";
+  name?: string;
+  type?: string;
+  description?: string;
+  operatorAddress?: string;
+  location?: { lat: number; lng: number };
+  pricing?: { currency?: string; baseCost?: number | string };
+  sla?: {
+    acceptanceWindowSec: number;
+    completionDeadlineSec: number;
+    presence?: "available" | "busy" | "offline";
+    mode?: "on-demand" | "scheduled" | "recurring";
+    onTimeout?: string;
+    onDeadlineMiss?: string;
+  };
+}
+
+const PCC_AAI_GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.network";
+
+/**
+ * Onboard an operator end-to-end from a description: register the kernel, publish
+ * the capability (with the human-lane accept/deadline SLA), and return the live
+ * A2A agent-card URL. Reuses KernelFacade.register + CapabilityFacade.create.
+ */
+async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promise<A2AArtifact[]> {
+  if (!p.name || !p.type) {
+    throw new Error("name and type are required for pcc-author-integration");
+  }
+  const lane = p.lane === "human" ? "human" : "machine";
+
+  const kr = await getKernelFacade().register({
+    name: p.name,
+    operatorAddress: p.operatorAddress ?? "a2a-operator",
+  });
+  if (!kr.success) {
+    return [{ type: "pcc.author_integration", description: "kernel register failed", data: { error: kr.error.message } }];
+  }
+  const kernelId = kr.data.kernel.id;
+
+  const cr = await getCapabilityFacade().create({
+    kernelId,
+    type: p.type,
+    name: p.name,
+    description: p.description,
+    location: p.location ?? { lat: 0, lng: 0 },
+    pricing: {
+      currency: p.pricing?.currency ?? "USDC",
+      baseCost: String(p.pricing?.baseCost ?? 10),
+      minimum: "0",
+    },
+    ...(lane === "human" && p.sla ? { sla: p.sla } : {}),
+  });
+  if (!cr.success) {
+    return [{ type: "pcc.author_integration", description: "capability publish failed", data: { error: cr.error.message } }];
+  }
+
+  const agentCardUrl = `${PCC_AAI_GATEWAY_URL}/api/kernels/${kernelId}/agent-card.json`;
+  return [{
+    type: "pcc.author_integration",
+    description: `Published "${p.type}" on kernel ${kernelId} — live as an A2A agent`,
+    data: {
+      lane,
+      kernelId,
+      capability: cr.data.capability,
+      created: cr.data.created,
+      agentCardUrl,
+      proveNext: lane === "machine"
+        ? "POST /api/setup/test-job { kernelId, deviceId, assuranceTier } to prove + auto-activate"
+        : "POST /api/onboard/registrations/:id/prove { evidence: photo + GPS } to activate at Tier 1",
+    },
+  }];
+}
+
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
@@ -688,6 +764,18 @@ async function dispatchTasksSend(
           ...(settleState === "FAILED"
             ? { errorMessage: "Escrow lookup failed; settlement not posted" }
             : {}),
+        };
+        a2aTasks.set(taskId, task);
+        return rpcSuccess(rpcId, task);
+      }
+
+      case "pcc-author-integration": {
+        const artifacts = await handlePccAuthorIntegration(skillParams as PccAuthorIntegrationParams);
+        const task: A2ATask = {
+          ...baseTask,
+          state: "COMPLETED",
+          artifacts,
+          updatedAt: new Date().toISOString(),
         };
         a2aTasks.set(taskId, task);
         return rpcSuccess(rpcId, task);

@@ -33,6 +33,15 @@ export interface CreateCapabilityInput {
   pricing?: { currency: string; baseCost: string; perMinute?: string; minimum: string };
   materials?: string[];
   assuranceTiers?: number[];
+  /** Human-node SLA — only set for human-operator capabilities. */
+  sla?: {
+    acceptanceWindowSec: number;
+    completionDeadlineSec: number;
+    presence?: "available" | "busy" | "offline";
+    mode?: "on-demand" | "scheduled" | "recurring";
+    onTimeout?: string;
+    onDeadlineMiss?: string;
+  };
 }
 
 export class CapabilityFacade extends BaseFacade {
@@ -260,6 +269,7 @@ export class CapabilityFacade extends BaseFacade {
         materials: body.materials || [],
         assuranceTiers: body.assuranceTiers || [0, 1],
         availability: {},
+        sla: body.sla ?? null,
       });
       const kernel = this.repos.kernels.findById(kernelId);
       const dto = populateCapabilityDTO(cap as any, kernel as any ?? undefined, context);

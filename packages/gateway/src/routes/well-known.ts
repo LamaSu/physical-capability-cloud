@@ -250,6 +250,18 @@ export async function wellKnownRoutes(app: FastifyInstance) {
           inputModes: ["application/json"],
           outputModes: ["application/json"],
         },
+        {
+          id: "pcc-author-integration",
+          name: "Author an Integration",
+          description: "Onboard a new operator end-to-end: from a machine or human-skill description, register the kernel, publish the capability (with the human-lane accept/deadline SLA), and return the live A2A agent-card URL.",
+          tags: ["onboarding", "operator", "integration", "kernel", "capability", "physical-world"],
+          examples: [
+            "Publish my Opentrons OT-2 as a liquid-handling capability via generic-http",
+            "List me as a same-day SF courier - accept within 90s, finish within 1h",
+          ],
+          inputModes: ["application/json"],
+          outputModes: ["application/json"],
+        },
       ],
 
       // PCC-specific extension fields (non-standard, prefixed with x-)
