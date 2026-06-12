@@ -16,6 +16,7 @@ import { ModeToggle } from "./components/ModeToggle.js";
 import { Sentry } from "./lib/telemetry.js";
 import { usePageTracking } from "./hooks/use-page-tracking.js";
 import { SpatialApp } from "./SpatialApp.js";
+import { AgentLandingHero } from "./components/AgentLandingHero.js";
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages (code-split per route)
@@ -305,9 +306,12 @@ function Shell() {
   }
 
   // Landing page — agent-first (root)
+  // AgentLandingHero is the eager, above-the-fold hero (onboard-ui aesthetic +
+  // machine-readable agent entrypoints); the existing LandingPage renders below it.
   if (location.pathname === "/") {
     return (
       <Suspense fallback={<PageLoader />}>
+        <AgentLandingHero />
         <LandingPage />
       </Suspense>
     );
