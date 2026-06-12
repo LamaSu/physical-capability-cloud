@@ -38,10 +38,10 @@ import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { verifyWithOracle } from "../services/oracle-client.js";
+import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
-import { AlkahestEscrowBridge } from "@pcc/payments";
+import { submitAttestationV2, isWriteEnabled as escrowWriteEnabled } from "../contracts/escrow-client.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -61,6 +61,15 @@ const resolver = new TemplateResolver();
 /** Whether mock settlement is active (default: true for testnet) */
 function isMockSettlement(): boolean {
   return process.env.MOCK_SETTLEMENT !== "false";
+}
+
+/**
+ * Whether to route settlement through the EAS-gated MilestoneEscrowV2 path.
+ * Default OFF — the V1 flow stays the default so existing callers are unaffected.
+ * Opt in per-deployment with PCC_USE_EAS_V2=true.
+ */
+function useEasV2(): boolean {
+  return process.env.PCC_USE_EAS_V2 === "true";
 }
 
 /** Resolve chain ID from PCC_NETWORK env var */
@@ -502,6 +511,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         type: string;
         payload?: Record<string, unknown>;
       }>;
+      /** Oracle-minted EAS attestation UID to bind on-chain (V2 path only). */
+      easUid?: string;
     };
   }>("/api/jobs/:jobId/complete", async (req, reply) => {
     const { jobId } = req.params;
@@ -744,56 +755,57 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // Store the attestation for potential on-chain submission
       const oracleAttestation = oracleResponse.attestation;
 
-      // ── 4c. Alkahest (Arkhai) escrow — lock, fulfill, collect ────────
-      let alkahestObligation: Record<string, unknown> | null = null;
-      try {
-        const alkahest = new AlkahestEscrowBridge({ mock: true });
-
-        // Lock: buyer creates escrow obligation for this milestone
-        const locked = await alkahest.lockMilestone({
-          pccEscrowId: escrowId ?? `esc-${jobId}`,
-          milestone: {
+      // ── 4c. EAS attestation bridge (V2) — gated by PCC_USE_EAS_V2 ─────
+      // V1 default: no on-chain attestation bridge here (backwards compatible —
+      // settlement below is unchanged). V2 (PCC_USE_EAS_V2=true): build the
+      // pcc.evidence.v1 attestation payload from the oracle verdict + evidence
+      // and, when the gateway can write to a real escrow and an oracle-minted
+      // EAS UID is supplied, bind it on-chain via
+      // MilestoneEscrowV2.submitAttestation(uid). This replaces the removed
+      // Alkahest bridge.
+      let easBridge: Record<string, unknown> | null = null;
+      if (useEasV2()) {
+        try {
+          const easMeta = buildEasAttestationMetadata({
+            jobId,
+            kernelId: job.kernelId,
             stepId: job.stepId,
-            amount: "11.00",
-            status: "evidence_submitted",
-            bondAmount: "0.00",
-          } as any,
-          buyer: sessionRow?.userAgentId ?? "0x0000000000000000000000000000000000000000",
-          seller: "0x0000000000000000000000000000000000000000",
-          bondConfig: { tier: 0, operatorBondPercent: 0 } as any,
-        });
-
-        // Fulfill: operator submits evidence result
-        const fulfilled = await alkahest.fulfillMilestone({
-          obligationUid: locked.uid,
-          result: {
-            bundleHash,
+            evidenceBundleHash: bundleHash,
             ipfsCid: ipfsCid ?? "",
-            consensusScore: 0.95,
-            verifierCount: 3,
-            zkProofId: starknetTxHash ?? undefined,
-          },
-        });
+            assuranceTier: 0,
+            oracleVerified: oracleResponse.result.verified,
+            recipient: escrowAddress && escrowAddress.startsWith("0x") ? escrowAddress : undefined,
+          });
 
-        // Collect: operator collects escrowed funds
-        const collected = await alkahest.collectEscrow(fulfilled.uid);
+          easBridge = {
+            schema: easMeta.schema,
+            schemaUid: easMeta.schemaUid,
+            recipient: easMeta.recipient,
+            encoded: easMeta.encoded,
+            submitted: false,
+            attestationUid: null as string | null,
+            attestationTxHash: null as string | null,
+          };
 
-        alkahestObligation = {
-          uid: collected.uid,
-          status: collected.status,
-          lockTxHash: collected.lockTxHash,
-          settleTxHash: collected.settleTxHash,
-          fulfillmentUid: collected.fulfillmentUid,
-          amount: collected.amount,
-          arbiter: collected.arbiter,
-          expiration: collected.expiration,
-        };
+          // Oracle-minted EAS UID, if the caller supplied one to bind on-chain.
+          const easUid = typeof body.easUid === "string" ? (body.easUid as `0x${string}`) : undefined;
+          if (easUid && escrowWriteEnabled() && escrowAddress && escrowAddress.startsWith("0x")) {
+            const submitted = await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
+            easBridge.submitted = true;
+            easBridge.attestationUid = easUid;
+            easBridge.attestationTxHash = submitted.transactionHash;
+          }
 
-        pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-          metadata: { alkahestUid: collected.uid, alkahestStatus: collected.status },
-        });
-      } catch (alkErr) {
-        console.warn("[complete] Alkahest escrow failed (best-effort):", alkErr instanceof Error ? alkErr.message : alkErr);
+          pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+            metadata: {
+              path: "eas-v2",
+              easSchema: easMeta.schema,
+              easSubmitted: easBridge.submitted,
+            },
+          });
+        } catch (easErr) {
+          console.warn("[complete] EAS attestation bridge failed (best-effort):", easErr instanceof Error ? easErr.message : easErr);
+        }
       }
 
       // ── 5. Settlement ──────────────────────────────────────────────
@@ -842,7 +854,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         settledAt,
         ipfsCid,
         starknetAnchorTxHash: starknetTxHash,
-        alkahest: alkahestObligation,
+        eas: easBridge,
         scopesRevoked: 0,
         toolCallsRecorded: auditTrail.length,
         oracleVerified: oracleResponse.result.verified,
