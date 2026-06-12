@@ -36,4 +36,14 @@ export const capabilities = sqliteTable("capabilities", {
   /** Wave 4.1.x — tenant scoping. Nullable; null = public discovery surface
    *  (today's behavior). Buyers/marketplace queries pass `tenantOpts(req)`. */
   tenantId: text("tenant_id"),
+  /** Human-node SLA — accept/deadline windows + presence + scheduling mode.
+   *  Nullable; set only for human-operator capabilities (machine caps leave it null). */
+  sla: text("sla", { mode: "json" }).$type<{
+    acceptanceWindowSec: number;
+    completionDeadlineSec: number;
+    presence?: "available" | "busy" | "offline";
+    mode?: "on-demand" | "scheduled" | "recurring";
+    onTimeout?: string;
+    onDeadlineMiss?: string;
+  }>(),
 });
