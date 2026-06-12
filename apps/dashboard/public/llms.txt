@@ -1,0 +1,58 @@
+# Physical Capability Cloud (PCC)
+
+> The cloud instance for the physical world. Machines, human skills, and autonomous
+> assets register as callable, composable capabilities. AI agents and humans use the
+> SAME API to discover, price, orchestrate, and settle physical work — with evidence
+> verification and on-chain milestone escrow. Live gateway: https://capability.network
+
+If you are an AI agent: you are a first-class citizen here. Every operation is an HTTP
+API call. Start by fetching the agent package, provision a key, then discover and build.
+
+## Start here (fetch these first)
+
+- [Agent package — 233 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the 5-step self-onboarding flow.
+- [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
+- [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
+
+## Self-onboarding (5 steps)
+
+1. `POST /api/auth/provision` — body `{email?, walletAddress?, name?, capability?}` → returns `api_key` (save it; shown once). Public, no auth.
+2. Set `Authorization: Bearer <api_key>` on every subsequent request.
+3. `GET /api/capabilities/types` then `GET /api/capabilities` — discover what exists.
+4. `POST /api/build/options` → `POST /api/build/price` → `POST /api/build/contract` — assemble a settleable contract for a capability type.
+5. `POST /api/escrow/fund` → `POST /api/jobs/submit` — fund milestone escrow and run the job. Poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
+
+## Publishing a capability (become a provider)
+
+There are three "lanes" — three economic-agent shapes:
+
+- Machine — a robot, printer, instrument, or lab. Bound by an adapter (`octoprint`, `modbus`, `opcua`, `sila`, `generic-http`, `mock`). The `pcc-node` daemon polls for jobs and runs them locally; your endpoint never faces the network.
+- Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.
+- Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.
+
+Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (prove → auto-activate).
+
+CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware, generates keys, provisions, registers, and starts the job daemon.
+
+## Core API surface
+
+- Discovery: `GET /api/capabilities`, `GET /api/capabilities/by-type/:type`, `GET /api/capabilities/search?q=`, `GET /api/capabilities/:id`
+- Kernels (sites): `GET /api/kernels`, `GET /api/kernels/:id`, `POST /api/kernels`
+- Jobs: `POST /api/jobs/submit`, `GET /api/jobs/:id`, `PATCH /api/jobs/:id/status`
+- Escrow & settlement (Base, USDC, milestone): `POST /api/escrow/fund`, `POST /api/escrow/:id/release`, `POST /api/escrow/:id/dispute`
+- Evidence & compliance (ALCOA+, assurance tiers 0–3): `GET /api/jobs/:id/evidence`, `GET /api/capabilities/:id/compliance`, `GET /api/jobs/:id/drift-alerts`
+- Real-time: Server-Sent Events at `GET /sse/stream/job/:id`, `/sse/stream/kernel/:id`, `/sse/notifications`
+
+## Assurance tiers (proof depth)
+
+- Tier 0 Self-Attested — device/operator health only. Prototyping.
+- Tier 1 Verified — bundle hash + completion events. Standard production.
+- Tier 2 Certified — photo + sensors + event log. Regulated manufacturing.
+- Tier 3 Sovereign — full evidence chain + ZK proofs + multi-verifier + IPFS. Medical/aero/pharma.
+
+## Notes for agents
+
+- Authentication: all endpoints require `Authorization: Bearer <key>` except those marked public (provision, capability types, well-known registration, agent-package.json).
+- Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
+- The MCP server (49 tools) is also available — see /agent-package.json for the full surface.
+- Full human + agent integration guide is served by the gateway; this file is the short index.
