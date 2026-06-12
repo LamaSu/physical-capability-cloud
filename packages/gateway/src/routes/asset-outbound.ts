@@ -32,10 +32,12 @@ import {
   OutboundDemandRequestSchema,
   ApproveOutboundDemandRequestSchema,
   type AssetAgentBudget,
+  type ComposeRequest,
   type OutboundDemandRequest,
   type OutboundDemandResponse,
   type OutboundDemandStatus,
 } from "@pcc/spec";
+import { planComposition } from "./compose.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -78,7 +80,13 @@ function snapshotOf(b: AssetAgentBudget): OutboundDemandResponse["budgetSnapshot
   };
 }
 
-/** Synthesize a mock composed solution. Follow-on wires this to /api/compose. */
+/**
+ * Synthesize a mock composed solution.
+ *
+ * Retained ONLY for the owner-approval gate (`/approve`), whose planner wiring
+ * is a separate follow-up. The direct `proposed` path below now routes through
+ * the real composition engine via {@link toComposeRequest} + `planComposition`.
+ */
 function synthesizeSolution(
   request: OutboundDemandRequest,
   budget: AssetAgentBudget,
@@ -87,6 +95,30 @@ function synthesizeSolution(
     compositionId: `cmp_${crypto.randomUUID()}`,
     totalPriceUSD: Math.min(request.maxPriceUSD, budget.budgetCapUSD),
     stepCount: 1,
+  };
+}
+
+/**
+ * Map an OutboundDemandRequest into a ComposeRequest for the composition engine.
+ *
+ *   - `requiredCapabilityType` → `outcomeType`: the matchable key the planner
+ *     resolves against capability instances. (NOT the human description — that
+ *     would never match a real `capabilityType`.)
+ *   - `maxPriceUSD` → `budgetUSD`: the planner's hard ceiling, so any plan it
+ *     returns is already within the asset's willingness-to-pay.
+ *   - `preferredOptimization` → `optimizeFor` (default "price").
+ *   - `location` passes straight through (shapes are identical).
+ *   - `description` is carried for audit only; the planner ignores it.
+ *   - `deadline` has no ComposeRequest analog yet and is intentionally dropped.
+ */
+function toComposeRequest(request: OutboundDemandRequest): ComposeRequest {
+  return {
+    outcomeType: request.requiredCapabilityType,
+    budgetUSD: request.maxPriceUSD,
+    minAssuranceTier: request.minAssuranceTier,
+    optimizeFor: request.preferredOptimization ?? "price",
+    location: request.location,
+    description: `${request.requiredCapabilityType}: ${request.description}`,
   };
 }
 
@@ -250,8 +282,39 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         return persist("owner_approval_required");
       }
 
-      // 4. Happy path — synthesize a solution and charge the budget.
-      const composedSolution = synthesizeSolution(request, budget);
+      // 4. Route the demand through the real composition engine. The budget
+      //    gate above already guaranteed headroom for `maxPriceUSD`, which is
+      //    handed to the planner as its budget — so any returned plan is within
+      //    the asset's ceiling.
+      const composition = planComposition(toComposeRequest(request));
+
+      // 4a. No capability covers the demand at the required tier → reject,
+      //     without touching the spend counters.
+      if (composition.status === "no_path_found") {
+        return persist("rejected", {
+          rejectionReason:
+            composition.rejectionReason ??
+            `No composition path found for "${request.requiredCapabilityType}"`,
+        });
+      }
+
+      // 4b. Even the cheapest path exceeds the demand's max price → no spend.
+      //     (Mapped to budget_exceeded — same terminal meaning as the pre-gate.)
+      if (composition.status === "over_budget") {
+        return persist("budget_exceeded", {
+          rejectionReason:
+            composition.rejectionReason ??
+            `Cheapest composition exceeds maxPriceUSD ${request.maxPriceUSD}`,
+        });
+      }
+
+      // 4c. Proposed — charge the ACTUAL composed price (≤ maxPriceUSD), not the
+      //     ceiling, then persist. Spend counters move ONLY on this branch.
+      const composedSolution = {
+        compositionId: composition.compositionId,
+        totalPriceUSD: composition.totalPriceUSD,
+        stepCount: composition.steps.length,
+      };
       budget.spentTodayUSD += composedSolution.totalPriceUSD;
       budget.spentLifetimeUSD += composedSolution.totalPriceUSD;
       budget.updatedAt = nowIso;
