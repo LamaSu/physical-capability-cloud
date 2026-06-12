@@ -1,0 +1,1599 @@
+[
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/3d-printing-fdm/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "FDM 3D Printing",
+    "description": "Fused deposition modeling — layer-by-layer thermoplastic extrusion of a 3D model.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["octoprint", "http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "pla", "label": "PLA" },
+          { "value": "petg", "label": "PETG" },
+          { "value": "abs", "label": "ABS", "pricingImpact": { "mode": "percent", "value": "10" } },
+          { "value": "tpu", "label": "TPU (flexible)", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "nylon", "label": "Nylon", "pricingImpact": { "mode": "percent", "value": "25" } }
+        ]
+      },
+      { "type": "number", "key": "infill", "label": "Infill Density", "required": false, "group": "Print Settings", "min": 5, "max": 100, "step": 5, "unit": "%", "defaultValue": 20 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 1000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Print completion receipt", "required": ["jobId", "timestamp", "material", "printDurationSeconds"] },
+      "tier1": { "description": "Completion + slicer/printer log + model hash", "required": ["jobId", "timestamp", "material", "printDurationSeconds", "gcodeHash", "filamentUsedMm"] },
+      "tier2": { "description": "Completion + log + photo of finished part", "required": ["jobId", "timestamp", "material", "printDurationSeconds", "gcodeHash", "filamentUsedMm", "outputPhotoCid"] }
+    },
+    "pricing": { "basePrice": "12.00", "currency": "USDC", "unit": "per part", "minimumCharge": "5.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/3d-printing-sla/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "SLA / Resin 3D Printing",
+    "description": "Stereolithography — UV-cured photopolymer resin printing for high-detail parts.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "resin", "label": "Resin", "required": true, "group": "Material",
+        "options": [
+          { "value": "standard", "label": "Standard" },
+          { "value": "tough", "label": "Tough", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "castable", "label": "Castable", "pricingImpact": { "mode": "percent", "value": "35" } },
+          { "value": "dental", "label": "Dental / Biocompatible", "pricingImpact": { "mode": "percent", "value": "60" } }
+        ]
+      },
+      {
+        "type": "enum", "key": "layerHeight", "label": "Layer Height", "required": true, "group": "Print Settings", "defaultValue": "0.05",
+        "options": [
+          { "value": "0.025", "label": "0.025mm (ultra fine)", "pricingImpact": { "mode": "multiplier", "value": "1.8" } },
+          { "value": "0.05", "label": "0.05mm (fine)" },
+          { "value": "0.1", "label": "0.10mm (standard)", "pricingImpact": { "mode": "multiplier", "value": "0.8" } }
+        ]
+      },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Print completion receipt", "required": ["jobId", "timestamp", "resin", "printDurationSeconds"] },
+      "tier1": { "description": "Completion + cure log + model hash", "required": ["jobId", "timestamp", "resin", "printDurationSeconds", "modelHash", "cureTimeSeconds"] },
+      "tier2": { "description": "Completion + log + photo of post-cured part", "required": ["jobId", "timestamp", "resin", "printDurationSeconds", "modelHash", "cureTimeSeconds", "outputPhotoCid"] }
+    },
+    "pricing": { "basePrice": "18.00", "currency": "USDC", "unit": "per part", "minimumCharge": "8.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/cnc-milling/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "CNC Milling",
+    "description": "Subtractive 3-axis milling of metals and engineering plastics from solid stock.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["opcua", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "aluminum-6061", "label": "Aluminum 6061" },
+          { "value": "steel-1018", "label": "Steel 1018", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "stainless-304", "label": "Stainless 304", "pricingImpact": { "mode": "percent", "value": "40" } },
+          { "value": "brass", "label": "Brass C360", "pricingImpact": { "mode": "percent", "value": "10" } },
+          { "value": "delrin", "label": "Delrin (POM)" }
+        ]
+      },
+      {
+        "type": "enum", "key": "tolerance", "label": "Tolerance", "required": true, "group": "Machining", "defaultValue": "standard",
+        "options": [
+          { "value": "standard", "label": "Standard (±0.13mm)" },
+          { "value": "precision", "label": "Precision (±0.05mm)", "pricingImpact": { "mode": "percent", "value": "25" } },
+          { "value": "high-precision", "label": "High Precision (±0.025mm)", "pricingImpact": { "mode": "percent", "value": "50" } }
+        ]
+      },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Job completion receipt", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds"] },
+      "tier1": { "description": "Completion + machine log + CMM measurement report", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds", "cmmReportCid", "toolpathHash"] },
+      "tier2": { "description": "Completion + CMM report + inspection photos", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds", "cmmReportCid", "toolpathHash", "inspectionPhotosCid"] }
+    },
+    "pricing": { "basePrice": "75.00", "currency": "USDC", "unit": "per part", "minimumCharge": "50.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/cnc-turning/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "CNC Turning (Lathe)",
+    "description": "Subtractive turning of cylindrical parts on a CNC lathe.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["opcua", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "aluminum-6061", "label": "Aluminum 6061" },
+          { "value": "steel-1018", "label": "Steel 1018", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "stainless-303", "label": "Stainless 303", "pricingImpact": { "mode": "percent", "value": "35" } },
+          { "value": "brass", "label": "Brass C360", "pricingImpact": { "mode": "percent", "value": "10" } }
+        ]
+      },
+      { "type": "number", "key": "stockDiameter", "label": "Stock Diameter", "required": true, "group": "Machining", "min": 3, "max": 200, "step": 1, "unit": "mm", "defaultValue": 25 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 1000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Job completion receipt", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds"] },
+      "tier1": { "description": "Completion + machine log + measurement report", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds", "measurementReportCid", "toolpathHash"] },
+      "tier2": { "description": "Completion + measurement report + inspection photos", "required": ["jobId", "timestamp", "material", "machiningTimeSeconds", "measurementReportCid", "toolpathHash", "inspectionPhotosCid"] }
+    },
+    "pricing": { "basePrice": "60.00", "currency": "USDC", "unit": "per part", "minimumCharge": "40.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/laser-cutting/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Laser Cutting",
+    "description": "Precision 2D through-cutting of sheet stock with a CO2 or fiber laser.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "acrylic", "label": "Acrylic" },
+          { "value": "plywood", "label": "Plywood" },
+          { "value": "mdf", "label": "MDF" },
+          { "value": "steel-mild", "label": "Mild Steel", "pricingImpact": { "mode": "percent", "value": "30" } },
+          { "value": "aluminum", "label": "Aluminum", "pricingImpact": { "mode": "percent", "value": "25" } }
+        ]
+      },
+      { "type": "number", "key": "thickness", "label": "Sheet Thickness", "required": true, "group": "Material", "min": 1, "max": 25, "step": 1, "unit": "mm", "defaultValue": 3 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 5000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [
+      {
+        "key": "laser-metal-thickness",
+        "human": "Metals are limited to 6mm and thinner on a typical laser.",
+        "severity": "error",
+        "when": [{ "param": "material", "operator": "in", "value": ["steel-mild", "aluminum"] }],
+        "then": [{ "action": "setMax", "param": "thickness", "value": 6, "message": "Reduce thickness to 6mm or use water-jet for thicker metal." }]
+      }
+    ],
+    "evidence": {
+      "tier0": { "description": "Cut completion receipt", "required": ["jobId", "timestamp", "material", "cutDurationSeconds"] },
+      "tier1": { "description": "Completion + machine log + vector hash", "required": ["jobId", "timestamp", "material", "cutDurationSeconds", "machineLogCid", "vectorFileHash"] },
+      "tier2": { "description": "Completion + log + photo of cut parts", "required": ["jobId", "timestamp", "material", "cutDurationSeconds", "machineLogCid", "vectorFileHash", "outputPhotoCid"] }
+    },
+    "pricing": { "basePrice": "20.00", "currency": "USDC", "unit": "per sheet", "minimumCharge": "10.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/laser-engraving/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Laser Engraving",
+    "description": "Raster surface marking of logos, text, and patterns onto a substrate.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "wood", "label": "Wood" },
+          { "value": "acrylic", "label": "Acrylic" },
+          { "value": "anodized-aluminum", "label": "Anodized Aluminum" },
+          { "value": "leather", "label": "Leather" },
+          { "value": "glass", "label": "Glass", "pricingImpact": { "mode": "percent", "value": "20" } }
+        ]
+      },
+      { "type": "number", "key": "engraveAreaCm2", "label": "Engrave Area", "required": true, "group": "Job", "min": 1, "max": 5000, "step": 1, "unit": "cm²", "defaultValue": 25 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 5000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Engrave completion receipt", "required": ["jobId", "timestamp", "material", "engraveDurationSeconds"] },
+      "tier1": { "description": "Completion + machine log + artwork hash", "required": ["jobId", "timestamp", "material", "engraveDurationSeconds", "artworkHash", "machineLogCid"] }
+    },
+    "pricing": { "basePrice": "12.00", "currency": "USDC", "unit": "per piece", "minimumCharge": "8.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/pcb-fabrication/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "PCB Fabrication",
+    "description": "Manufacture of printed circuit boards from Gerber/ODB++ data.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "layers", "label": "Layer Count", "required": true, "group": "Stackup", "defaultValue": "2",
+        "options": [
+          { "value": "1", "label": "1 layer" },
+          { "value": "2", "label": "2 layer" },
+          { "value": "4", "label": "4 layer", "pricingImpact": { "mode": "percent", "value": "60" } },
+          { "value": "6", "label": "6 layer", "pricingImpact": { "mode": "percent", "value": "140" } }
+        ]
+      },
+      {
+        "type": "enum", "key": "surfaceFinish", "label": "Surface Finish", "required": false, "group": "Finish", "defaultValue": "hasl",
+        "options": [
+          { "value": "hasl", "label": "HASL" },
+          { "value": "enig", "label": "ENIG (gold)", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 10000, "step": 1, "defaultValue": 5 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Fabrication completion receipt", "required": ["jobId", "timestamp", "layers", "fabTimeSeconds"] },
+      "tier1": { "description": "Completion + Gerber hash + electrical test log", "required": ["jobId", "timestamp", "layers", "fabTimeSeconds", "gerberHash", "flyingProbeLogCid"] },
+      "tier2": { "description": "Completion + test log + AOI inspection photos", "required": ["jobId", "timestamp", "layers", "fabTimeSeconds", "gerberHash", "flyingProbeLogCid", "aoiPhotosCid"] }
+    },
+    "pricing": { "basePrice": "25.00", "currency": "USDC", "unit": "per board", "minimumCharge": "50.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/injection-molding/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Plastic Injection Molding",
+    "description": "High-volume thermoplastic part production from a machined mold tool.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["opcua", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Resin", "required": true, "group": "Material",
+        "options": [
+          { "value": "abs", "label": "ABS" },
+          { "value": "pp", "label": "Polypropylene" },
+          { "value": "pc", "label": "Polycarbonate", "pricingImpact": { "mode": "percent", "value": "25" } },
+          { "value": "nylon-gf", "label": "Glass-Filled Nylon", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "number", "key": "cavities", "label": "Mold Cavities", "required": false, "group": "Tooling", "min": 1, "max": 64, "step": 1, "defaultValue": 1 },
+      { "type": "number", "key": "quantity", "label": "Quantity (shots)", "required": true, "group": "Order", "min": 100, "max": 1000000, "step": 100, "defaultValue": 1000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "material", "shotCount"] },
+      "tier1": { "description": "Completion + process log + part-weight QC", "required": ["jobId", "timestamp", "material", "shotCount", "processLogCid", "partWeightGrams"] },
+      "tier2": { "description": "Completion + QC + first-article inspection photos", "required": ["jobId", "timestamp", "material", "shotCount", "processLogCid", "partWeightGrams", "firstArticlePhotosCid"] }
+    },
+    "pricing": { "basePrice": "2.50", "currency": "USDC", "unit": "per part", "minimumCharge": "500.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/sheet-metal-bending/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Sheet Metal Bending",
+    "description": "Press-brake forming of flat sheet metal into bent and folded parts.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["opcua", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "steel-mild", "label": "Mild Steel" },
+          { "value": "stainless-304", "label": "Stainless 304", "pricingImpact": { "mode": "percent", "value": "35" } },
+          { "value": "aluminum-5052", "label": "Aluminum 5052" }
+        ]
+      },
+      { "type": "number", "key": "thickness", "label": "Thickness", "required": true, "group": "Material", "min": 0.5, "max": 12, "step": 0.5, "unit": "mm", "defaultValue": 2 },
+      { "type": "number", "key": "bendCount", "label": "Number of Bends", "required": true, "group": "Forming", "min": 1, "max": 50, "step": 1, "defaultValue": 4 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 5000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [
+      {
+        "key": "bending-stainless-thickness",
+        "human": "Stainless 304 over 6mm exceeds typical press-brake tonnage.",
+        "severity": "error",
+        "when": [{ "param": "material", "operator": "equals", "value": "stainless-304" }],
+        "then": [{ "action": "setMax", "param": "thickness", "value": 6, "message": "Reduce stainless thickness to 6mm or request a heavy press brake." }]
+      }
+    ],
+    "evidence": {
+      "tier0": { "description": "Forming completion receipt", "required": ["jobId", "timestamp", "material", "bendCount"] },
+      "tier1": { "description": "Completion + bend program + angle QC log", "required": ["jobId", "timestamp", "material", "bendCount", "bendProgramHash", "angleQcLogCid"] },
+      "tier2": { "description": "Completion + QC + inspection photos", "required": ["jobId", "timestamp", "material", "bendCount", "bendProgramHash", "angleQcLogCid", "inspectionPhotosCid"] }
+    },
+    "pricing": { "basePrice": "18.00", "currency": "USDC", "unit": "per part", "minimumCharge": "25.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/water-jet-cutting/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Water Jet Cutting",
+    "description": "Abrasive water-jet cutting of thick metal, stone, and composite plate.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["opcua", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "material", "label": "Material", "required": true, "group": "Material",
+        "options": [
+          { "value": "steel", "label": "Steel" },
+          { "value": "stainless", "label": "Stainless" },
+          { "value": "aluminum", "label": "Aluminum" },
+          { "value": "titanium", "label": "Titanium", "pricingImpact": { "mode": "percent", "value": "80" } },
+          { "value": "stone", "label": "Stone / Tile" }
+        ]
+      },
+      { "type": "number", "key": "thickness", "label": "Plate Thickness", "required": true, "group": "Material", "min": 1, "max": 200, "step": 1, "unit": "mm", "defaultValue": 10 },
+      { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "group": "Order", "min": 1, "max": 1000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [
+      {
+        "key": "waterjet-titanium-thickness",
+        "human": "Titanium is limited to 50mm and thinner per pass.",
+        "severity": "warning",
+        "when": [{ "param": "material", "operator": "equals", "value": "titanium" }],
+        "then": [{ "action": "setMax", "param": "thickness", "value": 50, "message": "Split thicker titanium into multiple passes." }]
+      }
+    ],
+    "evidence": {
+      "tier0": { "description": "Cut completion receipt", "required": ["jobId", "timestamp", "material", "cutDurationSeconds"] },
+      "tier1": { "description": "Completion + machine log + vector hash", "required": ["jobId", "timestamp", "material", "cutDurationSeconds", "machineLogCid", "vectorFileHash"] },
+      "tier2": { "description": "Completion + log + photo of cut plate", "required": ["jobId", "timestamp", "material", "cutDurationSeconds", "machineLogCid", "vectorFileHash", "outputPhotoCid"] }
+    },
+    "pricing": { "basePrice": "30.00", "currency": "USDC", "unit": "per sheet", "minimumCharge": "20.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/liquid-handling/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Automated Liquid Handling",
+    "description": "Robotic pipetting and plate preparation on an automated liquid handler.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "plateFormat", "label": "Plate Format", "required": true, "group": "Labware", "defaultValue": "96",
+        "options": [
+          { "value": "24", "label": "24-well" },
+          { "value": "96", "label": "96-well" },
+          { "value": "384", "label": "384-well", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "string", "key": "protocolRef", "label": "Protocol Reference", "required": true, "group": "Protocol", "maxLength": 256, "placeholder": "Opentrons protocol ID or CID" },
+      { "type": "number", "key": "replicates", "label": "Replicate Plates", "required": true, "group": "Order", "min": 1, "max": 200, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "plateFormat", "runDurationSeconds"] },
+      "tier1": { "description": "Completion + transfer log + protocol hash", "required": ["jobId", "timestamp", "plateFormat", "runDurationSeconds", "transferLogCid", "protocolHash"] },
+      "tier2": { "description": "Completion + log + deck camera snapshots", "required": ["jobId", "timestamp", "plateFormat", "runDurationSeconds", "transferLogCid", "protocolHash", "deckPhotosCid"] }
+    },
+    "pricing": { "basePrice": "40.00", "currency": "USDC", "unit": "per plate", "minimumCharge": "40.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/hplc/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "HPLC Analysis",
+    "description": "High-performance liquid chromatography for compound separation and quantitation.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "method", "label": "Method", "required": true, "group": "Method",
+        "options": [
+          { "value": "reverse-phase", "label": "Reverse Phase" },
+          { "value": "normal-phase", "label": "Normal Phase" },
+          { "value": "ion-exchange", "label": "Ion Exchange" },
+          { "value": "size-exclusion", "label": "Size Exclusion" }
+        ]
+      },
+      {
+        "type": "enum", "key": "detector", "label": "Detector", "required": false, "group": "Method", "defaultValue": "uv-vis",
+        "options": [
+          { "value": "uv-vis", "label": "UV-Vis" },
+          { "value": "dad", "label": "Diode Array" },
+          { "value": "fluorescence", "label": "Fluorescence", "pricingImpact": { "mode": "percent", "value": "20" } }
+        ]
+      },
+      { "type": "number", "key": "sampleCount", "label": "Sample Count", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "method", "sampleCount"] },
+      "tier1": { "description": "Completion + chromatogram data + method hash", "required": ["jobId", "timestamp", "method", "sampleCount", "chromatogramCid", "methodHash"] },
+      "tier2": { "description": "Completion + chromatogram + calibration + column QC", "required": ["jobId", "timestamp", "method", "sampleCount", "chromatogramCid", "methodHash", "calibrationCurveCid", "columnQcCid"] },
+      "tier3": { "description": "Tier 2 + chain-of-custody + multi-verifier attestation + ZK integrity proof", "required": ["jobId", "timestamp", "method", "sampleCount", "chromatogramCid", "methodHash", "calibrationCurveCid", "columnQcCid", "custodyChainCid", "verifierAttestations", "zkProofCid"] }
+    },
+    "pricing": { "basePrice": "85.00", "currency": "USDC", "unit": "per sample", "minimumCharge": "85.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/gc-ms/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "GC-MS Analysis",
+    "description": "Gas chromatography–mass spectrometry for volatile compound identification.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "mode", "label": "Acquisition Mode", "required": true, "group": "Method", "defaultValue": "scan",
+        "options": [
+          { "value": "scan", "label": "Full Scan" },
+          { "value": "sim", "label": "Selected Ion Monitoring", "pricingImpact": { "mode": "percent", "value": "15" } }
+        ]
+      },
+      { "type": "boolean", "key": "derivatization", "label": "Derivatization Required", "required": false, "group": "Prep", "defaultValue": false, "pricingImpact": { "mode": "flat", "value": "20.00" } },
+      { "type": "number", "key": "sampleCount", "label": "Sample Count", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "mode", "sampleCount"] },
+      "tier1": { "description": "Completion + total ion chromatogram + method hash", "required": ["jobId", "timestamp", "mode", "sampleCount", "ticDataCid", "methodHash"] },
+      "tier2": { "description": "Completion + TIC + spectral library match report", "required": ["jobId", "timestamp", "mode", "sampleCount", "ticDataCid", "methodHash", "libraryMatchReportCid"] },
+      "tier3": { "description": "Tier 2 + chain-of-custody + multi-verifier attestation + ZK proof", "required": ["jobId", "timestamp", "mode", "sampleCount", "ticDataCid", "methodHash", "libraryMatchReportCid", "custodyChainCid", "verifierAttestations", "zkProofCid"] }
+    },
+    "pricing": { "basePrice": "120.00", "currency": "USDC", "unit": "per sample", "minimumCharge": "120.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/pcr/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "PCR Amplification",
+    "description": "Polymerase chain reaction thermal cycling for nucleic acid amplification.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "pcrType", "label": "PCR Type", "required": true, "group": "Assay", "defaultValue": "qpcr",
+        "options": [
+          { "value": "endpoint", "label": "Endpoint PCR" },
+          { "value": "qpcr", "label": "Real-Time qPCR" },
+          { "value": "rt-pcr", "label": "RT-PCR", "pricingImpact": { "mode": "percent", "value": "20" } }
+        ]
+      },
+      { "type": "number", "key": "cycles", "label": "Cycle Count", "required": false, "group": "Assay", "min": 20, "max": 50, "step": 1, "defaultValue": 35 },
+      { "type": "number", "key": "plates", "label": "Plates", "required": true, "group": "Order", "min": 1, "max": 200, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "pcrType", "cycles"] },
+      "tier1": { "description": "Completion + amplification curves + protocol hash", "required": ["jobId", "timestamp", "pcrType", "cycles", "amplificationCurvesCid", "protocolHash"] },
+      "tier2": { "description": "Completion + curves + Ct report + no-template control", "required": ["jobId", "timestamp", "pcrType", "cycles", "amplificationCurvesCid", "protocolHash", "ctReportCid", "ntcResult"] }
+    },
+    "pricing": { "basePrice": "35.00", "currency": "USDC", "unit": "per plate", "minimumCharge": "35.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/dna-sequencing/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "DNA Sequencing",
+    "description": "Next-generation or long-read sequencing of nucleic acid samples.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "http", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "platform", "label": "Platform", "required": true, "group": "Method",
+        "options": [
+          { "value": "illumina-short", "label": "Illumina (short read)" },
+          { "value": "nanopore", "label": "Oxford Nanopore (long read)", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "pacbio", "label": "PacBio HiFi", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "number", "key": "targetCoverage", "label": "Target Coverage", "required": false, "group": "Method", "min": 1, "max": 200, "step": 1, "unit": "x", "defaultValue": 30 },
+      { "type": "number", "key": "sampleCount", "label": "Sample Count", "required": true, "group": "Order", "min": 1, "max": 384, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "platform", "sampleCount"] },
+      "tier1": { "description": "Completion + FASTQ hash + run QC metrics", "required": ["jobId", "timestamp", "platform", "sampleCount", "fastqHash", "runQcMetricsCid"] },
+      "tier2": { "description": "Completion + QC + per-base quality + coverage report", "required": ["jobId", "timestamp", "platform", "sampleCount", "fastqHash", "runQcMetricsCid", "perBaseQualityCid", "coverageReportCid"] },
+      "tier3": { "description": "Tier 2 + chain-of-custody + multi-verifier attestation + ZK proof", "required": ["jobId", "timestamp", "platform", "sampleCount", "fastqHash", "runQcMetricsCid", "perBaseQualityCid", "coverageReportCid", "custodyChainCid", "verifierAttestations", "zkProofCid"] }
+    },
+    "pricing": { "basePrice": "90.00", "currency": "USDC", "unit": "per sample", "minimumCharge": "90.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/mass-spec/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Mass Spectrometry",
+    "description": "High-resolution mass spectrometry for accurate-mass identification and quantitation.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "ionization", "label": "Ionization", "required": true, "group": "Method",
+        "options": [
+          { "value": "esi", "label": "Electrospray (ESI)" },
+          { "value": "maldi", "label": "MALDI" },
+          { "value": "apci", "label": "APCI" }
+        ]
+      },
+      {
+        "type": "enum", "key": "analyzer", "label": "Analyzer", "required": false, "group": "Method", "defaultValue": "qtof",
+        "options": [
+          { "value": "qtof", "label": "Q-TOF" },
+          { "value": "orbitrap", "label": "Orbitrap", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "sampleCount", "label": "Sample Count", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "ionization", "sampleCount"] },
+      "tier1": { "description": "Completion + raw spectra + method hash", "required": ["jobId", "timestamp", "ionization", "sampleCount", "rawSpectraCid", "methodHash"] },
+      "tier2": { "description": "Completion + spectra + mass-calibration + peak report", "required": ["jobId", "timestamp", "ionization", "sampleCount", "rawSpectraCid", "methodHash", "massCalibrationCid", "peakReportCid"] },
+      "tier3": { "description": "Tier 2 + chain-of-custody + multi-verifier attestation + ZK proof", "required": ["jobId", "timestamp", "ionization", "sampleCount", "rawSpectraCid", "methodHash", "massCalibrationCid", "peakReportCid", "custodyChainCid", "verifierAttestations", "zkProofCid"] }
+    },
+    "pricing": { "basePrice": "150.00", "currency": "USDC", "unit": "per sample", "minimumCharge": "150.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/electron-microscopy/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Electron Microscopy (SEM/TEM)",
+    "description": "Nanoscale imaging via scanning or transmission electron microscopy.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "mode", "label": "Mode", "required": true, "group": "Imaging",
+        "options": [
+          { "value": "sem", "label": "SEM (surface)" },
+          { "value": "tem", "label": "TEM (transmission)", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "boolean", "key": "edsMapping", "label": "EDS Elemental Mapping", "required": false, "group": "Imaging", "defaultValue": false, "pricingImpact": { "mode": "flat", "value": "60.00" } },
+      { "type": "number", "key": "hours", "label": "Session Hours", "required": true, "group": "Order", "min": 1, "max": 8, "step": 1, "unit": "h", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Session completion receipt", "required": ["jobId", "timestamp", "mode", "sessionSeconds"] },
+      "tier1": { "description": "Completion + micrograph set + instrument log", "required": ["jobId", "timestamp", "mode", "sessionSeconds", "micrographSetCid", "instrumentLogCid"] },
+      "tier2": { "description": "Completion + micrographs + scale-calibration + metadata", "required": ["jobId", "timestamp", "mode", "sessionSeconds", "micrographSetCid", "instrumentLogCid", "scaleCalibrationCid", "acquisitionMetadataCid"] }
+    },
+    "pricing": { "basePrice": "140.00", "currency": "USDC", "unit": "per hour", "minimumCharge": "140.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/centrifugation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Centrifugation",
+    "description": "Density separation of samples in a fixed-angle or swing-bucket centrifuge.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["sila", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "rotorType", "label": "Rotor Type", "required": true, "group": "Run",
+        "options": [
+          { "value": "fixed-angle", "label": "Fixed Angle" },
+          { "value": "swing-bucket", "label": "Swing Bucket" },
+          { "value": "ultracentrifuge", "label": "Ultracentrifuge", "pricingImpact": { "mode": "percent", "value": "60" } }
+        ]
+      },
+      { "type": "number", "key": "rcf", "label": "Relative Centrifugal Force", "required": true, "group": "Run", "min": 100, "max": 1000000, "step": 100, "unit": "xg", "defaultValue": 3000 },
+      { "type": "number", "key": "durationMinutes", "label": "Duration", "required": true, "group": "Run", "min": 1, "max": 720, "step": 1, "unit": "min", "defaultValue": 10 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "rotorType", "durationSeconds"] },
+      "tier1": { "description": "Completion + speed/temperature trace", "required": ["jobId", "timestamp", "rotorType", "durationSeconds", "speedTraceCid", "temperatureTraceCid"] }
+    },
+    "pricing": { "basePrice": "15.00", "currency": "USDC", "unit": "per run", "minimumCharge": "15.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/incubation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Controlled Incubation",
+    "description": "Temperature- and atmosphere-controlled incubation of plates, flasks, or cultures.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "manual"] },
+    "parameters": [
+      { "type": "number", "key": "temperature", "label": "Temperature", "required": true, "group": "Conditions", "min": 4, "max": 70, "step": 1, "unit": "°C", "defaultValue": 37 },
+      {
+        "type": "enum", "key": "atmosphere", "label": "Atmosphere", "required": false, "group": "Conditions", "defaultValue": "ambient",
+        "options": [
+          { "value": "ambient", "label": "Ambient Air" },
+          { "value": "co2-5", "label": "5% CO₂", "pricingImpact": { "mode": "percent", "value": "20" } },
+          { "value": "anaerobic", "label": "Anaerobic", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "days", "label": "Incubation Days", "required": true, "group": "Order", "min": 1, "max": 90, "step": 1, "unit": "d", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Incubation completion receipt", "required": ["jobId", "timestamp", "temperature", "incubationSeconds"] },
+      "tier1": { "description": "Completion + temperature/CO₂ logger trace", "required": ["jobId", "timestamp", "temperature", "incubationSeconds", "temperatureTraceCid", "co2TraceCid"] },
+      "tier2": { "description": "Completion + trace + interval photos", "required": ["jobId", "timestamp", "temperature", "incubationSeconds", "temperatureTraceCid", "co2TraceCid", "intervalPhotosCid"] }
+    },
+    "pricing": { "basePrice": "8.00", "currency": "USDC", "unit": "per plate-day", "minimumCharge": "8.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/cell-culture/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Cell Culture",
+    "description": "Maintenance, passaging, and expansion of mammalian or microbial cell lines.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["manual"] },
+    "parameters": [
+      { "type": "string", "key": "cellLine", "label": "Cell Line", "required": true, "group": "Culture", "maxLength": 128, "placeholder": "e.g. HEK293, CHO-K1, E. coli BL21" },
+      {
+        "type": "enum", "key": "vessel", "label": "Culture Vessel", "required": true, "group": "Culture", "defaultValue": "t75",
+        "options": [
+          { "value": "t25", "label": "T25 Flask" },
+          { "value": "t75", "label": "T75 Flask" },
+          { "value": "bioreactor-1l", "label": "1L Bioreactor", "pricingImpact": { "mode": "percent", "value": "80" } }
+        ]
+      },
+      { "type": "number", "key": "weeks", "label": "Duration", "required": true, "group": "Order", "min": 1, "max": 52, "step": 1, "unit": "wk", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Culture maintenance receipt", "required": ["jobId", "timestamp", "cellLine", "durationSeconds"] },
+      "tier1": { "description": "Completion + passage log + viability counts", "required": ["jobId", "timestamp", "cellLine", "durationSeconds", "passageLogCid", "viabilityCountsCid"] },
+      "tier2": { "description": "Completion + log + microscopy images + mycoplasma test", "required": ["jobId", "timestamp", "cellLine", "durationSeconds", "passageLogCid", "viabilityCountsCid", "microscopyImagesCid", "mycoplasmaTestResult"] },
+      "tier3": { "description": "Tier 2 + chain-of-custody + multi-verifier attestation + ZK proof", "required": ["jobId", "timestamp", "cellLine", "durationSeconds", "passageLogCid", "viabilityCountsCid", "microscopyImagesCid", "mycoplasmaTestResult", "custodyChainCid", "verifierAttestations", "zkProofCid"] }
+    },
+    "pricing": { "basePrice": "200.00", "currency": "USDC", "unit": "per flask-week", "minimumCharge": "200.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/hydroponic-grow/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Hydroponic Cultivation",
+    "description": "Soil-free controlled-environment cultivation of leafy greens and herbs.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "crop", "label": "Crop", "required": true, "group": "Grow", "maxLength": 64, "placeholder": "e.g. lettuce, basil, kale" },
+      {
+        "type": "enum", "key": "system", "label": "System Type", "required": true, "group": "Grow", "defaultValue": "nft",
+        "options": [
+          { "value": "nft", "label": "Nutrient Film Technique" },
+          { "value": "dwc", "label": "Deep Water Culture" },
+          { "value": "aeroponic", "label": "Aeroponic", "pricingImpact": { "mode": "percent", "value": "25" } }
+        ]
+      },
+      { "type": "number", "key": "cycleDays", "label": "Grow Cycle", "required": true, "group": "Order", "min": 7, "max": 180, "step": 1, "unit": "d", "defaultValue": 35 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Harvest completion receipt", "required": ["jobId", "timestamp", "crop", "cycleDays"] },
+      "tier1": { "description": "Harvest + environmental logger (pH/EC/temp)", "required": ["jobId", "timestamp", "crop", "cycleDays", "phEcTraceCid", "temperatureTraceCid", "harvestWeightGrams"] },
+      "tier2": { "description": "Harvest + logger + time-lapse photos", "required": ["jobId", "timestamp", "crop", "cycleDays", "phEcTraceCid", "temperatureTraceCid", "harvestWeightGrams", "timelapsePhotosCid"] }
+    },
+    "pricing": { "basePrice": "25.00", "currency": "USDC", "unit": "per tray-cycle", "minimumCharge": "25.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/mycelium-fermentation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Mycelium Fermentation",
+    "description": "Solid-state or submerged fungal fermentation for materials, food, or compounds.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "species", "label": "Fungal Species", "required": true, "group": "Culture", "maxLength": 96, "placeholder": "e.g. Ganoderma lucidum, Pleurotus ostreatus" },
+      {
+        "type": "enum", "key": "substrate", "label": "Substrate", "required": true, "group": "Culture", "defaultValue": "sawdust",
+        "options": [
+          { "value": "sawdust", "label": "Hardwood Sawdust" },
+          { "value": "grain", "label": "Grain Spawn" },
+          { "value": "agricultural-waste", "label": "Agricultural Waste" }
+        ]
+      },
+      { "type": "number", "key": "batchKg", "label": "Batch Mass", "required": true, "group": "Order", "min": 1, "max": 1000, "step": 1, "unit": "kg", "defaultValue": 10 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Batch completion receipt", "required": ["jobId", "timestamp", "species", "batchKg"] },
+      "tier1": { "description": "Completion + temperature/humidity trace + colonization log", "required": ["jobId", "timestamp", "species", "batchKg", "tempHumidityTraceCid", "colonizationLogCid"] },
+      "tier2": { "description": "Completion + trace + contamination check photos", "required": ["jobId", "timestamp", "species", "batchKg", "tempHumidityTraceCid", "colonizationLogCid", "contaminationCheckPhotosCid"] }
+    },
+    "pricing": { "basePrice": "60.00", "currency": "USDC", "unit": "per batch", "minimumCharge": "60.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/algae-cultivation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Algae Cultivation",
+    "description": "Photobioreactor or open-pond cultivation of microalgae for biomass or compounds.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "strain", "label": "Algae Strain", "required": true, "group": "Culture", "maxLength": 96, "placeholder": "e.g. Chlorella, Spirulina, Nannochloropsis" },
+      {
+        "type": "enum", "key": "reactorType", "label": "Reactor Type", "required": true, "group": "Culture", "defaultValue": "tubular-pbr",
+        "options": [
+          { "value": "open-pond", "label": "Open Pond" },
+          { "value": "tubular-pbr", "label": "Tubular Photobioreactor" },
+          { "value": "flat-panel-pbr", "label": "Flat-Panel Photobioreactor", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "volumeLiters", "label": "Culture Volume", "required": true, "group": "Order", "min": 1, "max": 100000, "step": 1, "unit": "L", "defaultValue": 100 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Harvest completion receipt", "required": ["jobId", "timestamp", "strain", "volumeLiters"] },
+      "tier1": { "description": "Harvest + optical density + pH/temp trace", "required": ["jobId", "timestamp", "strain", "volumeLiters", "opticalDensityTraceCid", "phTempTraceCid", "dryBiomassGrams"] },
+      "tier2": { "description": "Harvest + traces + microscopy purity check", "required": ["jobId", "timestamp", "strain", "volumeLiters", "opticalDensityTraceCid", "phTempTraceCid", "dryBiomassGrams", "purityCheckImagesCid"] }
+    },
+    "pricing": { "basePrice": "5.00", "currency": "USDC", "unit": "per liter", "minimumCharge": "50.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/plant-tissue-culture/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Plant Tissue Culture",
+    "description": "In-vitro micropropagation of plant explants on sterile nutrient media.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["manual"] },
+    "parameters": [
+      { "type": "string", "key": "species", "label": "Plant Species", "required": true, "group": "Culture", "maxLength": 96, "placeholder": "e.g. Cannabis sativa, Musa, Solanum" },
+      {
+        "type": "enum", "key": "medium", "label": "Growth Medium", "required": true, "group": "Culture", "defaultValue": "ms",
+        "options": [
+          { "value": "ms", "label": "Murashige & Skoog" },
+          { "value": "b5", "label": "Gamborg B5" },
+          { "value": "wpm", "label": "Woody Plant Medium" }
+        ]
+      },
+      { "type": "number", "key": "explants", "label": "Explant Count", "required": true, "group": "Order", "min": 1, "max": 10000, "step": 1, "defaultValue": 24 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Culture completion receipt", "required": ["jobId", "timestamp", "species", "explants"] },
+      "tier1": { "description": "Completion + subculture log + contamination rate", "required": ["jobId", "timestamp", "species", "explants", "subcultureLogCid", "contaminationRate"] },
+      "tier2": { "description": "Completion + log + explant photos", "required": ["jobId", "timestamp", "species", "explants", "subcultureLogCid", "contaminationRate", "explantPhotosCid"] }
+    },
+    "pricing": { "basePrice": "12.00", "currency": "USDC", "unit": "per explant", "minimumCharge": "60.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/biofilm-reactor/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Biofilm Reactor Run",
+    "description": "Controlled cultivation of microbial biofilms for treatment or bioproduction.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "organism", "label": "Organism / Consortium", "required": true, "group": "Culture", "maxLength": 128, "placeholder": "e.g. activated sludge, Geobacter, defined consortium" },
+      {
+        "type": "enum", "key": "reactorType", "label": "Reactor Type", "required": true, "group": "Culture", "defaultValue": "mbbr",
+        "options": [
+          { "value": "mbbr", "label": "Moving Bed Biofilm" },
+          { "value": "drip", "label": "Trickling / Drip" },
+          { "value": "membrane", "label": "Membrane Biofilm", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "runDays", "label": "Run Duration", "required": true, "group": "Order", "min": 1, "max": 180, "step": 1, "unit": "d", "defaultValue": 14 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Run completion receipt", "required": ["jobId", "timestamp", "organism", "runDays"] },
+      "tier1": { "description": "Completion + DO/pH/flow trace + performance metrics", "required": ["jobId", "timestamp", "organism", "runDays", "doTraceCid", "phFlowTraceCid", "performanceMetricsCid"] },
+      "tier2": { "description": "Completion + traces + biofilm imaging", "required": ["jobId", "timestamp", "organism", "runDays", "doTraceCid", "phFlowTraceCid", "performanceMetricsCid", "biofilmImagingCid"] }
+    },
+    "pricing": { "basePrice": "80.00", "currency": "USDC", "unit": "per run", "minimumCharge": "80.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/courier/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Courier / Last-Mile Delivery",
+    "description": "Human-performed pickup and delivery of physical items over a defined route.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "vehicleClass", "label": "Vehicle Class", "required": true, "group": "Delivery", "defaultValue": "car",
+        "options": [
+          { "value": "bike", "label": "Bicycle / E-bike" },
+          { "value": "car", "label": "Car" },
+          { "value": "van", "label": "Cargo Van", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      {
+        "type": "enum", "key": "priority", "label": "Priority", "required": false, "group": "Delivery", "defaultValue": "standard",
+        "options": [
+          { "value": "standard", "label": "Standard (same day)" },
+          { "value": "express", "label": "Express (≤2h)", "pricingImpact": { "mode": "percent", "value": "50" } }
+        ]
+      },
+      { "type": "number", "key": "distanceKm", "label": "Route Distance", "required": true, "group": "Order", "min": 1, "max": 500, "step": 1, "unit": "km", "defaultValue": 5 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Delivery completion receipt", "required": ["jobId", "timestamp", "courierId", "deliveredEvent"] },
+      "tier1": { "description": "Completion + GPS pickup/drop track", "required": ["jobId", "timestamp", "courierId", "deliveredEvent", "pickupGps", "dropoffGps", "gpsTrackCid"] },
+      "tier2": { "description": "Completion + GPS + proof-of-delivery photo + signature", "required": ["jobId", "timestamp", "courierId", "deliveredEvent", "pickupGps", "dropoffGps", "gpsTrackCid", "podPhotoCid", "recipientSignatureCid"] }
+    },
+    "pricing": { "basePrice": "8.00", "currency": "USDC", "unit": "per delivery", "minimumCharge": "8.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/field-tech/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Field Technician Visit",
+    "description": "On-site human technician for installation, maintenance, or repair tasks.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "skillLevel", "label": "Skill Level", "required": true, "group": "Service", "defaultValue": "journeyman",
+        "options": [
+          { "value": "apprentice", "label": "Apprentice" },
+          { "value": "journeyman", "label": "Journeyman" },
+          { "value": "master", "label": "Master / Specialist", "pricingImpact": { "mode": "percent", "value": "60" } }
+        ]
+      },
+      { "type": "number", "key": "hours", "label": "On-Site Hours", "required": true, "group": "Order", "min": 1, "max": 40, "step": 1, "unit": "h", "defaultValue": 2 },
+      { "type": "number", "key": "travelKm", "label": "Travel Distance", "required": false, "group": "Order", "min": 0, "max": 500, "step": 1, "unit": "km", "defaultValue": 10 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Visit completion receipt", "required": ["jobId", "timestamp", "technicianId", "completionEvent"] },
+      "tier1": { "description": "Completion + check-in/out GPS + time log", "required": ["jobId", "timestamp", "technicianId", "completionEvent", "checkInGps", "checkOutGps", "timeLogCid"] },
+      "tier2": { "description": "Completion + GPS + before/after photos + customer signature", "required": ["jobId", "timestamp", "technicianId", "completionEvent", "checkInGps", "checkOutGps", "timeLogCid", "beforeAfterPhotosCid", "customerSignatureCid"] }
+    },
+    "pricing": { "basePrice": "95.00", "currency": "USDC", "unit": "per hour", "minimumCharge": "95.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/inspection/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Physical Inspection",
+    "description": "Human visual or instrumented inspection of goods, sites, or assets.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "inspectionType", "label": "Inspection Type", "required": true, "group": "Service",
+        "options": [
+          { "value": "quality", "label": "Quality / QC" },
+          { "value": "safety", "label": "Safety / Compliance" },
+          { "value": "property", "label": "Property / Site" },
+          { "value": "incoming-goods", "label": "Incoming Goods" }
+        ]
+      },
+      { "type": "number", "key": "itemCount", "label": "Items / Units", "required": true, "group": "Order", "min": 1, "max": 100000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Inspection completion receipt", "required": ["jobId", "timestamp", "inspectorId", "verdict"] },
+      "tier1": { "description": "Completion + GPS-stamped checklist + findings", "required": ["jobId", "timestamp", "inspectorId", "verdict", "checklistCid", "siteGps", "findingsCid"] },
+      "tier2": { "description": "Completion + checklist + annotated photos + signed report", "required": ["jobId", "timestamp", "inspectorId", "verdict", "checklistCid", "siteGps", "findingsCid", "annotatedPhotosCid", "signedReportCid"] }
+    },
+    "pricing": { "basePrice": "50.00", "currency": "USDC", "unit": "per inspection", "minimumCharge": "50.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/sample-collection/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Field Sample Collection",
+    "description": "Human collection of physical/biological samples in the field with chain-of-custody.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "sampleType", "label": "Sample Type", "required": true, "group": "Collection",
+        "options": [
+          { "value": "water", "label": "Water" },
+          { "value": "soil", "label": "Soil" },
+          { "value": "air", "label": "Air / Particulate" },
+          { "value": "biological", "label": "Biological / Swab" }
+        ]
+      },
+      { "type": "boolean", "key": "coldChain", "label": "Cold Chain Required", "required": false, "group": "Collection", "defaultValue": false, "pricingImpact": { "mode": "percent", "value": "25" } },
+      { "type": "number", "key": "sampleCount", "label": "Sample Count", "required": true, "group": "Order", "min": 1, "max": 1000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Collection completion receipt", "required": ["jobId", "timestamp", "collectorId", "sampleCount"] },
+      "tier1": { "description": "Completion + GPS-stamped collection log", "required": ["jobId", "timestamp", "collectorId", "sampleCount", "collectionGps", "custodyLogCid"] },
+      "tier2": { "description": "Completion + custody log + sample photos + cold-chain trace", "required": ["jobId", "timestamp", "collectorId", "sampleCount", "collectionGps", "custodyLogCid", "samplePhotosCid", "coldChainTraceCid"] }
+    },
+    "pricing": { "basePrice": "30.00", "currency": "USDC", "unit": "per sample", "minimumCharge": "30.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/data-labeling/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Data Labeling / Annotation",
+    "description": "Human annotation of images, text, audio, or video for machine-learning datasets.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "modality", "label": "Data Modality", "required": true, "group": "Task",
+        "options": [
+          { "value": "image-bbox", "label": "Image Bounding Boxes" },
+          { "value": "image-segmentation", "label": "Image Segmentation", "pricingImpact": { "mode": "percent", "value": "60" } },
+          { "value": "text-classification", "label": "Text Classification" },
+          { "value": "audio-transcript", "label": "Audio Annotation" }
+        ]
+      },
+      {
+        "type": "enum", "key": "qaLevel", "label": "QA Level", "required": false, "group": "Task", "defaultValue": "single-pass",
+        "options": [
+          { "value": "single-pass", "label": "Single Pass" },
+          { "value": "consensus-3", "label": "3-Way Consensus", "pricingImpact": { "mode": "percent", "value": "120" } }
+        ]
+      },
+      { "type": "number", "key": "itemCount", "label": "Item Count", "required": true, "group": "Order", "min": 1, "max": 1000000, "step": 1, "defaultValue": 1000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Batch completion receipt", "required": ["jobId", "timestamp", "annotatorId", "itemCount"] },
+      "tier1": { "description": "Completion + label export hash + per-item timing", "required": ["jobId", "timestamp", "annotatorId", "itemCount", "labelExportHash", "perItemTimingCid"] },
+      "tier2": { "description": "Completion + export + QA agreement metrics + gold-set audit", "required": ["jobId", "timestamp", "annotatorId", "itemCount", "labelExportHash", "perItemTimingCid", "interAnnotatorAgreement", "goldSetAuditCid"] }
+    },
+    "pricing": { "basePrice": "0.05", "currency": "USDC", "unit": "per item", "minimumCharge": "25.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/design-review/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Expert Design Review",
+    "description": "Human expert review of a design, document, or plan with written findings.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "domain", "label": "Review Domain", "required": true, "group": "Review",
+        "options": [
+          { "value": "mechanical", "label": "Mechanical / DFM" },
+          { "value": "electrical", "label": "Electrical / PCB" },
+          { "value": "software", "label": "Software / Architecture" },
+          { "value": "regulatory", "label": "Regulatory / Compliance", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "number", "key": "turnaroundHours", "label": "Turnaround", "required": false, "group": "Order", "min": 4, "max": 240, "step": 1, "unit": "h", "defaultValue": 48 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Review completion receipt", "required": ["jobId", "timestamp", "reviewerId", "verdict"] },
+      "tier1": { "description": "Completion + signed review report + reviewer credentials hash", "required": ["jobId", "timestamp", "reviewerId", "verdict", "reviewReportCid", "credentialsHash"] }
+    },
+    "pricing": { "basePrice": "250.00", "currency": "USDC", "unit": "per review", "minimumCharge": "250.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/photography/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Photography",
+    "description": "Professional human photography session with edited deliverables.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "style", "label": "Style", "required": true, "group": "Shoot",
+        "options": [
+          { "value": "product", "label": "Product / Catalog" },
+          { "value": "real-estate", "label": "Real Estate" },
+          { "value": "event", "label": "Event" },
+          { "value": "portrait", "label": "Portrait" }
+        ]
+      },
+      { "type": "number", "key": "hours", "label": "Session Hours", "required": true, "group": "Order", "min": 1, "max": 12, "step": 1, "unit": "h", "defaultValue": 2 },
+      { "type": "number", "key": "editedDeliverables", "label": "Edited Photos", "required": false, "group": "Order", "min": 1, "max": 1000, "step": 1, "defaultValue": 25 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Shoot completion receipt", "required": ["jobId", "timestamp", "photographerId", "deliverableCount"] },
+      "tier1": { "description": "Completion + gallery CID + capture metadata", "required": ["jobId", "timestamp", "photographerId", "deliverableCount", "galleryCid", "exifMetadataCid"] },
+      "tier2": { "description": "Completion + gallery + GPS/time stamp + client acceptance", "required": ["jobId", "timestamp", "photographerId", "deliverableCount", "galleryCid", "exifMetadataCid", "shootGps", "clientAcceptanceCid"] }
+    },
+    "pricing": { "basePrice": "120.00", "currency": "USDC", "unit": "per hour", "minimumCharge": "120.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/video-shoot/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Video Production Shoot",
+    "description": "Human-crewed video capture with edited footage deliverables.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "format", "label": "Format", "required": true, "group": "Shoot",
+        "options": [
+          { "value": "interview", "label": "Interview / Talking Head" },
+          { "value": "product", "label": "Product / Commercial" },
+          { "value": "event", "label": "Event Coverage" },
+          { "value": "documentary", "label": "Documentary", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "hours", "label": "Shoot Hours", "required": true, "group": "Order", "min": 1, "max": 24, "step": 1, "unit": "h", "defaultValue": 4 },
+      { "type": "number", "key": "crewSize", "label": "Crew Size", "required": false, "group": "Order", "min": 1, "max": 20, "step": 1, "defaultValue": 2 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Shoot completion receipt", "required": ["jobId", "timestamp", "producerId", "footageDurationSeconds"] },
+      "tier1": { "description": "Completion + footage CID + shot log", "required": ["jobId", "timestamp", "producerId", "footageDurationSeconds", "footageCid", "shotLogCid"] },
+      "tier2": { "description": "Completion + footage + GPS/time stamp + client acceptance", "required": ["jobId", "timestamp", "producerId", "footageDurationSeconds", "footageCid", "shotLogCid", "shootGps", "clientAcceptanceCid"] }
+    },
+    "pricing": { "basePrice": "200.00", "currency": "USDC", "unit": "per hour", "minimumCharge": "400.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/translation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Human Translation",
+    "description": "Professional human translation of text between a source and target language.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "sourceLang", "label": "Source Language", "required": true, "group": "Languages", "maxLength": 32, "placeholder": "e.g. en, es, zh" },
+      { "type": "string", "key": "targetLang", "label": "Target Language", "required": true, "group": "Languages", "maxLength": 32, "placeholder": "e.g. fr, de, ja" },
+      {
+        "type": "enum", "key": "domain", "label": "Subject Domain", "required": false, "group": "Quality", "defaultValue": "general",
+        "options": [
+          { "value": "general", "label": "General" },
+          { "value": "legal", "label": "Legal", "pricingImpact": { "mode": "percent", "value": "40" } },
+          { "value": "medical", "label": "Medical", "pricingImpact": { "mode": "percent", "value": "50" } },
+          { "value": "technical", "label": "Technical", "pricingImpact": { "mode": "percent", "value": "25" } }
+        ]
+      },
+      { "type": "number", "key": "wordCount", "label": "Word Count", "required": true, "group": "Order", "min": 1, "max": 1000000, "step": 1, "defaultValue": 1000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Translation completion receipt", "required": ["jobId", "timestamp", "translatorId", "wordCount"] },
+      "tier1": { "description": "Completion + delivered text hash + translator credentials", "required": ["jobId", "timestamp", "translatorId", "wordCount", "deliveredTextHash", "credentialsHash"] }
+    },
+    "pricing": { "basePrice": "0.12", "currency": "USDC", "unit": "per word", "minimumCharge": "25.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/transcription/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Audio Transcription",
+    "description": "Human transcription of audio or video into accurate written text.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      { "type": "string", "key": "language", "label": "Audio Language", "required": true, "group": "Audio", "maxLength": 32, "placeholder": "e.g. en, es" },
+      { "type": "boolean", "key": "verbatim", "label": "Verbatim (incl. fillers)", "required": false, "group": "Quality", "defaultValue": false, "pricingImpact": { "mode": "percent", "value": "20" } },
+      { "type": "boolean", "key": "timestamps", "label": "Speaker Timestamps", "required": false, "group": "Quality", "defaultValue": true },
+      { "type": "number", "key": "audioMinutes", "label": "Audio Length", "required": true, "group": "Order", "min": 1, "max": 6000, "step": 1, "unit": "min", "defaultValue": 30 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Transcription completion receipt", "required": ["jobId", "timestamp", "transcriberId", "audioMinutes"] },
+      "tier1": { "description": "Completion + transcript hash + source audio hash", "required": ["jobId", "timestamp", "transcriberId", "audioMinutes", "transcriptHash", "sourceAudioHash"] }
+    },
+    "pricing": { "basePrice": "1.50", "currency": "USDC", "unit": "per audio-minute", "minimumCharge": "15.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/warehouse-bay/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Warehouse Storage Bay",
+    "description": "Rentable pallet/bay storage capacity in a managed warehouse facility.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "bayClass", "label": "Bay Class", "required": true, "group": "Storage", "defaultValue": "ambient",
+        "options": [
+          { "value": "ambient", "label": "Ambient" },
+          { "value": "climate", "label": "Climate Controlled", "pricingImpact": { "mode": "percent", "value": "40" } },
+          { "value": "cold", "label": "Cold / Frozen", "pricingImpact": { "mode": "percent", "value": "120" } },
+          { "value": "hazmat", "label": "Hazmat Rated", "pricingImpact": { "mode": "percent", "value": "80" } }
+        ]
+      },
+      { "type": "number", "key": "pallets", "label": "Pallet Positions", "required": true, "group": "Order", "min": 1, "max": 10000, "step": 1, "defaultValue": 1 },
+      { "type": "number", "key": "days", "label": "Duration", "required": true, "group": "Order", "min": 1, "max": 3650, "step": 1, "unit": "d", "defaultValue": 30 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Storage booking receipt", "required": ["bookingId", "timestamp", "bayClass", "pallets"] },
+      "tier1": { "description": "Booking + WMS slot log + occupancy record", "required": ["bookingId", "timestamp", "bayClass", "pallets", "wmsSlotLogCid", "occupancyRecordCid"] }
+    },
+    "pricing": { "basePrice": "2.00", "currency": "USDC", "unit": "per pallet-day", "minimumCharge": "30.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/compute-time-gpu/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "GPU Compute Time",
+    "description": "Rentable GPU accelerator time for training or inference workloads.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "gpuModel", "label": "GPU Model", "required": true, "group": "Hardware",
+        "options": [
+          { "value": "a100-80g", "label": "NVIDIA A100 80GB" },
+          { "value": "h100", "label": "NVIDIA H100", "pricingImpact": { "mode": "percent", "value": "60" } },
+          { "value": "l40s", "label": "NVIDIA L40S", "pricingImpact": { "mode": "percent", "value": "-30" } },
+          { "value": "gb200", "label": "NVIDIA GB200", "pricingImpact": { "mode": "percent", "value": "140" } }
+        ]
+      },
+      { "type": "number", "key": "gpuCount", "label": "GPU Count", "required": false, "group": "Hardware", "min": 1, "max": 256, "step": 1, "defaultValue": 1 },
+      { "type": "number", "key": "gpuHours", "label": "GPU Hours", "required": true, "group": "Order", "min": 1, "max": 100000, "step": 1, "unit": "h", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Compute session receipt", "required": ["bookingId", "timestamp", "gpuModel", "gpuHours"] },
+      "tier1": { "description": "Session + utilization telemetry + node attestation", "required": ["bookingId", "timestamp", "gpuModel", "gpuHours", "utilizationTelemetryCid", "nodeAttestationCid"] },
+      "tier2": { "description": "Session + telemetry + TEE/remote-attestation quote", "required": ["bookingId", "timestamp", "gpuModel", "gpuHours", "utilizationTelemetryCid", "nodeAttestationCid", "teeAttestationQuote"] }
+    },
+    "pricing": { "basePrice": "2.50", "currency": "USDC", "unit": "per GPU-hour", "minimumCharge": "2.50" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/compute-time-cpu/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "CPU Compute Time",
+    "description": "Rentable general-purpose vCPU time for batch and server workloads.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "instanceClass", "label": "Instance Class", "required": true, "group": "Hardware", "defaultValue": "standard",
+        "options": [
+          { "value": "standard", "label": "Standard" },
+          { "value": "compute-optimized", "label": "Compute Optimized", "pricingImpact": { "mode": "percent", "value": "30" } },
+          { "value": "memory-optimized", "label": "Memory Optimized", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "number", "key": "vcpuHours", "label": "vCPU Hours", "required": true, "group": "Order", "min": 1, "max": 1000000, "step": 1, "unit": "h", "defaultValue": 100 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Compute session receipt", "required": ["bookingId", "timestamp", "instanceClass", "vcpuHours"] },
+      "tier1": { "description": "Session + utilization telemetry + node attestation", "required": ["bookingId", "timestamp", "instanceClass", "vcpuHours", "utilizationTelemetryCid", "nodeAttestationCid"] }
+    },
+    "pricing": { "basePrice": "0.05", "currency": "USDC", "unit": "per vCPU-hour", "minimumCharge": "1.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/delivery-vehicle/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Delivery Vehicle Rental",
+    "description": "Rentable vehicle capacity (with or without driver) for freight movement.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "vehicleType", "label": "Vehicle Type", "required": true, "group": "Vehicle",
+        "options": [
+          { "value": "cargo-van", "label": "Cargo Van" },
+          { "value": "box-truck", "label": "Box Truck", "pricingImpact": { "mode": "percent", "value": "60" } },
+          { "value": "refrigerated", "label": "Refrigerated Truck", "pricingImpact": { "mode": "percent", "value": "100" } },
+          { "value": "flatbed", "label": "Flatbed", "pricingImpact": { "mode": "percent", "value": "80" } }
+        ]
+      },
+      { "type": "boolean", "key": "withDriver", "label": "Include Driver", "required": false, "group": "Vehicle", "defaultValue": true, "pricingImpact": { "mode": "percent", "value": "70" } },
+      { "type": "number", "key": "distanceKm", "label": "Distance", "required": true, "group": "Order", "min": 1, "max": 5000, "step": 1, "unit": "km", "defaultValue": 50 }
+    ],
+    "constraints": [
+      {
+        "key": "delivery-reefer-driver",
+        "human": "Refrigerated trucks must be operated with a driver.",
+        "severity": "error",
+        "when": [
+          { "param": "vehicleType", "operator": "equals", "value": "refrigerated" },
+          { "param": "withDriver", "operator": "equals", "value": false }
+        ],
+        "then": [{ "action": "reject", "param": "withDriver", "message": "Refrigerated vehicle requires an included driver." }]
+      }
+    ],
+    "evidence": {
+      "tier0": { "description": "Trip completion receipt", "required": ["bookingId", "timestamp", "vehicleType", "distanceKm"] },
+      "tier1": { "description": "Completion + GPS route track + odometer log", "required": ["bookingId", "timestamp", "vehicleType", "distanceKm", "gpsTrackCid", "odometerLogCid"] },
+      "tier2": { "description": "Completion + GPS + cargo condition photos + temperature trace", "required": ["bookingId", "timestamp", "vehicleType", "distanceKm", "gpsTrackCid", "odometerLogCid", "cargoConditionPhotosCid", "temperatureTraceCid"] }
+    },
+    "pricing": { "basePrice": "1.20", "currency": "USDC", "unit": "per km", "minimumCharge": "40.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/dataset-curated/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Curated Dataset License",
+    "description": "Access license to a curated, documented dataset asset.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "domain", "label": "Dataset Domain", "required": true, "group": "Dataset",
+        "options": [
+          { "value": "vision", "label": "Computer Vision" },
+          { "value": "nlp", "label": "Language / NLP" },
+          { "value": "sensor", "label": "Sensor / Time-Series" },
+          { "value": "geospatial", "label": "Geospatial" }
+        ]
+      },
+      {
+        "type": "enum", "key": "license", "label": "License Tier", "required": true, "group": "Dataset", "defaultValue": "research",
+        "options": [
+          { "value": "research", "label": "Research / Non-Commercial" },
+          { "value": "commercial", "label": "Commercial", "pricingImpact": { "mode": "multiplier", "value": "4" } }
+        ]
+      },
+      { "type": "number", "key": "rows", "label": "Row / Record Count", "required": false, "group": "Dataset", "min": 1, "max": 1000000000, "step": 1, "defaultValue": 100000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Access grant receipt", "required": ["bookingId", "timestamp", "datasetId", "accessGranted"] },
+      "tier1": { "description": "Grant + dataset content hash + datasheet + license terms hash", "required": ["bookingId", "timestamp", "datasetId", "accessGranted", "datasetContentHash", "datasheetCid", "licenseTermsHash"] }
+    },
+    "pricing": { "basePrice": "500.00", "currency": "USDC", "unit": "per dataset", "minimumCharge": "500.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/equipment-rental/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Equipment Rental",
+    "description": "Time-based rental of a physical tool, machine, or instrument asset.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "category", "label": "Equipment Category", "required": true, "group": "Equipment",
+        "options": [
+          { "value": "power-tool", "label": "Power Tool" },
+          { "value": "construction", "label": "Construction / Heavy" },
+          { "value": "lab-instrument", "label": "Lab Instrument" },
+          { "value": "av", "label": "Audio / Visual" }
+        ]
+      },
+      { "type": "boolean", "key": "insurance", "label": "Damage Waiver", "required": false, "group": "Equipment", "defaultValue": true, "pricingImpact": { "mode": "percent", "value": "12" } },
+      { "type": "number", "key": "days", "label": "Rental Days", "required": true, "group": "Order", "min": 1, "max": 365, "step": 1, "unit": "d", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Rental booking receipt", "required": ["bookingId", "timestamp", "assetId", "days"] },
+      "tier1": { "description": "Booking + checkout/return log + condition record", "required": ["bookingId", "timestamp", "assetId", "days", "checkoutReturnLogCid", "conditionRecordCid"] },
+      "tier2": { "description": "Booking + log + checkout/return condition photos", "required": ["bookingId", "timestamp", "assetId", "days", "checkoutReturnLogCid", "conditionRecordCid", "conditionPhotosCid"] }
+    },
+    "pricing": { "basePrice": "75.00", "currency": "USDC", "unit": "per day", "minimumCharge": "75.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/sensor-feed/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Sensor Data Feed",
+    "description": "Subscription access to a live or historical physical sensor data stream.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["mqtt", "http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "sensorType", "label": "Sensor Type", "required": true, "group": "Feed",
+        "options": [
+          { "value": "environmental", "label": "Environmental (temp/humidity/air)" },
+          { "value": "vibration", "label": "Vibration / Acoustic" },
+          { "value": "power", "label": "Power / Energy" },
+          { "value": "gps-telemetry", "label": "GPS / Telemetry" }
+        ]
+      },
+      { "type": "number", "key": "samplingHz", "label": "Sampling Rate", "required": false, "group": "Feed", "min": 1, "max": 100000, "step": 1, "unit": "Hz", "defaultValue": 1 },
+      { "type": "number", "key": "months", "label": "Subscription Months", "required": true, "group": "Order", "min": 1, "max": 60, "step": 1, "unit": "mo", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Feed activation receipt", "required": ["bookingId", "timestamp", "sensorType", "channelId"] },
+      "tier1": { "description": "Activation + delivered-readings hash + uptime record + calibration cert", "required": ["bookingId", "timestamp", "sensorType", "channelId", "readingsHash", "uptimeRecordCid", "calibrationCertCid"] }
+    },
+    "pricing": { "basePrice": "49.00", "currency": "USDC", "unit": "per month", "minimumCharge": "49.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/parking-space/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Parking / Staging Space",
+    "description": "Rentable parking or equipment-staging space for a defined period.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api", "manual"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "spaceType", "label": "Space Type", "required": true, "group": "Space",
+        "options": [
+          { "value": "standard", "label": "Standard Vehicle" },
+          { "value": "oversize", "label": "Oversize / RV", "pricingImpact": { "mode": "percent", "value": "60" } },
+          { "value": "covered", "label": "Covered / Indoor", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "number", "key": "days", "label": "Duration", "required": true, "group": "Order", "min": 1, "max": 365, "step": 1, "unit": "d", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Space booking receipt", "required": ["bookingId", "timestamp", "spaceType", "days"] },
+      "tier1": { "description": "Booking + entry/exit access log", "required": ["bookingId", "timestamp", "spaceType", "days", "accessLogCid"] }
+    },
+    "pricing": { "basePrice": "15.00", "currency": "USDC", "unit": "per day", "minimumCharge": "15.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/server-rack/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Server Rack Colocation",
+    "description": "Rentable rack-unit colocation with power and network in a data center.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api"] },
+    "parameters": [
+      { "type": "number", "key": "rackUnits", "label": "Rack Units (U)", "required": true, "group": "Colo", "min": 1, "max": 48, "step": 1, "unit": "U", "defaultValue": 4 },
+      { "type": "number", "key": "powerKw", "label": "Power Allocation", "required": true, "group": "Colo", "min": 1, "max": 50, "step": 1, "unit": "kW", "defaultValue": 2 },
+      {
+        "type": "enum", "key": "redundancy", "label": "Redundancy", "required": false, "group": "Colo", "defaultValue": "n",
+        "options": [
+          { "value": "n", "label": "N (no redundancy)" },
+          { "value": "n+1", "label": "N+1", "pricingImpact": { "mode": "percent", "value": "25" } },
+          { "value": "2n", "label": "2N", "pricingImpact": { "mode": "percent", "value": "60" } }
+        ]
+      },
+      { "type": "number", "key": "months", "label": "Duration", "required": true, "group": "Order", "min": 1, "max": 60, "step": 1, "unit": "mo", "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Colocation booking receipt", "required": ["bookingId", "timestamp", "rackUnits", "months"] },
+      "tier1": { "description": "Booking + power draw telemetry + uptime SLA record", "required": ["bookingId", "timestamp", "rackUnits", "months", "powerTelemetryCid", "uptimeSlaRecordCid"] },
+      "tier2": { "description": "Booking + telemetry + access-control audit log", "required": ["bookingId", "timestamp", "rackUnits", "months", "powerTelemetryCid", "uptimeSlaRecordCid", "accessAuditLogCid"] }
+    },
+    "pricing": { "basePrice": "50.00", "currency": "USDC", "unit": "per U-month", "minimumCharge": "200.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/bandwidth-allocation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Bandwidth Allocation",
+    "description": "Committed network egress/transit bandwidth allocation.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "tier", "label": "Network Tier", "required": true, "group": "Network", "defaultValue": "standard",
+        "options": [
+          { "value": "standard", "label": "Standard Transit" },
+          { "value": "premium", "label": "Premium / Low-Latency", "pricingImpact": { "mode": "percent", "value": "50" } }
+        ]
+      },
+      { "type": "number", "key": "gigabytes", "label": "Data Volume", "required": true, "group": "Order", "min": 1, "max": 10000000, "step": 1, "unit": "GB", "defaultValue": 1000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Allocation activation receipt", "required": ["bookingId", "timestamp", "tier", "gigabytes"] },
+      "tier1": { "description": "Activation + transferred-bytes meter + latency SLA record", "required": ["bookingId", "timestamp", "tier", "gigabytes", "byteMeterCid", "latencySlaRecordCid"] }
+    },
+    "pricing": { "basePrice": "0.08", "currency": "USDC", "unit": "per GB", "minimumCharge": "10.00" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/llm-inference/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "LLM Inference",
+    "description": "Token-metered large language model inference over a prompt.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "modelClass", "label": "Model Class", "required": true, "group": "Model",
+        "options": [
+          { "value": "small", "label": "Small / Fast" },
+          { "value": "medium", "label": "Medium", "pricingImpact": { "mode": "multiplier", "value": "3" } },
+          { "value": "frontier", "label": "Frontier", "pricingImpact": { "mode": "multiplier", "value": "12" } }
+        ]
+      },
+      { "type": "number", "key": "inputTokens", "label": "Input Tokens", "required": true, "group": "Usage", "min": 1, "max": 2000000, "step": 1, "defaultValue": 1000 },
+      { "type": "number", "key": "outputTokens", "label": "Output Tokens", "required": true, "group": "Usage", "min": 1, "max": 200000, "step": 1, "defaultValue": 500 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Inference completion receipt", "required": ["requestId", "timestamp", "modelClass", "status"] },
+      "tier1": { "description": "Completion + prompt/output hashes + token usage", "required": ["requestId", "timestamp", "modelClass", "status", "promptHash", "outputHash", "tokenUsage"] },
+      "tier2": { "description": "Completion + hashes + signed receipt + model/version attestation", "required": ["requestId", "timestamp", "modelClass", "status", "promptHash", "outputHash", "tokenUsage", "signedReceiptCid", "modelVersionAttestation"] }
+    },
+    "pricing": { "basePrice": "0.01", "currency": "USDC", "unit": "per 1K tokens", "minimumCharge": "0.01" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/vector-search/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Vector Search Query",
+    "description": "Approximate nearest-neighbor search over a hosted vector index.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "indexSize", "label": "Index Size", "required": true, "group": "Index", "defaultValue": "medium",
+        "options": [
+          { "value": "small", "label": "≤1M vectors" },
+          { "value": "medium", "label": "1M–100M vectors" },
+          { "value": "large", "label": ">100M vectors", "pricingImpact": { "mode": "percent", "value": "80" } }
+        ]
+      },
+      { "type": "number", "key": "topK", "label": "Top-K", "required": false, "group": "Query", "min": 1, "max": 1000, "step": 1, "defaultValue": 10 },
+      { "type": "number", "key": "queries", "label": "Query Count", "required": true, "group": "Order", "min": 1, "max": 100000000, "step": 1, "defaultValue": 1000 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Query batch receipt", "required": ["requestId", "timestamp", "indexSize", "queryCount"] },
+      "tier1": { "description": "Completion + index snapshot hash + latency metrics", "required": ["requestId", "timestamp", "indexSize", "queryCount", "indexSnapshotHash", "latencyMetricsCid"] }
+    },
+    "pricing": { "basePrice": "0.50", "currency": "USDC", "unit": "per 1K queries", "minimumCharge": "0.50" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/image-generation/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Image Generation",
+    "description": "Text-to-image or image-to-image generative model inference.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "resolution", "label": "Resolution", "required": true, "group": "Output", "defaultValue": "1024",
+        "options": [
+          { "value": "512", "label": "512×512" },
+          { "value": "1024", "label": "1024×1024" },
+          { "value": "2048", "label": "2048×2048", "pricingImpact": { "mode": "multiplier", "value": "3" } }
+        ]
+      },
+      { "type": "number", "key": "images", "label": "Image Count", "required": true, "group": "Order", "min": 1, "max": 10000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Generation completion receipt", "required": ["requestId", "timestamp", "resolution", "imageCount"] },
+      "tier1": { "description": "Completion + prompt hash + output image hashes + seed", "required": ["requestId", "timestamp", "resolution", "imageCount", "promptHash", "outputImageHashes", "seed"] },
+      "tier2": { "description": "Completion + hashes + C2PA provenance manifest", "required": ["requestId", "timestamp", "resolution", "imageCount", "promptHash", "outputImageHashes", "seed", "c2paManifestCid"] }
+    },
+    "pricing": { "basePrice": "0.04", "currency": "USDC", "unit": "per image", "minimumCharge": "0.04" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/code-execution/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Sandboxed Code Execution",
+    "description": "Isolated execution of submitted code in a metered sandbox runtime.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "runtime", "label": "Runtime", "required": true, "group": "Sandbox",
+        "options": [
+          { "value": "python", "label": "Python" },
+          { "value": "node", "label": "Node.js" },
+          { "value": "wasm", "label": "WASM" },
+          { "value": "container", "label": "Custom Container", "pricingImpact": { "mode": "percent", "value": "30" } }
+        ]
+      },
+      { "type": "number", "key": "memoryGb", "label": "Memory", "required": false, "group": "Sandbox", "min": 1, "max": 256, "step": 1, "unit": "GB", "defaultValue": 2 },
+      { "type": "number", "key": "computeMinutes", "label": "Compute Minutes", "required": true, "group": "Order", "min": 1, "max": 100000, "step": 1, "unit": "min", "defaultValue": 10 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Execution completion receipt", "required": ["requestId", "timestamp", "runtime", "exitCode"] },
+      "tier1": { "description": "Completion + code hash + stdout/stderr hash + resource usage", "required": ["requestId", "timestamp", "runtime", "exitCode", "codeHash", "outputLogHash", "resourceUsageCid"] },
+      "tier2": { "description": "Completion + hashes + TEE attestation of sandbox", "required": ["requestId", "timestamp", "runtime", "exitCode", "codeHash", "outputLogHash", "resourceUsageCid", "teeAttestationQuote"] }
+    },
+    "pricing": { "basePrice": "0.10", "currency": "USDC", "unit": "per minute", "minimumCharge": "0.10" }
+  },
+  {
+    "$schema": "https://pcc.network/schemas/csd/v1",
+    "url": "pcc://capabilities/structured-extraction/v1",
+    "version": "1.0.0",
+    "status": "active",
+    "name": "Structured Data Extraction",
+    "description": "Extraction of structured fields from unstructured documents or media.",
+    "kind": "base",
+    "baseDefinition": null,
+    "discovery": { "protocols": ["http", "api"] },
+    "parameters": [
+      {
+        "type": "enum", "key": "modality", "label": "Input Modality", "required": true, "group": "Input",
+        "options": [
+          { "value": "pdf", "label": "PDF / Document" },
+          { "value": "image", "label": "Image / Scan" },
+          { "value": "html", "label": "HTML / Web" },
+          { "value": "audio", "label": "Audio", "pricingImpact": { "mode": "percent", "value": "40" } }
+        ]
+      },
+      { "type": "string", "key": "schemaRef", "label": "Target Schema Reference", "required": true, "group": "Schema", "maxLength": 256, "placeholder": "JSON Schema ID or CID" },
+      { "type": "number", "key": "documents", "label": "Document Count", "required": true, "group": "Order", "min": 1, "max": 1000000, "step": 1, "defaultValue": 1 }
+    ],
+    "constraints": [],
+    "evidence": {
+      "tier0": { "description": "Extraction completion receipt", "required": ["requestId", "timestamp", "modality", "documentCount"] },
+      "tier1": { "description": "Completion + source hash + output hash + schema-validation report", "required": ["requestId", "timestamp", "modality", "documentCount", "sourceHash", "outputHash", "schemaValidationReportCid"] },
+      "tier2": { "description": "Completion + hashes + field-level confidence + human-QA sample", "required": ["requestId", "timestamp", "modality", "documentCount", "sourceHash", "outputHash", "schemaValidationReportCid", "fieldConfidenceCid", "humanQaSampleCid"] }
+    },
+    "pricing": { "basePrice": "0.02", "currency": "USDC", "unit": "per document", "minimumCharge": "1.00" }
+  }
+]
