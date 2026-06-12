@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Publish a Capability</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0c0f15; --surface:#11151d; --surface2:#161b25;
+  --line:rgba(150,172,205,.10); --line2:rgba(150,172,205,.20);
+  --fg:#e9edf4; --muted:#8b94a6; --faint:#5b6475;
+  --lime:#c6f24e; --cyan:#6cd6ff; --amber:#ffb24d; --violet:#c8a2ff; --danger:#ff6f6f;
+  --accent:var(--lime);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Instrument Sans',system-ui,sans-serif;
+  --display:'Bricolage Grotesque',var(--sans);
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg); color:var(--fg); font-family:var(--sans);
+  -webkit-font-smoothing:antialiased; line-height:1.5; overflow-x:hidden;
+}
+/* atmosphere */
+.grid-bg,.glow,.grain{position:fixed;inset:0;pointer-events:none;z-index:0}
+.grid-bg{
+  background-image:
+    linear-gradient(var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px),
+    linear-gradient(rgba(150,172,205,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(150,172,205,.05) 1px,transparent 1px);
+  background-size:160px 160px,160px 160px,32px 32px,32px 32px;
+  mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);
+  opacity:.6;
+}
+.glow{
+  background:
+    radial-gradient(60% 50% at 82% -5%,rgba(198,242,78,.10),transparent 60%),
+    radial-gradient(55% 45% at 8% 8%,rgba(108,214,255,.08),transparent 60%);
+}
+.grain{
+  opacity:.045;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+/* top bar */
+header{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
+  padding:16px clamp(18px,4vw,52px);
+  background:linear-gradient(180deg,rgba(10,12,16,.92),rgba(10,12,16,.55));
+  backdrop-filter:blur(14px);border-bottom:1px solid var(--line);
+}
+.brand{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;letter-spacing:.04em}
+.brand .mark{width:26px;height:26px;border:1.5px solid var(--lime);border-radius:7px;position:relative;flex:none}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--lime)}
+.brand .mark::before{inset:6px auto 6px 6px;width:2px}
+.brand .mark::after{inset:6px 6px auto 6px;height:2px}
+.brand b{color:var(--fg);font-weight:700}
+.brand span{color:var(--faint)}
+.top-right{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px}
+.lane-chip{display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid var(--line2);border-radius:999px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.lane-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.lane-chip[data-on="machine"]{color:var(--cyan);border-color:rgba(108,214,255,.4)}
+.lane-chip[data-on="machine"] .dot{background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+.lane-chip[data-on="human"]{color:var(--amber);border-color:rgba(255,178,77,.4)}
+.lane-chip[data-on="human"] .dot{background:var(--amber);box-shadow:0 0 10px var(--amber)}
+.lane-chip[data-on="asset"]{color:var(--violet);border-color:rgba(200,162,255,.4)}
+.lane-chip[data-on="asset"] .dot{background:var(--violet);box-shadow:0 0 10px var(--violet)}
+.mode-toggle{display:flex;border:1px solid var(--line2);border-radius:999px;overflow:hidden;cursor:pointer;user-select:none}
+.mode-toggle span{padding:6px 12px;color:var(--faint);transition:.2s}
+.mode-toggle span.on{background:var(--lime);color:#0a0c10;font-weight:700}
+.mode-toggle span.live.on{background:var(--danger);color:#fff}
+
+/* layout */
+main{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:clamp(20px,4vw,44px);
+  display:grid;grid-template-columns:minmax(0,1.06fr) minmax(0,.94fr);gap:clamp(16px,2.4vw,30px);align-items:start}
+@media(max-width:920px){main{grid-template-columns:1fr}.wire{position:static!important}}
+
+.hero{grid-column:1/-1;margin-bottom:6px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);transition:color .4s}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(30px,4.6vw,52px);line-height:1.02;letter-spacing:-.02em;margin:.32em 0 .15em}
+.hero h1 .em{color:var(--accent);transition:color .4s}
+.hero p{color:var(--muted);max-width:54ch;font-size:15px}
+.manifesto{font-family:var(--display);font-weight:800;font-size:clamp(22px,3.6vw,42px);letter-spacing:-.025em;margin-top:24px;color:var(--lime);display:flex;align-items:center;gap:14px;text-shadow:0 0 44px rgba(198,242,78,.35)}
+.manifesto .mk{font-size:.58em;opacity:.75;animation:blip 2.4s infinite}
+.manifesto::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,rgba(198,242,78,.5),transparent)}
+
+.panel{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.panel-pad{padding:clamp(20px,2.4vw,30px)}
+
+/* stepper */
+.stepper{display:flex;gap:4px;padding:14px clamp(16px,2vw,24px);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.stepper::-webkit-scrollbar{display:none}
+.step-pip{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:9px;cursor:pointer;white-space:nowrap;color:var(--faint);transition:.2s;flex:none}
+.step-pip .n{font-family:var(--mono);font-size:11px;width:20px;height:20px;display:grid;place-items:center;border:1px solid var(--line2);border-radius:6px}
+.step-pip .lbl{font-size:12.5px;letter-spacing:.02em}
+.step-pip.done{color:var(--muted)}
+.step-pip.done .n{border-color:rgba(198,242,78,.5);color:var(--lime)}
+.step-pip.active{color:var(--fg)}
+.step-pip.active .n{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+
+/* step body */
+.step-body{animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.kick{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
+.q{font-family:var(--display);font-weight:700;font-size:clamp(20px,2.4vw,27px);letter-spacing:-.01em;margin:0 0 4px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 22px;max-width:52ch}
+
+/* lane cards */
+.lanes{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:820px){.lanes{grid-template-columns:1fr}}
+.lane{position:relative;text-align:left;padding:22px;border:1px solid var(--line2);border-radius:12px;background:var(--surface2);cursor:pointer;transition:.22s;overflow:hidden}
+.lane:hover{transform:translateY(-3px);border-color:var(--lc)}
+.lane.sel{border-color:var(--lc);box-shadow:0 0 0 1px var(--lc),0 18px 40px -22px var(--lc)}
+.lane::after{content:"";position:absolute;inset:0;background:radial-gradient(120% 80% at 100% 0%,var(--lcg),transparent 60%);opacity:.5;pointer-events:none}
+.lane .ico{font-family:var(--mono);font-size:12px;color:var(--lc);letter-spacing:.1em}
+.lane h3{font-family:var(--display);font-weight:700;font-size:22px;margin:10px 0 6px}
+.lane p{color:var(--muted);font-size:13.5px;margin:0}
+.lane.m{--lc:var(--cyan);--lcg:rgba(108,214,255,.16)}
+.lane.h{--lc:var(--amber);--lcg:rgba(255,178,77,.16)}
+.lane.a{--lc:var(--violet);--lcg:rgba(200,162,255,.16)}
+.lane .tag{margin-top:14px;display:inline-block;font-family:var(--mono);font-size:10.5px;color:var(--faint);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+
+/* fields */
+.field{margin-bottom:18px}
+.field>label{display:block;font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.field .hint{color:var(--faint);font-size:12px;font-family:var(--sans);text-transform:none;letter-spacing:0}
+input[type=text],input[type=number],input[type=url],input[type=password],input[type=datetime-local],textarea,select{
+  width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:10px;color:var(--fg);
+  font-family:var(--mono);font-size:14px;padding:12px 14px;transition:.18s;outline:none}
+textarea{font-family:var(--sans);min-height:84px;resize:vertical;line-height:1.5}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:520px){.row{grid-template-columns:1fr}}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chip{font-family:var(--mono);font-size:12px;padding:6px 11px;border:1px solid var(--line2);border-radius:999px;color:var(--muted);cursor:pointer;transition:.15s}
+.chip:hover{border-color:var(--accent);color:var(--fg)}
+.chip.on{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+
+/* toggle */
+.tog{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;color:var(--muted);cursor:pointer;user-select:none}
+.tog .sw{width:34px;height:20px;background:var(--line2);border-radius:11px;position:relative;transition:.2s;flex:none}
+.tog .sw::after{content:"";position:absolute;width:14px;height:14px;background:var(--fg);border-radius:50%;top:3px;left:3px;transition:.2s}
+.tog input{display:none}
+.tog input:checked+.sw{background:var(--accent)}
+.tog input:checked+.sw::after{left:17px;background:#0a0c10}
+
+/* segmented */
+.seg{display:flex;gap:6px;background:var(--bg);border:1px solid var(--line2);border-radius:11px;padding:5px}
+.seg button{flex:1;font-family:var(--mono);font-size:12.5px;padding:9px 8px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;transition:.15s;letter-spacing:.02em}
+.seg button:hover{color:var(--fg)}
+.seg button.on{background:var(--accent);color:#0a0c10;font-weight:700}
+.seg.presence button[data-v=available].on{background:var(--lime)}
+.seg.presence button[data-v=busy].on{background:var(--amber)}
+.seg.presence button[data-v=offline].on{background:var(--faint);color:#fff}
+
+/* slider */
+.slider-row{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px}
+.slider-row .val{font-family:var(--mono);color:var(--accent);font-size:15px;font-weight:700}
+.slider-row .human{font-size:12.5px;color:var(--muted)}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:4px;background:var(--line2);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--accent);cursor:pointer;border:3px solid var(--bg);box-shadow:0 0 0 1px var(--accent),0 0 16px color-mix(in srgb,var(--accent) 60%,transparent)}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:3px solid var(--bg)}
+
+/* tier cards */
+.tiers{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+@media(max-width:620px){.tiers{grid-template-columns:1fr 1fr}}
+.tier{padding:13px 12px;border:1px solid var(--line2);border-radius:10px;background:var(--surface2);cursor:pointer;transition:.16s}
+.tier:hover{border-color:var(--accent)}
+.tier.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.tier .t{font-family:var(--mono);font-size:11px;color:var(--accent)}
+.tier .nm{font-weight:600;font-size:14px;margin:6px 0 3px}
+.tier .d{font-size:11.5px;color:var(--muted);line-height:1.35}
+
+/* prove */
+.prove-card{border:1px dashed var(--line2);border-radius:12px;padding:22px;text-align:center;background:var(--surface2)}
+.prove-card .big{font-family:var(--display);font-weight:700;font-size:19px;margin:6px 0}
+.prove-card .meta{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:8px}
+.evi{display:flex;gap:10px;justify-content:center;margin:16px 0 4px;flex-wrap:wrap}
+.evi .pill{font-family:var(--mono);font-size:11.5px;padding:8px 12px;border:1px solid var(--line2);border-radius:8px;color:var(--muted);cursor:pointer;transition:.15s}
+.evi .pill.got{border-color:var(--lime);color:var(--lime)}
+
+/* network teaser (machine flow truth box) */
+.tbox{border:1px solid rgba(108,214,255,.25);border-radius:10px;background:rgba(108,214,255,.04);padding:13px 15px;margin-top:14px;font-size:13px;color:var(--muted)}
+.tbox b{color:var(--cyan);font-family:var(--mono);font-size:12px;letter-spacing:.08em}
+.tbox code{font-family:var(--mono);font-size:12px;background:var(--bg);padding:1px 6px;border-radius:4px;color:var(--fg)}
+
+/* nav */
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:12px 22px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn.primary:disabled{opacity:.4;cursor:not-allowed;transform:none;filter:none}
+.btn.ghost{padding:12px 16px}
+
+/* wire / api plan */
+.wire{position:sticky;top:84px}
+.wire .panel{background:linear-gradient(180deg,#0b0e14,#090b10)}
+.wire-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.wire-head .tcol{display:flex;align-items:center;gap:7px;color:var(--muted)}
+.wire-head .blip{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1.6s infinite}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+.console{padding:8px 0;max-height:calc(100vh - 220px);overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.55}
+.console::-webkit-scrollbar{width:8px}.console::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+.call{padding:11px 16px;border-left:2px solid transparent;transition:.25s;opacity:.55}
+.call.active{opacity:1;border-left-color:var(--accent);background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 7%,transparent),transparent 70%)}
+.call .meth{display:inline-block;font-weight:700;padding:1px 7px;border-radius:5px;font-size:10.5px;margin-right:8px}
+.call .meth.POST{background:rgba(198,242,78,.16);color:var(--lime)}
+.call .meth.GET{background:rgba(108,214,255,.16);color:var(--cyan)}
+.call .meth.PUT{background:rgba(200,162,255,.16);color:var(--violet)}
+.call .path{color:var(--fg)}
+.call .lab{display:block;color:var(--faint);font-size:10.5px;margin:3px 0 0 2px;letter-spacing:.02em}
+.call .opt{color:var(--amber);font-size:9.5px;border:1px solid rgba(255,178,77,.4);border-radius:4px;padding:0 4px;margin-left:6px}
+.json{margin:7px 0 0;padding:10px 12px;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word;color:var(--muted)}
+.json .k{color:var(--cyan)}.json .s{color:var(--lime)}.json .n{color:var(--amber)}.json .v{color:#d7b3ff}
+.wire-foot{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+.wire-foot .btn{flex:1;text-align:center;padding:10px}
+
+/* live finale */
+.finale{text-align:center;padding:20px 6px;animation:rise .6s both}
+.activated{font-family:var(--mono);font-size:12px;letter-spacing:.3em;color:var(--lime);text-transform:uppercase}
+.finale h2{font-family:var(--display);font-weight:800;font-size:clamp(26px,4vw,40px);letter-spacing:-.02em;margin:10px 0 4px}
+.live-card{margin:22px auto 0;max-width:480px;text-align:left;border:1px solid rgba(198,242,78,.35);border-radius:14px;background:linear-gradient(180deg,rgba(198,242,78,.05),transparent);padding:20px;box-shadow:0 0 60px -28px var(--lime)}
+.live-card .lh{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em}
+.live-card .cn{font-family:var(--display);font-weight:700;font-size:20px;margin:8px 0}
+.live-card .meta{font-family:var(--mono);font-size:12px;color:var(--muted);display:grid;gap:5px;margin-top:8px}
+.live-card .meta b{color:var(--fg);font-weight:500}
+.cardurl{margin-top:16px;display:flex;gap:8px;align-items:center;background:var(--bg);border:1px solid var(--line2);border-radius:9px;padding:9px 11px;font-family:var(--mono);font-size:11.5px;color:var(--cyan);overflow:auto;white-space:nowrap}
+.cardurl button{flex:none;margin-left:auto;font-family:var(--mono);font-size:10.5px;background:transparent;border:1px solid var(--line2);color:var(--muted);border-radius:6px;padding:5px 8px;cursor:pointer}
+
+/* what-happens-next grid in finale */
+.wn{margin:22px auto 0;max-width:680px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:620px){.wn{grid-template-columns:1fr 1fr}}
+.wn .c{border:1px solid var(--line2);border-radius:10px;padding:13px 12px;background:var(--surface2);text-align:left}
+.wn .c .h{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--accent);text-transform:uppercase}
+.wn .c .t{font-family:var(--display);font-weight:700;font-size:14px;margin:6px 0 4px;line-height:1.2}
+.wn .c .d{font-size:11.5px;color:var(--muted);line-height:1.4}
+
+/* modal */
+.scrim{position:fixed;inset:0;background:rgba(5,6,9,.72);backdrop-filter:blur(6px);z-index:50;display:none;place-items:center;padding:20px}
+.scrim.on{display:grid}
+.modal{width:min(460px,100%);background:var(--surface);border:1px solid var(--line2);border-radius:14px;padding:24px;animation:rise .3s both}
+.modal h3{font-family:var(--display);font-weight:700;margin:0 0 6px;font-size:20px}
+.modal .warn{font-size:13px;color:var(--amber);background:rgba(255,178,77,.08);border:1px solid rgba(255,178,77,.3);border-radius:9px;padding:10px 12px;margin:6px 0 16px;font-family:var(--mono);font-size:12px;line-height:1.5}
+.modal .acts{display:flex;gap:10px;margin-top:18px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--lime);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:11px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.foot{grid-column:1/-1;text-align:center;font-family:var(--mono);font-size:11px;color:var(--faint);padding:30px 0 6px;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div><div class="glow"></div><div class="grain"></div>
+
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// capability.network</span></div>
+  <div class="top-right">
+    <div class="lane-chip" id="laneChip"><span class="dot"></span><span id="laneChipTxt">no lane</span></div>
+    <div class="mode-toggle" id="modeToggle" title="dry-run never posts to the network">
+      <span class="on" data-m="dry">DRY-RUN</span><span class="live" data-m="live">LIVE</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow" id="eyebrow">Operator onboarding</div>
+    <h1>Publish a <span class="em">capability</span> to the network.</h1>
+    <p>Wrap a machine, a human skill, or an asset as a callable, composable PCC capability. Fill the left — watch the real protocol assemble on the right.</p>
+    <div class="manifesto"><span class="mk">&#9670;</span> Agentically compose reality.</div>
+  </div>
+
+  <!-- LEFT: guided form -->
+  <div class="panel">
+    <div class="stepper" id="stepper"></div>
+    <div class="panel-pad"><div id="stepBody"></div>
+      <div class="nav">
+        <button class="btn ghost" id="backBtn">← Back</button>
+        <button class="btn primary" id="nextBtn">Continue →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live wire -->
+  <div class="wire">
+    <div class="panel">
+      <div class="wire-head">
+        <span>Outbound · A2A / REST</span>
+        <span class="tcol"><span class="blip"></span><span id="wireMode">dry-run</span></span>
+      </div>
+      <div class="console" id="console"></div>
+      <div class="wire-foot">
+        <button class="btn" id="copyBtn">Copy plan</button>
+        <button class="btn primary" id="goliveBtn">Go live ▸</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Agentically compose reality · PCC // capability.network · publish the primitive, agents compose the rest</div>
+</main>
+
+<div class="scrim" id="scrim">
+  <div class="modal">
+    <h3>Execute against a gateway</h3>
+    <p style="color:var(--muted);font-size:13.5px;margin:0 0 4px">This runs the sequence for real. Point at a dev gateway — live creates an actual kernel, capability, or asset.</p>
+    <div class="warn">⚠ Never aim this at production capability.network with throwaway data. Use http://localhost:8080 or a staging URL.</div>
+    <div class="field"><label>Base URL</label><input type="url" id="mBase" value="http://localhost:8080"></div>
+    <div class="field"><label>API key <span class="hint">(pcc_live_… / pcc_test_…)</span></label><input type="password" id="mKey" placeholder="leave blank to provision a fresh one"></div>
+    <div class="acts"><button class="btn ghost" id="mCancel" style="flex:1">Cancel</button><button class="btn primary" id="mRun" style="flex:1">Execute sequence</button></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const STEPS=["Lane","Identity","Configure","Terms","Prove","Live"];
+const TYPES_M=["3d-printing","cnc","laser-cutting","hplc","liquid-handling","pcb","injection-molding"];
+const TYPES_H=["courier","inspection","field-tech","data-labeling","design-review","sample-collection"];
+const TYPES_A=["warehouse-bay","compute-time","delivery-vehicle","dataset","equipment-rental","sensor-feed"];
+const ADAPTERS=["generic-http","octoprint","modbus","opcua","sila","mock"];
+const TIERS=[["0","Self-attested","Device/operator health only. Prototyping."],["1","Verified","Bundle hash + completion events. Standard."],["2","Certified","Photo + sensors + event log. Regulated."],["3","Sovereign","Full chain + ZK + multi-verifier. Medical/aero."]];
+const ASSET_NEED_TYPES=["3d-printing","liquid-handling","courier","inspection","data-labeling","compute-time","field-tech"];
+
+const S={lane:null,name:"",type:"",desc:"",email:"",
+ adapter:"generic-http",endpoint:"",model:"",
+ city:"San Francisco",lat:37.77,lng:-122.42,
+ acceptSec:90,deadlineSec:3600,presence:"available",mode:"on-demand",
+ schedAt:"",schedDur:30,recurEvery:"daily",recurAt:"09:00",
+ onTimeout:"reassign",onMiss:"refund+bond-slash",
+ budgetCap:5000,dailyCap:200,allowedTypes:[],requireApproval:false,
+ optimize:"price",
+ price:10,tier:1, proof:{},
+ step:0,live:false};
+
+const $=s=>document.querySelector(s);
+const laneColor=()=>S.lane==="machine"?"var(--cyan)":S.lane==="human"?"var(--amber)":S.lane==="asset"?"var(--violet)":"var(--lime)";
+const slug=t=>(t||"cap").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+function setAccent(){document.documentElement.style.setProperty('--accent',laneColor());}
+
+function humanTime(s){s=+s;if(s<60)return s+"s";if(s<3600)return(Math.round(s/60*10)/10).toString().replace(/\.0$/,'')+" min";return(Math.round(s/3600*10)/10).toString().replace(/\.0$/,'')+" hr";}
+
+/* ---------- API PLAN ---------- */
+/* Routes touched per lane:
+ *   machine → /api/kernels, /api/setup/register-device, /api/capabilities, /api/setup/test-job
+ *   human   → /api/kernels, /api/skills, /api/skills/:id/verify          (PR #90: human-node skills)
+ *   asset   → /api/assets, /api/assets/:id/budget, /api/assets/:id/outbound-demand  (PR #89)
+ */
+function buildPlan(){
+  const email=S.email||"you@example.com", kid="${kernelId}", aid="${assetId}",
+        dev=`dev-${slug(S.type)}-001`, p=[];
+
+  p.push({s:0,m:"POST",path:"/api/auth/provision",lab:"identity — get a key (public)",b:{email,name:S.name||"My Operation",capability:S.type||"a capability"}});
+  p.push({s:1,m:"POST",path:"/api/onboard/analyze",opt:1,lab:"design — AI capability analysis",b:{description:S.desc||S.type||"…"}});
+
+  if(S.lane==="machine"){
+    p.push({s:2,m:"POST",path:"/api/kernels",lab:"register your kernel (site/operator)",
+      b:{name:S.name||"My Operation",operatorAddress:email,location:{lat:S.lat,lng:S.lng},maxAssuranceTier:S.tier}});
+    p.push({s:2,m:"POST",path:"/api/setup/register-device",lab:`bind the machine via ${S.adapter}`,
+      b:{kernelId:kid,deviceId:dev,type:"machine",model:S.model||"device",adapterType:S.adapter,adapterConfig:S.endpoint?{url:S.endpoint}:{},capabilities:[S.type||"custom"]}});
+    p.push({s:3,m:"POST",path:"/api/capabilities",lab:"publish the capability",
+      b:{kernelId:kid,type:S.type||"custom",name:S.name||"capability",pricing:{currency:"USDC",baseCost:+S.price},location:{lat:S.lat,lng:S.lng},assuranceTiers:[S.tier]}});
+    p.push({s:4,m:"POST",path:"/api/setup/test-job",lab:"prove → your pcc-node picks the job up and runs it locally",
+      b:{kernelId:kid,deviceId:dev,assuranceTier:1}});
+  }
+  else if(S.lane==="human"){
+    p.push({s:2,m:"POST",path:"/api/kernels",lab:"register YOU as a kernel (you ARE the site)",
+      b:{name:S.name||"You",operatorAddress:email,location:{lat:S.lat,lng:S.lng},maxAssuranceTier:S.tier}});
+    const sk={
+      kernelId:kid,
+      ownerDid:email,
+      capabilityType:S.type||"custom",
+      name:S.name||"skill",
+      description:S.desc||"",
+      location:{lat:S.lat,lng:S.lng},
+      pricing:{currency:"USDC",baseCost:+S.price},
+      minAssuranceTier:S.tier,
+      acceptanceWindowSec:+S.acceptSec,
+      completionDeadlineSec:+S.deadlineSec,
+      presence:S.presence,
+      mode:S.mode,
+      onTimeout:S.onTimeout,
+      onDeadlineMiss:S.onMiss
+    };
+    if(S.mode==="scheduled")sk.slot={at:S.schedAt||"<datetime>",durationMin:+S.schedDur};
+    if(S.mode==="recurring")sk.recurrence={every:S.recurEvery,at:S.recurAt};
+    p.push({s:3,m:"POST",path:"/api/skills",lab:"publish the human-node skill (PR #90)",b:sk});
+    p.push({s:4,m:"POST",path:"/api/skills/${skillId}/verify",lab:"prove a job → photo + GPS → activate (Tier 1)",
+      b:{evidence:{events:[{type:"execution_completed"}],deviceHealth:{status:"idle",model:"human-operator"},geo:S.proof.geo||"<lat,lng>",photoBase64:S.proof.photo?"<captured>":"<photo>"}}});
+  }
+  else if(S.lane==="asset"){
+    p.push({s:2,m:"POST",path:"/api/assets",lab:"register the asset (the thing itself, not its owner)",
+      b:{ownerDid:email,assetType:S.type||"custom",name:S.name||"asset",description:S.desc||"",location:{lat:S.lat,lng:S.lng}}});
+    p.push({s:3,m:"PUT",path:"/api/assets/${assetId}/budget",lab:"set the asset's autonomy budget (PR #89)",
+      b:{ownerDid:email,budgetCapUSD:+S.budgetCap,dailyCapUSD:+S.dailyCap,allowedCapabilityTypes:S.allowedTypes.length?S.allowedTypes:undefined,requiresOwnerApproval:!!S.requireApproval}});
+    p.push({s:4,m:"POST",path:"/api/assets/${assetId}/outbound-demand",lab:"prove → asset posts its first demand → engine plans (PR #88 + #95)",
+      b:{description:S.desc||"sample demand",requiredCapabilityType:S.allowedTypes[0]||S.type||"compute-time",maxPriceUSD:Math.min(+S.dailyCap,+S.price*10),minAssuranceTier:S.tier,preferredOptimization:S.optimize,location:{lat:S.lat,lng:S.lng,radiusKm:25}}});
+  }
+  else{
+    // no lane chosen — just identity + analyze + a placeholder
+    p.push({s:2,m:"POST",path:"/api/<...>",lab:"pick a lane to see the rest of the sequence",b:null});
+  }
+
+  p.push({s:5,m:"GET",path:"/api/kernels/${kernelId}/agent-card.json",terminal:1,lab:"live — your own discoverable A2A agent"});
+  return p;
+}
+function hl(obj){
+  let j=JSON.stringify(obj,null,2);
+  j=j.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+  j=j.replace(/"([^"]+)":/g,'"<span class="k">$1</span>":');
+  j=j.replace(/: "([^"]*)"/g,': "<span class="s">$1</span>"');
+  j=j.replace(/: (\d+\.?\d*)/g,': <span class="n">$1</span>');
+  return j;
+}
+function renderPlan(){
+  const cur=Math.min(S.step,5);
+  $("#console").innerHTML=buildPlan().map(c=>`
+    <div class="call ${c.s===cur?'active':''}">
+      <span class="meth ${c.m}">${c.m}</span><span class="path">${c.path}</span>${c.opt?'<span class="opt">optional</span>':''}
+      <span class="lab">${c.lab}</span>
+      ${c.b?`<pre class="json">${hl(c.b)}</pre>`:''}
+    </div>`).join("");
+}
+
+/* ---------- STEP RENDER ---------- */
+function renderStepper(){
+  $("#stepper").innerHTML=STEPS.map((s,i)=>`
+    <div class="step-pip ${i===S.step?'active':i<S.step?'done':''}" data-i="${i}">
+      <span class="n">${i<S.step?'✓':i+1}</span><span class="lbl">${s}</span></div>`).join("");
+  $("#stepper").querySelectorAll(".step-pip").forEach(p=>p.onclick=()=>{const i=+p.dataset.i;if(i<=maxReached)go(i);});
+}
+let maxReached=0;
+
+function renderStep(){
+  const b=$("#stepBody"); let h="";
+  if(S.step===0){
+    h=`<div class="kick">Step 01 · choose your lane</div><div class="q">What are you putting on the network?</div>
+    <p class="sub">Three economic-agent shapes: a machine you operate, a human skill you offer, or an asset that bids for work on its own.</p>
+    <div class="lanes">
+      <div class="lane m ${S.lane==='machine'?'sel':''}" data-lane="machine">
+        <div class="ico">▣ MACHINE</div><h3>A machine</h3><p>Robot, printer, instrument, lab. Bound by an adapter; <code style="font-family:var(--mono);font-size:12px;color:var(--cyan)">pcc-node</code> polls for jobs and runs them locally.</p>
+        <span class="tag">Opentrons · Prusa · HPLC</span></div>
+      <div class="lane h ${S.lane==='human'?'sel':''}" data-lane="human">
+        <div class="ico">◐ HUMAN</div><h3>A human skill</h3><p>A person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.</p>
+        <span class="tag">courier · field tech · inspector</span></div>
+      <div class="lane a ${S.lane==='asset'?'sel':''}" data-lane="asset">
+        <div class="ico">◈ ASSET</div><h3>An asset</h3><p>An asset that posts <b>outbound demand</b> on its own behalf. You set its budget; the asset bids for capabilities to use.</p>
+        <span class="tag">warehouse · vehicle · dataset</span></div>
+    </div>`;
+  }
+  else if(S.step===1){
+    const types=S.lane==='machine'?TYPES_M:S.lane==='human'?TYPES_H:TYPES_A;
+    const nameHint=S.lane==='machine'?'BenchTop Lab':S.lane==='human'?'You — SF Courier':'Warehouse Bay 7';
+    const typeHint=S.lane==='machine'?'liquid-handling':S.lane==='human'?'courier':'warehouse-bay';
+    const ownerLbl=S.lane==='asset'?'Owner email <span class="hint">— who controls the asset</span>':'Operator email <span class="hint">— or leave blank, we provision anonymously</span>';
+    h=`<div class="kick">Step 02 · identity</div><div class="q">Describe it.</div>
+    <p class="sub">This becomes your ${S.lane==='asset'?'asset listing':'capability listing'} — what agents see when they discover you.</p>
+    <div class="field"><label>Name</label><input type="text" data-f="name" value="${esc(S.name)}" placeholder="${nameHint}"></div>
+    <div class="field"><label>${S.lane==='asset'?'Asset type':'Capability type'}</label><input type="text" data-f="type" value="${esc(S.type)}" placeholder="${typeHint}">
+      <div class="chips">${types.map(t=>`<span class="chip" data-chip="${t}">${t}</span>`).join("")}</div></div>
+    <div class="field"><label>Description <span class="hint">— fed to /api/onboard/analyze</span></label>
+      <textarea data-f="desc" placeholder="What it does, how it's reached, what proves a job is done.">${esc(S.desc)}</textarea></div>
+    <div class="field"><label>${ownerLbl}</label><input type="text" data-f="email" value="${esc(S.email)}" placeholder="you@example.com"></div>`;
+  }
+  else if(S.step===2){
+    if(S.lane==='machine'){
+      h=`<div class="kick">Step 03 · configure · machine</div><div class="q">Bind the machine.</div>
+      <p class="sub">An adapter speaks your device's protocol. If it has any HTTP API, use <b>generic-http</b> — no custom code.</p>
+      <div class="field"><label>Adapter</label><select data-f="adapter">${ADAPTERS.map(a=>`<option ${S.adapter===a?'selected':''}>${a}</option>`).join("")}</select></div>
+      <div class="row"><div class="field"><label>Model</label><input type="text" data-f="model" value="${esc(S.model)}" placeholder="Opentrons OT-2"></div>
+      <div class="field"><label>Endpoint URL <span class="hint">your local network</span></label><input type="url" data-f="endpoint" value="${esc(S.endpoint)}" placeholder="http://192.168.1.50:31950"></div></div>
+      <div class="field"><label>Location <span class="hint">lat, lng</span></label><div class="row"><input type="number" step="0.01" data-f="lat" value="${S.lat}"><input type="number" step="0.01" data-f="lng" value="${S.lng}"></div></div>
+      <div class="tbox"><b>HOW IT WORKS</b><br>You don't expose your endpoint to PCC. <code>pcc-node</code> runs on your hardware, polls <code>capability.network</code>, picks up jobs, talks to your device, and posts evidence back. Your endpoint above is just for <code>pcc-node</code>'s local config.</div>`;
+    } else if(S.lane==='human'){
+      h=`<div class="kick">Step 03 · configure · human skill</div><div class="q">Set your terms of engagement.</div>
+      <p class="sub">Unlike a machine, you have to <b>accept</b> a ping in time, then <b>finish</b> by a deadline. This is the rideshare contract.</p>
+      <div class="field"><label>Location <span class="hint">lat, lng</span></label><div class="row"><input type="number" step="0.01" data-f="lat" value="${S.lat}"><input type="number" step="0.01" data-f="lng" value="${S.lng}"></div></div>
+      <div class="field"><div class="slider-row"><label style="margin:0">Acceptance window</label><span class="val" id="accV">${humanTime(S.acceptSec)}</span></div>
+        <input type="range" min="15" max="600" step="15" data-f="acceptSec" value="${S.acceptSec}"><div class="human">You get pinged — accept or reject within <b id="accH">${humanTime(S.acceptSec)}</b>, or it reassigns.</div></div>
+      <div class="field"><div class="slider-row"><label style="margin:0">Completion deadline</label><span class="val" id="dlV">${humanTime(S.deadlineSec)}</span></div>
+        <input type="range" min="300" max="86400" step="300" data-f="deadlineSec" value="${S.deadlineSec}"><div class="human">Clock starts <b>on accept</b>. Miss it → refund + bond slash.</div></div>
+      <div class="field"><label>Presence right now</label><div class="seg presence" data-seg="presence">
+        ${["available","busy","offline"].map(v=>`<button data-v="${v}" class="${S.presence===v?'on':''}">${v}</button>`).join("")}</div>
+        <div class="human" style="margin-top:8px">You're only ever assigned while <b>available</b>.</div></div>
+      <div class="field"><label>Scheduling mode</label><div class="seg" data-seg="mode">
+        ${["on-demand","scheduled","recurring"].map(v=>`<button data-v="${v}" class="${S.mode===v?'on':''}">${v}</button>`).join("")}</div>
+        <div id="modeExtra"></div></div>`;
+    } else if(S.lane==='asset'){
+      h=`<div class="kick">Step 03 · configure · asset autonomy</div><div class="q">Give the asset a wallet to bid with.</div>
+      <p class="sub">An asset is an <b>economic agent</b> that posts outbound demand on its own behalf. You set the ceiling; it bids inside it.</p>
+      <div class="field"><label>Location <span class="hint">lat, lng</span></label><div class="row"><input type="number" step="0.01" data-f="lat" value="${S.lat}"><input type="number" step="0.01" data-f="lng" value="${S.lng}"></div></div>
+      <div class="row">
+        <div class="field"><label>Lifetime cap <span class="hint">USDC, hard ceiling</span></label><input type="number" min="0" step="100" data-f="budgetCap" value="${S.budgetCap}"></div>
+        <div class="field"><label>Daily cap <span class="hint">resets at UTC midnight</span></label><input type="number" min="0" step="10" data-f="dailyCap" value="${S.dailyCap}"></div>
+      </div>
+      <div class="field"><label>Allowed capability types <span class="hint">— leave empty to allow all</span></label>
+        <div class="chips">${ASSET_NEED_TYPES.map(t=>`<span class="chip ${S.allowedTypes.includes(t)?'on':''}" data-allow="${t}">${t}</span>`).join("")}</div>
+      </div>
+      <div class="field"><label class="tog"><input type="checkbox" id="reqApprovalCk" ${S.requireApproval?'checked':''}><span class="sw"></span> Require owner approval before each demand</label>
+        <div class="human" style="margin-top:8px;font-size:12.5px;color:var(--muted)">If on, every outbound demand parks in <code style="font-family:var(--mono);color:var(--violet)">owner_approval_required</code> until you sign off.</div></div>`;
+    } else {
+      h=`<div class="kick">Step 03 · configure</div><div class="q">Pick a lane first.</div><p class="sub">Go back to step 1 and choose machine, human skill, or asset.</p>`;
+    }
+  }
+  else if(S.step===3){
+    const priceLbl=S.lane==='asset'?'Per-demand budget <span class="hint">USDC ceiling per outbound demand</span>':'Base price <span class="hint">USDC per job</span>';
+    h=`<div class="kick">Step 04 · terms</div><div class="q">${S.lane==='asset'?'Demand &amp; assurance.':'Price &amp; assurance.'}</div>
+    <p class="sub">${S.lane==='asset'?'When this asset bids, this is the most it offers per task. Tier is the proof depth it requires from sellers.':'Payment settles in USDC escrow on verified evidence. Tier sets how much proof a job must carry.'}</p>
+    <div class="field"><label>${priceLbl}</label><input type="number" min="0" step="1" data-f="price" value="${S.price}"></div>
+    ${S.lane==='asset'?`<div class="field"><label>Optimize for</label><div class="seg" data-seg="optimize">${["price","speed","quality"].map(v=>`<button data-v="${v}" class="${S.optimize===v?'on':''}">${v}</button>`).join("")}</div></div>`:''}
+    <div class="field"><label>${S.lane==='asset'?'Minimum assurance tier accepted':'Assurance tier'}</label><div class="tiers">${TIERS.map(t=>`
+      <div class="tier ${+S.tier===+t[0]?'sel':''}" data-tier="${t[0]}"><div class="t">TIER ${t[0]}</div><div class="nm">${t[1]}</div><div class="d">${t[2]}</div></div>`).join("")}</div></div>`;
+  }
+  else if(S.step===4){
+    if(S.lane==='machine'){
+      h=`<div class="kick">Step 05 · prove</div><div class="q">Prove it works → go live.</div>
+      <p class="sub">PCC queues a test job. Your <code style="font-family:var(--mono);color:var(--cyan)">pcc-node</code> picks it up, runs it on the device, posts an evidence bundle. Clean run → auto-activate, no human approval.</p>
+      <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--cyan)">▣ TEST JOB</div>
+        <div class="big">${esc(S.model||S.name||'Your machine')}</div>
+        <div class="evi"><span class="pill ${S.proof.test?'got':''}" data-ev="test">${S.proof.test?'✓ test job passed':'▸ queue test job'}</span></div>
+        <div class="meta">POST /api/setup/test-job · polls to completion · emits evidence bundle</div></div>`;
+    } else if(S.lane==='human'){
+      h=`<div class="kick">Step 05 · prove</div><div class="q">Prove a job → go live.</div>
+      <p class="sub">Human skills activate on real evidence. Capture a photo + your GPS — that's a Tier 1 bundle.</p>
+      <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--amber)">◐ EVIDENCE</div>
+        <div class="big">${esc(S.name||'Your skill')}</div>
+        <div class="evi"><span class="pill ${S.proof.photo?'got':''}" data-ev="photo">${S.proof.photo?'✓ photo':'▸ capture photo'}</span>
+          <span class="pill ${S.proof.geo?'got':''}" data-ev="geo">${S.proof.geo?'✓ '+S.proof.geo:'▸ capture GPS'}</span></div>
+        <div class="meta">POST /api/skills/&lt;id&gt;/verify · ALCOA+ · auto-activates at Tier 1</div></div>`;
+    } else if(S.lane==='asset'){
+      h=`<div class="kick">Step 05 · prove</div><div class="q">Post a sample demand → see the engine plan.</div>
+      <p class="sub">Your first outbound demand exercises the loop end-to-end: the compose engine plans (single- or multi-step via graph-search), the asset is now bidding for capabilities.</p>
+      <div class="prove-card"><div class="ico" style="font-family:var(--mono);color:var(--violet)">◈ SAMPLE DEMAND</div>
+        <div class="big">${esc(S.name||'Your asset')}</div>
+        <div class="evi"><span class="pill ${S.proof.demand?'got':''}" data-ev="demand">${S.proof.demand?'✓ demand posted, composed':'▸ post sample demand'}</span></div>
+        <div class="meta">POST /api/assets/&lt;id&gt;/outbound-demand · composer plans path · status: <b>proposed</b></div></div>`;
+    } else {
+      h=`<div class="kick">Step 05 · prove</div><div class="q">Pick a lane first.</div>`;
+    }
+  }
+  else if(S.step===5){
+    const kid="kernel-"+slug(S.name||"op")+"-01";
+    const aid="asset-"+slug(S.name||"asset")+"-01";
+    const isAsset=S.lane==='asset';
+    h=`<div class="finale"><div class="activated">◆ Activated</div>
+      <h2>You're on the network.</h2>
+      <p class="sub" style="margin:0 auto;max-width:50ch">${isAsset?'This asset is now an economic agent: it posts outbound demand, the compose engine plans paths, settlement runs through V2 escrow.':'Your capability is now its own A2A agent — discoverable and composable by every agent on PCC.'}</p>
+      <div class="live-card">
+        <div class="lh"><span>${S.lane==='machine'?'▣ machine':S.lane==='human'?'◐ human skill':'◈ asset'} capability</span><span style="color:var(--lime)">LIVE</span></div>
+        <div class="cn">${esc(S.name||'Capability')}</div>
+        <div class="meta">
+          <span>type · <b>${esc(S.type||'custom')}</b></span>
+          ${isAsset
+            ? `<span>budget · <b>${S.budgetCap} USDC</b> total · <b>${S.dailyCap}/day</b></span><span>optimizes for · <b>${S.optimize}</b> · min tier <b>${S.tier}</b></span>`
+            : `<span>price · <b>${S.price} USDC</b> / job · tier <b>${S.tier}</b></span>`}
+          ${S.lane==='human'?`<span>accept within <b>${humanTime(S.acceptSec)}</b> · finish in <b>${humanTime(S.deadlineSec)}</b> · <b>${S.mode}</b></span>`:''}
+          ${S.lane==='machine'?`<span>adapter · <b>${S.adapter}</b></span>`:''}
+        </div>
+        <div class="cardurl">GET capability.network/api/${isAsset?'assets/'+aid+'/agent-card':'kernels/'+kid+'/agent-card'}.json<button data-copy="https://capability.network/api/${isAsset?'assets/'+aid+'/agent-card':'kernels/'+kid+'/agent-card'}.json">copy</button></div>
+      </div>
+      <div class="wn">
+        <div class="c"><div class="h">${isAsset?'/api/compose':'/api/compose'}</div><div class="t">Composer finds you</div><div class="d">${isAsset?'Your demand gets planned into a 1- or multi-step solution via graph-search.':'Agents calling compose can route a step to you when your type, tier, and price fit.'}</div></div>
+        <div class="c"><div class="h">/api/reputation</div><div class="t">Per-job scoring</div><div class="d">Every step you complete moves your score. +10 success / −15 failure / +5 bonus when whole compositions succeed.</div></div>
+        <div class="c"><div class="h">/api/graph-search</div><div class="t">Multi-step paths</div><div class="d">${isAsset?'Your demand chains across operators automatically when no single capability covers it.':'You can be node 2 of 4 in a complex workflow — graph-search routes the chain.'}</div></div>
+        <div class="c"><div class="h">EAS v2 / Base</div><div class="t">Settlement gate</div><div class="d">Funds release on EAS attestation of evidence. No oracle trust required.</div></div>
+      </div>
+      </div>`;
+  }
+  b.innerHTML=h; wireStep();
+  $("#backBtn").style.visibility=S.step===0?"hidden":"visible";
+  const nb=$("#nextBtn");
+  nb.textContent=S.step===4?(S.lane==='machine'?"Prove & activate →":S.lane==='asset'?"Post demand & activate →":"Submit proof & activate →"):S.step===5?"Done":"Continue →";
+  nb.disabled=!canAdvance();
+  if(S.step===5){nb.disabled=true;nb.style.display="none";}else nb.style.display="";
+}
+function esc(s){return(s||"").replace(/"/g,"&quot;").replace(/</g,"&lt;");}
+
+function modeExtra(){
+  const e=$("#modeExtra"); if(!e)return; let h="";
+  if(S.mode==="scheduled")h=`<div class="row" style="margin-top:12px"><div class="field" style="margin:0"><label>Slot start</label><input type="datetime-local" data-f="schedAt" value="${S.schedAt}"></div><div class="field" style="margin:0"><label>Duration (min)</label><input type="number" data-f="schedDur" value="${S.schedDur}"></div></div><div class="human" style="margin-top:8px">Two-phase: you accept the <b>reservation</b> now, then <b>confirm presence</b> at the slot.</div>`;
+  else if(S.mode==="recurring")h=`<div class="row" style="margin-top:12px"><div class="field" style="margin:0"><label>Every</label><select data-f="recurEvery"><option ${S.recurEvery==='daily'?'selected':''}>daily</option><option ${S.recurEvery==='weekly'?'selected':''}>weekly</option></select></div><div class="field" style="margin:0"><label>At</label><input type="text" data-f="recurAt" value="${S.recurAt}" placeholder="09:00"></div></div><div class="human" style="margin-top:8px">Each occurrence re-pings you for a fresh accept.</div>`;
+  e.innerHTML=h; e.querySelectorAll("[data-f]").forEach(bindInput);
+}
+
+/* ---------- BINDINGS ---------- */
+function bindInput(el){
+  const f=el.dataset.f;
+  el.addEventListener("input",()=>{
+    S[f]=el.value;
+    if(f==="acceptSec"){$("#accV").textContent=humanTime(el.value);$("#accH").textContent=humanTime(el.value);}
+    if(f==="deadlineSec"){$("#dlV").textContent=humanTime(el.value);}
+    if(f==="type")$("#nextBtn").disabled=!canAdvance();
+    if(f==="name")$("#nextBtn").disabled=!canAdvance();
+    renderPlan();
+  });
+}
+function wireStep(){
+  const b=$("#stepBody");
+  b.querySelectorAll("[data-lane]").forEach(c=>c.onclick=()=>{S.lane=c.dataset.lane;setAccent();updateChips();renderStepper();renderStep();renderPlan();$("#nextBtn").disabled=!canAdvance();});
+  b.querySelectorAll("[data-f]").forEach(bindInput);
+  b.querySelectorAll("[data-chip]").forEach(c=>c.onclick=()=>{S.type=c.dataset.chip;renderStep();renderPlan();});
+  b.querySelectorAll("[data-allow]").forEach(c=>c.onclick=()=>{
+    const t=c.dataset.allow, i=S.allowedTypes.indexOf(t);
+    if(i>=0)S.allowedTypes.splice(i,1); else S.allowedTypes.push(t);
+    renderStep();renderPlan();
+  });
+  b.querySelectorAll("[data-tier]").forEach(t=>t.onclick=()=>{S.tier=+t.dataset.tier;renderStep();renderPlan();});
+  b.querySelectorAll("[data-seg] button").forEach(bt=>bt.onclick=()=>{const seg=bt.closest("[data-seg]").dataset.seg;S[seg]=bt.dataset.v;if(seg==="mode"){renderStep();}else{bt.closest("[data-seg]").querySelectorAll("button").forEach(x=>x.classList.remove("on"));bt.classList.add("on");}renderPlan();});
+  b.querySelectorAll("[data-ev]").forEach(p=>p.onclick=()=>{
+    const ev=p.dataset.ev;
+    if(ev==="geo"){S.proof.geo=S.lat.toFixed(3)+","+S.lng.toFixed(3);}
+    else S.proof[ev]=true;
+    renderStep();renderPlan();$("#nextBtn").disabled=!canAdvance();});
+  const rq=b.querySelector("#reqApprovalCk");
+  if(rq)rq.onchange=()=>{S.requireApproval=rq.checked;renderPlan();};
+  b.querySelectorAll("[data-copy]").forEach(x=>x.onclick=()=>copy(x.dataset.copy));
+  if(S.step===2&&S.lane==='human')modeExtra();
+  updateChips();
+}
+function updateChips(){const c=$("#laneChip");if(!c)return;c.dataset.on=S.lane||"";$("#laneChipTxt").textContent=S.lane?S.lane:"no lane";$("#eyebrow").textContent=S.lane?S.lane+" lane · operator onboarding":"operator onboarding";}
+
+function canAdvance(){
+  if(S.step===0)return!!S.lane;
+  if(S.step===1)return S.name.trim()&&S.type.trim();
+  if(S.step===4){
+    if(S.lane==='machine')return!!S.proof.test;
+    if(S.lane==='human')return!!(S.proof.photo&&S.proof.geo);
+    if(S.lane==='asset')return!!S.proof.demand;
+  }
+  return true;
+}
+function go(n){
+  if(n>S.step&&!canAdvance())return;
+  S.step=Math.max(0,Math.min(5,n)); maxReached=Math.max(maxReached,S.step);
+  renderStepper();renderStep();renderPlan();
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+$("#nextBtn").onclick=()=>{if(S.step===4){activate();}go(S.step+1);};
+$("#backBtn").onclick=()=>go(S.step-1);
+
+function activate(){
+  document.documentElement.style.setProperty('--accent','var(--lime)');
+  toast("◆ "+(S.lane==='asset'?'asset':'capability')+" activated");
+}
+
+/* ---------- mode toggle / go live / copy ---------- */
+$("#modeToggle").onclick=e=>{const m=e.target.dataset.m;if(!m)return;S.live=(m==="live");
+  $("#modeToggle").querySelectorAll("span").forEach(s=>s.classList.toggle("on",s.dataset.m===m));
+  $("#wireMode").textContent=S.live?"LIVE — will POST":"dry-run";};
+$("#copyBtn").onclick=()=>{
+  const txt=buildPlan().map(c=>`# ${c.lab}\ncurl -X ${c.m} ${(S.live?'':'https://capability.network')}${c.path}`+(c.b?` \\\n  -H 'content-type: application/json' \\\n  -d '${JSON.stringify(c.b)}'`:'')).join("\n\n");
+  copy(txt,"plan copied · "+buildPlan().length+" calls");};
+$("#goliveBtn").onclick=()=>$("#scrim").classList.add("on");
+$("#mCancel").onclick=()=>$("#scrim").classList.remove("on");
+$("#scrim").onclick=e=>{if(e.target===$("#scrim"))$("#scrim").classList.remove("on");};
+$("#mRun").onclick=async()=>{
+  const base=$("#mBase").value.replace(/\/$/,""),key=$("#mKey").value.trim();
+  $("#scrim").classList.remove("on");
+  toast("▸ executing "+buildPlan().length+" calls against "+base);
+  const ctx={key};let i=0;
+  for(const c of buildPlan()){
+    if(c.terminal)continue;
+    let path=c.path.replace("${kernelId}",ctx.kernelId||"").replace("${regId}",ctx.regId||"").replace("${assetId}",ctx.assetId||"").replace("${skillId}",ctx.skillId||"");
+    try{
+      const r=await fetch(base+path,{method:c.m,headers:Object.assign({"content-type":"application/json"},ctx.key?{authorization:"Bearer "+ctx.key}:{}),body:c.m==="GET"?undefined:JSON.stringify(resolveBody(c.b,ctx))});
+      const j=await r.json().catch(()=>({}));
+      if(c.path.includes("/auth/provision")&&j.api_key)ctx.key=j.api_key;
+      if(c.path==="/api/kernels")ctx.kernelId=(j.kernel&&j.kernel.id)||j.id||ctx.kernelId;
+      if(c.path==="/api/onboard/register")ctx.regId=j.id||ctx.regId;
+      if(c.path==="/api/assets")ctx.assetId=(j.asset&&j.asset.id)||j.id||ctx.assetId;
+      if(c.path==="/api/skills")ctx.skillId=(j.skill&&j.skill.id)||j.id||ctx.skillId;
+      markCall(i,r.ok);
+      if(!r.ok&&!c.opt){toast("✕ stopped at "+path+" ("+r.status+")");break;}
+    }catch(err){toast("✕ "+err.message);break;}
+    i++;await new Promise(r=>setTimeout(r,250));
+  }
+};
+function resolveBody(b,ctx){if(!b)return b;return JSON.parse(JSON.stringify(b).replace(/\$\{kernelId\}/g,ctx.kernelId||"").replace(/\$\{regId\}/g,ctx.regId||"").replace(/\$\{assetId\}/g,ctx.assetId||"").replace(/\$\{skillId\}/g,ctx.skillId||""));}
+function markCall(i,ok){const el=$("#console").children[i];if(el){el.style.borderLeftColor=ok?"var(--lime)":"var(--danger)";el.style.opacity=1;}}
+
+function copy(t,msg){navigator.clipboard?.writeText(t).then(()=>toast(msg||"copied")).catch(()=>toast("copy failed"));}
+let tt;function toast(m){const el=$("#toast");el.textContent=m;el.classList.add("on");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2600);}
+
+/* init */
+setAccent();renderStepper();renderStep();renderPlan();
+</script>
+</body>
+</html>
