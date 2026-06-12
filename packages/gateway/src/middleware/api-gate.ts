@@ -22,7 +22,7 @@ const PUBLIC_PREFIXES = [
   "/api/dht/",                  // DHT discovery is public (distributed capability queries)
   "/api/marketplace/",          // Marketplace browsing is public (see what's available)
   "/.well-known/",
-  "/docs",                      // Swagger UI (and its static assets) is public
+  "/docs",                      // Docs hub + Swagger UI (/docs/api) are public
 ];
 
 const PUBLIC_EXACT = [
