@@ -96,7 +96,7 @@ export function AgentLandingHero() {
 
         <div className="alh-agentbar">
           <span className="alh-agentbar-h">Agents start here</span>
-          <a href="/agent-package.json">233-tool agent package</a>
+          <a href="/agent-package.json">237-tool agent package</a>
           <a href="/.well-known/agent-registration.json">ERC-8004 registration</a>
           <a href="/api/capabilities/types">capability types</a>
           <a href="/llms.txt">llms.txt</a>
