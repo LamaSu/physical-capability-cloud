@@ -50,11 +50,15 @@ export interface LocationConstraint {
 /**
  * Compose-engine input.
  *
- * Two modes:
+ * Three modes:
  *   - Single-step: provide `outcomeType` only; engine returns the best
- *     capability instance of that type.
- *   - Multi-step: provide `steps` as an ordered list of capability types;
- *     engine returns one instance per step, sequenced.
+ *     capability instance of that type — falling back to capability
+ *     graph-search if no direct provider matches.
+ *   - Multi-step (explicit types): provide `steps` as an ordered list of
+ *     capability types; engine returns one instance per step, sequenced.
+ *   - Multi-step (graph chain): provide `outcomeChain` of outcome types; the
+ *     engine delegates to graph-search's Dijkstra traversal to discover the
+ *     cheapest multi-step path realizing the chain's final outcome.
  *
  * Full DAG-with-branching mode is planned for a future iteration; the
  * current scaffold is linear.
@@ -69,6 +73,17 @@ export interface ComposeRequest {
    * over `outcomeType`.
    */
   steps?: string[];
+  /**
+   * Optional ordered chain of OUTCOME types to thread through the capability
+   * graph, e.g. `["synth", "purify", "assay"]`. When present (and non-empty),
+   * the planner bypasses single-step provider matching and delegates to
+   * graph-search: it targets the chain's FINAL element as the outcome type and
+   * returns the cheapest multi-step path the graph can realize. The earlier
+   * elements document the intended per-step outputs; the graph topology
+   * (node input/output types + edges) must support the sequence. Absent
+   * (default) → single-step / `steps` mode.
+   */
+  outcomeChain?: string[];
   /** Maximum total USD the engine may allocate across all steps */
   budgetUSD: number;
   /** Minimum assurance tier (0-3) every step must offer */
@@ -95,6 +110,7 @@ export const LocationConstraintSchema = z.object({
 export const ComposeRequestSchema = z.object({
   outcomeType: z.string().min(1).max(120),
   steps: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
+  outcomeChain: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
   budgetUSD: z.number().positive().max(1_000_000_000),
   minAssuranceTier: z.union([
     z.literal(0),

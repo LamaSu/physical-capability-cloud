@@ -429,6 +429,25 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Public search entrypoint — in-process graph search without an HTTP round-trip
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a capability-graph search and return the proposal — the exact logic
+ * `POST /api/capabilities/graph-search` runs (prune expired proposals, then a
+ * Dijkstra traversal over the graph), exposed for in-process callers that need
+ * the result directly without an HTTP round-trip (e.g. the composition
+ * planner's multi-step fallback in compose.ts).
+ *
+ * The returned proposal is persisted in the same store as the HTTP route, so
+ * its `searchId` stays retrievable via `GET /api/capabilities/graph-search/:id`.
+ */
+export function searchGraph(req: GraphSearchRequest): GraphSearchResponse {
+  pruneExpiredSearches();
+  return runGraphSearch(req);
+}
+
+// ---------------------------------------------------------------------------
 // Registration (scaffold candidate injection — idempotent upsert)
 // ---------------------------------------------------------------------------
 
@@ -493,8 +512,7 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
-    pruneExpiredSearches();
-    const response = runGraphSearch(parsed.data);
+    const response = searchGraph(parsed.data);
     return reply.status(201).send(response);
   });
 
