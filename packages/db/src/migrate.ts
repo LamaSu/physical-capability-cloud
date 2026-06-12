@@ -1442,6 +1442,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
   safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
   safeAddColumn("capabilities", "tenant_id", "TEXT");
+  // Human-node SLA (accept/deadline windows + presence + scheduling mode) on
+  // capabilities — additive JSON-as-TEXT column; null for machine capabilities.
+  safeAddColumn("capabilities", "sla", "TEXT");
   safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
 
   // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
