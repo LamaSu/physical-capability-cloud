@@ -1,4 +1,5 @@
 import React from "react";
+import { HoloSkills } from "./HoloSkills.js";
 
 /**
  * AgentLandingHero — the agent-first hero for capability.network.
@@ -25,6 +26,7 @@ export function AgentLandingHero() {
         <div className="alh-grid" aria-hidden="true" />
         <div className="alh-glow" aria-hidden="true" />
         <div className="alh-grain" aria-hidden="true" />
+        <HoloSkills />
 
         <div className="alh-top">
           <a className="alh-brand" href="/" aria-label="PCC home">
@@ -143,7 +145,7 @@ const CSS = `
   opacity:.045;mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
-.alh > *:not(.alh-grid):not(.alh-glow):not(.alh-grain){position:relative;z-index:1}
+.alh > *:not(.alh-grid):not(.alh-glow):not(.alh-grain):not(.hsk-wrap){position:relative;z-index:1}
 
 .alh-top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0 0;flex-wrap:wrap}
 .alh-brand{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;letter-spacing:.04em;text-decoration:none;color:var(--fg)}
