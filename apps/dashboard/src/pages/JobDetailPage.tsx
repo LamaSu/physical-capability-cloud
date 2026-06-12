@@ -5,10 +5,12 @@ import {
   DataCell, HashDisplay, AddressDisplay, EvidenceTimeline, TierRequirementsList,
   MilestoneTimeline, IPFSLink, DIDBadge, ChainTxLink,
 } from "@pcc/ui";
-import type { EvidenceEvent, AssuranceTier } from "@pcc/spec";
+import type { EvidenceEvent, AssuranceTier, PointMap3DTrace } from "@pcc/spec";
 import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { mockJobs, jobMeta, mockEscrows } from "../api/mock-data.js";
+import { PointMap3DViewer } from "../components/viewer/index.js";
+import { makeDemoPointMap3DTrace } from "../components/viewer/fixtures.js";
 
 // Mock evidence events for the detail view
 const mockEvidence: EvidenceEvent[] = [
@@ -38,6 +40,14 @@ export function JobDetailPage() {
   const job = mockJobs.find((j) => j.id === jobId);
   const meta = jobId ? jobMeta[jobId] : undefined;
   const escrow = mockEscrows.find((e: any) => (e.milestones ?? []).some((m: any) => m.stepId === job?.stepId));
+
+  // Streaming-3D trace for this job's evidence. Real wiring (Phase 2 of the
+  // LingBot rollout) will fetch this off the gateway / IPFS — for now we
+  // gate on a "Load trace" button that synthesizes a deterministic fixture.
+  const [pointMaps3D, setPointMaps3D] = React.useState<PointMap3DTrace | null>(null);
+  const handleLoadTrace = React.useCallback(() => {
+    setPointMaps3D(makeDemoPointMap3DTrace(jobId ? jobId.length + 11 : 7));
+  }, [jobId]);
 
   React.useEffect(() => {
     setPageMeta(meta?.name ?? `Job ${jobId}`, "Job progress, evidence, and escrow details");
@@ -96,6 +106,23 @@ export function JobDetailPage() {
           <GlassPanel padding="lg">
             <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">Evidence Timeline</h3>
             <EvidenceTimeline events={mockEvidence} />
+          </GlassPanel>
+
+          {/* Streaming-3D trace viewer (LingBot point map + camera path). */}
+          <GlassPanel padding="md">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-[10px] text-white/30 uppercase tracking-wider">Streaming 3D Trace</h3>
+              {!pointMaps3D && (
+                <button
+                  type="button"
+                  onClick={handleLoadTrace}
+                  className="px-2.5 py-1 rounded-md text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25 transition-all"
+                >
+                  Load demo trace
+                </button>
+              )}
+            </div>
+            <PointMap3DViewer trace={pointMaps3D} title="LingBot point map" height={300} />
           </GlassPanel>
 
           {/* Sovereign Infrastructure */}
