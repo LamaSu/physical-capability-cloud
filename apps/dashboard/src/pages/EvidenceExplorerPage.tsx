@@ -2,10 +2,17 @@ import React from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { GlassPanel, GlowBadge, IPFSLink, DIDBadge, ChainTxLink } from "@pcc/ui";
-import type { EncryptedEvidenceBundle, EvidenceCommitment, ZKProof } from "@pcc/spec";
+import type {
+  EncryptedEvidenceBundle,
+  EvidenceCommitment,
+  PointMap3DTrace,
+  ZKProof,
+} from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEvidenceExplorerStore } from "../stores/evidence-explorer-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { PointMap3DViewer } from "../components/viewer/index.js";
+import { makeDemoPointMap3DTrace } from "../components/viewer/fixtures.js";
 
 const GATEWAY = "/api";
 
@@ -16,6 +23,17 @@ export function EvidenceExplorerPage() {
     bundles, selectedBundleId, decryptedBundle, commitments, proofs, isDecrypting,
     setBundles, selectBundle, setDecrypted, addCommitment, addProof, setDecrypting,
   } = useEvidenceExplorerStore();
+
+  // Streaming-3D trace for the currently selected bundle. Local state (not
+  // store) because the trace can be very large (≈8 KB for the fixture but
+  // can grow much larger from a real LingBot capture) and is only relevant
+  // while the bundle is on screen. Set by `handleLoadTrace`.
+  const [pointMaps3D, setPointMaps3D] = React.useState<PointMap3DTrace | null>(null);
+  React.useEffect(() => {
+    // Reset the trace when the user changes bundles — keeping a stale trace
+    // around would be confusing (and the fixture seed is the same anyway).
+    setPointMaps3D(null);
+  }, [bundleId, selectedBundleId]);
 
   React.useEffect(() => {
     setPageMeta("Evidence Explorer", bundleId ? `Bundle: ${bundleId}` : "Encrypted evidence browser");
@@ -92,6 +110,18 @@ export function EvidenceExplorerPage() {
       kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "secp256k1", value: "mock" },
       createdAt: new Date().toISOString(),
     });
+  };
+
+  /**
+   * Load a streaming-3D trace for the selected bundle.
+   *
+   * In production this would fetch the trace from the gateway (e.g. by
+   * resolving the IPFS CID stored alongside the encrypted bundle). For the
+   * mock evidence flow used here we synthesize a deterministic demo trace
+   * so the viewer is exercised end-to-end during development.
+   */
+  const handleLoadTrace = () => {
+    setPointMaps3D(makeDemoPointMap3DTrace(42));
   };
 
   const handleVerifyProof = async (bundle: EncryptedEvidenceBundle) => {
@@ -253,6 +283,33 @@ export function EvidenceExplorerPage() {
                   </div>
                 </GlassPanel>
               )}
+
+              {/* Streaming-3D trace viewer (LingBot-Map adapter output). */}
+              <GlassPanel padding="md">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-medium text-white/60">Streaming 3D Trace</h3>
+                    {pointMaps3D && <GlowBadge color="green">loaded</GlowBadge>}
+                  </div>
+                  {!pointMaps3D && (
+                    <button
+                      type="button"
+                      onClick={handleLoadTrace}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25 transition-all"
+                    >
+                      Load demo trace
+                    </button>
+                  )}
+                </div>
+                <PointMap3DViewer trace={pointMaps3D} title="LingBot point map" />
+                {pointMaps3D && (
+                  <div className="mt-2 text-[10px] text-white/30 font-mono">
+                    device <span className="text-white/50">{pointMaps3D.deviceId}</span>
+                    {" · "}
+                    adapter <span className="text-white/50">{pointMaps3D.adapterVersion}</span>
+                  </div>
+                )}
+              </GlassPanel>
 
               {/* Decrypted view */}
               {decryptedBundle && (
