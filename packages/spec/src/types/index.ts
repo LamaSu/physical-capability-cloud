@@ -29,6 +29,9 @@ export * from "./swf.js";
 export * from "./fiat-ramp.js";
 export * from "./licensing.js";
 export * from "./operator-policy.js";
+// Demo-scoped policy for the pizza demo — distinct from the production
+// OperatorPolicy above (see demo-operator-policy.ts header for why).
+export * from "./demo-operator-policy.js";
 export * from "./negotiation.js";
 export * from "./p2p.js";
 export * from "./device-tools.js";

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Operator policy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--surface:#11151d;--surface2:#161b25;--line:rgba(150,172,205,.10);--line2:rgba(150,172,205,.20);--fg:#e9edf4;--muted:#8b94a6;--faint:#5b6475;--lime:#c6f24e;--cyan:#6cd6ff;--amber:#ffb24d;--danger:#ff6f6f;--accent:var(--cyan);--mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Instrument Sans',system-ui,sans-serif;--display:'Bricolage Grotesque',var(--sans)}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.5}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:rgba(10,12,16,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--cyan);border-radius:6px;position:relative}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--cyan)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 18px}
+.hero{margin-bottom:18px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--cyan)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(24px,6.5vw,36px);line-height:1.04;letter-spacing:-.02em;margin:.3em 0 .12em}
+.hero h1 .em{color:var(--cyan)}
+.hero p{color:var(--muted);font-size:14.5px;margin:0}
+.panel{background:linear-gradient(180deg,var(--surface),#0c0f15);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+.panel h2{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0 0 14px}
+.kv{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12.5px;color:var(--muted);padding:5px 0}
+.kv b{color:var(--fg);font-weight:500}
+.modes{display:flex;gap:8px}
+.mode{flex:1;font-family:var(--mono);font-size:12.5px;letter-spacing:.03em;padding:14px 8px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;text-align:center}
+.mode:hover{color:var(--fg);border-color:var(--fg)}
+.mode.on{background:var(--cyan);color:#0a0c10;border-color:var(--cyan);font-weight:700}
+.mode small{display:block;font-size:9.5px;letter-spacing:.04em;opacity:.7;margin-top:4px;text-transform:uppercase}
+.field{margin-bottom:14px}
+.field:last-child{margin-bottom:0}
+.field label{display:block;font-family:var(--mono);font-size:12px;color:var(--fg);margin-bottom:5px}
+.field .hint{font-family:var(--sans);font-size:11.5px;color:var(--faint);margin-top:4px}
+.input-wrap{display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--line2);border-radius:9px;padding:0 12px;transition:.18s}
+.input-wrap:focus-within{border-color:var(--cyan);box-shadow:0 0 0 1px rgba(108,214,255,.3)}
+.input-wrap .pre{font-family:var(--mono);font-size:13px;color:var(--faint)}
+.input-wrap input{flex:1;background:transparent;border:0;outline:0;color:var(--fg);font-family:var(--mono);font-size:14px;padding:11px 0}
+.input-wrap input::placeholder{color:var(--faint)}
+.input-wrap .post{font-family:var(--mono);font-size:11.5px;color:var(--faint);white-space:nowrap}
+.hidden{display:none}
+.summary{background:linear-gradient(180deg,rgba(108,214,255,.06),transparent);border:1px solid rgba(108,214,255,.25);border-radius:14px;padding:18px;margin-bottom:14px}
+.summary h2{color:var(--cyan)}
+.summary p{margin:0;font-size:14px;color:var(--fg);line-height:1.6}
+.summary .line{display:flex;gap:9px;align-items:flex-start;padding:4px 0}
+.summary .line .b{color:var(--cyan);font-family:var(--mono);flex:none}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:14px 18px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;width:100%}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--cyan);color:#0a0c10;border-color:var(--cyan);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08)}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--cyan);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:10px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.toast.err{background:var(--danger);color:#fff}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:24px 0 8px;letter-spacing:.04em}
+.foot a{color:var(--muted);text-decoration:none}.foot a:hover{color:var(--cyan)}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// operator policy</span></div>
+  <span style="color:var(--muted)"><span class="dot"></span> <span id="connStatus">policy console</span></span>
+</header>
+<main>
+  <div class="hero">
+    <div class="eyebrow"><span id="slugLabel">…</span> · agent policy</div>
+    <h1>Teach your <span class="em">agent</span> how to decide.</h1>
+    <p>Your shop/driver doesn't accept by reflex. It runs <i>this</i> policy on every incoming offer — accept, counter, decline, or ask you. Set it once; the agent handles the rest.</p>
+  </div>
+
+  <div class="panel">
+    <h2>who this applies to</h2>
+    <div class="kv"><span>assignee slug</span><b id="slugVal">—</b></div>
+    <div class="kv"><span>capability</span><b id="capVal">—</b></div>
+    <div class="kv"><span>current policy</span><b id="curMode">loading…</b></div>
+  </div>
+
+  <div class="panel">
+    <h2>decision mode</h2>
+    <div class="modes">
+      <button class="mode" data-mode="auto">auto<small>accept / decline</small></button>
+      <button class="mode" data-mode="negotiate">negotiate<small>counter-offer</small></button>
+      <button class="mode" data-mode="always-prompt">always ask<small>human decides</small></button>
+    </div>
+  </div>
+
+  <div class="panel" id="rulesPanel">
+    <h2>rules</h2>
+    <div class="field">
+      <label for="minPrice">Price floor</label>
+      <div class="input-wrap"><span class="pre">$</span><input id="minPrice" type="number" min="0" step="0.5" placeholder="none"><span class="post">/ job</span></div>
+      <div class="hint" id="minPriceHint">In <b>auto</b> mode: decline below this. In <b>negotiate</b> mode: counter below this.</div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="maxConcurrent">Max concurrent</label>
+        <div class="input-wrap"><input id="maxConcurrent" type="number" min="0" step="1" placeholder="∞"><span class="post">jobs</span></div>
+        <div class="hint">Refuse while this many are already running.</div>
+      </div>
+      <div class="field">
+        <label for="minDeadline">Min deadline</label>
+        <div class="input-wrap"><input id="minDeadline" type="number" min="0" step="1" placeholder="none"><span class="post">min</span></div>
+        <div class="hint">Refuse if the clock is tighter.</div>
+      </div>
+    </div>
+    <div class="field">
+      <label for="autoCeiling">Escalation ceiling</label>
+      <div class="input-wrap"><span class="pre">$</span><input id="autoCeiling" type="number" min="0" step="1" placeholder="none"><span class="post">/ job</span></div>
+      <div class="hint">Orders at or above this always ask you — too high-value to auto-handle.</div>
+    </div>
+  </div>
+
+  <div class="panel hidden" id="negPanel">
+    <h2>negotiation</h2>
+    <div class="row">
+      <div class="field">
+        <label for="counterMult">Counter multiplier</label>
+        <div class="input-wrap"><input id="counterMult" type="number" min="1" step="0.05" placeholder="1.2"><span class="post">× offer</span></div>
+        <div class="hint">1.2 = ask for 20% more.</div>
+      </div>
+      <div class="field">
+        <label for="maxCounters">Max attempts</label>
+        <div class="input-wrap"><input id="maxCounters" type="number" min="0" step="1" placeholder="1"><span class="post">tries</span></div>
+        <div class="hint">Give up (decline) after this many.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="summary">
+    <h2>what your agent will do</h2>
+    <div id="summary"></div>
+  </div>
+
+  <button class="btn primary" id="saveBtn">Save policy →</button>
+  <button class="btn" id="resetBtn" style="margin-top:10px">Revert to “always ask” (delete policy)</button>
+
+  <div class="foot">PCC // capability.network · operator policy · <a href="operator.html" id="opLink">→ operating console</a></div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const params=new URLSearchParams(location.search);
+const slug=params.get("slug")||params.get("shop")||params.get("driver")||params.get("assignee")||"shop-roma";
+const isDriver=/^driver/i.test(slug)||params.has("driver");
+const capabilityType=params.get("capability")||(isDriver?"delivered-pizza":"make-pizza");
+const BASE=location.origin;
+
+$("#slugLabel").textContent=slug;
+$("#slugVal").textContent=slug;
+$("#capVal").textContent=capabilityType;
+$("#opLink").href=(isDriver?"driver.html?driver=":"operator.html?shop=")+encodeURIComponent(slug);
+
+const state={mode:"always-prompt",rules:{},negotiation:{}};
+let tt;function toast(m,e){const el=$("#toast");el.textContent=m;el.className="toast on"+(e?" err":"");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2800);}
+
+async function api(path,opts={}){
+  const r=await fetch(BASE+path,{...opts,headers:{"content-type":"application/json",...(opts.headers||{})}});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.message||j.error||("error "+r.status));
+  return j;
+}
+
+const num=el=>{const v=parseFloat($(el).value);return Number.isFinite(v)?v:undefined;};
+const money=n=>"$"+(Number.isInteger(n)?n:n.toFixed(2));
+
+function setMode(m){
+  state.mode=m;
+  document.querySelectorAll(".mode").forEach(b=>b.classList.toggle("on",b.dataset.mode===m));
+  $("#rulesPanel").classList.toggle("hidden",m==="always-prompt");
+  $("#negPanel").classList.toggle("hidden",m!=="negotiate");
+  renderSummary();
+}
+
+// Collect the form into a policy body (the shape PUT expects).
+function collect(){
+  const rules={};
+  const mp=num("#minPrice"); if(mp!==undefined)rules.minPriceUSD=mp;
+  const mc=num("#maxConcurrent"); if(mc!==undefined)rules.maxConcurrent=mc;
+  const dl=num("#minDeadline"); if(dl!==undefined)rules.requireDeadlineMinSec=Math.round(dl*60);
+  const ac=num("#autoCeiling"); if(ac!==undefined)rules.autoAcceptUnderUSD=ac;
+  const body={mode:state.mode,ownerId:slug,scope:{capabilityType,assigneeSlug:slug},rules};
+  if(state.mode==="negotiate"){
+    const negotiation={};
+    const cm=num("#counterMult"); if(cm!==undefined)negotiation.counterPriceMultiplier=cm;
+    const mco=num("#maxCounters"); if(mco!==undefined)negotiation.maxCounterOffers=mco;
+    if(Object.keys(negotiation).length)body.negotiation=negotiation;
+  }
+  return body;
+}
+
+// Plain-English description of the policy — mirrors decideOnOffer's precedence.
+function renderSummary(){
+  const b=collect();
+  const r=b.rules||{};
+  const lines=[];
+  const add=(t)=>lines.push(`<div class="line"><span class="b">▸</span><span>${t}</span></div>`);
+
+  if(b.mode==="always-prompt"){
+    add("Ask you about <b>every</b> order — nothing is automatic.");
+  } else {
+    // hard gates (both modes)
+    if(r.maxConcurrent!==undefined) add(`Refuse new jobs while <b>${r.maxConcurrent}</b> ${r.maxConcurrent===1?"job is":"jobs are"} already running.`);
+    if(r.requireDeadlineMinSec!==undefined) add(`Refuse anything due in under <b>${Math.round(r.requireDeadlineMinSec/60)} min</b>.`);
+
+    if(b.mode==="auto"){
+      if(r.minPriceUSD!==undefined) add(`Auto-accept orders <b>${money(r.minPriceUSD)} or more</b>; auto-decline anything cheaper.`);
+      else add("Auto-accept every order that clears the gates above.");
+      if(r.autoAcceptUnderUSD!==undefined) add(`But escalate orders of <b>${money(r.autoAcceptUnderUSD)}+</b> to you — too high-value to auto-accept.`);
+    } else { // negotiate
+      const mult=(b.negotiation&&b.negotiation.counterPriceMultiplier)||1.2;
+      const tries=(b.negotiation&&b.negotiation.maxCounterOffers!==undefined)?b.negotiation.maxCounterOffers:1;
+      if(r.minPriceUSD!==undefined){
+        add(`Auto-accept orders <b>${money(r.minPriceUSD)} or more</b>.`);
+        add(`Below that, counter at <b>${mult}× the offer</b> (floored at ${money(r.minPriceUSD)}), up to <b>${tries}</b> ${tries===1?"try":"tries"} — then decline so the order re-routes elsewhere.`);
+      } else {
+        add("No floor set — auto-accept every order that clears the gates (nothing to negotiate).");
+      }
+      if(r.autoAcceptUnderUSD!==undefined) add(`Escalate orders of <b>${money(r.autoAcceptUnderUSD)}+</b> to you instead of negotiating.`);
+    }
+  }
+  $("#summary").innerHTML=lines.join("")||`<p>—</p>`;
+}
+
+async function save(){
+  try{
+    const body=collect();
+    const {policy}=await api(`/api/demo/operator-policy/${encodeURIComponent(slug)}`,{method:"PUT",body:JSON.stringify(body)});
+    $("#curMode").textContent=policy.mode;
+    toast("✓ policy saved — your agent is live");
+  }catch(e){toast(e.message,1);}
+}
+
+async function reset(){
+  try{
+    await api(`/api/demo/operator-policy/${encodeURIComponent(slug)}`,{method:"DELETE"});
+    setMode("always-prompt");
+    ["#minPrice","#maxConcurrent","#minDeadline","#autoCeiling","#counterMult","#maxCounters"].forEach(s=>$(s).value="");
+    $("#curMode").textContent="always-prompt (default)";
+    renderSummary();
+    toast("reverted to always-ask");
+  }catch(e){toast(e.message,1);}
+}
+
+function hydrate(p,isDefault){
+  setMode(p.mode||"always-prompt");
+  const r=p.rules||{};
+  if(r.minPriceUSD!==undefined)$("#minPrice").value=r.minPriceUSD;
+  if(r.maxConcurrent!==undefined)$("#maxConcurrent").value=r.maxConcurrent;
+  if(r.requireDeadlineMinSec!==undefined)$("#minDeadline").value=Math.round(r.requireDeadlineMinSec/60);
+  if(r.autoAcceptUnderUSD!==undefined)$("#autoCeiling").value=r.autoAcceptUnderUSD;
+  const n=p.negotiation||{};
+  if(n.counterPriceMultiplier!==undefined)$("#counterMult").value=n.counterPriceMultiplier;
+  if(n.maxCounterOffers!==undefined)$("#maxCounters").value=n.maxCounterOffers;
+  $("#curMode").textContent=isDefault?`${p.mode} (default)`:p.mode;
+  renderSummary();
+}
+
+async function load(){
+  try{
+    const {policy,isDefault}=await api(`/api/demo/operator-policy/${encodeURIComponent(slug)}`);
+    hydrate(policy,isDefault);
+  }catch(e){
+    setMode("always-prompt");
+    $("#curMode").textContent="always-prompt (default)";
+    renderSummary();
+  }
+}
+
+document.querySelectorAll(".mode").forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
+document.querySelectorAll("input").forEach(i=>i.addEventListener("input",renderSummary));
+$("#saveBtn").onclick=save;
+$("#resetBtn").onclick=reset;
+load();
+</script>
+</body>
+</html>
