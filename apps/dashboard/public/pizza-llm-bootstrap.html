@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Order pizza with your AI</title>
+<meta name="description" content="Turn your Claude, ChatGPT, or Gemini session into a pizza-ordering agent on PCC. Paste one prompt, say 'I want a pizza'.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--surface:#11151d;--surface2:#161b25;--line:rgba(150,172,205,.10);--line2:rgba(150,172,205,.20);--fg:#e9edf4;--muted:#8b94a6;--faint:#5b6475;--lime:#c6f24e;--cyan:#6cd6ff;--amber:#ffb24d;--violet:#c8a2ff;--danger:#ff6f6f;--accent:var(--lime);--mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Instrument Sans',system-ui,sans-serif;--display:'Bricolage Grotesque',var(--sans)}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+.grid-bg,.glow{position:fixed;inset:0;pointer-events:none;z-index:0}
+.grid-bg{background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.5}
+.glow{background:radial-gradient(60% 50% at 82% -5%,rgba(198,242,78,.10),transparent 60%),radial-gradient(55% 45% at 8% 8%,rgba(108,214,255,.07),transparent 60%)}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:rgba(10,12,16,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--lime);border-radius:6px;position:relative}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--lime)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1.6s infinite}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+main{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:30px 18px 60px}
+.hero{margin-bottom:26px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--lime)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(30px,8vw,52px);line-height:1.02;letter-spacing:-.02em;margin:.28em 0 .2em}
+.hero h1 .em{color:var(--lime)}
+.hero p{color:var(--muted);font-size:15.5px;margin:0;max-width:54ch}
+.steps{display:flex;flex-direction:column;gap:14px;margin-bottom:22px}
+.panel{background:linear-gradient(180deg,var(--surface),#0c0f15);border:1px solid var(--line);border-radius:14px;padding:20px 20px}
+.step{display:flex;gap:15px;align-items:flex-start}
+.step .n{font-family:var(--mono);font-size:13px;font-weight:700;width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--lime);border-radius:8px;color:var(--lime);flex:none;margin-top:2px}
+.step .body{flex:1;min-width:0}
+.step h3{font-family:var(--display);font-weight:700;font-size:18px;margin:2px 0 5px}
+.step p{color:var(--muted);font-size:14px;margin:0 0 4px}
+.step code{font-family:var(--mono);font-size:13px;background:var(--bg);border:1px solid var(--line2);border-radius:6px;padding:2px 7px;color:var(--cyan)}
+.logos{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.logos .chip{font-family:var(--mono);font-size:11.5px;color:var(--fg);background:var(--surface2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px}
+.copywrap{margin-top:12px;border:1px solid rgba(198,242,78,.3);border-radius:12px;overflow:hidden;background:linear-gradient(180deg,rgba(198,242,78,.05),transparent)}
+.copyhead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 13px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+pre.preview{margin:0;padding:14px;max-height:200px;overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.55;color:var(--muted);white-space:pre-wrap;word-break:break-word}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:12px 18px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;text-decoration:none;display:inline-flex;align-items:center;gap:8px;justify-content:center}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--lime);color:#0a0c10;border-color:var(--lime);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.sm{padding:8px 13px;font-size:12px}
+.btnrow{display:flex;flex-wrap:wrap;gap:9px;margin-top:13px}
+.fallback{margin-top:22px;border:1px dashed var(--line2);border-radius:14px;padding:18px 20px;background:var(--surface)}
+.fallback h3{font-family:var(--display);font-weight:700;font-size:16px;margin:0 0 6px}
+.fallback p{color:var(--muted);font-size:13.5px;margin:0 0 11px}
+.how{margin-top:26px;border-top:1px solid var(--line);padding-top:18px}
+.how h4{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:0 0 10px}
+.how ol{margin:0;padding-left:20px;color:var(--muted);font-size:13.5px;line-height:1.7}
+.how b{color:var(--fg);font-weight:600}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:30px 0 6px;letter-spacing:.04em}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--lime);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:11px 20px;border-radius:10px;z-index:60;opacity:0;transition:.3s}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.toast.err{background:var(--danger);color:#fff}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<div class="glow"></div>
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// order with your AI</span></div>
+  <span style="color:var(--muted)"><span class="dot"></span> live</span>
+</header>
+<main>
+  <div class="hero">
+    <div class="eyebrow">Agentic commerce · vibecodenights</div>
+    <h1>Order pizza with <span class="em">your AI</span>.</h1>
+    <p>Drop one prompt into a chat you already have open. Your AI becomes a pizza-ordering
+       agent on PCC — it asks what you want, finds a shop and a driver, gets your OK, and
+       watches it to your door. No app, no signup, no API key.</p>
+  </div>
+
+  <div class="steps">
+    <div class="panel step">
+      <div class="n">1</div>
+      <div class="body">
+        <h3>Open an AI session</h3>
+        <p>Any model with a chat window works. You don't need tools turned on — your AI
+           can hand you <code>curl</code> commands if it has no internet access.</p>
+        <div class="logos">
+          <span class="chip">Claude</span><span class="chip">ChatGPT</span><span class="chip">Gemini</span><span class="chip">…or any LLM</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel step">
+      <div class="n">2</div>
+      <div class="body">
+        <h3>Paste this prompt at the top of the chat</h3>
+        <p>It turns the model into your pizza agent and tells it exactly how to talk to PCC.</p>
+        <div class="copywrap">
+          <div class="copyhead"><span>pizza-llm-agent-prompt.md</span><span id="promptLen">~310 lines</span></div>
+          <pre class="preview" id="preview">Loading the prompt…</pre>
+        </div>
+        <div class="btnrow">
+          <button class="btn primary" id="copyBtn">⧉ Copy the prompt</button>
+          <a class="btn" id="rawBtn" href="/pizza-llm-agent-prompt.md" target="_blank" rel="noopener">View raw .md</a>
+          <a class="btn" href="/pizza-llm-agent-prompt.html" target="_blank" rel="noopener">Read it rendered</a>
+          <a class="btn sm" id="pkgBtn" href="/pcc-agent-package-pizza.json" download>↓ Agent package (.json)</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel step">
+      <div class="n">3</div>
+      <div class="body">
+        <h3>Tell your AI: <span style="color:var(--lime)">“I want a pizza.”</span></h3>
+        <p>It takes it from there — clarifies size, toppings, dietary needs, whether you want
+           cheapest / fastest / best-rated, shows you the plan and total, and only orders once
+           you say yes. Then it narrates the order to your door and reports the settlement.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="fallback">
+    <h3>No AI session? Order from the form.</h3>
+    <p>Same compose engine, same shops and drivers — just a classic web form instead of a chat.</p>
+    <a class="btn primary" href="/order.html">Open /order.html →</a>
+  </div>
+
+  <div class="how">
+    <h4>What actually happens</h4>
+    <ol>
+      <li>Your AI reads PCC's <b>make-pizza</b> capability spec to learn what to ask you.</li>
+      <li>It calls <b>/api/demo/pizza-order</b> — the compose engine picks the best
+          <b>shop × driver</b> pair for what you care about, within your budget.</li>
+      <li>You confirm. Two independent agents — a shop, then a driver — run the job in sequence.</li>
+      <li>On delivery, PCC <b>settles</b>: the shop and driver get paid, PCC takes a 2.35% fee,
+          and everyone's <b>reputation</b> updates — including yours.</li>
+    </ol>
+  </div>
+
+  <div class="foot">PCC // capability.network · agents compose reality</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const PROMPT_URL="/pizza-llm-agent-prompt.md";
+let promptText=null;
+let tt;function toast(m,e){const el=$("#toast");el.textContent=m;el.className="toast on"+(e?" err":"");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2600);}
+
+async function loadPrompt(){
+  try{
+    const r=await fetch(PROMPT_URL,{cache:"no-store"});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    promptText=await r.text();
+    const lines=promptText.split("\n");
+    $("#promptLen").textContent="~"+lines.length+" lines";
+    $("#preview").textContent=lines.slice(0,16).join("\n")+"\n\n  … "+(lines.length-16)+" more lines — hit Copy to grab the whole thing.";
+  }catch(e){
+    $("#preview").textContent="Couldn't preview the prompt here. Use “View raw .md” to open it, then copy all.";
+  }
+}
+
+$("#copyBtn").onclick=async()=>{
+  try{
+    if(!promptText){const r=await fetch(PROMPT_URL,{cache:"no-store"});promptText=await r.text();}
+    await navigator.clipboard.writeText(promptText);
+    toast("Prompt copied — paste it into your AI chat");
+  }catch(e){
+    toast("Copy blocked — open “View raw .md” and copy manually",1);
+    window.open(PROMPT_URL,"_blank","noopener");
+  }
+};
+
+loadPrompt();
+</script>
+</body>
+</html>
