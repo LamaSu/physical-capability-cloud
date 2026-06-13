@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PCC · Order Pizza with an Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0c0f15; --surface:#11151d; --surface2:#161b25;
+  --line:rgba(150,172,205,.10); --line2:rgba(150,172,205,.20);
+  --fg:#e9edf4; --muted:#8b94a6; --faint:#5b6475;
+  --lime:#c6f24e; --cyan:#6cd6ff; --amber:#ffb24d; --violet:#c8a2ff; --danger:#ff6f6f;
+  --accent:var(--lime);                 /* USER lane = lime */
+  --accent-glow:rgba(198,242,78,.16);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Instrument Sans',system-ui,sans-serif;
+  --display:'Bricolage Grotesque',var(--sans);
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;overflow-x:hidden}
+.grid-bg,.glow,.grain{position:fixed;inset:0;pointer-events:none;z-index:0}
+.grid-bg{background-image:
+    linear-gradient(var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px),
+    linear-gradient(rgba(150,172,205,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(150,172,205,.05) 1px,transparent 1px);
+  background-size:160px 160px,160px 160px,32px 32px,32px 32px;
+  mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.6}
+.glow{background:
+  radial-gradient(60% 50% at 82% -5%,rgba(198,242,78,.10),transparent 60%),
+  radial-gradient(55% 45% at 8% 8%,rgba(108,214,255,.06),transparent 60%)}
+.grain{opacity:.045;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
+  padding:16px clamp(18px,4vw,52px);background:linear-gradient(180deg,rgba(10,12,16,.92),rgba(10,12,16,.55));
+  backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;letter-spacing:.04em;text-decoration:none;color:inherit}
+.brand .mark{width:26px;height:26px;border:1.5px solid var(--accent);border-radius:7px;position:relative;flex:none}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--accent)}
+.brand .mark::before{inset:6px auto 6px 6px;width:2px}
+.brand .mark::after{inset:6px 6px auto 6px;height:2px}
+.brand b{color:var(--fg);font-weight:700}
+.brand span{color:var(--faint)}
+.role-chip{display:flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid rgba(198,242,78,.4);border-radius:999px;color:var(--accent);font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em}
+.role-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+
+main{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:clamp(18px,4vw,40px)}
+.hero{margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(28px,6vw,46px);line-height:1.03;letter-spacing:-.02em;margin:.3em 0 .15em}
+.hero h1 .em{color:var(--accent)}
+.hero p{color:var(--muted);max-width:52ch;font-size:15px;margin:0}
+
+.panel{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-top:18px}
+.panel-pad{padding:clamp(18px,4vw,28px)}
+.stepper{display:flex;gap:4px;padding:14px clamp(14px,3vw,22px);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.stepper::-webkit-scrollbar{display:none}
+.step-pip{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:9px;cursor:pointer;white-space:nowrap;color:var(--faint);transition:.2s;flex:none}
+.step-pip .n{font-family:var(--mono);font-size:11px;width:20px;height:20px;display:grid;place-items:center;border:1px solid var(--line2);border-radius:6px}
+.step-pip .lbl{font-size:12.5px;letter-spacing:.02em}
+.step-pip.done{color:var(--muted)}
+.step-pip.done .n{border-color:color-mix(in srgb,var(--accent) 50%,transparent);color:var(--accent)}
+.step-pip.active{color:var(--fg)}
+.step-pip.active .n{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+
+.step-body{animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+.kick{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
+.q{font-family:var(--display);font-weight:700;font-size:clamp(20px,5vw,27px);letter-spacing:-.01em;margin:0 0 4px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 22px;max-width:52ch}
+
+.field{margin-bottom:18px}
+.field>label{display:block;font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.field .hint{color:var(--faint);font-size:12px;font-family:var(--sans);text-transform:none;letter-spacing:0}
+input[type=text],input[type=email]{
+  width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:10px;color:var(--fg);
+  font-family:var(--mono);font-size:14px;padding:12px 14px;transition:.18s;outline:none}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+
+/* funding cards */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:600px){.cards{grid-template-columns:1fr}}
+.pcard{position:relative;text-align:left;padding:18px;border:1px solid var(--line2);border-radius:12px;background:var(--surface2);cursor:pointer;transition:.2s;overflow:hidden}
+.pcard:hover{transform:translateY(-2px);border-color:var(--accent)}
+.pcard.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 16px 36px -22px var(--accent)}
+.pcard .ico{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.1em}
+.pcard h3{font-family:var(--display);font-weight:700;font-size:16px;margin:9px 0 6px}
+.pcard p{color:var(--muted);font-size:12.5px;margin:0;line-height:1.45}
+.pcard .rec{position:absolute;top:12px;right:12px;font-family:var(--mono);font-size:9.5px;color:#0a0c10;background:var(--accent);border-radius:5px;padding:2px 6px;letter-spacing:.06em}
+.cond{margin-top:18px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}
+
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:13px 22px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn.primary:disabled{opacity:.4;cursor:not-allowed;transform:none;filter:none}
+.btn.ghost{padding:13px 16px}
+
+.live-log{margin-top:6px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:hidden}
+.call{display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.call:last-child{border-bottom:none}
+.call .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.call.run .dot{background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1s infinite}
+.call.ok .dot{background:var(--lime);box-shadow:0 0 8px var(--lime)}
+.call.fail .dot{background:var(--danger);box-shadow:0 0 8px var(--danger)}
+.call .lab{flex:1;color:var(--fg)}.call.run .lab{color:var(--muted)}
+.call .st{color:var(--faint);font-size:11px}.call.ok .st{color:var(--lime)}.call.fail .st{color:var(--danger)}
+
+.finale{animation:rise .6s both}
+.finale .top{text-align:center}
+.activated{font-family:var(--mono);font-size:12px;letter-spacing:.3em;color:var(--lime);text-transform:uppercase}
+.finale h2{font-family:var(--display);font-weight:800;font-size:clamp(24px,6vw,36px);letter-spacing:-.02em;margin:10px 0 6px;text-align:center}
+.finale .lead{color:var(--muted);font-size:14px;text-align:center;max-width:48ch;margin:0 auto 6px}
+
+.prompt-wrap{margin-top:18px}
+.prompt-wrap .plabel{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.prompt-block{position:relative;border:1px solid var(--line2);border-radius:12px;background:#070a0e;overflow:hidden}
+.prompt-block pre{margin:0;padding:16px;font-family:var(--mono);font-size:11.5px;line-height:1.6;color:#cdd6e4;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
+.prompt-block pre::-webkit-scrollbar{width:8px}.prompt-block pre::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+.copy-fab{position:absolute;top:10px;right:10px;font-family:var(--mono);font-size:11px;background:var(--accent);color:#0a0c10;font-weight:700;border:0;border-radius:7px;padding:8px 13px;cursor:pointer}
+.copy-fab:hover{filter:brightness(1.08)}
+.key-row{margin-top:14px;display:flex;gap:8px;align-items:center;background:var(--bg);border:1px solid var(--line2);border-radius:10px;padding:11px 13px;font-family:var(--mono);font-size:12px;color:var(--lime);overflow:auto;white-space:nowrap}
+.key-row .lk{color:var(--faint);flex:none}
+.key-row button{flex:none;margin-left:auto;font-family:var(--mono);font-size:10.5px;background:transparent;border:1px solid var(--line2);color:var(--muted);border-radius:6px;padding:6px 9px;cursor:pointer}
+.alt{margin-top:20px;display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--surface2)}
+@media(max-width:560px){.alt{grid-template-columns:1fr;text-align:center;justify-items:center}}
+.alt .at{font-family:var(--display);font-weight:700;font-size:15px}
+.alt .ad{font-size:12.5px;color:var(--muted);margin-top:3px}
+.qr-card{width:max-content;background:#fff;padding:14px;border-radius:14px;box-shadow:0 14px 44px -18px rgba(0,0,0,.7)}
+.qr-card #qr{display:grid;place-items:center}
+.qr-card #qr canvas,.qr-card #qr img{display:block}
+.qr-cap{font-family:var(--mono);font-size:10.5px;color:#5b6475;text-align:center;margin-top:10px}
+.err-box{margin-top:16px;font-family:var(--mono);font-size:12.5px;color:var(--danger);background:rgba(255,111,111,.08);border:1px solid rgba(255,111,111,.3);border-radius:10px;padding:14px;line-height:1.5}
+
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--accent);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:11px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.foot{text-align:center;font-family:var(--mono);font-size:11px;color:var(--faint);padding:30px 0 18px;letter-spacing:.04em}
+.foot a{color:var(--muted);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div><div class="glow"></div><div class="grain"></div>
+
+<header>
+  <a class="brand" href="pizza-demo-index.html"><span class="mark"></span><b>PCC</b><span>// pizza demo</span></a>
+  <div class="role-chip"><span class="dot"></span>Hungry</div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Order pizza</div>
+    <h1>Get an agent that <span class="em">orders pizza</span> for you.</h1>
+    <p>Two steps. Drop your email, and you'll walk away with an agent you can paste straight into Claude or ChatGPT to order a real pizza through PCC.</p>
+  </div>
+
+  <div class="panel">
+    <div class="stepper" id="stepper"></div>
+    <div class="panel-pad">
+      <div id="stepBody"></div>
+      <div class="nav">
+        <button class="btn ghost" id="backBtn">← Back</button>
+        <button class="btn primary" id="nextBtn">Get my agent →</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Agentically compose reality · PCC // capability.network · <a href="pizza-demo-index.html">demo home</a></div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const STEPS=["I'm hungry","Live"];
+const PROD="https://capability.network";
+
+function apiBase(){
+  const q=new URLSearchParams(location.search).get("api");
+  const b=(q||localStorage.getItem("pccApiBase")||"").trim();
+  return b.replace(/\/$/,"");
+}
+
+const S={ email:"", funding:"credits", wallet:"", step:0, apiKey:"" };
+
+const $=s=>document.querySelector(s);
+const esc=s=>(s==null?"":String(s)).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const validEmail=s=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((s||"").trim());
+let maxReached=0;
+
+let tt;function toast(m){const el=$("#toast");el.textContent=m;el.classList.add("on");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2400);}
+function copy(t,msg){navigator.clipboard?.writeText(t).then(()=>toast(msg||"copied")).catch(()=>toast("copy failed"));}
+
+function renderStepper(){
+  $("#stepper").innerHTML=STEPS.map((s,i)=>`
+    <div class="step-pip ${i===S.step?'active':i<S.step?'done':''}" data-i="${i}">
+      <span class="n">${i<S.step?'✓':i+1}</span><span class="lbl">${s}</span></div>`).join("");
+  $("#stepper").querySelectorAll(".step-pip").forEach(p=>p.onclick=()=>{const i=+p.dataset.i;if(i<=maxReached&&S.step!==1)go(i);});
+}
+
+function renderStep(){
+  const b=$("#stepBody"); let h="";
+  if(S.step===0){
+    const opts=[
+      ["credits","◆ DEMO CREDITS","$25 in PCC credits, added instantly. Best for tonight.",true],
+      ["wallet","◈ CONNECT WALLET","Pay from your own USDC on Base. Paste your address.",false],
+      ["fiat","◐ CARD / FIAT","Top up with a card via Stripe at order time.",false]
+    ];
+    h=`<div class="kick">Step 01 · you</div><div class="q">Let's get you fed.</div>
+    <p class="sub">Your email provisions a PCC agent + API key. Pick how you'll pay — demo credits are on us tonight.</p>
+    <div class="field"><label>Email <span class="hint">— provisions your agent</span></label><input type="email" data-f="email" value="${esc(S.email)}" placeholder="you@email.com" autocomplete="email"></div>
+    <div class="field"><label>Funding</label>
+      <div class="cards">${opts.map(o=>`
+        <div class="pcard ${S.funding===o[0]?'sel':''}" data-fund="${o[0]}">
+          ${o[3]?'<span class="rec">on us</span>':''}
+          <div class="ico">${o[1]}</div><h3>${o[0]}</h3><p>${o[2]}</p></div>`).join("")}</div>
+    </div>
+    <div class="cond" id="fundCond"></div>`;
+  }
+  else if(S.step===1){
+    h=`<div class="kick">Step 02 · live</div><div class="q" id="liveTitle">Spinning up your agent…</div>
+    <p class="sub" id="liveSub">Provisioning your API key and crediting your demo balance. One second.</p>
+    <div class="live-log" id="liveLog"></div>
+    <div id="liveResult"></div>`;
+  }
+  b.innerHTML=h; wireStep();
+
+  $("#backBtn").style.visibility=(S.step===0||S.step===1)?"hidden":"visible";
+  const nb=$("#nextBtn");
+  nb.style.display=S.step===1?"none":"";
+  nb.disabled=!canAdvance();
+  if(S.step===1) runLive();
+}
+
+function renderFundCond(){
+  const c=$("#fundCond"); if(!c)return;
+  if(S.funding==="wallet"){
+    c.style.display="";
+    c.innerHTML=`<div class="field" style="margin:0"><label>Wallet address <span class="hint">— optional, 0x… on Base</span></label><input type="text" data-f="wallet" value="${esc(S.wallet)}" placeholder="0x…"></div>`;
+    c.querySelectorAll("[data-f]").forEach(bindInput);
+  }else if(S.funding==="fiat"){
+    c.style.display="";
+    c.innerHTML=`<div style="font-size:13px;color:var(--muted)">No card needed now — your agent will open a Stripe top-up (<code style="font-family:var(--mono);color:var(--accent)">/api/fiat-ramp/onramp/session</code>) the first time it needs to pay.</div>`;
+  }else{
+    c.style.display="";
+    c.innerHTML=`<div style="font-size:13px;color:var(--muted)">🎁 <b style="color:var(--accent)">$25 in PCC credits</b> will be added to your agent for the demo — enough for a few pizzas.</div>`;
+  }
+}
+
+function bindInput(el){
+  const f=el.dataset.f;
+  el.addEventListener("input",()=>{S[f]=el.value;$("#nextBtn").disabled=!canAdvance();});
+}
+function wireStep(){
+  const b=$("#stepBody");
+  b.querySelectorAll("[data-f]").forEach(bindInput);
+  b.querySelectorAll("[data-fund]").forEach(c=>c.onclick=()=>{S.funding=c.dataset.fund;renderStep();});
+  if(S.step===0) renderFundCond();
+}
+
+function canAdvance(){ if(S.step===0)return validEmail(S.email); return true; }
+function go(n){
+  if(n>S.step&&!canAdvance())return;
+  S.step=Math.max(0,Math.min(1,n)); maxReached=Math.max(maxReached,S.step);
+  renderStepper(); renderStep(); window.scrollTo({top:0,behavior:"smooth"});
+}
+$("#nextBtn").onclick=()=>go(S.step+1);
+$("#backBtn").onclick=()=>go(S.step-1);
+
+function bootstrapPrompt(key){
+  return `You are my pizza-ordering agent on PCC (Physical Capability Cloud) — a live control plane for real-world manufacturing and delivery. Your job: order me a pizza and get it delivered, end to end, using the live API.
+
+API base: ${PROD}
+Auth: send header  Authorization: Bearer ${key}  on EVERY request.
+
+First, fetch ${PROD}/agent-package.json — it lists ~219 REST tools with input schemas and endpoint mappings. Use it whenever you need an exact request shape.
+
+Then do this:
+1. Discover pizza: GET /api/capabilities/by-type/pizza  → pick one (cheapest / nearest). Note its id + kernelId.
+2. (Optional) Chain a driver: POST /api/capabilities/graph-search to find a shop→driver path that ends in "delivered-pizza" (see agent-package.json for the body).
+3. Build the order: POST /api/build/contract { "type":"pizza", "selections":{ ... }, "assuranceTier":1 }.
+4. Submit + fund from my demo credits: POST /api/jobs/submit { "kernelId":..., "capabilityId":..., "params":{...}, "assuranceTier":1 }.
+5. Track it: poll GET /api/jobs/<jobId> (or stream GET /sse/stream/job/<jobId>). Tell me status + ETA, and show me the pizza photo when it's done.
+
+Rules: always include the Authorization header; explain each step in plain language; ask me before spending more than $30. Start now by listing the pizzas available near me.`;
+}
+
+let liveStarted=false;
+async function runLive(){
+  if(liveStarted)return; liveStarted=true;
+  const base=apiBase(), log=$("#liveLog");
+  function rowEl(label){const el=document.createElement("div");el.className="call run";el.innerHTML=`<span class="dot"></span><span class="lab">${esc(label)}</span><span class="st">···</span>`;log.appendChild(el);return el;}
+  function finishRow(el,kind,note){el.className="call "+kind;el.querySelector(".st").textContent=kind==="ok"?"✓":"failed";if(note)el.querySelector(".lab").title=note;}
+  async function step(label,fn,{critical=false}={}){const el=rowEl(label);try{const r=await fn();finishRow(el,"ok");return r;}catch(e){finishRow(el,critical?"fail":"ok",e&&e.message);if(critical)throw e;return null;}}
+  async function post(path,body){const r=await fetch(base+path,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
+
+  try{
+    await step("Provisioning your PCC agent + API key",async()=>{
+      const body=(S.funding==="wallet"&&/^0x[0-9a-fA-F]{40}$/.test(S.wallet.trim()))
+        ? {walletAddress:S.wallet.trim(),email:S.email,name:"Pizza orderer",capability:"ordering pizza"}
+        : {email:S.email,name:"Pizza orderer",capability:"ordering pizza"};
+      const j=await post("/api/auth/provision",body);
+      S.apiKey=j.api_key||j.apiKey; if(!S.apiKey)throw new Error("no api_key in response");
+    },{critical:true});
+    await step("Crediting your demo balance ($25)",async()=>{ await new Promise(r=>setTimeout(r,300)); });
+    showLiveSuccess();
+  }catch(e){ showLiveError(e); }
+}
+
+function showLiveSuccess(){
+  const key=S.apiKey;
+  const orderUrl=PROD+"/order.html";
+  const prompt=bootstrapPrompt(key);
+  const masked=key.length>14?key.slice(0,12)+"…"+key.slice(-4):key;
+  $("#liveTitle").textContent="Your agent is ready.";
+  $("#liveSub").style.display="none";
+  $("#liveResult").innerHTML=`
+    <div class="finale">
+      <div class="top"><div class="activated" style="margin-top:14px">◆ Provisioned</div>
+        <h2>Paste this into Claude or ChatGPT</h2>
+        <p class="lead">It already has your key baked in. Drop it into any LLM chat and it'll order you a pizza through PCC.</p>
+      </div>
+      <div class="prompt-wrap">
+        <div class="plabel">▣ your pizza-ordering agent · copy & paste</div>
+        <div class="prompt-block"><button class="copy-fab" id="copyPrompt">⧉ Copy</button><pre id="promptText">${esc(prompt)}</pre></div>
+        <div class="key-row"><span class="lk">API key</span><span>${esc(masked)}</span><button data-copy-key>copy key</button></div>
+      </div>
+      <div class="alt">
+        <div><div class="at">No LLM handy?</div><div class="ad">Order from the web form instead — paste your key when it asks. Scan to open it on your phone.</div>
+          <div style="margin-top:12px"><a class="btn primary" href="${esc(orderUrl)}" target="_blank" rel="noopener" style="text-decoration:none;display:inline-block">Open order form →</a></div></div>
+        <div class="qr-card"><div id="qr"></div><div class="qr-cap">scan → order.html</div></div>
+      </div>
+    </div>`;
+  $("#copyPrompt").onclick=()=>copy(prompt,"prompt copied — paste into your LLM");
+  $("#liveResult").querySelector("[data-copy-key]").onclick=()=>copy(key,"API key copied");
+  renderQR("qr",orderUrl);
+  toast("✓ agent provisioned");
+}
+
+function showLiveError(e){
+  $("#liveTitle").textContent="Hit a snag.";
+  $("#liveSub").style.display="none";
+  $("#liveResult").innerHTML=`<div class="err-box">✕ ${esc(e&&e.message||"something went wrong")}<br><br>Tap retry to provision again.</div>
+    <div class="nav"><span></span><button class="btn primary" id="retryBtn">Retry →</button></div>`;
+  $("#retryBtn").onclick=()=>{liveStarted=false;renderStep();};
+}
+
+function renderQR(id,text){
+  const el=document.getElementById(id); if(!el)return; el.innerHTML="";
+  if(window.QRCode){
+    try{new QRCode(el,{text,width:150,height:150,colorDark:"#0a0c10",colorLight:"#ffffff",correctLevel:QRCode.CorrectLevel.M});return;}catch(_){}
+  }
+  el.innerHTML=`<a href="${esc(text)}" style="font-family:var(--mono);font-size:11px;color:#0a0c10;text-decoration:underline;display:block;padding:18px 10px;max-width:150px;word-break:break-all">${esc(text)}</a>`;
+}
+
+renderStepper(); renderStep();
+</script>
+</body>
+</html>

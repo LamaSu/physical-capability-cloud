@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PCC · Deliver Pizza on the Network</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0c0f15; --surface:#11151d; --surface2:#161b25;
+  --line:rgba(150,172,205,.10); --line2:rgba(150,172,205,.20);
+  --fg:#e9edf4; --muted:#8b94a6; --faint:#5b6475;
+  --lime:#c6f24e; --cyan:#6cd6ff; --amber:#ffb24d; --violet:#c8a2ff; --danger:#ff6f6f;
+  --accent:var(--amber);                /* DRIVER lane = amber */
+  --accent-glow:rgba(255,178,77,.16);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Instrument Sans',system-ui,sans-serif;
+  --display:'Bricolage Grotesque',var(--sans);
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;overflow-x:hidden}
+.grid-bg,.glow,.grain{position:fixed;inset:0;pointer-events:none;z-index:0}
+.grid-bg{background-image:
+    linear-gradient(var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px),
+    linear-gradient(rgba(150,172,205,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(150,172,205,.05) 1px,transparent 1px);
+  background-size:160px 160px,160px 160px,32px 32px,32px 32px;
+  mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.6}
+.glow{background:
+  radial-gradient(60% 50% at 82% -5%,rgba(255,178,77,.12),transparent 60%),
+  radial-gradient(55% 45% at 8% 8%,rgba(255,178,77,.07),transparent 60%)}
+.grain{opacity:.045;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
+  padding:16px clamp(18px,4vw,52px);background:linear-gradient(180deg,rgba(10,12,16,.92),rgba(10,12,16,.55));
+  backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:13px;letter-spacing:.04em;text-decoration:none;color:inherit}
+.brand .mark{width:26px;height:26px;border:1.5px solid var(--accent);border-radius:7px;position:relative;flex:none}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--accent)}
+.brand .mark::before{inset:6px auto 6px 6px;width:2px}
+.brand .mark::after{inset:6px 6px auto 6px;height:2px}
+.brand b{color:var(--fg);font-weight:700}
+.brand span{color:var(--faint)}
+.role-chip{display:flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid rgba(255,178,77,.4);border-radius:999px;color:var(--accent);font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em}
+.role-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+
+main{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:clamp(18px,4vw,40px)}
+.hero{margin-bottom:14px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(28px,6vw,46px);line-height:1.03;letter-spacing:-.02em;margin:.3em 0 .15em}
+.hero h1 .em{color:var(--accent)}
+.hero p{color:var(--muted);max-width:52ch;font-size:15px;margin:0}
+
+.panel{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-top:18px}
+.panel-pad{padding:clamp(18px,4vw,28px)}
+.stepper{display:flex;gap:4px;padding:14px clamp(14px,3vw,22px);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.stepper::-webkit-scrollbar{display:none}
+.step-pip{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:9px;cursor:pointer;white-space:nowrap;color:var(--faint);transition:.2s;flex:none}
+.step-pip .n{font-family:var(--mono);font-size:11px;width:20px;height:20px;display:grid;place-items:center;border:1px solid var(--line2);border-radius:6px}
+.step-pip .lbl{font-size:12.5px;letter-spacing:.02em}
+.step-pip.done{color:var(--muted)}
+.step-pip.done .n{border-color:color-mix(in srgb,var(--accent) 50%,transparent);color:var(--accent)}
+.step-pip.active{color:var(--fg)}
+.step-pip.active .n{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+
+.step-body{animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+.kick{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
+.q{font-family:var(--display);font-weight:700;font-size:clamp(20px,5vw,27px);letter-spacing:-.01em;margin:0 0 4px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 22px;max-width:52ch}
+
+.field{margin-bottom:18px}
+.field>label{display:block;font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.field .hint{color:var(--faint);font-size:12px;font-family:var(--sans);text-transform:none;letter-spacing:0}
+input[type=text],input[type=email],input[type=number],input[type=url],select{
+  width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:10px;color:var(--fg);
+  font-family:var(--mono);font-size:14px;padding:12px 14px;transition:.18s;outline:none}
+input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+select{appearance:none;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 18px,calc(100% - 13px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:520px){.row{grid-template-columns:1fr}}
+
+.geo-btn{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;font-family:var(--mono);font-size:13px;padding:12px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--fg);cursor:pointer;transition:.18s}
+.geo-btn:hover{border-color:var(--accent);color:var(--accent)}
+.geo-state{font-family:var(--mono);font-size:12px;color:var(--accent);margin-top:8px;min-height:16px}
+
+/* sliders */
+.slider-row{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px}
+.slider-row label{margin:0}
+.slider-row .val{font-family:var(--mono);color:var(--accent);font-size:15px;font-weight:700}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:4px;background:var(--line2);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--accent);cursor:pointer;border:3px solid var(--bg);box-shadow:0 0 0 1px var(--accent),0 0 16px color-mix(in srgb,var(--accent) 60%,transparent)}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:3px solid var(--bg)}
+.human{font-size:12.5px;color:var(--muted);margin-top:8px}
+
+/* policy cards */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:600px){.cards{grid-template-columns:1fr}}
+.pcard{position:relative;text-align:left;padding:18px;border:1px solid var(--line2);border-radius:12px;background:var(--surface2);cursor:pointer;transition:.2s;overflow:hidden}
+.pcard:hover{transform:translateY(-2px);border-color:var(--accent)}
+.pcard.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 16px 36px -22px var(--accent)}
+.pcard .ico{font-family:var(--mono);font-size:11px;color:var(--accent);letter-spacing:.1em}
+.pcard h3{font-family:var(--display);font-weight:700;font-size:17px;margin:9px 0 6px}
+.pcard p{color:var(--muted);font-size:12.5px;margin:0;line-height:1.45}
+.cond{margin-top:18px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}
+.cond .note{font-size:13px;color:var(--muted)}
+
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:13px 22px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--accent);color:#0a0c10;border-color:var(--accent);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn.primary:disabled{opacity:.4;cursor:not-allowed;transform:none;filter:none}
+.btn.ghost{padding:13px 16px}
+
+.live-log{margin-top:6px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);overflow:hidden}
+.call{display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.call:last-child{border-bottom:none}
+.call .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.call.run .dot{background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1s infinite}
+.call.ok .dot{background:var(--lime);box-shadow:0 0 8px var(--lime)}
+.call.warn .dot{background:var(--amber)}
+.call.fail .dot{background:var(--danger);box-shadow:0 0 8px var(--danger)}
+.call .lab{flex:1;color:var(--fg)}
+.call.run .lab{color:var(--muted)}
+.call .st{color:var(--faint);font-size:11px;white-space:nowrap}
+.call.ok .st{color:var(--lime)}.call.warn .st{color:var(--amber)}.call.fail .st{color:var(--danger)}
+
+.finale{text-align:center;animation:rise .6s both}
+.activated{font-family:var(--mono);font-size:12px;letter-spacing:.3em;color:var(--lime);text-transform:uppercase}
+.finale h2{font-family:var(--display);font-weight:800;font-size:clamp(24px,6vw,38px);letter-spacing:-.02em;margin:10px 0 6px}
+.live-card{margin:20px auto 0;max-width:460px;text-align:left;border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);border-radius:14px;background:linear-gradient(180deg,var(--accent-glow),transparent);padding:20px;box-shadow:0 0 60px -30px var(--accent)}
+.live-card .lh{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em}
+.live-card .cn{font-family:var(--display);font-weight:700;font-size:20px;margin:8px 0}
+.live-card .meta{font-family:var(--mono);font-size:12px;color:var(--muted);display:grid;gap:5px;margin-top:8px}
+.live-card .meta b{color:var(--fg);font-weight:500}
+.qr-card{margin:20px auto 0;width:max-content;background:#fff;padding:16px;border-radius:16px;box-shadow:0 14px 44px -18px rgba(0,0,0,.7)}
+.qr-card #qr{display:grid;place-items:center}
+.qr-card #qr canvas,.qr-card #qr img{display:block}
+.qr-cap{font-family:var(--mono);font-size:11px;color:#5b6475;text-align:center;margin-top:12px;letter-spacing:.04em}
+.cardurl{margin:16px auto 0;max-width:460px;display:flex;gap:8px;align-items:center;background:var(--bg);border:1px solid var(--line2);border-radius:10px;padding:11px 13px;font-family:var(--mono);font-size:12px;color:var(--accent);overflow:auto;white-space:nowrap}
+.cardurl button{flex:none;margin-left:auto;font-family:var(--mono);font-size:10.5px;background:transparent;border:1px solid var(--line2);color:var(--muted);border-radius:6px;padding:6px 9px;cursor:pointer}
+.cardurl button:hover{color:var(--fg);border-color:var(--fg)}
+.keep-open{margin:18px auto 0;max-width:460px;font-family:var(--mono);font-size:12.5px;color:var(--amber);background:rgba(255,178,77,.08);border:1px solid rgba(255,178,77,.3);border-radius:10px;padding:12px 14px;line-height:1.5}
+.wn{margin:22px auto 0;max-width:560px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wn .c{border:1px solid var(--line2);border-radius:10px;padding:13px;background:var(--surface2);text-align:left}
+.wn .c .h{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--accent);text-transform:uppercase}
+.wn .c .t{font-family:var(--display);font-weight:700;font-size:14px;margin:6px 0 4px;line-height:1.2}
+.wn .c .d{font-size:11.5px;color:var(--muted);line-height:1.4}
+.err-box{margin-top:16px;font-family:var(--mono);font-size:12.5px;color:var(--danger);background:rgba(255,111,111,.08);border:1px solid rgba(255,111,111,.3);border-radius:10px;padding:14px;line-height:1.5}
+
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--accent);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:11px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.foot{text-align:center;font-family:var(--mono);font-size:11px;color:var(--faint);padding:30px 0 18px;letter-spacing:.04em}
+.foot a{color:var(--muted);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div><div class="glow"></div><div class="grain"></div>
+
+<header>
+  <a class="brand" href="pizza-demo-index.html"><span class="mark"></span><b>PCC</b><span>// pizza demo</span></a>
+  <div class="role-chip"><span class="dot"></span>Driver</div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Driver onboarding</div>
+    <h1>Deliver pizza for <span class="em">the network</span>.</h1>
+    <p>Five quick steps. You'll get a working agent, your delivery skill published, and a dashboard to take jobs from your phone during the demo.</p>
+  </div>
+
+  <div class="panel">
+    <div class="stepper" id="stepper"></div>
+    <div class="panel-pad">
+      <div id="stepBody"></div>
+      <div class="nav">
+        <button class="btn ghost" id="backBtn">← Back</button>
+        <button class="btn primary" id="nextBtn">Continue →</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Agentically compose reality · PCC // capability.network · <a href="pizza-demo-index.html">demo home</a></div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const STEPS=["Identity","Service area","Pricing","Policy","Live"];
+const PROD="https://capability.network";
+const CITIES={"San Francisco":[37.77,-122.42],"New York":[40.71,-74.01],"London":[51.51,-0.13],
+  "Berlin":[52.52,13.40],"Toronto":[43.65,-79.38],"Austin":[30.27,-97.74],"Lagos":[6.52,3.38],
+  "Bengaluru":[12.97,77.59],"São Paulo":[-23.55,-46.63],"Singapore":[1.35,103.82]};
+
+function apiBase(){
+  const q=new URLSearchParams(location.search).get("api");
+  const b=(q||localStorage.getItem("pccApiBase")||"").trim();
+  return b.replace(/\/$/,"");
+}
+
+const S={
+  name:"", email:"", city:"San Francisco", lat:37.77, lng:-122.42, geoOk:false,
+  pickupRadius:15, deliveryRadius:15,
+  basePrice:6, distanceMult:1.5, eta:30,
+  policyMode:"auto", maxConcurrent:1, priceFloor:5, counterMult:1.15, maxCounter:3,
+  step:0, slug:"", apiKey:"", skillId:""
+};
+
+const $=s=>document.querySelector(s);
+const esc=s=>(s==null?"":String(s)).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const rid=()=>Math.random().toString(36).slice(2,6);
+const slugify=s=>((s||"driver").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40)||"driver");
+const validEmail=s=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((s||"").trim());
+let maxReached=0;
+
+let tt;function toast(m){const el=$("#toast");el.textContent=m;el.classList.add("on");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2400);}
+function copy(t,msg){navigator.clipboard?.writeText(t).then(()=>toast(msg||"copied")).catch(()=>toast("copy failed"));}
+
+function renderStepper(){
+  $("#stepper").innerHTML=STEPS.map((s,i)=>`
+    <div class="step-pip ${i===S.step?'active':i<S.step?'done':''}" data-i="${i}">
+      <span class="n">${i<S.step?'✓':i+1}</span><span class="lbl">${s}</span></div>`).join("");
+  $("#stepper").querySelectorAll(".step-pip").forEach(p=>p.onclick=()=>{const i=+p.dataset.i;if(i<=maxReached&&S.step!==4)go(i);});
+}
+
+function renderStep(){
+  const b=$("#stepBody"); let h="";
+
+  if(S.step===0){
+    h=`<div class="kick">Step 01 · identity</div><div class="q">Who's driving?</div>
+    <p class="sub">Your email gets a fresh PCC agent + API key. Your location is where you start picking up.</p>
+    <div class="field"><label>Driver name</label><input type="text" data-f="name" value="${esc(S.name)}" placeholder="Sam Rider" autocomplete="name"></div>
+    <div class="field"><label>Email <span class="hint">— provisions your agent</span></label><input type="email" data-f="email" value="${esc(S.email)}" placeholder="you@email.com" autocomplete="email"></div>
+    <div class="field"><label>Current location</label>
+      <button class="geo-btn" id="geoBtn">📍 Use my current location</button>
+      <div class="geo-state" id="geoState">${S.geoOk?`✓ detected · ${S.lat.toFixed(3)}, ${S.lng.toFixed(3)}`:""}</div>
+      <div class="row" style="margin-top:12px">
+        <div><span class="mini-lbl" style="font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px">Or pick a city</span>
+          <select data-f="city">${Object.keys(CITIES).map(c=>`<option ${S.city===c?'selected':''}>${c}</option>`).join("")}</select></div>
+        <div><span class="mini-lbl" style="font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:6px">Lat / Lng</span>
+          <div class="row"><input type="number" step="0.0001" data-f="lat" value="${S.lat}"><input type="number" step="0.0001" data-f="lng" value="${S.lng}"></div></div>
+      </div></div>`;
+  }
+  else if(S.step===1){
+    h=`<div class="kick">Step 02 · service area</div><div class="q">How far will you range?</div>
+    <p class="sub">Pickup radius is how far you'll travel to grab a pizza. Delivery radius is how far you'll carry it from there.</p>
+    <div class="field">
+      <div class="slider-row"><label>Pickup radius</label><span class="val" id="pickV">${S.pickupRadius} km</span></div>
+      <input type="range" min="5" max="50" step="1" data-f="pickupRadius" data-out="pickV" value="${S.pickupRadius}">
+      <div class="human">You'll be offered pizzas from shops within <b id="pickH">${S.pickupRadius} km</b> of you.</div>
+    </div>
+    <div class="field">
+      <div class="slider-row"><label>Delivery radius</label><span class="val" id="delV">${S.deliveryRadius} km</span></div>
+      <input type="range" min="5" max="50" step="1" data-f="deliveryRadius" data-out="delV" value="${S.deliveryRadius}">
+      <div class="human">You'll take deliveries dropping within <b id="delH">${S.deliveryRadius} km</b> of pickup.</div>
+    </div>`;
+  }
+  else if(S.step===2){
+    h=`<div class="kick">Step 03 · pricing</div><div class="q">What do you charge?</div>
+    <p class="sub">Your agent quotes <b>base + distance × $/km</b>. ETA is what you promise when a delivery starts.</p>
+    <div class="row">
+      <div class="field"><label>Base price <span class="hint">USDC / delivery</span></label><input type="number" min="1" step="0.5" data-f="basePrice" value="${S.basePrice}"></div>
+      <div class="field"><label>Distance rate <span class="hint">USDC / km</span></label><input type="number" min="0" step="0.25" data-f="distanceMult" value="${S.distanceMult}"></div>
+    </div>
+    <div class="field"><label>ETA at start <span class="hint">minutes from pickup to door</span></label><input type="number" min="1" step="1" data-f="eta" value="${S.eta}"></div>
+    <div class="cond"><div class="note">Example: a 4 km drop quotes <b style="color:var(--accent)">$${(+S.basePrice + 4*(+S.distanceMult)).toFixed(2)}</b> · ETA <b style="color:var(--accent)">${S.eta} min</b>.</div></div>`;
+  }
+  else if(S.step===3){
+    const modes=[
+      ["auto","◆ AUTO","Accept deliveries automatically when price + range check out. Hands-off — best for the demo."],
+      ["negotiate","◈ NEGOTIATE","Counter-offer on price, then auto-accept inside your rules."],
+      ["always-prompt","◐ ALWAYS ASK","Every delivery pings you to accept or decline by hand."]
+    ];
+    h=`<div class="kick">Step 04 · policy</div><div class="q">How should your agent take jobs?</div>
+    <p class="sub">Your policy decides what happens when a delivery offer lands. Change it any time from your dashboard.</p>
+    <div class="cards">${modes.map(m=>`
+      <div class="pcard ${S.policyMode===m[0]?'sel':''}" data-mode="${m[0]}">
+        <div class="ico">${m[1]}</div><h3>${m[0].replace("-"," ")}</h3><p>${m[2]}</p></div>`).join("")}</div>
+    <div class="cond">
+      <div class="field" style="margin:0 0 16px"><label>Max concurrent deliveries</label><input type="number" min="1" step="1" data-f="maxConcurrent" value="${S.maxConcurrent}">
+        <div class="human">Keep this at <b>1</b> for the demo — one pizza at a time.</div></div>
+      <div id="cond"></div>
+    </div>`;
+  }
+  else if(S.step===4){
+    h=`<div class="kick">Step 05 · go live</div><div class="q" id="liveTitle">Putting you on the network…</div>
+    <p class="sub" id="liveSub">Provisioning your agent, publishing your delivery skill, wiring you to every pizza shop. About ten seconds.</p>
+    <div class="live-log" id="liveLog"></div>
+    <div id="liveResult"></div>`;
+  }
+
+  b.innerHTML=h; wireStep();
+
+  $("#backBtn").style.visibility=(S.step===0||S.step===4)?"hidden":"visible";
+  const nb=$("#nextBtn");
+  nb.style.display=S.step===4?"none":"";
+  nb.textContent=S.step===3?"Go live →":"Continue →";
+  nb.disabled=!canAdvance();
+
+  if(S.step===4) runLive();
+}
+
+function renderCond(){
+  const c=$("#cond"); if(!c)return; let h="";
+  if(S.policyMode==="auto"){
+    h=`<div class="field" style="margin:0"><label>Price floor <span class="hint">USDC, won't drive below</span></label><input type="number" min="0" step="0.5" data-f="priceFloor" value="${S.priceFloor}"></div>`;
+  }else if(S.policyMode==="negotiate"){
+    h=`<div class="row">
+      <div class="field" style="margin:0"><label>Counter multiplier <span class="hint">×offer, e.g. 1.15</span></label><input type="number" min="1" step="0.05" data-f="counterMult" value="${S.counterMult}"></div>
+      <div class="field" style="margin:0"><label>Max counter attempts</label><input type="number" min="1" step="1" data-f="maxCounter" value="${S.maxCounter}"></div></div>`;
+  }else{
+    h=`<div class="note">You'll get a notification for every delivery offer and tap <b style="color:var(--accent)">Accept</b> or <b>Decline</b>.</div>`;
+  }
+  c.innerHTML=h; c.querySelectorAll("[data-f]").forEach(bindInput);
+}
+
+function bindInput(el){
+  const f=el.dataset.f;
+  el.addEventListener("input",()=>{
+    S[f]=(el.type==="number"||el.type==="range")?(el.value===""?"":+el.value):el.value;
+    if(el.dataset.out){const o=document.getElementById(el.dataset.out);if(o)o.textContent=el.value+" km";const hh=document.getElementById(el.dataset.out.replace("V","H"));if(hh)hh.textContent=el.value+" km";}
+    if(f==="city"){const c=CITIES[el.value];if(c){S.lat=c[0];S.lng=c[1];S.geoOk=false;const g=$("#geoState");if(g)g.textContent="";const la=$('[data-f=lat]'),ln=$('[data-f=lng]');if(la)la.value=S.lat;if(ln)ln.value=S.lng;}}
+    if(S.step===2){const c=$(".cond .note");if(c)c.innerHTML=`Example: a 4 km drop quotes <b style="color:var(--accent)">$${(+S.basePrice + 4*(+S.distanceMult)).toFixed(2)}</b> · ETA <b style="color:var(--accent)">${S.eta} min</b>.`;}
+    $("#nextBtn").disabled=!canAdvance();
+  });
+}
+function wireStep(){
+  const b=$("#stepBody");
+  b.querySelectorAll("[data-f]").forEach(bindInput);
+  const geo=$("#geoBtn"); if(geo) geo.onclick=detectLocation;
+  b.querySelectorAll("[data-mode]").forEach(c=>c.onclick=()=>{S.policyMode=c.dataset.mode;renderStep();});
+  if(S.step===3) renderCond();
+}
+
+function detectLocation(){
+  const st=$("#geoState"); if(!navigator.geolocation){if(st)st.textContent="Geolocation unavailable — pick a city below.";return;}
+  if(st)st.textContent="Locating…";
+  navigator.geolocation.getCurrentPosition(p=>{
+    S.lat=+p.coords.latitude.toFixed(4); S.lng=+p.coords.longitude.toFixed(4); S.geoOk=true;
+    if(st)st.textContent=`✓ detected · ${S.lat}, ${S.lng}`;
+    const la=$('[data-f=lat]'),ln=$('[data-f=lng]');if(la)la.value=S.lat;if(ln)ln.value=S.lng;
+  },err=>{if(st)st.textContent="Couldn't get location ("+err.message+") — pick a city below.";},{enableHighAccuracy:true,timeout:8000});
+}
+
+function canAdvance(){
+  if(S.step===0)return S.name.trim()&&validEmail(S.email)&&S.lat!==""&&S.lng!=="";
+  if(S.step===2)return +S.basePrice>0&&+S.eta>0;
+  return true;
+}
+function go(n){
+  if(n>S.step&&!canAdvance())return;
+  S.step=Math.max(0,Math.min(4,n)); maxReached=Math.max(maxReached,S.step);
+  renderStepper(); renderStep(); window.scrollTo({top:0,behavior:"smooth"});
+}
+$("#nextBtn").onclick=()=>go(S.step+1);
+$("#backBtn").onclick=()=>go(S.step-1);
+
+function policyBody(){
+  const b={slug:S.slug,role:"driver",mode:S.policyMode,maxConcurrentDeliveries:+S.maxConcurrent||1};
+  if(S.policyMode==="auto"){b.priceFloorUSD=+S.priceFloor||0;}
+  else if(S.policyMode==="negotiate"){b.counterMultiplier=+S.counterMult||1.1;b.maxCounterAttempts=+S.maxCounter||1;}
+  return b;
+}
+
+let liveStarted=false;
+async function runLive(){
+  if(liveStarted)return; liveStarted=true;
+  if(!S.slug)S.slug=slugify(S.name)+"-"+rid();
+  const base=apiBase(), log=$("#liveLog");
+  const driverKernel="driver-"+S.slug;
+  const ctx={key:S.apiKey||null,skillId:null};
+  const auth=()=>ctx.key?{authorization:"Bearer "+ctx.key}:{};
+
+  function rowEl(label){const el=document.createElement("div");el.className="call run";el.innerHTML=`<span class="dot"></span><span class="lab">${esc(label)}</span><span class="st">···</span>`;log.appendChild(el);log.scrollTop=log.scrollHeight;return el;}
+  function finishRow(el,kind,note){el.className="call "+kind;el.querySelector(".st").textContent=kind==="ok"?"✓":kind==="warn"?"skipped":"failed";if(note)el.querySelector(".lab").title=note;}
+  async function step(label,fn,{critical=false}={}){
+    const el=rowEl(label);
+    try{const r=await fn();finishRow(el,"ok");return r;}
+    catch(e){finishRow(el,critical?"fail":"warn",e&&e.message);if(critical)throw e;return null;}
+  }
+  async function post(path,body){const r=await fetch(base+path,{method:"POST",headers:{"content-type":"application/json",...auth()},body:JSON.stringify(body)});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
+  async function put(path,body){const r=await fetch(base+path,{method:"PUT",headers:{"content-type":"application/json",...auth()},body:JSON.stringify(body)});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
+  async function get(path){const r=await fetch(base+path,{headers:{...auth()}});if(!r.ok)throw new Error(path+" → "+r.status);return r.json().catch(()=>({}));}
+
+  const price=Math.max(1,+S.basePrice||1), durMs=(+S.eta||30)*60000;
+
+  try{
+    await step("Provisioning your PCC agent + API key",async()=>{
+      const j=await post("/api/auth/provision",{email:S.email,name:S.name,capability:"pizza-delivery"});
+      ctx.key=j.api_key||j.apiKey; if(!ctx.key)throw new Error("no api_key in response"); S.apiKey=ctx.key;
+    },{critical:true});
+
+    await step("Publishing your delivery skill",async()=>{
+      const j=await post("/api/skills/register",{humanDid:S.email,name:S.name+" — pizza delivery",
+        description:"Pizza delivery · pickup "+S.pickupRadius+"km / drop "+S.deliveryRadius+"km · ~"+S.eta+"min",
+        skillType:"pizza-delivery",certifications:[],hourlyRateUSD:price,
+        location:{lat:+S.lat,lng:+S.lng},serviceRadiusKm:Math.max(+S.pickupRadius,+S.deliveryRadius)||15,weeklyAvailableHours:40});
+      ctx.skillId=j.id||(j.skill&&j.skill.id); if(!ctx.skillId)throw new Error("no skill id"); S.skillId=ctx.skillId;
+    },{critical:true});
+
+    await step("Registering with the compose engine",()=>post("/api/compose/_dev/register-candidate",
+      {capabilityId:ctx.skillId,kernelId:driverKernel,operatorAddress:S.email,capabilityType:"pizza-delivery",
+       estimatedPriceUSD:price,estimatedDurationMs:durMs,assuranceTier:1,location:{lat:+S.lat,lng:+S.lng},available:true}));
+
+    await step("Adding you to the capability graph",()=>post("/api/capabilities/graph/_dev/register-node",
+      {capabilityId:ctx.skillId,capabilityType:"pizza-delivery",kernelId:driverKernel,operatorAddress:S.email,
+       estimatedPriceUSD:price,estimatedDurationMs:durMs,assuranceTier:1,location:{lat:+S.lat,lng:+S.lng},
+       available:true,inputTypes:["pizza"],outputTypes:["delivered-pizza"]}));
+
+    await step("Linking you to every pizza shop on the network",async()=>{
+      let shops=[];
+      try{const j=await get("/api/capabilities/by-type/pizza");shops=j.capabilities||j.data||(Array.isArray(j)?j:[]);}catch(_){shops=[];}
+      let edges=0;
+      for(const sh of shops.slice(0,25)){
+        const sid=sh.id||sh.capabilityId; if(!sid)continue;
+        try{await post("/api/capabilities/graph/_dev/register-edge",{fromCapabilityId:sid,toCapabilityId:ctx.skillId,capabilityTypeFlow:"pizza"});edges++;}catch(_){}
+      }
+      if(!shops.length)throw new Error("no shops yet — they'll link to you when they join");
+    });
+
+    await step("Saving your "+S.policyMode+" delivery policy",()=>put("/api/demo/operator-policy/"+S.slug,policyBody()));
+
+    showLiveSuccess();
+  }catch(e){ showLiveError(e); }
+}
+
+function showLiveSuccess(){
+  const url=PROD+"/driver.html?driver="+encodeURIComponent(S.slug);
+  $("#liveTitle").textContent="You're live.";
+  $("#liveSub").style.display="none";
+  const pol=S.policyMode==="auto"?`auto · floor $${S.priceFloor}`
+    :S.policyMode==="negotiate"?`negotiate · ×${S.counterMult} · ${S.maxCounter} tries`:`always ask`;
+  $("#liveResult").innerHTML=`
+    <div class="finale">
+      <div class="activated" style="margin-top:18px">◆ Activated</div>
+      <h2>${esc(S.name)} is delivering on PCC.</h2>
+      <div class="live-card">
+        <div class="lh"><span>◐ delivery driver</span><span style="color:var(--lime)">LIVE</span></div>
+        <div class="cn">${esc(S.name)}</div>
+        <div class="meta">
+          <span>range · <b>${S.pickupRadius}km pickup · ${S.deliveryRadius}km drop</b></span>
+          <span>price · <b>$${S.basePrice} + $${S.distanceMult}/km</b> · ETA <b>${S.eta}min</b></span>
+          <span>policy · <b>${pol} · ${S.maxConcurrent} at a time</b></span>
+          <span>slug · <b>${esc(S.slug)}</b></span>
+        </div>
+      </div>
+      <div class="qr-card"><div id="qr"></div><div class="qr-cap">scan → your driver dashboard</div></div>
+      <div class="cardurl">${esc(url)}<button data-copy="${esc(url)}">copy</button></div>
+      <div class="keep-open">📱 Open this on your phone and <b>keep it open during the demo</b> — delivery offers land here and you accept with a tap.</div>
+      <div class="wn">
+        <div class="c"><div class="h">/api/capabilities/graph</div><div class="t">Shop → you → door</div><div class="d">You're node 2 of the pizza→delivery chain. Compose routes pickups to you.</div></div>
+        <div class="c"><div class="h">/api/skills</div><div class="t">Discoverable</div><div class="d">Any agent searching pizza-delivery near a shop can hire you directly.</div></div>
+        <div class="c"><div class="h">escrow · Base</div><div class="t">You get paid</div><div class="d">USDC releases on proof of delivery — photo at the door.</div></div>
+        <div class="c"><div class="h">/api/reputation</div><div class="t">Per-drop score</div><div class="d">Every completed delivery moves your reputation on the network.</div></div>
+      </div>
+    </div>`;
+  $("#liveResult").querySelectorAll("[data-copy]").forEach(x=>x.onclick=()=>copy(x.dataset.copy,"dashboard URL copied"));
+  renderQR("qr",url);
+  toast("✓ "+S.name+" is live");
+}
+
+function showLiveError(e){
+  $("#liveTitle").textContent="Hit a snag.";
+  $("#liveSub").style.display="none";
+  $("#liveResult").innerHTML=`<div class="err-box">✕ ${esc(e&&e.message||"something went wrong")}<br><br>Nothing was lost. Tap retry to run the live steps again.</div>
+    <div class="nav"><span></span><button class="btn primary" id="retryBtn">Retry go-live →</button></div>`;
+  $("#retryBtn").onclick=()=>{liveStarted=false;renderStep();};
+}
+
+function renderQR(id,text){
+  const el=document.getElementById(id); if(!el)return; el.innerHTML="";
+  if(window.QRCode){
+    try{new QRCode(el,{text,width:208,height:208,colorDark:"#0a0c10",colorLight:"#ffffff",correctLevel:QRCode.CorrectLevel.M});return;}catch(_){}
+  }
+  el.innerHTML=`<a href="${esc(text)}" style="font-family:var(--mono);font-size:12px;color:#0a0c10;text-decoration:underline;display:block;padding:24px 12px;max-width:200px;word-break:break-all">${esc(text)}</a>`;
+}
+
+renderStepper(); renderStep();
+</script>
+</body>
+</html>
