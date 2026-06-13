@@ -156,7 +156,7 @@ async function registerComposeCandidate(p: ProviderSpec): Promise<void> {
 }
 
 async function registerGraphNode(p: ProviderSpec): Promise<void> {
-  await api("POST", "/api/graph-search/_dev/register-node", {
+  await api("POST", "/api/capabilities/graph/_dev/register-node", {
     capabilityId: `cap_${p.slug}`,
     capabilityType: p.capabilityType,
     kernelId: `k_${p.slug}`,
@@ -167,11 +167,14 @@ async function registerGraphNode(p: ProviderSpec): Promise<void> {
     available: true,
     inputTypes: p.inputTypes,
     outputTypes: p.outputTypes,
+    // Required: compose passes a location filter; nodes without a location are
+    // rejected by graph-search's proximity check (→ no_path_found).
+    location: p.location,
   });
 }
 
 async function registerGraphEdge(from: string, to: string): Promise<void> {
-  await api("POST", "/api/graph-search/_dev/register-edge", {
+  await api("POST", "/api/capabilities/graph/_dev/register-edge", {
     fromCapabilityId: `cap_${from}`,
     toCapabilityId: `cap_${to}`,
     capabilityTypeFlow: "pizza",
@@ -229,6 +232,7 @@ async function main(): Promise<void> {
 
   console.log("");
   console.log("next:");
+  console.log(`  ${BASE}/pizza-observability.html                ← live observability (audience screen)`);
   console.log(`  ${BASE}/order.html                              ← user/orderer`);
   SHOPS.forEach(s => console.log(`  ${BASE}/operator.html?shop=${s.slug}    ← ${s.name}`));
   DRIVERS.forEach(d => console.log(`  ${BASE}/driver.html?driver=${d.slug}    ← ${d.name}`));
