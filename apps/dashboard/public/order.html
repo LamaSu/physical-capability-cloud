@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Order pizza</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--surface:#11151d;--surface2:#161b25;--line:rgba(150,172,205,.10);--line2:rgba(150,172,205,.20);--fg:#e9edf4;--muted:#8b94a6;--faint:#5b6475;--lime:#c6f24e;--cyan:#6cd6ff;--amber:#ffb24d;--violet:#c8a2ff;--danger:#ff6f6f;--accent:var(--lime);--mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Instrument Sans',system-ui,sans-serif;--display:'Bricolage Grotesque',var(--sans)}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.5}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:rgba(10,12,16,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--lime);border-radius:6px;position:relative}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--lime)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1.6s infinite}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:24px 18px}
+.hero{margin-bottom:18px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--lime)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(26px,7vw,40px);line-height:1.04;letter-spacing:-.02em;margin:.3em 0 .15em}
+.hero h1 .em{color:var(--lime)}
+.hero p{color:var(--muted);font-size:14.5px;margin:0}
+.panel{background:linear-gradient(180deg,var(--surface),#0c0f15);border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:14px}
+.field{margin-bottom:16px}.field>label{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.field .hint{color:var(--faint);font-size:12px;font-family:var(--sans);text-transform:none;letter-spacing:0}
+input[type=text],input[type=number],textarea{width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:10px;color:var(--fg);font-family:var(--mono);font-size:14px;padding:11px 13px;outline:none;transition:.18s}
+textarea{font-family:var(--sans);min-height:60px;resize:vertical;line-height:1.4}
+input:focus,textarea:focus{border-color:var(--lime);box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 22%,transparent)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:460px){.row{grid-template-columns:1fr}}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:13px 22px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;width:100%}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--lime);color:#0a0c10;border-color:var(--lime);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08)}.btn.primary:disabled{opacity:.4;cursor:not-allowed;filter:none}
+.btn.danger{background:var(--danger);color:#fff;border-color:var(--danger);font-weight:700}
+.btn.secondary{background:rgba(108,214,255,.12);color:var(--cyan);border-color:rgba(108,214,255,.3)}
+.composition{background:linear-gradient(180deg,rgba(198,242,78,.06),transparent);border:1px solid rgba(198,242,78,.3);border-radius:12px;padding:18px}
+.composition h3{font-family:var(--display);font-weight:700;font-size:18px;margin:0 0 12px;color:var(--lime)}
+.step{display:flex;align-items:flex-start;gap:12px;padding:12px;background:var(--surface2);border-radius:10px;margin-bottom:8px;border:1px solid var(--line2)}
+.step .n{font-family:var(--mono);font-size:11px;width:22px;height:22px;display:grid;place-items:center;border:1px solid var(--lime);border-radius:6px;color:var(--lime);flex:none}
+.step .body{flex:1}
+.step .body .t{font-family:var(--display);font-weight:700;font-size:14.5px;margin-bottom:2px}
+.step .body .d{color:var(--muted);font-size:12.5px}
+.step .price{font-family:var(--mono);color:var(--lime);font-size:14px;font-weight:700;flex:none}
+.summary{display:flex;justify-content:space-between;align-items:baseline;padding:10px 12px;background:var(--bg);border:1px solid var(--line2);border-radius:8px;margin-top:8px;font-family:var(--mono);font-size:13px}
+.summary b{color:var(--lime);font-size:18px}
+.actions{display:flex;gap:10px;margin-top:14px}
+.actions .btn{flex:1}
+.status-card{background:linear-gradient(180deg,rgba(198,242,78,.04),transparent);border:1px solid var(--line2);border-radius:14px;padding:22px;text-align:center}
+.status-card .label{font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase}
+.status-card .big{font-family:var(--display);font-weight:800;font-size:22px;margin:8px 0;color:var(--lime)}
+.status-card .meta{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+.timeline{margin-top:18px;border-top:1px solid var(--line);padding-top:14px;font-family:var(--mono);font-size:11.5px}
+.timeline .ev{display:flex;gap:10px;padding:6px 0;color:var(--muted)}
+.timeline .ev .t{color:var(--faint);min-width:55px}
+.timeline .ev.now{color:var(--lime)}
+.timeline .ev.now .t{color:var(--lime)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--lime);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:10px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.toast.err{background:var(--danger);color:#fff}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:24px 0 8px;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// order pizza</span></div>
+  <span style="color:var(--muted)"><span class="dot"></span> live</span>
+</header>
+<main>
+  <div class="hero">
+    <div class="eyebrow">Agentic composition · x402</div>
+    <h1>Order a <span class="em">pizza</span> from any shop, any driver.</h1>
+    <p>The compose engine picks the cheapest shop × driver pair. You confirm. Two agents work in sequence. Substrate handles settlement + reputation.</p>
+  </div>
+
+  <div id="step1" class="panel">
+    <div class="field"><label>Who are you? <span class="hint">— used as your agent id</span></label>
+      <input type="text" id="userId" placeholder="alex@vibecode" value=""></div>
+    <div class="field"><label>What pizza?</label>
+      <textarea id="desc" placeholder="1 large pepperoni, extra cheese">1 pepperoni pizza</textarea></div>
+    <div class="field"><label>Deliver to</label>
+      <input type="text" id="addr" placeholder="123 Main St, San Francisco" value="vibecodenights venue"></div>
+    <div class="row">
+      <div class="field"><label>Max price <span class="hint">USDC</span></label>
+        <input type="number" id="maxPrice" min="10" step="1" value="30"></div>
+      <div class="field"><label>Max time <span class="hint">minutes</span></label>
+        <input type="number" id="maxTime" min="15" step="5" value="45"></div>
+    </div>
+    <button class="btn primary" id="planBtn">Plan composition →</button>
+  </div>
+
+  <div id="step2" class="panel composition" style="display:none">
+    <h3>The compose engine planned this</h3>
+    <div id="steps"></div>
+    <div class="summary">total · <b><span id="totalPrice">—</span> USDC</b></div>
+    <div class="summary">ETA · <b><span id="totalEta">—</span></b></div>
+    <div class="actions">
+      <button class="btn" id="backBtn">← Back</button>
+      <button class="btn primary" id="confirmBtn">Confirm + execute →</button>
+    </div>
+  </div>
+
+  <div id="step3" class="panel status-card" style="display:none">
+    <div class="label" id="statusLabel">awaiting shop</div>
+    <div class="big" id="statusTitle">Your order is being made</div>
+    <div class="meta" id="statusMeta">—</div>
+    <div class="timeline" id="timeline"></div>
+  </div>
+  <div class="foot">PCC // capability.network · agents compose reality</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const S={orderId:null,sse:null,events:[]};
+const BASE = location.origin;
+let tt;function toast(m,e){const el=$("#toast");el.textContent=m;el.className="toast on"+(e?" err":"");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),3000);}
+function ts(){return new Date().toLocaleTimeString().slice(0,8)}
+function pushTl(text,now){S.events.push({t:ts(),text,now});renderTl()}
+function renderTl(){$("#timeline").innerHTML=S.events.map(e=>`<div class="ev ${e.now?'now':''}"><span class="t">${e.t}</span>${e.text}</div>`).join("")}
+
+async function api(path,opts={}){
+  const r=await fetch(BASE+path,{...opts,headers:{"content-type":"application/json",...(opts.headers||{})}});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.message||j.error||"error "+r.status);
+  return j;
+}
+
+function fmtSec(s){if(s<60)return s+"s";if(s<3600)return Math.round(s/60)+" min";return Math.round(s/3600*10)/10+" hr";}
+
+$("#planBtn").onclick=async()=>{
+  const userId=$("#userId").value.trim();
+  if(!userId){toast("set your agent id first",1);return;}
+  $("#planBtn").disabled=true;
+  try{
+    const {order}=await api("/api/demo/pizza-order",{method:"POST",body:JSON.stringify({
+      userId, description:$("#desc").value, deliveryAddress:$("#addr").value,
+      maxPriceUSD:+$("#maxPrice").value, maxTimeMin:+$("#maxTime").value
+    })});
+    S.orderId=order.orderId;
+    const c=order.composition;
+    $("#steps").innerHTML=`
+      <div class="step"><span class="n">1</span><div class="body"><div class="t">${c.shop.name}</div><div class="d">make-pizza · ETA ${fmtSec(c.shop.etaSec)}</div></div><span class="price">$${c.shop.priceUSD}</span></div>
+      <div class="step"><span class="n">2</span><div class="body"><div class="t">${c.driver.name}</div><div class="d">deliver-pizza · ETA ${fmtSec(c.driver.etaSec)}</div></div><span class="price">$${c.driver.priceUSD}</span></div>`;
+    $("#totalPrice").textContent=c.totalPriceUSD;
+    $("#totalEta").textContent=fmtSec(c.etaSec);
+    $("#step1").style.display="none"; $("#step2").style.display="";
+  }catch(e){toast(e.message,1)} finally{$("#planBtn").disabled=false;}
+};
+
+$("#backBtn").onclick=()=>{$("#step1").style.display=""; $("#step2").style.display="none";};
+
+$("#confirmBtn").onclick=async()=>{
+  $("#confirmBtn").disabled=true;
+  try{
+    await api(`/api/demo/orders/${S.orderId}/confirm`,{method:"POST"});
+    $("#step2").style.display="none"; $("#step3").style.display="";
+    pushTl("order confirmed · waiting for shop to accept",true);
+    connectSse();
+  }catch(e){toast(e.message,1); $("#confirmBtn").disabled=false;}
+};
+
+function setStatus(label,title,meta){
+  $("#statusLabel").textContent=label;
+  $("#statusTitle").textContent=title;
+  $("#statusMeta").textContent=meta||"";
+}
+function connectSse(){
+  const es=new EventSource(`${BASE}/sse/demo/order/${S.orderId}`);
+  S.sse=es;
+  es.onmessage=ev=>{
+    let d; try{d=JSON.parse(ev.data)}catch{return}
+    if(d.type==="connected")return;
+    const e=d.event;
+    if(e.type==="status"){
+      const o=e.order;
+      const map={
+        awaiting_shop:["awaiting shop","Pinging the pizza shop's agent","waiting up to 60s for accept"],
+        making:["making","Your pizza is being made","shop accepted — cooking now"],
+        awaiting_driver:["awaiting driver","Pizza is ready — finding driver","make-pizza done · pinging delivery"],
+        ready_for_pickup:["ready for pickup","Driver is on the way","driver accepted — heading to pickup"],
+        in_transit:["in transit","Pizza is on its way!","driver picked up — delivering"],
+        delivered:["delivered","Pizza delivered ✓","substrate cycle complete"],
+        rejected:["rejected","Order rejected",o.rejectionReason||""],
+      };
+      const m=map[o.status]||[o.status,"...",""];
+      setStatus(m[0],m[1],m[2]);
+      pushTl(`status → ${o.status}`,true);
+    } else if(e.type==="job_accepted"){pushTl(`${e.job.type} job accepted by ${e.job.assigneeSlug}`,true)}
+      else if(e.type==="job_pickup"){pushTl(`driver picked up the pizza`,true)}
+      else if(e.type==="delivered"){
+        pushTl(`settlement — shop $${e.settlement.shopPayoutUSD} · driver $${e.settlement.driverPayoutUSD} · pcc fee $${e.settlement.pccFeeUSD}`,true);
+        pushTl(`reputation — shop +${e.reputation.shopDelta} · driver +${e.reputation.driverDelta}`,true);
+      }
+  };
+  es.onerror=()=>pushTl("connection lost — retry?",false);
+}
+</script>
+</body>
+</html>
