@@ -631,6 +631,7 @@ export async function createGateway(port = 3200) {
       ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff": "font/woff",
       ".woff2": "font/woff2", ".ttf": "font/ttf", ".map": "application/json",
       ".txt": "text/plain", ".webp": "image/webp", ".avif": "image/avif",
+      ".md": "text/markdown; charset=utf-8", ".markdown": "text/markdown; charset=utf-8",
     };
 
     const { resolve: resolvePath } = await import("node:path");
