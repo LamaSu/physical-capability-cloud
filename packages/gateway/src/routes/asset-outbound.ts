@@ -14,15 +14,15 @@
  *   GET  /api/assets/:id/outbound-demand[?status=]      — list demands for asset
  *   GET  /api/assets/:id/outbound-demand/:demandId      — single demand
  *
- * Design notes (mirrors the composition-engine scaffold):
- *   - Storage is two process-local `Map`s. Production wires budgets to the
- *     AssetFacade and persists demands alongside escrow rows.
- *   - `composedSolution` is synthesized here; a follow-on PR calls the real
- *     `/api/compose` engine and threads the returned composition through.
- *   - Demands expire 30 minutes after creation (same TTL as a negotiation /
- *     composition session) — a stale demand returns 410 Gone.
- *   - Daily caps reset lazily at the first demand on a new UTC day; there is
- *     no cron — the reset is folded into the spend check.
+ * Storage: SQLite via @pcc/store (asset_budgets + outbound_demands), following
+ * the marketplace / requests persistence pattern — budgets and demands survive
+ * gateway redeploys. The budget envelope is a flat object stored column-by-
+ * column (it mutates in place on spend / daily-reset, so a single source of
+ * truth avoids JSON drift). Demands keep the full OutboundDemandResponse in a
+ * JSON column.
+ *
+ * Daily caps reset lazily at the first demand on a new UTC day; there is no
+ * cron — the reset is folded into the spend check.
  */
 
 import crypto from "node:crypto";
@@ -37,7 +37,28 @@ import {
   type OutboundDemandResponse,
   type OutboundDemandStatus,
 } from "@pcc/spec";
+import { schema, eq } from "@pcc/store";
+import { getStore, initStore } from "../db.js";
 import { planComposition } from "./compose.js";
+
+// ---------------------------------------------------------------------------
+// Store access — see compose.ts for the lazy-init rationale.
+// ---------------------------------------------------------------------------
+
+function db() {
+  try {
+    return getStore().db;
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    return initStore({ seed: false }).db;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -47,14 +68,86 @@ import { planComposition } from "./compose.js";
 const DEMAND_TTL_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// In-memory stores (process-local scaffold)
+// Persistence helpers
 // ---------------------------------------------------------------------------
 
-/** Budget envelope per asset, keyed by assetId. */
-const budgets = new Map<string, AssetAgentBudget>();
+/** Reconstruct an AssetAgentBudget from its column row (optionals → undefined). */
+function loadBudget(assetId: string): AssetAgentBudget | undefined {
+  const row = db()
+    .select()
+    .from(schema.assetBudgets)
+    .where(eq(schema.assetBudgets.assetId, assetId))
+    .get();
+  if (!row) return undefined;
+  return {
+    assetId: row.assetId,
+    ownerDid: row.ownerDid,
+    budgetCapUSD: row.budgetCapUsd,
+    dailyCapUSD: row.dailyCapUsd,
+    spentTodayUSD: row.spentTodayUsd,
+    spentLifetimeUSD: row.spentLifetimeUsd,
+    allowedCapabilityTypes: row.allowedCapabilityTypes ?? undefined,
+    requiresOwnerApproval: row.requiresOwnerApproval ?? undefined,
+    lastResetAt: row.lastResetAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
-/** Posted outbound demands, keyed by demandId. */
-const demands = new Map<string, OutboundDemandResponse>();
+/** Idempotent upsert of a budget by assetId. created_at is preserved on update. */
+function saveBudget(b: AssetAgentBudget): void {
+  const cols = {
+    ownerDid: b.ownerDid,
+    budgetCapUsd: b.budgetCapUSD,
+    dailyCapUsd: b.dailyCapUSD,
+    spentTodayUsd: b.spentTodayUSD,
+    spentLifetimeUsd: b.spentLifetimeUSD,
+    allowedCapabilityTypes: b.allowedCapabilityTypes ?? null,
+    requiresOwnerApproval: b.requiresOwnerApproval ?? null,
+    lastResetAt: b.lastResetAt,
+    updatedAt: b.updatedAt,
+  };
+  db()
+    .insert(schema.assetBudgets)
+    .values({ assetId: b.assetId, createdAt: b.createdAt, ...cols })
+    .onConflictDoUpdate({ target: schema.assetBudgets.assetId, set: cols })
+    .run();
+}
+
+function getDemand(demandId: string): OutboundDemandResponse | undefined {
+  const row = db()
+    .select()
+    .from(schema.outboundDemands)
+    .where(eq(schema.outboundDemands.demandId, demandId))
+    .get();
+  return row ? (row.data as OutboundDemandResponse) : undefined;
+}
+
+function listDemandsForAsset(assetId: string): OutboundDemandResponse[] {
+  const rows = db()
+    .select()
+    .from(schema.outboundDemands)
+    .where(eq(schema.outboundDemands.assetId, assetId))
+    .all();
+  return rows.map((r) => r.data as OutboundDemandResponse);
+}
+
+/** Idempotent upsert of a demand by demandId. */
+function saveDemand(d: OutboundDemandResponse): void {
+  const cols = {
+    assetId: d.assetId,
+    status: d.status,
+    rejectionReason: d.rejectionReason ?? null,
+    expiresAt: d.expiresAt,
+    updatedAt: new Date().toISOString(),
+    data: d,
+  };
+  db()
+    .insert(schema.outboundDemands)
+    .values({ demandId: d.demandId, createdAt: d.createdAt, ...cols })
+    .onConflictDoUpdate({ target: schema.outboundDemands.demandId, set: cols })
+    .run();
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -145,7 +238,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
 
       const assetId = req.params.id;
       const nowIso = new Date().toISOString();
-      const existing = budgets.get(assetId);
+      const existing = loadBudget(assetId);
 
       if (existing) {
         const updated: AssetAgentBudget = {
@@ -157,7 +250,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
           requiresOwnerApproval: parsed.data.requiresOwnerApproval,
           updatedAt: nowIso,
         };
-        budgets.set(assetId, updated);
+        saveBudget(updated);
         return reply.status(200).send(updated);
       }
 
@@ -174,7 +267,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         createdAt: nowIso,
         updatedAt: nowIso,
       };
-      budgets.set(assetId, created);
+      saveBudget(created);
       return reply.status(201).send(created);
     },
   );
@@ -183,7 +276,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>(
     "/api/assets/:id/budget",
     async (req, reply) => {
-      const budget = budgets.get(req.params.id);
+      const budget = loadBudget(req.params.id);
       if (!budget) {
         return reply.status(404).send({
           error: "budget_not_found",
@@ -212,7 +305,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
       }
 
       const assetId = req.params.id;
-      const budget = budgets.get(assetId);
+      const budget = loadBudget(assetId);
       if (!budget) {
         return reply.status(404).send({
           error: "budget_not_found",
@@ -228,6 +321,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         budget.spentTodayUSD = 0;
         budget.lastResetAt = nowIso;
         budget.updatedAt = nowIso;
+        saveBudget(budget);
       }
 
       const request: OutboundDemandRequest = parsed.data;
@@ -254,7 +348,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
           createdAt,
           expiresAt,
         };
-        demands.set(demandId, demand);
+        saveDemand(demand);
         return reply.status(201).send(demand);
       };
 
@@ -318,6 +412,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
       budget.spentTodayUSD += composedSolution.totalPriceUSD;
       budget.spentLifetimeUSD += composedSolution.totalPriceUSD;
       budget.updatedAt = nowIso;
+      saveBudget(budget);
       return persist("proposed", { composedSolution });
     },
   );
@@ -338,7 +433,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         });
       }
 
-      const demand = demands.get(req.params.demandId);
+      const demand = getDemand(req.params.demandId);
       if (!demand) {
         return reply.status(404).send({
           error: "demand_not_found",
@@ -352,7 +447,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         });
       }
 
-      const budget = budgets.get(req.params.id);
+      const budget = loadBudget(req.params.id);
       if (!budget) {
         return reply.status(404).send({
           error: "budget_not_found",
@@ -367,6 +462,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         budget.spentTodayUSD += composedSolution.totalPriceUSD;
         budget.spentLifetimeUSD += composedSolution.totalPriceUSD;
         budget.updatedAt = nowIso;
+        saveBudget(budget);
         demand.status = "approved";
         demand.composedSolution = composedSolution;
         demand.rejectionReason = undefined;
@@ -375,7 +471,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
         demand.rejectionReason = parsed.data.note ?? "Rejected by owner";
       }
       demand.budgetSnapshot = snapshotOf(budget);
-      demands.set(demand.demandId, demand);
+      saveDemand(demand);
       return reply.status(200).send(demand);
     },
   );
@@ -388,7 +484,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
       const assetId = req.params.id;
       const statusFilter = req.query.status;
 
-      let list = Array.from(demands.values()).filter((d) => d.assetId === assetId);
+      let list = listDemandsForAsset(assetId);
       if (statusFilter) {
         list = list.filter((d) => d.status === statusFilter);
       }
@@ -406,7 +502,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string; demandId: string } }>(
     "/api/assets/:id/outbound-demand/:demandId",
     async (req, reply) => {
-      const demand = demands.get(req.params.demandId);
+      const demand = getDemand(req.params.demandId);
       if (!demand) {
         return reply.status(404).send({
           error: "demand_not_found",
@@ -430,18 +526,19 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/** Clear both in-memory stores between tests. */
+/** Clear both stores between tests. */
 export function _clearAssetOutboundForTests(): void {
-  budgets.clear();
-  demands.clear();
+  const d = db();
+  d.delete(schema.assetBudgets).run();
+  d.delete(schema.outboundDemands).run();
 }
 
 /** Seed a budget directly (bypasses PUT validation/stamping). */
 export function _seedBudgetForTests(budget: AssetAgentBudget): void {
-  budgets.set(budget.assetId, budget);
+  saveBudget(budget);
 }
 
 /** Seed a demand directly — lets tests control createdAt / expiresAt / status. */
 export function _seedDemandForTests(demand: OutboundDemandResponse): void {
-  demands.set(demand.demandId, demand);
+  saveDemand(demand);
 }
