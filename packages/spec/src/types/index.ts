@@ -70,3 +70,5 @@ export * from "./skill-capability.js";
 export * from "./reputation.js";
 // Capability graph search
 export * from "./graph-search.js";
+// Pre-commit / hash-commit-reveal job commitments + evidence bundles
+export * from "./job-commitment.js";
