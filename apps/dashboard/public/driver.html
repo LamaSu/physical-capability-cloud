@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Driver</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--surface:#11151d;--surface2:#161b25;--line:rgba(150,172,205,.10);--line2:rgba(150,172,205,.20);--fg:#e9edf4;--muted:#8b94a6;--faint:#5b6475;--lime:#c6f24e;--cyan:#6cd6ff;--amber:#ffb24d;--danger:#ff6f6f;--accent:var(--amber);--mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Instrument Sans',system-ui,sans-serif;--display:'Bricolage Grotesque',var(--sans)}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.5}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:rgba(10,12,16,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--amber);border-radius:6px;position:relative}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--amber)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 10px var(--amber);animation:blip 1.6s infinite}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 18px}
+.hero{margin-bottom:18px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--amber)}
+.hero h1{font-family:var(--display);font-weight:800;font-size:clamp(24px,6.5vw,36px);line-height:1.04;letter-spacing:-.02em;margin:.3em 0 .12em}
+.hero h1 .em{color:var(--amber)}
+.hero p{color:var(--muted);font-size:14.5px;margin:0}
+.queue{display:flex;flex-direction:column;gap:12px;margin-bottom:18px}
+.empty{padding:50px 20px;text-align:center;border:1px dashed var(--line2);border-radius:14px;color:var(--faint);font-family:var(--mono);font-size:13px}
+.empty .blink{color:var(--amber);animation:blip 2s infinite}
+.job{background:linear-gradient(180deg,var(--surface),#0c0f15);border:1px solid var(--line2);border-radius:14px;padding:18px;animation:rise .4s both}
+.job.accepted{border-color:var(--amber);box-shadow:0 0 0 1px rgba(255,178,77,.3)}
+.job.picked_up{border-color:var(--lime);box-shadow:0 0 0 1px rgba(198,242,78,.3)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.job-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}
+.job-head .t{font-family:var(--display);font-weight:700;font-size:17px}
+.job-head .p{font-family:var(--mono);color:var(--amber);font-size:17px;font-weight:700}
+.route{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-bottom:8px;padding:10px 12px;background:var(--bg);border:1px solid var(--line2);border-radius:8px}
+.route .from,.route .to{display:flex;align-items:center;gap:8px}
+.route .arrow{padding:4px 0;color:var(--faint)}
+.route b{color:var(--fg);font-weight:500}
+.job-meta{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin:10px 0 14px;display:flex;gap:14px;flex-wrap:wrap}
+.job-meta b{color:var(--fg);font-weight:500}
+.job-actions{display:flex;gap:10px}
+.btn{font-family:var(--mono);font-size:13px;letter-spacing:.03em;padding:12px 18px;border-radius:10px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;flex:1}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--amber);color:#0a0c10;border-color:var(--amber);font-weight:700}
+.btn.primary.lime{background:var(--lime);border-color:var(--lime)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{background:var(--danger);color:#fff;border-color:var(--danger);font-weight:700}
+.pill{display:inline-block;padding:3px 8px;border:1px solid rgba(255,178,77,.4);border-radius:6px;color:var(--amber);font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase}
+.pill.lime{border-color:rgba(198,242,78,.4);color:var(--lime)}
+.panel{background:linear-gradient(180deg,var(--surface),#0c0f15);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+.kv{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12.5px;color:var(--muted);padding:5px 0}
+.kv b{color:var(--fg);font-weight:500}
+.history{font-family:var(--mono);font-size:11.5px;color:var(--muted);max-height:140px;overflow-y:auto}
+.history .e{padding:6px 0;border-bottom:1px solid var(--line)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--amber);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:10px 18px;border-radius:10px;z-index:60;opacity:0;transition:.3s}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.toast.err{background:var(--danger);color:#fff}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:24px 0 8px;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// driver</span></div>
+  <span style="color:var(--muted)"><span class="dot"></span> <span id="connStatus">connecting</span></span>
+</header>
+<main>
+  <div class="hero">
+    <div class="eyebrow"><span id="driverSlug">…</span> · delivery courier</div>
+    <h1>Your <span class="em">skill</span>, on the network.</h1>
+    <p>Pickup → deliver. Accept jobs inside the window, prove with a photo at dropoff, settle automatic.</p>
+  </div>
+
+  <div class="panel">
+    <div class="kv"><span>driver slug</span><b id="driverName">—</b></div>
+    <div class="kv"><span>skill published</span><b>deliver-pizza</b></div>
+    <div class="kv"><span>active deliveries</span><b id="activeCount">0</b></div>
+    <div class="kv"><span>completed today</span><b id="completedCount">0</b></div>
+    <div class="kv"><span>earnings today</span><b id="earnings">$0</b></div>
+  </div>
+
+  <div id="queue" class="queue">
+    <div class="empty"><span class="blink">◐</span> available — waiting for the next delivery.<br><br>(SSE topic: driver:<span id="topicSlug">…</span>)</div>
+  </div>
+
+  <div class="panel">
+    <div style="font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase;margin-bottom:8px">history</div>
+    <div class="history" id="history"><div class="e" style="color:var(--faint)">no jobs yet</div></div>
+  </div>
+  <div class="foot">PCC // capability.network · driver dashboard</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const params=new URLSearchParams(location.search);
+const slug=params.get("driver")||"driver-alex";
+const BASE=location.origin;
+$("#driverSlug").textContent=slug; $("#driverName").textContent=slug; $("#topicSlug").textContent=slug;
+
+const S={jobs:new Map(),completed:[],earnings:0};
+let tt;function toast(m,e){const el=$("#toast");el.textContent=m;el.className="toast on"+(e?" err":"");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2800);}
+function ts(){return new Date().toLocaleTimeString().slice(0,8)}
+
+async function api(path,opts={}){
+  const r=await fetch(BASE+path,{...opts,headers:{"content-type":"application/json",...(opts.headers||{})}});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.message||j.error||"error "+r.status);
+  return j;
+}
+function fmtSec(s){if(s<60)return s+"s";if(s<3600)return Math.round(s/60)+" min";return Math.round(s/3600*10)/10+" hr";}
+
+function render(){
+  const active=Array.from(S.jobs.values()).filter(j=>j.status!=="complete"&&j.status!=="rejected");
+  $("#activeCount").textContent=active.length;
+  $("#completedCount").textContent=S.completed.length;
+  $("#earnings").textContent="$"+S.earnings.toFixed(0);
+  const q=$("#queue");
+  if(active.length===0){
+    q.innerHTML=`<div class="empty"><span class="blink">◐</span> available — waiting for the next delivery.<br><br>(SSE topic: driver:${slug})</div>`;
+    return;
+  }
+  q.innerHTML=active.map(j=>{
+    const isQueue=j.status==="queued";
+    const isAcc=j.status==="accepted";
+    const isPicked=j.status==="picked_up";
+    const stateLabel=isQueue?"NEW DELIVERY":isAcc?"HEAD TO PICKUP":"DELIVERING";
+    const stateClass=isPicked?"lime":isAcc?"":"";
+    return `<div class="job ${isAcc?'accepted':isPicked?'picked_up':''}">
+      <div class="job-head">
+        <div><span class="pill ${stateClass}">${stateLabel}</span>
+          <div class="t" style="margin-top:6px">${j.details.description}</div>
+        </div>
+        <div class="p">$${j.details.priceUSD}</div>
+      </div>
+      <div class="route">
+        <div class="from">↑ pickup · <b>${j.details.pickupAddress||"shop"}</b></div>
+        <div class="arrow">|</div>
+        <div class="to">↓ deliver · <b>${j.details.deliveryAddress||"customer"}</b></div>
+      </div>
+      <div class="job-meta">
+        <span>deadline · <b>${fmtSec(j.details.deadlineSec)}</b></span>
+        <span>job · <b>${j.jobId}</b></span>
+      </div>
+      <div class="job-actions">
+        ${isQueue
+          ? `<button class="btn danger" data-act="reject" data-id="${j.jobId}">Reject</button>
+             <button class="btn primary" data-act="accept" data-id="${j.jobId}">Accept →</button>`
+          : isAcc
+          ? `<button class="btn primary" data-act="pickup" data-id="${j.jobId}">Picked up →</button>`
+          : `<button class="btn primary lime" data-act="complete" data-id="${j.jobId}">Delivered (with photo) →</button>`}
+      </div>
+    </div>`;
+  }).join("");
+  q.querySelectorAll("[data-act]").forEach(b=>b.onclick=()=>act(b.dataset.act,b.dataset.id));
+}
+function pushHistory(text){
+  const h=$("#history");
+  if(h.querySelector('.e[style*="faint"]'))h.innerHTML="";
+  const el=document.createElement("div");
+  el.className="e";
+  el.textContent=`${ts()} · ${text}`;
+  h.insertBefore(el,h.firstChild);
+}
+async function act(action,id){
+  try{
+    if(action==="accept"){
+      await api(`/api/demo/jobs/${id}/accept`,{method:"POST"});
+      const j=S.jobs.get(id); if(j){j.status="accepted"; render();}
+      toast("accepted — head to pickup");
+      pushHistory(`accepted delivery ${id}`);
+    } else if(action==="pickup"){
+      await api(`/api/demo/jobs/${id}/pickup`,{method:"POST"});
+      const j=S.jobs.get(id); if(j){j.status="picked_up"; render();}
+      toast("picked up — drive to dropoff");
+      pushHistory(`picked up ${id}`);
+    } else if(action==="complete"){
+      await api(`/api/demo/jobs/${id}/complete`,{method:"POST",body:JSON.stringify({})});
+      const j=S.jobs.get(id);
+      if(j){
+        S.earnings+=j.details.priceUSD;
+        S.completed.push(j);
+        S.jobs.delete(id);
+        render();
+      }
+      toast("✓ delivered — $"+(j?.details.priceUSD||0)+" earned");
+      pushHistory(`delivered ${id} — earned $${j?.details.priceUSD||0}`);
+    } else if(action==="reject"){
+      await api(`/api/demo/jobs/${id}/reject`,{method:"POST",body:JSON.stringify({reason:"driver unavailable"})});
+      S.jobs.delete(id); render();
+      toast("rejected"); pushHistory(`rejected ${id}`);
+    }
+  }catch(e){toast(e.message,1)}
+}
+async function loadQueue(){
+  try{
+    const {active,completed}=await api(`/api/demo/jobs/${slug}/queue`);
+    S.jobs.clear();
+    active.forEach(j=>S.jobs.set(j.jobId,j));
+    S.completed=completed||[];
+    S.earnings=S.completed.reduce((a,j)=>a+(j.details?.priceUSD||0),0);
+    render();
+  }catch(e){console.error(e)}
+}
+function connect(){
+  const es=new EventSource(`${BASE}/sse/demo/driver/${slug}`);
+  es.onopen=()=>{$("#connStatus").textContent="live"; pushHistory(`connected to PCC`);};
+  es.onmessage=ev=>{
+    let d; try{d=JSON.parse(ev.data)}catch{return}
+    if(d.type==="connected")return;
+    if(d.event?.type==="job_assigned"){
+      const j=d.event.job;
+      S.jobs.set(j.jobId,j); render();
+      toast("new delivery!");
+      pushHistory(`new delivery: ${j.details.description} · $${j.details.priceUSD}`);
+      try{navigator.vibrate?.([100,40,100])}catch{}
+    }
+  };
+  es.onerror=()=>{$("#connStatus").textContent="reconnecting"; setTimeout(connect,3000); es.close();};
+}
+loadQueue(); connect();
+</script>
+</body>
+</html>
