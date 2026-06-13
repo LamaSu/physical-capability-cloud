@@ -5,9 +5,11 @@
  * budget + assurance tier, returns a sequenced DAG of capability instances
  * ready for execution.
  *
- * Storage: in-memory Map for the scaffold (compositions + candidates).
- * Production wiring will swap the candidate provider to CapabilityFacade and
- * persist compositions via the same SQLite layer as marketplace + bounty.
+ * Storage: SQLite via @pcc/store (compositions + composition_candidates +
+ * composition_executions tables), following the marketplace / requests
+ * persistence pattern. State survives gateway redeploys. The candidate provider
+ * is still the dev-injected pool for the scaffold; production wiring swaps it to
+ * CapabilityFacade without changing the persisted shape.
  *
  * The execute endpoint is currently a stub — it returns a synthetic workflow
  * id without actually queueing jobs. Follow-on PR wires this into
@@ -35,17 +37,32 @@ import {
   type ReputationDelta,
   type StepOutcomeStatus,
 } from "@pcc/spec";
+import { schema, eq } from "@pcc/store";
+import { getStore, initStore } from "../db.js";
 import { searchGraph } from "./graph-search.js";
 import { recordStepOutcome, finalizeReputation } from "./reputation.js";
 
 // ---------------------------------------------------------------------------
-// In-memory store (scaffold-only; production swaps to facades + SQLite)
+// Store access — getStore() is booted by server.ts in production; tests lazily
+// initialise an in-memory store on first touch (mirrors the other substrate
+// routes). Both share the @pcc/store singleton, so cross-module helpers
+// (reputation, graph-search) see the same database.
 // ---------------------------------------------------------------------------
 
-const candidates = new Map<string, CompositionCandidate>();
-const compositions = new Map<string, ComposeResponse>();
-/** Execute results keyed by compositionId — replayed for idempotent re-execute. */
-const executions = new Map<string, ExecuteCompositionResponse>();
+function db() {
+  try {
+    return getStore().db;
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    return initStore({ seed: false }).db;
+  }
+}
 
 const COMPOSITION_TTL_MS = 30 * 60 * 1000; // 30 min
 
@@ -54,12 +71,97 @@ function nowISO(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/** Every candidate currently in the scaffold pool. */
+function listCandidates(): CompositionCandidate[] {
+  const rows = db().select().from(schema.compositionCandidates).all();
+  return rows.map((r) => r.data as CompositionCandidate);
+}
+
+/** Idempotent upsert of a candidate by capabilityId. */
+function saveCandidate(c: CompositionCandidate): void {
+  const row = {
+    capabilityId: c.capabilityId,
+    kernelId: c.kernelId,
+    operatorAddress: c.operatorAddress,
+    capabilityType: c.capabilityType,
+    estimatedPriceUsd: c.estimatedPriceUSD,
+    estimatedDurationMs: c.estimatedDurationMs,
+    assuranceTier: c.assuranceTier,
+    reputation: c.reputation ?? null,
+    available: c.available,
+    createdAt: nowISO(),
+    data: c,
+  };
+  db()
+    .insert(schema.compositionCandidates)
+    .values(row)
+    .onConflictDoUpdate({ target: schema.compositionCandidates.capabilityId, set: row })
+    .run();
+}
+
+/** Persist a proposed composition so GET /api/compose/:id can return it. */
+function saveComposition(r: ComposeResponse): void {
+  db()
+    .insert(schema.compositions)
+    .values({
+      id: r.compositionId,
+      status: r.status,
+      totalPriceUsd: r.totalPriceUSD,
+      stepCount: r.steps.length,
+      requesterAgentId: null,
+      expiresAt: r.expiresAt,
+      createdAt: r.proposedAt,
+      data: r,
+    })
+    .run();
+}
+
+function getComposition(id: string): ComposeResponse | undefined {
+  const row = db()
+    .select()
+    .from(schema.compositions)
+    .where(eq(schema.compositions.id, id))
+    .get();
+  return row ? (row.data as ComposeResponse) : undefined;
+}
+
+function getExecution(id: string): ExecuteCompositionResponse | undefined {
+  const row = db()
+    .select()
+    .from(schema.compositionExecutions)
+    .where(eq(schema.compositionExecutions.compositionId, id))
+    .get();
+  return row ? (row.data as ExecuteCompositionResponse) : undefined;
+}
+
+function saveExecution(r: ExecuteCompositionResponse): void {
+  db()
+    .insert(schema.compositionExecutions)
+    .values({
+      compositionId: r.compositionId,
+      workflowId: r.workflowId,
+      status: r.status,
+      startedAt: r.startedAt,
+      createdAt: nowISO(),
+      data: r,
+    })
+    .onConflictDoUpdate({
+      target: schema.compositionExecutions.compositionId,
+      set: { workflowId: r.workflowId, status: r.status, startedAt: r.startedAt, data: r },
+    })
+    .run();
+}
+
+// ---------------------------------------------------------------------------
 // Candidate provider interface — production wiring point
 // ---------------------------------------------------------------------------
 
 /**
  * Pluggable provider that returns capability candidates matching a step's
- * constraints. The scaffold uses an in-memory implementation; production
+ * constraints. The scaffold uses a SQLite-backed implementation; production
  * wires this to CapabilityFacade.list({ capabilityType, ... }).
  */
 export interface CapabilityProvider {
@@ -74,7 +176,7 @@ export interface CapabilityProvider {
 
 const inMemoryProvider: CapabilityProvider = {
   findByType: (capabilityType, constraints) => {
-    const all = Array.from(candidates.values());
+    const all = listCandidates();
     return all.filter((c) => {
       if (c.capabilityType !== capabilityType) return false;
       if (!c.available) return false;
@@ -347,7 +449,7 @@ function planSteps(req: ComposeRequest): PlanResult {
 export function planComposition(req: ComposeRequest): ComposeResponse {
   const result = planSteps(req);
   const response = summarize(req, result.steps, result.status, result.rejection);
-  compositions.set(response.compositionId, response);
+  saveComposition(response);
   return response;
 }
 
@@ -389,7 +491,8 @@ const NOOP_RUNNER = (_step: CompositionStep): void => {};
 /**
  * Module-level runner the HTTP execute endpoint uses when no explicit binding
  * is supplied. Tests override it via {@link _setStepRunnerForTests} to inject a
- * mid-stream failure; reset by {@link _clearComposeForTests}.
+ * mid-stream failure; reset by {@link _clearComposeForTests}. This is behaviour
+ * injection (not persisted state), so it stays a module variable.
  */
 let stepRunner: (step: CompositionStep) => void = NOOP_RUNNER;
 
@@ -488,7 +591,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string } }>(
     "/api/compose/:id",
     async (req, reply) => {
-      const c = compositions.get(req.params.id);
+      const c = getComposition(req.params.id);
       if (!c) {
         return reply.code(404).send({
           error: "not_found",
@@ -530,7 +633,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const c = compositions.get(req.params.id);
+      const c = getComposition(req.params.id);
       if (!c) {
         return reply.code(404).send({
           error: "not_found",
@@ -540,7 +643,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
 
       // Idempotency: a composition that already executed replays its stored
       // result — reputation deltas were applied exactly once on the first run.
-      const prior = executions.get(req.params.id);
+      const prior = getExecution(req.params.id);
       if (prior) {
         return reply.code(202).send(prior);
       }
@@ -565,7 +668,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
         status: result.status,
         startedAt: result.startedAt,
       };
-      executions.set(req.params.id, response);
+      saveExecution(response);
       return reply.code(202).send(response);
     },
   );
@@ -586,7 +689,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       const cap = parsed.data;
-      candidates.set(cap.capabilityId, cap);
+      saveCandidate(cap);
       return reply.code(201).send({ ok: true, capabilityId: cap.capabilityId });
     },
   );
@@ -596,17 +699,18 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-/** Clear in-memory stores between test cases */
+/** Clear all composition stores between test cases. */
 export function _clearComposeForTests(): void {
-  candidates.clear();
-  compositions.clear();
-  executions.clear();
+  const d = db();
+  d.delete(schema.compositionCandidates).run();
+  d.delete(schema.compositions).run();
+  d.delete(schema.compositionExecutions).run();
   stepRunner = NOOP_RUNNER;
 }
 
-/** Direct candidate injection for tests (bypass the dev endpoint) */
+/** Direct candidate injection for tests (bypass the dev endpoint). */
 export function _registerCandidateForTests(c: CompositionCandidate): void {
-  candidates.set(c.capabilityId, c);
+  saveCandidate(c);
 }
 
 /**

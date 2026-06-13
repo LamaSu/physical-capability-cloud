@@ -9,8 +9,10 @@
  * endpoints. Escrow wiring is a follow-on PR (the job carries an `escrowId`
  * slot).
  *
- * Storage: process-local `Map`s, mirroring the composition engine. Production
- * wires this to a `SkillFacade` + persistence; the HTTP shape stays the same.
+ * Storage: SQLite via @pcc/store (skill_capabilities + skill_jobs), following
+ * the marketplace / requests persistence pattern — skills and jobs survive
+ * gateway redeploys. The full SkillCapability / SkillJob lives in a JSON column
+ * alongside the scalar columns the discovery filters use.
  *
  * Pattern fidelity: Zod `safeParse` guards every body/query, error responses
  * use the `{ error, message, details? }` shape, ids are minted with
@@ -30,18 +32,99 @@ import {
   type SkillCapability,
   type SkillJob,
 } from "@pcc/spec";
+import { schema, eq } from "@pcc/store";
+import { getStore, initStore } from "../db.js";
 
 // ---------------------------------------------------------------------------
-// In-memory stores (process-local — mirrors the composition engine scaffold)
+// Store access — see compose.ts for the lazy-init rationale.
 // ---------------------------------------------------------------------------
 
-const skills = new Map<string, SkillCapability>();
-const jobs = new Map<string, SkillJob>();
+function db() {
+  try {
+    return getStore().db;
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    return initStore({ seed: false }).db;
+  }
+}
 
 const DEFAULT_SERVICE_RADIUS_KM = 50;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const REPUTATION_PER_COMPLETION = 20;
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+function listSkills(): SkillCapability[] {
+  const rows = db().select().from(schema.skillCapabilities).all();
+  return rows.map((r) => r.data as SkillCapability);
+}
+
+function getSkill(id: string): SkillCapability | undefined {
+  const row = db()
+    .select()
+    .from(schema.skillCapabilities)
+    .where(eq(schema.skillCapabilities.id, id))
+    .get();
+  return row ? (row.data as SkillCapability) : undefined;
+}
+
+function saveSkill(s: SkillCapability): void {
+  const cols = {
+    humanDid: s.humanDid,
+    skillType: s.skillType,
+    hourlyRateUsd: s.hourlyRateUSD,
+    reputation: s.reputation,
+    active: s.active,
+    updatedAt: s.updatedAt,
+    data: s,
+  };
+  db()
+    .insert(schema.skillCapabilities)
+    .values({ id: s.id, createdAt: s.registeredAt, ...cols })
+    .onConflictDoUpdate({ target: schema.skillCapabilities.id, set: cols })
+    .run();
+}
+
+function getJob(jobId: string): SkillJob | undefined {
+  const row = db()
+    .select()
+    .from(schema.skillJobs)
+    .where(eq(schema.skillJobs.jobId, jobId))
+    .get();
+  return row ? (row.data as SkillJob) : undefined;
+}
+
+function listJobsForSkill(skillId: string): SkillJob[] {
+  const rows = db()
+    .select()
+    .from(schema.skillJobs)
+    .where(eq(schema.skillJobs.skillId, skillId))
+    .all();
+  return rows.map((r) => r.data as SkillJob);
+}
+
+function saveJob(j: SkillJob): void {
+  const cols = {
+    skillId: j.skillId,
+    status: j.status,
+    updatedAt: j.updatedAt,
+    data: j,
+  };
+  db()
+    .insert(schema.skillJobs)
+    .values({ jobId: j.jobId, createdAt: j.createdAt, ...cols })
+    .onConflictDoUpdate({ target: schema.skillJobs.jobId, set: cols })
+    .run();
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -136,7 +219,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       registeredAt: now,
       updatedAt: now,
     };
-    skills.set(skill.id, skill);
+    saveSkill(skill);
     return reply.status(201).send(skill);
   });
 
@@ -154,7 +237,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     const q = parsed.data;
-    let list = [...skills.values()];
+    let list = listSkills();
 
     if (q.skillType !== undefined) {
       const t = q.skillType;
@@ -196,7 +279,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
   // ═════════════════════════════════════════════════════════════════
 
   app.get<{ Params: { id: string } }>("/api/skills/:id", async (req, reply) => {
-    const skill = skills.get(req.params.id);
+    const skill = getSkill(req.params.id);
     if (!skill) {
       return reply.status(404).send({
         error: "not_found",
@@ -220,7 +303,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const skill = skills.get(req.params.id);
+    const skill = getSkill(req.params.id);
     if (!skill) {
       return reply.status(404).send({
         error: "not_found",
@@ -241,7 +324,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       skill.weeklyAvailableHours = parsed.data.weeklyAvailableHours;
     if (parsed.data.active !== undefined) skill.active = parsed.data.active;
     skill.updatedAt = new Date().toISOString();
-    skills.set(skill.id, skill);
+    saveSkill(skill);
     return skill;
   });
 
@@ -260,7 +343,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
     }
     const body = parsed.data;
 
-    const skill = skills.get(req.params.id);
+    const skill = getSkill(req.params.id);
     if (!skill) {
       return reply.status(404).send({
         error: "not_found",
@@ -306,7 +389,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       createdAt: now,
       updatedAt: now,
     };
-    jobs.set(job.jobId, job);
+    saveJob(job);
     return reply.status(201).send(job);
   });
 
@@ -326,7 +409,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const job = jobs.get(req.params.jobId);
+      const job = getJob(req.params.jobId);
       if (!job) {
         return reply.status(404).send({
           error: "not_found",
@@ -340,7 +423,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
           `Job is ${job.status}, expected pending_acceptance`,
         );
       }
-      const skill = skills.get(job.skillId);
+      const skill = getSkill(job.skillId);
       if (!skill) {
         return reply.status(404).send({
           error: "not_found",
@@ -358,7 +441,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       job.status = "accepted";
       job.acceptedAt = now;
       job.updatedAt = now;
-      jobs.set(job.jobId, job);
+      saveJob(job);
       return job;
     },
   );
@@ -370,7 +453,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { jobId: string } }>(
     "/api/skills/jobs/:jobId/start",
     async (req, reply) => {
-      const job = jobs.get(req.params.jobId);
+      const job = getJob(req.params.jobId);
       if (!job) {
         return reply.status(404).send({
           error: "not_found",
@@ -389,7 +472,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       job.status = "in_progress";
       job.startedAt = now;
       job.updatedAt = now;
-      jobs.set(job.jobId, job);
+      saveJob(job);
       return job;
     },
   );
@@ -411,7 +494,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       }
       const proof = parsed.data;
 
-      const job = jobs.get(req.params.jobId);
+      const job = getJob(req.params.jobId);
       if (!job) {
         return reply.status(404).send({
           error: "not_found",
@@ -433,16 +516,16 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
       if (proof.photoBase64 || proof.webauthnSignature) {
         job.proofBundleId = `proof_${randomUUID()}`;
       }
-      jobs.set(job.jobId, job);
+      saveJob(job);
 
       // Bump the skill's reputation + completion count. The skill should
       // always exist, but guard defensively so completion never 500s.
-      const skill = skills.get(job.skillId);
+      const skill = getSkill(job.skillId);
       if (skill) {
         skill.completedJobs += 1;
         skill.reputation = clampReputation(skill.reputation + REPUTATION_PER_COMPLETION);
         skill.updatedAt = now;
-        skills.set(skill.id, skill);
+        saveSkill(skill);
       }
 
       return job;
@@ -456,7 +539,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { jobId: string } }>(
     "/api/skills/jobs/:jobId",
     async (req, reply) => {
-      const job = jobs.get(req.params.jobId);
+      const job = getJob(req.params.jobId);
       if (!job) {
         return reply.status(404).send({
           error: "not_found",
@@ -483,7 +566,7 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       const { status } = parsed.data;
-      let entries = [...jobs.values()].filter((j) => j.skillId === req.params.id);
+      let entries = listJobsForSkill(req.params.id);
       if (status !== undefined) {
         entries = entries.filter((j) => j.status === status);
       }
@@ -497,13 +580,14 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-/** Clear both in-memory stores. Test reset hook. */
+/** Clear both stores. Test reset hook. */
 export function _clearSkillsForTests(): void {
-  skills.clear();
-  jobs.clear();
+  const d = db();
+  d.delete(schema.skillCapabilities).run();
+  d.delete(schema.skillJobs).run();
 }
 
 /** Preload a fully-formed skill into the store. Test helper. */
 export function _seedSkillForTests(skill: SkillCapability): void {
-  skills.set(skill.id, skill);
+  saveSkill(skill);
 }

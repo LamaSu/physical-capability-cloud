@@ -13,12 +13,12 @@
  *   POST /api/capabilities/graph/_dev/register-node — scaffold candidate injection (201)
  *   POST /api/capabilities/graph/_dev/register-edge — scaffold candidate injection (201)
  *
- * Storage: three process-local Maps — `nodes` (capabilityId → node), `edges`
- * (`from->to` → edge), and `searches` (searchId → response, 30-min TTL). This
- * mirrors the in-memory pattern used by a2a-tasks.ts. In production the
- * `_dev/register-*` endpoints are replaced by a CapabilityFacade-backed graph
- * rebuild, and search proposals are persisted via the same SQLite layer as
- * marketplace + bounty. The HTTP shape stays identical.
+ * Storage: SQLite via @pcc/store (graph_search_nodes + graph_search_edges +
+ * graph_search_proposals), following the marketplace / requests persistence
+ * pattern. The graph + search proposals survive gateway redeploys. A search
+ * loads the node/edge snapshot from SQLite and runs the traversal in memory; in
+ * production the `_dev/register-*` endpoints are replaced by a CapabilityFacade-
+ * backed graph rebuild. The HTTP shape stays identical.
  *
  * Algorithm: for each (start, end) capability pair we run a bounded best-path
  * search (Dijkstra-style — explores in composite-score order, prunes on a
@@ -55,6 +55,27 @@ import type {
   RegisterGraphNodeInput,
   RegisterGraphEdgeInput,
 } from "@pcc/spec";
+import { schema, eq, sql } from "@pcc/store";
+import { getStore, initStore } from "../db.js";
+
+// ---------------------------------------------------------------------------
+// Store access — see compose.ts for the lazy-init rationale.
+// ---------------------------------------------------------------------------
+
+function db() {
+  try {
+    return getStore().db;
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    return initStore({ seed: false }).db;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -67,27 +88,143 @@ const DEFAULT_RADIUS_KM = 50;
 /** Search proposals live 30 minutes (matches the negotiation session TTL). */
 const SEARCH_TTL_MS = 30 * 60 * 1000;
 
-// ---------------------------------------------------------------------------
-// In-memory stores (process-local — see file header)
-// ---------------------------------------------------------------------------
-
-const nodes = new Map<string, CapabilityGraphNode>();
-const edges = new Map<string, CapabilityGraphEdge>();
-const searches = new Map<string, GraphSearchResponse>();
-let lastRebuiltAt: string | null = null;
+function nowISO(): string {
+  return new Date().toISOString();
+}
 
 function edgeKey(fromCapabilityId: string, toCapabilityId: string): string {
   return `${fromCapabilityId}->${toCapabilityId}`;
 }
 
-/** Drop search proposals whose TTL has elapsed so the map doesn't leak. */
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/** Snapshot of every graph node, for an in-memory traversal. */
+function loadNodes(): CapabilityGraphNode[] {
+  const rows = db().select().from(schema.graphSearchNodes).all();
+  return rows.map((r) => r.data as CapabilityGraphNode);
+}
+
+/** Snapshot of every graph edge. */
+function loadEdges(): CapabilityGraphEdge[] {
+  const rows = db().select().from(schema.graphSearchEdges).all();
+  return rows.map((r) => r.data as CapabilityGraphEdge);
+}
+
+/**
+ * Upsert a node by capabilityId — re-registering replaces it. `created_at`
+ * is bumped on every write so graph-stats' `lastRebuiltAt` (MAX(created_at))
+ * reflects the most recent rebuild.
+ */
+function persistNode(node: CapabilityGraphNode): void {
+  const cols = {
+    capabilityType: node.capabilityType,
+    kernelId: node.kernelId,
+    estimatedPriceUsd: node.estimatedPriceUSD,
+    estimatedDurationMs: node.estimatedDurationMs,
+    assuranceTier: node.assuranceTier,
+    reputation: node.reputation,
+    available: node.available,
+    createdAt: nowISO(),
+    data: node,
+  };
+  db()
+    .insert(schema.graphSearchNodes)
+    .values({ capabilityId: node.capabilityId, ...cols })
+    .onConflictDoUpdate({ target: schema.graphSearchNodes.capabilityId, set: cols })
+    .run();
+}
+
+/** Upsert an edge by `${from}->${to}` — re-registering replaces it. */
+function persistEdge(edge: CapabilityGraphEdge): void {
+  const cols = {
+    fromCapabilityId: edge.fromCapabilityId,
+    toCapabilityId: edge.toCapabilityId,
+    capabilityTypeFlow: edge.capabilityTypeFlow,
+    createdAt: nowISO(),
+    data: edge,
+  };
+  db()
+    .insert(schema.graphSearchEdges)
+    .values({ id: edgeKey(edge.fromCapabilityId, edge.toCapabilityId), ...cols })
+    .onConflictDoUpdate({ target: schema.graphSearchEdges.id, set: cols })
+    .run();
+}
+
+/** Persist a search proposal so it can be retrieved by id within its TTL. */
+function saveProposal(response: GraphSearchResponse, req: GraphSearchRequest): void {
+  db()
+    .insert(schema.graphSearchProposals)
+    .values({
+      id: response.searchId,
+      requestJson: req,
+      optionsJson: response.options,
+      searchStatsJson: {
+        searchStats: response.searchStats,
+        outcomeType: response.outcomeType,
+        optimizedFor: response.optimizedFor,
+        proposedAt: response.proposedAt,
+      },
+      expiresAt: response.expiresAt,
+      createdAt: response.proposedAt,
+    })
+    .run();
+}
+
+/** Reconstruct a stored GraphSearchResponse, or undefined when absent. */
+function loadProposal(searchId: string): GraphSearchResponse | undefined {
+  const row = db()
+    .select()
+    .from(schema.graphSearchProposals)
+    .where(eq(schema.graphSearchProposals.id, searchId))
+    .get();
+  if (!row) return undefined;
+  const meta = row.searchStatsJson as {
+    searchStats: GraphSearchResponse["searchStats"];
+    outcomeType: string;
+    optimizedFor: GraphSearchOptimization;
+    proposedAt: string;
+  };
+  return {
+    searchId: row.id,
+    outcomeType: meta.outcomeType,
+    optimizedFor: meta.optimizedFor,
+    options: row.optionsJson as GraphPathOption[],
+    searchStats: meta.searchStats,
+    proposedAt: meta.proposedAt,
+    expiresAt: row.expiresAt,
+  };
+}
+
+function deleteProposal(searchId: string): void {
+  db()
+    .delete(schema.graphSearchProposals)
+    .where(eq(schema.graphSearchProposals.id, searchId))
+    .run();
+}
+
+/** Drop search proposals whose TTL has elapsed so the table doesn't grow. */
 function pruneExpiredSearches(): void {
-  const nowMs = Date.now();
-  for (const [id, s] of searches.entries()) {
-    if (Date.parse(s.expiresAt) <= nowMs) {
-      searches.delete(id);
-    }
-  }
+  db()
+    .delete(schema.graphSearchProposals)
+    .where(sql`${schema.graphSearchProposals.expiresAt} <= ${nowISO()}`)
+    .run();
+}
+
+/** Most recent node/edge write time, or null when the graph is empty. */
+function lastRebuiltAt(): string | null {
+  const n = db()
+    .select({ m: sql<string | null>`max(${schema.graphSearchNodes.createdAt})` })
+    .from(schema.graphSearchNodes)
+    .get();
+  const e = db()
+    .select({ m: sql<string | null>`max(${schema.graphSearchEdges.createdAt})` })
+    .from(schema.graphSearchEdges)
+    .get();
+  const candidates = [n?.m, e?.m].filter((x): x is string => typeof x === "string");
+  if (candidates.length === 0) return null;
+  return candidates.sort().at(-1)!;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,12 +296,13 @@ function edgeWeight(
 function compositeScoreForPath(
   steps: GraphPathStep[],
   optimizeFor: GraphSearchOptimization,
+  edgesByKey: Map<string, CapabilityGraphEdge>,
 ): number {
   let score = 0;
   for (let i = 0; i < steps.length; i++) {
     score += scoreNode(steps[i], optimizeFor);
     if (i > 0) {
-      const edge = edges.get(edgeKey(steps[i - 1].capabilityId, steps[i].capabilityId));
+      const edge = edgesByKey.get(edgeKey(steps[i - 1].capabilityId, steps[i].capabilityId));
       if (edge) score += edgeWeight(edge, optimizeFor);
     }
   }
@@ -316,6 +454,7 @@ function dijkstra(
 function buildPathOption(
   steps: GraphPathStep[],
   optimizeFor: GraphSearchOptimization,
+  edgesByKey: Map<string, CapabilityGraphEdge>,
 ): GraphPathOption {
   let totalPriceUSD = 0;
   let totalDurationMs = 0;
@@ -329,7 +468,7 @@ function buildPathOption(
     repSum += s.reputation;
     if (s.assuranceTier < minAssuranceTier) minAssuranceTier = s.assuranceTier;
     if (i > 0) {
-      const edge = edges.get(edgeKey(steps[i - 1].capabilityId, s.capabilityId));
+      const edge = edgesByKey.get(edgeKey(steps[i - 1].capabilityId, s.capabilityId));
       if (edge) {
         totalPriceUSD += edge.estimatedHandoffPriceUSD;
         totalDurationMs += edge.estimatedHandoffDurationMs;
@@ -344,7 +483,7 @@ function buildPathOption(
     totalDurationMs,
     minAssuranceTier,
     avgReputation: steps.length ? repSum / steps.length : 0,
-    compositeScore: compositeScoreForPath(steps, optimizeFor),
+    compositeScore: compositeScoreForPath(steps, optimizeFor, edgesByKey),
   };
 }
 
@@ -361,7 +500,13 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
     cappedAtBudget: false,
   };
 
-  const all = [...nodes.values()];
+  // Load the graph snapshot from SQLite for this traversal.
+  const all = loadNodes();
+  const edgeList = loadEdges();
+  const edgesByKey = new Map(
+    edgeList.map((e) => [edgeKey(e.fromCapabilityId, e.toCapabilityId), e] as const),
+  );
+
   const startCandidates = findStartNodes(req.startInputType, all).filter((n) =>
     nodePassesFilters(n, req),
   );
@@ -375,7 +520,7 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
     string,
     Array<{ edge: CapabilityGraphEdge; to: CapabilityGraphNode }>
   >();
-  for (const edge of edges.values()) {
+  for (const edge of edgeList) {
     const to = nodesById.get(edge.toCapabilityId);
     if (!to || !nodesById.has(edge.fromCapabilityId)) continue; // dangling edge
     const list = adjacency.get(edge.fromCapabilityId) ?? [];
@@ -401,7 +546,7 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
       const key = steps.map((st) => st.capabilityId).join("->");
       if (seen.has(key)) continue; // distinct sequences only
       seen.add(key);
-      collected.push(buildPathOption(steps, optimizeFor));
+      collected.push(buildPathOption(steps, optimizeFor, edgesByKey));
     }
   }
 
@@ -424,7 +569,7 @@ function runGraphSearch(req: GraphSearchRequest): GraphSearchResponse {
     proposedAt: new Date(startedMs).toISOString(),
     expiresAt: new Date(startedMs + SEARCH_TTL_MS).toISOString(),
   };
-  searches.set(searchId, response);
+  saveProposal(response, req);
   return response;
 }
 
@@ -466,8 +611,7 @@ function upsertNode(input: RegisterGraphNodeInput): CapabilityGraphNode {
     inputTypes: input.inputTypes ?? [],
     outputTypes: input.outputTypes ?? [],
   };
-  nodes.set(node.capabilityId, node); // upsert — re-registering replaces, never dupes
-  lastRebuiltAt = new Date().toISOString();
+  persistNode(node); // upsert — re-registering replaces, never dupes
   return node;
 }
 
@@ -479,21 +623,22 @@ function upsertEdge(input: RegisterGraphEdgeInput): CapabilityGraphEdge {
     estimatedHandoffPriceUSD: input.estimatedHandoffPriceUSD ?? 0,
     estimatedHandoffDurationMs: input.estimatedHandoffDurationMs ?? 0,
   };
-  edges.set(edgeKey(edge.fromCapabilityId, edge.toCapabilityId), edge); // upsert
-  lastRebuiltAt = new Date().toISOString();
+  persistEdge(edge); // upsert
   return edge;
 }
 
 function buildStats(): GraphStatsResponse {
+  const nodes = loadNodes();
+  const edges = loadEdges();
   const typeSet = new Set<string>();
-  for (const n of nodes.values()) typeSet.add(n.capabilityType);
+  for (const n of nodes) typeSet.add(n.capabilityType);
   const capabilityTypes = [...typeSet].sort();
   return {
-    nodeCount: nodes.size,
-    edgeCount: edges.size,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
     capabilityTypeCount: capabilityTypes.length,
     capabilityTypes,
-    lastRebuiltAt,
+    lastRebuiltAt: lastRebuiltAt(),
   };
 }
 
@@ -521,7 +666,7 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
     "/api/capabilities/graph-search/:searchId",
     async (req, reply) => {
       const { searchId } = req.params;
-      const s = searches.get(searchId);
+      const s = loadProposal(searchId);
       if (!s) {
         return reply.status(404).send({
           error: "search_not_found",
@@ -529,7 +674,7 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       if (Date.parse(s.expiresAt) <= Date.now()) {
-        searches.delete(searchId);
+        deleteProposal(searchId);
         return reply.status(410).send({
           error: "search_expired",
           message: `Search ${searchId} has expired`,
@@ -578,12 +723,12 @@ export async function graphSearchRoutes(app: FastifyInstance): Promise<void> {
 // Test-only helpers
 // ---------------------------------------------------------------------------
 
-/** Clear every in-memory store. Call in beforeEach. */
+/** Clear every store. Call in beforeEach. */
 export function _clearGraphSearchForTests(): void {
-  nodes.clear();
-  edges.clear();
-  searches.clear();
-  lastRebuiltAt = null;
+  const d = db();
+  d.delete(schema.graphSearchNodes).run();
+  d.delete(schema.graphSearchEdges).run();
+  d.delete(schema.graphSearchProposals).run();
 }
 
 /** Bulk-inject nodes/edges directly (bypasses HTTP) for test setup. */

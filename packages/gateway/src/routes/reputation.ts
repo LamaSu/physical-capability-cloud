@@ -16,11 +16,11 @@
  *   POST /api/disputes/:disputeId/resolve               — resolve (apply deltas)
  *   POST /api/compositions/:compositionId/finalize-reputation — settle all deltas
  *
- * Storage is an in-memory Map (reputations + deltas + outcomes + disputes),
- * mirroring the kernel-marketplace route. Production wires this to a
- * ReputationFacade and persists. The composition engine (PR #88) calls POST
- * step-outcome on each step completion and POST finalize-reputation at
- * workflow finish.
+ * Storage is SQLite via @pcc/store (agent_reputations + reputation_deltas +
+ * composition_step_outcomes + composition_step_disputes), following the
+ * marketplace / requests persistence pattern. State survives gateway redeploys.
+ * The composition engine (PR #88) calls the in-process `recordStepOutcome` on
+ * each step completion and `finalizeReputation` at workflow finish.
  *
  * Scoring defaults: score ∈ [0, 1000], starts at 500 (neutral). step_completed
  * +10, step_failed -15, dispute_upheld -50 (disputed agent), dispute_rejected
@@ -45,6 +45,27 @@ import {
   type FinalizeCompositionReputationResponse,
 } from "@pcc/spec";
 import { z } from "zod";
+import { schema, eq, and, desc } from "@pcc/store";
+import { getStore, initStore } from "../db.js";
+
+// ---------------------------------------------------------------------------
+// Store access — see compose.ts for the lazy-init rationale.
+// ---------------------------------------------------------------------------
+
+function db() {
+  try {
+    return getStore().db;
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    return initStore({ seed: false }).db;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Scoring constants
@@ -67,19 +88,6 @@ const DEFAULT_AGENT_KIND: ReputationAgentKind = "operator-kernel";
 const RECENT_DELTAS_LIMIT = 20;
 
 // ---------------------------------------------------------------------------
-// In-memory stores (production: swap for ReputationFacade-backed storage)
-// ---------------------------------------------------------------------------
-
-const reputations = new Map<string, AgentReputation>();
-const deltas = new Map<string, ReputationDelta>();
-const outcomes = new Map<string, CompositionStepOutcome>();
-/** Secondary index: `${compositionId}#${stepIndex}` -> outcomeId */
-const outcomeByStep = new Map<string, string>();
-const disputes = new Map<string, CompositionStepDispute>();
-/** Compositions that have already received the composition_completed bonus. */
-const completionBonusApplied = new Set<string>();
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -89,20 +97,71 @@ function clampScore(score: number): number {
   return Math.max(MIN_SCORE, Math.min(MAX_SCORE, score));
 }
 
-function stepKey(compositionId: string, stepIndex: number): string {
-  return `${compositionId}#${stepIndex}`;
+// ── agent_reputations ──────────────────────────────────────────────────
+
+/** Map a DB row to the public AgentReputation (drops the created_at column). */
+function loadReputation(agentId: string): AgentReputation | undefined {
+  const row = db()
+    .select()
+    .from(schema.agentReputations)
+    .where(eq(schema.agentReputations.agentId, agentId))
+    .get();
+  if (!row) return undefined;
+  return {
+    agentId: row.agentId,
+    kind: row.kind as ReputationAgentKind,
+    score: row.score,
+    positiveContributions: row.positiveContributions,
+    negativeContributions: row.negativeContributions,
+    disputesUpheld: row.disputesUpheld,
+    disputesRejected: row.disputesRejected,
+    lastUpdatedAt: row.lastUpdatedAt,
+  };
+}
+
+function loadAllReputations(): AgentReputation[] {
+  const rows = db().select().from(schema.agentReputations).all();
+  return rows.map((row) => ({
+    agentId: row.agentId,
+    kind: row.kind as ReputationAgentKind,
+    score: row.score,
+    positiveContributions: row.positiveContributions,
+    negativeContributions: row.negativeContributions,
+    disputesUpheld: row.disputesUpheld,
+    disputesRejected: row.disputesRejected,
+    lastUpdatedAt: row.lastUpdatedAt,
+  }));
+}
+
+/** Idempotent upsert of a reputation row. created_at is preserved on update. */
+function saveReputation(rep: AgentReputation): void {
+  const cols = {
+    kind: rep.kind,
+    score: rep.score,
+    positiveContributions: rep.positiveContributions,
+    negativeContributions: rep.negativeContributions,
+    disputesUpheld: rep.disputesUpheld,
+    disputesRejected: rep.disputesRejected,
+    lastUpdatedAt: rep.lastUpdatedAt,
+  };
+  db()
+    .insert(schema.agentReputations)
+    .values({ agentId: rep.agentId, createdAt: now(), ...cols })
+    .onConflictDoUpdate({ target: schema.agentReputations.agentId, set: cols })
+    .run();
 }
 
 /**
  * Fetch an agent's reputation, lazily initializing it at the neutral starting
- * score on first reference. The returned object is the stored reference —
- * mutating it mutates the registry.
+ * score on first reference (persisted immediately, mirroring the in-memory
+ * Map's set-on-init). Returns a fresh object each call — callers that mutate it
+ * must call {@link saveReputation} to persist.
  */
 export function getOrInitReputation(
   agentId: string,
   kind: ReputationAgentKind = DEFAULT_AGENT_KIND,
 ): AgentReputation {
-  const existing = reputations.get(agentId);
+  const existing = loadReputation(agentId);
   if (existing) return existing;
 
   const fresh: AgentReputation = {
@@ -115,7 +174,7 @@ export function getOrInitReputation(
     disputesRejected: 0,
     lastUpdatedAt: now(),
   };
-  reputations.set(agentId, fresh);
+  saveReputation(fresh);
   return fresh;
 }
 
@@ -147,6 +206,7 @@ export function applyDelta(
 
   rep.score = clampScore(rep.score + delta);
   rep.lastUpdatedAt = now();
+  saveReputation(rep);
 
   const record: ReputationDelta = {
     deltaId: randomUUID(),
@@ -160,34 +220,136 @@ export function applyDelta(
     appliedBy: context.appliedBy,
     note: context.note,
   };
-  deltas.set(record.deltaId, record);
+  insertDelta(record);
   return record;
 }
 
-/** All deltas for an agent, newest-first (reverse insertion order). */
-function deltasForAgent(agentId: string): ReputationDelta[] {
-  const all: ReputationDelta[] = [];
-  for (const d of deltas.values()) {
-    if (d.agentId === agentId) all.push(d);
-  }
-  return all.reverse();
+function insertDelta(record: ReputationDelta): void {
+  db()
+    .insert(schema.reputationDeltas)
+    .values({
+      deltaId: record.deltaId,
+      agentId: record.agentId,
+      delta: record.delta,
+      reason: record.reason,
+      compositionId: record.compositionId ?? null,
+      stepIndex: record.stepIndex ?? null,
+      appliedAt: record.appliedAt,
+      createdAt: now(),
+      data: record,
+    })
+    .run();
 }
+
+/** All deltas for an agent, newest-first (descending insertion order). */
+function deltasForAgent(agentId: string): ReputationDelta[] {
+  const rows = db()
+    .select()
+    .from(schema.reputationDeltas)
+    .where(eq(schema.reputationDeltas.agentId, agentId))
+    .orderBy(desc(schema.reputationDeltas.seq))
+    .all();
+  return rows.map((r) => r.data as ReputationDelta);
+}
+
+/** True once a composition_completed bonus has been recorded for a composition. */
+function bonusApplied(compositionId: string): boolean {
+  const row = db()
+    .select({ seq: schema.reputationDeltas.seq })
+    .from(schema.reputationDeltas)
+    .where(
+      and(
+        eq(schema.reputationDeltas.compositionId, compositionId),
+        eq(schema.reputationDeltas.reason, "composition_completed"),
+      ),
+    )
+    .get();
+  return !!row;
+}
+
+// ── composition_step_outcomes ──────────────────────────────────────────
 
 /** All outcomes for a composition, ordered by stepIndex ascending. */
 function outcomesForComposition(compositionId: string): CompositionStepOutcome[] {
-  const list: CompositionStepOutcome[] = [];
-  for (const o of outcomes.values()) {
-    if (o.compositionId === compositionId) list.push(o);
-  }
-  return list.sort((a, b) => a.stepIndex - b.stepIndex);
+  const rows = db()
+    .select()
+    .from(schema.compositionStepOutcomes)
+    .where(eq(schema.compositionStepOutcomes.compositionId, compositionId))
+    .orderBy(schema.compositionStepOutcomes.stepIndex)
+    .all();
+  return rows.map((r) => r.data as CompositionStepOutcome);
 }
 
 function getOutcomeByStep(
   compositionId: string,
   stepIndex: number,
 ): CompositionStepOutcome | undefined {
-  const id = outcomeByStep.get(stepKey(compositionId, stepIndex));
-  return id ? outcomes.get(id) : undefined;
+  const row = db()
+    .select()
+    .from(schema.compositionStepOutcomes)
+    .where(
+      and(
+        eq(schema.compositionStepOutcomes.compositionId, compositionId),
+        eq(schema.compositionStepOutcomes.stepIndex, stepIndex),
+      ),
+    )
+    .get();
+  return row ? (row.data as CompositionStepOutcome) : undefined;
+}
+
+/** Upsert an outcome by outcomeId (reused across the (comp, step) idempotency). */
+function saveOutcome(outcome: CompositionStepOutcome): void {
+  const cols = {
+    compositionId: outcome.compositionId,
+    stepIndex: outcome.stepIndex,
+    agentId: outcome.agentId,
+    capabilityId: outcome.capabilityId,
+    status: outcome.status,
+    finalReputationApplied: outcome.finalReputationApplied,
+    data: outcome,
+  };
+  db()
+    .insert(schema.compositionStepOutcomes)
+    .values({ outcomeId: outcome.outcomeId, createdAt: now(), ...cols })
+    .onConflictDoUpdate({ target: schema.compositionStepOutcomes.outcomeId, set: cols })
+    .run();
+}
+
+// ── composition_step_disputes ──────────────────────────────────────────
+
+function getDispute(disputeId: string): CompositionStepDispute | undefined {
+  const row = db()
+    .select()
+    .from(schema.compositionStepDisputes)
+    .where(eq(schema.compositionStepDisputes.disputeId, disputeId))
+    .get();
+  return row ? (row.data as CompositionStepDispute) : undefined;
+}
+
+function listDisputesForComposition(compositionId: string): CompositionStepDispute[] {
+  const rows = db()
+    .select()
+    .from(schema.compositionStepDisputes)
+    .where(eq(schema.compositionStepDisputes.compositionId, compositionId))
+    .all();
+  return rows.map((r) => r.data as CompositionStepDispute);
+}
+
+function saveDispute(dispute: CompositionStepDispute): void {
+  const cols = {
+    compositionId: dispute.compositionId,
+    stepIndex: dispute.stepIndex,
+    disputerDid: dispute.disputerId,
+    status: dispute.status,
+    resolution: dispute.resolutionNote ?? null,
+    resolvedAt: dispute.resolvedAt ?? null,
+    data: dispute,
+  };
+  db()
+    .insert(schema.compositionStepDisputes)
+    .values({ disputeId: dispute.disputeId, createdAt: dispute.filedAt, ...cols })
+    .onConflictDoUpdate({ target: schema.compositionStepDisputes.disputeId, set: cols })
+    .run();
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +401,7 @@ export function recordStepOutcome(
     reputationDelta: undefined,
     finalReputationApplied: false,
   };
-  outcomes.set(outcome.outcomeId, outcome);
-  outcomeByStep.set(stepKey(compositionId, stepIndex), outcome.outcomeId);
+  saveOutcome(outcome);
   return { ok: true, outcome };
 }
 
@@ -251,8 +412,8 @@ export function recordStepOutcome(
  * (+5) bonus to each participant when EVERY step succeeded.
  *
  * Idempotent: outcomes carry `finalReputationApplied` and the bonus is guarded
- * by `completionBonusApplied`, so a second call applies nothing. Returns the
- * deltas applied during this call (empty array on a no-op re-finalize).
+ * by a recorded composition_completed delta, so a second call applies nothing.
+ * Returns the deltas applied during this call (empty array on a no-op re-finalize).
  */
 export function finalizeReputation(
   compositionId: string,
@@ -275,6 +436,7 @@ export function finalizeReputation(
       );
       outcome.reputationDelta = STEP_COMPLETED_DELTA;
       outcome.finalReputationApplied = true;
+      saveOutcome(outcome);
     } else if (outcome.status === "failed") {
       deltasApplied.push(
         applyDelta(outcome.agentId, STEP_FAILED_DELTA, "step_failed", {
@@ -286,6 +448,7 @@ export function finalizeReputation(
       );
       outcome.reputationDelta = STEP_FAILED_DELTA;
       outcome.finalReputationApplied = true;
+      saveOutcome(outcome);
     }
     // 'disputed' / 'abandoned' steps get no immediate delta — they wait for
     // dispute resolution and are intentionally left un-finalized.
@@ -296,7 +459,7 @@ export function finalizeReputation(
   if (
     compOutcomes.length > 0 &&
     compOutcomes.every((o) => o.status === "success") &&
-    !completionBonusApplied.has(compositionId)
+    !bonusApplied(compositionId)
   ) {
     const participants = [...new Set(compOutcomes.map((o) => o.agentId))];
     for (const agentId of participants) {
@@ -309,7 +472,6 @@ export function finalizeReputation(
         ),
       );
     }
-    completionBonusApplied.add(compositionId);
   }
 
   return deltasApplied;
@@ -351,7 +513,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
     const effectiveLimit = limit ?? 20;
     const effectiveOffset = offset ?? 0;
 
-    let agents = [...reputations.values()];
+    let agents = loadAllReputations();
     if (kind) agents = agents.filter((a) => a.kind === kind);
     agents.sort((a, b) => b.score - a.score);
 
@@ -489,12 +651,13 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
         resolutionNote: undefined,
         reputationDeltasApplied: [],
       };
-      disputes.set(dispute.disputeId, dispute);
+      saveDispute(dispute);
 
       // Flip a previously-successful outcome to 'disputed' so finalize-reputation
       // holds off crediting it until the dispute resolves.
       if (outcome.status === "success") {
         outcome.status = "disputed";
+        saveOutcome(outcome);
       }
 
       return reply.status(201).send({ dispute });
@@ -505,9 +668,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { compositionId: string } }>(
     "/api/compositions/:compositionId/disputes",
     async (req) => {
-      const list = [...disputes.values()].filter(
-        (d) => d.compositionId === req.params.compositionId,
-      );
+      const list = listDisputesForComposition(req.params.compositionId);
       return { disputes: list, count: list.length };
     },
   );
@@ -525,7 +686,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       const { disputeId } = req.params;
-      const dispute = disputes.get(disputeId);
+      const dispute = getDispute(disputeId);
       if (!dispute) {
         return reply.status(404).send({
           error: "dispute_not_found",
@@ -557,6 +718,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
           );
           const rep = getOrInitReputation(disputedAgentId);
           rep.disputesUpheld += 1;
+          saveReputation(rep);
 
           // Revert a previously-credited step_completed +10 if finalize already
           // settled this step before the dispute was upheld.
@@ -599,6 +761,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
           );
           const rep = getOrInitReputation(disputedAgentId);
           rep.disputesRejected += 1;
+          saveReputation(rep);
         }
         applied.push(
           applyDelta(
@@ -620,6 +783,7 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
       dispute.resolverId = resolverId;
       dispute.resolutionNote = resolutionNote;
       dispute.reputationDeltasApplied = applied.map((d) => d.deltaId);
+      saveDispute(dispute);
 
       return reply.status(200).send({ dispute, deltasApplied: applied });
     },
@@ -664,17 +828,16 @@ export async function reputationRoutes(app: FastifyInstance): Promise<void> {
 // Test-only helpers
 // ---------------------------------------------------------------------------
 
-/** Wipe every in-memory reputation store. Test helper. */
+/** Wipe every reputation store. Test helper. */
 export function _clearReputationForTests(): void {
-  reputations.clear();
-  deltas.clear();
-  outcomes.clear();
-  outcomeByStep.clear();
-  disputes.clear();
-  completionBonusApplied.clear();
+  const d = db();
+  d.delete(schema.agentReputations).run();
+  d.delete(schema.reputationDeltas).run();
+  d.delete(schema.compositionStepOutcomes).run();
+  d.delete(schema.compositionStepDisputes).run();
 }
 
 /** Preload a single AgentReputation into the registry. Test helper. */
 export function _seedReputationForTests(rep: AgentReputation): void {
-  reputations.set(rep.agentId, rep);
+  saveReputation(rep);
 }
