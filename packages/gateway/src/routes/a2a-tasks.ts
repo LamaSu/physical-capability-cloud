@@ -55,6 +55,14 @@ import { getEventBus } from "../services/event-bus.js";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import {
+  attachChannel,
+  getChannelsByOperator,
+  serializeAvailability,
+  type ChannelInput,
+  type ChannelRecord,
+  type AvailabilityRecord,
+} from "./operator-channels.js";
 
 const { negotiationSessions, operatorPolicies, evidenceBundles, jobs, escrows, escrowMilestones } = schema;
 
@@ -609,6 +617,31 @@ interface PccAuthorIntegrationParams {
     onTimeout?: string;
     onDeadlineMiss?: string;
   };
+  /**
+   * Optional channels — how PCC will notify the operator when a job lands.
+   * The operator's onboarding agent fills these in from the setup conversation.
+   * Empty/omitted = operator uses the SSE dashboard only ("manual" transport).
+   */
+  channels?: ChannelInput[];
+  /**
+   * Optional availability — when this capability is reachable. Mirrors the
+   * envelope pattern from sla: small enum + describe slot for the long tail.
+   * Omitted = treated as "always" (24/7) by downstream agents.
+   */
+  availability?: AvailabilityRecord;
+  /**
+   * Optional operator slug — defaults to a sanitized form of name. The slug
+   * is what scopes the channel records and is what other agents reference.
+   */
+  operatorSlug?: string;
+}
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "operator";
 }
 
 const PCC_AAI_GATEWAY_URL = process.env.PCC_GATEWAY_URL ?? "https://capability.network";
@@ -645,9 +678,29 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
       minimum: "0",
     },
     ...(lane === "human" && p.sla ? { sla: p.sla } : {}),
+    ...(p.availability
+      ? { availability: serializeAvailability(p.availability) }
+      : {}),
   });
   if (!cr.success) {
     return [{ type: "pcc.author_integration", description: "capability publish failed", data: { error: cr.error.message } }];
+  }
+
+  // Attach any channels the operator's onboarding agent passed in. This is
+  // the wire-protocol slot — how PCC will ping the operator when a job lands.
+  // Operator slug defaults to a sanitized form of name so the same agent can
+  // attach more channels later without us having to mint a separate id.
+  const operatorSlug = p.operatorSlug ?? slugify(p.name);
+  const attached: ChannelRecord[] = [];
+  const channelErrors: Array<{ index: number; error: string }> = [];
+  if (Array.isArray(p.channels) && p.channels.length > 0) {
+    for (let i = 0; i < p.channels.length; i++) {
+      try {
+        attached.push(attachChannel(operatorSlug, p.channels[i]!));
+      } catch (e) {
+        channelErrors.push({ index: i, error: (e as Error).message });
+      }
+    }
   }
 
   const agentCardUrl = `${PCC_AAI_GATEWAY_URL}/api/kernels/${kernelId}/agent-card.json`;
@@ -657,12 +710,88 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
     data: {
       lane,
       kernelId,
+      operatorSlug,
       capability: cr.data.capability,
       created: cr.data.created,
+      channelsAttached: attached.length,
+      channels: attached,
+      ...(channelErrors.length ? { channelErrors } : {}),
+      availability: p.availability ?? null,
       agentCardUrl,
       proveNext: lane === "machine"
         ? "POST /api/setup/test-job { kernelId, deviceId, assuranceTier } to prove + auto-activate"
         : "POST /api/onboard/registrations/:id/prove { evidence: photo + GPS } to activate at Tier 1",
+      attachMoreChannels: `tasks/send { skill: "pcc-attach-channel", params: { operatorSlug: "${operatorSlug}", ... } }`,
+    },
+  }];
+}
+
+// ── pcc-attach-channel: add a notification/dispatch channel to an operator ───
+
+interface PccAttachChannelParams {
+  operatorSlug?: string;
+  channels?: ChannelInput[];
+  /** Single-channel shorthand — same fields as one entry of channels[]. */
+  label?: string;
+  transport?: ChannelInput["transport"];
+  direction?: ChannelInput["direction"];
+  endpoint?: Record<string, unknown>;
+  credentialRef?: string;
+  describe?: string;
+  replyContract?: string;
+  enabled?: boolean;
+}
+
+/**
+ * Attach one or more channels to an existing operator slug. Callable as a
+ * standalone A2A skill so an operator's onboarding agent can add new
+ * channels at any time without going back through pcc-author-integration.
+ *
+ * Two input shapes accepted:
+ *   - { operatorSlug, channels: [ChannelInput, ...] }  (batch)
+ *   - { operatorSlug, label, transport, describe, ... } (single, shorthand)
+ */
+async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArtifact[]> {
+  if (!p.operatorSlug) {
+    throw new Error("operatorSlug is required for pcc-attach-channel");
+  }
+  const inputs: ChannelInput[] = Array.isArray(p.channels) && p.channels.length > 0
+    ? p.channels
+    : (p.transport && p.label && p.describe
+        ? [{
+            label: p.label,
+            transport: p.transport,
+            direction: p.direction,
+            endpoint: p.endpoint,
+            credentialRef: p.credentialRef,
+            describe: p.describe,
+            replyContract: p.replyContract,
+            enabled: p.enabled,
+          }]
+        : []);
+  if (inputs.length === 0) {
+    throw new Error(
+      "pcc-attach-channel needs either channels: [...] or single-channel shorthand (label, transport, describe required)",
+    );
+  }
+  const attached: ChannelRecord[] = [];
+  const errors: Array<{ index: number; error: string }> = [];
+  for (let i = 0; i < inputs.length; i++) {
+    try {
+      attached.push(attachChannel(p.operatorSlug, inputs[i]!));
+    } catch (e) {
+      errors.push({ index: i, error: (e as Error).message });
+    }
+  }
+  return [{
+    type: "pcc.attach_channel",
+    description: `Attached ${attached.length} channel(s) to operator ${p.operatorSlug}`,
+    data: {
+      operatorSlug: p.operatorSlug,
+      attached,
+      totalChannelsNow: getChannelsByOperator(p.operatorSlug).length,
+      ...(errors.length ? { errors } : {}),
+      testDispatch: `POST /api/operators/${p.operatorSlug}/channels/test — fire a synthetic job at every enabled channel to verify`,
     },
   }];
 }
@@ -771,6 +900,18 @@ async function dispatchTasksSend(
 
       case "pcc-author-integration": {
         const artifacts = await handlePccAuthorIntegration(skillParams as PccAuthorIntegrationParams);
+        const task: A2ATask = {
+          ...baseTask,
+          state: "COMPLETED",
+          artifacts,
+          updatedAt: new Date().toISOString(),
+        };
+        a2aTasks.set(taskId, task);
+        return rpcSuccess(rpcId, task);
+      }
+
+      case "pcc-attach-channel": {
+        const artifacts = await handlePccAttachChannel(skillParams as PccAttachChannelParams);
         const task: A2ATask = {
           ...baseTask,
           state: "COMPLETED",
