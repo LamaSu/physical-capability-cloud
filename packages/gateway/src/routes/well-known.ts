@@ -253,11 +253,26 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         {
           id: "pcc-author-integration",
           name: "Author an Integration",
-          description: "Onboard a new operator end-to-end: from a machine or human-skill description, register the kernel, publish the capability (with the human-lane accept/deadline SLA), and return the live A2A agent-card URL.",
-          tags: ["onboarding", "operator", "integration", "kernel", "capability", "physical-world"],
+          description: "Onboard a new operator end-to-end: from a machine or human-skill description, register the kernel, publish the capability (with optional human-lane accept/deadline SLA, optional availability windows, and optional notification channels), and return the live A2A agent-card URL. Accepts channels[] and availability inline so a fully-formed operator can be onboarded in one call.",
+          tags: ["onboarding", "operator", "integration", "kernel", "capability", "physical-world", "channels", "availability"],
           examples: [
             "Publish my Opentrons OT-2 as a liquid-handling capability via generic-http",
             "List me as a same-day SF courier - accept within 90s, finish within 1h",
+            "Publish my pizza shop with a webhook channel to my receipt printer and availability windows 9am-10pm daily",
+          ],
+          inputModes: ["application/json"],
+          outputModes: ["application/json"],
+        },
+        {
+          id: "pcc-attach-channel",
+          name: "Attach a Notification Channel",
+          description: "Attach a notification/dispatch channel to an existing operator so PCC knows how to ping them when a job lands. Channels carry a small stable transport enum (webhook/email/sms/voice/push/mqtt/file/manual) plus a plain-English describe field the operator's onboarding agent fills in by conversation. PCC the substrate stays neutral on specific vendors — new backend types appear by conversation, not code change. Returns the channel record + a test-dispatch URL for end-to-end verification.",
+          tags: ["onboarding", "operator", "channel", "notification", "integration", "wire-protocol"],
+          examples: [
+            "Add a webhook channel for my pizza shop that POSTs to my receipt printer's local URL",
+            "Add an SMS channel to my phone so I get pinged for new courier jobs",
+            "Attach an MQTT topic on my lab's broker for incoming HPLC runs",
+            "Add a manual channel (dashboard only) for my one-person studio",
           ],
           inputModes: ["application/json"],
           outputModes: ["application/json"],

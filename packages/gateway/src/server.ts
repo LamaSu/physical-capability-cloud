@@ -27,6 +27,7 @@ import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
+import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
@@ -443,6 +444,7 @@ export async function createGateway(port = 3200) {
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
   await app.register(operatorsPublicRoutes);
+  await app.register(operatorChannelsRoutes);
   await app.register(captureRoutes);
   await app.register(skillsRoutes);
   await app.register(capture3dRoutes);
