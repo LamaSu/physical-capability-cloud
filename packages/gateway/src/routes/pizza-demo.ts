@@ -55,6 +55,8 @@ interface DemoOrder {
     delivery?: string; // jobId
   };
   rejectionReason?: string;
+  /** Set when the user's agent acknowledges receipt via /confirm-delivery. */
+  userConfirmedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -225,6 +227,7 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
       deliveryLocation: { lat: number; lng: number };
       maxPriceUSD: number;
       maxTimeMin: number;
+      optimizeFor: "price" | "speed" | "quality";
     }>;
 
     if (!body || !body.userId || !body.description || !body.deliveryAddress) {
@@ -236,20 +239,27 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
 
     const loc = body.deliveryLocation ?? { lat: 37.77, lng: -122.42 };
     const maxPrice = body.maxPriceUSD ?? 30;
+    // What the user cares about — "cheapest" (price), "fastest" (speed), or
+    // "best rated" (quality). The agent asks; the compose engine optimizes for
+    // it. Defaults to price so the existing form (order.html) is unchanged.
+    const optimizeFor =
+      body.optimizeFor === "speed" || body.optimizeFor === "quality"
+        ? body.optimizeFor
+        : "price";
 
     // Plan a 2-step composition: make-pizza → deliver-pizza via graph-search.
     const composeReq: ComposeRequest = {
-      requesterAgentId: body.userId,
+      requester: { agentId: body.userId },
       outcomeType: "delivered-pizza",
       outcomeChain: ["make-pizza", "delivered-pizza"],
       budgetUSD: maxPrice,
       minAssuranceTier: 1,
-      optimizeFor: "price",
+      optimizeFor,
       location: { lat: loc.lat, lng: loc.lng, radiusKm: 25 },
     };
 
     const planned = planComposition(composeReq);
-    if (planned.status !== "proposed" || !planned.candidate) {
+    if (planned.status !== "proposed" || planned.steps.length < 2) {
       return reply.status(planned.status === "over_budget" ? 402 : 404).send({
         error: planned.status,
         message:
@@ -258,7 +268,9 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const cand = planned.candidate;
+    // ComposeResponse carries the chosen path directly: steps[0] = make-pizza
+    // shop, steps[1] = delivered-pizza driver, with totals at the top level.
+    const cand = planned;
     const shopStep = cand.steps[0]!;
     const driverStep = cand.steps[1]!;
 
@@ -347,6 +359,49 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
           delivery: order.jobs.delivery ? jobs.get(order.jobs.delivery) : null,
         },
       });
+    },
+  );
+
+  // POST /api/demo/orders/:id/confirm-delivery — user acknowledges receipt.
+  //
+  // The driver's `complete` already settled the order and fired the `delivered`
+  // event; this is the user agent's closing acknowledgement. Idempotent, returns
+  // the settlement summary for the agent to report, and grants the user +5
+  // reputation for closing the loop (first confirm only). If the user is unhappy
+  // they should NOT call this — file a dispute via /api/escrow/:id/dispute.
+  app.post<{ Params: { id: string } }>(
+    "/api/demo/orders/:id/confirm-delivery",
+    async (req, reply) => {
+      const order = orders.get(req.params.id);
+      if (!order) return reply.status(404).send({ error: "not_found" });
+      if (order.status !== "delivered")
+        return reply.status(409).send({
+          error: "wrong_state",
+          message: `expected delivered, got ${order.status}`,
+        });
+
+      const firstConfirm = !order.userConfirmedAt;
+      order.userConfirmedAt = order.userConfirmedAt ?? nowIso();
+      order.updatedAt = nowIso();
+
+      const settlement = {
+        shopPayoutUSD: order.composition!.shop.priceUSD,
+        driverPayoutUSD: order.composition!.driver.priceUSD,
+        pccFeeUSD: +(order.composition!.totalPriceUSD * 0.0235).toFixed(2),
+      };
+      const reputation = {
+        shopDelta: 15,
+        driverDelta: 15,
+        userDelta: firstConfirm ? 5 : 0, // user earns +5 for closing the loop
+      };
+
+      emit(`order:${order.orderId}`, {
+        type: "receipt_confirmed",
+        order,
+        settlement,
+        reputation,
+      });
+      return reply.status(200).send({ order, settlement, reputation });
     },
   );
 

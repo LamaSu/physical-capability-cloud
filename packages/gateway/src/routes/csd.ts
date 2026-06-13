@@ -10,20 +10,31 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { loadBuiltinCsds, CsdRegistry, CsdSchema } from "@pcc/spec";
+import { loadBuiltinCsds, CsdRegistry, CsdSchema, type CSD } from "@pcc/spec";
+import { PIZZA_CSDS } from "./pizza-csds.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
 
 /**
  * Get (or lazily initialize) the shared CSD registry.
- * Pre-loaded with all 5 built-in CSDs.
+ * Pre-loaded with all built-in CSDs.
  */
 export function getCsdRegistry(): CsdRegistry {
   if (!_registry) {
     _registry = loadBuiltinCsds();
   }
   return _registry;
+}
+
+/**
+ * Derive a bare capability type from a CSD's canonical URI.
+ * "pcc://capabilities/make-pizza/v1" → "make-pizza"; the type is the path
+ * segment immediately before the version tag.
+ */
+function csdTypeFromUrl(url: string): string {
+  const segs = url.split("/").filter(Boolean); // ["pcc:", "capabilities", "make-pizza", "v1"]
+  return segs.length >= 2 ? segs[segs.length - 2]! : url;
 }
 
 /** Reset the registry (used in tests). */
@@ -51,6 +62,29 @@ export async function csdRoutes(app: FastifyInstance) {
 
     return { csds };
   });
+
+  // ── GET /api/csd/by-type/:type ──────────────────────────────────
+  // Return every CSD whose capability type matches :type (derived from the
+  // CSD's canonical URI). Used by agents to discover a capability's parameter
+  // shape before clarifying with a user, e.g. GET /api/csd/by-type/make-pizza.
+  // Registered before the /:url wildcard so "by-type" is never read as a URI.
+  // Sources: the builtin registry PLUS the demo pizza CSDs (make-pizza,
+  // delivered-pizza), which are demo-scoped rather than @pcc/spec builtins.
+  app.get<{ Params: { type: string } }>(
+    "/api/csd/by-type/:type",
+    async (req) => {
+      const wanted = decodeURIComponent(req.params.type).toLowerCase();
+      const byUrl = new Map<string, CSD>();
+      for (const c of getCsdRegistry().list()) {
+        if (csdTypeFromUrl(c.url).toLowerCase() === wanted) byUrl.set(c.url, c);
+      }
+      for (const c of PIZZA_CSDS) {
+        if (csdTypeFromUrl(c.url).toLowerCase() === wanted) byUrl.set(c.url, c);
+      }
+      const csds = [...byUrl.values()];
+      return { type: wanted, count: csds.length, csds };
+    },
+  );
 
   // ── POST /api/csd/resolve ───────────────────────────────────────
   // Must be registered BEFORE the /:url wildcard so Fastify doesn't

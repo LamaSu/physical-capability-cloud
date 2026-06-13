@@ -21,6 +21,8 @@ const PUBLIC_PREFIXES = [
   // endpoints (approve/reject/activate) without auth. Now uses exact match below.
   "/api/dht/",                  // DHT discovery is public (distributed capability queries)
   "/api/marketplace/",          // Marketplace browsing is public (see what's available)
+  "/api/demo/",                 // vibecodenights pizza demo (keyless walk-up; in-memory mock state only)
+  "/api/csd/by-type/",          // CSD parameter discovery by capability type is public
   "/.well-known/",
   "/docs",                      // Docs hub + Swagger UI (/docs/api) are public
 ];
