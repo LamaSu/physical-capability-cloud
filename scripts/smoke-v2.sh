@@ -56,6 +56,10 @@ declare -i FAILED=0
 declare -a FAIL_DETAILS=()
 GATEWAY_PID=""
 
+# API key (provisioned in step 1.5)
+PCC_KEY=""
+AUTH_HEADER=""
+
 # ── Colors (only if stdout is a tty) ────────────────────────────────────────
 if [[ -t 1 ]]; then
   C_GREEN='\033[0;32m'
@@ -210,6 +214,30 @@ check_health() {
   fi
 }
 
+# ── Provision an API key for all subsequent authenticated calls ────────────
+provision_key() {
+  step "Provision smoke API key via POST /api/auth/provision"
+  local payload
+  payload=$(cat <<EOF
+{"email": "smoke+${SLUG}@example.invalid", "name": "smoke-test", "capability": "smoke"}
+EOF
+)
+  local resp; resp=$(http_post "${PCC_BASE}/api/auth/provision" "$payload")
+  local s; s=$(status_of "$resp")
+  local body; body=$(body_of "$resp")
+  if [[ "$s" != "201" && "$s" != "200" ]]; then
+    fail "/api/auth/provision returned ${s}: $(echo "$body" | head -c 200)"
+    return 1
+  fi
+  PCC_KEY=$(echo "$body" | jq -r '.api_key' 2>/dev/null || echo "")
+  if [[ -z "$PCC_KEY" || "$PCC_KEY" == "null" ]]; then
+    fail "no api_key in provision response: $(echo "$body" | head -c 200)"
+    return 1
+  fi
+  AUTH_HEADER="Authorization: Bearer ${PCC_KEY}"
+  pass "provisioned key (length ${#PCC_KEY})"
+}
+
 # ── Step 3: agent-card skills count ────────────────────────────────────────
 check_agent_card() {
   step "GET /.well-known/agent-card.json → skills.length === 8"
@@ -248,7 +276,7 @@ check_csd_endpoints() {
   step "GET /api/csd/suggest?q=fdm and /api/csd/popular"
 
   local resp s body
-  resp=$(http_get "${PCC_BASE}/api/csd/suggest?q=fdm")
+  resp=$(http_get "${PCC_BASE}/api/csd/suggest?q=fdm" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" == "200" ]]; then
@@ -262,7 +290,7 @@ check_csd_endpoints() {
     fail "/api/csd/suggest returned ${s}: $(echo "$body" | head -c 200)"
   fi
 
-  resp=$(http_get "${PCC_BASE}/api/csd/popular")
+  resp=$(http_get "${PCC_BASE}/api/csd/popular" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" == "200" ]]; then
@@ -281,7 +309,7 @@ check_operator_endpoints_precreate() {
   step "GET /api/operators/${SLUG}/status (pre-create) → unconfigured + POST /channels → 201"
 
   local resp s body
-  resp=$(http_get "${PCC_BASE}/api/operators/${SLUG}/status")
+  resp=$(http_get "${PCC_BASE}/api/operators/${SLUG}/status" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" == "200" ]]; then
@@ -298,7 +326,7 @@ check_operator_endpoints_precreate() {
 
   # Pre-attach a channel to verify the channels route works on its own
   local sample_channel='{"label":"pre-test SMS","transport":"sms","direction":"out","endpoint":{"phone":"+15555550100"},"describe":"smoke-test pre-attach to verify the channels POST route works on its own"}'
-  resp=$(http_post "${PCC_BASE}/api/operators/${SLUG}/channels" "$sample_channel")
+  resp=$(http_post "${PCC_BASE}/api/operators/${SLUG}/channels" "$sample_channel" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" == "201" ]]; then
@@ -373,7 +401,7 @@ EOF
 )
 
   local resp s body
-  resp=$(http_post "${PCC_BASE}/a2a/tasks/send" "$payload")
+  resp=$(http_post "${PCC_BASE}/a2a/tasks/send" "$payload" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" != "200" ]]; then
@@ -446,7 +474,7 @@ check_suggest_templates() {
 EOF
 )
   local resp s body
-  resp=$(http_post "${PCC_BASE}/a2a/tasks/send" "$payload")
+  resp=$(http_post "${PCC_BASE}/a2a/tasks/send" "$payload" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" != "200" ]]; then
@@ -468,7 +496,7 @@ check_status_after_create() {
   step "GET /api/operators/${SLUG}/status (post-create) → ready or partial"
 
   local resp s body
-  resp=$(http_get "${PCC_BASE}/api/operators/${SLUG}/status")
+  resp=$(http_get "${PCC_BASE}/api/operators/${SLUG}/status" -H "$AUTH_HEADER")
   s=$(status_of "$resp")
   body=$(body_of "$resp")
   if [[ "$s" != "200" ]]; then
@@ -545,6 +573,7 @@ main() {
   boot_gateway
   check_health
   check_agent_card
+  provision_key
   check_csd_endpoints
   check_operator_endpoints_precreate
   check_author_integration
