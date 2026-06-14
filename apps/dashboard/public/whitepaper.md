@@ -1,55 +1,66 @@
-# Physical Capability Cloud: A Credibly Neutral Coordination Layer for Physical Manufacturing
+# Physical Capability Cloud: A Substrate for Agentic Composition of the Global Economy
 
-**Version**: 2.1 | **Date**: March 31, 2026
+**Version**: 3.0 | **Date**: June 13, 2026
 
 ---
 
-> *The internet made information programmable. Cloud computing made compute programmable. We never did the same for the physical world.*
+> *The internet made information programmable. Cloud computing made compute programmable. We never did the same for the rest of the economy.*
 >
-> *A CNC mill in Detroit and a bioreactor in Nairobi have more in common than either has with the software that runs them — they are both idle most of the day, both capable of extraordinary precision, and both invisible to the global economy unless someone happens to know they exist.*
+> *Every good and every service today is coordinated through a stack of rent-seeking intermediaries — SaaS for the software, middle management for the people, admin for the paperwork. The work itself is usually fine. The coordination layer around it is the cost.*
 >
-> *What happens when every machine on Earth can be discovered, verified, and orchestrated by an AI agent as easily as calling an API? When a factory in Shenzhen and a makerspace in Medellín can form a trustless supply chain in minutes, not months? When the person operating the equipment keeps 97% of what they earn instead of surrendering a third of it to a platform that did nothing but sit in the middle?*
+> *What happens when every capability — a machine in Shenzhen, a person who knows how to do something in Medellín, an autonomous system on a remote tower — can be discovered, verified, composed, and settled by an agent the same way an agent calls any other API? When the coordination layer is a protocol, not a platform? When ownership of every node stays with the operator, but the ability to compose them into any value chain belongs to everyone?*
 >
-> *PCC is the answer to a question the physical world hasn't been allowed to ask: what if manufacturing was as composable as software?*
+> *PCC is the substrate that lets agents compose reality. Not "AWS for the physical world" — the protocol that replaces the rent-extracting middle of every value chain with a verifiable substrate any agent can build on.*
 
 ---
 
 ## Abstract
 
-Physical manufacturing is fragmented. A CNC shop in Detroit, a plating operation in Austin, and a quality-inspection lab in Munich cannot form a trustless workflow without a broker, a contract, and months of relationship-building. No neutral coordination layer exists for physical capabilities the way AWS exists for compute. The Physical Capability Cloud (PCC) is that layer.
+Coordination is the expensive part of every value chain. A pizza shop pays 30% to a delivery platform. A small fab shop pays a fifth of its revenue to the marketplace that surfaces it. A clinical lab pays a SaaS vendor for the LIMS that schedules its instruments. A delivery driver pays a percentage to whoever routes them. None of these intermediaries do the work. They sit in the middle of the work and charge for the position.
 
-PCC abstracts physical manufacturing capabilities into composable, verifiable, settleable services discoverable by AI agents. Shop Kernels are the Availability Zones — physical sites with equipment connected to the network. Capabilities are the billing units — not machines, but what machines can do: 5-axis milling at ±0.01mm, FDM extrusion in PETG up to 250×210×210mm, HPLC purity analysis down to 0.1% peak area. Assurance Tiers are the SLAs — escalating evidence requirements and slashable bonds that make claims credible. Milestone escrow with cryptographic evidence makes settlement automatic and auditable.
+The Physical Capability Cloud (PCC) is the substrate that lets agents compose verifiable primitives directly — so the rent-extracting middle becomes unnecessary. Any capability that can be expressed as a typed contract — *I will make a pizza*, *I will mill aluminum to ±0.01mm*, *I will run an HPLC*, *I will drive a same-day route* — becomes a node any agent in the network can discover, negotiate, escrow, execute, verify, and settle against.
 
-PCC is not a centralized marketplace with a relay in the middle. Operators run their own nodes (`pip install pcc-node && pcc-node start`) which auto-detect hardware, register capabilities, and communicate peer-to-peer using NaCl-encrypted messages with Ed25519-signed capability announcements. The gateway is a bootstrap and discovery service, not a required intermediary. A DHT-based capability discovery layer allows agents to find operators without querying any central server.
+The substrate is the moat. Every UX surface that talks to PCC — voice, forms, mobile apps, chat, autonomous-asset agents — is an early adapter on top of the substrate. They will evolve. The substrate underneath does not need to.
 
-The key innovation is that PCC does not just coordinate work — it creates permanent intellectual property from it. Capability StructureDefinitions (CSDs) are machine-readable design artifacts registered as IP Assets on Story Protocol. Every job run is a derivative of the CSD it was built from, creating an on-chain provenance chain. Every CSD fork pays royalties to the original designer. Physical work becomes programmable IP, and operators, designers, and verifiers earn from the network they build.
+Three structural goals, conventionally treated as a two-of-three trade-off in economic theory, become simultaneously achievable when coordination is a protocol:
+
+- **Perfect competition** — many sellers, identical typed products (via Capability StructureDefinitions), perfect price information (via published pricing rules and on-chain evidence), zero entry barrier (via one-command operator onboarding through a user's own agent).
+- **Full verticalization** — composition gives every node the coordination benefits of vertical integration without the integration step. An agent stitches a multi-step value chain at runtime; no merger, no procurement department, no master service agreement.
+- **Distributed ownership** — every node owns its primitive. No central coordinator extracts the integration rent. The network treasury accrues from a flat, transparent protocol fee, not from positioning.
+
+The implications follow directly. SaaS coordination layers (LIMS, ERP, MES, scheduling, dispatch, marketplace) collapse when their function becomes a substrate primitive any agent can compose against. Most middle-management and admin coordination cost becomes a protocol function rather than a job description. Settlement and evidence become enforcement mechanisms — load-bearing, but not the headline. The headline is what they enable: the world's first programmable, composable substrate for agent-mediated economic coordination.
+
+This document describes the substrate, the four primitive slots that turn an arbitrary capability into a network participant, the bidirectional onboarding flow that lets a user's own agent and the registry converse during setup, and the enforcement layer (escrow, evidence, on-chain identity, IP attribution) that makes the substrate's claims credible at scale.
 
 ---
 
 ## 1. Introduction
 
-### 1.1 Why Cloud Infrastructure Succeeded
+### 1.1 The Coordination Tax
 
-Amazon Web Services succeeded because it solved three hard problems at once. First, abstraction: developers no longer needed to know the physical location, hardware model, or maintenance schedule of the server running their code. An EC2 instance is an EC2 instance. Second, standardized billing: compute is priced by the unit (CPU-hour, GB-month), making cost predictable and discoverable without a sales conversation. Third, SLAs with teeth: AWS commits to 99.99% uptime with documented remedies for failures, backed by contractual obligations rather than reputation alone.
+Every value chain today is bracketed by intermediaries that do not do the work and charge for the position. A delivery app takes 25-30% of every order from a pizza shop that already employs the staff, owns the oven, and has a customer who explicitly asked for that shop's pizza. A fabrication marketplace takes 15-25% of every part order from a machinist who already owns the mill and the expertise. A clinical-trial platform takes a license fee from a lab that already has the instruments and the SOPs. A freight broker takes a percentage from the driver who already owns the truck.
 
-These three properties — capability abstraction, unit pricing, and credible commitment — allowed the cloud ecosystem to compose. A startup in 2008 could string together S3, EC2, RDS, and SQS without speaking to a human, because each service published what it did, what it cost, and what happened if it failed.
+None of these middlemen do the work. They sit in the middle of the work and charge for being there. The structural reason they can charge for being there is that the alternative — the supplier and the customer finding each other, agreeing terms, verifying execution, and settling payment — was, until recently, harder than paying the middleman.
 
-### 1.2 Why Physical Manufacturing Has Not Had Its AWS Moment
+That is no longer true. An agent on the customer's side can find suppliers, negotiate terms, lock escrow, monitor evidence, and release settlement, faster and more verifiably than any human-mediated coordination layer can. The only thing missing is **the substrate the agents on both sides are talking to**. Without a substrate, every agent rebuilds the coordination layer privately. With one, the coordination layer becomes a protocol — and protocols compose.
 
-Physical manufacturing is the largest sector of the global economy and remains almost entirely opaque to programmatic access. A company that needs aluminum parts milled, anodized, and inspected must find vendors manually, negotiate contracts individually, manage delivery schedules in spreadsheets, and verify quality through sampling and relationship trust. None of this is API-accessible. None of it composes.
+### 1.2 What Cloud Infrastructure Got Right and Where It Stopped
 
-The structural reasons are not lack of technology. CNC machines, lab instruments, and industrial sensors are increasingly networked. The missing layer is not connectivity — it is coordination. Specifically:
+Amazon Web Services succeeded because it turned compute into three composable properties: capability abstraction (an EC2 instance is an EC2 instance regardless of which physical box runs it), unit pricing (CPU-hour, GB-month, no sales call), and credible commitment (an SLA with documented remedies). These three properties let an entire ecosystem compose: a 2008 startup could string together S3, EC2, RDS, and SQS without speaking to a human, because each service published what it did, what it cost, and what happened if it failed.
 
-- **No capability abstraction**: There is no universal format for expressing what a machine can do. A Haas VF-2 and a Tormach PCNC 440 are both 3-axis CNC mills, but their tolerable geometries, supported materials, and achievable surface finishes differ significantly. No standard lets these machines advertise their actual working envelope in a way that agents can reason about.
-- **No trustless pricing**: Quoting requires a human conversation because no machine-readable format encodes pricing rules that respond to job parameters (material, tolerance, batch size, delivery speed).
-- **No credible settlement**: Payment is contingent on trust, not cryptographic proof. If a part fails inspection, the legal and financial resolution is slow, expensive, and uncertain.
-- **No composability**: Multi-step workflows (machine → treat → inspect → ship) cross organizational boundaries, each with separate contracts, separate escrow relationships, and no shared notion of evidence.
+The same three properties have never existed for anything outside compute. A CNC shop and a pizza place and a same-day courier and a contract-research-organization and a delivery driver are all running businesses where the *work* is well-defined, the *price* is reasonable from inputs, and the *quality* could be verified — but none of those three things is exposed in a form an agent can compose against. The result is the present economy: every transaction goes through human-mediated coordination, and the intermediaries who own that coordination layer charge for the privilege.
 
-### 1.3 The Gap: No Neutral Coordination Layer
+PCC extends the three properties — capability abstraction, unit pricing, credible commitment — to **every** unit of work, not just compute. The technical substrate is described in §3-§6 of this document. What makes it economically load-bearing is summarized in §1.3.
 
-Every attempt to build a "manufacturing marketplace" has produced a platform, not a protocol. Platforms aggregate supply and demand but position themselves as intermediaries — they take a percentage, they own the relationships, and they create lock-in. The physical world needs what the internet needed: a protocol, not a platform. A layer that is credibly neutral because no single party controls it, and that composes because it has defined, machine-readable primitives.
+### 1.3 What This Substrate Is, And What It Is Not
 
-PCC is that protocol layer. It is not a marketplace. It is a control plane.
+PCC is **not** a marketplace. Marketplaces own the relationships, take a percentage, and create lock-in. PCC is **not** a SaaS product, a vertical solution, a manufacturing app, or "AWS for the physical world." Those framings undersell it by anchoring on a single vertical or a single UX pattern.
+
+PCC is the substrate **all** of those things are composed from. Anyone — a person, a machine, an autonomous asset — can publish a typed capability and be a node. Any agent — a user's Claude session, a ChatGPT custom GPT, a Codex loop, a future model nobody has named yet — can compose those nodes into a value chain at runtime by talking to the substrate over a few small, stable surfaces: an A2A skill bus, an OpenAPI registry, a tool-use spec.
+
+Every other surface — voice routing, mobile onboarding wizards, SMS fallbacks, web dashboards, marketplace UIs, embedded buttons — is an early adapter on top of the substrate. Some will mature. Some will be displaced by direct A2A as more agents come online. The substrate underneath outlasts each of them, and that is the durable layer.
+
+The remainder of this document describes the substrate in detail (§2-§6), the enforcement mechanisms that make its claims credible (§7-§9 — escrow, evidence, identity, on-chain IP), and the economic model that lets it sustain itself without rent extraction (§10-§13).
 
 ---
 
@@ -961,7 +972,26 @@ Current Story integration targets the Aeneid testnet (chain 1513). Migration to 
 
 ## 17. Conclusion
 
-Physical Capability Cloud is the missing coordination layer for the physical world. It applies the three principles that made cloud infrastructure succeed — capability abstraction, unit pricing, and credible commitment — to physical manufacturing, adding the sovereign infrastructure (encrypted IPFS evidence, Lit Protocol access control, Bittensor quality verification, Starknet ZK anchoring) needed for trustless operation, and the IP layer (Story Protocol) needed to make physical work financially composable.
+Physical Capability Cloud is the substrate for agent-mediated economic coordination. It applies the three principles that made cloud infrastructure succeed — capability abstraction, unit pricing, credible commitment — to every unit of work, not just compute. The enforcement layer (encrypted IPFS evidence, Lit Protocol access control, Bittensor quality verification, Starknet ZK anchoring, milestone escrow, Story Protocol IP) is what makes its claims load-bearing. The substrate is what makes its claims compose.
+
+### What's live in the substrate today
+
+Beyond the three properties named in §1.2, the substrate ships four slots that turn any capability — a machine, a person who can do something, an autonomous asset — into a network participant addressable by any agent:
+
+1. **Capability + parameters** — what the node does, expressed as a typed Capability StructureDefinition (CSD). FHIR-inspired, inheritable, registered, and counted toward adoption.
+2. **Service-level agreement** — for human-operated nodes, an explicit acceptance window + completion deadline + presence + scheduling mode. For machine-operated nodes, null. Captured in one JSON column.
+3. **Notification channel** — how PCC pings the operator when work lands: a small stable transport enum (webhook, email, SMS, voice, push, MQTT, file, manual) plus a plain-English `describe` field that the operator's onboarding agent writes during setup. The substrate stays neutral on every specific vendor; new backend integrations appear by conversation, not by adapter code.
+4. **Availability** — when the capability is reachable: `always | windows | cron | manual-claim | delegate-to-agent`, plus a `describe` slot for the long tail.
+
+All four slots are addressable from a single A2A skill (`pcc-author-integration`), which means a user's own agent — talking to the user in their own session, in their own LLM client of choice — can publish a full operator in one round-trip after the setup conversation.
+
+### Bidirectional onboarding: the registry talks back
+
+The substrate is conversational on both sides. The user's agent can push data INTO the registry (publish a capability, attach a channel, set availability) AND ask the registry to push candidate templates BACK to the user's agent during setup (`pcc-suggest-templates`). When the user's agent says *"I'm setting up a same-day courier service"* or *"I have an Opentrons OT-2"*, the registry returns N candidate CSDs that match — with relevance scores and adoption counts — and the user's agent picks one. This converts onboarding from filling-out-a-blank-form into picking from a library, and it turns the library itself into a marketplace primitive: every adoption is attributed to a CSD, which makes royalty flow and template authorship tractable problems rather than open ones.
+
+Templates can be free (the default — pure substrate primitive) or monetized through smart-contract gating (Story Protocol IP layer, §6). The user's agent is the one that picks. Every node hosted on the network sits at the same place on the same shape — substrate primitives all the way down.
+
+### What the substrate's existence implies
 
 With the March 2026 session, PCC crossed from prototype to working distributed system. Operators can join the network with `pip install pcc-node && pcc-node start`. Hardware is auto-detected. Capabilities are announced with Ed25519 signatures and discoverable via a gossip DHT. Agent-to-agent messages are encrypted end-to-end with NaCl box. Execution scopes enforce a four-class security model that allows AI agents to control physical equipment while bounding the blast radius of errors. A real Opentrons OT-2 liquid handler has run jobs through the complete pipeline: brain reasoning on DGX Spark, tool calls relayed through PCC, execution on the device, camera frames streaming back to the dashboard.
 
