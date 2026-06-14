@@ -52,6 +52,33 @@ export async function csdRoutes(app: FastifyInstance) {
     return { csds };
   });
 
+  // ── GET /api/csd/suggest ────────────────────────────────────────
+  // Bidirectional onboarding: a user's agent describes what they're trying to
+  // set up; the registry returns N candidate CSD templates the agent can pick.
+  // Query: ?q=<description>  &limit=<N>  &kind=<base|profile|extension|workflow>
+  // Empty q falls back to popularity-ordered.
+  app.get<{
+    Querystring: { q?: string; limit?: string; kind?: string };
+  }>("/api/csd/suggest", async (req) => {
+    const registry = getCsdRegistry();
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit ?? "5", 10) || 5));
+    const matches = registry.suggest(req.query.q ?? "", {
+      limit,
+      kind: req.query.kind as "base" | "profile" | "extension" | "workflow" | undefined,
+    });
+    return { suggestions: matches };
+  });
+
+  // ── GET /api/csd/popular ────────────────────────────────────────
+  // Returns CSDs sorted by adoption (usage count desc).
+  app.get<{
+    Querystring: { limit?: string };
+  }>("/api/csd/popular", async (req) => {
+    const registry = getCsdRegistry();
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? "10", 10) || 10));
+    return { popular: registry.popular(limit) };
+  });
+
   // ── POST /api/csd/resolve ───────────────────────────────────────
   // Must be registered BEFORE the /:url wildcard so Fastify doesn't
   // treat "resolve" as a URL param.

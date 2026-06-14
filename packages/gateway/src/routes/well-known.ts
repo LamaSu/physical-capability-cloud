@@ -277,6 +277,20 @@ export async function wellKnownRoutes(app: FastifyInstance) {
           inputModes: ["application/json"],
           outputModes: ["application/json"],
         },
+        {
+          id: "pcc-suggest-templates",
+          name: "Suggest Capability Templates",
+          description: "Bidirectional onboarding: the registry talks back. A user's agent describes in plain English what they're trying to set up (\"I'm publishing a wood-fired pizza shop\", \"I have an Opentrons OT-2\", \"I want to do same-day courier runs in SF\") and the registry returns N candidate CSD (Capability StructureDefinition) templates with relevance scores and usage attribution. The user's agent then picks one — or rolls a new template via POST /api/csd — and passes the chosen type to pcc-author-integration. Templates carry adoption counters (the marketplace data layer for future smart-contract gating + free/paid choice). Empty query returns popularity-ordered top picks.",
+          tags: ["onboarding", "templates", "csd", "registry", "discovery", "marketplace", "bidirectional"],
+          examples: [
+            "I'm setting up a wood-fired Neapolitan pizza shop in SF",
+            "I have an Opentrons OT-2 I want to publish as a liquid-handling capability",
+            "Show me the most-adopted human-skill templates",
+            "I want to do same-day courier runs — what templates are close to that?",
+          ],
+          inputModes: ["application/json", "text/plain"],
+          outputModes: ["application/json"],
+        },
       ],
 
       // PCC-specific extension fields (non-standard, prefixed with x-)
