@@ -189,7 +189,7 @@ through `POST /a2a/tasks/send`:
 
 Plus the substrate also speaks **OpenAPI 3.0.3** at
 `https://capability.network/openapi.json` (700+ paths) and a generic
-**agent-package.json** (237 tools, v2.12) at
+**agent-package.json** (248 tools, v2.13) at
 `https://capability.network/agent-package.json`. Any client picks the
 surface it understands; the network underneath is the same.
 

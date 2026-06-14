@@ -10,7 +10,7 @@ API call. Start by fetching the agent package, provision a key, then discover an
 
 ## Start here (fetch these first)
 
-- [Agent package — 237 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the 5-step self-onboarding flow.
+- [Agent package — 248 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the 5-step self-onboarding flow.
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
 
