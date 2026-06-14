@@ -20,8 +20,17 @@ and all the other gateway streams.
    railway variables set ANTHROPIC_API_KEY=sk-ant-...
    ```
 
-2. Boot or redeploy the gateway. No other config needed — the SDK is loaded
-   lazily, so the route is registered either way.
+2. Ensure `@anthropic-ai/sdk` is installed in the gateway's `node_modules`.
+   It is deliberately not listed as a hard dependency in `packages/gateway/package.json`
+   (to keep the lockfile change for this PR minimal). For production:
+
+   ```bash
+   pnpm --filter @pcc/gateway add @anthropic-ai/sdk
+   ```
+
+   The narrator loads the SDK via dynamic `import()` and gracefully degrades
+   to a `needs_api_key` chunk if either the SDK or the API key is missing —
+   so the route is safe to register either way.
 
 3. Open `https://capability.network/commentary.html` (or
    `http://localhost:3200/commentary.html` if running the gateway with

@@ -22,7 +22,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
     "@fastify/cookie": "^9.4.0",
     "@fastify/cors": "^9.0.0",
     "@fastify/static": "^7.0.4",
