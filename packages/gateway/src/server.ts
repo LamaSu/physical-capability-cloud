@@ -83,6 +83,7 @@ import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
 import { wizardRoutes } from "./routes/wizard.js";
 import { complianceRoutes } from "./routes/compliance.js";
+import { commentaryRoutes } from "./routes/commentary.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, getAgentCards, isAgentBridgeReady } from "./agent-bridge.js";
 import { a2aRelayRoutes } from "@pcc/a2a";
@@ -339,6 +340,9 @@ export async function createGateway(port = 3200) {
   // Wizard sessions + compliance
   await app.register(wizardRoutes);
   await app.register(complianceRoutes);
+
+  // Sports-commentator LLM narration over event streams
+  await app.register(commentaryRoutes);
 
   // Paid job flow — end-to-end: discovery -> negotiation -> escrow -> execution -> settlement
   await app.register(paidJobFlowRoutes);
