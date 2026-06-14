@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "../src/MilestoneEscrowV2.sol";
 import "../src/MockUSDC.sol";
 import "./mocks/MockEAS.sol";
+import {Clones} from "../src/libraries/Clones.sol";
 
 /**
  * @title MilestoneEscrowV2Test
@@ -86,7 +87,7 @@ contract MilestoneEscrowV2Test is Test {
         usdc    = new MockUSDC(1_000_000e6);
         mockEAS = new MockEAS();
 
-        escrow = new MilestoneEscrowV2(
+        escrow = _deployEscrow(
             payer,
             arbiter,
             address(usdc),
@@ -158,6 +159,28 @@ contract MilestoneEscrowV2Test is Test {
         });
 
         mockEAS.setAttestation(uid, att);
+    }
+
+    /**
+     * @dev Deploy a usable MilestoneEscrowV2 the clone way: deploy a locked
+     *      implementation (3-arg constructor: eas / schema / oracle), clone it via
+     *      EIP-1167, then initialize the clone with the per-escrow config. Mirrors the
+     *      old 8-arg `new MilestoneEscrowV2(...)` semantics so each test keeps its shape.
+     *      `_eas_` is passed in so a test can wire a per-test MockEAS into the clone.
+     */
+    function _deployEscrow(
+        address _payer,
+        address _arbiter,
+        address _token,
+        bytes32 _cwmId,
+        address _protocolRoot,
+        address _eas_,
+        bytes32 _schemaUid,
+        address _oracle
+    ) internal returns (MilestoneEscrowV2 esc) {
+        address impl = address(new MilestoneEscrowV2(_eas_, _schemaUid, _oracle));
+        esc = MilestoneEscrowV2(Clones.clone(impl));
+        esc.initialize(_payer, _arbiter, _token, _cwmId, _protocolRoot);
     }
 
     // ── Test 1: Happy path ───────────────────────────────────────────────────
@@ -381,7 +404,7 @@ contract MilestoneEscrowV2Test is Test {
         // Build a fresh two-milestone escrow (setUp escrow is already funded/bonded/evidenced)
         MockUSDC usdc2    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS2 = new MockEAS();
-        MilestoneEscrowV2 escrow2 = new MilestoneEscrowV2(
+        MilestoneEscrowV2 escrow2 = _deployEscrow(
             payer, arbiter, address(usdc2), CWM_ID, address(0),
             address(mockEAS2), SCHEMA_UID, oracle
         );
@@ -477,7 +500,7 @@ contract MilestoneEscrowV2Test is Test {
         // requiredTier = 4 exceeds MAX_ASSURANCE_TIER (3) → "Invalid tier"
         MockUSDC usdc3    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS3 = new MockEAS();
-        MilestoneEscrowV2 escrow3 = new MilestoneEscrowV2(
+        MilestoneEscrowV2 escrow3 = _deployEscrow(
             payer, arbiter, address(usdc3), CWM_ID, address(0),
             address(mockEAS3), SCHEMA_UID, oracle
         );
@@ -490,12 +513,13 @@ contract MilestoneEscrowV2Test is Test {
     // ── Test 14b: Zero schema UID constructor (security review H1) ───────────
 
     function test_revert_zeroSchemaUidConstructor() public {
-        MockUSDC usdc4    = new MockUSDC(1_000_000e6);
-        MockEAS  mockEAS4 = new MockEAS();
+        MockEAS mockEAS4 = new MockEAS();
 
+        // H1 now lives on the implementation's 3-arg constructor (eas / schema / oracle).
+        // A clone inherits the implementation's immutable schema, so guarding the impl
+        // constructor is sufficient — a zero-schema impl can never be deployed.
         vm.expectRevert("Schema UID unset");
         new MilestoneEscrowV2(
-            payer, arbiter, address(usdc4), CWM_ID, address(0),
             address(mockEAS4),
             bytes32(0), // zero schemaUid — must revert (H1)
             oracle
@@ -508,7 +532,7 @@ contract MilestoneEscrowV2Test is Test {
         // Fresh escrow where submitEvidence was NOT called
         MockUSDC usdc5    = new MockUSDC(1_000_000e6);
         MockEAS  mockEAS5 = new MockEAS();
-        MilestoneEscrowV2 escrow5 = new MilestoneEscrowV2(
+        MilestoneEscrowV2 escrow5 = _deployEscrow(
             payer, arbiter, address(usdc5), CWM_ID, address(0),
             address(mockEAS5), SCHEMA_UID, oracle
         );
