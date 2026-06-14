@@ -1,5 +1,7 @@
 # PCC Substrate Visualizer — Design Rationale
 
+![visualizer](./img/visualizer-screenshot.png)
+
 **Page**: `apps/dashboard/public/visualizer.html`
 **Live URL**: `https://capability.network/visualizer.html` (when deployed)
 **Local URL**: `http://localhost:3200/visualizer.html` (gateway static-serves it)
