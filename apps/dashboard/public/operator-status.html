@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PCC · Operator Status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0c0f15; --surface:#11151d; --surface2:#161b25;
+  --line:rgba(150,172,205,.10); --line2:rgba(150,172,205,.20);
+  --fg:#e9edf4; --muted:#8b94a6; --faint:#5b6475;
+  --lime:#c6f24e; --cyan:#6cd6ff; --amber:#ffb24d; --violet:#c8a2ff; --danger:#ff6f6f; --emerald:#6cf2b5;
+  --accent:var(--cyan);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Instrument Sans',system-ui,sans-serif;
+  --display:'Bricolage Grotesque',var(--sans);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5}
+.wrap{max-width:1080px;margin:0 auto;padding:32px clamp(18px,4vw,40px) 80px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;padding-bottom:20px;border-bottom:1px solid var(--line)}
+.brand{font-family:var(--mono);font-size:13px;letter-spacing:.04em;color:var(--muted)}
+.brand b{color:var(--fg)}
+h1{font-family:var(--display);font-weight:700;font-size:clamp(28px,4vw,42px);margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:15px;margin:0 0 28px}
+
+.lookup{display:flex;gap:8px;margin-bottom:32px;align-items:stretch}
+.lookup input{flex:1;background:var(--surface);border:1px solid var(--line2);border-radius:10px;padding:14px 18px;color:var(--fg);font-family:var(--mono);font-size:14px;outline:none}
+.lookup input:focus{border-color:var(--accent)}
+.lookup button{background:var(--accent);color:#0a0c10;border:none;border-radius:10px;padding:14px 24px;font-family:var(--sans);font-weight:600;font-size:14px;cursor:pointer}
+.lookup button:hover{filter:brightness(1.1)}
+
+.status-card{background:var(--surface);border:1px solid var(--line2);border-radius:14px;padding:24px;margin-bottom:24px}
+.status-pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;font-weight:600}
+.status-pill.ready{background:rgba(108,242,181,.12);color:var(--emerald);border:1px solid rgba(108,242,181,.3)}
+.status-pill.partial{background:rgba(255,178,77,.12);color:var(--amber);border:1px solid rgba(255,178,77,.3)}
+.status-pill.unconfigured{background:rgba(91,100,117,.12);color:var(--muted);border:1px solid var(--line2)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+
+.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px;margin:24px 0}
+.tot{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px}
+.tot .lbl{font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+.tot .val{font-family:var(--display);font-size:28px;font-weight:700;color:var(--fg);margin-top:4px}
+
+h2{font-family:var(--display);font-weight:700;font-size:22px;margin:32px 0 12px;letter-spacing:-.01em}
+h2 .count{font-family:var(--mono);font-size:14px;color:var(--faint);margin-left:8px;font-weight:400}
+
+.list{display:flex;flex-direction:column;gap:10px}
+.item{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 18px;font-family:var(--mono);font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.item .key{color:var(--muted)}
+.item .val{color:var(--fg);font-weight:500}
+.item .meta{font-size:11px;color:var(--faint);text-align:right}
+.item code{background:var(--bg2);padding:2px 8px;border-radius:4px;font-size:12px}
+
+.missing{background:rgba(255,178,77,.08);border:1px solid rgba(255,178,77,.25);border-radius:10px;padding:16px 20px;margin:16px 0}
+.missing h3{font-family:var(--display);font-size:14px;color:var(--amber);text-transform:uppercase;letter-spacing:.06em;margin:0 0 10px}
+.missing ul{margin:0;padding-left:20px;color:var(--fg);font-size:14px}
+.missing li{margin-bottom:6px;line-height:1.5}
+
+.acard-link{display:inline-block;background:var(--bg2);border:1px solid var(--line2);color:var(--accent);padding:8px 14px;border-radius:8px;text-decoration:none;font-family:var(--mono);font-size:12px;margin:4px 8px 4px 0}
+.acard-link:hover{background:var(--accent);color:#0a0c10}
+
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty h3{font-family:var(--display);font-size:22px;color:var(--fg);margin:0 0 8px}
+.empty p{margin:0 0 20px}
+
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.error{background:rgba(255,111,111,.08);border:1px solid rgba(255,111,111,.3);border-radius:10px;padding:16px;color:var(--danger);font-family:var(--mono);font-size:13px;margin:16px 0}
+
+footer{margin-top:48px;padding-top:24px;border-top:1px solid var(--line);color:var(--faint);font-size:13px;font-family:var(--mono)}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a href="/" class="brand"><b>PCC</b> · operator-status</a>
+    <a href="/FOUR_SLOTS.md" class="brand" style="color:var(--accent)">read the four-slot picture →</a>
+  </header>
+
+  <h1>Operator Status</h1>
+  <p class="sub">Self-service four-slot verification. Enter an operator slug (your <code>operatorAddress</code>) to see which substrate slots are wired.</p>
+
+  <form class="lookup" id="form">
+    <input id="slug" type="text" placeholder="e.g. 0x1234... or operator@myshop.com" autocomplete="off" required>
+    <button type="submit">Check</button>
+  </form>
+
+  <div id="out"></div>
+
+  <footer>
+    Powered by <code>GET /api/operators/:slug/status</code> — the four-slot substrate view. Backed by PRs #112 (channels), #118 (registry), #120 (this endpoint).
+    <br>Read the conceptual map: <a href="/FOUR_SLOTS.md">FOUR_SLOTS.md</a> · <a href="/whitepaper.md">Whitepaper</a> · <a href="/MCP_INSTALL.md">MCP install</a>
+  </footer>
+</div>
+
+<script>
+const out = document.getElementById('out');
+const slugIn = document.getElementById('slug');
+
+// Allow ?slug= prefill
+const params = new URLSearchParams(location.search);
+if (params.has('slug')) {
+  slugIn.value = params.get('slug');
+  setTimeout(()=>document.getElementById('form').dispatchEvent(new Event('submit',{cancelable:true})), 100);
+}
+
+document.getElementById('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const slug = slugIn.value.trim();
+  if (!slug) return;
+  out.innerHTML = '<div class="status-card"><span class="spinner"></span> Loading status for <code>'+escape(slug)+'</code>…</div>';
+  try {
+    const r = await fetch('/api/operators/'+encodeURIComponent(slug)+'/status');
+    if (!r.ok) {
+      out.innerHTML = '<div class="error">HTTP '+r.status+': '+await r.text()+'</div>';
+      return;
+    }
+    const d = await r.json();
+    render(d);
+    // Update URL so this view is shareable
+    history.replaceState(null, '', '?slug='+encodeURIComponent(slug));
+  } catch (err) {
+    out.innerHTML = '<div class="error">Error: '+escape(err.message)+'</div>';
+  }
+});
+
+function escape(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function render(d) {
+  const html = [];
+
+  // Status banner
+  html.push('<div class="status-card">');
+  html.push('<div style="display:flex;justify-content:space-between;align-items:start;gap:20px;flex-wrap:wrap">');
+  html.push('<div><div class="brand" style="margin-bottom:8px">operator</div><div style="font-family:var(--mono);font-size:18px;color:var(--fg)">'+escape(d.operatorSlug)+'</div></div>');
+  html.push('<div class="status-pill '+d.status+'"><span class="dot"></span>'+d.status+'</div>');
+  html.push('</div>');
+
+  // Totals
+  html.push('<div class="totals">');
+  html.push(tot('kernels', d.totals.kernelCount));
+  html.push(tot('capabilities', d.totals.capabilityCount));
+  html.push(tot('channels', d.totals.channelCount+' / '+d.totals.enabledChannelCount+' on'));
+  html.push(tot('lanes', d.totals.humanLaneCount+'h / '+d.totals.machineLaneCount+'m'));
+  html.push('</div>');
+  html.push('</div>');
+
+  // Missing
+  if (d.missing && d.missing.length) {
+    html.push('<div class="missing"><h3>Unfilled slots ('+d.missing.length+')</h3><ul>');
+    for (const m of d.missing) html.push('<li>'+escape(m)+'</li>');
+    html.push('</ul></div>');
+  } else if (d.status === 'ready') {
+    html.push('<div class="missing" style="background:rgba(108,242,181,.08);border-color:rgba(108,242,181,.3)"><h3 style="color:var(--emerald)">All four slots wired ✓</h3><p style="margin:0;color:var(--fg);font-size:14px">Your operator is A2A-callable. Other agents can discover you via the agent-card URL below.</p></div>');
+  }
+
+  // Kernels
+  if (d.kernels.length) {
+    html.push('<h2>Kernels <span class="count">'+d.kernels.length+'</span></h2>');
+    html.push('<div class="list">');
+    for (const k of d.kernels) {
+      html.push('<div class="item"><div><span class="key">id</span> <code>'+escape(k.id)+'</code> <span class="val">'+escape(k.name)+'</span></div><div class="meta">status: '+escape(k.status)+(k.lastHeartbeat?' · last heartbeat '+k.lastHeartbeat.slice(0,19).replace('T',' '):'')+'</div></div>');
+    }
+    html.push('</div>');
+  }
+
+  // Capabilities
+  if (d.capabilities.length) {
+    html.push('<h2>Capabilities <span class="count">'+d.capabilities.length+'</span></h2>');
+    html.push('<div class="list">');
+    for (const c of d.capabilities) {
+      const lane = c.sla ? 'human' : 'machine';
+      html.push('<div class="item"><div><span class="key">type</span> <code>'+escape(c.type)+'</code> <span class="val">'+escape(c.name)+'</span></div><div class="meta">'+lane+' lane · sla '+(c.sla?'set':'—')+' · availability '+(c.availability && Object.keys(c.availability).length?'set':'—')+'</div></div>');
+    }
+    html.push('</div>');
+  }
+
+  // Channels
+  if (d.channels.length) {
+    html.push('<h2>Channels <span class="count">'+d.channels.length+'</span></h2>');
+    html.push('<div class="list">');
+    for (const ch of d.channels) {
+      html.push('<div class="item"><div><span class="val">'+escape(ch.label)+'</span> <code>'+escape(ch.transport)+'</code> '+(ch.enabled?'<span style="color:var(--emerald);font-size:11px;margin-left:6px">● ENABLED</span>':'<span style="color:var(--faint);font-size:11px;margin-left:6px">○ DISABLED</span>')+'</div><div class="meta">'+escape(ch.direction)+' · '+escape((ch.describe||'').slice(0,80))+'</div></div>');
+    }
+    html.push('</div>');
+  }
+
+  // Agent-card URLs
+  if (d.agentCardUrls.length) {
+    html.push('<h2>A2A Agent Cards</h2>');
+    html.push('<div style="margin:8px 0 16px">');
+    for (const u of d.agentCardUrls) html.push('<a href="'+escape(u)+'" class="acard-link" target="_blank">'+escape(u)+'</a>');
+    html.push('</div>');
+  }
+
+  if (d.status === 'unconfigured') {
+    html.push('<div class="empty"><h3>No record for this slug</h3><p>No kernel is registered with operatorAddress = <code>'+escape(d.operatorSlug)+'</code>. Onboard via the <code>pcc-author-integration</code> A2A skill, or the wizard at <a href="/pizza-onboard-shop.html" style="color:var(--accent)">/pizza-onboard-shop.html</a>.</p></div>');
+  }
+
+  out.innerHTML = html.join('');
+}
+
+function tot(lbl, val) {
+  return '<div class="tot"><div class="lbl">'+lbl+'</div><div class="val">'+val+'</div></div>';
+}
+</script>
+</body>
+</html>
