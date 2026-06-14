@@ -169,12 +169,13 @@ export async function operatorStatusRoutes(app: FastifyInstance): Promise<void> 
       if (caps.length === 0) {
         missing.push("capability (slot 1) — no capability published; use pcc-author-integration A2A skill");
       }
-      if (humanLaneCount > 0) {
-        const humanCapsWithoutSla = caps.filter((c) => c.sla == null);
-        if (humanCapsWithoutSla.length > 0) {
-          missing.push(`SLA (slot 2) — ${humanCapsWithoutSla.length} human-lane capability lacks sla; set acceptanceWindowSec + completionDeadlineSec via PATCH /api/capabilities/:id`);
-        }
-      }
+      // SLA (slot 2) is optional by design — its presence is how we classify
+      // human-lane vs machine-lane. A capability with null sla is a machine
+      // capability, NOT a human-capability-missing-sla. So there's no
+      // "missing SLA" state to flag from this endpoint. Operators who
+      // genuinely want human lane on a capability without sla should
+      // re-register that capability with sla set.
+      void humanLaneCount; // keep humanLaneCount in totals; just not used for missing[]
       if (channels.length === 0) {
         missing.push("channel (slot 3) — no notification channel attached; use pcc-attach-channel A2A skill or POST /api/operators/:slug/channels");
       } else if (enabledChannels.length === 0) {
