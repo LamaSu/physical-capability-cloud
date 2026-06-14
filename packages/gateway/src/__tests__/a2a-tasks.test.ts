@@ -18,7 +18,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore, getStore } from "../db.js";
-import { schema } from "@pcc/store";
+import { schema, eq } from "@pcc/store";
 
 const { shopKernels, capabilities } = schema;
 
@@ -542,6 +542,64 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
     const body = res.json();
     expect(body.result).toBeDefined();
     expect(body.result.state).toBe("COMPLETED");
+  });
+
+  // ── pcc-author-integration: availability lands on capability row ───────
+
+  it("tasks/send pcc-author-integration persists availability through to the capability row", async () => {
+    // Regression for PR #125 smoke-test finding: the handler passes
+    // serializeAvailability(p.availability) to CapabilityFacade.create(),
+    // but CreateCapabilityInput previously omitted the field so the row
+    // was always written with availability={}. Verifies the end-to-end
+    // path now stores the operator-supplied availability verbatim.
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: rpcRequest("rpc-availability", "tasks/send", {
+        skill: "pcc-author-integration",
+        params: {
+          lane: "human",
+          name: "A2A Availability Diner",
+          type: "make_pizza_availability",
+          description: "regression diner",
+          operatorAddress: "0xavail",
+          availability: {
+            mode: "windows",
+            describe: "Open 11-9 Pacific, closed Tuesdays",
+            timezone: "America/Los_Angeles",
+            windows: [
+              { start: "11:00", end: "21:00", daysOfWeek: [1, 3, 4, 5, 6, 0] },
+            ],
+          },
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.result).toBeDefined();
+    expect(body.result.state).toBe("COMPLETED");
+    const artifact = body.result.artifacts?.[0];
+    expect(artifact?.type).toBe("pcc.author_integration");
+    const capabilityId = artifact?.data?.capability?.id;
+    expect(typeof capabilityId).toBe("string");
+
+    // Verify the DB row actually carries the availability the agent passed in.
+    const { db } = getStore();
+    const row = db
+      .select()
+      .from(capabilities)
+      .where(eq(capabilities.id, capabilityId))
+      .get();
+    expect(row).toBeDefined();
+    expect(row?.availability).toEqual({
+      mode: "windows",
+      describe: "Open 11-9 Pacific, closed Tuesdays",
+      timezone: "America/Los_Angeles",
+      windows: [
+        { start: "11:00", end: "21:00", daysOfWeek: [1, 3, 4, 5, 6, 0] },
+      ],
+    });
   });
 
   // ── Auth (re-enable) ───────────────────────────────────────────────────

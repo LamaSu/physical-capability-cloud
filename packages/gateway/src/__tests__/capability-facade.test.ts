@@ -375,5 +375,56 @@ describe("CapabilityFacade", () => {
       const result = await facade.create({ kernelId: "", type: "" });
       expect(result.success).toBe(false);
     });
+
+    it("stores availability on the capability row when passed in body", async () => {
+      // Regression test for PR #125 smoke-test finding: CreateCapabilityInput
+      // previously omitted `availability`, so the field was silently dropped
+      // and every A2A-created operator landed with availability={} on its
+      // capability row. Verifies the column is now populated end-to-end.
+      const availability = {
+        mode: "always",
+        describe: "24/7 demo capability — availability regression test",
+        timezone: "UTC",
+      };
+      const result = await facade.create({
+        kernelId: "kernel-nyc",
+        type: "availability_regression",
+        id: "cap-availability-regression",
+        name: "Availability regression",
+        availability,
+      });
+      expect(result.success).toBe(true);
+
+      // Reach into the raw DB row to confirm the column got the value —
+      // populateCapabilityDTO may strip/reshape, so we verify at the source.
+      const { getStore } = await import("../db.js");
+      const { schema, eq } = await import("@pcc/store");
+      const { db } = getStore();
+      const row = db
+        .select()
+        .from(schema.capabilities)
+        .where(eq(schema.capabilities.id, "cap-availability-regression"))
+        .get();
+      expect(row).toBeDefined();
+      expect(row?.availability).toEqual(availability);
+    });
+
+    it("defaults availability to {} when omitted from body", async () => {
+      const result = await facade.create({
+        kernelId: "kernel-nyc",
+        type: "availability_default",
+        id: "cap-availability-default",
+      });
+      expect(result.success).toBe(true);
+      const { getStore } = await import("../db.js");
+      const { schema, eq } = await import("@pcc/store");
+      const { db } = getStore();
+      const row = db
+        .select()
+        .from(schema.capabilities)
+        .where(eq(schema.capabilities.id, "cap-availability-default"))
+        .get();
+      expect(row?.availability).toEqual({});
+    });
   });
 });
