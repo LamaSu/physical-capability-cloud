@@ -7,7 +7,7 @@
 #
 # Steps (each one fails fast and exits non-zero on error):
 #   1. Boot gateway on :8080 with mocks
-#   2. Wait for /health → 200
+#   2. Wait for /api/health → 200
 #   3. /.well-known/agent-card.json: skills.length === 8
 #   4. /api/csd/suggest?q=fdm → suggestions present
 #      /api/csd/popular → popular present
@@ -180,10 +180,10 @@ boot_gateway() {
   GATEWAY_PID=$!
   info "gateway PID=${GATEWAY_PID}"
 
-  info "Waiting up to ${BOOT_TIMEOUT_SEC}s for /health..."
+  info "Waiting up to ${BOOT_TIMEOUT_SEC}s for /api/health..."
   local elapsed=0
   while (( elapsed < BOOT_TIMEOUT_SEC )); do
-    if curl -sf -o /dev/null "${PCC_BASE}/health" 2>/dev/null; then
+    if curl -sf -o /dev/null "${PCC_BASE}/api/health" 2>/dev/null; then
       pass "gateway booted in ${elapsed}s"
       return
     fi
@@ -198,15 +198,15 @@ boot_gateway() {
   exit 3
 }
 
-# ── Step 2: /health ────────────────────────────────────────────────────────
+# ── Step 2: /api/health ────────────────────────────────────────────────────
 check_health() {
-  step "GET /health → 200"
-  local resp; resp=$(http_get "${PCC_BASE}/health")
+  step "GET /api/health → 200"
+  local resp; resp=$(http_get "${PCC_BASE}/api/health")
   local s; s=$(status_of "$resp")
   if [[ "$s" == "200" ]]; then
-    pass "/health is 200"
+    pass "/api/health is 200"
   else
-    fail "/health returned ${s}: $(body_of "$resp" | head -c 200)"
+    fail "/api/health returned ${s}: $(body_of "$resp" | head -c 200)"
   fi
 }
 
