@@ -154,12 +154,15 @@ boot_gateway() {
   fi
 
   step "Boot gateway on :${GATEWAY_PORT} with mocks"
-  info "Build first to ensure dist is current (pnpm --filter @pcc/gateway build)"
-  if ! pnpm --filter @pcc/gateway build >>"$GATEWAY_LOG" 2>&1; then
+  info "Build first to ensure dist is current (pnpm --filter @pcc/gateway... build with deps)"
+  # Trailing ... selects gateway + all its workspace deps. --workspace-concurrency
+  # avoids OOM on small machines (tablet is 16GB; Spark is fine without it but
+  # we set it anyway for portability).
+  if ! pnpm --workspace-concurrency=2 --filter @pcc/gateway... build >>"$GATEWAY_LOG" 2>&1; then
     fail "gateway build failed — see ${GATEWAY_LOG}"
     exit 3
   fi
-  pass "gateway built"
+  pass "gateway + workspace deps built"
 
   info "Starting gateway in background (logs: ${GATEWAY_LOG})"
   PCC_DB_PATH=":memory:" \
