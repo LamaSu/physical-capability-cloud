@@ -90,3 +90,16 @@ export {
   type PayoutResult,
   type BatchPayoutResult,
 } from "./wise/index.js";
+// Coinbase CDP (funded-key on-ramp: embedded wallet + onramp + scoped spend-permissions)
+export {
+  CdpWalletClient,
+  CdpOnrampClient,
+  type CreateOnrampParams,
+  CdpSpendPermissionService,
+  type IssueSpendPermissionParams,
+  type CdpConfig,
+  type CdpNetwork,
+  type CdpWallet,
+  type OnrampSession,
+  type SpendPermission,
+} from "./cdp/index.js";
