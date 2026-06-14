@@ -43,7 +43,7 @@ The funded wallet + spend-permission **is** the operator's settlement endpoint: 
 
 ## Build / verify discipline
 - TS written on the tablet (no OOM). Build/tests on Spark, **coordinated** — not contending with Lanes A/B while they serialize.
-- Gate-A `/vet` the `@coinbase/cdp-sdk` dependency before adding it.
+- Gate-A `/vet` the `@coinbase/cdp-sdk` dependency before adding it. **✓ PRE-CLEARED 2026-06-14** (Spark): `@coinbase/cdp-sdk@1.51.0`, MIT, official Coinbase npm org (`coinbase-owner` / `coinbase-npm`), `npm audit` = **0 vulnerabilities**, 49 transitive deps. Gate A = PASS — safe to add when creds land. Re-run at add time to confirm the resolved version still audits clean.
 - **Verify the actual CDP SDK surface before writing integration code** — do not assume the API.
 
 ## Coordination
