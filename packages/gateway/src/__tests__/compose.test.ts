@@ -11,11 +11,12 @@
  * expiry, and the execute stub.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   composeRoutes,
   executeComposition,
+  createProductionBinding,
   _clearComposeForTests,
   _registerCandidateForTests,
   _setStepRunnerForTests,
@@ -833,7 +834,7 @@ describe("POST /api/compose/:id/execute — reputation wiring", () => {
     const id = await proposeTwoStep(app);
 
     const got = await app.inject({ method: "GET", url: `/api/compose/${id}` });
-    const result = executeComposition(got.json());
+    const result = await executeComposition(got.json());
 
     expect(result.status).toBe("completed");
     expect(result.stepsExecuted).toBe(2);
@@ -842,5 +843,102 @@ describe("POST /api/compose/:id/execute — reputation wiring", () => {
 
     const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
     expect(prep.json().reputation.score).toBe(515);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production binding — verifies real job submission + workflow id
+// ---------------------------------------------------------------------------
+
+describe("createProductionBinding", () => {
+  function registerProdSteps(
+    specs: { capabilityType: string; capabilityId: string; operatorAddress: string }[],
+  ): void {
+    for (const s of specs) {
+      _registerCandidateForTests(
+        makeCandidate({
+          capabilityId: s.capabilityId,
+          capabilityType: s.capabilityType,
+          operatorAddress: s.operatorAddress,
+        }),
+      );
+    }
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    _clearComposeForTests();
+    _clearGraphSearchForTests();
+  });
+
+  it("submits a real job via JobFacade for each step and returns a workflow id", async () => {
+    // Arrange: stub JobFacade.submit to return a successful ack
+    const submitMock = vi.fn().mockResolvedValue({
+      success: true,
+      data: { jobId: "job-stub-001", deviceId: null, status: "queued" },
+    });
+    const stubFacade = { submit: submitMock };
+
+    // Register a candidate and build a composition
+    registerProdSteps([
+      { capabilityType: "print", capabilityId: "cap-prod", operatorAddress: "op-prod" },
+    ]);
+    const app = makeApp();
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "print", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+    const composition = prop.json();
+
+    // Act: execute with production binding, injecting the stub facade
+    const binding = createProductionBinding(() => stubFacade as never);
+    const result = await executeComposition(composition, binding);
+
+    // Assert: job was submitted, execution succeeded, workflow id is present
+    expect(submitMock).toHaveBeenCalledOnce();
+    expect(submitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ capabilityId: "cap-prod", kernelId: expect.any(String) }),
+    );
+    expect(result.status).toBe("completed");
+    expect(result.stepsExecuted).toBe(1);
+    expect(result.workflowId).toBeTruthy();
+    expect(result.failedStepIndex).toBeNull();
+  });
+
+  it("marks a step failed and short-circuits when JobFacade.submit returns an error", async () => {
+    // Arrange: stub JobFacade.submit to return failure
+    const submitMock = vi.fn().mockResolvedValue({
+      success: false,
+      error: { code: "no_capability_found_for_kernel", message: "No capability", httpStatus: 400 },
+    });
+    const stubFacade = { submit: submitMock };
+
+    // Register two candidates — second should never be executed
+    registerProdSteps([
+      { capabilityType: "prep", capabilityId: "cap-a", operatorAddress: "op-a" },
+      { capabilityType: "print", capabilityId: "cap-b", operatorAddress: "op-b" },
+    ]);
+    const app = makeApp();
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "print",
+        steps: ["prep", "print"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    const composition = prop.json();
+
+    const binding = createProductionBinding(() => stubFacade as never);
+    const result = await executeComposition(composition, binding);
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepIndex).toBe(0);
+    expect(result.stepsExecuted).toBe(1); // short-circuited after first failure
+    // Only one submit call — second step was never reached
+    expect(submitMock).toHaveBeenCalledOnce();
   });
 });
