@@ -605,14 +605,16 @@ export async function executeComposition(
   const startedAt = nowISO();
   const resolveExecutor =
     binding.resolveExecutor ?? ((s: CompositionStep) => s.operatorAddress);
-  const runStep = binding.runStep ?? stepRunner;
 
-  // Use production binding when env flag is set and no explicit binding provided
-  const effectiveBinding: ExecutorBinding =
-    !binding.runStep && process.env.PCC_COMPOSE_EXECUTE_REAL === "true"
-      ? createProductionBinding()
-      : { runStep };
-  const effectiveRunStep = effectiveBinding.runStep ?? stepRunner;
+  // Determine the effective step runner:
+  // - Explicit binding.runStep always wins.
+  // - Otherwise, use the production binding when PCC_COMPOSE_EXECUTE_REAL=true.
+  // - Otherwise, fall back to the module-level stepRunner (NOOP in tests).
+  const effectiveRunStep: (step: CompositionStep) => Promise<void> | void =
+    binding.runStep ??
+    (process.env.PCC_COMPOSE_EXECUTE_REAL === "true"
+      ? createProductionBinding().runStep!
+      : stepRunner);
 
   let failedStepIndex: number | null = null;
   let stepsExecuted = 0;
