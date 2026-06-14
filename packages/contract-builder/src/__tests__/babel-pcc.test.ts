@@ -365,15 +365,18 @@ describe("TestDataGenerator", () => {
 // ── CompileAll ───────────────────────────────────────────────────────
 
 describe("BabelPCC.compileAll", () => {
-  it("compiles all 5 built-in CSDs", () => {
+  it("compiles all 8 built-in CSDs", () => {
     const results = compiler.compileAll(registry);
 
-    expect(results.size).toBe(5);
+    expect(results.size).toBe(8);
     expect(results.has("pcc://capabilities/fdm/v2")).toBe(true);
     expect(results.has("pcc://capabilities/sla/v2")).toBe(true);
     expect(results.has("pcc://capabilities/cnc-3axis/v2")).toBe(true);
     expect(results.has("pcc://capabilities/laser-cut/v2")).toBe(true);
     expect(results.has("pcc://capabilities/2d-print/v1")).toBe(true);
+    expect(results.has("pcc://capabilities/make-pizza/v1")).toBe(true);
+    expect(results.has("pcc://capabilities/courier-route/v1")).toBe(true);
+    expect(results.has("pcc://capabilities/hot-food-prep/v1")).toBe(true);
   });
 
   it("all results have all 4 code artifacts", () => {

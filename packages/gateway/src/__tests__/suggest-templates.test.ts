@@ -118,13 +118,67 @@ describe("CsdRegistry — findUrlByType", () => {
   });
 
   it("returns the URL for a registered type", () => {
-    // All 5 builtin CSDs have a "type" field
     const fdmUrl = registry.findUrlByType("fdm");
     expect(fdmUrl).toBe("pcc://capabilities/fdm/v2");
   });
 
   it("returns undefined for unregistered type", () => {
     expect(registry.findUrlByType("not-a-real-type")).toBeUndefined();
+  });
+
+  it("resolves make-pizza type slug to the make-pizza CSD URL", () => {
+    expect(registry.findUrlByType("make-pizza")).toBe("pcc://capabilities/make-pizza/v1");
+  });
+
+  it("resolves courier-route type slug to the courier-route CSD URL", () => {
+    expect(registry.findUrlByType("courier-route")).toBe("pcc://capabilities/courier-route/v1");
+  });
+
+  it("resolves hot-food-prep type slug to the hot-food-prep CSD URL", () => {
+    expect(registry.findUrlByType("hot-food-prep")).toBe("pcc://capabilities/hot-food-prep/v1");
+  });
+});
+
+// ── Demo CSD discoverability ─────────────────────────────────────────────────
+
+describe("CsdRegistry — demo CSDs are suggestable by keyword", () => {
+  let registry: CsdRegistry;
+
+  beforeEach(() => {
+    registry = loadBuiltinCsds();
+  });
+
+  it("suggest(\"pizza\") returns the make-pizza CSD as the top match", () => {
+    const matches = registry.suggest("pizza");
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches[0]!.csd.url).toBe("pcc://capabilities/make-pizza/v1");
+    expect(matches[0]!.score).toBeGreaterThan(0);
+  });
+
+  it("suggest(\"make pizza\") returns the make-pizza CSD as the top match", () => {
+    const matches = registry.suggest("make pizza");
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches[0]!.csd.url).toBe("pcc://capabilities/make-pizza/v1");
+  });
+
+  it("suggest(\"courier\") returns the courier-route CSD as the top match", () => {
+    const matches = registry.suggest("courier");
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches[0]!.csd.url).toBe("pcc://capabilities/courier-route/v1");
+  });
+
+  it("suggest(\"delivery\") returns the courier-route CSD", () => {
+    const matches = registry.suggest("delivery");
+    expect(matches.length).toBeGreaterThan(0);
+    const urls = matches.map((m) => m.csd.url);
+    expect(urls).toContain("pcc://capabilities/courier-route/v1");
+  });
+
+  it("suggest(\"hot food\") returns the hot-food-prep CSD", () => {
+    const matches = registry.suggest("hot food");
+    expect(matches.length).toBeGreaterThan(0);
+    const urls = matches.map((m) => m.csd.url);
+    expect(urls).toContain("pcc://capabilities/hot-food-prep/v1");
   });
 });
 

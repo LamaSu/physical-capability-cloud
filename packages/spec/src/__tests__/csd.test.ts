@@ -8,6 +8,9 @@ import slaRaw from "../csds/sla.csd.json" with { type: "json" };
 import cnc3axisRaw from "../csds/cnc-3axis.csd.json" with { type: "json" };
 import laserCutRaw from "../csds/laser-cut.csd.json" with { type: "json" };
 import print2dRaw from "../csds/2d-print.csd.json" with { type: "json" };
+import makePizzaRaw from "../csds/make-pizza.csd.json" with { type: "json" };
+import courierRouteRaw from "../csds/courier-route.csd.json" with { type: "json" };
+import hotFoodPrepRaw from "../csds/hot-food-prep.csd.json" with { type: "json" };
 
 // ── CSD JSON validation ─────────────────────────────────────────────
 
@@ -48,6 +51,30 @@ describe("CsdSchema — built-in CSD files", () => {
     const result = CsdSchema.safeParse(print2dRaw);
     if (!result.success) {
       console.error("2d-print validation errors:", result.error.errors);
+    }
+    expect(result.success).toBe(true);
+  });
+
+  it("validates make-pizza.csd.json (demo: vibecodenights)", () => {
+    const result = CsdSchema.safeParse(makePizzaRaw);
+    if (!result.success) {
+      console.error("make-pizza validation errors:", result.error.errors);
+    }
+    expect(result.success).toBe(true);
+  });
+
+  it("validates courier-route.csd.json (demo: agentic delivery)", () => {
+    const result = CsdSchema.safeParse(courierRouteRaw);
+    if (!result.success) {
+      console.error("courier-route validation errors:", result.error.errors);
+    }
+    expect(result.success).toBe(true);
+  });
+
+  it("validates hot-food-prep.csd.json (demo: hot food substrate)", () => {
+    const result = CsdSchema.safeParse(hotFoodPrepRaw);
+    if (!result.success) {
+      console.error("hot-food-prep validation errors:", result.error.errors);
     }
     expect(result.success).toBe(true);
   });
@@ -563,9 +590,9 @@ describe("loadBuiltinCsds", () => {
     expect(() => loadBuiltinCsds()).not.toThrow();
   });
 
-  it("loads exactly 5 built-in CSDs", () => {
+  it("loads exactly 8 built-in CSDs", () => {
     const registry = loadBuiltinCsds();
-    expect(registry.size).toBe(5);
+    expect(registry.size).toBe(8);
   });
 
   it("all built-in CSDs are retrievable by URL", () => {
@@ -575,12 +602,15 @@ describe("loadBuiltinCsds", () => {
     expect(registry.get("pcc://capabilities/cnc-3axis/v2")).toBeDefined();
     expect(registry.get("pcc://capabilities/laser-cut/v2")).toBeDefined();
     expect(registry.get("pcc://capabilities/2d-print/v1")).toBeDefined();
+    expect(registry.get("pcc://capabilities/make-pizza/v1")).toBeDefined();
+    expect(registry.get("pcc://capabilities/courier-route/v1")).toBeDefined();
+    expect(registry.get("pcc://capabilities/hot-food-prep/v1")).toBeDefined();
   });
 
   it("all built-in CSDs have kind = 'base'", () => {
     const registry = loadBuiltinCsds();
     const bases = registry.findByKind("base");
-    expect(bases).toHaveLength(5);
+    expect(bases).toHaveLength(8);
   });
 
   it("all built-in CSDs resolve without inheritance errors", () => {
@@ -591,6 +621,9 @@ describe("loadBuiltinCsds", () => {
       "pcc://capabilities/cnc-3axis/v2",
       "pcc://capabilities/laser-cut/v2",
       "pcc://capabilities/2d-print/v1",
+      "pcc://capabilities/make-pizza/v1",
+      "pcc://capabilities/courier-route/v1",
+      "pcc://capabilities/hot-food-prep/v1",
     ];
     for (const url of urls) {
       expect(() => registry.resolve(url)).not.toThrow();
@@ -631,5 +664,126 @@ describe("loadBuiltinCsds", () => {
     const laser = registry.get("pcc://capabilities/laser-cut/v2");
     expect(laser?.evidence).toBeDefined();
     expect(laser?.evidence?.["tier0"]).toBeDefined();
+  });
+});
+
+// ── Demo-relevant CSDs (vibecodenights pizza demo) ─────────────────
+
+describe("loadBuiltinCsds — demo CSDs (make-pizza, courier-route, hot-food-prep)", () => {
+  it("make-pizza CSD has expected pizza-shop parameters", () => {
+    const registry = loadBuiltinCsds();
+    const pizza = registry.get("pcc://capabilities/make-pizza/v1");
+    expect(pizza).toBeDefined();
+    const paramKeys = pizza?.parameters.map((p) => p.key) ?? [];
+    expect(paramKeys).toContain("size");
+    expect(paramKeys).toContain("crust");
+    expect(paramKeys).toContain("toppings");
+    expect(paramKeys).toContain("dietary");
+    expect(paramKeys).toContain("notes");
+    expect(paramKeys).toContain("quantity");
+  });
+
+  it("make-pizza CSD has realistic pricing (base ~$12)", () => {
+    const registry = loadBuiltinCsds();
+    const pizza = registry.get("pcc://capabilities/make-pizza/v1");
+    expect(pizza?.pricing.basePrice).toBe("12.00");
+    expect(pizza?.pricing.currency).toBe("USDC");
+    expect(pizza?.pricing.unit).toBe("per pizza");
+  });
+
+  it("make-pizza CSD has per-topping pricing on the toppings parameter", () => {
+    const registry = loadBuiltinCsds();
+    const pizza = registry.get("pcc://capabilities/make-pizza/v1");
+    const toppings = pizza?.parameters.find((p) => p.key === "toppings");
+    expect(toppings).toBeDefined();
+    expect(toppings?.pricingImpact).toBeDefined();
+    expect(toppings?.pricingImpact?.mode).toBe("per_unit");
+  });
+
+  it("make-pizza CSD has at least one constraint", () => {
+    const registry = loadBuiltinCsds();
+    const pizza = registry.get("pcc://capabilities/make-pizza/v1");
+    expect((pizza?.constraints.length ?? 0)).toBeGreaterThan(0);
+  });
+
+  it("courier-route CSD has expected delivery parameters", () => {
+    const registry = loadBuiltinCsds();
+    const courier = registry.get("pcc://capabilities/courier-route/v1");
+    expect(courier).toBeDefined();
+    const paramKeys = courier?.parameters.map((p) => p.key) ?? [];
+    expect(paramKeys).toContain("vehicle");
+    expect(paramKeys).toContain("pickupLat");
+    expect(paramKeys).toContain("pickupLng");
+    expect(paramKeys).toContain("dropoffLat");
+    expect(paramKeys).toContain("dropoffLng");
+    expect(paramKeys).toContain("distanceKm");
+    expect(paramKeys).toContain("deadlineMinutes");
+  });
+
+  it("courier-route CSD has per-km pricing on distance + plausible base ($5)", () => {
+    const registry = loadBuiltinCsds();
+    const courier = registry.get("pcc://capabilities/courier-route/v1");
+    expect(courier?.pricing.basePrice).toBe("5.00");
+    expect(courier?.pricing.unit).toBe("per delivery");
+    const distance = courier?.parameters.find((p) => p.key === "distanceKm");
+    expect(distance?.pricingImpact?.mode).toBe("per_unit");
+  });
+
+  it("courier-route CSD has vehicle options covering bike/car/van/foot", () => {
+    const registry = loadBuiltinCsds();
+    const courier = registry.get("pcc://capabilities/courier-route/v1");
+    const vehicle = courier?.parameters.find((p) => p.key === "vehicle");
+    expect(vehicle?.type).toBe("enum");
+    if (vehicle?.type === "enum") {
+      const values = vehicle.options.map((o) => o.value);
+      expect(values).toContain("bike");
+      expect(values).toContain("car");
+      expect(values).toContain("van");
+      expect(values).toContain("foot");
+    }
+  });
+
+  it("hot-food-prep CSD has expected generic hot-food parameters", () => {
+    const registry = loadBuiltinCsds();
+    const hotFood = registry.get("pcc://capabilities/hot-food-prep/v1");
+    expect(hotFood).toBeDefined();
+    const paramKeys = hotFood?.parameters.map((p) => p.key) ?? [];
+    expect(paramKeys).toContain("temperature");
+    expect(paramKeys).toContain("prepTimeMinutes");
+    expect(paramKeys).toContain("kitchenType");
+  });
+
+  it("hot-food-prep CSD has kitchen-type options covering commercial/home/food-truck", () => {
+    const registry = loadBuiltinCsds();
+    const hotFood = registry.get("pcc://capabilities/hot-food-prep/v1");
+    const kitchen = hotFood?.parameters.find((p) => p.key === "kitchenType");
+    expect(kitchen?.type).toBe("enum");
+    if (kitchen?.type === "enum") {
+      const values = kitchen.options.map((o) => o.value);
+      expect(values).toContain("commercial");
+      expect(values).toContain("home");
+      expect(values).toContain("food-truck");
+    }
+  });
+
+  it("hot-food-prep CSD has temperature enum (warm/hot/very-hot)", () => {
+    const registry = loadBuiltinCsds();
+    const hotFood = registry.get("pcc://capabilities/hot-food-prep/v1");
+    const temp = hotFood?.parameters.find((p) => p.key === "temperature");
+    expect(temp?.type).toBe("enum");
+    if (temp?.type === "enum") {
+      const values = temp.options.map((o) => o.value);
+      expect(values).toContain("warm");
+      expect(values).toContain("hot");
+      expect(values).toContain("very-hot");
+    }
+  });
+
+  it("all 3 demo CSDs surface via registry.list()", () => {
+    const registry = loadBuiltinCsds();
+    const urls = registry.list().map((c) => c.url);
+    expect(urls).toContain("pcc://capabilities/make-pizza/v1");
+    expect(urls).toContain("pcc://capabilities/courier-route/v1");
+    expect(urls).toContain("pcc://capabilities/hot-food-prep/v1");
   });
 });

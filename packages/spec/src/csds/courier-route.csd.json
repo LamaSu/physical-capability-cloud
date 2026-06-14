@@ -1,0 +1,307 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/courier-route/v1",
+  "version": "1.0.0",
+  "status": "active",
+  "name": "Courier Route Delivery",
+  "description": "Point-to-point physical delivery of a package or hot-food order from a pickup location to a dropoff location, performed by a human courier on bike, foot, car, or van.",
+  "kind": "base",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["api", "manual"],
+    "detect": {
+      "manual": {
+        "attributes": ["vehicleClass", "serviceRadiusKm", "operatingHours", "insuranceClass"]
+      }
+    }
+  },
+  "adapter": {
+    "type": "generic-http",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "dispatchUrl": { "type": "string", "description": "Courier dispatch endpoint (POST /jobs)" },
+        "apiKey": { "type": "string", "description": "Bearer token for dispatch API" },
+        "courierId": { "type": "string", "description": "Operator-side courier identifier (driver/rider ID)" }
+      },
+      "required": ["dispatchUrl"]
+    },
+    "commands": {
+      "dispatch": { "description": "Dispatch the courier to pickup", "input": "routeSpec", "output": "jobId" },
+      "track": { "description": "Get live position + ETA", "input": "jobId", "output": "trackingState" },
+      "cancel": { "description": "Cancel before pickup (free) or after pickup (partial fee)", "input": "jobId" }
+    }
+  },
+  "parameters": [
+    {
+      "type": "enum",
+      "key": "vehicle",
+      "label": "Vehicle Class",
+      "description": "Mode of transport — determines speed, capacity, and pricing",
+      "required": true,
+      "order": 1,
+      "group": "Vehicle",
+      "defaultValue": "bike",
+      "options": [
+        { "value": "foot", "label": "On Foot", "description": "Walking courier, ≤2km, ≤5kg", "pricingImpact": { "mode": "multiplier", "value": "0.85", "label": "0.85x (walking)" } },
+        { "value": "bike", "label": "Bicycle / E-bike", "description": "Bike courier, ≤10km, ≤15kg" },
+        { "value": "scooter", "label": "Scooter / Motorbike", "description": "Two-wheeler, ≤25km, ≤25kg", "pricingImpact": { "mode": "multiplier", "value": "1.1", "label": "1.1x (motorbike)" } },
+        { "value": "car", "label": "Car", "description": "Sedan/hatchback, ≤50km, ≤100kg", "pricingImpact": { "mode": "multiplier", "value": "1.4", "label": "1.4x (car)" } },
+        { "value": "van", "label": "Van", "description": "Cargo van, ≤80km, ≤500kg", "pricingImpact": { "mode": "multiplier", "value": "2.0", "label": "2.0x (van)" } }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "pickupLat",
+      "label": "Pickup Latitude",
+      "description": "Pickup location latitude (WGS84)",
+      "required": true,
+      "order": 2,
+      "group": "Pickup",
+      "min": -90,
+      "max": 90,
+      "step": 0.000001,
+      "unit": "°"
+    },
+    {
+      "type": "number",
+      "key": "pickupLng",
+      "label": "Pickup Longitude",
+      "description": "Pickup location longitude (WGS84)",
+      "required": true,
+      "order": 3,
+      "group": "Pickup",
+      "min": -180,
+      "max": 180,
+      "step": 0.000001,
+      "unit": "°"
+    },
+    {
+      "type": "string",
+      "key": "pickupAddress",
+      "label": "Pickup Address",
+      "description": "Human-readable pickup address",
+      "required": false,
+      "order": 4,
+      "group": "Pickup",
+      "maxLength": 256,
+      "placeholder": "123 Main St, Apt 4B, San Francisco CA"
+    },
+    {
+      "type": "number",
+      "key": "dropoffLat",
+      "label": "Dropoff Latitude",
+      "description": "Dropoff location latitude (WGS84)",
+      "required": true,
+      "order": 5,
+      "group": "Dropoff",
+      "min": -90,
+      "max": 90,
+      "step": 0.000001,
+      "unit": "°"
+    },
+    {
+      "type": "number",
+      "key": "dropoffLng",
+      "label": "Dropoff Longitude",
+      "description": "Dropoff location longitude (WGS84)",
+      "required": true,
+      "order": 6,
+      "group": "Dropoff",
+      "min": -180,
+      "max": 180,
+      "step": 0.000001,
+      "unit": "°"
+    },
+    {
+      "type": "string",
+      "key": "dropoffAddress",
+      "label": "Dropoff Address",
+      "description": "Human-readable dropoff address",
+      "required": false,
+      "order": 7,
+      "group": "Dropoff",
+      "maxLength": 256,
+      "placeholder": "456 Market St, Floor 12, San Francisco CA"
+    },
+    {
+      "type": "number",
+      "key": "distanceKm",
+      "label": "Route Distance",
+      "description": "Estimated route distance — drives the per-km surcharge",
+      "required": true,
+      "order": 8,
+      "group": "Route",
+      "min": 0.1,
+      "max": 200,
+      "step": 0.1,
+      "unit": "km",
+      "defaultValue": 3,
+      "pricingImpact": { "mode": "per_unit", "value": "2.50", "label": "+$2.50 per km" }
+    },
+    {
+      "type": "number",
+      "key": "deadlineMinutes",
+      "label": "Delivery Deadline",
+      "description": "Maximum delivery time from pickup. Shorter deadlines have surcharges.",
+      "required": true,
+      "order": 9,
+      "group": "Service",
+      "min": 15,
+      "max": 480,
+      "step": 5,
+      "unit": "min",
+      "defaultValue": 45
+    },
+    {
+      "type": "enum",
+      "key": "priority",
+      "label": "Service Tier",
+      "description": "Express requires a free courier within 90s; rush is best-effort within 5min",
+      "required": false,
+      "order": 10,
+      "group": "Service",
+      "defaultValue": "standard",
+      "options": [
+        { "value": "standard", "label": "Standard", "description": "Best-available courier" },
+        { "value": "rush", "label": "Rush", "description": "Dispatch within 5min", "pricingImpact": { "mode": "percent", "value": "25", "label": "+25% rush" } },
+        { "value": "express", "label": "Express", "description": "Dispatch within 90s, dedicated courier", "pricingImpact": { "mode": "percent", "value": "60", "label": "+60% express" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "packageType",
+      "label": "Package Type",
+      "description": "What's being delivered — affects insulation, handling, and insurance",
+      "required": true,
+      "order": 11,
+      "group": "Package",
+      "defaultValue": "general",
+      "options": [
+        { "value": "general", "label": "General Goods", "description": "Standard package, room temperature" },
+        { "value": "hot-food", "label": "Hot Food", "description": "Insulated bag, ≤30min from pickup", "pricingImpact": { "mode": "flat", "value": "1.00", "label": "+$1 hot bag" } },
+        { "value": "cold-food", "label": "Cold / Frozen", "description": "Insulated bag with cold pack", "pricingImpact": { "mode": "flat", "value": "1.50", "label": "+$1.50 cold pack" } },
+        { "value": "fragile", "label": "Fragile", "description": "Handle-with-care, extra padding", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 fragile handling" } },
+        { "value": "documents", "label": "Documents / Signature Required", "description": "Signature on delivery", "pricingImpact": { "mode": "flat", "value": "1.50", "label": "+$1.50 signature" } }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "weightKg",
+      "label": "Package Weight",
+      "description": "Approximate package weight",
+      "required": false,
+      "order": 12,
+      "group": "Package",
+      "min": 0.1,
+      "max": 500,
+      "step": 0.1,
+      "unit": "kg",
+      "defaultValue": 1
+    },
+    {
+      "type": "boolean",
+      "key": "contactlessDropoff",
+      "label": "Contactless Dropoff",
+      "description": "Leave at door, photo confirmation only",
+      "required": false,
+      "order": 13,
+      "group": "Service",
+      "defaultValue": false
+    },
+    {
+      "type": "string",
+      "key": "notes",
+      "label": "Courier Notes",
+      "description": "Instructions for the courier (gate code, drop spot, recipient name)",
+      "required": false,
+      "order": 14,
+      "group": "Service",
+      "maxLength": 280,
+      "placeholder": "Gate code 4321, leave with doorman, ring buzzer 12B"
+    }
+  ],
+  "constraints": [
+    {
+      "key": "courier-route-1",
+      "human": "Hot food requires ≤30 minute delivery from pickup",
+      "severity": "error",
+      "when": [
+        { "param": "packageType", "operator": "equals", "value": "hot-food" },
+        { "param": "deadlineMinutes", "operator": "gt", "value": 30 }
+      ],
+      "then": [{ "action": "setMax", "param": "deadlineMinutes", "value": 30, "message": "Hot food deliveries must arrive within 30 minutes of pickup" }]
+    },
+    {
+      "key": "courier-route-2",
+      "human": "Foot couriers cannot exceed 2km routes or 5kg packages",
+      "severity": "error",
+      "when": [
+        { "param": "vehicle", "operator": "equals", "value": "foot" }
+      ],
+      "then": [{ "action": "setMax", "param": "distanceKm", "value": 2, "message": "Foot couriers are limited to 2km routes — choose bike or scooter for longer routes" }]
+    },
+    {
+      "key": "courier-route-3",
+      "human": "Bike couriers are limited to 10km routes",
+      "severity": "warning",
+      "when": [
+        { "param": "vehicle", "operator": "equals", "value": "bike" },
+        { "param": "distanceKm", "operator": "gt", "value": 10 }
+      ],
+      "then": [{ "action": "warn", "message": "Routes over 10km on a bike — consider scooter or car" }]
+    },
+    {
+      "key": "courier-route-4",
+      "human": "Heavy packages (>25kg) require a car or van",
+      "severity": "error",
+      "when": [
+        { "param": "weightKg", "operator": "gt", "value": 25 }
+      ],
+      "then": [{ "action": "restrictTo", "param": "vehicle", "values": ["car", "van"] }]
+    },
+    {
+      "key": "courier-route-5",
+      "human": "Very heavy packages (>100kg) require a van",
+      "severity": "error",
+      "when": [
+        { "param": "weightKg", "operator": "gt", "value": 100 }
+      ],
+      "then": [{ "action": "restrictTo", "param": "vehicle", "values": ["van"] }]
+    },
+    {
+      "key": "courier-route-6",
+      "human": "Express service requires deadline of 45 minutes or less",
+      "severity": "warning",
+      "when": [
+        { "param": "priority", "operator": "equals", "value": "express" },
+        { "param": "deadlineMinutes", "operator": "gt", "value": 45 }
+      ],
+      "then": [{ "action": "warn", "message": "Express tier is only meaningful for ≤45min deadlines — drop to rush or standard for longer windows" }]
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Delivery completion receipt",
+      "required": ["jobId", "timestamp", "vehicle", "distanceKm", "actualDurationMinutes"]
+    },
+    "tier1": {
+      "description": "Delivery + GPS track + dropoff confirmation",
+      "required": ["jobId", "timestamp", "vehicle", "distanceKm", "actualDurationMinutes", "gpsTrackCid", "pickupTimestamp", "dropoffTimestamp", "courierIdHash"]
+    },
+    "tier2": {
+      "description": "Delivery + GPS + photo proof of delivery",
+      "required": ["jobId", "timestamp", "vehicle", "distanceKm", "actualDurationMinutes", "gpsTrackCid", "pickupTimestamp", "dropoffTimestamp", "courierIdHash", "dropoffPhotoCid"]
+    },
+    "tier3": {
+      "description": "Delivery + GPS + photo + recipient signature + chain-of-custody",
+      "required": ["jobId", "timestamp", "vehicle", "distanceKm", "actualDurationMinutes", "gpsTrackCid", "pickupTimestamp", "dropoffTimestamp", "courierIdHash", "dropoffPhotoCid", "recipientSignatureCid", "custodyChainCid"]
+    }
+  },
+  "pricing": {
+    "basePrice": "5.00",
+    "currency": "USDC",
+    "unit": "per delivery",
+    "minimumCharge": "5.00"
+  }
+}
