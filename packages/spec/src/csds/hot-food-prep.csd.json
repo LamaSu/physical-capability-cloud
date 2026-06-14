@@ -1,0 +1,297 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/hot-food-prep/v1",
+  "version": "1.0.0",
+  "status": "active",
+  "name": "Hot Food Preparation",
+  "description": "Generic hot-food preparation by a human cook in any kitchen — commercial, home, food truck, ghost kitchen, or pop-up. Composable substrate for any cooked food capability (pizza, burgers, ramen, biryani, tacos).",
+  "kind": "base",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["api", "manual"],
+    "detect": {
+      "manual": {
+        "attributes": ["kitchenType", "permitClass", "maxBurnerTempC", "refrigerationAvailable", "operatingHours"]
+      }
+    }
+  },
+  "adapter": {
+    "type": "generic-http",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "kitchenUrl": { "type": "string", "description": "Kitchen order endpoint (POST /tickets)" },
+        "apiKey": { "type": "string", "description": "Bearer token for the kitchen API" }
+      },
+      "required": ["kitchenUrl"]
+    },
+    "commands": {
+      "ticket": { "description": "Submit a food ticket to the kitchen", "input": "orderSpec", "output": "ticketId" },
+      "status": { "description": "Get ticket status (queued/prepping/cooking/plated/ready)", "input": "ticketId", "output": "ticketState" },
+      "cancel": { "description": "Cancel a ticket before cooking starts", "input": "ticketId" }
+    }
+  },
+  "parameters": [
+    {
+      "type": "string",
+      "key": "dishName",
+      "label": "Dish Name",
+      "description": "Name of the dish being prepared",
+      "required": true,
+      "order": 1,
+      "group": "Dish",
+      "maxLength": 128,
+      "placeholder": "e.g. Margherita Pizza, Carne Asada Tacos, Ramen"
+    },
+    {
+      "type": "enum",
+      "key": "cuisine",
+      "label": "Cuisine",
+      "description": "Cuisine style — affects ingredient sourcing and prep methods",
+      "required": false,
+      "order": 2,
+      "group": "Dish",
+      "defaultValue": "other",
+      "options": [
+        { "value": "italian", "label": "Italian" },
+        { "value": "mexican", "label": "Mexican / Latin American" },
+        { "value": "american", "label": "American" },
+        { "value": "japanese", "label": "Japanese" },
+        { "value": "chinese", "label": "Chinese" },
+        { "value": "indian", "label": "Indian / South Asian" },
+        { "value": "thai", "label": "Thai" },
+        { "value": "middle-eastern", "label": "Middle Eastern" },
+        { "value": "mediterranean", "label": "Mediterranean" },
+        { "value": "korean", "label": "Korean" },
+        { "value": "vietnamese", "label": "Vietnamese" },
+        { "value": "ethiopian", "label": "Ethiopian" },
+        { "value": "other", "label": "Other / Mixed" }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "kitchenType",
+      "label": "Kitchen Type",
+      "description": "Type of kitchen the cook is operating from — determines food-safety certification and pricing",
+      "required": true,
+      "order": 3,
+      "group": "Kitchen",
+      "defaultValue": "commercial",
+      "options": [
+        { "value": "commercial", "label": "Commercial Kitchen", "description": "Licensed restaurant kitchen with health-inspector permit" },
+        { "value": "ghost-kitchen", "label": "Ghost / Cloud Kitchen", "description": "Shared commercial kitchen, delivery-only" },
+        { "value": "food-truck", "label": "Food Truck / Cart", "description": "Mobile food vendor with permit", "pricingImpact": { "mode": "flat", "value": "1.00", "label": "+$1 mobile vendor" } },
+        { "value": "pop-up", "label": "Pop-up / Event", "description": "Temporary event kitchen with limited permit", "pricingImpact": { "mode": "flat", "value": "1.50", "label": "+$1.50 pop-up surcharge" } },
+        { "value": "home", "label": "Home Kitchen (Cottage Food)", "description": "Cottage-food permitted home kitchen — limited dish types per jurisdiction", "pricingImpact": { "mode": "multiplier", "value": "0.85", "label": "0.85x home kitchen" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "temperature",
+      "label": "Serving Temperature",
+      "description": "Target temperature at handoff",
+      "required": true,
+      "order": 4,
+      "group": "Cooking",
+      "defaultValue": "hot",
+      "options": [
+        { "value": "warm", "label": "Warm (60-70°C)", "description": "Just-warm, e.g. proofed bread, warm salads" },
+        { "value": "hot", "label": "Hot (70-85°C)", "description": "Standard hot food serving temperature" },
+        { "value": "very-hot", "label": "Very Hot (85°C+)", "description": "Sizzling plates, fresh-from-oven items", "pricingImpact": { "mode": "flat", "value": "0.50", "label": "+$0.50 very-hot" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "cookingMethod",
+      "label": "Primary Cooking Method",
+      "description": "Main heat application",
+      "required": false,
+      "order": 5,
+      "group": "Cooking",
+      "options": [
+        { "value": "grill", "label": "Grilled" },
+        { "value": "fry", "label": "Fried" },
+        { "value": "bake", "label": "Baked / Roasted" },
+        { "value": "saute", "label": "Sautéed / Stir-fried" },
+        { "value": "boil", "label": "Boiled / Poached" },
+        { "value": "steam", "label": "Steamed" },
+        { "value": "braise", "label": "Braised / Stewed" },
+        { "value": "smoke", "label": "Smoked", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 smoking" } },
+        { "value": "raw", "label": "Raw / No Heat", "description": "Cold prep — sushi, ceviche, tartare" }
+      ]
+    },
+    {
+      "type": "number",
+      "key": "prepTimeMinutes",
+      "label": "Estimated Prep Time",
+      "description": "Total prep + cook time from ticket to plate",
+      "required": true,
+      "order": 6,
+      "group": "Cooking",
+      "min": 1,
+      "max": 240,
+      "step": 1,
+      "unit": "min",
+      "defaultValue": 15
+    },
+    {
+      "type": "enum",
+      "key": "spiceLevel",
+      "label": "Spice Level",
+      "description": "Heat intensity",
+      "required": false,
+      "order": 7,
+      "group": "Dish",
+      "defaultValue": "medium",
+      "options": [
+        { "value": "none", "label": "No spice" },
+        { "value": "mild", "label": "Mild" },
+        { "value": "medium", "label": "Medium" },
+        { "value": "hot", "label": "Hot" },
+        { "value": "extra-hot", "label": "Extra Hot / 🔥🔥🔥" }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "dietary",
+      "label": "Dietary Restrictions",
+      "description": "Special dietary requirements",
+      "required": false,
+      "order": 8,
+      "group": "Dietary",
+      "defaultValue": "none",
+      "multi": true,
+      "options": [
+        { "value": "none", "label": "No restrictions" },
+        { "value": "vegetarian", "label": "Vegetarian" },
+        { "value": "vegan", "label": "Vegan", "pricingImpact": { "mode": "flat", "value": "1.00", "label": "+$1 vegan substitutions" } },
+        { "value": "gluten-free", "label": "Gluten-Free", "pricingImpact": { "mode": "flat", "value": "1.50", "label": "+$1.50 GF substitutions" } },
+        { "value": "dairy-free", "label": "Dairy-Free" },
+        { "value": "nut-free", "label": "Nut-Free" },
+        { "value": "shellfish-free", "label": "Shellfish-Free" },
+        { "value": "halal", "label": "Halal", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 halal certified" } },
+        { "value": "kosher", "label": "Kosher", "pricingImpact": { "mode": "flat", "value": "3.00", "label": "+$3 kosher certified" } }
+      ]
+    },
+    {
+      "type": "string",
+      "key": "allergens",
+      "label": "Known Allergens (Avoid)",
+      "description": "Customer allergens to strictly exclude (comma-separated)",
+      "required": false,
+      "order": 9,
+      "group": "Dietary",
+      "maxLength": 280,
+      "placeholder": "peanuts, sesame, eggs"
+    },
+    {
+      "type": "number",
+      "key": "portions",
+      "label": "Number of Portions",
+      "description": "Servings per order",
+      "required": true,
+      "order": 10,
+      "group": "Order",
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "defaultValue": 1
+    },
+    {
+      "type": "boolean",
+      "key": "includesPackaging",
+      "label": "Hot-hold Packaging",
+      "description": "Include insulated packaging for delivery",
+      "required": false,
+      "order": 11,
+      "group": "Service",
+      "defaultValue": true,
+      "pricingImpact": { "mode": "flat", "value": "0.75", "label": "+$0.75 hot-hold packaging" }
+    },
+    {
+      "type": "string",
+      "key": "notes",
+      "label": "Special Instructions",
+      "description": "Notes for the cook (preparations, modifications, allergy emphasis)",
+      "required": false,
+      "order": 12,
+      "group": "Service",
+      "maxLength": 500,
+      "placeholder": "e.g. sauce on the side, no onions, well-done"
+    }
+  ],
+  "constraints": [
+    {
+      "key": "hot-food-prep-1",
+      "human": "Home (cottage food) kitchens may not serve very-hot temperatures or raw preparations in most jurisdictions",
+      "severity": "warning",
+      "when": [
+        { "param": "kitchenType", "operator": "equals", "value": "home" },
+        { "param": "temperature", "operator": "equals", "value": "very-hot" }
+      ],
+      "then": [{ "action": "warn", "message": "Home kitchens may be restricted from very-hot service depending on local cottage-food laws — verify operator permit" }]
+    },
+    {
+      "key": "hot-food-prep-2",
+      "human": "Raw preparations are not safe under cottage-food (home) permits in most jurisdictions",
+      "severity": "error",
+      "when": [
+        { "param": "kitchenType", "operator": "equals", "value": "home" },
+        { "param": "cookingMethod", "operator": "equals", "value": "raw" }
+      ],
+      "then": [{ "action": "warn", "message": "Raw/no-heat preparations typically require a commercial kitchen permit, not cottage food" }]
+    },
+    {
+      "key": "hot-food-prep-3",
+      "human": "Smoking requires outdoor-vented kitchen — not available in most pop-ups or home kitchens",
+      "severity": "warning",
+      "when": [
+        { "param": "cookingMethod", "operator": "equals", "value": "smoke" },
+        { "param": "kitchenType", "operator": "in", "value": ["pop-up", "home"] }
+      ],
+      "then": [{ "action": "warn", "message": "Smoking requires proper venting — verify kitchen has outdoor smoker access" }]
+    },
+    {
+      "key": "hot-food-prep-4",
+      "human": "Very long prep times suggest complex dishes — flag for operator confirmation",
+      "severity": "warning",
+      "when": [
+        { "param": "prepTimeMinutes", "operator": "gt", "value": 90 }
+      ],
+      "then": [{ "action": "warn", "message": "Prep times over 90 minutes are unusual for à-la-carte — confirm dish complexity with operator" }]
+    },
+    {
+      "key": "hot-food-prep-5",
+      "human": "Kosher and halal are mutually exclusive — pick one",
+      "severity": "error",
+      "when": [
+        { "param": "dietary", "operator": "equals", "value": "halal" }
+      ],
+      "then": [{ "action": "exclude", "param": "dietary", "values": ["kosher"] }]
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Food ready receipt",
+      "required": ["ticketId", "timestamp", "dishName", "kitchenType", "prepDurationSeconds"]
+    },
+    "tier1": {
+      "description": "Food ready + kitchen ticket log + temperature reading",
+      "required": ["ticketId", "timestamp", "dishName", "kitchenType", "prepDurationSeconds", "servingTempC", "kitchenStationId", "cookIdHash"]
+    },
+    "tier2": {
+      "description": "Food ready + log + temperature + photo of plated dish",
+      "required": ["ticketId", "timestamp", "dishName", "kitchenType", "prepDurationSeconds", "servingTempC", "kitchenStationId", "cookIdHash", "outputPhotoCid"]
+    },
+    "tier3": {
+      "description": "Food ready + log + temperature + photo + allergen attestation + health-permit reference",
+      "required": ["ticketId", "timestamp", "dishName", "kitchenType", "prepDurationSeconds", "servingTempC", "kitchenStationId", "cookIdHash", "outputPhotoCid", "allergenAttestationCid", "healthPermitRef"]
+    }
+  },
+  "pricing": {
+    "basePrice": "9.00",
+    "currency": "USDC",
+    "unit": "per portion",
+    "minimumCharge": "6.00"
+  }
+}

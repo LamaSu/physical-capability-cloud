@@ -1,0 +1,249 @@
+{
+  "$schema": "https://pcc.network/schemas/csd/v1",
+  "url": "pcc://capabilities/make-pizza/v1",
+  "version": "1.0.0",
+  "status": "active",
+  "name": "Make Pizza",
+  "description": "Hand-stretched pizza prepared and baked to order — Neapolitan, New York, Detroit, wood-fired, or gluten-free crust styles.",
+  "kind": "base",
+  "baseDefinition": null,
+  "discovery": {
+    "protocols": ["api", "manual"],
+    "detect": {
+      "manual": {
+        "attributes": ["ovenType", "maxOvenTempC", "kitchenLocation", "hoursOfOperation"]
+      }
+    }
+  },
+  "adapter": {
+    "type": "generic-http",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "kitchenUrl": { "type": "string", "description": "Operator's order endpoint (POST /orders)" },
+        "apiKey": { "type": "string", "description": "Bearer token for the kitchen's order API" }
+      },
+      "required": ["kitchenUrl"]
+    },
+    "commands": {
+      "submit": { "description": "Submit a pizza order to the kitchen", "input": "orderSpec", "output": "ticketId" },
+      "status": { "description": "Get ticket status (queued/prepping/baking/ready)", "input": "ticketId", "output": "ticketState" },
+      "cancel": { "description": "Cancel a ticket before it enters the oven", "input": "ticketId" }
+    }
+  },
+  "parameters": [
+    {
+      "type": "enum",
+      "key": "size",
+      "label": "Pizza Size",
+      "description": "Finished pizza diameter",
+      "required": true,
+      "order": 1,
+      "group": "Pizza",
+      "defaultValue": "medium",
+      "options": [
+        { "value": "small", "label": "Small (10\")", "description": "Personal pizza, 6 slices", "pricingImpact": { "mode": "multiplier", "value": "0.75", "label": "0.75x base price" } },
+        { "value": "medium", "label": "Medium (14\")", "description": "Serves 2-3, 8 slices" },
+        { "value": "large", "label": "Large (18\")", "description": "Serves 3-4, 10 slices", "pricingImpact": { "mode": "multiplier", "value": "1.4", "label": "1.4x base price" } },
+        { "value": "extra-large", "label": "Extra Large (22\")", "description": "Party size, 12 slices", "pricingImpact": { "mode": "multiplier", "value": "1.85", "label": "1.85x base price" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "crust",
+      "label": "Crust Style",
+      "description": "Dough recipe and baking style",
+      "required": true,
+      "order": 2,
+      "group": "Pizza",
+      "defaultValue": "thin",
+      "options": [
+        { "value": "thin", "label": "Thin Crust", "description": "Crispy NY-style hand-tossed crust" },
+        { "value": "neapolitan", "label": "Neapolitan", "description": "Soft, leoparded crust, 60-90s bake at 450°C", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 Neapolitan" } },
+        { "value": "wood-fired", "label": "Wood-Fired", "description": "Cooked in a wood-burning oven, smoky char", "pricingImpact": { "mode": "flat", "value": "3.50", "label": "+$3.50 wood-fired" } },
+        { "value": "detroit", "label": "Detroit Deep-Dish", "description": "Rectangular, thick airy crust with crispy cheese edges", "pricingImpact": { "mode": "flat", "value": "2.50", "label": "+$2.50 Detroit" } },
+        { "value": "gluten-free", "label": "Gluten-Free", "description": "Rice + tapioca flour crust, dedicated prep area", "pricingImpact": { "mode": "flat", "value": "4.00", "label": "+$4 gluten-free" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "sauce",
+      "label": "Sauce",
+      "description": "Base sauce on the pizza",
+      "required": true,
+      "order": 3,
+      "group": "Pizza",
+      "defaultValue": "tomato",
+      "options": [
+        { "value": "tomato", "label": "Classic Tomato", "description": "San Marzano tomato sauce" },
+        { "value": "white", "label": "White (Béchamel)", "description": "Cream and parmesan base, no tomato" },
+        { "value": "pesto", "label": "Basil Pesto", "description": "Green pesto base", "pricingImpact": { "mode": "flat", "value": "1.50", "label": "+$1.50 pesto" } },
+        { "value": "bbq", "label": "BBQ Sauce", "description": "Sweet smoky BBQ base" },
+        { "value": "no-sauce", "label": "No Sauce", "description": "Just cheese and toppings" }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "cheese",
+      "label": "Cheese",
+      "description": "Cheese blend",
+      "required": false,
+      "order": 4,
+      "group": "Pizza",
+      "defaultValue": "mozzarella",
+      "options": [
+        { "value": "mozzarella", "label": "Whole-Milk Mozzarella" },
+        { "value": "fresh-mozzarella", "label": "Fresh Mozzarella", "description": "Sliced fresh fior di latte", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 fresh mozz" } },
+        { "value": "vegan", "label": "Vegan Mozzarella", "description": "Cashew or coconut-oil based", "pricingImpact": { "mode": "flat", "value": "2.50", "label": "+$2.50 vegan cheese" } },
+        { "value": "blend", "label": "Italian Blend", "description": "Mozzarella + provolone + parmesan", "pricingImpact": { "mode": "flat", "value": "1.00", "label": "+$1 blend" } },
+        { "value": "no-cheese", "label": "No Cheese" }
+      ]
+    },
+    {
+      "type": "string",
+      "key": "toppings",
+      "label": "Toppings (comma-separated)",
+      "description": "List toppings separated by commas (e.g. \"pepperoni, mushrooms, basil\"). Each topping adds to the base price.",
+      "required": false,
+      "order": 5,
+      "group": "Pizza",
+      "maxLength": 500,
+      "placeholder": "pepperoni, mushrooms, basil, olives",
+      "pricingImpact": { "mode": "per_unit", "value": "1.50", "label": "+$1.50 per topping" }
+    },
+    {
+      "type": "enum",
+      "key": "dietary",
+      "label": "Dietary Requirements",
+      "description": "Special dietary preparation",
+      "required": false,
+      "order": 6,
+      "group": "Dietary",
+      "defaultValue": "none",
+      "options": [
+        { "value": "none", "label": "No restrictions" },
+        { "value": "vegetarian", "label": "Vegetarian", "description": "No meat toppings" },
+        { "value": "vegan", "label": "Vegan", "description": "No animal products — auto-selects vegan cheese" },
+        { "value": "halal", "label": "Halal", "description": "Halal-certified meats only", "pricingImpact": { "mode": "flat", "value": "2.00", "label": "+$2 halal certification" } },
+        { "value": "kosher", "label": "Kosher", "description": "Kosher-certified ingredients and prep", "pricingImpact": { "mode": "flat", "value": "3.00", "label": "+$3 kosher" } }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "doneness",
+      "label": "Bake Doneness",
+      "description": "How dark to bake the crust",
+      "required": false,
+      "order": 7,
+      "group": "Bake",
+      "defaultValue": "standard",
+      "options": [
+        { "value": "light", "label": "Lightly baked", "description": "Pale crust, softer" },
+        { "value": "standard", "label": "Standard", "description": "Golden brown" },
+        { "value": "well-done", "label": "Well-done / Extra crispy", "description": "Dark golden, crispy edges" }
+      ]
+    },
+    {
+      "type": "boolean",
+      "key": "cutSlices",
+      "label": "Pre-cut into slices",
+      "description": "Cut the pizza before boxing",
+      "required": false,
+      "order": 8,
+      "group": "Service",
+      "defaultValue": true
+    },
+    {
+      "type": "string",
+      "key": "notes",
+      "label": "Special Instructions",
+      "description": "Notes for the kitchen (allergies, customizations)",
+      "required": false,
+      "order": 9,
+      "group": "Service",
+      "maxLength": 280,
+      "placeholder": "e.g. light on the cheese, extra crispy, no oregano"
+    },
+    {
+      "type": "number",
+      "key": "quantity",
+      "label": "Quantity",
+      "description": "Number of pizzas",
+      "required": true,
+      "order": 10,
+      "group": "Order",
+      "min": 1,
+      "max": 200,
+      "step": 1,
+      "defaultValue": 1
+    }
+  ],
+  "constraints": [
+    {
+      "key": "make-pizza-1",
+      "human": "Vegan dietary requirement forces vegan cheese and excludes meat toppings",
+      "severity": "error",
+      "when": [
+        { "param": "dietary", "operator": "equals", "value": "vegan" }
+      ],
+      "then": [{ "action": "restrictTo", "param": "cheese", "values": ["vegan", "no-cheese"] }]
+    },
+    {
+      "key": "make-pizza-2",
+      "human": "Gluten-free pizzas cannot be baked in wood-fired ovens (cross-contamination)",
+      "severity": "error",
+      "when": [
+        { "param": "crust", "operator": "equals", "value": "gluten-free" }
+      ],
+      "then": [{ "action": "warn", "message": "Gluten-free orders require a dedicated prep area — verify kitchen has cross-contamination controls" }]
+    },
+    {
+      "key": "make-pizza-3",
+      "human": "Detroit-style is rectangular and cannot be made small",
+      "severity": "error",
+      "when": [
+        { "param": "crust", "operator": "equals", "value": "detroit" },
+        { "param": "size", "operator": "equals", "value": "small" }
+      ],
+      "then": [{ "action": "restrictTo", "param": "size", "values": ["medium", "large", "extra-large"] }]
+    },
+    {
+      "key": "make-pizza-4",
+      "human": "Vegetarian forbids common meat toppings — kitchen should reject orders with meat in notes/toppings",
+      "severity": "warning",
+      "when": [
+        { "param": "dietary", "operator": "equals", "value": "vegetarian" }
+      ],
+      "then": [{ "action": "warn", "message": "Vegetarian order — verify toppings list has no meat (pepperoni, sausage, ham, bacon, anchovies, chicken)" }]
+    },
+    {
+      "key": "make-pizza-5",
+      "human": "Large quantity orders should warn for prep time",
+      "severity": "warning",
+      "when": [
+        { "param": "quantity", "operator": "gte", "value": 20 }
+      ],
+      "then": [{ "action": "warn", "message": "Orders of 20+ pizzas require 90+ minutes lead time — confirm with operator" }]
+    }
+  ],
+  "evidence": {
+    "tier0": {
+      "description": "Pizza completion receipt",
+      "required": ["ticketId", "timestamp", "size", "crust", "prepDurationSeconds"]
+    },
+    "tier1": {
+      "description": "Pizza completion + kitchen ticket log",
+      "required": ["ticketId", "timestamp", "size", "crust", "prepDurationSeconds", "ovenTempC", "bakeDurationSeconds", "kitchenStationId"]
+    },
+    "tier2": {
+      "description": "Pizza completion + log + photo of finished pizza",
+      "required": ["ticketId", "timestamp", "size", "crust", "prepDurationSeconds", "ovenTempC", "bakeDurationSeconds", "kitchenStationId", "outputPhotoCid"]
+    }
+  },
+  "pricing": {
+    "basePrice": "12.00",
+    "currency": "USDC",
+    "unit": "per pizza",
+    "minimumCharge": "8.00"
+  }
+}

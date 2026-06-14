@@ -15,6 +15,9 @@ import slaCsd from "../csds/sla.csd.json" with { type: "json" };
 import cnc3axisCsd from "../csds/cnc-3axis.csd.json" with { type: "json" };
 import laserCutCsd from "../csds/laser-cut.csd.json" with { type: "json" };
 import print2dCsd from "../csds/2d-print.csd.json" with { type: "json" };
+import makePizzaCsd from "../csds/make-pizza.csd.json" with { type: "json" };
+import courierRouteCsd from "../csds/courier-route.csd.json" with { type: "json" };
+import hotFoodPrepCsd from "../csds/hot-food-prep.csd.json" with { type: "json" };
 
 /**
  * Per-CSD usage attribution.
@@ -379,6 +382,9 @@ export class CsdRegistry {
  *   pcc://capabilities/cnc-3axis/v2
  *   pcc://capabilities/laser-cut/v2
  *   pcc://capabilities/2d-print/v1
+ *   pcc://capabilities/make-pizza/v1
+ *   pcc://capabilities/courier-route/v1
+ *   pcc://capabilities/hot-food-prep/v1
  *
  * @param usageRepo Optional persistent usage backend (e.g. SQLite-backed).
  *   When omitted, the registry uses an in-memory map — matches the original
@@ -388,7 +394,16 @@ export class CsdRegistry {
 export function loadBuiltinCsds(usageRepo?: CsdUsageRepository): CsdRegistry {
   const registry = new CsdRegistry(usageRepo);
 
-  const builtins = [fdmCsd, slaCsd, cnc3axisCsd, laserCutCsd, print2dCsd];
+  const builtins = [
+    fdmCsd,
+    slaCsd,
+    cnc3axisCsd,
+    laserCutCsd,
+    print2dCsd,
+    makePizzaCsd,
+    courierRouteCsd,
+    hotFoodPrepCsd,
+  ];
   for (const raw of builtins) {
     // Use validate first to get a clear error message, then register
     const result = CsdSchema.safeParse(raw);
