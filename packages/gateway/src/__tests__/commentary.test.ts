@@ -317,10 +317,13 @@ describe("commentary routes", () => {
     await app.ready();
 
     // We can't easily inject an SSE stream (it never ends), but we can confirm
-    // the route exists by checking the printed routes table.
+    // the routes exist by checking the printed routes table. Fastify's radix
+    // tree renderer splits a shared path prefix across lines, so we assert on
+    // the suffixes + the method tags that always appear together.
     const routes = app.printRoutes();
-    expect(routes).toContain("/api/commentary/stream");
-    expect(routes).toContain("/api/commentary/status");
+    expect(routes).toContain("api/commentary/st");
+    expect(routes).toMatch(/ream\s*\((?=[^)]*POST)[^)]*GET[^)]*\)/);
+    expect(routes).toMatch(/atus\s*\(GET[^)]*\)/);
 
     await app.close();
   });
