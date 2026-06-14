@@ -17,11 +17,15 @@ import laserCutCsd from "../csds/laser-cut.csd.json" with { type: "json" };
 import print2dCsd from "../csds/2d-print.csd.json" with { type: "json" };
 
 /**
- * Per-CSD usage attribution. In-memory map; the persistence layer in
- * `capability_template_store` (packages/db/src/schema/templates.ts) already
- * carries the matching shape — moving these counters to SQLite is a follow-on
- * that doesn't change the public API here. Marketplace mechanics (rating,
- * fork, royalty) layer on top of this without changing the registry surface.
+ * Per-CSD usage attribution.
+ *
+ * In-memory by default; SQLite-backed when a CsdUsageRepository is supplied to
+ * the CsdRegistry constructor. The public registry API (recordUsage / getUsage
+ * / suggest / popular / findUrlByType) is unchanged either way — only the
+ * storage swaps.
+ *
+ * Marketplace mechanics (rating, fork, royalty) layer on top of this without
+ * changing the registry surface.
  */
 export interface CsdUsage {
   /** Number of times this CSD has been adopted via an A2A skill / capability create. */
@@ -30,6 +34,26 @@ export interface CsdUsage {
   recentAdopters: string[];
   /** Last time recordUsage was called for this CSD. */
   lastUsedAt: string | null;
+}
+
+/**
+ * Storage contract for CsdUsage. CsdRegistry calls these methods when wired
+ * to a persistent backend. The default (no repo) keeps the in-memory Map.
+ *
+ * Implementations live in @pcc/store; @pcc/spec defines the interface only so
+ * the spec package stays storage-agnostic (no @pcc/store dependency from spec,
+ * which would create a cycle).
+ */
+export interface CsdUsageRepository {
+  /** Read usage for one CSD URL. Return the zero shape if never recorded. */
+  get(url: string): CsdUsage;
+  /**
+   * Record one adoption. Implementation handles count increment, lastUsedAt
+   * stamp, and the deduped recent-adopter list (capped at 50, newest at end).
+   */
+  record(url: string, byAgentId: string): void;
+  /** Bulk-load usage for a set of URLs. Used by suggest()/popular() to avoid N+1 reads. */
+  getMany(urls: readonly string[]): Map<string, CsdUsage>;
 }
 
 /**
@@ -74,9 +98,54 @@ function tokenize(s: string): Set<string> {
   );
 }
 
+/**
+ * In-memory CsdUsageRepository — the default backing store. Kept fast for
+ * the suggest-templates test suite and any consumer that doesn't need the
+ * counter to survive process restart. Swapped at construction time when the
+ * gateway wires a SQLite-backed implementation.
+ */
+class InMemoryCsdUsageRepository implements CsdUsageRepository {
+  private usage: Map<string, CsdUsage> = new Map();
+
+  get(url: string): CsdUsage {
+    return this.usage.get(url) ?? { count: 0, recentAdopters: [], lastUsedAt: null };
+  }
+
+  record(url: string, byAgentId: string): void {
+    const now = new Date().toISOString();
+    let u = this.usage.get(url);
+    if (!u) {
+      u = { count: 0, recentAdopters: [], lastUsedAt: null };
+      this.usage.set(url, u);
+    }
+    u.count += 1;
+    u.lastUsedAt = now;
+    // Keep recentAdopters deduped + capped (newest at end)
+    const idx = u.recentAdopters.indexOf(byAgentId);
+    if (idx >= 0) u.recentAdopters.splice(idx, 1);
+    u.recentAdopters.push(byAgentId);
+    if (u.recentAdopters.length > 50) u.recentAdopters.shift();
+  }
+
+  getMany(urls: readonly string[]): Map<string, CsdUsage> {
+    const out = new Map<string, CsdUsage>();
+    for (const u of urls) out.set(u, this.get(u));
+    return out;
+  }
+}
+
 export class CsdRegistry {
   private csds: Map<string, CSD> = new Map();
-  private usage: Map<string, CsdUsage> = new Map();
+  private usageRepo: CsdUsageRepository;
+
+  /**
+   * @param usageRepo Optional storage backend for usage attribution. Defaults
+   *   to an in-memory map. Pass a CsdUsageRepository implementation (e.g. the
+   *   SQLite-backed one in @pcc/store) to make counters survive restart.
+   */
+  constructor(usageRepo?: CsdUsageRepository) {
+    this.usageRepo = usageRepo ?? new InMemoryCsdUsageRepository();
+  }
 
   /**
    * Validate a CSD document and store it in the registry.
@@ -98,24 +167,12 @@ export class CsdRegistry {
    */
   recordUsage(url: string, byAgentId: string): void {
     if (!this.csds.has(url)) return;
-    const now = new Date().toISOString();
-    let u = this.usage.get(url);
-    if (!u) {
-      u = { count: 0, recentAdopters: [], lastUsedAt: null };
-      this.usage.set(url, u);
-    }
-    u.count += 1;
-    u.lastUsedAt = now;
-    // Keep recentAdopters deduped + capped (newest at end)
-    const idx = u.recentAdopters.indexOf(byAgentId);
-    if (idx >= 0) u.recentAdopters.splice(idx, 1);
-    u.recentAdopters.push(byAgentId);
-    if (u.recentAdopters.length > 50) u.recentAdopters.shift();
+    this.usageRepo.record(url, byAgentId);
   }
 
   /** Get usage attribution for a CSD. Returns zeros for never-used CSDs. */
   getUsage(url: string): CsdUsage {
-    return this.usage.get(url) ?? { count: 0, recentAdopters: [], lastUsedAt: null };
+    return this.usageRepo.get(url);
   }
 
   /**
@@ -167,10 +224,13 @@ export class CsdRegistry {
     let candidates: CSD[] = this.list();
     if (opts?.kind) candidates = candidates.filter((c) => c.kind === opts.kind);
 
+    // One bulk usage read avoids N round-trips on SQLite-backed implementations.
+    const usageMap = this.usageRepo.getMany(candidates.map((c) => c.url));
+    const zero: CsdUsage = { count: 0, recentAdopters: [], lastUsedAt: null };
     const scored = candidates.map((csd) => ({
       csd,
       score: relevanceScore(csd, tokens),
-      usage: this.getUsage(csd.url),
+      usage: usageMap.get(csd.url) ?? zero,
     }));
 
     // If no query tokens, sort by popularity instead.
@@ -187,8 +247,11 @@ export class CsdRegistry {
 
   /** Return CSDs sorted by usage count desc, capped at `limit`. */
   popular(limit = 10): Array<{ csd: CSD; usage: CsdUsage }> {
-    return this.list()
-      .map((csd) => ({ csd, usage: this.getUsage(csd.url) }))
+    const all = this.list();
+    const usageMap = this.usageRepo.getMany(all.map((c) => c.url));
+    const zero: CsdUsage = { count: 0, recentAdopters: [], lastUsedAt: null };
+    return all
+      .map((csd) => ({ csd, usage: usageMap.get(csd.url) ?? zero }))
       .sort((a, b) => b.usage.count - a.usage.count)
       .slice(0, limit);
   }
@@ -316,9 +379,14 @@ export class CsdRegistry {
  *   pcc://capabilities/cnc-3axis/v2
  *   pcc://capabilities/laser-cut/v2
  *   pcc://capabilities/2d-print/v1
+ *
+ * @param usageRepo Optional persistent usage backend (e.g. SQLite-backed).
+ *   When omitted, the registry uses an in-memory map — matches the original
+ *   pre-persistence behavior. The gateway wires the SQLite implementation
+ *   here when `PCC_CSD_PERSIST=true`.
  */
-export function loadBuiltinCsds(): CsdRegistry {
-  const registry = new CsdRegistry();
+export function loadBuiltinCsds(usageRepo?: CsdUsageRepository): CsdRegistry {
+  const registry = new CsdRegistry(usageRepo);
 
   const builtins = [fdmCsd, slaCsd, cnc3axisCsd, laserCutCsd, print2dCsd];
   for (const raw of builtins) {
