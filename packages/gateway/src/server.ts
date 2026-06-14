@@ -34,6 +34,7 @@ import { composeRoutes } from "./routes/compose.js";
 import { skillsRoutes } from "./routes/skills.js";
 import { capture3dRoutes } from "./routes/capture-3d.js";
 import { captureSimRoutes } from "./routes/capture-sim.js";
+import { pizzaDemoRoutes } from "./routes/pizza-demo.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
 import { a2aTasksRoutes } from "./routes/a2a-tasks.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
@@ -449,6 +450,7 @@ export async function createGateway(port = 3200) {
   await app.register(skillsRoutes);
   await app.register(capture3dRoutes);
   await app.register(captureSimRoutes);
+  await app.register(pizzaDemoRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
