@@ -13,6 +13,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@coinbase/cdp-sdk": "^1.51.0",
     "@pcc/spec": "workspace:*",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "1",

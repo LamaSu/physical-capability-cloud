@@ -100,10 +100,11 @@ function getCdp(): {
 } {
   if (!cdpWallet) {
     const cfg = {
-      apiKeyId: process.env.CDP_API_KEY,
-      apiSecret: process.env.CDP_API_SECRET,
+      apiKeyId: process.env.CDP_API_KEY_ID,
+      apiKeySecret: process.env.CDP_API_KEY_SECRET,
       walletSecret: process.env.CDP_WALLET_SECRET,
       network: (process.env.CDP_NETWORK as "base-sepolia" | "base") ?? "base-sepolia",
+      onrampAppId: process.env.CDP_ONRAMP_APP_ID,
     };
     cdpWallet = new CdpWalletClient(cfg);
     cdpOnramp = new CdpOnrampClient(cfg);

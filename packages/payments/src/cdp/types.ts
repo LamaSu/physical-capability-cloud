@@ -13,14 +13,16 @@
 export type CdpNetwork = "base-sepolia" | "base";
 
 export interface CdpConfig {
-  /** CDP_API_KEY (key id). When absent, the client runs in mock mode. */
+  /** CDP_API_KEY_ID (key id). When absent, the client runs in mock mode. */
   apiKeyId?: string;
-  /** CDP_API_SECRET. */
-  apiSecret?: string;
-  /** CDP_WALLET_SECRET (server-wallet signing material, held by CDP). */
+  /** CDP_API_KEY_SECRET (the Ed25519 secret shown once at key creation). */
+  apiKeySecret?: string;
+  /** CDP_WALLET_SECRET (server-wallet signing material, held by CDP's TEE). */
   walletSecret?: string;
   /** Target chain. Default: base-sepolia. */
   network?: CdpNetwork;
+  /** Coinbase Onramp App ID (CDP_ONRAMP_APP_ID) for building the hosted onramp URL. */
+  onrampAppId?: string;
   /** Force mock regardless of keys. Default: !apiKeyId. */
   mock?: boolean;
 }

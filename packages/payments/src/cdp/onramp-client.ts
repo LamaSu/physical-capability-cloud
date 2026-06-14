@@ -9,17 +9,21 @@ export interface CreateOnrampParams {
 }
 
 /**
- * CdpOnrampClient — card → USDC on Base, into a destination wallet. The single human
+ * CdpOnrampClient — card -> USDC on Base, into a destination wallet. The single human
  * step in the whole flow is opening `onrampUrl` and paying once.
  *
- * Mock-first (matches Stripe/Yellowcard). Real-mode uses CDP headless Onramp: create a
- * session server-side, return the hosted/embedded widget URL.
+ * Mock/real switch is presence-of-creds. Onramp is real-money, so it targets Base
+ * MAINNET; on testnet there's nothing to buy — fund via the wallet client's faucet
+ * instead. Real-mode builds the hosted Coinbase Onramp URL from the project's
+ * Onramp App ID (cfg.onrampAppId / CDP_ONRAMP_APP_ID).
  */
 export class CdpOnrampClient {
   private readonly network: CdpNetwork;
   private readonly mock: boolean;
+  private readonly cfg: CdpConfig;
 
   constructor(cfg: CdpConfig = {}) {
+    this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
     this.mock = cfg.mock ?? !cfg.apiKeyId;
   }
@@ -44,14 +48,30 @@ export class CdpOnrampClient {
         createdAt: new Date().toISOString(),
       };
     }
-    throw new Error("CDP_REAL_NOT_WIRED: wire CDP headless Onramp session/URL");
+    // Real hosted Coinbase Onramp URL. Funds settle on Base mainnet (onramp is real money).
+    const appId = this.cfg.onrampAppId ?? "";
+    const addresses = encodeURIComponent(JSON.stringify({ [params.destinationAddress]: ["base"] }));
+    const assets = encodeURIComponent(JSON.stringify(["USDC"]));
+    const amt = params.presetAmountUSD
+      ? `&presetFiatAmount=${params.presetAmountUSD}&fiatCurrency=USD`
+      : "";
+    return {
+      sessionId,
+      onrampUrl:
+        `https://pay.coinbase.com/buy/select-asset?appId=${appId}` +
+        `&addresses=${addresses}&assets=${assets}&defaultNetwork=base${amt}`,
+      destinationAddress: params.destinationAddress,
+      asset: "USDC",
+      network: this.network,
+      status: "created",
+      createdAt: new Date().toISOString(),
+    };
   }
 
   async getSession(sessionId: string): Promise<Pick<OnrampSession, "sessionId" | "status">> {
-    if (this.mock) {
-      // Mock funds settle instantly.
-      return { sessionId, status: "completed" };
-    }
-    throw new Error("CDP_REAL_NOT_WIRED: wire CDP onramp session status");
+    // Settlement status is observed on-chain via the wallet balance (getBalance), not a
+    // CDP session poll — the hosted widget owns the card flow. Report "created" until the
+    // destination wallet shows the funds.
+    return { sessionId, status: "created" };
   }
 }
