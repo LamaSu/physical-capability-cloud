@@ -163,9 +163,13 @@ contract MilestoneEscrowV2 {
     IERC20 public token;
     bytes32 public cwmId;
 
-    /// @notice The PCCProtocol root contract. Set at deployment (immutable).
+    /// @notice The PCCProtocol root contract. Set per-escrow in `initialize`.
     /// @dev Zero address means no protocol root (standalone / legacy deployment).
-    address public immutable protocolRoot;
+    ///      Moved from immutable to storage for the EIP-1167 clone refactor: the
+    ///      factory address is not known when the shared implementation is deployed,
+    ///      and it differs per factory, so each clone records its own root at init.
+    ///      When non-zero, a fee is deducted on release().
+    address public protocolRoot;
 
     // ── EAS Wiring (immutables) ──────────────────────────────────────────
 
@@ -179,6 +183,13 @@ contract MilestoneEscrowV2 {
 
     /// @notice The PCC gateway oracle signer. Must equal the EAS attestation's `attester`.
     address public immutable authorizedOracle;
+
+    /// @notice Re-initialization guard for the clone/initialize pattern (EIP-1167).
+    /// @dev The implementation contract sets this true in its constructor (the
+    ///      `_disableInitializers` pattern) so the implementation itself can never be
+    ///      initialized or used directly — only freshly-cloned proxies (whose storage
+    ///      starts zeroed, so `_initialized == false`) can call `initialize` exactly once.
+    bool private _initialized;
 
     Milestone[] public milestones;
     mapping(uint256 => Dispute) public disputes;
@@ -324,25 +335,38 @@ contract MilestoneEscrowV2 {
         _;
     }
 
-    // ── Constructor ──────────────────────────────────────────────────────
+    // ── Errors ───────────────────────────────────────────────────────────
+
+    /// @notice Thrown when `initialize` is called on an already-initialized escrow.
+    /// @dev Covers both the second `initialize` on a clone AND any `initialize` on the
+    ///      locked implementation (whose constructor pre-sets `_initialized = true`).
+    error AlreadyInitialized();
+
+    // ── Constructor (implementation only) ─────────────────────────────────
 
     /**
-     * @param _payer        Address that funds the escrow and can add milestones.
-     * @param _arbiter      Address that resolves disputes.
-     * @param _token        ERC-20 token used for payments.
-     * @param _cwmId        Canonical Workflow Model identifier.
-     * @param _protocolRoot PCCProtocol root address. Set to address(0) for standalone/legacy use.
-     *                      When non-zero, a fee is deducted on release().
+     * @notice Deploy the SHARED implementation logic for every escrow clone.
+     *
+     * @dev EIP-1167 fault-isolation refactor. The values set here live in the
+     *      implementation's CODE and are shared by every clone via delegatecall:
+     *        - `eas`, `PCC_EVIDENCE_SCHEMA_UID`, `authorizedOracle` are immutable and
+     *          IDENTICAL for every escrow, so they are correctly baked into the shared
+     *          code here and read by all clones.
+     *      The PER-ESCROW config (`payer`, `arbiter`, `token`, `cwmId`, `protocolRoot`)
+     *      is NOT set here — it differs per escrow (and `protocolRoot` is the factory
+     *      address, unknown at implementation-deploy time) and is written to each
+     *      clone's own storage by `initialize` after cloning.
+     *
+     *      The constructor also LOCKS the implementation: it sets `_initialized = true`
+     *      so the implementation contract itself can never be initialized or used
+     *      directly (the `_disableInitializers` pattern). Only fresh clones — whose
+     *      storage starts zeroed, so `_initialized == false` — can be initialized.
+     *
      * @param _eas          The EAS contract (Base + Base Sepolia: 0x42...0021).
      * @param _schemaUid    The `pcc.evidence.v1` schema UID this escrow gates on.
      * @param _oracle       The PCC gateway oracle signer (== EAS attester). Must be non-zero.
      */
     constructor(
-        address _payer,
-        address _arbiter,
-        address _token,
-        bytes32 _cwmId,
-        address _protocolRoot,
         address _eas,
         bytes32 _schemaUid,
         address _oracle
@@ -354,15 +378,58 @@ contract MilestoneEscrowV2 {
         // locks every milestone's funds. The value is immutable — reject at construction.
         require(_schemaUid != bytes32(0), "Schema UID unset");
 
+        eas = IEAS(_eas);
+        PCC_EVIDENCE_SCHEMA_UID = _schemaUid;
+        authorizedOracle = _oracle;
+
+        // Lock the implementation: only clones (with zeroed storage) may initialize.
+        _initialized = true;
+    }
+
+    // ── Initializer (clones only) ──────────────────────────────────────────
+
+    /**
+     * @notice One-time per-escrow configuration for a freshly-deployed clone.
+     *
+     * @dev Sets the PER-ESCROW config that differs across escrows and therefore
+     *      cannot live in the shared implementation code. Each clone has its own
+     *      storage, so these writes affect ONLY this clone — the heart of the
+     *      fault-isolation guarantee.
+     *
+     *      Reverts `AlreadyInitialized` if called twice, and is unreachable on the
+     *      implementation contract (its constructor already set `_initialized = true`).
+     *      The reentrancy guard slot `_locked` also starts at 0 in a fresh clone, so
+     *      it is set to 1 here to arm the `nonReentrant` modifier.
+     *
+     *      NOTE: the H1 zero-schema guard is enforced once, on the implementation, at
+     *      construction. Clones share that immutable through delegatecall, so a clone
+     *      can never observe a zero schema UID — no per-clone H1 re-check is needed.
+     *
+     * @param _payer        Address that funds the escrow and can add milestones.
+     * @param _arbiter      Address that resolves disputes.
+     * @param _token        ERC-20 token used for payments.
+     * @param _cwmId        Canonical Workflow Model identifier.
+     * @param _protocolRoot PCCProtocol root address (the factory). address(0) for
+     *                      standalone/legacy use; when non-zero, a fee is deducted on release().
+     */
+    function initialize(
+        address _payer,
+        address _arbiter,
+        address _token,
+        bytes32 _cwmId,
+        address _protocolRoot
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
+
         payer = _payer;
         arbiter = _arbiter;
         token = IERC20(_token);
         cwmId = _cwmId;
         protocolRoot = _protocolRoot;
 
-        eas = IEAS(_eas);
-        PCC_EVIDENCE_SCHEMA_UID = _schemaUid;
-        authorizedOracle = _oracle;
+        // Arm the reentrancy guard for this clone (storage starts at 0).
+        _locked = 1;
     }
 
     // ── PGTR Forwarder Management ──────────────────────────────────────
