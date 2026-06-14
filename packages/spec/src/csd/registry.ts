@@ -119,15 +119,32 @@ export class CsdRegistry {
   }
 
   /**
-   * Find a CSD URL whose `type` field matches the given capability type string.
-   * Used by the author-integration handler to map a free-text capability type
-   * (e.g. "make-pizza") back to a registered CSD so usage can be attributed.
-   * Returns the first match — CSD types should be unique by convention.
+   * Find a CSD URL whose canonical URL contains the given capability type
+   * slug. CSD URLs follow the convention `pcc://capabilities/<type-slug>/<version>`,
+   * so we extract the slug from the path and match. Used by the
+   * author-integration handler to map a free-text capability type
+   * (e.g. "fdm", "make-pizza") back to a registered CSD so usage can be
+   * attributed. Returns the first match — type slugs are unique by convention.
+   *
+   * Falls back to matching the CSD's `name` field case-insensitively when no
+   * URL slug match is found, so an agent passing a friendly type ("FDM") still
+   * resolves to the right CSD.
    */
   findUrlByType(type: string): string | undefined {
+    const lower = type.toLowerCase();
+    // Pass 1: URL-path slug match (most common — pcc://capabilities/<slug>/<v>)
+    for (const [url] of this.csds.entries()) {
+      const m = url.match(/^pcc:\/\/capabilities\/([^/]+)\//i);
+      if (m && m[1]!.toLowerCase() === lower) return url;
+    }
+    // Pass 2: explicit `type` field (CSDs that opt in to it later)
     for (const [url, csd] of this.csds.entries()) {
       const csdType = (csd as Record<string, unknown>).type;
-      if (typeof csdType === "string" && csdType === type) return url;
+      if (typeof csdType === "string" && csdType.toLowerCase() === lower) return url;
+    }
+    // Pass 3: name match, case-insensitive
+    for (const [url, csd] of this.csds.entries()) {
+      if (typeof csd.name === "string" && csd.name.toLowerCase() === lower) return url;
     }
     return undefined;
   }
