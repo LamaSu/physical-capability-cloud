@@ -37,12 +37,12 @@ describe("CSD Registry API", () => {
   // ── GET /api/csd ────────────────────────────────────────────────
 
   describe("GET /api/csd", () => {
-    it("lists all 5 built-in CSDs", async () => {
+    it("lists all 8 built-in CSDs", async () => {
       const res = await app.inject({ method: "GET", url: "/api/csd" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(Array.isArray(body.csds)).toBe(true);
-      expect(body.csds.length).toBe(5);
+      expect(body.csds.length).toBe(8);
     });
 
     it("each CSD has url, name, version, status, kind", async () => {
