@@ -42,6 +42,14 @@ export interface CreateCapabilityInput {
     onTimeout?: string;
     onDeadlineMiss?: string;
   };
+  /**
+   * Availability — when this capability is reachable. Stored verbatim in the
+   * `availability` JSON column. Callers (e.g. the A2A `pcc-author-integration`
+   * skill) should pre-serialize via `serializeAvailability()` from
+   * `routes/operator-channels.ts` so the column carries the canonical shape.
+   * Omitted = stored as `{}` (treated as "always" by downstream agents).
+   */
+  availability?: Record<string, unknown>;
 }
 
 export class CapabilityFacade extends BaseFacade {
@@ -268,7 +276,7 @@ export class CapabilityFacade extends BaseFacade {
         pricing: body.pricing || { currency: "USDC", baseCost: "0", minimum: "0" },
         materials: body.materials || [],
         assuranceTiers: body.assuranceTiers || [0, 1],
-        availability: {},
+        availability: body.availability ?? {},
         sla: body.sla ?? null,
       });
       const kernel = this.repos.kernels.findById(kernelId);
