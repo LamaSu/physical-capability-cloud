@@ -94,6 +94,10 @@ export type {
   InvocationReceiptRow,
   InvocationReceiptInsert,
   InvocationReceiptFilter,
+  ICsdUsageRepository,
+  CsdUsage,
+  CsdUsageRow,
+  CsdUsageInsert,
   IAnalyticsRepository,
   AnalyticsEventRow,
   AnalyticsEventInsert,
@@ -133,5 +137,6 @@ export {
   ContributorRepository,
   RequestRepository,
   InvocationReceiptRepository,
+  CsdUsageRepository,
 } from "./repositories/index.js";
 export type { A2AMessageRow, A2AMessageInsert, A2AConversationRow } from "./repositories/a2a-messages.js";

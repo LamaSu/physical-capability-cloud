@@ -236,6 +236,7 @@ import type { IRatingRepository } from "./IRatingRepository.js";
 import type { IContributorRepository } from "./IContributorRepository.js";
 import type { IRequestRepository } from "./IRequestRepository.js";
 import type { IInvocationReceiptRepository } from "./IInvocationReceiptRepository.js";
+import type { ICsdUsageRepository } from "./ICsdUsageRepository.js";
 
 export type {
   IRatingRepository,
@@ -243,6 +244,13 @@ export type {
   RatingInsert,
   RatingAggregate,
 } from "./IRatingRepository.js";
+
+export type {
+  ICsdUsageRepository,
+  CsdUsage,
+  CsdUsageRow,
+  CsdUsageInsert,
+} from "./ICsdUsageRepository.js";
 
 export type {
   IRequestRepository,
@@ -303,4 +311,7 @@ export interface IRepositories {
   // Universal Aggregator (Phase 1) — per-invocation provenance receipts for
   // indexed-tool calls proxied through /api/aggregator/invoke.
   invocationReceipts: IInvocationReceiptRepository;
+  // PR #118 follow-on — persistent CSD usage attribution (replaces in-memory
+  // Map on CsdRegistry). Opt-in via PCC_CSD_PERSIST=true in gateway boot.
+  csdUsage: ICsdUsageRepository;
 }

@@ -86,3 +86,27 @@ export const templateRatings = sqliteTable("template_ratings", {
   comment: text("comment"),
   createdAt: text("created_at").notNull(),
 });
+
+/**
+ * CSD usage attribution — backs CsdRegistry.recordUsage / getUsage.
+ *
+ * One row per CSD canonical URL. count tracks total adoptions; recentAdopters
+ * stores the deduped list of the last 50 agent IDs (newest at end), serialized
+ * as a JSON string[]. lastUsedAt is an ISO-8601 timestamp.
+ *
+ * Distinct from capability_template_store (which carries CapabilityTemplate
+ * marketplace metadata + its own usageCount/recentAdopters): CSDs are the
+ * FHIR-style schemas, templates are concrete instances. PR #118 introduced
+ * registry.usage as an in-memory Map; this table makes those counters survive
+ * gateway restart, opt-in via PCC_CSD_PERSIST=true.
+ */
+export const csdUsage = sqliteTable("csd_usage", {
+  /** Canonical CSD URL — pcc://capabilities/<slug>/<version> */
+  url: text("url").primaryKey(),
+  /** Total adoptions (every recordUsage call increments). */
+  count: integer("count").notNull().default(0),
+  /** JSON string[] of agent IDs, deduped, capped at 50 (newest at end). */
+  recentAdopters: text("recent_adopters", { mode: "json" }).$type<string[]>().notNull().default([]),
+  /** ISO-8601 timestamp of the last recordUsage call. */
+  lastUsedAt: text("last_used_at"),
+});
