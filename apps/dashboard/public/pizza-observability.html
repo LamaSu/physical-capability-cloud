@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PCC · Pizza Observability</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c10; --bg2:#0c0f15; --surface:#11151d; --surface2:#161b25;
+  --line:rgba(150,172,205,.10); --line2:rgba(150,172,205,.20);
+  --fg:#e9edf4; --muted:#8b94a6; --faint:#5b6475;
+  --lime:#c6f24e; --cyan:#6cd6ff; --amber:#ffb24d; --violet:#c8a2ff; --danger:#ff6f6f;
+  --accent:var(--lime);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Instrument Sans',system-ui,sans-serif;
+  --display:'Bricolage Grotesque',var(--sans);
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 90% at 50% 0%,#000 30%,transparent 95%);opacity:.5}
+a{color:inherit}
+::-webkit-scrollbar{height:9px;width:9px}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ── header ── */
+header{position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:13px 18px;background:rgba(10,12,16,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--lime);border-radius:6px;position:relative;flex:none}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--lime)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.hstat{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:blip 1.6s infinite}
+.dot.off{background:var(--danger);box-shadow:0 0 10px var(--danger)}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 60%,transparent)}50%{box-shadow:0 0 0 6px transparent}}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+/* ── top stat bar ── */
+.statbar{position:relative;z-index:1;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;max-width:1500px;margin:0 auto;padding:16px 18px 4px}
+.tile{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.tile .k{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.tile .v{font-family:var(--display);font-weight:800;font-size:clamp(20px,2.4vw,30px);line-height:1.05;margin-top:6px;letter-spacing:-.01em}
+.tile .s{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px}
+.tile.lime .v{color:var(--lime)} .tile.cyan .v{color:var(--cyan)} .tile.amber .v{color:var(--amber)} .tile.violet .v{color:var(--violet)}
+.tile.conn{display:flex;flex-direction:column;justify-content:center}
+.tile.conn .v{font-size:clamp(16px,2vw,21px);display:flex;align-items:center;gap:9px}
+
+/* ── layout ── */
+.wrap{position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:12px 18px 28px;display:grid;grid-template-columns:1fr 372px;gap:16px;align-items:start}
+.col-main{min-width:0;display:flex;flex-direction:column;gap:14px}
+.sectlabel{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);display:flex;align-items:center;gap:8px;margin:2px 0}
+.sectlabel .ct{color:var(--muted)}
+
+/* ── order card ── */
+.empty{padding:54px 22px;text-align:center;border:1px dashed var(--line2);border-radius:var(--r);color:var(--faint);font-family:var(--mono);font-size:13px}
+.empty .blink{color:var(--lime);animation:blip 2s infinite}
+.ocard{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line2);border-radius:var(--r);padding:16px 16px 6px;animation:rise .35s both}
+.ocard.terminal{opacity:.85}
+.ocard.delivered{border-color:rgba(198,242,78,.35)}
+.ocard.rejected,.ocard.failed{border-color:rgba(255,111,111,.4)}
+.oc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.oc-id{font-family:var(--display);font-weight:700;font-size:17px;display:flex;align-items:center;gap:9px}
+.oc-id .oid{font-family:var(--mono);font-size:12px;color:var(--faint);font-weight:400}
+.oc-sub{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:3px}
+.oc-sub b{color:var(--fg);font-weight:500}
+.oc-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:inline-block;padding:4px 9px;border:1px solid var(--line2);border-radius:7px;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.pill.lime{border-color:rgba(198,242,78,.45);color:var(--lime)} .pill.cyan{border-color:rgba(108,214,255,.45);color:var(--cyan)}
+.pill.amber{border-color:rgba(255,178,77,.45);color:var(--amber)} .pill.violet{border-color:rgba(200,162,255,.45);color:var(--violet)}
+.pill.danger{border-color:rgba(255,111,111,.5);color:var(--danger)}
+.oc-price{font-family:var(--mono);font-weight:700;font-size:18px;color:var(--lime)}
+.oc-elapsed{font-family:var(--mono);font-size:12px;color:var(--amber)}
+
+/* timeline */
+.timeline{overflow-x:auto;padding:4px 2px 8px;margin:0 -4px}
+.track{display:flex;min-width:min-content}
+.node{flex:0 0 96px;position:relative;background:none;border:0;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:7px;padding:6px 2px 4px;font-family:var(--mono)}
+.node::before{content:"";position:absolute;top:21px;left:-50%;width:100%;height:2px;background:var(--line2)}
+.node:first-child::before{display:none}
+.node.done::before,.node.current::before{background:var(--lime)}
+.node .bullet{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--line2);background:var(--surface);font-size:12px;color:var(--faint);z-index:1;transition:.2s}
+.node.done .bullet{border-color:var(--lime);color:var(--lime);background:color-mix(in srgb,var(--lime) 12%,var(--surface))}
+.node.current .bullet{border-color:var(--accent);color:var(--accent);animation:pulse 1.4s infinite}
+.node .roledot{width:5px;height:5px;border-radius:50%;background:var(--faint);margin-top:-3px}
+.node .nlabel{font-size:9.5px;letter-spacing:.03em;text-transform:uppercase;text-align:center;line-height:1.18;max-width:90px;color:var(--faint)}
+.node.done .nlabel{color:var(--muted)} .node.current .nlabel{color:var(--fg);font-weight:700}
+.node .ntime{font-size:9px;color:var(--faint);min-height:11px}
+.node.current .ntime{color:var(--accent)}
+.node.sel .bullet{outline:2px solid var(--fg);outline-offset:2px}
+.node.evidence .bullet::after{content:"◆";position:absolute;font-size:7px;color:var(--cyan);transform:translate(11px,-11px)}
+.node.chainstep .bullet::after{content:"⛓";position:absolute;font-size:8px;transform:translate(11px,-11px)}
+
+/* step detail drawer */
+.stepdetail{display:none;margin:2px 0 12px;border:1px solid var(--line);border-radius:11px;background:var(--bg);overflow:hidden}
+.stepdetail.open{display:block;animation:rise .2s both}
+.sd-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px}
+.sd-head .t{font-family:var(--display);font-weight:700;font-size:14px}
+.sd-body{padding:12px 14px;font-family:var(--mono);font-size:12px}
+.kv{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--line)}
+.kv:last-child{border-bottom:0}
+.kv .kk{color:var(--faint);min-width:120px;flex:none}
+.kv .vv{color:var(--fg);word-break:break-all}
+.kv .vv a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan)}
+.tag{display:inline-block;padding:1px 6px;border-radius:5px;border:1px solid var(--line2);font-size:9.5px;letter-spacing:.05em;color:var(--muted);text-transform:uppercase}
+.mock{color:var(--amber);border-color:rgba(255,178,77,.4)}
+pre.raw{margin:10px 0 0;padding:10px;background:var(--surface);border:1px solid var(--line);border-radius:8px;font-size:11px;color:var(--muted);overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:230px;overflow-y:auto}
+.crumbs{margin-top:8px}
+.crumbs svg{display:block;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+
+/* ── sidebar feed ── */
+.col-side{position:sticky;top:74px;display:flex;flex-direction:column;gap:12px;max-height:calc(100vh - 90px)}
+.panel{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;min-height:0}
+.panel .ph{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.panel .ph .t{font-family:var(--display);font-weight:700;font-size:14px}
+.filters{display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px 6px}
+.chip{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;padding:5px 10px;border-radius:20px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.15s}
+.chip:hover{color:var(--fg);border-color:var(--fg)}
+.chip.on{background:var(--lime);color:#0a0c10;border-color:var(--lime);font-weight:700}
+.fsearch{width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:9px;color:var(--fg);font-family:var(--mono);font-size:11.5px;padding:8px 10px;outline:none;margin:0 0 4px}
+.fsearch:focus{border-color:var(--lime)}
+.feed{overflow-y:auto;padding:4px 8px 10px;flex:1;min-height:120px}
+.fe{border-bottom:1px solid var(--line);padding:7px 6px;cursor:pointer;font-family:var(--mono)}
+.fe:hover{background:rgba(150,172,205,.04)}
+.fe-top{display:flex;align-items:center;gap:7px;font-size:11px}
+.fe-top .ft{color:var(--faint);font-size:10px}
+.fe-top .badge{padding:1px 6px;border-radius:5px;font-size:9px;letter-spacing:.05em;text-transform:uppercase;border:1px solid var(--line2);color:var(--muted)}
+.badge.user{border-color:rgba(198,242,78,.4);color:var(--lime)}
+.badge.shop{border-color:rgba(108,214,255,.4);color:var(--cyan)}
+.badge.driver{border-color:rgba(255,178,77,.4);color:var(--amber)}
+.badge.chain{border-color:rgba(200,162,255,.4);color:var(--violet)}
+.badge.compose{border-color:rgba(200,162,255,.4);color:var(--violet)}
+.badge.sys{border-color:var(--line2);color:var(--faint)}
+.fe-msg{font-size:11.5px;color:var(--fg);margin-top:3px;line-height:1.35}
+.fe-msg .oref{color:var(--faint)}
+.fe pre{display:none;margin:6px 0 2px;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:7px;font-size:10px;color:var(--muted);white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto}
+.fe.open pre{display:block}
+
+/* ── footer chain log ── */
+.chainwrap{position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:4px 18px 40px}
+.chainpanel{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:var(--r)}
+.chainpanel .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:13px 16px;border-bottom:1px solid var(--line)}
+.chainpanel .ph .t{font-family:var(--display);font-weight:700;font-size:15px;display:flex;align-items:center;gap:9px}
+.legend{display:flex;gap:7px;flex-wrap:wrap;font-family:var(--mono);font-size:10px}
+.clog{max-height:300px;overflow-y:auto}
+.crow{display:grid;grid-template-columns:150px 120px 110px 1fr 120px 90px;gap:12px;align-items:center;padding:9px 16px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px}
+.crow:hover{background:rgba(150,172,205,.04)}
+.crow .ctype{display:flex;align-items:center;gap:7px}
+.cbadge{width:8px;height:8px;border-radius:2px;flex:none}
+.cb-escrow_locked{background:var(--violet)} .cb-escrow_released{background:var(--lime)}
+.cb-usdc_transfer{background:var(--cyan)} .cb-eas_attestation{background:var(--amber)} .cb-reputation_delta{background:var(--violet)}
+.crow .camt{color:var(--lime);font-weight:700}
+.crow .cflow{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .cflow b{color:var(--fg);font-weight:500}
+.crow .ctx a{color:var(--cyan);text-decoration:none}
+.crow .ctx .blk{color:var(--faint);font-size:10px}
+.crow .cwhen{color:var(--faint);text-align:right;font-size:10.5px}
+.crow .cmeta{color:var(--faint);font-size:10px}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:10px 0 28px;letter-spacing:.04em}
+
+/* ── responsive ── */
+@media(max-width:1080px){
+  .wrap{grid-template-columns:1fr}
+  .col-side{position:static;max-height:none}
+  .feed{max-height:340px}
+  .crow{grid-template-columns:130px 1fr 110px;}
+  .crow .cflow,.crow .cmeta{display:none}
+}
+@media(max-width:640px){
+  .statbar{grid-template-columns:repeat(2,1fr)}
+  .tile.conn{grid-column:span 2}
+  .crow{grid-template-columns:1fr auto;gap:8px}
+  .crow .cflow,.crow .cmeta,.crow .cwhen{display:none}
+}
+/* ── audience / tablet big mode (?big=1) ── */
+body.big .tile .v{font-size:clamp(26px,3vw,40px)}
+body.big .node{flex-basis:108px}
+body.big .node .nlabel{font-size:10.5px}
+body.big .oc-id{font-size:19px}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza observability</span></div>
+  <div class="hstat">
+    <span><span class="dot" id="connDot"></span> <span id="connTxt">connecting</span></span>
+    <span style="color:var(--faint)" id="serverClock">—</span>
+  </div>
+</header>
+
+<div class="statbar">
+  <div class="tile lime"><div class="k">Active orders</div><div class="v" id="stActive">0</div><div class="s" id="stActiveSub">live on the substrate</div></div>
+  <div class="tile cyan"><div class="k">Volume today</div><div class="v" id="stVolume">$0</div><div class="s" id="stVolumeSub">0 delivered</div></div>
+  <div class="tile amber"><div class="k">Avg time-to-deliver</div><div class="v" id="stAvg">—</div><div class="s">order → dropoff</div></div>
+  <div class="tile violet"><div class="k">PCC fee today</div><div class="v" id="stFee">$0</div><div class="s">2.35% protocol fee</div></div>
+  <div class="tile conn"><div class="k">Firehose</div><div class="v"><span class="dot" id="fhDot"></span><span id="fhTxt">connecting</span></div><div class="s" id="fhSub">/sse/demo/firehose</div></div>
+</div>
+
+<div class="wrap">
+  <div class="col-main">
+    <div class="sectlabel">Order timelines <span class="ct" id="orderCount">· 0</span></div>
+    <div id="orders">
+      <div class="empty"><span class="blink">▣</span> waiting for orders — place one at <b>/order.html</b> and watch it flow through the substrate.</div>
+    </div>
+  </div>
+
+  <div class="col-side">
+    <div class="panel" style="max-height:60vh">
+      <div class="ph"><span class="t">Live event feed</span><span class="tag" id="feedCount">0</span></div>
+      <div class="filters">
+        <button class="chip on" data-f="all">all</button>
+        <button class="chip" data-f="order">orders</button>
+        <button class="chip" data-f="chain">chain</button>
+        <button class="chip" data-f="job">jobs</button>
+        <button class="chip" data-f="evidence">evidence</button>
+      </div>
+      <div style="padding:0 12px 6px"><input class="fsearch" id="feedSearch" placeholder="filter by order id / role…"></div>
+      <div class="feed" id="feed"></div>
+    </div>
+  </div>
+</div>
+
+<div class="chainwrap">
+  <div class="chainpanel">
+    <div class="ph">
+      <span class="t">⛓ Smart-contract event log <span class="tag mock">mocked · base-sepolia shaped</span></span>
+      <span class="legend">
+        <span style="color:var(--violet)">■ escrow lock</span>
+        <span style="color:var(--lime)">■ release</span>
+        <span style="color:var(--cyan)">■ USDC transfer</span>
+        <span style="color:var(--amber)">■ EAS attestation</span>
+      </span>
+    </div>
+    <div class="clog" id="clog">
+      <div class="empty" style="border:0;border-radius:0">no on-chain events yet — they appear on escrow lock, settlement release & reputation writes.</div>
+    </div>
+  </div>
+  <div class="foot">PCC // capability.network · every leg of every order, in one surface · agents compose reality</div>
+</div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const params=new URLSearchParams(location.search);
+const BASE=(params.get("base")||location.origin).replace(/\/$/,"");
+if(params.get("big")==="1")document.body.classList.add("big");
+
+// ── canonical order lifecycle (drives every timeline) ───────────────────────
+const STEPS=[
+  {id:"order_placed",        label:"Order placed",        short:"Order",      role:"user"},
+  {id:"composition_planned", label:"Composition planned", short:"Compose",    role:"compose"},
+  {id:"user_confirmed",      label:"User confirmed",      short:"Confirm",    role:"user"},
+  {id:"escrow_locked",       label:"Escrow locked",       short:"Escrow",     role:"chain", chain:true},
+  {id:"make_dispatched",     label:"Make-pizza dispatched",short:"Dispatch",  role:"shop"},
+  {id:"shop_accepted",       label:"Shop accepted",       short:"Accept",     role:"shop"},
+  {id:"pizza_ready",         label:"Pizza ready",         short:"Ready",      role:"shop", evidence:true},
+  {id:"delivery_dispatched", label:"Delivery dispatched", short:"Dispatch",   role:"driver"},
+  {id:"driver_accepted",     label:"Driver accepted",     short:"Accept",     role:"driver"},
+  {id:"driver_pickup",       label:"Driver picked up",    short:"Pickup",     role:"driver"},
+  {id:"in_transit",          label:"In transit",          short:"Transit",    role:"driver", statusOnly:"in_transit"},
+  {id:"pizza_delivered",     label:"Driver delivered",    short:"Delivered",  role:"driver", evidence:true},
+  {id:"settlement_released", label:"Settlement released", short:"Settle",     role:"chain", chain:true},
+  {id:"reputation_applied",  label:"Reputation applied",  short:"Reputation", role:"chain", chain:true},
+];
+const STEP_BY_ID=Object.fromEntries(STEPS.map(s=>[s.id,s]));
+const ROLE_COLOR={user:"var(--lime)",compose:"var(--violet)",shop:"var(--cyan)",driver:"var(--amber)",chain:"var(--violet)",sys:"var(--faint)"};
+// which canonical step is "in progress" for a given live status
+const STATUS_CURRENT={
+  proposed:"user_confirmed", confirmed:"escrow_locked", awaiting_shop:"shop_accepted",
+  making:"pizza_ready", awaiting_driver:"driver_accepted", ready_for_pickup:"driver_pickup",
+  in_transit:"in_transit", delivered:null, rejected:null, failed:null,
+};
+const TERMINAL=new Set(["delivered","rejected","failed"]);
+const STATUS_PILL={
+  proposed:["violet","proposed"], awaiting_shop:["cyan","awaiting shop"], making:["cyan","making"],
+  awaiting_driver:["amber","awaiting driver"], ready_for_pickup:["amber","driver enroute"],
+  in_transit:["amber","in transit"], delivered:["lime","delivered ✓"], rejected:["danger","rejected"],
+  failed:["danger","failed"], confirmed:["violet","confirmed"],
+};
+
+// ── state ───────────────────────────────────────────────────────────────────
+const ST={
+  orders:new Map(),            // id -> order record (base + merged timeline/chain)
+  feed:[], chain:[], chainSeen:new Set(),
+  stats:{activeOrders:0,completedToday:0,totalVolumeUSD:0,pccFeeUSDToday:0,avgTimeToDeliverSec:0,totalOrders:0},
+  filter:"all", search:"",
+  expSteps:new Set(), expFeed:new Set(),
+};
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+function ts(d){const x=d?new Date(d):new Date();return x.toLocaleTimeString([], {hour12:false});}
+function shortId(id){return (id||"").replace(/^order_/,"").slice(0,8);}
+function shortHash(h){return h?h.slice(0,8)+"…"+h.slice(-4):"";}
+function money(n){return "$"+(Number(n)||0).toFixed(2);}
+function fmtDur(sec){
+  if(sec==null||!isFinite(sec))return "";
+  if(sec<1)return "<1s"; if(sec<90)return Math.round(sec)+"s";
+  if(sec<3600)return (sec/60).toFixed(1)+"m"; return (sec/3600).toFixed(1)+"h";
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function elapsedSince(iso){return (Date.now()-new Date(iso).getTime())/1000;}
+
+async function api(path){
+  const r=await fetch(BASE+path,{headers:{"content-type":"application/json"}});
+  if(!r.ok)throw new Error("http "+r.status);
+  return r.json();
+}
+
+// ── order record management (append-only timeline/chain, deduped) ───────────
+function ensureOrder(id){
+  let o=ST.orders.get(id);
+  if(!o){o={orderId:id,status:"proposed",composition:null,jobs:{},timeline:[],chainEvents:[],
+    _tl:new Set(),_ce:new Set(),userId:"",description:"",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+    ST.orders.set(id,o);}
+  return o;
+}
+function mergeBase(src){
+  if(!src||!src.orderId)return null;
+  const o=ensureOrder(src.orderId);
+  for(const k of ["userId","description","deliveryAddress","deliveryLocation","status","composition","rejectionReason","createdAt","updatedAt","jobs"]){
+    if(src[k]!==undefined&&src[k]!==null)o[k]=src[k];
+  }
+  if(Array.isArray(src.timeline))mergeTimeline(o,src.timeline);
+  if(Array.isArray(src.chainEvents))src.chainEvents.forEach(ce=>mergeChain(o,ce));
+  return o;
+}
+function mergeTimeline(o,entries){
+  for(const e of entries){
+    if(!e||!e.step)continue;
+    const key=e.step+"@"+e.at;
+    if(o._tl.has(key))continue;
+    o._tl.add(key); o.timeline.push(e);
+    // synthesize a partial composition early so the card has shop/driver names
+    if(e.step==="composition_planned"&&!o.composition&&e.detail){
+      o.composition={compositionId:e.detail.compositionId,
+        shop:{name:e.detail.shop,priceUSD:e.detail.shopPriceUSD},
+        driver:{name:e.detail.driver,priceUSD:e.detail.driverPriceUSD},
+        totalPriceUSD:e.detail.totalPriceUSD,etaSec:e.detail.etaSec};
+    }
+    if(e.step==="order_placed"&&e.detail&&!o.description)o.description=e.detail.description||"";
+  }
+  o.timeline.sort((a,b)=>a.at.localeCompare(b.at));
+}
+function mergeChain(o,ce){
+  if(!ce||!ce.id||o._ce.has(ce.id))return;
+  o._ce.add(ce.id); o.chainEvents.push(ce);
+  if(!ST.chainSeen.has(ce.id)){ST.chainSeen.add(ce.id); ST.chain.unshift(ce); if(ST.chain.length>200)ST.chain.pop();}
+}
+
+// ── timeline geometry per order ─────────────────────────────────────────────
+function stepStates(o){
+  const done=new Set(o.timeline.map(t=>t.step));
+  if(o.status==="delivered"||done.has("pizza_delivered"))done.add("in_transit");
+  if(done.has("driver_pickup"))done.add("in_transit_started");
+  const cur=TERMINAL.has(o.status)?null:STATUS_CURRENT[o.status];
+  const times={}; o.timeline.forEach(t=>{times[t.step]=t.at;});
+  return {done,cur,times};
+}
+
+// ── rendering ───────────────────────────────────────────────────────────────
+function renderStats(){
+  const s=ST.stats;
+  $("#stActive").textContent=s.activeOrders;
+  $("#stActiveSub").textContent=s.totalOrders+" total · "+s.completedToday+" delivered";
+  $("#stVolume").textContent=money(s.totalVolumeUSD);
+  $("#stVolumeSub").textContent=s.completedToday+" delivered today";
+  $("#stAvg").textContent=s.avgTimeToDeliverSec?fmtDur(s.avgTimeToDeliverSec):"—";
+  $("#stFee").textContent=money(s.pccFeeUSDToday);
+}
+
+function orderList(){
+  const arr=[...ST.orders.values()];
+  arr.sort((a,b)=>{
+    const at=TERMINAL.has(a.status),bt=TERMINAL.has(b.status);
+    if(at!==bt)return at?1:-1;
+    const ka=at?a.updatedAt:a.createdAt, kb=bt?b.updatedAt:b.createdAt;
+    return (kb||"").localeCompare(ka||"");
+  });
+  return arr;
+}
+
+function renderOrders(){
+  const arr=orderList();
+  $("#orderCount").textContent="· "+arr.length;
+  const host=$("#orders");
+  if(arr.length===0){
+    host.innerHTML='<div class="empty"><span class="blink">▣</span> waiting for orders — place one at <b>/order.html</b> and watch it flow through the substrate.</div>';
+    return;
+  }
+  host.innerHTML=arr.slice(0,24).map(renderCard).join("");
+  // rebind step clicks
+  host.querySelectorAll(".node").forEach(n=>n.onclick=()=>toggleStep(n.dataset.order,n.dataset.step));
+}
+
+function renderCard(o){
+  const {done,cur,times}=stepStates(o);
+  const comp=o.composition||{};
+  const [pcls,ptxt]=STATUS_PILL[o.status]||["", o.status];
+  const total=comp.totalPriceUSD!=null?money(comp.totalPriceUSD):"—";
+  const shop=comp.shop?.name||"—", driver=comp.driver?.name||"—";
+  // total elapsed (or final duration)
+  const startAt=times.order_placed||o.createdAt;
+  let elapsedHtml="";
+  if(o.status==="delivered"&&times.pizza_delivered){
+    elapsedHtml=`<span class="oc-elapsed" style="color:var(--lime)">⧗ ${fmtDur((new Date(times.pizza_delivered)-new Date(startAt))/1000)}</span>`;
+  }else if(!TERMINAL.has(o.status)){
+    elapsedHtml=`<span class="oc-elapsed" data-since="${startAt}">⧗ —</span>`;
+  }
+
+  let lastTime=null;
+  const nodes=STEPS.map(step=>{
+    const isDone=done.has(step.id);
+    const isCur=cur===step.id&&!isDone;
+    let state=isDone?"done":isCur?"current":"future";
+    const cls=[ "node",state, step.evidence?"evidence":"", step.chain?"chainstep":"",
+      ST.expSteps.has(o.orderId+":"+step.id)?"sel":"" ].join(" ");
+    // node time label: done -> +duration ; current -> live elapsed
+    let tlabel="";
+    const at=times[step.id];
+    if(isDone&&at){
+      const d= lastTime? (new Date(at)-new Date(lastTime))/1000 : null;
+      tlabel= d!=null? "+"+fmtDur(d) : ts(at);
+      lastTime=at;
+    }else if(isDone&&step.id==="in_transit"){
+      tlabel="✓";
+    }else if(isCur){
+      tlabel=`<span data-since="${lastTime||startAt}">…</span>`;
+    }
+    const bul=isDone?"✓":isCur?"●":(STEPS.indexOf(step)+1);
+    const rc=ROLE_COLOR[step.role]||"var(--faint)";
+    return `<button class="${cls}" data-order="${o.orderId}" data-step="${step.id}" title="${esc(step.label)}">
+      <span class="bullet">${bul}</span>
+      <span class="roledot" style="background:${state==='future'?'var(--faint)':rc}"></span>
+      <span class="nlabel">${step.short}</span>
+      <span class="ntime">${tlabel}</span>
+    </button>`;
+  }).join("");
+
+  // selected step detail (rendered under the timeline)
+  let detailHtml="";
+  for(const step of STEPS){
+    if(ST.expSteps.has(o.orderId+":"+step.id)){
+      detailHtml+=renderStepDetail(o,step,times[step.id]);
+    }
+  }
+
+  const rejected=o.rejectionReason?`<div class="oc-sub" style="color:var(--danger)">✕ ${esc(o.rejectionReason)}</div>`:"";
+  return `<div class="ocard ${TERMINAL.has(o.status)?'terminal':''} ${o.status}">
+    <div class="oc-head">
+      <div>
+        <div class="oc-id">🍕 ${esc(o.description||"pizza order")} <span class="oid">${shortId(o.orderId)}</span></div>
+        <div class="oc-sub">by <b>${esc(o.userId||"—")}</b> · ${esc(shop)} <span style="color:var(--faint)">→</span> ${esc(driver)} <span style="color:var(--faint)">→</span> ${esc(o.deliveryAddress||"")}</div>
+        ${rejected}
+      </div>
+      <div class="oc-right">
+        ${elapsedHtml}
+        <span class="oc-price">${total}</span>
+        <span class="pill ${pcls}">${ptxt}</span>
+      </div>
+    </div>
+    <div class="timeline"><div class="track">${nodes}</div></div>
+    ${detailHtml}
+  </div>`;
+}
+
+function renderStepDetail(o,step,at){
+  const entry=o.timeline.find(t=>t.step===step.id);
+  const det=entry?.detail||{};
+  const rows=[];
+  rows.push(["role",`<span class="tag" style="color:${ROLE_COLOR[step.role]};border-color:${ROLE_COLOR[step.role]}">${step.role}</span>`]);
+  if(at)rows.push(["timestamp",esc(ts(at))+" · "+esc(at)]);
+  // duration from previous done step
+  const states=stepStates(o); let prevAt=null;
+  for(const s of STEPS){ if(s.id===step.id)break; if(states.times[s.id])prevAt=states.times[s.id]; }
+  if(at&&prevAt)rows.push(["Δ from previous","+"+fmtDur((new Date(at)-new Date(prevAt))/1000)]);
+
+  // friendly fields
+  if(det.txHash){
+    rows.push(["tx hash",`<a href="${esc(det.explorerUrl||('https://sepolia.basescan.org/tx/'+det.txHash))}" target="_blank" rel="noopener">${esc(shortHash(det.txHash))}</a> <span class="tag mock">mock</span>`]);
+  }
+  if(det.blockNumber)rows.push(["block",`#${det.blockNumber}`]);
+  if(det.contract)rows.push(["contract",esc(det.contract)]);
+  if(det.amountUSDC)rows.push(["amount",`<span style="color:var(--lime)">${esc(det.amountUSDC)} USDC</span>`]);
+  if(det.evidenceHash)rows.push(["evidence",esc(det.evidenceHash)]);
+  if(det.photo)rows.push(["photo",esc(det.photo)]);
+  if(det.gps)rows.push(["gps",`${det.gps.lat}, ${det.gps.lng}`]);
+  if(det.assuranceTier!=null)rows.push(["assurance tier",`T${det.assuranceTier}`]);
+  if(det.shopPayoutUSD!=null)rows.push(["shop payout",`$${det.shopPayoutUSD}`]);
+  if(det.driverPayoutUSD!=null)rows.push(["driver payout",`$${det.driverPayoutUSD}`]);
+  if(det.pccFeeUSD!=null)rows.push(["pcc fee",`$${det.pccFeeUSD}`]);
+  if(det.shopDelta!=null)rows.push(["shop Δrep",`+${det.shopDelta}`]);
+  if(det.driverDelta!=null)rows.push(["driver Δrep",`+${det.driverDelta}`]);
+  if(det.engine)rows.push(["engine",esc(det.engine)]);
+  if(det.assignee)rows.push(["assignee",esc(det.assignee)]);
+
+  let crumbs="";
+  if(Array.isArray(det.breadcrumbs)&&det.breadcrumbs.length){
+    crumbs=renderCrumbs(det.breadcrumbs);
+  }
+  const kv=rows.map(([k,v])=>`<div class="kv"><span class="kk">${esc(k)}</span><span class="vv">${v}</span></div>`).join("");
+  const pending = !entry ? `<div class="kv"><span class="kk">status</span><span class="vv" style="color:var(--faint)">not reached yet</span></div>`:"";
+  return `<div class="stepdetail open">
+    <div class="sd-head"><span class="t">${esc(step.label)}</span>
+      <span class="tag" style="cursor:pointer" data-close="${o.orderId}:${step.id}" onclick="window.__closeStep('${o.orderId}','${step.id}')">close ✕</span></div>
+    <div class="sd-body">${kv}${pending}${crumbs}
+      ${entry?`<pre class="raw">${esc(JSON.stringify(det,null,2))}</pre>`:""}
+    </div>
+  </div>`;
+}
+
+function renderCrumbs(pts){
+  const lats=pts.map(p=>p.lat),lngs=pts.map(p=>p.lng);
+  const minLa=Math.min(...lats),maxLa=Math.max(...lats),minLo=Math.min(...lngs),maxLo=Math.max(...lngs);
+  const W=300,H=70,pad=10;
+  const sx=v=>pad+((v-minLo)/((maxLo-minLo)||1))*(W-2*pad);
+  const sy=v=>H-pad-((v-minLa)/((maxLa-minLa)||1))*(H-2*pad);
+  const d=pts.map((p,i)=>(i?"L":"M")+sx(p.lng).toFixed(1)+" "+sy(p.lat).toFixed(1)).join(" ");
+  const dots=pts.map(p=>`<circle cx="${sx(p.lng).toFixed(1)}" cy="${sy(p.lat).toFixed(1)}" r="3" fill="var(--amber)"/>`).join("");
+  return `<div class="crumbs"><div class="kk" style="font-size:10px;color:var(--faint);margin-bottom:4px">geo breadcrumbs · ${pts.length} pts</div>
+    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><path d="${d}" fill="none" stroke="var(--amber)" stroke-width="1.5" stroke-dasharray="3 3" opacity=".7"/>${dots}</svg></div>`;
+}
+
+function toggleStep(orderId,stepId){
+  const key=orderId+":"+stepId;
+  if(ST.expSteps.has(key))ST.expSteps.delete(key); else ST.expSteps.add(key);
+  renderOrders();
+}
+window.__closeStep=(o,s)=>{ST.expSteps.delete(o+":"+s);renderOrders();};
+
+// ── live feed ───────────────────────────────────────────────────────────────
+function feedCategory(topic,ev){
+  const t=ev?.type;
+  if(t==="chain_event")return "chain";
+  if(t==="job_assigned"||t==="job_accepted"||t==="job_pickup")return "job";
+  if(t==="timeline"){const st=ev.entry?.step; if(["pizza_ready","pizza_delivered"].includes(st))return "evidence"; if(STEP_BY_ID[st]?.chain)return "chain"; return "order";}
+  if(t==="status"||t==="delivered")return "order";
+  return "order";
+}
+function feedRole(topic,ev){
+  if(topic.startsWith("operator:"))return "shop";
+  if(topic.startsWith("driver:"))return "driver";
+  const t=ev?.type;
+  if(t==="chain_event")return "chain";
+  if(t==="timeline")return ev.entry?.role||"sys";
+  if(t==="delivered")return "chain";
+  return "user";
+}
+function feedSummary(topic,ev){
+  const t=ev?.type;
+  if(t==="timeline")return `${ev.entry.label}`;
+  if(t==="chain_event"){const c=ev.chainEvent;return `${c.type.replace(/_/g," ")}${c.amountUSDC?" · "+c.amountUSDC+" USDC":""}`;}
+  if(t==="status")return `status → ${ev.order.status}`;
+  if(t==="delivered")return `delivered · settled $${(ev.settlement?.shopPayoutUSD||0)+(ev.settlement?.driverPayoutUSD||0)+(ev.settlement?.pccFeeUSD||0)}`;
+  if(t==="job_assigned")return `job assigned → ${ev.job.assigneeSlug} · ${ev.job.type}`;
+  if(t==="job_accepted")return `job accepted · ${ev.job.type}`;
+  if(t==="job_pickup")return `picked up · ${ev.job.type}`;
+  return t||"event";
+}
+function feedOrderId(topic,ev){
+  if(topic.startsWith("order:"))return topic.slice(6);
+  const t=ev?.type;
+  if(ev?.order?.orderId)return ev.order.orderId;
+  if(ev?.job?.orderId)return ev.job.orderId;
+  if(ev?.chainEvent?.orderId)return ev.chainEvent.orderId;
+  return "";
+}
+function pushFeed(d){
+  const ev=d.event||{};
+  const cat=feedCategory(d.topic,ev), role=feedRole(d.topic,ev);
+  const item={ts:d.ts||new Date().toISOString(),topic:d.topic,cat,role,
+    oid:feedOrderId(d.topic,ev),summary:feedSummary(d.topic,ev),raw:ev,_id:"f"+(ST.feed.length)+Math.random().toString(36).slice(2,6)};
+  ST.feed.unshift(item); if(ST.feed.length>240)ST.feed.pop();
+}
+function feedVisible(){
+  return ST.feed.filter(f=>{
+    if(ST.filter!=="all"&&f.cat!==ST.filter)return false;
+    if(ST.search){const q=ST.search.toLowerCase();
+      if(!(f.oid.toLowerCase().includes(q)||f.role.includes(q)||f.summary.toLowerCase().includes(q)))return false;}
+    return true;
+  });
+}
+function renderFeed(){
+  const vis=feedVisible();
+  $("#feedCount").textContent=ST.feed.length;
+  const host=$("#feed");
+  if(vis.length===0){host.innerHTML='<div style="padding:24px 8px;color:var(--faint);font-family:var(--mono);font-size:11.5px;text-align:center">no events match.</div>';return;}
+  host.innerHTML=vis.slice(0,120).map(f=>{
+    const open=ST.expFeed.has(f._id)?"open":"";
+    return `<div class="fe ${open}" data-id="${f._id}">
+      <div class="fe-top"><span class="badge ${f.role}">${f.role}</span><span class="ft">${ts(f.ts)}</span>
+        ${f.oid?`<span class="ft">· ${shortId(f.oid)}</span>`:""}</div>
+      <div class="fe-msg">${esc(f.summary)}</div>
+      <pre>${esc(JSON.stringify(f.raw,null,2))}</pre>
+    </div>`;
+  }).join("");
+  host.querySelectorAll(".fe").forEach(el=>el.onclick=()=>{
+    const id=el.dataset.id; if(ST.expFeed.has(id))ST.expFeed.delete(id); else ST.expFeed.add(id); renderFeed();
+  });
+}
+
+// ── chain log ───────────────────────────────────────────────────────────────
+function renderChain(){
+  const host=$("#clog");
+  if(ST.chain.length===0){host.innerHTML='<div class="empty" style="border:0">no on-chain events yet — they appear on escrow lock, settlement release & reputation writes.</div>';return;}
+  host.innerHTML=ST.chain.slice(0,120).map(c=>{
+    const flow=(c.from||c.to)?`<b>${esc(c.from||"—")}</b> → <b>${esc(c.to||"—")}</b>`:(c.schema?esc(c.schema):"");
+    return `<div class="crow">
+      <span class="ctype"><span class="cbadge cb-${c.type}"></span>${esc(c.type.replace(/_/g," "))}</span>
+      <span class="cmeta">${esc(c.contract)}</span>
+      <span class="camt">${c.amountUSDC?esc(c.amountUSDC)+" USDC":(c.schema?"attestation":"")}</span>
+      <span class="cflow">${flow}</span>
+      <span class="ctx"><a href="${esc(c.explorerUrl)}" target="_blank" rel="noopener">${esc(shortHash(c.txHash))}</a> <span class="blk">#${c.blockNumber}</span></span>
+      <span class="cwhen">${ts(c.at)}<br>${shortId(c.orderId)}</span>
+    </div>`;
+  }).join("");
+}
+
+// ── live tickers (elapsed labels, no re-render) ─────────────────────────────
+setInterval(()=>{
+  document.querySelectorAll("[data-since]").forEach(el=>{
+    const s=elapsedSince(el.dataset.since);
+    el.textContent=(el.classList.contains("oc-elapsed")?"⧗ ":"")+fmtDur(s);
+  });
+  $("#serverClock").textContent=ts();
+},1000);
+
+// ── data flow: poll + firehose ──────────────────────────────────────────────
+let refetchTimer=null;
+function scheduleRefetch(){ if(refetchTimer)return; refetchTimer=setTimeout(()=>{refetchTimer=null;loadAll();},350); }
+
+async function loadAll(){
+  try{
+    const data=await api("/api/demo/orders/observability");
+    (data.orders||[]).forEach(mergeBase);
+    if(data.stats)ST.stats=data.stats;
+    renderStats(); renderOrders(); renderChain();
+  }catch(e){ /* gateway may be booting */ }
+}
+
+function onFirehose(d){
+  // d = {topic, event, ts}
+  const ev=d.event||{}; const t=ev.type;
+  pushFeed(d);
+  let touched=false;
+  if(t==="status"&&ev.order){mergeBase(ev.order);touched=true;}
+  else if(t==="delivered"&&ev.order){mergeBase(ev.order);touched=true;}
+  else if(t==="timeline"&&ev.entry){
+    const oid=feedOrderId(d.topic,ev);
+    if(oid){const o=ensureOrder(oid);mergeTimeline(o,[ev.entry]);touched=true; if(!o.composition&&ev.entry.step!=="composition_planned")scheduleRefetch();}
+  }
+  else if(t==="chain_event"&&ev.chainEvent){
+    const o=ensureOrder(ev.chainEvent.orderId); mergeChain(o,ev.chainEvent); touched=true;
+  }
+  else if(t==="job_assigned"||t==="job_accepted"||t==="job_pickup"){
+    const oid=ev.job?.orderId; if(oid){const o=ensureOrder(oid); o.jobs=o.jobs||{};
+      if(ev.job.type==="make-pizza")o.jobs.makePizza=ev.job; else o.jobs.delivery=ev.job;
+      if(!o.composition)scheduleRefetch(); touched=true;}
+  }
+  renderFeed();
+  if(touched){renderOrders(); renderChain();}
+}
+
+let es=null;
+function connect(){
+  try{es&&es.close();}catch{}
+  es=new EventSource(BASE+"/sse/demo/firehose");
+  es.onopen=()=>{setConn(true);};
+  es.onmessage=e=>{
+    let d; try{d=JSON.parse(e.data);}catch{return;}
+    if(d.type==="connected")return;
+    if(d.topic&&d.event)onFirehose(d);
+  };
+  es.onerror=()=>{setConn(false); try{es.close();}catch{} setTimeout(connect,3000);};
+}
+function setConn(ok){
+  $("#connDot").className="dot"+(ok?"":" off"); $("#connTxt").textContent=ok?"live":"reconnecting";
+  $("#fhDot").className="dot"+(ok?"":" off"); $("#fhTxt").textContent=ok?"streaming":"down";
+}
+
+// filters
+document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
+  document.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
+  c.classList.add("on"); ST.filter=c.dataset.f; renderFeed();
+});
+$("#feedSearch").oninput=e=>{ST.search=e.target.value.trim();renderFeed();};
+
+// boot
+loadAll(); connect();
+setInterval(loadAll,4000); // reconciliation safety net
+</script>
+</body>
+</html>
