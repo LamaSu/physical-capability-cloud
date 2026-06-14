@@ -50,7 +50,9 @@ export class CdpWalletClient {
     }
     const cdp = await this.cdp();
     const owner = await cdp.evm.createAccount();
-    const smart = await cdp.evm.createSmartAccount({ owner });
+    // enableSpendPermissions adds the SpendPermissionManager as a second owner, so the
+    // wallet can later grant scoped, revocable spend permissions — the lane's custody model.
+    const smart = await cdp.evm.createSmartAccount({ owner, enableSpendPermissions: true });
     return {
       address: smart.address as `0x${string}`,
       network: this.network,
