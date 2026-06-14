@@ -203,16 +203,20 @@
     relayoutTopology();
   }
 
-  // Faint background grid — concentric rings + radial spokes.
+  // Faint background grid — concentric rings + radial spokes + a sparse
+  // hex point lattice that literally suggests "substrate". Computed once
+  // per resize; rendered every frame as a fixed pattern.
   function rebuildConstellation() {
     state.constellationLines = [];
+    state.substrateDots = [];
     const cx = state.cx, cy = state.cy;
     const maxR = Math.min(state.width, state.height) * 0.5;
+
     // Concentric rings
     for (let r = 60; r < maxR; r += 80) {
       state.constellationLines.push({ kind: "ring", r });
     }
-    // Hex spokes
+    // Radial spokes (hex symmetry)
     for (let i = 0; i < 12; i++) {
       const a = (i / 12) * TAU;
       state.constellationLines.push({
@@ -222,6 +226,28 @@
         x2: cx + Math.cos(a) * maxR,
         y2: cy + Math.sin(a) * maxR,
       });
+    }
+
+    // Hex point lattice — extremely faint dots arranged on a hexagonal
+    // grid. Reads as "structure underneath" without competing with the
+    // pulse motion. Pitch ~48px, vertical interleave.
+    const pitch = 48;
+    const rowH = pitch * Math.sin(Math.PI / 3);
+    const cols = Math.ceil(state.width / pitch) + 2;
+    const rows = Math.ceil(state.height / rowH) + 2;
+    for (let row = -1; row < rows; row++) {
+      const offset = (row % 2 === 0) ? 0 : pitch / 2;
+      for (let col = -1; col < cols; col++) {
+        const x = col * pitch + offset;
+        const y = row * rowH;
+        // Skip dots inside the central node region to keep it clean.
+        const dx = x - cx, dy = y - cy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 40) continue;
+        // Alpha falls off with distance from center for a soft halo edge.
+        const alpha = 0.024 + 0.020 * Math.max(0, 1 - d / (maxR * 1.4));
+        state.substrateDots.push({ x, y, alpha });
+      }
     }
   }
 
@@ -336,6 +362,13 @@
   // ─────────────────────────────────────────────────────────────────
   function spawnPulse({ from, to, color, weight, durationMs }) {
     if (!from || !to) return;
+    // Guard: if any endpoint coordinate is not finite (race during very
+    // first events before layout has run), skip this pulse. The next
+    // event from the same source will replay the visual.
+    if (!Number.isFinite(from.x) || !Number.isFinite(from.y) ||
+        !Number.isFinite(to.x)   || !Number.isFinite(to.y)) {
+      return;
+    }
     const dur = durationMs || (1200 + Math.random() * 600);
     // Bezier control point — offset perpendicular to the segment to give
     // each pulse a graceful arc rather than a straight line.
@@ -489,12 +522,22 @@
         from, to,
         color: style.color,
         weight: style.weight,
-        durationMs: isSettlement ? 2200 : (900 + Math.random() * 500),
+        durationMs: isSettlement ? 2400 : (900 + Math.random() * 500),
       });
 
-      // Settlement gets a sympathetic second pulse for visual emphasis.
+      // Settlement gets sympathetic second + third pulses for visual
+      // emphasis — value moving through the substrate should FEEL
+      // like value moving.
       if (isSettlement) {
-        setTimeout(() => spawnPulse({ from, to, color: COLORS.gold, weight: 1.4, durationMs: 1800 }), 180);
+        setTimeout(() => spawnPulse({ from, to, color: COLORS.gold, weight: 1.6, durationMs: 2000 }), 180);
+        setTimeout(() => spawnPulse({ from, to, color: COLORS.gold, weight: 1.2, durationMs: 1600 }), 360);
+        // Settlement flash on the destination kernel.
+        if (from.id && state.kernels.has(from.id)) {
+          state.kernels.get(from.id).glow = 1.0;
+        }
+        if (to.id && state.agents.has(to.id)) {
+          state.agents.get(to.id).glow = 1.0;
+        }
       }
     }
 
@@ -591,6 +634,16 @@
     ctxS.globalCompositeOperation = "source-over";
     ctxS.fillStyle = "rgba(6, 7, 13, 0.16)";
     ctxS.fillRect(0, 0, w, h);
+
+    // Substrate dot lattice — the literal "this is a substrate" texture.
+    if (state.substrateDots) {
+      for (const d of state.substrateDots) {
+        ctxS.fillStyle = `rgba(232, 229, 220, ${d.alpha})`;
+        ctxS.beginPath();
+        ctxS.arc(d.x, d.y, 0.9, 0, TAU);
+        ctxS.fill();
+      }
+    }
 
     // Background constellation grid
     ctxS.strokeStyle = COLORS.grid;
@@ -718,33 +771,44 @@
       const y = k.y + Math.sin(c.angle) * c.orbitR;
       const birthEase = ease(c.birthT);
 
+      // Tether — a faint line from kernel core to capability, hinting
+      // at the structural "this belongs to that".
+      ctxS.strokeStyle = `rgba(91, 211, 255, ${0.10 + c.glow * 0.30})`;
+      ctxS.lineWidth = 0.6;
+      ctxS.beginPath();
+      ctxS.moveTo(k.x, k.y);
+      ctxS.lineTo(x, y);
+      ctxS.stroke();
+
       // Chevron / kite marker pointed outward from kernel.
       const ang = Math.atan2(y - k.y, x - k.x);
       ctxS.save();
       ctxS.translate(x, y);
       ctxS.rotate(ang);
 
-      // Glow
+      // Glow halo — brighter than v1 so capabilities read at distance
       ctxS.globalCompositeOperation = "lighter";
-      const cglow = ctxS.createRadialGradient(0, 0, 0, 0, 0, 14 + c.glow * 18);
-      cglow.addColorStop(0, `rgba(91, 211, 255, ${0.35 + c.glow * 0.45})`);
+      const gr = 18 + c.glow * 26;
+      const cglow = ctxS.createRadialGradient(0, 0, 0, 0, 0, gr);
+      cglow.addColorStop(0, `rgba(91, 211, 255, ${0.55 + c.glow * 0.40})`);
+      cglow.addColorStop(0.4, `rgba(91, 211, 255, ${0.18 + c.glow * 0.22})`);
       cglow.addColorStop(1, "rgba(91, 211, 255, 0)");
       ctxS.fillStyle = cglow;
       ctxS.beginPath();
-      ctxS.arc(0, 0, 14 + c.glow * 18, 0, TAU);
+      ctxS.arc(0, 0, gr, 0, TAU);
       ctxS.fill();
       ctxS.globalCompositeOperation = "source-over";
 
-      // Chevron
-      const size = 5 * birthEase;
-      ctxS.fillStyle = `rgba(232, 229, 220, ${0.95 * birthEase})`;
-      ctxS.strokeStyle = `rgba(91, 211, 255, ${0.55 * birthEase})`;
-      ctxS.lineWidth = 1;
+      // Chevron — larger and brighter
+      const size = 6.5 * birthEase;
+      ctxS.fillStyle = `rgba(232, 244, 255, ${0.98 * birthEase})`;
+      ctxS.strokeStyle = `rgba(91, 211, 255, ${0.85 * birthEase})`;
+      ctxS.lineWidth = 1.2;
       ctxS.beginPath();
-      ctxS.moveTo(size * 1.4, 0);
-      ctxS.lineTo(-size, size * 0.85);
-      ctxS.lineTo(-size * 0.4, 0);
-      ctxS.lineTo(-size, -size * 0.85);
+      ctxS.moveTo(size * 1.5, 0);
+      ctxS.lineTo(-size, size * 0.95);
+      ctxS.lineTo(-size * 0.35, 0);
+      ctxS.lineTo(-size, -size * 0.95);
       ctxS.closePath();
       ctxS.fill();
       ctxS.stroke();
@@ -816,6 +880,14 @@
       // x/y inline, so reading p.fromX still works.
       const x = bez(p.fromX, p.ctrlX, p.toX, t);
       const y = bez(p.fromY, p.ctrlY, p.toY, t);
+
+      // Safety: skip if coords are not finite (defensive — should be
+      // caught in spawnPulse, but a re-render after node deletion could
+      // theoretically leave stale references).
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        state.pulses.splice(i, 1);
+        continue;
+      }
 
       // Pulse core
       const radius = 2.2 + (p.weight || 1) * 1.4;
@@ -893,14 +965,37 @@
     return here;
   }
 
-  function connectLive() {
+  async function connectLive() {
     if (state.eventSource) {
       state.eventSource.close();
       state.eventSource = null;
     }
     setConnState("connecting", "connecting");
 
-    const url = `${gatewayOrigin()}/api/visualizer/events`;
+    const origin = gatewayOrigin();
+    const url = `${origin}/api/visualizer/events`;
+
+    // Pre-flight: hit the snapshot endpoint to verify the gateway has
+    // the visualizer routes. This avoids the noisy "GET … net::ERR_*"
+    // EventSource error in browser devtools when there's no gateway,
+    // and lets us go straight to offline mode.
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2200);
+      const probe = await fetch(`${origin}/api/visualizer/events.json?limit=1`, {
+        method: "GET",
+        credentials: "omit",
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (!probe.ok) throw new Error(`probe http ${probe.status}`);
+    } catch (err) {
+      // Gateway not reachable or doesn't expose visualizer routes.
+      // Fall through silently to offline mode — no devtools noise.
+      fallbackToOffline("offline");
+      return;
+    }
+
     let es;
     try {
       es = new EventSource(url);
