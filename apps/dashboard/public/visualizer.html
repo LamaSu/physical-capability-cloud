@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>PCC · Substrate in Motion</title>
+<meta name="description" content="A live visualization of the Physical Capability Cloud — jobs, evidence, and settlement flowing across the substrate of agentic composition." />
+
+<!-- Typography rationale (defended per RULE 6):
+     – Bricolage Grotesque (display) — used at small caps with wide tracking for the HUD label.
+       Chosen for its extreme weight contrast and slightly mechanical feel; reads like
+       a scientific instrument's nameplate without descending into "fintech sans."
+     – JetBrains Mono (mono) — used for live event counters, IDs, timestamps. Its
+       round terminals and slashed zero make running data legible at small sizes.
+     – Instrument Sans (body) — used for short captions and the legend. Quiet
+       neo-grotesque that disappears behind the visualization.
+     One display, one mono, one body. No more. Matches the existing
+     capability.network landing page system. -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@300;400;500&display=swap" />
+<link rel="stylesheet" href="/visualizer.css" />
+<link rel="icon" href="/pcc-icon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <!-- Substrate — the literal layer the visualization lives on. -->
+  <canvas id="substrate" aria-hidden="true"></canvas>
+  <canvas id="overlay" aria-hidden="true"></canvas>
+
+  <!-- HUD: corner instruments. Quiet. Lets the substrate breathe. -->
+  <header class="hud hud--topleft" role="banner">
+    <div class="brand">
+      <svg class="brand__mark" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="2.5" fill="currentColor" />
+        <circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="1" opacity="0.55" />
+        <circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25" />
+      </svg>
+      <div class="brand__text">
+        <span class="brand__line1">Physical Capability Cloud</span>
+        <span class="brand__line2">Substrate in motion</span>
+      </div>
+    </div>
+  </header>
+
+  <aside class="hud hud--topright" aria-label="Connection state">
+    <div class="conn" data-conn="connecting">
+      <span class="conn__dot" aria-hidden="true"></span>
+      <span class="conn__label" id="conn-label">connecting</span>
+    </div>
+    <div class="metrics">
+      <div class="metric">
+        <span class="metric__num" id="metric-events">0</span>
+        <span class="metric__unit">events</span>
+      </div>
+      <div class="metric">
+        <span class="metric__num" id="metric-nodes">0</span>
+        <span class="metric__unit">nodes</span>
+      </div>
+      <div class="metric">
+        <span class="metric__num" id="metric-pulses">0</span>
+        <span class="metric__unit">in-flight</span>
+      </div>
+    </div>
+  </aside>
+
+  <section class="hud hud--bottomleft" aria-label="Legend">
+    <div class="legend">
+      <div class="legend__row">
+        <span class="legend__sw" style="--c: #5BD3FF"></span>
+        <span class="legend__label">escrow lock</span>
+      </div>
+      <div class="legend__row">
+        <span class="legend__sw" style="--c: #FFB147"></span>
+        <span class="legend__label">job in-flight</span>
+      </div>
+      <div class="legend__row">
+        <span class="legend__sw" style="--c: #3DEDA8"></span>
+        <span class="legend__label">evidence attested</span>
+      </div>
+      <div class="legend__row">
+        <span class="legend__sw" style="--c: #FFD66E"></span>
+        <span class="legend__label">settlement</span>
+      </div>
+    </div>
+    <p class="legend__caption">
+      Each pulse is a real event on the network. Discs are kernels (physical sites).
+      Chevrons are capabilities. Arcs glow brighter the more jobs they have carried.
+    </p>
+  </section>
+
+  <footer class="hud hud--bottomright" aria-label="Controls">
+    <div class="controls">
+      <button class="ctrl" data-mode="live" id="btn-live" aria-pressed="true">Live</button>
+      <button class="ctrl" data-mode="replay" id="btn-replay" aria-pressed="false">Replay 10m</button>
+      <button class="ctrl" data-mode="offline" id="btn-offline" aria-pressed="false">Offline</button>
+    </div>
+    <div class="caption" id="caption" aria-live="polite"></div>
+  </footer>
+
+  <!-- Floating event ticker — surfaces the most recent semantic event in
+       human prose so a viewer can read what is happening even before the
+       motion makes it obvious. -->
+  <div class="ticker" id="ticker" aria-live="polite"></div>
+
+  <script src="/visualizer.js" defer></script>
+</body>
+</html>

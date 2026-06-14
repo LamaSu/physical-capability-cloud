@@ -1,0 +1,125 @@
+{
+  "_comment": "Offline fixture stream for /visualizer.html. ~10 minute story arc covering registration, discovery, multiple concurrent jobs, evidence, and settlement across 6 kernels. Loaded when /api/visualizer/events is unreachable. Hand-curated to demo the full flow.",
+  "capturedAt": "2026-06-14T12:00:00.000Z",
+  "count": 96,
+  "events": [
+    { "id": "e1",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:00.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc" } },
+    { "id": "e2",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:01.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo" } },
+    { "id": "e3",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:02.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams" } },
+    { "id": "e4",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:03.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok" } },
+    { "id": "e5",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:04.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln" } },
+    { "id": "e6",  "type": "kernel_registered",    "ts": "2026-06-14T11:50:05.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon" } },
+
+    { "id": "e7",  "type": "capability_announced", "ts": "2026-06-14T11:50:06.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-fdm",   "capabilityType": "3d-printing"   } },
+    { "id": "e8",  "type": "capability_announced", "ts": "2026-06-14T11:50:07.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-laser", "capabilityType": "laser-cutting" } },
+    { "id": "e9",  "type": "capability_announced", "ts": "2026-06-14T11:50:08.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "capabilityId": "cap-sfo-cnc",   "capabilityType": "cnc"           } },
+    { "id": "e10", "type": "capability_announced", "ts": "2026-06-14T11:50:09.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "capabilityId": "cap-sfo-pcb",   "capabilityType": "pcb"           } },
+    { "id": "e11", "type": "capability_announced", "ts": "2026-06-14T11:50:10.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "capabilityId": "cap-ams-hplc",  "capabilityType": "hplc"          } },
+    { "id": "e12", "type": "capability_announced", "ts": "2026-06-14T11:50:11.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "capabilityId": "cap-tok-laser", "capabilityType": "laser-cutting" } },
+    { "id": "e13", "type": "capability_announced", "ts": "2026-06-14T11:50:12.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "capabilityId": "cap-bln-inj",   "capabilityType": "injection-molding" } },
+    { "id": "e14", "type": "capability_announced", "ts": "2026-06-14T11:50:13.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "capabilityId": "cap-lon-fdm",   "capabilityType": "3d-printing"   } },
+
+    { "id": "e15", "type": "capability_discovered","ts": "2026-06-14T11:51:00.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-fdm", "capabilityType": "3d-printing", "jobId": "job-aaa" } },
+    { "id": "e16", "type": "negotiation_session_created","ts": "2026-06-14T11:51:02.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-fdm", "jobId": "job-aaa" } },
+    { "id": "e17", "type": "quote_returned",       "ts": "2026-06-14T11:51:03.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-fdm", "jobId": "job-aaa", "amount": "12.40", "currency": "USDC" } },
+    { "id": "e18", "type": "negotiation_session_committed","ts": "2026-06-14T11:51:04.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa" } },
+    { "id": "e19", "type": "escrow_funded",        "ts": "2026-06-14T11:51:05.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "amount": "12.40", "currency": "USDC" } },
+    { "id": "e20", "type": "job_submitted",        "ts": "2026-06-14T11:51:06.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "capabilityType": "3d-printing" } },
+    { "id": "e21", "type": "job_started",          "ts": "2026-06-14T11:51:10.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm" } },
+
+    { "id": "e22", "type": "capability_discovered","ts": "2026-06-14T11:51:30.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "capabilityId": "cap-sfo-cnc", "capabilityType": "cnc", "jobId": "job-bbb" } },
+    { "id": "e23", "type": "quote_returned",       "ts": "2026-06-14T11:51:33.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "capabilityId": "cap-sfo-cnc", "jobId": "job-bbb", "amount": "84.00", "currency": "USDC" } },
+    { "id": "e24", "type": "escrow_funded",        "ts": "2026-06-14T11:51:35.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "amount": "84.00", "currency": "USDC" } },
+    { "id": "e25", "type": "job_submitted",        "ts": "2026-06-14T11:51:36.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "capabilityType": "cnc" } },
+
+    { "id": "e26", "type": "job_progress",         "ts": "2026-06-14T11:52:00.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "progress": 20 } },
+    { "id": "e27", "type": "sensor_reading",       "ts": "2026-06-14T11:52:02.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "channel": "extruder_temp", "value": 210.4 } },
+    { "id": "e28", "type": "job_progress",         "ts": "2026-06-14T11:52:30.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "progress": 55 } },
+    { "id": "e29", "type": "sensor_reading",       "ts": "2026-06-14T11:52:33.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "channel": "spindle_rpm", "value": 8400 } },
+    { "id": "e30", "type": "job_progress",         "ts": "2026-06-14T11:52:55.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "progress": 28 } },
+
+    { "id": "e31", "type": "capability_discovered","ts": "2026-06-14T11:53:00.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "capabilityId": "cap-ams-hplc", "capabilityType": "hplc", "jobId": "job-ccc" } },
+    { "id": "e32", "type": "quote_returned",       "ts": "2026-06-14T11:53:02.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "capabilityId": "cap-ams-hplc", "jobId": "job-ccc", "amount": "210.00", "currency": "USDC" } },
+    { "id": "e33", "type": "escrow_funded",        "ts": "2026-06-14T11:53:04.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "amount": "210.00", "currency": "USDC" } },
+    { "id": "e34", "type": "job_submitted",        "ts": "2026-06-14T11:53:05.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityId": "cap-ams-hplc", "capabilityType": "hplc" } },
+
+    { "id": "e35", "type": "job_progress",         "ts": "2026-06-14T11:53:30.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "progress": 85 } },
+    { "id": "e36", "type": "sensor_anomaly",       "ts": "2026-06-14T11:53:45.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "channel": "spindle_rpm", "severity": "low" } },
+
+    { "id": "e37", "type": "evidence_captured",    "ts": "2026-06-14T11:54:00.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityId": "cap-nyc-fdm", "evidenceBundleId": "ev-aaa-1" } },
+    { "id": "e38", "type": "job_completed",        "ts": "2026-06-14T11:54:02.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "capabilityType": "3d-printing", "status": "completed" } },
+    { "id": "e39", "type": "attestation_submitted","ts": "2026-06-14T11:54:04.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "evidenceBundleId": "ev-aaa-1" } },
+    { "id": "e40", "type": "escrow_released",      "ts": "2026-06-14T11:54:06.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-aaa", "amount": "12.40", "currency": "USDC" } },
+
+    { "id": "e41", "type": "capability_discovered","ts": "2026-06-14T11:54:20.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "capabilityId": "cap-tok-laser", "capabilityType": "laser-cutting", "jobId": "job-ddd" } },
+    { "id": "e42", "type": "quote_returned",       "ts": "2026-06-14T11:54:22.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "capabilityId": "cap-tok-laser", "jobId": "job-ddd", "amount": "42.50", "currency": "USDC" } },
+    { "id": "e43", "type": "escrow_funded",        "ts": "2026-06-14T11:54:24.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "amount": "42.50", "currency": "USDC" } },
+    { "id": "e44", "type": "job_submitted",        "ts": "2026-06-14T11:54:25.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityId": "cap-tok-laser", "capabilityType": "laser-cutting" } },
+
+    { "id": "e45", "type": "job_progress",         "ts": "2026-06-14T11:54:30.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "progress": 62 } },
+    { "id": "e46", "type": "sensor_reading",       "ts": "2026-06-14T11:54:40.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityId": "cap-ams-hplc", "channel": "pressure_mPa", "value": 12.4 } },
+    { "id": "e47", "type": "job_progress",         "ts": "2026-06-14T11:54:50.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityId": "cap-ams-hplc", "progress": 18 } },
+
+    { "id": "e48", "type": "capability_discovered","ts": "2026-06-14T11:55:00.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "capabilityId": "cap-bln-inj", "capabilityType": "injection-molding", "jobId": "job-eee" } },
+    { "id": "e49", "type": "quote_returned",       "ts": "2026-06-14T11:55:02.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "capabilityId": "cap-bln-inj", "jobId": "job-eee", "amount": "660.00", "currency": "USDC" } },
+    { "id": "e50", "type": "escrow_funded",        "ts": "2026-06-14T11:55:04.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "amount": "660.00", "currency": "USDC" } },
+    { "id": "e51", "type": "job_submitted",        "ts": "2026-06-14T11:55:05.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "capabilityType": "injection-molding" } },
+
+    { "id": "e52", "type": "job_progress",         "ts": "2026-06-14T11:55:20.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityId": "cap-tok-laser", "progress": 40 } },
+    { "id": "e53", "type": "sensor_reading",       "ts": "2026-06-14T11:55:35.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityId": "cap-tok-laser", "channel": "laser_pwr", "value": 84.2 } },
+
+    { "id": "e54", "type": "evidence_captured",    "ts": "2026-06-14T11:55:50.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityId": "cap-sfo-cnc", "evidenceBundleId": "ev-bbb-1" } },
+    { "id": "e55", "type": "job_completed",        "ts": "2026-06-14T11:55:52.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "capabilityType": "cnc", "status": "completed" } },
+    { "id": "e56", "type": "attestation_submitted","ts": "2026-06-14T11:55:54.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "evidenceBundleId": "ev-bbb-1" } },
+    { "id": "e57", "type": "escrow_released",      "ts": "2026-06-14T11:55:56.000Z", "topic": { "type": "kernel", "id": "kernel-sfo" }, "payload": { "kernelId": "kernel-sfo", "jobId": "job-bbb", "amount": "84.00", "currency": "USDC" } },
+
+    { "id": "e58", "type": "capability_discovered","ts": "2026-06-14T11:56:10.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "capabilityId": "cap-lon-fdm", "capabilityType": "3d-printing", "jobId": "job-fff" } },
+    { "id": "e59", "type": "quote_returned",       "ts": "2026-06-14T11:56:12.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "capabilityId": "cap-lon-fdm", "jobId": "job-fff", "amount": "18.00", "currency": "USDC" } },
+    { "id": "e60", "type": "escrow_funded",        "ts": "2026-06-14T11:56:14.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "amount": "18.00", "currency": "USDC" } },
+    { "id": "e61", "type": "job_submitted",        "ts": "2026-06-14T11:56:15.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityId": "cap-lon-fdm", "capabilityType": "3d-printing" } },
+
+    { "id": "e62", "type": "job_progress",         "ts": "2026-06-14T11:56:30.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityId": "cap-tok-laser", "progress": 78 } },
+    { "id": "e63", "type": "job_progress",         "ts": "2026-06-14T11:56:40.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "progress": 22 } },
+    { "id": "e64", "type": "sensor_reading",       "ts": "2026-06-14T11:56:50.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "channel": "barrel_temp", "value": 244.0 } },
+
+    { "id": "e65", "type": "evidence_captured",    "ts": "2026-06-14T11:57:00.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityId": "cap-tok-laser", "evidenceBundleId": "ev-ddd-1" } },
+    { "id": "e66", "type": "job_completed",        "ts": "2026-06-14T11:57:02.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "capabilityType": "laser-cutting", "status": "completed" } },
+    { "id": "e67", "type": "attestation_submitted","ts": "2026-06-14T11:57:04.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "evidenceBundleId": "ev-ddd-1" } },
+    { "id": "e68", "type": "escrow_released",      "ts": "2026-06-14T11:57:06.000Z", "topic": { "type": "kernel", "id": "kernel-tok" }, "payload": { "kernelId": "kernel-tok", "jobId": "job-ddd", "amount": "42.50", "currency": "USDC" } },
+
+    { "id": "e69", "type": "job_progress",         "ts": "2026-06-14T11:57:20.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityId": "cap-ams-hplc", "progress": 50 } },
+    { "id": "e70", "type": "drift_alert",          "ts": "2026-06-14T11:57:30.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "severity": "medium" } },
+    { "id": "e71", "type": "job_progress",         "ts": "2026-06-14T11:57:45.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityId": "cap-lon-fdm", "progress": 35 } },
+
+    { "id": "e72", "type": "capability_discovered","ts": "2026-06-14T11:58:00.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-laser", "capabilityType": "laser-cutting", "jobId": "job-ggg" } },
+    { "id": "e73", "type": "quote_returned",       "ts": "2026-06-14T11:58:02.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "capabilityId": "cap-nyc-laser", "jobId": "job-ggg", "amount": "29.00", "currency": "USDC" } },
+    { "id": "e74", "type": "escrow_funded",        "ts": "2026-06-14T11:58:04.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "amount": "29.00", "currency": "USDC" } },
+    { "id": "e75", "type": "job_submitted",        "ts": "2026-06-14T11:58:05.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "capabilityId": "cap-nyc-laser", "capabilityType": "laser-cutting" } },
+
+    { "id": "e76", "type": "job_progress",         "ts": "2026-06-14T11:58:20.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "progress": 58 } },
+    { "id": "e77", "type": "sensor_reading",       "ts": "2026-06-14T11:58:35.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityId": "cap-lon-fdm", "channel": "extruder_temp", "value": 215.0 } },
+    { "id": "e78", "type": "job_progress",         "ts": "2026-06-14T11:58:45.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityId": "cap-lon-fdm", "progress": 72 } },
+
+    { "id": "e79", "type": "evidence_captured",    "ts": "2026-06-14T11:59:00.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityId": "cap-ams-hplc", "evidenceBundleId": "ev-ccc-1" } },
+    { "id": "e80", "type": "job_completed",        "ts": "2026-06-14T11:59:02.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "capabilityType": "hplc", "status": "completed" } },
+    { "id": "e81", "type": "attestation_submitted","ts": "2026-06-14T11:59:04.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "evidenceBundleId": "ev-ccc-1" } },
+    { "id": "e82", "type": "escrow_released",      "ts": "2026-06-14T11:59:06.000Z", "topic": { "type": "kernel", "id": "kernel-ams" }, "payload": { "kernelId": "kernel-ams", "jobId": "job-ccc", "amount": "210.00", "currency": "USDC" } },
+
+    { "id": "e83", "type": "job_progress",         "ts": "2026-06-14T11:59:20.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "capabilityId": "cap-nyc-laser", "progress": 30 } },
+    { "id": "e84", "type": "evidence_captured",    "ts": "2026-06-14T11:59:35.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityId": "cap-lon-fdm", "evidenceBundleId": "ev-fff-1" } },
+    { "id": "e85", "type": "job_completed",        "ts": "2026-06-14T11:59:37.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "capabilityType": "3d-printing", "status": "completed" } },
+    { "id": "e86", "type": "attestation_submitted","ts": "2026-06-14T11:59:39.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "evidenceBundleId": "ev-fff-1" } },
+    { "id": "e87", "type": "escrow_released",      "ts": "2026-06-14T11:59:41.000Z", "topic": { "type": "kernel", "id": "kernel-lon" }, "payload": { "kernelId": "kernel-lon", "jobId": "job-fff", "amount": "18.00", "currency": "USDC" } },
+
+    { "id": "e88", "type": "job_progress",         "ts": "2026-06-14T11:59:55.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "progress": 88 } },
+    { "id": "e89", "type": "job_progress",         "ts": "2026-06-14T12:00:05.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "capabilityId": "cap-nyc-laser", "progress": 76 } },
+    { "id": "e90", "type": "evidence_captured",    "ts": "2026-06-14T12:00:20.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityId": "cap-bln-inj", "evidenceBundleId": "ev-eee-1" } },
+    { "id": "e91", "type": "job_completed",        "ts": "2026-06-14T12:00:22.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "capabilityType": "injection-molding", "status": "completed" } },
+    { "id": "e92", "type": "attestation_submitted","ts": "2026-06-14T12:00:24.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "evidenceBundleId": "ev-eee-1" } },
+    { "id": "e93", "type": "escrow_released",      "ts": "2026-06-14T12:00:26.000Z", "topic": { "type": "kernel", "id": "kernel-bln" }, "payload": { "kernelId": "kernel-bln", "jobId": "job-eee", "amount": "660.00", "currency": "USDC" } },
+
+    { "id": "e94", "type": "evidence_captured",    "ts": "2026-06-14T12:00:40.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "capabilityId": "cap-nyc-laser", "evidenceBundleId": "ev-ggg-1" } },
+    { "id": "e95", "type": "job_completed",        "ts": "2026-06-14T12:00:42.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "capabilityType": "laser-cutting", "status": "completed" } },
+    { "id": "e96", "type": "escrow_released",      "ts": "2026-06-14T12:00:46.000Z", "topic": { "type": "kernel", "id": "kernel-nyc" }, "payload": { "kernelId": "kernel-nyc", "jobId": "job-ggg", "amount": "29.00", "currency": "USDC" } }
+  ]
+}
