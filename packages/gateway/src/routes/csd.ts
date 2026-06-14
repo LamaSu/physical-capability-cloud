@@ -10,7 +10,8 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { loadBuiltinCsds, CsdRegistry, CsdSchema } from "@pcc/spec";
+import { loadBuiltinCsds, CsdRegistry, CsdSchema, type CsdUsageRepository } from "@pcc/spec";
+import { getRepos } from "../db.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -18,10 +19,29 @@ let _registry: CsdRegistry | null = null;
 /**
  * Get (or lazily initialize) the shared CSD registry.
  * Pre-loaded with all 5 built-in CSDs.
+ *
+ * Usage attribution storage: in-memory by default; SQLite-backed when
+ * PCC_CSD_PERSIST=true (counters survive gateway restart). The fast
+ * in-memory path remains the default so the suggest-templates tests
+ * stay cheap and unrelated routes don't pay a SQLite cost they don't need.
  */
 export function getCsdRegistry(): CsdRegistry {
   if (!_registry) {
-    _registry = loadBuiltinCsds();
+    let usageRepo: CsdUsageRepository | undefined;
+    if (process.env.PCC_CSD_PERSIST === "true") {
+      try {
+        // getRepos() throws if the store isn't initialized yet (boot-order
+        // safety). Fall back to in-memory so tests/CLIs that don't initStore()
+        // still work — log a warning to make the demotion visible.
+        usageRepo = getRepos().csdUsage;
+      } catch (err) {
+        console.warn(
+          `[csd] PCC_CSD_PERSIST=true but store not ready — falling back to in-memory usage:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+    _registry = loadBuiltinCsds(usageRepo);
   }
   return _registry;
 }
