@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PCC · Pizza agent prompt</title>
+<meta name="description" content="The system prompt that turns your AI into a pizza-ordering agent on PCC. Read it, then copy it into your chat.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0c10;--surface:#11151d;--surface2:#161b25;--code:#0c0f15;--line:rgba(150,172,205,.10);--line2:rgba(150,172,205,.20);--fg:#e9edf4;--muted:#8b94a6;--faint:#5b6475;--lime:#c6f24e;--cyan:#6cd6ff;--amber:#ffb24d;--violet:#c8a2ff;--danger:#ff6f6f;--mono:'JetBrains Mono',ui-monospace,monospace;--sans:'Instrument Sans',system-ui,sans-serif;--display:'Bricolage Grotesque',var(--sans)}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+.grid-bg{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:120px 120px;mask-image:radial-gradient(ellipse 120% 80% at 50% 0%,#000 25%,transparent 90%);opacity:.45}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 20px;background:rgba(10,12,16,.93);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:22px;height:22px;border:1.5px solid var(--lime);border-radius:6px;position:relative;flex:none}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;background:var(--lime)}
+.brand .mark::before{inset:5px auto 5px 5px;width:2px}.brand .mark::after{inset:5px 5px auto 5px;height:2px}
+.brand b{font-weight:700}.brand span{color:var(--faint)}
+.btn{font-family:var(--mono);font-size:12.5px;letter-spacing:.03em;padding:9px 15px;border-radius:9px;border:1px solid var(--line2);background:transparent;color:var(--muted);cursor:pointer;transition:.18s;text-decoration:none;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.btn:hover{color:var(--fg);border-color:var(--fg)}
+.btn.primary{background:var(--lime);color:#0a0c10;border-color:var(--lime);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08)}
+.bar{position:sticky;top:53px;z-index:15;display:flex;flex-wrap:wrap;gap:9px;align-items:center;padding:11px 20px;background:rgba(10,12,16,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.bar .note{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
+main{position:relative;z-index:1;max-width:780px;margin:0 auto;padding:30px 20px 70px}
+article{font-size:15px}
+article h1{font-family:var(--display);font-weight:800;font-size:clamp(26px,5vw,38px);letter-spacing:-.02em;line-height:1.08;margin:.2em 0 .5em}
+article h2{font-family:var(--display);font-weight:700;font-size:21px;margin:1.7em 0 .5em;padding-top:.5em;border-top:1px solid var(--line);color:var(--lime)}
+article h3{font-family:var(--display);font-weight:700;font-size:16.5px;margin:1.3em 0 .4em}
+article p{color:#cdd4e0;margin:.55em 0}
+article strong{color:var(--fg);font-weight:600}
+article em{color:#e9edf4;font-style:italic}
+article a{color:var(--cyan);text-decoration:none;border-bottom:1px solid rgba(108,214,255,.3)}
+article a:hover{border-color:var(--cyan)}
+article hr{border:0;border-top:1px solid var(--line);margin:1.6em 0}
+article ul,article ol{color:#cdd4e0;margin:.5em 0;padding-left:1.4em}
+article li{margin:.35em 0}
+article blockquote{margin:.7em 0;padding:.5em 14px;border-left:3px solid var(--lime);background:linear-gradient(90deg,rgba(198,242,78,.06),transparent);color:#cdd4e0;border-radius:0 8px 8px 0}
+code.inline{font-family:var(--mono);font-size:.86em;background:var(--surface2);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;color:var(--cyan)}
+.codeblock{position:relative;margin:.9em 0;border:1px solid var(--line2);border-radius:10px;background:var(--code);overflow:hidden}
+.codeblock .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:5px 9px}
+.codeblock .cp{position:absolute;top:6px;right:48px;font-family:var(--mono);font-size:10.5px;color:var(--faint);background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:3px 8px;cursor:pointer;opacity:0;transition:.15s}
+.codeblock:hover .cp{opacity:1}.codeblock .cp:hover{color:var(--fg);border-color:var(--fg)}
+.codeblock pre{margin:0;padding:14px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#d7deea}
+.tok-com{color:var(--faint);font-style:italic}.tok-str{color:var(--lime)}.tok-key{color:var(--violet)}.tok-num{color:var(--amber)}
+.tablewrap{overflow-x:auto;margin:.9em 0;border:1px solid var(--line2);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);background:var(--surface)}
+tr:last-child td{border-bottom:0}
+td code.inline,th code.inline{font-size:.82em}
+.foot{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-align:center;padding:34px 0 6px;letter-spacing:.04em}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--lime);color:#0a0c10;font-family:var(--mono);font-size:12.5px;font-weight:700;padding:11px 20px;border-radius:10px;z-index:60;opacity:0;transition:.3s}
+.toast.on{opacity:1;transform:translateX(-50%)}
+.toast.err{background:var(--danger);color:#fff}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<header>
+  <div class="brand"><span class="mark"></span><b>PCC</b><span>// pizza agent prompt</span></div>
+  <a class="btn" href="/pizza-llm-bootstrap.html">&larr; Bootstrap</a>
+</header>
+<div class="bar">
+  <button class="btn primary" id="copyAll">&#9106; Copy full prompt</button>
+  <a class="btn" href="/pizza-llm-agent-prompt.md" target="_blank" rel="noopener">Raw .md</a>
+  <a class="btn" href="/pcc-agent-package-pizza.json" download>&darr; Agent package</a>
+  <span class="note">paste this into Claude &middot; ChatGPT &middot; Gemini</span>
+</div>
+<main>
+  <article id="doc">Loading the prompt&hellip;</article>
+  <div class="foot">PCC // capability.network &middot; agents compose reality</div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const PROMPT_URL="/pizza-llm-agent-prompt.md";
+let rawText="";
+let tt;function toast(m,e){const el=$("#toast");el.textContent=m;el.className="toast on"+(e?" err":"");clearTimeout(tt);tt=setTimeout(()=>el.classList.remove("on"),2400);}
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+// Inline formatting. Split on backtick code spans first (odd parts are literal
+// code), so bold/italic/link regexes never touch code contents.
+function inline(t){
+  // Protect inline code with an ASCII sentinel (never appears in prose), so
+  // bold/italic spans that WRAP code (e.g. **The `x` object:**) still convert.
+  const codes=[];
+  let s=t.replace(/`([^`]+)`/g,(m,c)=>{codes.push(c);return "@@@C"+(codes.length-1)+"@@@";});
+  s=esc(s);
+  s=s.replace(/\*\*([\s\S]+?)\*\*/g,'<strong>$1</strong>');       // bold (may wrap code + *italics*)
+  s=s.replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>');         // italics
+  s=s.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s=s.replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  s=s.replace(/@@@C(\d+)@@@/g,(m,i)=>'<code class="inline">'+esc(codes[+i])+'</code>');
+  return s;
+}
+
+// Light highlight for fenced code; operates on escaped text (only inserts spans).
+function highlight(code,lang){
+  let h=esc(code);
+  if(/json/.test(lang)){
+    h=h.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)(\s*:)?/g,(m,str,colon)=>
+      colon? '<span class="tok-key">'+str+'</span>'+colon : '<span class="tok-str">'+str+'</span>')
+       .replace(/\b(-?\d+\.?\d*)\b/g,'<span class="tok-num">$1</span>')
+       .replace(/\b(true|false|null)\b/g,'<span class="tok-key">$1</span>');
+  }else{
+    h=h.split("\n").map(line=>{
+      const c=line.indexOf("#");
+      if(c>=0 && !/https?:\/\//.test(line.slice(0,c+1))) return line.slice(0,c)+'<span class="tok-com">'+line.slice(c)+'</span>';
+      return line;
+    }).join("\n");
+    h=h.replace(/(&#39;[^&]*?&#39;|&quot;[^&]*?&quot;)/g,'<span class="tok-str">$1</span>')
+       .replace(/\b(curl|GET|POST|PATCH|DELETE)\b/g,'<span class="tok-key">$1</span>');
+  }
+  return h;
+}
+
+function renderTable(rows){
+  const cells=r=>r.replace(/^\||\|$/g,"").split("|").map(c=>c.trim());
+  const head=cells(rows[0]), body=rows.slice(2).map(cells);
+  let h='<div class="tablewrap"><table><thead><tr>'+head.map(c=>'<th>'+inline(c)+'</th>').join("")+'</tr></thead><tbody>';
+  for(const r of body){ if(r.length===1&&r[0]==="")continue; h+='<tr>'+r.map(c=>'<td>'+inline(c)+'</td>').join("")+'</tr>'; }
+  return h+'</tbody></table></div>';
+}
+
+// Render a prose segment (no fenced code — those are handled by the caller).
+function renderProse(md){
+  const lines=md.split("\n");
+  let html="",i=0,list=null;
+  const closeList=()=>{ if(list){html+=(list==="ol"?"</ol>":"</ul>");list=null;} };
+  const cont=()=>{ // join indented continuation lines into the current list item
+    let extra="";
+    while(i<lines.length && /^\s+\S/.test(lines[i]) && !/^\s*(-\s|\d+\.\s)/.test(lines[i])){ extra+=" "+lines[i].trim(); i++; }
+    return extra;
+  };
+  while(i<lines.length){
+    let ln=lines[i], m;
+    if(/^\s*$/.test(ln)){ closeList(); i++; continue; }
+    if(/^\|.*\|/.test(ln) && i+1<lines.length && /^\|[\s:|-]+\|/.test(lines[i+1])){
+      closeList(); const rows=[]; while(i<lines.length && /^\|.*\|/.test(lines[i])){rows.push(lines[i]);i++;} html+=renderTable(rows); continue;
+    }
+    if((m=ln.match(/^(#{1,6})\s+(.*)$/))){ closeList(); const lv=m[1].length; html+="<h"+lv+">"+inline(m[2])+"</h"+lv+">"; i++; continue; }
+    if(/^---+\s*$/.test(ln)){ closeList(); html+="<hr>"; i++; continue; }
+    if((m=ln.match(/^>\s?(.*)$/))){ closeList(); const q=[]; while(i<lines.length&&/^>\s?/.test(lines[i])){q.push(lines[i].replace(/^>\s?/,""));i++;} html+="<blockquote>"+inline(q.join(" "))+"</blockquote>"; continue; }
+    if((m=ln.match(/^\s*-\s+(.*)$/))){ if(list!=="ul"){closeList();html+="<ul>";list="ul";} i++; html+="<li>"+inline(m[1]+cont())+"</li>"; continue; }
+    if((m=ln.match(/^\s*\d+\.\s+(.*)$/))){ if(list!=="ol"){closeList();html+="<ol>";list="ol";} i++; html+="<li>"+inline(m[1]+cont())+"</li>"; continue; }
+    closeList(); const para=[];
+    while(i<lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6}\s|>|---+\s*$|\s*-\s|\s*\d+\.\s|\|.*\|)/.test(lines[i])){ para.push(lines[i]); i++; }
+    html+="<p>"+inline(para.join(" "))+"</p>";
+  }
+  closeList();
+  return html;
+}
+
+let codeIdx=0;
+function mdToHtml(md){
+  md=md.replace(/\r\n/g,"\n"); codeIdx=0;
+  const out=[]; const re=/```(\w*)\n([\s\S]*?)```/g; let last=0,mm;
+  while((mm=re.exec(md))){
+    out.push(renderProse(md.slice(last,mm.index)));
+    const lang=mm[1]||"text", code=mm[2].replace(/\n$/,""), idx=codeIdx++;
+    out.push('<div class="codeblock"><span class="lang">'+esc(lang)+'</span><span class="cp" data-code="'+idx+'">copy</span><pre>'+highlight(code,lang)+'</pre></div>');
+    last=re.lastIndex;
+  }
+  out.push(renderProse(md.slice(last)));
+  return out.join("");
+}
+
+async function load(){
+  try{
+    const r=await fetch(PROMPT_URL,{cache:"no-store"});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    rawText=await r.text();
+    $("#doc").innerHTML=mdToHtml(rawText);
+    const codes=[...rawText.matchAll(/```\w*\n([\s\S]*?)```/g)].map(x=>x[1].replace(/\n$/,""));
+    document.querySelectorAll(".codeblock .cp").forEach(el=>{
+      el.onclick=async()=>{ try{
+        await navigator.clipboard.writeText(codes[+el.dataset.code] ?? el.parentElement.querySelector("pre").innerText);
+        el.textContent="copied"; setTimeout(()=>el.textContent="copy",1200);
+      }catch(e){ toast("copy blocked",1); } };
+    });
+  }catch(e){
+    $("#doc").innerHTML='<p>Couldn&rsquo;t load the prompt. Open the <a href="/pizza-llm-agent-prompt.md">raw .md</a> directly.</p>';
+  }
+}
+$("#copyAll").onclick=async()=>{
+  try{ if(!rawText){const r=await fetch(PROMPT_URL,{cache:"no-store"});rawText=await r.text();}
+    await navigator.clipboard.writeText(rawText); toast("Full prompt copied — paste it into your AI chat");
+  }catch(e){ toast("Copy blocked — open Raw .md and copy manually",1); window.open(PROMPT_URL,"_blank","noopener"); }
+};
+load();
+</script>
+</body>
+</html>

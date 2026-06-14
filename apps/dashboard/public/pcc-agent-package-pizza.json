@@ -1,0 +1,366 @@
+{
+  "schema": "pcc-agent-package-pizza/1.0",
+  "name": "PCC Pizza Demo — Agent Package",
+  "description": "The minimal PCC tool set a Claude/ChatGPT/Gemini session needs to order a pizza for its user: discover the capability spec, plan a shop x driver composition, confirm, watch it run over SSE. A filtered subset of https://capability.network/agent-package.json. The pizza demo endpoints are keyless — no API key required.",
+  "version": "1.0.0",
+  "toolCount": 11,
+  "lastUpdated": "2026-06-14",
+  "homepage": "https://capability.network/pizza-llm-bootstrap.html",
+  "api_base": "https://capability.network",
+  "system_prompt": "You are a pizza-ordering agent on PCC (Physical Capability Cloud). Full instructions: https://capability.network/pizza-llm-agent-prompt.md. The flow: (0) GET /api/csd/suggest?q=make-pizza to discover the spec, or use the inline fallback in the prompt if no suggestions are returned; (1) clarify pizza + dietary + delivery + budget with the user, and ask whether they want cheapest/fastest/best-rated (-> optimizeFor); (2) POST /api/demo/pizza-order to plan (no spend); (3) show the plan + total and get an explicit yes; (4) POST /api/demo/orders/:id/confirm to place it; (5) watch GET /sse/demo/order/:id (or poll GET /api/demo/orders/:id) and narrate each event in plain English; (6) on the `delivered` event, report settlement (shop/driver payouts + 2.35% PCC fee). ABSOLUTE RULES: never spend without explicit confirmation; never accept a higher price or a worse deal on the user's behalf; always explain that you're asking because PCC's capability spec needs that detail.",
+  "tools": [
+    {
+      "name": "discover_csd_suggestions",
+      "description": "START HERE. Search the CSD registry for capability specs matching a query string. Returns ranked CSD candidates with their parameter list. Call with q='make-pizza' to learn what to ask about the pizza, and q='delivered-pizza' for the delivery. Read each parameter: required + no defaultValue means you MUST ask; a defaultValue means you may take it (but mention it). If `suggestions` is empty (CSD not yet seeded on this gateway), fall back to the inline parameter list in pizza-llm-agent-prompt.md Section 3 / Step 1. PUBLIC / keyless.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "q": { "type": "string", "description": "Free-form query — typically the capability type slug, e.g. 'make-pizza' or 'delivered-pizza'." },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+          "kind": { "type": "string", "enum": ["base", "profile", "extension", "workflow"], "description": "Optional kind filter." }
+        },
+        "required": ["q"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "csd": {
+                  "type": "object",
+                  "properties": {
+                    "url": { "type": "string", "description": "Canonical CSD URI, e.g. pcc://capabilities/make-pizza/v1" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["base", "profile", "extension", "workflow"] },
+                    "parameters": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": { "type": "string", "enum": ["enum", "number", "boolean", "string"] },
+                          "key": { "type": "string" },
+                          "label": { "type": "string" },
+                          "description": { "type": "string" },
+                          "required": { "type": "boolean" },
+                          "defaultValue": { "description": "Present only when the parameter has a sensible default." },
+                          "multi": { "type": "boolean", "description": "enum only — user may pick several" },
+                          "options": { "type": "array", "items": { "type": "object", "properties": { "value": { "type": "string" }, "label": { "type": "string" } } } },
+                          "min": { "type": "number" }, "max": { "type": "number" }, "step": { "type": "number" }, "unit": { "type": "string" }
+                        }
+                      }
+                    },
+                    "constraints": { "type": "array", "description": "Rules between parameters, e.g. 'vegan excludes cheese/meat toppings'." }
+                  }
+                },
+                "score": { "type": "number", "description": "Relevance 0-1 (higher = better match)." },
+                "usage": { "type": "object", "properties": { "count": { "type": "integer" }, "lastUsedAt": { "type": ["string", "null"] } } }
+              }
+            }
+          }
+        }
+      },
+      "endpoint": { "method": "GET", "path": "/api/csd/suggest" },
+      "example": {
+        "request": "GET /api/csd/suggest?q=make-pizza&limit=5",
+        "response": {
+          "suggestions": [
+            {
+              "csd": {
+                "url": "pcc://capabilities/make-pizza/v1",
+                "name": "Make Pizza",
+                "kind": "base",
+                "parameters": [
+                  { "type": "enum", "key": "size", "label": "Size", "required": true, "options": [ { "value": "small", "label": "Small (10\")" }, { "value": "large", "label": "Large (14\")" } ] },
+                  { "type": "enum", "key": "dietary", "label": "Dietary", "required": false, "multi": true, "defaultValue": "none", "description": "ALWAYS confirm — a wrong assumption here is harmful." },
+                  { "type": "number", "key": "quantity", "label": "Quantity", "required": true, "min": 1, "max": 20, "step": 1, "defaultValue": 1 }
+                ]
+              },
+              "score": 0.87,
+              "usage": { "count": 12, "lastUsedAt": "2026-06-12T15:00:00Z" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "place_pizza_order",
+      "description": "Plan a 2-step pizza composition (a shop to make it, a driver to deliver it). The compose engine searches the capability graph and returns the best shop x driver pair under the chosen optimizeFor, within budget. This is a PROPOSAL — it does NOT spend or dispatch anything. Pack the user's clarified choices into 'description' as natural language (the make-pizza capability takes free text so any shop can fulfil it). Returns 201 with the proposed order; show the plan + total to the user before confirming. PUBLIC / keyless.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "userId": { "type": "string", "description": "The user's agent id, for attribution + reputation, e.g. 'alex@vibecode'." },
+          "description": { "type": "string", "description": "The pizza in natural language, packed from the user's answers, e.g. '1 large thin-crust pepperoni + mushroom, vegetarian, cut in squares'." },
+          "deliveryAddress": { "type": "string", "description": "Free-text delivery address shown to the driver." },
+          "deliveryLocation": { "type": "object", "properties": { "lat": { "type": "number" }, "lng": { "type": "number" } }, "description": "Optional coordinates for routing. Defaults to the venue (37.77, -122.42) if omitted." },
+          "maxPriceUSD": { "type": "number", "description": "Budget guardrail in USDC. Default 30. The total plan must fit inside this." },
+          "maxTimeMin": { "type": "number", "description": "Optional max end-to-end time in minutes. Default 30." },
+          "optimizeFor": { "type": "string", "enum": ["price", "speed", "quality"], "description": "What the user cares about: price=cheapest, speed=fastest, quality=best-rated. ASK the user; do not default silently. Default price." }
+        },
+        "required": ["userId", "description", "deliveryAddress"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "order": {
+            "type": "object",
+            "properties": {
+              "orderId": { "type": "string" },
+              "status": { "type": "string", "enum": ["proposed"] },
+              "composition": {
+                "type": "object",
+                "properties": {
+                  "compositionId": { "type": "string" },
+                  "shop": { "type": "object", "properties": { "capabilityId": { "type": "string" }, "kernelId": { "type": "string" }, "name": { "type": "string" }, "priceUSD": { "type": "number" }, "etaSec": { "type": "integer" } } },
+                  "driver": { "type": "object", "properties": { "capabilityId": { "type": "string" }, "kernelId": { "type": "string" }, "name": { "type": "string" }, "priceUSD": { "type": "number" }, "etaSec": { "type": "integer" } } },
+                  "totalPriceUSD": { "type": "number" },
+                  "etaSec": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errors": {
+        "400": "invalid_request — missing userId, description, or deliveryAddress.",
+        "402": "over_budget — a plan exists but costs more than maxPriceUSD. Ask the user before raising the budget.",
+        "404": "no_path_found — no shop+driver pair available (range/tier/availability). Offer to relax a constraint."
+      },
+      "endpoint": { "method": "POST", "path": "/api/demo/pizza-order" },
+      "example": {
+        "request": { "userId": "alex@vibecode", "description": "1 large pepperoni, extra cheese", "deliveryAddress": "vibecodenights venue", "optimizeFor": "price", "maxPriceUSD": 30 },
+        "response": {
+          "order": {
+            "orderId": "order_1a2b3c4d",
+            "status": "proposed",
+            "composition": {
+              "compositionId": "cmp_8f7e",
+              "shop": { "capabilityId": "cap_shop-slice-heaven", "kernelId": "k_shop-slice-heaven", "name": "shop-slice-heaven", "priceUSD": 12, "etaSec": 1200 },
+              "driver": { "capabilityId": "cap_driver-dana", "kernelId": "k_driver-dana", "name": "driver-dana", "priceUSD": 4, "etaSec": 1800 },
+              "totalPriceUSD": 16,
+              "etaSec": 3000
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "confirm_order",
+      "description": "Commit a proposed order. THIS IS THE SPEND — only call it after the user has seen the full plan + total and said yes. Dispatches the make-pizza job to the chosen shop and moves the order to 'awaiting_shop'. Returns the order + the make-pizza job. After this, watch the order. PUBLIC / keyless.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "id": { "type": "string", "description": "orderId from place_pizza_order." } },
+        "required": ["id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "order": { "type": "object", "properties": { "orderId": { "type": "string" }, "status": { "type": "string", "enum": ["awaiting_shop"] } } },
+          "job": { "type": "object", "properties": { "jobId": { "type": "string" }, "type": { "type": "string", "enum": ["make-pizza"] }, "assigneeSlug": { "type": "string" }, "status": { "type": "string" } } }
+        }
+      },
+      "errors": { "404": "not_found", "409": "wrong_state — order is not in 'proposed' state." },
+      "endpoint": { "method": "POST", "path": "/api/demo/orders/{id}/confirm" },
+      "example": {
+        "request": "POST /api/demo/orders/order_1a2b3c4d/confirm",
+        "response": { "order": { "orderId": "order_1a2b3c4d", "status": "awaiting_shop" }, "job": { "jobId": "job_55ab12cd", "type": "make-pizza", "assigneeSlug": "shop-slice-heaven", "status": "queued" } }
+      }
+    },
+    {
+      "name": "get_order",
+      "description": "Read the current state of an order plus its make-pizza and delivery jobs. Use this to poll status when you cannot keep an SSE stream open. Read order.status to know where things stand. PUBLIC / keyless.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "id": { "type": "string", "description": "orderId." } },
+        "required": ["id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "order": { "type": "object", "properties": { "orderId": { "type": "string" }, "status": { "type": "string", "enum": ["proposed", "awaiting_shop", "making", "awaiting_driver", "ready_for_pickup", "in_transit", "delivered", "rejected", "failed"] }, "rejectionReason": { "type": "string" }, "composition": { "type": "object" } } },
+          "jobs": { "type": "object", "properties": { "makePizza": { "type": ["object", "null"] }, "delivery": { "type": ["object", "null"] } } }
+        }
+      },
+      "errors": { "404": "not_found" },
+      "endpoint": { "method": "GET", "path": "/api/demo/orders/{id}" },
+      "example": {
+        "request": "GET /api/demo/orders/order_1a2b3c4d",
+        "response": { "order": { "orderId": "order_1a2b3c4d", "status": "in_transit" }, "jobs": { "makePizza": { "jobId": "job_55ab12cd", "status": "complete" }, "delivery": { "jobId": "job_77cd34ef", "status": "picked_up" } } }
+      }
+    },
+    {
+      "name": "watch_order",
+      "description": "Subscribe to the live Server-Sent Events stream for an order. Each event arrives as a line beginning 'data: ' followed by JSON. The first message is {\"type\":\"connected\"} (ignore). Every update is {\"topic\":\"order:<id>\",\"event\":{...},\"ts\":...} — read event.type: 'status' (order moved state — read event.order.status), 'job_accepted', 'job_pickup', 'delivered' (carries settlement + reputation). Lines starting with ':' are heartbeats (ignore). If you cannot stream, poll get_order instead. PUBLIC / keyless. Note: this is a streaming endpoint, not a one-shot request.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "id": { "type": "string", "description": "orderId." } },
+        "required": ["id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "A text/event-stream. Each 'data:' line is one of the shapes below.",
+        "properties": {
+          "event": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "enum": ["status", "job_accepted", "job_pickup", "delivered"] },
+              "order": { "type": "object", "description": "Present on status/delivered — read .status." },
+              "settlement": { "type": "object", "description": "Present on delivered — shopPayoutUSD, driverPayoutUSD, pccFeeUSD." },
+              "reputation": { "type": "object", "description": "Present on delivered — shopDelta, driverDelta." }
+            }
+          }
+        }
+      },
+      "endpoint": { "method": "GET", "path": "/sse/demo/order/{id}" },
+      "example": {
+        "request": "GET /sse/demo/order/order_1a2b3c4d  (curl -N)",
+        "stream": [
+          "data: {\"type\":\"connected\",\"topics\":[\"order:order_1a2b3c4d\"]}",
+          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"making\"}},\"ts\":\"2026-06-12T23:30:00Z\"}",
+          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"status\",\"order\":{\"status\":\"in_transit\"}},\"ts\":\"2026-06-12T23:45:00Z\"}",
+          "data: {\"topic\":\"order:order_1a2b3c4d\",\"event\":{\"type\":\"delivered\",\"settlement\":{\"shopPayoutUSD\":12,\"driverPayoutUSD\":4,\"pccFeeUSD\":0.38},\"reputation\":{\"shopDelta\":15,\"driverDelta\":15}}}"
+        ]
+      }
+    },
+    {
+      "name": "cancel_order",
+      "description": "Cancel an order — only allowed before a shop accepts it (status 'proposed' or 'awaiting_shop'). Moves the order to 'rejected'. After a shop accepts, the order is in flight and cannot be cleanly cancelled. PUBLIC / keyless.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "id": { "type": "string", "description": "orderId." } },
+        "required": ["id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": { "order": { "type": "object", "properties": { "status": { "type": "string", "enum": ["rejected"] }, "rejectionReason": { "type": "string" } } } }
+      },
+      "errors": { "404": "not_found", "409": "wrong_state — order already accepted / in flight." },
+      "endpoint": { "method": "POST", "path": "/api/demo/orders/{id}/cancel" },
+      "example": {
+        "request": "POST /api/demo/orders/order_1a2b3c4d/cancel",
+        "response": { "order": { "status": "rejected", "rejectionReason": "cancelled by user" } }
+      }
+    },
+    {
+      "name": "list_capability_types",
+      "description": "List every capability type registered on the PCC network. Reference / discovery — confirms what the network can do. PUBLIC. Note: the pizza demo's make-pizza / delivered-pizza providers are published to the compose + capability graph (not the capabilities catalog), so use discover_csd_suggestions for their parameter shape.",
+      "input_schema": { "type": "object", "properties": {}, "required": [] },
+      "output_schema": { "type": "object", "properties": { "types": { "type": "array", "items": { "type": "string" } } } },
+      "endpoint": { "method": "GET", "path": "/api/capabilities/types" },
+      "example": { "request": "GET /api/capabilities/types", "response": { "types": ["3d-printing", "cnc", "laser-cutting", "hplc"] } }
+    },
+    {
+      "name": "get_capabilities_by_type",
+      "description": "List capability instances of a given type. Reference only — the pizza demo's shops/drivers are not registered as capability instances (they live in the compose + graph stores). For pizza parameters use discover_csd_suggestions.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "type": { "type": "string", "description": "Capability type." } },
+        "required": ["type"]
+      },
+      "output_schema": { "type": "object", "properties": { "capabilities": { "type": "array", "items": { "type": "object" } } } },
+      "endpoint": { "method": "GET", "path": "/api/capabilities/by-type/{type}" },
+      "example": { "request": "GET /api/capabilities/by-type/3d-printing", "response": { "capabilities": [] } }
+    },
+    {
+      "name": "compose",
+      "description": "The raw composition engine that place_pizza_order wraps. Given an outcome chain + budget + tier, it returns a sequenced plan of capability instances. You normally don't call this for the pizza demo (use place_pizza_order, which also creates the watchable order + job lifecycle). Included for reference. PUBLIC for the demo gateway.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "outcomeType": { "type": "string", "description": "Final capability type the composition must deliver." },
+          "outcomeChain": { "type": "array", "items": { "type": "string" }, "description": "Ordered outcome types to thread through the graph, e.g. ['make-pizza','delivered-pizza']." },
+          "budgetUSD": { "type": "number" },
+          "minAssuranceTier": { "type": "integer", "enum": [0, 1, 2, 3] },
+          "optimizeFor": { "type": "string", "enum": ["price", "speed", "quality"] },
+          "location": { "type": "object", "properties": { "lat": { "type": "number" }, "lng": { "type": "number" }, "radiusKm": { "type": "number" } } },
+          "requester": { "type": "object", "properties": { "agentId": { "type": "string" } } }
+        },
+        "required": ["outcomeType", "budgetUSD", "minAssuranceTier"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "compositionId": { "type": "string" },
+          "status": { "type": "string", "enum": ["proposed", "over_budget", "no_path_found"] },
+          "steps": { "type": "array", "items": { "type": "object", "properties": { "index": { "type": "integer" }, "capabilityType": { "type": "string" }, "capabilityId": { "type": "string" }, "estimatedPriceUSD": { "type": "number" }, "estimatedDurationMs": { "type": "number" } } } },
+          "totalPriceUSD": { "type": "number" },
+          "totalDurationMs": { "type": "number" }
+        }
+      },
+      "endpoint": { "method": "POST", "path": "/api/compose" },
+      "example": {
+        "request": { "outcomeType": "delivered-pizza", "outcomeChain": ["make-pizza", "delivered-pizza"], "budgetUSD": 30, "minAssuranceTier": 1, "optimizeFor": "price", "requester": { "agentId": "alex@vibecode" } },
+        "response": { "compositionId": "cmp_8f7e", "status": "proposed", "steps": [ { "index": 0, "capabilityType": "make-pizza", "capabilityId": "cap_shop-slice-heaven", "estimatedPriceUSD": 12, "estimatedDurationMs": 1200000 }, { "index": 1, "capabilityType": "delivered-pizza", "capabilityId": "cap_driver-dana", "estimatedPriceUSD": 4, "estimatedDurationMs": 1800000 } ], "totalPriceUSD": 16, "totalDurationMs": 3000000 }
+      }
+    },
+    {
+      "name": "register_compose_candidate",
+      "description": "OPERATOR-SIDE, not for ordering. How a shop or driver publishes itself as a candidate the compose engine can pick. A user's pizza agent does NOT call this; it's how the demo's providers get seeded. Included for reference so you understand where the shops/drivers come from. Dev/scaffold endpoint.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "capabilityId": { "type": "string" },
+          "kernelId": { "type": "string" },
+          "operatorAddress": { "type": "string" },
+          "capabilityType": { "type": "string", "description": "e.g. 'make-pizza' or 'delivered-pizza'." },
+          "estimatedPriceUSD": { "type": "number" },
+          "estimatedDurationMs": { "type": "number" },
+          "assuranceTier": { "type": "integer", "enum": [0, 1, 2, 3] },
+          "reputation": { "type": "number", "description": "0-1000." },
+          "location": { "type": "object", "properties": { "lat": { "type": "number" }, "lng": { "type": "number" } } },
+          "available": { "type": "boolean" }
+        },
+        "required": ["capabilityId", "kernelId", "operatorAddress", "capabilityType", "estimatedPriceUSD", "estimatedDurationMs", "assuranceTier"]
+      },
+      "output_schema": { "type": "object", "properties": { "ok": { "type": "boolean" }, "capabilityId": { "type": "string" } } },
+      "endpoint": { "method": "POST", "path": "/api/compose/_dev/register-candidate" },
+      "example": {
+        "request": { "capabilityId": "cap_shop-roma", "kernelId": "k_shop-roma", "operatorAddress": "shop-roma@vibecode-demo", "capabilityType": "make-pizza", "estimatedPriceUSD": 15, "estimatedDurationMs": 900000, "assuranceTier": 1, "reputation": 600, "location": { "lat": 37.78, "lng": -122.41 }, "available": true },
+        "response": { "ok": true, "capabilityId": "cap_shop-roma" }
+      }
+    },
+    {
+      "name": "provision_api_key",
+      "description": "Provision a PCC API key. NOT required for the pizza demo (the /api/demo/* endpoints are keyless). Only needed if you want to use the wider PCC API beyond ordering pizza. Accepts email OR walletAddress. The key is shown once — save it. PUBLIC.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "description": "Operator email (use this OR walletAddress)." },
+          "walletAddress": { "type": "string", "description": "EVM wallet address (use this OR email)." },
+          "name": { "type": "string" },
+          "capability": { "type": "string" }
+        },
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "api_key": { "type": "string", "description": "pcc_live_* — include as 'Authorization: Bearer <key>'." },
+          "key_id": { "type": "string" },
+          "operator_id": { "type": "string" },
+          "scopes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "endpoint": { "method": "POST", "path": "/api/auth/provision" },
+      "example": {
+        "request": { "email": "operator@example.com", "name": "My Workshop" },
+        "response": { "api_key": "pcc_live_abc123", "key_id": "key-uuid", "operator_id": "operator@example.com", "scopes": ["*"] }
+      }
+    }
+  ],
+  "quickstart": {
+    "keyless": "The pizza demo needs no API key. Just call the endpoints under api_base. Order of operations: discover_csd_suggestions -> (clarify with user) -> place_pizza_order -> (show plan, get yes) -> confirm_order -> watch_order/get_order -> report settlement on `delivered` event.",
+    "curl_relay": "If your session has no HTTP tool, write the curl command for the user to run and ask them to paste back the JSON. For status, have them re-run `curl -s https://capability.network/api/demo/orders/<id>` every ~15s instead of streaming."
+  },
+  "metadata": {
+    "tool_count": 11,
+    "updated": "2026-06-14",
+    "demo": "vibecodenights pizza demo",
+    "full_package": "https://capability.network/agent-package.json",
+    "human_prompt": "https://capability.network/pizza-llm-agent-prompt.md",
+    "notes": "All /api/demo/* and /sse/demo/* endpoints are public (keyless). The /api/csd/suggest endpoint is also public. The other tools are reference/operator-side."
+  }
+}
