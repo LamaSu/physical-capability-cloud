@@ -124,6 +124,7 @@ import { templateSessionRoutes } from "./routes/template-session.js";
 import { orchestratorTemplatesRoutes } from "./routes/orchestrator-templates.js";
 import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-agents.js";
 import { commentaryRoutes } from "./routes/commentary.js";
+import { visualizerEvents } from "./routes/visualizer-events.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
@@ -565,6 +566,10 @@ export async function createGateway(port = 3200) {
 
   // Sports-commentator LLM narration over event streams
   await app.register(commentaryRoutes);
+
+  // Public, unauthenticated SSE fan-out for the substrate visualizer
+  // (apps/dashboard/public/visualizer.html). Read-only, no PII.
+  await app.register(visualizerEvents);
 
   // A2A relay — WebSocket + REST relay for networked agent-to-agent messaging
   await app.register(a2aRelayRoutes);
