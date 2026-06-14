@@ -2,26 +2,27 @@ import React from "react";
 import { getAuthHeaders } from "../stores/auth-store.js";
 
 /**
- * CdpFundedKeyOnramp — card → funded smart wallet → scoped, revocable agent key.
+ * CdpFundedKeyOnramp — zero-friction PCC onboarding.
  *
- * Drives the lane #017 routes:
- *   POST   /api/fiat-ramp/cdp/provision         (create smart wallet + onramp URL)
- *   POST   /api/fiat-ramp/cdp/spend-permission  (issue scoped, revocable key)
+ *   Step 1 (free):     create a gasless smart wallet — NO card. Usable on PCC
+ *                      immediately (gasless USDC on Base via paymaster: receive
+ *                      payments, hold an identity, operate).
+ *   Step 2 (optional): add funds with a card — only when you want to SPEND.
+ *   Step 3 (optional): issue a SCOPED, REVOCABLE agent key (never a raw key).
+ *
+ * Lane #017 routes (mock until CDP creds land):
+ *   POST   /api/fiat-ramp/cdp/wallet            (free wallet, no card)
+ *   POST   /api/fiat-ramp/coinbase/onramp       (fund an existing wallet — real URL)
+ *   POST   /api/fiat-ramp/cdp/spend-permission  (scoped agent key)
  *   DELETE /api/fiat-ramp/cdp/spend-permission/:id
- *
- * The only human step is paying once at the onramp URL. The agent receives a
- * scoped spend-permission, never a raw private key. Works against the mock routes
- * until CDP creds are wired (then the same flow is real).
  */
 
-interface Provisioned {
+interface Wallet {
   walletAddress: string;
   network: string;
-  onrampUrl: string;
-  sessionId: string;
+  smartAccount: boolean;
   mock?: boolean;
 }
-
 interface Permission {
   permissionId: string;
   spender: string;
@@ -46,8 +47,10 @@ const INPUT =
   "w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white/90 outline-none focus:border-teal-400/40";
 
 export function CdpFundedKeyOnramp() {
-  const [wallet, setWallet] = React.useState<Provisioned | null>(null);
-  const [provisioning, setProvisioning] = React.useState(false);
+  const [wallet, setWallet] = React.useState<Wallet | null>(null);
+  const [creating, setCreating] = React.useState(false);
+  const [onrampUrl, setOnrampUrl] = React.useState<string | null>(null);
+  const [funding, setFunding] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
   const [spender, setSpender] = React.useState("");
@@ -56,15 +59,31 @@ export function CdpFundedKeyOnramp() {
   const [issuing, setIssuing] = React.useState(false);
   const [perm, setPerm] = React.useState<Permission | null>(null);
 
-  async function provision() {
-    setProvisioning(true);
+  async function createWallet() {
+    setCreating(true);
     setErr(null);
     try {
-      setWallet(await api("/api/fiat-ramp/cdp/provision", "POST", { presetAmountUSD: 25 }));
+      setWallet(await api("/api/fiat-ramp/cdp/wallet", "POST"));
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setProvisioning(false);
+      setCreating(false);
+    }
+  }
+
+  async function fund() {
+    if (!wallet) return;
+    setFunding(true);
+    setErr(null);
+    try {
+      const r = await api("/api/fiat-ramp/coinbase/onramp", "POST", {
+        walletAddress: wallet.walletAddress,
+      });
+      setOnrampUrl(r.onrampUrl);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setFunding(false);
     }
   }
 
@@ -102,29 +121,30 @@ export function CdpFundedKeyOnramp() {
     <div className="bg-white/[0.02] border border-white/[0.06] rounded-2xl">
       <div className="p-5 space-y-5">
         <div>
-          <h3 className="text-base font-semibold text-white/90">Funded agent key</h3>
+          <h3 className="text-base font-semibold text-white/90">Start on PCC — no card needed</h3>
           <p className="text-[13px] text-white/40 mt-1">
-            Attach a card once → a smart wallet is created and funded with USDC on Base (gasless).
-            Your agent gets a <span className="text-teal-400/80">scoped, revocable</span> spending
-            key — never a raw private key.
+            Create a wallet for free and use PCC immediately — gasless on Base (receive payments,
+            hold an identity, operate). Add a card <span className="text-white/60">only</span> when
+            you want to spend, and scope a <span className="text-teal-400/80">revocable</span> key
+            for your agent.
           </p>
         </div>
 
-        {/* Step 1 — provision */}
+        {/* Step 1 — free wallet */}
         <div className="space-y-2">
           <div className="text-[11px] uppercase tracking-wide text-white/30">
-            Step 1 · Create funded wallet
+            Step 1 · Create your wallet (free)
           </div>
           {!wallet ? (
             <button
-              onClick={provision}
-              disabled={provisioning}
+              onClick={createWallet}
+              disabled={creating}
               className={`${BTN} bg-teal-400/20 text-teal-400 border border-teal-400/30 hover:bg-teal-400/30`}
             >
-              {provisioning ? "Creating…" : "Create funded wallet"}
+              {creating ? "Creating…" : "Create wallet — no card"}
             </button>
           ) : (
-            <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 space-y-2">
+            <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-3 space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-[12px] text-white/70 break-all">
                   {wallet.walletAddress}
@@ -135,26 +155,45 @@ export function CdpFundedKeyOnramp() {
                   </span>
                 )}
               </div>
-              <div className="text-[11px] text-white/40">
-                {wallet.network} · smart account · gasless USDC
+              <div className="text-[11px] text-emerald-400/70">
+                ✓ Usable on PCC now · {wallet.network} · gasless
               </div>
-              <a
-                href={wallet.onrampUrl}
-                target="_blank"
-                rel="noreferrer"
-                className={`${BTN} inline-block bg-lime-400/15 text-lime-300 border border-lime-400/30 hover:bg-lime-400/25`}
-              >
-                Fund with card →
-              </a>
             </div>
           )}
         </div>
 
-        {/* Step 2 — scoped key */}
+        {/* Step 2 — optional fund */}
         {wallet && (
           <div className="space-y-2">
             <div className="text-[11px] uppercase tracking-wide text-white/30">
-              Step 2 · Issue a scoped agent key
+              Step 2 · Add funds (optional — only to spend)
+            </div>
+            {!onrampUrl ? (
+              <button
+                onClick={fund}
+                disabled={funding}
+                className={`${BTN} bg-white/[0.04] text-white/60 border border-white/10 hover:text-lime-300 hover:border-lime-400/30`}
+              >
+                {funding ? "Preparing…" : "Add funds with a card →"}
+              </button>
+            ) : (
+              <a
+                href={onrampUrl}
+                target="_blank"
+                rel="noreferrer"
+                className={`${BTN} inline-block bg-lime-400/15 text-lime-300 border border-lime-400/30 hover:bg-lime-400/25`}
+              >
+                Open card checkout →
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* Step 3 — optional scoped key */}
+        {wallet && (
+          <div className="space-y-2">
+            <div className="text-[11px] uppercase tracking-wide text-white/30">
+              Step 3 · Issue a scoped agent key (optional)
             </div>
             {!perm ? (
               <div className="space-y-2">

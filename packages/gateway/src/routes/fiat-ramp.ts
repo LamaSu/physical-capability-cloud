@@ -153,6 +153,25 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   // (no bring-your-own-address) and issues a SCOPED, REVOCABLE spend-permission —
   // never a raw private key. Card → funded wallet → scoped agent key, one human step.
 
+  // Card-FREE start: a gasless smart wallet so a user can use PCC immediately —
+  // gasless USDC on Base via the paymaster (receive payments, hold an identity,
+  // operate). No card, no gas. They fund it later (only when they want to SPEND).
+  // Pair with POST /api/auth/provision for an API key.
+  app.post("/api/fiat-ramp/cdp/wallet", async () => {
+    const { wallet } = getCdp();
+    const w = await wallet.createWallet();
+    return {
+      walletAddress: w.address,
+      network: w.network,
+      smartAccount: w.smartAccount,
+      mock: wallet.isMock,
+      usableNow: true,
+      note:
+        "Usable on PCC now — gasless on Base, no card, no gas. Pair with POST /api/auth/provision " +
+        "for an API key. Fund with a card later (POST /api/fiat-ramp/coinbase/onramp) only to pay for jobs.",
+    };
+  });
+
   app.post("/api/fiat-ramp/cdp/provision", async (req) => {
     const body = (req.body ?? {}) as { presetAmountUSD?: number };
     const { wallet, onramp } = getCdp();
