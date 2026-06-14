@@ -88,6 +88,7 @@ import { initAgentBridge, getAgentStatus, getConversations, getRecentMessages, g
 import { a2aRelayRoutes } from "@pcc/a2a";
 import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
+import { visualizerEvents } from "./routes/visualizer-events.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
 
@@ -352,6 +353,10 @@ export async function createGateway(port = 3200) {
   // SSE endpoints
   await app.register(notificationSSE);
   await app.register(topicSSE);
+
+  // Public, unauthenticated SSE fan-out for the substrate visualizer
+  // (apps/dashboard/public/visualizer.html). Read-only, no PII.
+  await app.register(visualizerEvents);
 
   // Mock SSE producers: ON by default in dev, OFF by default in production.
   // Override with ENABLE_MOCK_STREAMING=true|false in either environment.
