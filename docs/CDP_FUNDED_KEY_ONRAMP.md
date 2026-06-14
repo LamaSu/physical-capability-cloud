@@ -46,5 +46,23 @@ The funded wallet + spend-permission **is** the operator's settlement endpoint: 
 - Gate-A `/vet` the `@coinbase/cdp-sdk` dependency before adding it. **✓ PRE-CLEARED 2026-06-14** (Spark): `@coinbase/cdp-sdk@1.51.0`, MIT, official Coinbase npm org (`coinbase-owner` / `coinbase-npm`), `npm audit` = **0 vulnerabilities**, 49 transitive deps. Gate A = PASS — safe to add when creds land. Re-run at add time to confirm the resolved version still audits clean.
 - **Verify the actual CDP SDK surface before writing integration code** — do not assume the API.
 
+## Status — 2026-06-14: COMPLETE (real @coinbase/cdp-sdk@1.51.0 wired + smoke-verified)
+
+Real SDK wired behind the mock seam. The flip is presence-of-creds: `mock = !apiKeyId`, so
+setting `CDP_API_KEY_ID` (+ `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET`) in the gateway env
+makes every client real — no toggle. Live smoke on Spark vs **base-sepolia** (`isMock=false`):
+
+- `createWallet` → real 2-owner smart account (`enableSpendPermissions:true`) ✓
+- `requestFaucet` → real testnet-USDC tx ✓
+- `createSpendPermission` (scoped $) + `listSpendPermissions` ✓
+- `revokeSpendPermission` ✓ (space it from issue — back-to-back hits ERC-4337 `AA25` nonce race)
+- `@pcc/payments` typechecks clean against the real SDK; 300/300 payments tests pass.
+
+Onramp (`createSession`) builds the hosted Coinbase URL and is **mainnet-only by nature**
+(real money) — testnet funds via the faucet. `CDP_ONRAMP_APP_ID` sets the onramp App ID.
+
+**Deploy flip:** set `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET` / `CDP_WALLET_SECRET` in the
+gateway's env (Railway for capability.network; Spark if testing there) + restart. No code change.
+
 ## Coordination
 Lane: funded-key on-ramp (coord #017). Non-colliding with Lanes A/B/C (oracle/contracts/compose) and #113 (registry). Isolated branch `feat/cdp-funded-key` off `lamasu/master`.
