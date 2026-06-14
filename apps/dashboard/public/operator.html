@@ -161,16 +161,14 @@ async function act(action,id){
       toast("accepted — make the pizza");
       pushHistory(`accepted job ${id}`);
     } else if(action==="complete"){
-      await api(`/api/demo/jobs/${id}/complete`,{method:"POST",body:JSON.stringify({})});
-      const j=S.jobs.get(id);
-      if(j){
-        S.earnings+=j.details.priceUSD;
-        S.completed.push(j);
-        S.jobs.delete(id);
-        render();
-      }
-      toast("✓ marked done — $"+(j?.details.priceUSD||0)+" earned");
-      pushHistory(`completed job ${id} — earned $${j?.details.priceUSD||0}`);
+      // Hand off to the CVP capture flow. The capture page collects photo
+      // + GPS + DeviceMotion + WebAuthn-signed manifest, then posts the
+      // verdict's captureHash back to /api/demo/jobs/:id/complete as
+      // evidenceHash. We don't drive /complete from here anymore.
+      pushHistory(`opening capture flow for ${id}`);
+      const back = encodeURIComponent(location.href);
+      location.href = `/operator-capture.html?jobId=${encodeURIComponent(id)}&shop=${encodeURIComponent(slug)}&phase=complete&back=${back}`;
+      return;
     } else if(action==="reject"){
       await api(`/api/demo/jobs/${id}/reject`,{method:"POST",body:JSON.stringify({reason:"shop rejected"})});
       S.jobs.delete(id); render();
