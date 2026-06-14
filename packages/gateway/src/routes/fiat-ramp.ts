@@ -20,6 +20,9 @@ import {
   YellowcardOnramp,
   WiseClient,
   WisePayoutService,
+  CdpWalletClient,
+  CdpOnrampClient,
+  CdpSpendPermissionService,
 } from "@pcc/payments";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +89,30 @@ function getWise(): { client: WiseClient; payout: WisePayoutService } {
   return { client: wiseClient, payout: wisePayout! };
 }
 
+let cdpWallet: CdpWalletClient | undefined;
+let cdpOnramp: CdpOnrampClient | undefined;
+let cdpSpendPerm: CdpSpendPermissionService | undefined;
+
+function getCdp(): {
+  wallet: CdpWalletClient;
+  onramp: CdpOnrampClient;
+  spendPerm: CdpSpendPermissionService;
+} {
+  if (!cdpWallet) {
+    const cfg = {
+      apiKeyId: process.env.CDP_API_KEY_ID,
+      apiKeySecret: process.env.CDP_API_KEY_SECRET,
+      walletSecret: process.env.CDP_WALLET_SECRET,
+      network: (process.env.CDP_NETWORK as "base-sepolia" | "base") ?? "base-sepolia",
+      onrampAppId: process.env.CDP_ONRAMP_APP_ID,
+    };
+    cdpWallet = new CdpWalletClient(cfg);
+    cdpOnramp = new CdpOnrampClient(cfg);
+    cdpSpendPerm = new CdpSpendPermissionService(cfg);
+  }
+  return { wallet: cdpWallet, onramp: cdpOnramp!, spendPerm: cdpSpendPerm! };
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -120,6 +147,85 @@ export async function fiatRampRoutes(app: FastifyInstance) {
       },
       recommended: "coinbase",
     };
+  });
+
+  // ── CDP funded-key on-ramp (lane #017) ──────────────────────────
+  // Net-new vs /coinbase/onramp below: /provision also CREATES the smart wallet
+  // (no bring-your-own-address) and issues a SCOPED, REVOCABLE spend-permission —
+  // never a raw private key. Card → funded wallet → scoped agent key, one human step.
+
+  // Card-FREE start: a gasless smart wallet so a user can use PCC immediately —
+  // gasless USDC on Base via the paymaster (receive payments, hold an identity,
+  // operate). No card, no gas. They fund it later (only when they want to SPEND).
+  // Pair with POST /api/auth/provision for an API key.
+  app.post("/api/fiat-ramp/cdp/wallet", async () => {
+    const { wallet } = getCdp();
+    const w = await wallet.createWallet();
+    return {
+      walletAddress: w.address,
+      network: w.network,
+      smartAccount: w.smartAccount,
+      mock: wallet.isMock,
+      usableNow: true,
+      note:
+        "Usable on PCC now — gasless on Base, no card, no gas. Pair with POST /api/auth/provision " +
+        "for an API key. Fund with a card later (POST /api/fiat-ramp/coinbase/onramp) only to pay for jobs.",
+    };
+  });
+
+  app.post("/api/fiat-ramp/cdp/provision", async (req) => {
+    const body = (req.body ?? {}) as { presetAmountUSD?: number };
+    const { wallet, onramp } = getCdp();
+    const w = await wallet.createWallet();
+    const session = await onramp.createSession({
+      destinationAddress: w.address,
+      presetAmountUSD: body.presetAmountUSD,
+    });
+    return {
+      walletAddress: w.address,
+      network: w.network,
+      smartAccount: w.smartAccount,
+      onrampUrl: session.onrampUrl,
+      sessionId: session.sessionId,
+      mock: wallet.isMock,
+      instructions:
+        "Open onrampUrl, pay once by card → USDC lands in the smart wallet on Base (gasless). " +
+        "Then POST /api/fiat-ramp/cdp/spend-permission to give your agent a scoped, revocable spending key.",
+    };
+  });
+
+  app.get("/api/fiat-ramp/cdp/wallet/:address/balance", async (req) => {
+    const { address } = req.params as { address: string };
+    return getCdp().wallet.getBalance(address as `0x${string}`);
+  });
+
+  app.post("/api/fiat-ramp/cdp/spend-permission", async (req, reply) => {
+    const body = req.body as
+      | {
+          walletAddress?: string;
+          spender?: string;
+          allowanceUSDC?: number;
+          periodSec?: number;
+          expiresAt?: string;
+        }
+      | undefined;
+    if (!body?.walletAddress || !body?.spender || body.allowanceUSDC == null) {
+      return reply
+        .status(400)
+        .send({ error: "walletAddress, spender, allowanceUSDC required" });
+    }
+    return getCdp().spendPerm.issue({
+      account: body.walletAddress as `0x${string}`,
+      spender: body.spender as `0x${string}`,
+      allowanceUSDC: body.allowanceUSDC,
+      periodSec: body.periodSec ?? 86_400,
+      expiresAt: body.expiresAt,
+    });
+  });
+
+  app.delete("/api/fiat-ramp/cdp/spend-permission/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    return getCdp().spendPerm.revoke(id);
   });
 
   // ── Coinbase Onramp (PRIMARY — no merchant account needed) ──────

@@ -10,10 +10,11 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { getAuthHeaders } from "../stores/auth-store.js";
+import { CdpFundedKeyOnramp } from "../components/CdpFundedKeyOnramp.js";
 
 // ── Types ────────────────────────────────────────────────────────
 
-type Tab = "fund" | "withdraw" | "credits" | "activity";
+type Tab = "fund" | "withdraw" | "credits" | "activity" | "fundedkey";
 type Provider = "stripe" | "yellowcard" | "wise" | "all";
 
 interface FiatRampSession {
@@ -210,6 +211,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
     { id: "withdraw", label: "Withdraw" },
     { id: "credits", label: "API Credits" },
     { id: "activity", label: "Activity" },
+    { id: "fundedkey", label: "Funded Key" },
   ];
   return (
     <div className="flex items-center gap-1 bg-white/[0.03] border border-white/[0.06] rounded-xl p-1">
@@ -966,6 +968,7 @@ export function WalletPage() {
       {activeTab === "withdraw" && <WithdrawTab />}
       {activeTab === "credits" && <CreditsTab creditBalance={creditBalance} />}
       {activeTab === "activity" && <ActivityTab sessions={sessions} />}
+      {activeTab === "fundedkey" && <CdpFundedKeyOnramp />}
     </div>
   );
 }
