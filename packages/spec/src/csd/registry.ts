@@ -16,8 +16,67 @@ import cnc3axisCsd from "../csds/cnc-3axis.csd.json" with { type: "json" };
 import laserCutCsd from "../csds/laser-cut.csd.json" with { type: "json" };
 import print2dCsd from "../csds/2d-print.csd.json" with { type: "json" };
 
+/**
+ * Per-CSD usage attribution. In-memory map; the persistence layer in
+ * `capability_template_store` (packages/db/src/schema/templates.ts) already
+ * carries the matching shape — moving these counters to SQLite is a follow-on
+ * that doesn't change the public API here. Marketplace mechanics (rating,
+ * fork, royalty) layer on top of this without changing the registry surface.
+ */
+export interface CsdUsage {
+  /** Number of times this CSD has been adopted via an A2A skill / capability create. */
+  count: number;
+  /** Recent agent identifiers that adopted this CSD. Capped at 50 to bound memory. */
+  recentAdopters: string[];
+  /** Last time recordUsage was called for this CSD. */
+  lastUsedAt: string | null;
+}
+
+/**
+ * Score a CSD against a free-form description query.
+ *
+ * Cheap keyword overlap, no ML, no embeddings. Tokenizes the query and the
+ * CSD's name + description + tags into lowercase word sets; the score is
+ * the count of matching tokens, with a bonus for exact name match and a
+ * small bias toward shorter CSD names (more specific). Returns 0 if no
+ * tokens overlap. Good enough for the substrate — swap in graph-search or
+ * embeddings later without changing the public API.
+ */
+function relevanceScore(csd: CSD, queryTokens: Set<string>): number {
+  if (queryTokens.size === 0) return 0;
+  const nameTokens = tokenize(csd.name ?? "");
+  const descTokens = tokenize(csd.description ?? "");
+  const tagTokens = new Set<string>();
+  const tags = (csd as Record<string, unknown>).tags;
+  if (Array.isArray(tags)) {
+    for (const t of tags) {
+      if (typeof t === "string") for (const tok of tokenize(t)) tagTokens.add(tok);
+    }
+  }
+  let score = 0;
+  for (const tok of queryTokens) {
+    if (nameTokens.has(tok)) score += 3;          // name match weighs heaviest
+    if (tagTokens.has(tok)) score += 2;           // tags second
+    if (descTokens.has(tok)) score += 1;          // description third
+  }
+  // Slight bias toward shorter names — more specific is more useful.
+  if (score > 0 && csd.name) score += Math.max(0, 30 - csd.name.length) / 100;
+  return score;
+}
+
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, " ")
+      .split(/\s+/)
+      .filter((t) => t.length >= 3),
+  );
+}
+
 export class CsdRegistry {
   private csds: Map<string, CSD> = new Map();
+  private usage: Map<string, CsdUsage> = new Map();
 
   /**
    * Validate a CSD document and store it in the registry.
@@ -30,6 +89,91 @@ export class CsdRegistry {
       throw new Error(`Invalid CSD "${(csd as Record<string, unknown>).url ?? "unknown"}": ${messages}`);
     }
     this.csds.set(result.data.url, result.data);
+  }
+
+  /**
+   * Record that an agent has adopted a CSD (e.g. via pcc-author-integration).
+   * Bumps the usage counter and tracks recent adopters (deduped, capped at 50).
+   * No-op if the CSD URL is not registered — we don't track ghost usage.
+   */
+  recordUsage(url: string, byAgentId: string): void {
+    if (!this.csds.has(url)) return;
+    const now = new Date().toISOString();
+    let u = this.usage.get(url);
+    if (!u) {
+      u = { count: 0, recentAdopters: [], lastUsedAt: null };
+      this.usage.set(url, u);
+    }
+    u.count += 1;
+    u.lastUsedAt = now;
+    // Keep recentAdopters deduped + capped (newest at end)
+    const idx = u.recentAdopters.indexOf(byAgentId);
+    if (idx >= 0) u.recentAdopters.splice(idx, 1);
+    u.recentAdopters.push(byAgentId);
+    if (u.recentAdopters.length > 50) u.recentAdopters.shift();
+  }
+
+  /** Get usage attribution for a CSD. Returns zeros for never-used CSDs. */
+  getUsage(url: string): CsdUsage {
+    return this.usage.get(url) ?? { count: 0, recentAdopters: [], lastUsedAt: null };
+  }
+
+  /**
+   * Find a CSD URL whose `type` field matches the given capability type string.
+   * Used by the author-integration handler to map a free-text capability type
+   * (e.g. "make-pizza") back to a registered CSD so usage can be attributed.
+   * Returns the first match — CSD types should be unique by convention.
+   */
+  findUrlByType(type: string): string | undefined {
+    for (const [url, csd] of this.csds.entries()) {
+      const csdType = (csd as Record<string, unknown>).type;
+      if (typeof csdType === "string" && csdType === type) return url;
+    }
+    return undefined;
+  }
+
+  /**
+   * Suggest up to `limit` CSDs that best match a free-form description query.
+   * Falls back to popularity (usage count desc) when the query is empty.
+   * Each returned entry carries the CSD, the relevance score, and current usage.
+   *
+   * This is the substrate behind the pcc-suggest-templates A2A skill: a user's
+   * agent describes what they're trying to onboard in plain English, the
+   * registry returns N candidate templates the user's agent can pick from.
+   */
+  suggest(
+    query: string,
+    opts?: { limit?: number; kind?: CSD["kind"] },
+  ): Array<{ csd: CSD; score: number; usage: CsdUsage }> {
+    const limit = opts?.limit ?? 5;
+    const tokens = tokenize(query);
+    let candidates: CSD[] = this.list();
+    if (opts?.kind) candidates = candidates.filter((c) => c.kind === opts.kind);
+
+    const scored = candidates.map((csd) => ({
+      csd,
+      score: relevanceScore(csd, tokens),
+      usage: this.getUsage(csd.url),
+    }));
+
+    // If no query tokens, sort by popularity instead.
+    if (tokens.size === 0) {
+      scored.sort((a, b) => b.usage.count - a.usage.count);
+      return scored.slice(0, limit);
+    }
+    // Drop zero-score entries, sort by score desc, tie-break on usage.
+    return scored
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score || b.usage.count - a.usage.count)
+      .slice(0, limit);
+  }
+
+  /** Return CSDs sorted by usage count desc, capped at `limit`. */
+  popular(limit = 10): Array<{ csd: CSD; usage: CsdUsage }> {
+    return this.list()
+      .map((csd) => ({ csd, usage: this.getUsage(csd.url) }))
+      .sort((a, b) => b.usage.count - a.usage.count)
+      .slice(0, limit);
   }
 
   /**

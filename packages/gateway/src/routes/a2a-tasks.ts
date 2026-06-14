@@ -63,6 +63,7 @@ import {
   type ChannelRecord,
   type AvailabilityRecord,
 } from "./operator-channels.js";
+import { getCsdRegistry } from "./csd.js";
 
 const { negotiationSessions, operatorPolicies, evidenceBundles, jobs, escrows, escrowMilestones } = schema;
 
@@ -686,6 +687,15 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
     return [{ type: "pcc.author_integration", description: "capability publish failed", data: { error: cr.error.message } }];
   }
 
+  // Record CSD adoption: if the capability `type` matches a registered CSD,
+  // bump that CSD's usage counter so the marketplace data layer reflects
+  // who's adopting which templates. Silent no-op if no CSD matches.
+  const csdRegistry = getCsdRegistry();
+  const adoptedCsdUrl = csdRegistry.findUrlByType(p.type);
+  if (adoptedCsdUrl) {
+    csdRegistry.recordUsage(adoptedCsdUrl, p.operatorAddress ?? "a2a-operator");
+  }
+
   // Attach any channels the operator's onboarding agent passed in. This is
   // the wire-protocol slot — how PCC will ping the operator when a job lands.
   // Operator slug defaults to a sanitized form of name so the same agent can
@@ -722,6 +732,66 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
         ? "POST /api/setup/test-job { kernelId, deviceId, assuranceTier } to prove + auto-activate"
         : "POST /api/onboard/registrations/:id/prove { evidence: photo + GPS } to activate at Tier 1",
       attachMoreChannels: `tasks/send { skill: "pcc-attach-channel", params: { operatorSlug: "${operatorSlug}", ... } }`,
+    },
+  }];
+}
+
+// ── pcc-suggest-templates: bidirectional onboarding ─────────────────────────
+
+interface PccSuggestTemplatesParams {
+  /** Free-form description of what the user is trying to set up. */
+  description?: string;
+  /** Alias for description — accepts either, agents can use whichever feels natural. */
+  query?: string;
+  /** Max results. Default 5, clamped to [1, 20]. */
+  limit?: number;
+  /** Optional kind filter: base | profile | extension | workflow. */
+  kind?: "base" | "profile" | "extension" | "workflow";
+}
+
+/**
+ * The registry talks back. A user's agent says "I'm setting up a same-day
+ * courier" or "I have an Opentrons OT-2 I want to publish" or "I want to
+ * sell wood-fired Neapolitan pizza" — the registry returns N candidate CSD
+ * templates the agent can then pass into pcc-author-integration.
+ *
+ * This is the opposite direction of pcc-author-integration: that one is the
+ * user's agent pushing data INTO PCC; this one is the registry handing
+ * candidate templates BACK to the user's agent. Together they make the
+ * onboarding conversation conversational on both sides.
+ *
+ * Scoring is cheap keyword overlap today — name tokens (×3) + tag tokens
+ * (×2) + description tokens (×1), tied broken by usage. Swap in graph search
+ * or embeddings later without changing the skill surface.
+ */
+async function handlePccSuggestTemplates(p: PccSuggestTemplatesParams): Promise<A2AArtifact[]> {
+  const query = p.description ?? p.query ?? "";
+  const limit = Math.min(20, Math.max(1, p.limit ?? 5));
+  const registry = getCsdRegistry();
+  const suggestions = registry.suggest(query, {
+    limit,
+    kind: p.kind,
+  });
+  return [{
+    type: "pcc.suggest_templates",
+    description: suggestions.length === 0
+      ? `No matching templates for "${query}" — the user's agent can register a new CSD via POST /api/csd or proceed without a template.`
+      : `${suggestions.length} candidate template${suggestions.length === 1 ? "" : "s"} for "${query}"`,
+    data: {
+      query,
+      kind: p.kind ?? null,
+      suggestions: suggestions.map((s) => ({
+        url: s.csd.url,
+        name: s.csd.name,
+        kind: s.csd.kind,
+        description: s.csd.description,
+        type: (s.csd as Record<string, unknown>).type,
+        relevanceScore: s.score,
+        usage: s.usage,
+      })),
+      nextStep: suggestions.length === 0
+        ? "POST /a2a/tasks/send { skill: 'pcc-author-integration', params: { ... } } — no template; user's agent defines the capability inline"
+        : "POST /a2a/tasks/send { skill: 'pcc-author-integration', params: { type: <pick a template's type>, ...overrides } } — pass the chosen template's type to adopt it (this bumps its usage counter)",
     },
   }];
 }
@@ -912,6 +982,18 @@ async function dispatchTasksSend(
 
       case "pcc-attach-channel": {
         const artifacts = await handlePccAttachChannel(skillParams as PccAttachChannelParams);
+        const task: A2ATask = {
+          ...baseTask,
+          state: "COMPLETED",
+          artifacts,
+          updatedAt: new Date().toISOString(),
+        };
+        a2aTasks.set(taskId, task);
+        return rpcSuccess(rpcId, task);
+      }
+
+      case "pcc-suggest-templates": {
+        const artifacts = await handlePccSuggestTemplates(skillParams as PccSuggestTemplatesParams);
         const task: A2ATask = {
           ...baseTask,
           state: "COMPLETED",
