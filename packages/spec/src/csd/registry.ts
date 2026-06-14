@@ -317,3 +317,5 @@ export function loadBuiltinCsds(): CsdRegistry {
 
   return registry;
 }
+
+// retrigger CI: 2026-06-14
