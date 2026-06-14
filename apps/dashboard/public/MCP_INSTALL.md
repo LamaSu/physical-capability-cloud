@@ -170,7 +170,7 @@ matches your client:
 |---|---|---|
 | Claude Desktop, Claude Code, Cursor, Goose, ChatGPT Apps | **MCP** (this page) | `npx -y @pcc/mcp-server` |
 | ChatGPT Custom GPTs, OpenAI Custom Tools, Codex, Anthropic Custom Tools, Zapier, n8n, Make | **OpenAPI 3.0.3** | `https://capability.network/openapi.json` (700+ paths) |
-| A2A-native agents, your own LLM tool-use loop, any HTTP-aware agent | **agent-package.json** | `https://capability.network/agent-package.json` (237 tools, system prompt, input schemas, endpoint mappings) |
+| A2A-native agents, your own LLM tool-use loop, any HTTP-aware agent | **agent-package.json** | `https://capability.network/agent-package.json` (248 tools, system prompt, input schemas, endpoint mappings) |
 
 Any of the three gives full read access. Write access needs the same
 Bearer token across all three.

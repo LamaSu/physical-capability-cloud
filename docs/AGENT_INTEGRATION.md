@@ -748,9 +748,9 @@ For the full contributor-economics surface (REST endpoints, DSL, walkthrough), s
 
 ---
 
-## 8. Agent Package (237 Tools)
+## 8. Agent Package (248 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 237 tools with input schemas and endpoint mappings (v2.12.0 — bumped to 237 in May 2026 after adding 4 Trilobio operator helpers; previous bumps: 218 contributor-economics consolidation, 226 metadata, 233 hamilton + role flows).
+The agent package is a single JSON file any LLM can consume, containing 248 tools with input schemas and endpoint mappings (v2.13.0 — bumped to 248 in June 2026 after adding 11 tools for the channels substrate, suggest-templates, operator status, and the composition engine surface; previous bumps: 237 trilobio operator helpers in May 2026; 218 contributor-economics consolidation; 226 metadata; 233 hamilton + role flows).
 
 **Fetch it**:
 ```bash
