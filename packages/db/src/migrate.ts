@@ -1734,4 +1734,20 @@ export function migrateDatabase(sqlite: Database.Database): void {
       created_at TEXT NOT NULL
     );
   `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // CSD usage attribution — backs the SQLite CsdUsageRepository.
+  // Replaces the in-memory Map introduced in PR #118 so per-CSD adoption
+  // counters survive gateway restart. Opt-in via PCC_CSD_PERSIST=true; the
+  // default in-memory backend keeps suggest-templates tests fast.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS csd_usage (
+      url               TEXT PRIMARY KEY,
+      count             INTEGER NOT NULL DEFAULT 0,
+      recent_adopters   TEXT NOT NULL DEFAULT '[]',  -- JSON string[]
+      last_used_at      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS csd_usage_count_idx ON csd_usage(count DESC);
+  `);
 }

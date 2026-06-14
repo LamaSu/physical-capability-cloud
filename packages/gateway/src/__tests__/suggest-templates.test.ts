@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { CsdRegistry, loadBuiltinCsds } from "@pcc/spec";
+import { createStore } from "@pcc/store";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore } from "../db.js";
@@ -396,5 +397,57 @@ describe("pcc-author-integration auto-records CSD adoption", () => {
     for (const s of suggestions) {
       expect(s.usage.count).toBe(0);
     }
+  });
+});
+
+// ── CsdRegistry with SQLite-backed CsdUsageRepository ─────────────────────────
+//
+// Validates the public API of CsdRegistry is identical whether usage is held
+// in-memory or persisted to SQLite. The registry constructor accepts the
+// CsdUsageRepository interface; loadBuiltinCsds() forwards it. Close+reopen
+// proves the counter survives a process restart.
+
+describe("CsdRegistry — SQLite-backed usage attribution survives restart", () => {
+  it("persists counters across store close + reopen on a file DB", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "csd-registry-persist-"));
+    const dbPath = join(dir, "pcc.sqlite");
+    try {
+      // Round 1 — record usage through the registry's public API
+      const s1 = createStore({ dbPath, seed: false });
+      const reg1 = loadBuiltinCsds(s1.repos.csdUsage);
+      reg1.recordUsage("pcc://capabilities/fdm/v2", "0xagent-1");
+      reg1.recordUsage("pcc://capabilities/fdm/v2", "0xagent-2");
+      reg1.recordUsage("pcc://capabilities/cnc-3axis/v2", "0xagent-1");
+      // Sanity — the in-process registry reads back what it just wrote
+      expect(reg1.getUsage("pcc://capabilities/fdm/v2").count).toBe(2);
+      expect(reg1.popular(5)[0]!.csd.url).toBe("pcc://capabilities/fdm/v2");
+      s1.close();
+
+      // Round 2 — fresh registry instance against the same DB file
+      const s2 = createStore({ dbPath, seed: false });
+      const reg2 = loadBuiltinCsds(s2.repos.csdUsage);
+      const fdm = reg2.getUsage("pcc://capabilities/fdm/v2");
+      expect(fdm.count).toBe(2);
+      expect(fdm.recentAdopters).toEqual(["0xagent-1", "0xagent-2"]);
+      // suggest() reads through the bulk getMany() — popularity tie-break still works
+      const fdmMatches = reg2.suggest("fdm");
+      expect(fdmMatches[0]!.csd.url).toBe("pcc://capabilities/fdm/v2");
+      expect(fdmMatches[0]!.usage.count).toBe(2);
+      s2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores recordUsage for unknown CSDs (same as in-memory)", async () => {
+    const s = createStore({ seed: false });
+    const reg = loadBuiltinCsds(s.repos.csdUsage);
+    reg.recordUsage("pcc://does-not-exist/v1", "0xagent");
+    // No row written, no error, no count
+    expect(reg.getUsage("pcc://does-not-exist/v1").count).toBe(0);
+    s.close();
   });
 });
