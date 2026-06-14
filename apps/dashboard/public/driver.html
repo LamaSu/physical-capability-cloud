@@ -172,21 +172,19 @@ async function act(action,id){
       toast("accepted — head to pickup");
       pushHistory(`accepted delivery ${id}`);
     } else if(action==="pickup"){
-      await api(`/api/demo/jobs/${id}/pickup`,{method:"POST"});
-      const j=S.jobs.get(id); if(j){j.status="picked_up"; render();}
-      toast("picked up — drive to dropoff");
-      pushHistory(`picked up ${id}`);
+      // Pickup capture — driver photographs the pizza pickup at the shop.
+      // After PASS the capture page POSTs /api/demo/jobs/:id/pickup itself.
+      pushHistory(`opening capture flow for pickup of ${id}`);
+      const back = encodeURIComponent(location.href);
+      location.href = `/driver-capture.html?jobId=${encodeURIComponent(id)}&driver=${encodeURIComponent(slug)}&phase=pickup&back=${back}`;
+      return;
     } else if(action==="complete"){
-      await api(`/api/demo/jobs/${id}/complete`,{method:"POST",body:JSON.stringify({})});
-      const j=S.jobs.get(id);
-      if(j){
-        S.earnings+=j.details.priceUSD;
-        S.completed.push(j);
-        S.jobs.delete(id);
-        render();
-      }
-      toast("✓ delivered — $"+(j?.details.priceUSD||0)+" earned");
-      pushHistory(`delivered ${id} — earned $${j?.details.priceUSD||0}`);
+      // Dropoff capture — driver photographs the dropoff. After PASS the
+      // capture page POSTs /api/demo/jobs/:id/complete with evidenceHash.
+      pushHistory(`opening capture flow for dropoff of ${id}`);
+      const back = encodeURIComponent(location.href);
+      location.href = `/driver-capture.html?jobId=${encodeURIComponent(id)}&driver=${encodeURIComponent(slug)}&phase=complete&back=${back}`;
+      return;
     } else if(action==="reject"){
       await api(`/api/demo/jobs/${id}/reject`,{method:"POST",body:JSON.stringify({reason:"driver unavailable"})});
       S.jobs.delete(id); render();

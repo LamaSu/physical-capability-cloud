@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PCC · Driver capture</title>
+<meta http-equiv="refresh" content="0; url=/operator-capture.html">
+<script>
+// driver-capture.html — preserves the URL semantics expected by driver.html
+// while reusing the operator-capture.html implementation. Phase is preserved
+// via query params; the underlying capture flow keys on ?driver= vs ?shop=
+// to render driver-flavored colors / labels and post to /pickup vs /complete.
+(function(){
+  const url = new URL(location.href);
+  url.pathname = "/operator-capture.html";
+  location.replace(url.toString());
+})();
+</script>
+</head>
+<body>
+<p style="font-family:system-ui;padding:24px;color:#888">Redirecting to capture flow…</p>
+</body>
+</html>
