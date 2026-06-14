@@ -165,7 +165,11 @@ boot_gateway() {
   pass "gateway + workspace deps built"
 
   info "Starting gateway in background (logs: ${GATEWAY_LOG})"
+  # WORKFLOW_DB_PATH=:memory: avoids needing a filesystem dir for the workflow
+  # store; PCC_DB_PATH=:memory: avoids the same for the gateway store. Together
+  # they keep the smoke test fully ephemeral.
   PCC_DB_PATH=":memory:" \
+  WORKFLOW_DB_PATH=":memory:" \
   PCC_USE_EAS_V2=false \
   MOCK_SETTLEMENT=true \
   PCC_COMPOSE_EXECUTE_REAL=false \
