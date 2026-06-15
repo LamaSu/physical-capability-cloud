@@ -37,47 +37,51 @@ async function buildApp(): Promise<FastifyInstance> {
   const { db } = getStore();
   const now = new Date().toISOString();
 
+  const kernelDefaults = {
+    location: { lat: 0, lng: 0 },
+    maxAssuranceTier: 2,
+    publicKey: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    reputation: 0,
+    totalJobsCompleted: 0,
+    status: "online",
+    registeredAt: now,
+    lastHeartbeat: now,
+    version: "0.1.0",
+  };
+
   db.insert(shopKernels).values([
     {
+      ...kernelDefaults,
       id: "kernel_mqfmpq8u_pk81",
       name: "Demo Machine Shop",
       operatorAddress: "shop@demo.example",
-      location: { lat: 0, lng: 0 },
       physicalAddress: "Brooklyn",
-      maxAssuranceTier: 2,
-      status: "online",
-      lastHeartbeat: now,
-      version: "0.1.0",
-      createdAt: now,
     } as any,
     {
+      ...kernelDefaults,
       id: "kernel_mqfm6xuw_1151",
       name: "Marios Pizzeria",
       operatorAddress: "mario@mariospizza.example",
-      location: { lat: 0, lng: 0 },
       physicalAddress: "123 Mulberry St NYC",
-      maxAssuranceTier: 2,
-      status: "online",
-      lastHeartbeat: now,
-      version: "0.1.0",
-      createdAt: now,
     } as any,
     {
+      ...kernelDefaults,
       id: "kernel_mqfm8dka_v1jw",
       name: "Daves Delivery (mobile)",
       operatorAddress: "dave@davesdelivery.example",
-      location: { lat: 0, lng: 0 },
       physicalAddress: "roams Manhattan",
-      maxAssuranceTier: 2,
-      status: "online",
-      lastHeartbeat: now,
-      version: "0.1.0",
-      createdAt: now,
     } as any,
   ]).run();
 
+  const capDefaults = {
+    availability: {},
+    location: { lat: 0, lng: 0 },
+    queueDepth: 0,
+  };
+
   db.insert(capabilities).values([
     {
+      ...capDefaults,
       id: "cap-kernel_mqfmpq8u_pk81-fdm",
       kernelId: "kernel_mqfmpq8u_pk81",
       type: "fdm",
@@ -85,11 +89,10 @@ async function buildApp(): Promise<FastifyInstance> {
       description: "",
       materials: ["PLA"],
       assuranceTiers: [0, 1],
-      pricing: { currency: "USDC", baseCost: 20 },
-      location: { lat: 0, lng: 0 },
-      createdAt: now,
+      pricing: { currency: "USDC", baseCost: "20", minimum: "20" },
     } as any,
     {
+      ...capDefaults,
       id: "cap-kernel_mqfm6xuw_1151-wood-fired-pizza",
       kernelId: "kernel_mqfm6xuw_1151",
       type: "wood-fired-pizza",
@@ -97,11 +100,10 @@ async function buildApp(): Promise<FastifyInstance> {
       description: "",
       materials: ["dough", "mozzarella"],
       assuranceTiers: [0, 1],
-      pricing: { currency: "USDC", baseCost: 12 },
-      location: { lat: 0, lng: 0 },
-      createdAt: now,
+      pricing: { currency: "USDC", baseCost: "12", minimum: "12" },
     } as any,
     {
+      ...capDefaults,
       id: "cap-kernel_mqfm8dka_v1jw-local-courier-delivery",
       kernelId: "kernel_mqfm8dka_v1jw",
       type: "local-courier-delivery",
@@ -109,9 +111,7 @@ async function buildApp(): Promise<FastifyInstance> {
       description: "",
       materials: [],
       assuranceTiers: [0, 1],
-      pricing: { currency: "USDC", baseCost: 6 },
-      location: { lat: 0, lng: 0 },
-      createdAt: now,
+      pricing: { currency: "USDC", baseCost: "6", minimum: "6" },
     } as any,
   ]).run();
 
@@ -130,7 +130,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    if (app) await app.close();
     closeStore();
   });
 
