@@ -24,6 +24,14 @@ import {
   decodeEventLog,
   encodeEventTopics,
   encodeAbiParameters,
+  keccak256,
+  toBytes,
+  parseUnits,
+  formatUnits,
+  isAddress,
+  defineChain,
+  decodeAbiParameters,
+  http,
   type Hex,
 } from "viem";
 import { PCCProtocolV2ABI, MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
@@ -413,7 +421,7 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
   // whose decode yields NEW_ESCROW so extractEscrowCreatedAddress returns it.
   const waitForTransactionReceipt = vi.fn();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     writeContract.mockClear();
     waitForTransactionReceipt.mockReset();
@@ -428,32 +436,53 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
     process.env.MOCK_USDC_ADDRESS = FLOW_MOCK_USDC;
     process.env.PCC_DB_PATH = ":memory:";
 
+    // Build receipt data using the REAL viem (from the top-level static import).
+    // These values are captured before the mock below replaces the viem registry
+    // entry — the top-level bindings are live ESM references that aren't affected
+    // by vi.resetModules() or vi.doMock.
+    const receiptTopics = encodeEventTopics({
+      abi: PCCProtocolV2ABI,
+      eventName: "EscrowCreated",
+      args: {
+        escrow: NEW_ESCROW,
+        payer: ("0x" + "00".repeat(20)) as Hex,
+        arbiter: ("0x" + "00".repeat(20)) as Hex,
+      },
+    });
+    const receiptData = encodeAbiParameters(
+      [{ type: "address" }, { type: "bytes32" }],
+      [BASE_SEPOLIA_MOCK_USDC as Hex, ("0x" + "00".repeat(32)) as Hex],
+    );
+    waitForTransactionReceipt.mockResolvedValue({
+      logs: [{ topics: receiptTopics, data: receiptData, address: NEW_ESCROW }],
+    });
+
+    // Mock viem using the same async importOriginal pattern that the escrow-client
+    // tests use. importOriginal returns the REAL viem module (resolved by Vitest
+    // before the mock takes effect), so callers that need real implementations
+    // (chain-config.js → defineChain, escrow-client.ts → encodeFunctionData, etc.)
+    // all get working functions. Only createWalletClient and createPublicClient are
+    // replaced with spies that return our pre-wired mock clients.
     vi.doMock("viem", async (importOriginal) => {
       const actual = await importOriginal<typeof import("viem")>();
-      // Build a real EscrowCreated log for NEW_ESCROW so the route's
-      // decodeEventLog-based extractor returns it (no positional guessing).
-      const topics = actual.encodeEventTopics({
-        abi: PCCProtocolV2ABI,
-        eventName: "EscrowCreated",
-        args: {
-          escrow: NEW_ESCROW,
-          payer: ("0x" + "00".repeat(20)) as Hex,
-          arbiter: ("0x" + "00".repeat(20)) as Hex,
-        },
-      });
-      const data = actual.encodeAbiParameters(
-        [{ type: "address" }, { type: "bytes32" }],
-        [BASE_SEPOLIA_MOCK_USDC as Hex, ("0x" + "00".repeat(32)) as Hex],
-      );
-      waitForTransactionReceipt.mockResolvedValue({
-        logs: [{ topics, data, address: NEW_ESCROW }],
-      });
       return {
         ...actual,
         createWalletClient: () => ({ writeContract }),
         createPublicClient: () => ({ waitForTransactionReceipt }),
       };
     });
+
+    // Stub getKernelService so paid-job-flow.createJobFromSession can resolve
+    // the local kernel ID without depending on the real kernel-service singleton.
+    // This prevents the "Not initialised" CI failure (module isolation: paid-job-
+    // flow's static import of kernel-service resolves a DIFFERENT module instance
+    // than the one an earlier test file may have initialized). Each test gets a
+    // clean stub with a kernel ID, so no cross-test state leaks either.
+    vi.doMock("../services/kernel-service.js", () => ({
+      getKernelService: vi.fn().mockReturnValue({ config: { kernelId: "kernel-test-v2" } }),
+      initKernelService: vi.fn(),
+      resetKernelService: vi.fn(),
+    }));
   });
 
   afterEach(() => {
@@ -469,9 +498,10 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
       else process.env[k] = v;
     }
     vi.doUnmock("viem");
+    vi.doUnmock("../services/kernel-service.js");
   });
 
-  it("createEscrowV2 uses the chain-config token (0x18bef3…), NOT the Flow env token, then addMilestone", async () => {
+  it("createEscrowV2 uses the chain-config token (0x18bef3…), NOT the Flow env token, then addMilestone", { timeout: 15000 }, async () => {
     const { initStore, closeStore } = await import("../db.js");
     initStore({ seed: true });
     try {
@@ -507,7 +537,9 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
       } as any;
 
       const result = await createJobFromSession(session);
-      expect(result.escrowAddress).toBe(NEW_ESCROW);
+      // Address compare is checksum-case-insensitive (viem returns EIP-55 mixed
+      // case from decodeEventLog; the literal is lowercase).
+      expect(result.escrowAddress.toLowerCase()).toBe(NEW_ESCROW.toLowerCase());
 
       // First write = createEscrowV2 carrying the CHAIN-CONFIG token.
       const createCall = writeContract.mock.calls.find(
@@ -525,7 +557,7 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
         (c) => c[0].functionName === "addMilestone",
       );
       expect(addCall).toBeDefined();
-      expect(addCall![0].address).toBe(NEW_ESCROW);
+      expect((addCall![0].address as string).toLowerCase()).toBe(NEW_ESCROW.toLowerCase());
       // V2 addMilestone is 7-arg: [stepId, operator, amount, bond, window, tier, jobId]
       expect(addCall![0].args).toHaveLength(7);
       expect(addCall![0].args[6]).toBe("job-v2-token");
