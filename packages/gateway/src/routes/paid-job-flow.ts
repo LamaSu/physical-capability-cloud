@@ -47,6 +47,7 @@ import {
   submitEvidenceV2,
   getMilestoneV2,
   isWriteEnabled as escrowWriteEnabled,
+  resolveMockUSDCAddress,
 } from "../contracts/escrow-client.js";
 import type {
   OperatorPolicy,
@@ -244,11 +245,22 @@ export async function createJobFromSession(
       transport: http(deployment.rpcUrl),
     });
 
-    // Token: from chain-config mockUSDC (or MOCK_USDC_ADDRESS override) — never
-    // hardcoded. Both V1 createEscrow and V2 createEscrowV2 take the same
-    // (payer, arbiter, token, cwmId) shape; only the factory + fn name differ.
-    const tokenAddr = (process.env.MOCK_USDC_ADDRESS as `0x${string}` | undefined)
-      ?? getContractAddress(network, "mockUSDC");
+    // Token: chain-config mockUSDC for this network FIRST (the token the payer
+    // actually holds), with MOCK_USDC_ADDRESS env as a fallback only where
+    // chain-config has no token (e.g. localhost). resolveMockUSDCAddress is the
+    // SAME resolver approveToken uses, so the escrow's `_token`, the approve
+    // target, and the fund pull all reference one token. A polluted env
+    // (MOCK_USDC_ADDRESS = Flow-EVM 0x5f2eb54d… on base-sepolia) no longer wins
+    // and strands fund() against a token the payer holds 0 of. Both V1
+    // createEscrow and V2 createEscrowV2 take the same (payer, arbiter, token,
+    // cwmId) shape; only the factory + fn name differ.
+    const tokenAddr = resolveMockUSDCAddress(network);
+    if (!tokenAddr) {
+      throw new Error(
+        `No MockUSDC token resolvable for network ${network} ` +
+          `(no chain-config mockUSDC and MOCK_USDC_ADDRESS env unset)`,
+      );
+    }
     const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
 
     // V2 (EAS): deploy an EAS-gated MilestoneEscrowV2 via the V2 factory.
