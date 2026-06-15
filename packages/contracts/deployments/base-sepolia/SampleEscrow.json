@@ -1,0 +1,9 @@
+{
+  "address": "0xbC15763F646dAcb07731eC5AE5df3856974Bb293",
+  "chainId": 84532,
+  "contract": "MilestoneEscrowV2",
+  "note": "Sample/reference MilestoneEscrowV2 clone INSTANCE deployed by the V2 factory — NOT the factory itself. The factory is PCCProtocolV2 (see PCCProtocolV2.json). Per-job escrows are minted fresh via createEscrowV2; this instance is for reference/smoke wiring only.",
+  "factory": "0x39F6958b132c0972Ce8f5658A3F8F16491395642",
+  "eas": "0x4200000000000000000000000000000000000021",
+  "schemaUid": "0x5acb07db80019928f2aa8798cb0bebaee46a863f28d4b5aaf5a9e04902be8b93"
+}
