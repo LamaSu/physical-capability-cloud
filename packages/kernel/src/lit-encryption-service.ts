@@ -97,6 +97,20 @@ export interface LitEncryptionServiceOptions {
   apiUrl?: string;
   /** Chipotle API key (from dashboard.dev.litprotocol.com). Default: LIT_API_KEY env */
   apiKey?: string;
+  /**
+   * Encrypt-by-default PCC operator address. When set, the gateway's own key
+   * is added to the access-control conditions OR-chain so PCC can later read
+   * encrypted evidence for verification + observability without dropping the
+   * buyer / verifier gates. Pass undefined (default) to preserve the legacy
+   * 2-condition ACL (buyer OR high-reputation verifier).
+   *
+   * Per pcc-deliberation #058 gateway items: "Lit encrypt-by-default — when
+   * encrypted evidence is enabled, ensure PCC's own key is in the ACL".
+   *
+   * Convention: read from PCC_ENCRYPTION_OPERATOR_ADDRESS env in the gateway
+   * service factory.
+   */
+  pccOperatorAddress?: string;
 }
 
 // ── Service Implementation ────────────────────────────────────────────
@@ -105,6 +119,7 @@ export class LitEncryptionService {
   private readonly network: string;
   private readonly chain: string;
   private readonly mock: boolean;
+  private readonly pccOperatorAddress?: string;
   private connected = false;
 
   // Mock storage: maps dataToEncryptHash -> { plaintext, aesKey, iv }
@@ -123,9 +138,10 @@ export class LitEncryptionService {
     this.network = options.network ?? "datil-test";
     this.chain = options.chain ?? "baseSepolia";
     this.mock = options.mock ?? true;
+    this.pccOperatorAddress = options.pccOperatorAddress;
 
     console.log(
-      `[LIT] LitEncryptionService (mock) constructed — network=${this.network} chain=${this.chain}`,
+      `[LIT] LitEncryptionService (mock) constructed — network=${this.network} chain=${this.chain} pccInACL=${this.pccOperatorAddress ? "yes" : "no"}`,
     );
   }
 
@@ -183,7 +199,14 @@ export class LitEncryptionService {
    * Build Unified Access Control Conditions for an escrow-gated evidence bundle.
    *
    * The conditions enforce:
-   *   (caller is the buyer on the escrow contract) OR (caller is a verifier with >= 100 reputation)
+   *   (caller is the buyer on the escrow contract)
+   *   OR (caller is a verifier with >= 100 reputation)
+   *   OR (caller is the PCC operator — when `pccOperatorAddress` is configured)
+   *
+   * The PCC operator clause is added only when the service was constructed
+   * with `pccOperatorAddress` set (encrypt-by-default — see #058 in
+   * pcc-deliberation). When unset, the legacy 2-condition ACL stands and
+   * existing call sites are unaffected.
    *
    * This produces a real Lit-compatible condition chain that can be used with
    * the actual Lit SDK when switching off mock mode.
@@ -235,7 +258,35 @@ export class LitEncryptionService {
       },
     };
 
-    return [buyerCondition, orOperator, verifierCondition];
+    const chain: AccessControlConditionChain = [
+      buyerCondition,
+      orOperator,
+      verifierCondition,
+    ];
+
+    // Condition 3 (optional — encrypt-by-default): PCC operator key.
+    // When the service is constructed with `pccOperatorAddress`, append an OR
+    // clause so the gateway can later decrypt the bundle for verification +
+    // observability. The clause is an evmBasic address-equality check (no
+    // contract call required), which keeps it cheap on Lit nodes and avoids
+    // adding more on-chain calls to the condition chain.
+    if (this.pccOperatorAddress) {
+      const pccOrOperator: AccessControlConditionOperator = { operator: "or" };
+      const pccCondition: UnifiedAccessControlCondition = {
+        conditionType: "evmBasic",
+        chain: this.chain,
+        standardContractType: "",
+        method: "",
+        parameters: [":userAddress"],
+        returnValueTest: {
+          comparator: "=",
+          value: this.pccOperatorAddress,
+        },
+      };
+      chain.push(pccOrOperator, pccCondition);
+    }
+
+    return chain;
   }
 
   /**
