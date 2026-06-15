@@ -273,11 +273,25 @@ export async function createJobFromSession(
     const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
     const createFn = v2 ? "createEscrowV2" : "createEscrow";
 
+    // P0-1 fix: explicit sequential nonce management. The single hot key does two
+    // ordered writes (createEscrowV2, then addMilestone). On a laggy / rate-limited
+    // public RPC, eth_getTransactionCount can still report the pre-create count even
+    // after the create receipt is mined, so viem's auto-nonce hands addMilestone the
+    // SAME nonce -> it is dropped/replaced and the escrow comes back with
+    // milestoneCount 0 (the intermittent "milestone flaky" blocker). Pin explicit,
+    // monotonically increasing nonces so the sequence cannot collide regardless of
+    // RPC propagation lag.
+    let nonce = await publicClient.getTransactionCount({
+      address: account.address,
+      blockTag: "pending",
+    });
+
     const txHash = await walletClient.writeContract({
       address: factoryAddr,
       abi: factoryAbi,
       functionName: createFn,
       args: [account.address, account.address, tokenAddr, cwmIdBytes],
+      nonce: nonce++,
     });
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -315,12 +329,37 @@ export async function createJobFromSession(
             assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
             jobId,
           ],
+          nonce: nonce++, // P0-1: explicit sequential nonce (see createEscrowV2 above)
         });
-        await publicClient.waitForTransactionReceipt({ hash: addTx });
+        const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx });
+        if (addReceipt.status !== "success") {
+          throw new Error(
+            `addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}); escrow ${escrowAddress} would have 0 milestones`,
+          );
+        }
         console.log(
           `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
         );
       }
+
+      // P0-1 verification: confirm the milestones actually landed on-chain before
+      // leaving the create step. If the RPC silently dropped an addMilestone despite
+      // the explicit nonce, fail LOUD here rather than letting fund()/getMilestone(0)/
+      // attestation fail opaquely downstream (the board's "milestoneCount flaky" symptom).
+      const onChainCount = (await publicClient.readContract({
+        address: escrowAddress as `0x${string}`,
+        abi: MilestoneEscrowV2ABI,
+        functionName: "getMilestoneCount",
+      })) as bigint;
+      if (onChainCount < BigInt(normalizedMilestones.length)) {
+        throw new Error(
+          `On-chain milestoneCount=${onChainCount} < expected ${normalizedMilestones.length} ` +
+            `for escrow ${escrowAddress} — addMilestone did not land (P0-1 nonce/RPC race)`,
+        );
+      }
+      console.log(
+        `[paid-job] V2 milestones confirmed on-chain: count=${onChainCount} (escrow ${escrowAddress})`,
+      );
     }
   }
 
