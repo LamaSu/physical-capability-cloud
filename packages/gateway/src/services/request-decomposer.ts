@@ -53,6 +53,10 @@ function makeNode(
     bountyId: undefined,
     materials: [],
     evidenceRequirements: ["photo_of_completed_work"],
+    // Legacy template nodes are not matched to a registered capability.
+    // The agentic decomposer (services/agentic-decomposer.ts) sets this to
+    // "matched" when it grounds a node to a real capability instance.
+    matchStatus: "none",
     requestId,
     ...overrides,
   };
@@ -507,9 +511,15 @@ const TEMPLATE_KEYWORDS: Record<string, string[]> = {
     "synthesize", "synthesis", "compound", "reagent", "reaction", "prepare",
     "formulate", "molecule", "organic", "chemical", "extract", "ferment",
   ],
+  // NOTE: keyed on DOCUMENT/PRINT signals only. Generic delivery words
+  // ("deliver", "courier", "mail", "ship") are deliberately NOT here — they
+  // apply to pizza, parts, anything, and used to mis-route every "deliver X"
+  // goal into a document-printing DAG (composition keystone bug #133). A
+  // document goal is selected by an actual print/document signal; delivery is
+  // the second half of the template, not its selector.
   print_deliver: [
-    "print", "document", "deliver", "mail", "courier", "invoice",
-    "letter", "brochure", "flyer", "poster",
+    "print", "printed", "printing", "document", "invoice", "letter",
+    "brochure", "flyer", "poster", "leaflet", "booklet", "stationery",
   ],
   custom_product: [
     "fabricate", "manufacture", "custom", "product", "build", "make",
@@ -537,7 +547,7 @@ function detectTemplate(description: string): string {
 // Critical path calculation
 // ---------------------------------------------------------------------------
 
-function calculateCriticalPath(nodes: CapabilityNode[]): string[] {
+export function calculateCriticalPath(nodes: CapabilityNode[]): string[] {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
   // Earliest completion time for each node (by hours)

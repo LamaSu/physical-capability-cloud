@@ -36,9 +36,19 @@ import type {
   DemandEnvelope,
   IntentSource,
 } from "@pcc/spec";
+import type { DecompositionResult } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
-import { decomposeRequest } from "../services/request-decomposer.js";
+import { decomposeRequest, calculateCriticalPath } from "../services/request-decomposer.js";
+import {
+  decomposeAgentic,
+  createMatcher,
+  createAnthropicDecomposer,
+  type CapabilityLite,
+  type CapabilityMatcher,
+  type DecomposerLLM,
+} from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
+import { getCapabilityFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
 import { schema } from "@pcc/store";
 
@@ -123,6 +133,95 @@ function buildEnvelopeFromRequest(
     requesterIdHash,
     createdAt: request.createdAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Agentic decomposition wiring
+//
+// The capability matcher reads the live capability registry via the
+// CapabilityFacade; the LLM planner is the Anthropic-backed decomposer (null
+// when no API key is configured — the engine then uses its offline heuristic
+// and, only if nothing matches, the legacy keyword templates).
+// ---------------------------------------------------------------------------
+
+/** Snapshot of the registry as the semantic matcher needs it. */
+async function listCapsForMatch(): Promise<CapabilityLite[]> {
+  try {
+    const facade = getCapabilityFacade();
+    const res = await facade.list({}, { offset: 0, limit: 500 });
+    if (!res.success) return [];
+    return res.data.items.map((c) => ({
+      id: c.id,
+      type: c.type,
+      name: c.name,
+      description: c.description,
+      tags: c.tags,
+      materials: c.materials,
+      kernelId: c.kernelId,
+      pricing: c.pricing as { currency?: string; baseCost?: string; minimum?: string } | undefined,
+      assuranceTiers: (c.assuranceTiers ?? []) as number[],
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// LLM resolution is cached (one SDK load per process). Tests with no API key
+// resolve to null → deterministic heuristic. `_setDecomposerLLMForTests` lets a
+// test inject a deterministic planner to exercise the LLM path without a key.
+let _llmPromise: Promise<DecomposerLLM | null> | null = null;
+let _llmOverride: DecomposerLLM | null | undefined;
+
+async function resolveDecomposerLLM(): Promise<DecomposerLLM | null> {
+  if (_llmOverride !== undefined) return _llmOverride;
+  if (process.env.PCC_DECOMPOSE_DISABLE_LLM === "true") return null;
+  if (!_llmPromise) _llmPromise = createAnthropicDecomposer().catch(() => null);
+  return _llmPromise;
+}
+
+/** Override the LLM planner (or matcher source) for tests. */
+export function _setDecomposerLLMForTests(llm: DecomposerLLM | null | undefined): void {
+  _llmOverride = llm;
+  _llmPromise = null;
+}
+
+let _matcherOverride: CapabilityMatcher | undefined;
+/** Override the capability matcher for tests (defaults to the facade-backed one). */
+export function _setCapabilityMatcherForTests(m: CapabilityMatcher | undefined): void {
+  _matcherOverride = m;
+}
+
+/**
+ * Run the agentic decomposer for a request: LLM (or heuristic) plan → match
+ * each step to a registered capability → derive budget + evidence; falling
+ * back to the legacy templates only when neither an LLM nor any match grounded
+ * the plan.
+ */
+async function runAgenticDecompose(request: CapabilityRequest): Promise<DecompositionResult> {
+  const matcher = _matcherOverride ?? createMatcher(listCapsForMatch);
+  const llm = await resolveDecomposerLLM();
+  return decomposeAgentic(request, { llm, matcher, legacyFallback: decomposeRequest });
+}
+
+/**
+ * Apply a decomposition result to a request and return its resting status.
+ * The request is left "decomposed" — NOT published. Budget is derived from the
+ * matched capabilities' prices when the requester did not supply one (replacing
+ * the old hardcoded 1000 default); an explicit user budget always wins.
+ */
+function applyDecomposition(
+  request: CapabilityRequest,
+  result: DecompositionResult,
+  userBudget: number | undefined,
+): void {
+  request.capabilityDag = result.nodes;
+  request.totalEstimatedCost = result.totalEstimatedCost;
+  request.totalEstimatedHours = result.totalEstimatedHours;
+  if (userBudget === undefined && (result.matchedCount ?? 0) > 0 && result.derivedBudget) {
+    request.budget = result.derivedBudget;
+  }
+  request.status = "decomposed";
+  request.updatedAt = new Date().toISOString();
 }
 
 function emitIntent(envelope: DemandEnvelope, actor: string, actorType: "requestor" | "agent") {
@@ -248,13 +347,16 @@ export async function requestRoutes(app: FastifyInstance) {
     }
 
     const now = new Date().toISOString();
+    // Did the requester pin a budget? If not, we derive it from the matched
+    // capabilities' prices instead of defaulting to 1000.
+    const userBudget = body.budget !== undefined && body.budget > 0 ? body.budget : undefined;
     const request: CapabilityRequest = {
       id: newId("req"),
       title: body.title,
       description: body.description,
       requesterEmail: body.requesterEmail,
       requesterWallet: body.requesterWallet,
-      budget: body.budget ?? 1000,
+      budget: userBudget ?? 1000,
       currency: body.currency ?? "USDC",
       deadline: body.deadline ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       urgency: body.urgency ?? "standard",
@@ -266,11 +368,10 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     };
 
-    const result = decomposeRequest(request);
-    request.capabilityDag = result.nodes;
-    request.totalEstimatedCost = result.totalEstimatedCost;
-    request.totalEstimatedHours = result.totalEstimatedHours;
-    request.status = "published";
+    // Agentic decompose: LLM/heuristic plan → capability matching → derived
+    // budget + evidence. Leaves the request "decomposed" (NOT auto-published).
+    const result = await runAgenticDecompose(request);
+    applyDecomposition(request, result, userBudget);
 
     const signature = signatureFromDag(request.capabilityDag);
 
@@ -341,16 +442,16 @@ export async function requestRoutes(app: FastifyInstance) {
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
 
-    const result = decomposeRequest(request);
-    request.capabilityDag = result.nodes;
-    request.totalEstimatedCost = result.totalEstimatedCost;
-    request.totalEstimatedHours = result.totalEstimatedHours;
-    request.status = "published";
-    request.updatedAt = new Date().toISOString();
+    // Re-decompose agentically and re-derive the budget from the matched
+    // capabilities. Leaves the request "decomposed" — publishing stays an
+    // explicit, separate step (POST /api/requests/:id/publish).
+    const result = await runAgenticDecompose(request);
+    applyDecomposition(request, result, undefined);
 
     const signature = signatureFromDag(request.capabilityDag);
     repos.requests.update(request.id, {
       status: request.status,
+      budget: request.budget,
       capabilityDag: request.capabilityDag,
       totalEstimatedCost: request.totalEstimatedCost,
       totalEstimatedHours: request.totalEstimatedHours,
@@ -482,8 +583,10 @@ export async function requestRoutes(app: FastifyInstance) {
       return { requestId: request.id, criticalPath: [], totalHours: 0 };
     }
 
-    const result = decomposeRequest(request);
-    const criticalNodes = result.criticalPath
+    // Compute from the STORED DAG — never re-decompose on a read (re-decompose
+    // is async + may invoke an LLM; the stored DAG is the source of truth).
+    const criticalPath = calculateCriticalPath(request.capabilityDag);
+    const criticalNodes = criticalPath
       .map((id) => request.capabilityDag.find((n) => n.id === id))
       .filter(Boolean) as CapabilityNode[];
 
@@ -491,7 +594,7 @@ export async function requestRoutes(app: FastifyInstance) {
 
     return {
       requestId: request.id,
-      criticalPath: result.criticalPath,
+      criticalPath,
       criticalNodes,
       totalHours,
     };

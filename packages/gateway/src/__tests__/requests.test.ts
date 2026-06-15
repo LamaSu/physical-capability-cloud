@@ -21,12 +21,16 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from
 import Fastify, { type FastifyInstance } from "fastify";
 import { requestRoutes, resetRequestsStore } from "../routes/requests.js";
 import { detectTemplateName } from "../services/request-decomposer.js";
+import { getCapabilityFacade } from "../facades/index.js";
 import { initStore, closeStore } from "../db.js";
 
 // Wave 5 — requests now live in SQLite. Boot an in-memory store once for
 // the whole test file; resetRequestsStore() truncates + re-seeds per test.
 beforeAll(() => {
   process.env.PCC_DB_PATH = ":memory:";
+  // Decompose is now agentic: force the offline heuristic so tests are
+  // deterministic regardless of any ANTHROPIC_API_KEY in the environment.
+  process.env.PCC_DECOMPOSE_DISABLE_LLM = "true";
   initStore({ seed: true });
 });
 
@@ -117,7 +121,9 @@ describe("POST /api/requests", () => {
     expect(body.decomposition).toBeDefined();
     expect(body.request.id).toBeTruthy();
     expect(body.request.title).toBe(ROBOT_REQUEST.title);
-    expect(body.request.status).toBe("published");
+    // Decompose no longer auto-publishes — the request rests at "decomposed"
+    // (publishing is the explicit POST /api/requests/:id/publish step).
+    expect(body.request.status).toBe("decomposed");
     expect(body.request.capabilityDag).toBeInstanceOf(Array);
     expect(body.request.capabilityDag.length).toBeGreaterThan(0);
     expect(body.request.totalEstimatedCost).toBeGreaterThan(0);
@@ -177,7 +183,10 @@ describe("POST /api/requests", () => {
     expect(hasTesting).toBe(true);
   });
 
-  it("auto-decomposes into lab template for HPLC request", async () => {
+  it("matches an HPLC request to a registered hplc capability (agentic)", async () => {
+    // The seeded registry contains hplc capabilities. Under the agentic
+    // decomposer the analysis step is GROUNDED to a real hplc capability
+    // instead of expanding the old fixed sample-prep→…→report template.
     const res = await app.inject({
       method: "POST",
       url: "/api/requests",
@@ -185,12 +194,13 @@ describe("POST /api/requests", () => {
     });
     expect(res.statusCode).toBe(201);
     const { request } = res.json();
-    const nodeNames = request.capabilityDag.map((n: { name: string }) => n.name);
-    // lab_analysis template has sample prep and report nodes
-    const hasSamplePrep = nodeNames.some((n: string) => n.toLowerCase().includes("sample"));
-    const hasReport = nodeNames.some((n: string) => n.toLowerCase().includes("report"));
-    expect(hasSamplePrep).toBe(true);
-    expect(hasReport).toBe(true);
+    const matched = request.capabilityDag.filter(
+      (n: { matchStatus?: string }) => n.matchStatus === "matched",
+    );
+    expect(matched.length).toBeGreaterThan(0);
+    expect(
+      matched.some((n: { capabilityType: string }) => n.capabilityType === "hplc"),
+    ).toBe(true);
   });
 
   it("each decomposed node has required fields", async () => {
@@ -329,7 +339,8 @@ describe("POST /api/requests/:id/decompose", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.request.status).toBe("published");
+    // /decompose re-derives the DAG but does NOT publish.
+    expect(body.request.status).toBe("decomposed");
     expect(body.decomposition).toBeDefined();
     expect(body.decomposition.nodes.length).toBeGreaterThan(0);
   });
@@ -756,9 +767,19 @@ describe("Template detection — keyword matching", () => {
     expect(detectTemplateName("organic synthesis reaction and purification")).toBe("synthesis");
   });
 
-  it("detects print_deliver for print/deliver keywords", () => {
+  it("detects print_deliver only when there is a real document/print signal", () => {
     expect(detectTemplateName("print and deliver this document to the office")).toBe("print_deliver");
     expect(detectTemplateName("courier delivery of printed invoice")).toBe("print_deliver");
+  });
+
+  it("does NOT route a non-document 'deliver' goal into print_deliver (#133 root cause)", () => {
+    // The original bug: any goal containing "deliver" matched the document
+    // print+logistics template. A pizza is not a document.
+    expect(
+      detectTemplateName("a 12-inch margherita pizza made and delivered to me in Manhattan"),
+    ).not.toBe("print_deliver");
+    expect(detectTemplateName("deliver a birthday cake to my house")).not.toBe("print_deliver");
+    expect(detectTemplateName("courier a package across town")).not.toBe("print_deliver");
   });
 
   it("defaults to custom_product for unmatched descriptions", () => {
@@ -833,5 +854,101 @@ describe("Critical path calculation", () => {
     });
     const { criticalPath } = cpRes.json();
     expect(criticalPath.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Composition keystone (#133) — pizza decompose at the route layer
+// ---------------------------------------------------------------------------
+
+describe("Composition keystone (#133) — pizza decompose at the route", () => {
+  let app: FastifyInstance;
+
+  const PIZZA = {
+    title: "Margherita pizza",
+    description: "a 12-inch margherita pizza made and delivered to me in Manhattan",
+    requesterEmail: "hungry@example.com",
+  };
+
+  beforeEach(async () => {
+    resetRequestsStore();
+    // Seed the two live caps the keystone must match: a wood-fired-pizza maker
+    // ($12) and a local-courier-delivery driver ($6). create() is idempotent.
+    const facade = getCapabilityFacade();
+    await facade.create({
+      id: "cap-marios-pizzeria",
+      kernelId: "kernel-nyc",
+      type: "wood-fired-pizza",
+      name: "Marios Pizzeria",
+      description: "Hand-stretched wood-fired margherita and Neapolitan pizza baked to order",
+      pricing: { currency: "USDC", baseCost: "12.00", minimum: "8.00" },
+      materials: ["dough", "mozzarella", "basil", "tomato"],
+      assuranceTiers: [0, 1, 2],
+    });
+    await facade.create({
+      id: "cap-daves-delivery",
+      kernelId: "kernel-nyc",
+      type: "local-courier-delivery",
+      name: "Daves Delivery",
+      description: "Local last-mile courier delivery across Manhattan",
+      pricing: { currency: "USDC", baseCost: "6.00", minimum: "4.00" },
+      materials: [],
+      assuranceTiers: [0, 1],
+    });
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it("yields pizza+delivery nodes matched to the two seeded caps, budget 18, not published", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/requests", payload: PIZZA });
+    expect(res.statusCode).toBe(201);
+    const { request, decomposition } = res.json();
+
+    // Not auto-published — rests at "decomposed".
+    expect(request.status).toBe("decomposed");
+
+    // Exactly two nodes: make-pizza + delivery, matched to the seeded caps.
+    const types = request.capabilityDag.map((n: { capabilityType: string }) => n.capabilityType).sort();
+    expect(types).toEqual(["local-courier-delivery", "wood-fired-pizza"]);
+
+    const pizza = request.capabilityDag.find(
+      (n: { capabilityType: string }) => n.capabilityType === "wood-fired-pizza",
+    );
+    const delivery = request.capabilityDag.find(
+      (n: { capabilityType: string }) => n.capabilityType === "local-courier-delivery",
+    );
+    expect(pizza.matchStatus).toBe("matched");
+    expect(pizza.matchedCapabilityName).toBe("Marios Pizzeria");
+    expect(delivery.matchStatus).toBe("matched");
+    expect(delivery.matchedCapabilityName).toBe("Daves Delivery");
+
+    // Budget derived from the matched capability prices (12 + 6 = 18), NOT 1000.
+    expect(request.budget).toBe(18);
+    expect(request.totalEstimatedCost).toBe(18);
+    expect(decomposition.derivedBudget).toBe(18);
+
+    // Evidence from the matched capability, never the old hardcoded pdf_proof.
+    expect(pizza.evidenceRequirements).not.toContain("pdf_proof");
+    expect(delivery.evidenceRequirements).toContain("delivery_confirmation");
+
+    // No document-printing artefacts anywhere in the DAG.
+    expect(types).not.toContain("ipp");
+    expect(types).not.toContain("documentation");
+  });
+
+  it("re-decompose (POST /:id/decompose) keeps the matched pizza DAG and stays unpublished", async () => {
+    const create = await app.inject({ method: "POST", url: "/api/requests", payload: PIZZA });
+    const id = create.json().request.id;
+
+    const res = await app.inject({ method: "POST", url: `/api/requests/${id}/decompose` });
+    expect(res.statusCode).toBe(200);
+    const { request } = res.json();
+    expect(request.status).toBe("decomposed");
+    expect(request.budget).toBe(18);
+    const types = request.capabilityDag.map((n: { capabilityType: string }) => n.capabilityType).sort();
+    expect(types).toEqual(["local-courier-delivery", "wood-fired-pizza"]);
   });
 });
