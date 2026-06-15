@@ -28,6 +28,22 @@ import {
 } from "viem";
 import { PCCProtocolV2ABI, MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
 
+/**
+ * Assert the dispatched ABI is the V2 escrow ABI. We can't use reference
+ * equality (toBe) against the imported MilestoneEscrowV2ABI: the escrow-client
+ * is dynamically re-imported after vi.resetModules(), so it holds a SEPARATE
+ * module instance of the same ABI. Instead we check for a V2-ONLY member
+ * (`attestationUsed`, the single-use UID guard) that V1's MilestoneEscrowABI
+ * does not have — a stable, semantic discriminator.
+ */
+function expectV2Abi(abi: unknown): void {
+  expect(Array.isArray(abi)).toBe(true);
+  const names = (abi as Array<{ name?: string }>).map((e) => e.name);
+  expect(names).toContain("attestationUsed");
+  // Sanity: the canonical import also has it (guards against the marker moving).
+  expect((MilestoneEscrowV2ABI as ReadonlyArray<{ name?: string }>).some((e) => e.name === "attestationUsed")).toBe(true);
+}
+
 // ===========================================================================
 // 1 & 2 — PCCProtocolV2 ABI: createEscrowV2 + EscrowCreated
 // ===========================================================================
@@ -130,7 +146,7 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
     expect(call.functionName).toBe("submitEvidence");
     expect(call.address).toBe(ESCROW);
     expect(call.args).toEqual([2n, HASH]);
-    expect(call.abi).toBe(MilestoneEscrowV2ABI);
+    expectV2Abi(call.abi);
   });
 
   it("submitAttestationV2 calls submitAttestation(uint256, bytes32 easUid) on the V2 ABI", async () => {
@@ -140,7 +156,7 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
     const call = writeContract.mock.calls[0][0];
     expect(call.functionName).toBe("submitAttestation");
     expect(call.args).toEqual([0n, UID]);
-    expect(call.abi).toBe(MilestoneEscrowV2ABI);
+    expectV2Abi(call.abi);
   });
 
   it("releaseMilestoneV2 calls release(uint256) with ONLY the index (no struct)", async () => {
@@ -150,7 +166,7 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
     const call = writeContract.mock.calls[0][0];
     expect(call.functionName).toBe("release");
     expect(call.args).toEqual([1n]);
-    expect(call.abi).toBe(MilestoneEscrowV2ABI);
+    expectV2Abi(call.abi);
   });
 });
 
