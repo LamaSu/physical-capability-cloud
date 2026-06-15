@@ -28,7 +28,7 @@ import type {
   DecompositionResult,
   MaterialRequirement,
 } from "@pcc/spec";
-import type { ICapabilityRepository } from "@pcc/db";
+import type { ICapabilityRepository } from "@pcc/store";
 
 // ---------------------------------------------------------------------------
 // Types
