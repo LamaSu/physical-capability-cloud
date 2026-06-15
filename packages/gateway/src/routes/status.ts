@@ -179,9 +179,11 @@ export async function statusRoutes(app: FastifyInstance) {
         lit_protocol: {
           mode: litReal ? "real" : "mock",
           details: litReal
-            ? "Datil-dev threshold encryption — decryption requires on-chain access conditions"
+            ? "Chipotle threshold encryption — decryption requires on-chain access conditions"
             : "Local AES-256-GCM — no network, no access control enforcement",
-          network: litReal ? "datil-dev" : "none",
+          // Was previously hardcoded to "datil-dev" — the live network is
+          // "chipotle" (matches lit-provision.ts:134 / services.ts:178).
+          network: litReal ? "chipotle" : "none",
           live: litEncryptionService.getStatus(),
         },
         evidence_storage: {
