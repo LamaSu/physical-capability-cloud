@@ -24,8 +24,8 @@
 import {
   createPublicClient,
   createWalletClient,
-  http,
   encodeFunctionData,
+  type Abi,
   type Address,
   type Hex,
   type PublicClient,
@@ -44,8 +44,11 @@ import {
   milestoneStatusName,
   getDeployment,
   getContractAddress,
+  getRpcUrls,
   type OracleAttestation,
 } from "@pcc/contracts";
+import { buildRpcTransport } from "./rpc-transport.js";
+import { getNonceManager, isNonceManagerDisabled } from "./nonce-manager.js";
 // V2 / EAS-gated escrow ABI lives in the @pcc/contracts/abi subpath export
 // (it is intentionally not on the top-level barrel; the V1 stack is the default).
 import {
@@ -71,18 +74,15 @@ import {
 
 const PCC_NETWORK = process.env.PCC_NETWORK ?? "base-sepolia";
 
-function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
+function resolveChainConfig(): { chain: Chain; rpcUrls: string[] } {
+  // getRpcUrls handles env overrides (PCC_RPC_URLS / PCC_RPC_URL), per-network
+  // fallbacks from chain-config, and the last-resort default — for unknown
+  // networks it still returns a usable single-element list.
+  const rpcUrls = getRpcUrls(PCC_NETWORK);
   try {
-    const deployment = getDeployment(PCC_NETWORK);
-    return {
-      chain: deployment.chain,
-      rpcUrl: process.env.PCC_RPC_URL ?? deployment.rpcUrl ?? "https://sepolia.base.org",
-    };
+    return { chain: getDeployment(PCC_NETWORK).chain, rpcUrls };
   } catch {
-    return {
-      chain: baseSepolia,
-      rpcUrl: process.env.PCC_RPC_URL ?? "https://sepolia.base.org",
-    };
+    return { chain: baseSepolia, rpcUrls };
   }
 }
 
@@ -130,10 +130,10 @@ let _account: Account | undefined;
 
 function getPublicClient(): PublicClient {
   if (!_publicClient) {
-    const { chain, rpcUrl } = resolveChainConfig();
+    const { chain, rpcUrls } = resolveChainConfig();
     _publicClient = createPublicClient({
       chain,
-      transport: http(rpcUrl),
+      transport: buildRpcTransport(rpcUrls),
     }) as PublicClient;
   }
   return _publicClient;
@@ -147,15 +147,52 @@ function getWalletClient(): WalletClient {
         "Set this env var to enable escrow funding, milestone release, and dispute filing.",
       );
     }
-    const { chain, rpcUrl } = resolveChainConfig();
+    const { chain, rpcUrls } = resolveChainConfig();
     _account = privateKeyToAccount(GATEWAY_PRIVATE_KEY);
-    _walletClient = createWalletClient({
+    const base = createWalletClient({
       account: _account,
       chain,
-      transport: http(rpcUrl),
+      transport: buildRpcTransport(rpcUrls),
     });
+    _walletClient = wrapWithNonceManager(base, _account);
   }
   return _walletClient;
+}
+
+/**
+ * Wrap a wallet client so EVERY `writeContract` from the gateway's hot signer
+ * routes through the shared per-signer NonceManager — pinning monotonic nonces
+ * and serializing submission so concurrent settlements can't collide or drop a
+ * tx. A single wrap here covers all V1 + V2 write helpers (and `writeWithSigner`)
+ * with no churn at each call site.
+ *
+ * The nonce is only injected when the caller didn't already pin one (so the
+ * inline create+addMilestone path can still pass its own) and when the manager
+ * isn't disabled via PCC_NONCE_MANAGER_DISABLED. The flag + nonce checks run per
+ * call, so the kill-switch is dynamic.
+ */
+function wrapWithNonceManager(client: WalletClient, account: Account): WalletClient {
+  const original = client.writeContract.bind(client);
+
+  const wrapped = ((params: Record<string, unknown>) => {
+    if (isNonceManagerDisabled() || params?.nonce !== undefined) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return original(params as any);
+    }
+    const manager = getNonceManager(account.address, () =>
+      getPublicClient().getTransactionCount({ address: account.address, blockTag: "pending" }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return manager.submit((nonce) => original({ ...params, nonce } as any));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
+
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === "writeContract") return wrapped;
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as WalletClient;
 }
 
 function getAccount(): Account {
@@ -223,6 +260,33 @@ export interface EscrowEvent {
 export interface WriteResult {
   transactionHash: string;
   status: "submitted";
+}
+
+/**
+ * Submit an arbitrary contract write from the gateway's hot signer, through the
+ * same nonce-managed wallet client every escrow write uses. Exposed so sibling
+ * modules (e.g. the EAS multiAttest client) reuse one signer + one nonce queue
+ * instead of standing up a second wallet that could race the escrow writes.
+ */
+export async function writeWithSigner(params: {
+  address: Address;
+  abi: Abi;
+  functionName: string;
+  args: readonly unknown[];
+  value?: bigint;
+}): Promise<WriteResult> {
+  const wallet = getWalletClient();
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address: params.address,
+    abi: params.abi,
+    functionName: params.functionName,
+    args: params.args as unknown[],
+    ...(params.value !== undefined ? { value: params.value } : {}),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any);
+  return { transactionHash: hash, status: "submitted" };
 }
 
 // ---------------------------------------------------------------------------

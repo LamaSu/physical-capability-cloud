@@ -79,6 +79,14 @@ export interface ChainDeployment {
   chain: Chain;
   rpcUrl?: string;
   /**
+   * Ordered fallback RPC URLs for this network (primary first). When the
+   * primary RPC (`rpcUrl`) is laggy, rate-limited, or down, on-chain reads and
+   * writes rotate through these. Consumed by `getRpcUrls()` and the gateway's
+   * viem `fallback()` transport. `rpcUrl` is implicitly the head of the list;
+   * entries here are the additional fallbacks (deduped against `rpcUrl`).
+   */
+  rpcUrls?: string[];
+  /**
    * EAS `pcc.evidence.v1` schema UID for this network. Undefined until the schema
    * is registered on-chain (migration gate G1). keccak256(abi.encodePacked(schemaString,
    * address(0), true)) — the SAME UID resolves on Base Sepolia and Base mainnet only if
@@ -141,6 +149,11 @@ export const deployments: Record<string, ChainDeployment> = {
   sepolia: {
     chain: sepolia,
     rpcUrl: "https://ethereum-sepolia-rpc.publicnode.com",
+    rpcUrls: [
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://rpc.sepolia.org",
+      "https://1rpc.io/sepolia",
+    ],
     contracts: {
       milestoneEscrowFactory: "0x9e81f5fd7cfa08e2a6a2a0a0128498bf8fd66454",
       mockUSDC: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
@@ -150,6 +163,13 @@ export const deployments: Record<string, ChainDeployment> = {
   "base-sepolia": {
     chain: baseSepolia,
     rpcUrl: "https://sepolia.base.org",
+    // Fallback RPCs (public, no-key) for failover when sepolia.base.org is
+    // rate-limited or laggy — the root cause of the P0-1 nonce/milestone races.
+    rpcUrls: [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org",
+    ],
     contracts: {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
@@ -255,4 +275,51 @@ export function getContractAddress(network: string, contract: keyof ChainDeploym
     throw new Error(`Contract ${contract} not deployed on ${network}`);
   }
   return addr;
+}
+
+/** Last-resort RPC when a network is unknown or has no configured URL. */
+const DEFAULT_RPC_URL = "https://sepolia.base.org";
+
+/**
+ * Resolve the ordered RPC URL list for a network (primary first, fallbacks
+ * after). This is the single source of truth for RPC failover — consumers build
+ * a viem `fallback()` transport from the result so reads/writes rotate off a
+ * laggy or rate-limited endpoint instead of dropping a tx.
+ *
+ * Precedence:
+ *   1. `PCC_RPC_URLS` env (comma-separated) — full override, used verbatim.
+ *   2. `PCC_RPC_URL` env (single) — becomes the primary, then the network's
+ *      configured fallbacks (back-compat: the legacy single-URL override still
+ *      works AND now gains failover).
+ *   3. The network's `rpcUrl` + `rpcUrls` from chain-config.
+ *   4. `DEFAULT_RPC_URL` (matches the historical hardcoded fallback).
+ *
+ * The list is always deduped (case-sensitive, order-preserving) and non-empty.
+ */
+export function getRpcUrls(network: string): string[] {
+  const dedupe = (urls: Array<string | undefined>): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const u of urls) {
+      const url = u?.trim();
+      if (url && !seen.has(url)) {
+        seen.add(url);
+        out.push(url);
+      }
+    }
+    return out;
+  };
+
+  const envList = process.env.PCC_RPC_URLS
+    ? dedupe(process.env.PCC_RPC_URLS.split(","))
+    : [];
+  if (envList.length > 0) return envList;
+
+  const deployment = deployments[network];
+  const configured = [deployment?.rpcUrl, ...(deployment?.rpcUrls ?? [])];
+
+  const envSingle = process.env.PCC_RPC_URL?.trim();
+  const merged = dedupe(envSingle ? [envSingle, ...configured] : configured);
+
+  return merged.length > 0 ? merged : [DEFAULT_RPC_URL];
 }

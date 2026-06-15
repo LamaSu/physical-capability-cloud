@@ -9,15 +9,17 @@
  *   PCC_NETWORK=base-sepolia  → Base Sepolia (default, legacy)
  *   PCC_RPC_URL               → Override RPC URL for any network
  */
-import { createPublicClient, http, type Address, formatUnits } from "viem";
-import { baseSepolia, sepolia } from "viem/chains";
+import { createPublicClient, type Address, formatUnits } from "viem";
+import { baseSepolia } from "viem/chains";
 import {
   MilestoneEscrowABI,
   MockUSDCABI,
   MilestoneStatus,
   milestoneStatusName,
   getDeployment,
+  getRpcUrls,
 } from "@pcc/contracts";
+import { buildRpcTransport } from "./contracts/rpc-transport.js";
 
 // ---------------------------------------------------------------------------
 // Network-aware configuration
@@ -26,18 +28,15 @@ import {
 const PCC_NETWORK = process.env.PCC_NETWORK ?? "base-sepolia";
 
 function resolveChainConfig() {
+  // RPC URLs (primary + fallbacks, env-overridable) come from chain-config; the
+  // public client builds a viem fallback() transport so reads survive a laggy or
+  // rate-limited primary endpoint.
+  const rpcUrls = getRpcUrls(PCC_NETWORK);
   try {
-    const deployment = getDeployment(PCC_NETWORK);
-    return {
-      chain: deployment.chain,
-      rpcUrl: process.env.PCC_RPC_URL ?? deployment.rpcUrl ?? "https://sepolia.base.org",
-    };
+    return { chain: getDeployment(PCC_NETWORK).chain, rpcUrls };
   } catch {
     // Fallback to base-sepolia if network not found
-    return {
-      chain: baseSepolia,
-      rpcUrl: process.env.PCC_RPC_URL ?? "https://sepolia.base.org",
-    };
+    return { chain: baseSepolia, rpcUrls };
   }
 }
 
@@ -50,10 +49,10 @@ let _client: any;
 
 export function getPublicClient() {
   if (!_client) {
-    const { chain, rpcUrl } = resolveChainConfig();
+    const { chain, rpcUrls } = resolveChainConfig();
     _client = createPublicClient({
       chain,
-      transport: http(rpcUrl),
+      transport: buildRpcTransport(rpcUrls),
     });
   }
   return _client as ReturnType<typeof createPublicClient>;

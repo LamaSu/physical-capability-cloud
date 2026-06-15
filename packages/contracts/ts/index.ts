@@ -34,6 +34,7 @@ export {
   deployments,
   getDeployment,
   getContractAddress,
+  getRpcUrls,
 } from "./chain-config.js";
 export type { ChainDeployment } from "./chain-config.js";
 

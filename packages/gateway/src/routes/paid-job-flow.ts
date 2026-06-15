@@ -16,10 +16,12 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
+import { createWalletClient, createPublicClient, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
+import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress, getRpcUrls } from "@pcc/contracts";
 import { MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
+import { buildRpcTransport } from "../contracts/rpc-transport.js";
+import { getNonceManager, isNonceManagerDisabled } from "../contracts/nonce-manager.js";
 import { getStore, getRepos } from "../db.js";
 import { getSettlementFacade } from "../facades/index.js";
 
@@ -235,15 +237,39 @@ export async function createJobFromSession(
 
     const deployment = getDeployment(network);
     const account = privateKeyToAccount(pk);
+    // RPC failover: primary + fallback URLs (env-overridable) → viem fallback()
+    // transport with retry/backoff/timeout, so a laggy sepolia.base.org rotates
+    // to a fallback instead of stalling/dropping the settlement tx.
+    const transport = buildRpcTransport(getRpcUrls(network));
     const walletClient = createWalletClient({
       account,
       chain: deployment.chain,
-      transport: http(deployment.rpcUrl),
+      transport,
     });
     const publicClient = createPublicClient({
       chain: deployment.chain,
-      transport: http(deployment.rpcUrl),
+      transport,
     });
+
+    // Nonce sequencing (P0-1 → P2-SCALE consolidation): route the two ordered
+    // writes (createEscrowV2, then addMilestone) through the SHARED per-signer
+    // NonceManager rather than an inline `let nonce; nonce++`. Same monotonic-
+    // nonce guarantee that fixed the "milestone flaky" drop, but now on the same
+    // serialization queue escrow-client's release/attestation writes use — so a
+    // create here can't collide with a settlement of another job on this hot key.
+    // PCC_NONCE_MANAGER_DISABLED falls back to viem auto-nonce (kill-switch).
+    const nonceManager = isNonceManagerDisabled()
+      ? null
+      : getNonceManager(account.address, () =>
+          publicClient.getTransactionCount({ address: account.address, blockTag: "pending" }),
+        );
+    const sendTx = (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      writeArgs: any,
+    ): Promise<`0x${string}`> =>
+      nonceManager
+        ? nonceManager.submit((nonce) => walletClient.writeContract({ ...writeArgs, nonce }))
+        : walletClient.writeContract(writeArgs);
 
     // Token: chain-config mockUSDC for this network FIRST (the token the payer
     // actually holds), with MOCK_USDC_ADDRESS env as a fallback only where
@@ -273,25 +299,19 @@ export async function createJobFromSession(
     const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
     const createFn = v2 ? "createEscrowV2" : "createEscrow";
 
-    // P0-1 fix: explicit sequential nonce management. The single hot key does two
-    // ordered writes (createEscrowV2, then addMilestone). On a laggy / rate-limited
-    // public RPC, eth_getTransactionCount can still report the pre-create count even
-    // after the create receipt is mined, so viem's auto-nonce hands addMilestone the
-    // SAME nonce -> it is dropped/replaced and the escrow comes back with
-    // milestoneCount 0 (the intermittent "milestone flaky" blocker). Pin explicit,
-    // monotonically increasing nonces so the sequence cannot collide regardless of
-    // RPC propagation lag.
-    let nonce = await publicClient.getTransactionCount({
-      address: account.address,
-      blockTag: "pending",
-    });
-
-    const txHash = await walletClient.writeContract({
+    // The single hot key does two ordered writes (createEscrowV2, then
+    // addMilestone). On a laggy / rate-limited public RPC, eth_getTransactionCount
+    // can still report the pre-create count even after the create receipt is mined,
+    // so viem's auto-nonce hands addMilestone the SAME nonce -> it is
+    // dropped/replaced and the escrow comes back with milestoneCount 0 (the
+    // intermittent "milestone flaky" blocker). The shared NonceManager (sendTx)
+    // pins explicit, monotonically increasing nonces so the sequence cannot
+    // collide regardless of RPC propagation lag.
+    const txHash = await sendTx({
       address: factoryAddr,
       abi: factoryAbi,
       functionName: createFn,
       args: [account.address, account.address, tokenAddr, cwmIdBytes],
-      nonce: nonce++,
     });
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -316,7 +336,7 @@ export async function createJobFromSession(
     if (v2) {
       for (const ms of normalizedMilestones) {
         const stepIdBytes = keccak256(toBytes(ms.stepId));
-        const addTx = await walletClient.writeContract({
+        const addTx = await sendTx({
           address: escrowAddress as `0x${string}`,
           abi: MilestoneEscrowV2ABI,
           functionName: "addMilestone",
@@ -329,7 +349,6 @@ export async function createJobFromSession(
             assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
             jobId,
           ],
-          nonce: nonce++, // P0-1: explicit sequential nonce (see createEscrowV2 above)
         });
         const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx });
         if (addReceipt.status !== "success") {
