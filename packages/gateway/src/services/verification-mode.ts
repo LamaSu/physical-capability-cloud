@@ -23,14 +23,16 @@
  * `runVerification` returns a flag-off stub so production paths route to the
  * legacy Mode-B flow (verifyWithOracle) by default.
  *
- * NOTE: MilestoneEscrowV3 is being drafted in parallel (pcc-contracts repo,
- * branch feat/escrow-v3-payer-approval). Until its ABI lands, Mode A here
- * uses a forward-typed STUB ABI that mirrors the expected interface. The
- * actual on-chain call wiring is deferred — `runVerification` for Mode A
- * returns the calldata + target without executing any transaction.
+ * NOTE: MilestoneEscrowV3 has landed (#139) and its ABI is published from
+ * @pcc/contracts. Mode A now encodes approveAndRelease against the REAL V3 ABI
+ * (via the canonical encoder in escrow-client.ts), not a hand-rolled stub. The
+ * actual on-chain SEND is still deferred — `runVerification` for Mode A returns
+ * the calldata + target for the PAYER's wallet to submit (the gateway does not
+ * hold the payer key). V3 is not yet deployed, so nothing wires this into a live
+ * settlement route yet.
  *
  * NO chain transactions are executed by this module. NO Railway env mutations.
- * NO deploy implications. This is draft-only routing logic.
+ * NO deploy implications. This is routing logic only.
  */
 
 import {
@@ -39,7 +41,13 @@ import {
   type OracleVerifyRequest,
   type OracleResponse,
 } from "./oracle-client.js";
-import { encodeFunctionData, type Hex } from "viem";
+// Canonical V3 calldata encoder lives in escrow-client.ts alongside the V1/V2
+// encoders. Imported for internal use by runVerification (Mode A) and re-exported
+// below so existing call sites keep their import path.
+import { encodeApproveAndReleaseV3 } from "../contracts/escrow-client.js";
+// The REAL published MilestoneEscrowV3 ABI (replaces the former hand-rolled stub).
+import { MilestoneEscrowV3ABI } from "@pcc/contracts/abi";
+import { type Hex } from "viem";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,42 +124,35 @@ export function selectVerificationMode(
 }
 
 // ---------------------------------------------------------------------------
-// V3 escrow ABI stub — Mode A target
+// V3 escrow ABI — Mode A target
 // ---------------------------------------------------------------------------
 //
-// MilestoneEscrowV3 is being drafted in parallel (see implementer-oscar's
-// branch in pcc-contracts: feat/escrow-v3-payer-approval). Until that ABI
-// lands, this stub mirrors the expected signature so this router compiles.
-// When the real ABI exists, callers should swap the import.
+// MilestoneEscrowV3 has landed (#139); its ABI is published from @pcc/contracts.
+// Mode A encodes approveAndRelease against the REAL ABI via the canonical encoder
+// in escrow-client.ts. The names below are re-exported for call-site convenience
+// and back-compat with the pre-#139 stub.
 
 /**
- * Stub V3 escrow ABI fragment for `approveAndRelease(uint256 milestoneIndex)`.
- * The buyer/payer calls this to release a Mode-A user-attested milestone.
- * Replace with `MilestoneEscrowV3ABI` once published from @pcc/contracts.
+ * The published MilestoneEscrowV3 ABI (Mode-A target). Re-exported so
+ * verification-mode call sites can reach it without a second import.
  */
-export const MilestoneEscrowV3ABIStub = [
-  {
-    type: "function",
-    name: "approveAndRelease",
-    inputs: [{ name: "milestoneIndex", type: "uint256" }],
-    outputs: [],
-    stateMutability: "nonpayable",
-  },
-] as const;
+export { MilestoneEscrowV3ABI };
 
 /**
- * Build calldata for MilestoneEscrowV3.approveAndRelease(milestoneIndex).
- * Pure encoding — no transaction is sent. The caller (a future paid-job-flow
- * wiring or a dashboard "Approve" button) submits this calldata via the
- * payer's wallet.
+ * @deprecated V3 has landed — use {@link MilestoneEscrowV3ABI}, the full
+ * published ABI. Kept as an alias of the real ABI so existing imports keep
+ * working; it is NO LONGER a hand-rolled fragment. `decodeFunctionData({ abi:
+ * MilestoneEscrowV3ABIStub })` still resolves `approveAndRelease` (same selector).
  */
-export function encodeApproveAndReleaseV3(milestoneIndex: number): Hex {
-  return encodeFunctionData({
-    abi: MilestoneEscrowV3ABIStub,
-    functionName: "approveAndRelease",
-    args: [BigInt(milestoneIndex)],
-  });
-}
+export const MilestoneEscrowV3ABIStub = MilestoneEscrowV3ABI;
+
+/**
+ * Build calldata for MilestoneEscrowV3.approveAndRelease(milestoneIndex) — the
+ * Mode-A payer-approval call. Pure encoding; no transaction is sent. The payer's
+ * wallet submits it. Canonical implementation lives in escrow-client.ts (next to
+ * the V1/V2 encoders); re-exported here for back-compat.
+ */
+export { encodeApproveAndReleaseV3 };
 
 // ---------------------------------------------------------------------------
 // Mode-dispatch results

@@ -14,6 +14,9 @@ import {
   toBytes,
   type Hex,
 } from "viem";
+// V3 fee cap (1000 bps) — the single on-chain source of truth, mirrored here so
+// the v2 metadata builder can fail fast before minting an attestation V3 rejects.
+import { MAX_FEE_BPS_V3 } from "@pcc/contracts/abi";
 
 const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://localhost:4100";
 const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
@@ -350,8 +353,14 @@ export function buildEasAttestationMetadata(input: BuildEasAttestationInput): Ea
 export const PCC_EVIDENCE_SCHEMA_V2 =
   "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId, uint16 feeBps, address feeRecipient";
 
-/** viem ABI parameters for the v2 schema (order matches a future V3 Solidity decode). */
-const PCC_EVIDENCE_SCHEMA_V2_PARAMS = [
+/**
+ * viem ABI parameters for the v2 schema. Field order is LOAD-BEARING — it mirrors
+ * MilestoneEscrowV3.submitAttestation's
+ *   abi.decode(a.data, (string,bytes32,bytes32,string,uint8,bool,bytes32,uint16,address))
+ * Exported so a parity test can assert it never drifts from the contract's
+ * 9-field tuple.
+ */
+export const PCC_EVIDENCE_SCHEMA_V2_PARAMS = [
   { name: "jobId", type: "string" },
   { name: "kernelId", type: "bytes32" },
   { name: "evidenceBundleHash", type: "bytes32" },
@@ -442,6 +451,50 @@ export function isEvidenceV2Enabled(): boolean {
 }
 
 /**
+ * The on-chain MAX_FEE_BPS cap (1000 = 10%) MilestoneEscrowV3 enforces at
+ * attestation submission. Re-exported from @pcc/contracts so gateway callers can
+ * reference one source of truth.
+ */
+export { MAX_FEE_BPS_V3 };
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Mirror MilestoneEscrowV3.submitAttestation's fee guards OFF-CHAIN so the
+ * gateway never mints a `pcc.evidence.v2` attestation the contract would revert:
+ *   - `feeBps` must be a non-negative integer within the uint16 range
+ *   - `feeBps <= MAX_FEE_BPS_V3` (1000 = 10%) — the on-chain hard cap
+ *   - if `feeBps > 0`, `feeRecipient` must be a non-zero address
+ *
+ * Throws a descriptive Error on violation; returns void on success. This is the
+ * off-chain twin of the contract's
+ *   require(attestedFeeBps <= MAX_FEE_BPS, "Fee exceeds MAX_FEE_BPS");
+ *   if (attestedFeeBps > 0) require(attestedFeeRecipient != address(0), "Zero fee recipient");
+ */
+export function assertFeeWithinV3Cap(feeBps: number, feeRecipient: string): void {
+  if (!Number.isInteger(feeBps) || feeBps < 0) {
+    throw new Error(
+      `oracle.evidence.v2: feeBps must be a non-negative integer, got ${feeBps}`,
+    );
+  }
+  if (feeBps > MAX_FEE_BPS_V3) {
+    throw new Error(
+      `oracle.evidence.v2: feeBps ${feeBps} exceeds MAX_FEE_BPS (${MAX_FEE_BPS_V3}) — ` +
+        `MilestoneEscrowV3.submitAttestation would revert "Fee exceeds MAX_FEE_BPS"`,
+    );
+  }
+  if (feeBps > 0) {
+    const fr = feeRecipient.startsWith("0x") ? feeRecipient : `0x${feeRecipient}`;
+    if (fr.toLowerCase() === ZERO_ADDRESS) {
+      throw new Error(
+        `oracle.evidence.v2: feeBps ${feeBps} > 0 requires a non-zero feeRecipient — ` +
+          `MilestoneEscrowV3.submitAttestation would revert "Zero fee recipient"`,
+      );
+    }
+  }
+}
+
+/**
  * Build the `oracle.evidence.v2` attestation metadata for a completed job.
  *
  * V2 differs from V1 by carrying `feeBps` + `feeRecipient` in the signed payload,
@@ -457,6 +510,10 @@ export function buildEasAttestationMetadataV2(
   const feeRecipientHex = (input.feeRecipient.startsWith("0x")
     ? input.feeRecipient
     : `0x${input.feeRecipient}`) as Hex;
+
+  // Fail fast off-chain if this fee would be rejected on-chain (MAX_FEE_BPS cap
+  // + non-zero recipient when fee > 0). Mirrors MilestoneEscrowV3 guards.
+  assertFeeWithinV3Cap(input.feeBps, feeRecipientHex);
 
   const payload: EasEvidencePayloadV2 = {
     jobId: input.jobId,
