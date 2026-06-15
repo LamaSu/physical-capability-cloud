@@ -420,11 +420,18 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
   // EscrowCreated receipt: `escrow` is the first indexed topic. We feed a log
   // whose decode yields NEW_ESCROW so extractEscrowCreatedAddress returns it.
   const waitForTransactionReceipt = vi.fn();
+  // P0-1: createJobFromSession now pins explicit nonces (getTransactionCount) and
+  // verifies milestones landed on-chain (readContract -> getMilestoneCount). Mock
+  // both so the public client exposes the methods the new sequencing logic calls.
+  const getTransactionCount = vi.fn().mockResolvedValue(5);
+  const readContract = vi.fn().mockResolvedValue(1n); // getMilestoneCount >= the 1 milestone
 
   beforeEach(async () => {
     vi.resetModules();
     writeContract.mockClear();
     waitForTransactionReceipt.mockReset();
+    getTransactionCount.mockClear();
+    readContract.mockClear();
 
     process.env.PCC_GATEWAY_PRIVATE_KEY =
       "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -454,6 +461,7 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
       [BASE_SEPOLIA_MOCK_USDC as Hex, ("0x" + "00".repeat(32)) as Hex],
     );
     waitForTransactionReceipt.mockResolvedValue({
+      status: "success", // P0-1: addMilestone now asserts receipt.status === "success"
       logs: [{ topics: receiptTopics, data: receiptData, address: NEW_ESCROW }],
     });
 
@@ -468,7 +476,7 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
       return {
         ...actual,
         createWalletClient: () => ({ writeContract }),
-        createPublicClient: () => ({ waitForTransactionReceipt }),
+        createPublicClient: () => ({ waitForTransactionReceipt, getTransactionCount, readContract }),
       };
     });
 
