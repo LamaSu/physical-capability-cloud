@@ -71,37 +71,41 @@ const DELIVERY_CAP_ID = "cap-test-delivery";
 function seedTestCapabilities(): void {
   const repos = getRepos();
 
-  // Wood-fired pizza @ 12 USDC base.
-  repos.capabilities.insert({
-    id: PIZZA_CAP_ID,
-    kernelId: "kernel-nyc",
-    type: "wood-fired-pizza",
-    name: "Marios Pizzeria Wood-Fired Pizza",
-    description: "Neapolitan-style wood-fired pizza, 12-14 inch, made to order.",
-    materials: ["dough", "tomato", "mozzarella", "basil"],
-    assuranceTiers: [0, 1],
-    pricing: { currency: "USDC", baseCost: "12.00", minimum: "10.00" },
-    availability: {},
-    location: { lat: 40.7128, lng: -74.006 },
-    queueDepth: 0,
-    tags: ["pizza", "food", "wood-fired", "neapolitan"],
-  } as any);
+  // Idempotent — these tests run beforeEach and resetRequestsStore() doesn't
+  // wipe the capabilities table. Skip insert if already present.
+  if (!repos.capabilities.findById(PIZZA_CAP_ID)) {
+    repos.capabilities.insert({
+      id: PIZZA_CAP_ID,
+      kernelId: "kernel-nyc",
+      type: "wood-fired-pizza",
+      name: "Marios Pizzeria Wood-Fired Pizza",
+      description: "Neapolitan-style wood-fired pizza, 12-14 inch, made to order.",
+      materials: ["dough", "tomato", "mozzarella", "basil"],
+      assuranceTiers: [0, 1],
+      pricing: { currency: "USDC", baseCost: "12.00", minimum: "10.00" },
+      availability: {},
+      location: { lat: 40.7128, lng: -74.006 },
+      queueDepth: 0,
+      tags: ["pizza", "food", "wood-fired", "neapolitan"],
+    } as any);
+  }
 
-  // Local courier delivery @ 6 USDC base.
-  repos.capabilities.insert({
-    id: DELIVERY_CAP_ID,
-    kernelId: "kernel-nyc",
-    type: "local-courier-delivery",
-    name: "Daves Delivery Local Courier",
-    description: "Same-day local courier delivery within Manhattan.",
-    materials: [],
-    assuranceTiers: [0, 1],
-    pricing: { currency: "USDC", baseCost: "6.00", minimum: "5.00" },
-    availability: {},
-    location: { lat: 40.7128, lng: -74.006 },
-    queueDepth: 0,
-    tags: ["delivery", "courier", "manhattan", "logistics"],
-  } as any);
+  if (!repos.capabilities.findById(DELIVERY_CAP_ID)) {
+    repos.capabilities.insert({
+      id: DELIVERY_CAP_ID,
+      kernelId: "kernel-nyc",
+      type: "local-courier-delivery",
+      name: "Daves Delivery Local Courier",
+      description: "Same-day local courier delivery within Manhattan.",
+      materials: [],
+      assuranceTiers: [0, 1],
+      pricing: { currency: "USDC", baseCost: "6.00", minimum: "5.00" },
+      availability: {},
+      location: { lat: 40.7128, lng: -74.006 },
+      queueDepth: 0,
+      tags: ["delivery", "courier", "manhattan", "logistics"],
+    } as any);
+  }
 }
 
 // ---------------------------------------------------------------------------
