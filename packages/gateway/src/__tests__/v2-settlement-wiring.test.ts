@@ -128,13 +128,18 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
       "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
     // Mock viem so the wallet client's writeContract is our spy, but keep the
-    // real encoders (encodeFunctionData etc.) intact.
+    // real encoders (encodeFunctionData etc.) intact. getTransactionCount is now
+    // required: every escrow write routes through the per-signer NonceManager,
+    // which reads the pending nonce once and pins it explicitly (P2-SCALE).
     vi.doMock("viem", async (importOriginal) => {
       const actual = await importOriginal<typeof import("viem")>();
       return {
         ...actual,
         createWalletClient: () => ({ writeContract }),
-        createPublicClient: () => ({ readContract: vi.fn() }),
+        createPublicClient: () => ({
+          readContract: vi.fn(),
+          getTransactionCount: vi.fn().mockResolvedValue(11),
+        }),
       };
     });
   });
@@ -232,6 +237,18 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
     // bond "5.00" -> 5_000_000n (6dp)
     expect(call.args).toEqual([0n, 5_000_000n, HASH, "bad print"]);
     expectV2Abi(call.abi);
+  });
+
+  it("pins an explicit nonce from the NonceManager on every write (P2-SCALE)", async () => {
+    const { submitAttestationV2, releaseMilestoneV2 } = await import(
+      "../contracts/escrow-client.js"
+    );
+    // First write seeds from getTransactionCount() -> 11, second is monotonic (12).
+    await submitAttestationV2(0, UID, ESCROW);
+    await releaseMilestoneV2(1, ESCROW);
+
+    expect(writeContract.mock.calls[0][0].nonce).toBe(11);
+    expect(writeContract.mock.calls[1][0].nonce).toBe(12);
   });
 });
 
