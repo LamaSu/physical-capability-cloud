@@ -23,6 +23,7 @@ import { escrowRoutes } from "./routes/escrow.js";
 import { pccProtocolRoutes } from "./routes/pcc-protocol.js";
 import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
+import { waitlistRoutes } from "./routes/waitlist.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -374,6 +375,9 @@ export async function createGateway(port = 3200) {
 
   // API key provisioning routes (under /api/auth/ — must be before apiGate)
   await app.register(provisionRoutes);
+
+  // Public waitlist + beta-tester intake (mounted before apiGate so signup needs no key)
+  await app.register(waitlistRoutes);
 
   // AEGIS content scanning gate (before payment + REST routes — scans request bodies)
   const aegisEnabled = process.env.PCC_AEGIS_ENABLED !== "false";
