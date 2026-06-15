@@ -23,6 +23,7 @@ import { escrowRoutes } from "./routes/escrow.js";
 import { pccProtocolRoutes } from "./routes/pcc-protocol.js";
 import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
+import { onboardChatRoutes } from "./routes/onboard-chat.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -453,6 +454,11 @@ export async function createGateway(port = 3200) {
   await app.register(pccProtocolRoutes);
   await app.register(agentRoutes);
   await app.register(onboardRoutes);
+  // Conversational no-code onboarding chat (coord dc4d1ec8). Layperson-facing
+  // chat backed by the v3 agent-pack system_prompt. Registered after
+  // onboardRoutes so the chat tool execution can self-inject against the
+  // /api/onboard/* surface.
+  await app.register(onboardChatRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);

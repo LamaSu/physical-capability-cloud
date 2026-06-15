@@ -17,6 +17,10 @@ const PUBLIC_PREFIXES = [
   "/api/feedback",
   "/api/onboard/identify-device", // Device identification is public (install.html landing)
   "/api/onboard/check/",        // Invite code validation is public
+  "/api/onboard/chat",          // Layperson conversational onboarding (coord dc4d1ec8)
+                                // Public so anyone with a browser can register a capability
+                                // without first holding an API key. Rate-limited by the
+                                // global rate-limiter + an 8-turn-per-request hard cap.
   // REMOVED: "/api/onboard/registrations" — prefix match was too broad, exposed admin
   // endpoints (approve/reject/activate) without auth. Now uses exact match below.
   "/api/dht/",                  // DHT discovery is public (distributed capability queries)
