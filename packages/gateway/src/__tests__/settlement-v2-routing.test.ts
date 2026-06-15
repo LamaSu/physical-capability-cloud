@@ -26,6 +26,8 @@ import type { Address } from "viem";
 // Mocks — declared before the module under test is imported.
 // ---------------------------------------------------------------------------
 
+const mockIsWriteEnabled = vi.fn().mockReturnValue(true);
+
 const mockSubmitEvidence = vi.fn().mockResolvedValue({
   transactionHash: "0xv1_evidence_tx",
   status: "submitted",
@@ -68,7 +70,7 @@ vi.mock("../contracts/escrow-client.js", () => ({
   getDispute: vi.fn().mockResolvedValue({}),
   getEvents: vi.fn().mockResolvedValue([]),
   // Write guard — enabled so the facade proceeds to the chain call
-  isWriteEnabled: vi.fn().mockReturnValue(true),
+  isWriteEnabled: mockIsWriteEnabled,
   getSignerAddress: vi.fn().mockReturnValue("0x3e9cf724f848908fC172a075F3219746126cD319"),
   // Status enum shims
   MilestoneStatus: {},
@@ -146,9 +148,8 @@ describe("SettlementFacade — V2 routing (PCC_USE_EAS_V2)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // Ensure write is enabled for every test
-    const { isWriteEnabled } = require("../contracts/escrow-client.js");
-    isWriteEnabled.mockReturnValue(true);
+    // Ensure write is enabled for every test (reset to default after 503 test)
+    mockIsWriteEnabled.mockReturnValue(true);
   });
 
   afterEach(async () => {
@@ -226,8 +227,7 @@ describe("SettlementFacade — V2 routing (PCC_USE_EAS_V2)", () => {
 
     it("returns 503 when write is disabled regardless of V2 flag", async () => {
       process.env.PCC_USE_EAS_V2 = "true";
-      const { isWriteEnabled } = require("../contracts/escrow-client.js");
-      isWriteEnabled.mockReturnValue(false);
+      mockIsWriteEnabled.mockReturnValue(false);
       const facade = await getFacade();
       const result = await facade.submitAttestation(
         ESCROW_V2, MILESTONE_IDX, EAS_UID,
