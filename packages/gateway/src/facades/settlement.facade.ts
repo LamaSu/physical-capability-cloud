@@ -49,9 +49,17 @@ import {
   depositBond as chainDepositBond,
   submitEvidence as chainSubmitEvidence,
   submitAttestation as chainSubmitAttestation,
+  submitEvidenceV2 as chainSubmitEvidenceV2,
+  submitAttestationV2 as chainSubmitAttestationV2,
+  releaseMilestoneV2 as chainReleaseMilestoneV2,
   isWriteEnabled,
   getSignerAddress,
 } from "../contracts/escrow-client.js";
+
+/** Whether to use the EAS-gated MilestoneEscrowV2 path. */
+function useEasV2(): boolean {
+  return process.env.PCC_USE_EAS_V2 === "true";
+}
 import {
   isBatchEnabled,
   getSmartAccountAddress,
@@ -312,6 +320,10 @@ export class SettlementFacade extends BaseFacade {
   /**
    * Release a milestone (challenge window must have expired).
    * Replaces: POST /api/escrow/chain/:address/release/:milestoneIndex
+   *
+   * V2 (PCC_USE_EAS_V2=true): calls MilestoneEscrowV2.release(uint256) — no
+   * attestation struct needed; the binding was done at submitAttestation time.
+   * V1 (default): calls MilestoneEscrowV1.release(uint256).
    */
   async releaseMilestone(
     address: Address,
@@ -324,7 +336,9 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
-      const result = await chainReleaseMilestone(milestoneIndex, address);
+      const result = useEasV2()
+        ? await chainReleaseMilestoneV2(milestoneIndex, address)
+        : await chainReleaseMilestone(milestoneIndex, address);
       pipelineTelemetry.emit(address, "settlement_complete", "completed", {
         metadata: { escrow: address, milestoneIndex, released: true },
       });
@@ -424,6 +438,10 @@ export class SettlementFacade extends BaseFacade {
   /**
    * Submit evidence bundle hash for a milestone.
    * Replaces: POST /api/escrow/chain/:address/evidence/:milestoneIndex
+   *
+   * V2 (PCC_USE_EAS_V2=true): calls MilestoneEscrowV2.submitEvidence — same
+   * wire shape as V1 but uses the V2 ABI so it targets the V2 contract correctly.
+   * V1 (default): calls MilestoneEscrowV1.submitEvidence.
    */
   async submitEvidenceHash(
     address: Address,
@@ -440,11 +458,17 @@ export class SettlementFacade extends BaseFacade {
       if (!evidenceBundleHash) {
         throw Object.assign(new Error("evidenceBundleHash is required"), { name: "BadRequestError" });
       }
-      const result = await chainSubmitEvidence(
-        milestoneIndex,
-        evidenceBundleHash as `0x${string}`,
-        address,
-      );
+      const result = useEasV2()
+        ? await chainSubmitEvidenceV2(
+            milestoneIndex,
+            evidenceBundleHash as `0x${string}`,
+            address,
+          )
+        : await chainSubmitEvidence(
+            milestoneIndex,
+            evidenceBundleHash as `0x${string}`,
+            address,
+          );
       pipelineTelemetry.emit(address, "verification_request", "completed", {
         metadata: { escrow: address, milestoneIndex, evidenceBundleHash },
       });
@@ -466,6 +490,17 @@ export class SettlementFacade extends BaseFacade {
    * Submit verifier attestation for a milestone.
    * Replaces: POST /api/escrow/chain/:address/attestation/:milestoneIndex
    */
+  /**
+   * Submit an attestation (hash or EAS UID) for a milestone.
+   * Replaces: POST /api/escrow/chain/:address/attestation/:milestoneIndex
+   *
+   * V2 (PCC_USE_EAS_V2=true): `attestationHash` is an EAS UID (bytes32 from the
+   * oracle daemon). Routes to MilestoneEscrowV2.submitAttestation(uint256, bytes32).
+   * The contract validates the UID against the EAS contract on-chain.
+   *
+   * V1 (default): `attestationHash` is a free-form bytes32 verifier hash.
+   * Routes to MilestoneEscrowV1.submitAttestation(uint256, bytes32).
+   */
   async submitAttestation(
     address: Address,
     milestoneIndex: number,
@@ -481,13 +516,24 @@ export class SettlementFacade extends BaseFacade {
       if (!attestationHash) {
         throw Object.assign(new Error("attestationHash is required"), { name: "BadRequestError" });
       }
-      const result = await chainSubmitAttestation(
-        milestoneIndex,
-        attestationHash as `0x${string}`,
-        address,
-      );
+      const result = useEasV2()
+        ? await chainSubmitAttestationV2(
+            milestoneIndex,
+            attestationHash as `0x${string}`,
+            address,
+          )
+        : await chainSubmitAttestation(
+            milestoneIndex,
+            attestationHash as `0x${string}`,
+            address,
+          );
       pipelineTelemetry.emit(address, "verification_result", "completed", {
-        metadata: { escrow: address, milestoneIndex, attestationHash },
+        metadata: {
+          escrow: address,
+          milestoneIndex,
+          attestationHash,
+          easV2: useEasV2(),
+        },
       });
       auditService.log({
         eventType: "escrow.attestation_submitted",
@@ -495,7 +541,7 @@ export class SettlementFacade extends BaseFacade {
         resourceType: "escrow",
         resourceId: address,
         action: "submit_attestation",
-        metadata: { milestoneIndex, attestationHash },
+        metadata: { milestoneIndex, attestationHash, easV2: useEasV2() },
         ip,
         userAgent,
       });

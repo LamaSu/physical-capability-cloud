@@ -86,6 +86,12 @@ export abstract class BaseFacade {
               return err("BATCH_DISABLED", message, 503) as Result<T>;
             }
           }
+          // Log the real error before collapsing to INTERNAL so future 500s
+          // are diagnosable in Railway / pino logs without re-reading spans.
+          console.error(
+            `[facade:${this.facadeName}:${operation}] unhandled error: ${message}`,
+            error,
+          );
           return Errors.internal(message, { facade: this.facadeName, operation });
         } finally {
           span.end();
