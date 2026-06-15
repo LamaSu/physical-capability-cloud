@@ -116,17 +116,20 @@ RUN cd packages/db && node -e "const Database = require('better-sqlite3'); const
 
 # ── Security Hardening ────────────────────────────────────────────────────────
 
-# Remove build tools from production image (reduces attack surface)
-RUN apt-get purge -y python3 make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+# Remove build tools from production image (reduces attack surface).
+# Install gosu so the entrypoint can drop privileges to `pcc` after fixing volume ownership.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && apt-get purge -y python3 make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd --system --gid 1001 pcc && useradd --system --uid 1001 --gid pcc pcc
 
-# Create data directory with correct ownership
+# Create data directory with correct ownership (build-time; re-applied at runtime by the entrypoint)
 RUN mkdir -p /app/data && chown -R pcc:pcc /app/data
 
-# Drop to non-root user
-USER pcc
+# NOTE: intentionally NOT `USER pcc` here. A Railway persistent volume mounts at
+# /app/data ROOT-OWNED, which masks the build-time chown above. The entrypoint
+# below starts as root, re-chowns /app/data AFTER the volume mounts, then drops
+# to the non-root `pcc` user via gosu so the gateway can open its SQLite DBs.
 
 EXPOSE 3200
 
@@ -136,4 +139,6 @@ ENV PCC_DB_PATH=/app/data/pcc.sqlite
 ENV SERVE_DASHBOARD=true
 ENV DASHBOARD_PATH=/app/apps/dashboard/dist
 
+# As root: ensure the (possibly volume-mounted) /app/data is writable by pcc, then drop to pcc.
+ENTRYPOINT ["/bin/sh", "-c", "if [ \"$(id -u)\" = \"0\" ]; then mkdir -p /app/data && chown -R pcc:pcc /app/data && exec gosu pcc \"$@\"; fi; exec \"$@\"", "--"]
 CMD ["node", "packages/gateway/dist/server.js"]
