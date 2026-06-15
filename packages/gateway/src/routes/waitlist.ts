@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { SUMMIT_HTML } from "./summit-page.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // One JSONL line per submission — churn-proof: optional fields ride in `details`,
@@ -57,6 +58,11 @@ function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
 }
 
 export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
+  // Mobile-first summit signup page (self-contained; public — mounted before apiGate).
+  app.get("/summit", async (_req, reply) => {
+    return reply.header("content-type", "text/html; charset=utf-8").send(SUMMIT_HTML);
+  });
+
   // Low-friction waitlist signup (PUBLIC). Only requirement: a valid email.
   app.post("/api/waitlist", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, any>;
@@ -79,6 +85,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       useCase: b.useCase ?? null,
       inviteCode: b.inviteCode ? String(b.inviteCode).trim() : null,
       referral: b.referral ?? null,
+      source: b.source ?? b.ref ? String(b.source ?? b.ref).trim() : null,
       status: "new",
       createdAt: new Date().toISOString(),
       ip: req.ip,
@@ -98,12 +105,10 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     const email = String(b.email ?? "").trim().toLowerCase();
     const name = String(b.name ?? "").trim();
     const company = String(b.company ?? "").trim();
-    const missing: string[] = [];
-    if (!EMAIL_RE.test(email)) missing.push("email");
-    if (!name) missing.push("name");
-    if (!company) missing.push("company");
-    if (missing.length) {
-      return reply.code(400).send({ error: "bad_request", message: `Required: ${missing.join(", ")}.`, missing });
+    // Only email is hard-required — Step 2 (name/company/role/pitch) is fully
+    // skippable per the summit spec; it is pure upside.
+    if (!EMAIL_RE.test(email)) {
+      return reply.code(400).send({ error: "bad_request", message: "A valid email is required." });
     }
 
     // Optional invite code → fast-track if it validates against PCC's existing invite system.
@@ -123,15 +128,16 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Everything beyond the known top-levels lands in `details` (no migration on field changes).
-    const { email: _e, name: _n, company: _c, inviteCode: _i, role: _r, website: _w, hp: _h, ...details } = b;
+    const { email: _e, name: _n, company: _c, inviteCode: _i, role: _r, source: _s, ref: _rf, website: _w, hp: _h, ...details } = b;
     const rec = {
       id: rid("beta"),
       kind: "beta-application",
       email,
-      name,
-      company,
+      name: name || null,
+      company: company || null,
       role: b.role ?? null,
       inviteCode,
+      source: b.source ?? b.ref ? String(b.source ?? b.ref).trim() : null,
       status,
       details,
       createdAt: new Date().toISOString(),
@@ -147,6 +153,13 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
           ? "Valid invite — you're fast-tracked. Check your email for next steps."
           : "Application received — we read every one and will be in touch.",
     };
+  });
+
+  // Public live counter for the signup page (#N social proof + open-mic read-out). No auth.
+  app.get("/api/waitlist/count", async () => {
+    const count = readAll(WAITLIST_FILE).length;
+    const beta = readAll(BETA_FILE).length;
+    return { count, beta };
   });
 
   // Admin review / export (gated by X-Admin-Token).
