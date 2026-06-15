@@ -324,3 +324,159 @@ export function buildEasAttestationMetadata(input: BuildEasAttestationInput): Ea
     encoded: encodeEasEvidencePayload(payload),
   };
 }
+
+// ---------------------------------------------------------------------------
+// V2 (`oracle.evidence.v2`) — additive, gated by PCC_EVIDENCE_V2_ENABLED
+// ---------------------------------------------------------------------------
+//
+// The V2 schema extends `pcc.evidence.v1` with two trailing fee fields the
+// oracle SIGNS into the attestation payload itself:
+//
+//   feeBps        — uint16  fee in basis points (max 65,535 = 655.35%)
+//   feeRecipient  — address PCC treasury (or future fee router)
+//
+// Rationale (pcc-deliberation #066 / #058): with fee in the signed payload,
+// MilestoneEscrowV3 can DECODE it from the attestation and use it in
+// release/_distribute instead of constructor/root state — the oracle becomes
+// the sovereign source of the fee. Backwards compatibility:
+//   - v1 schema string + UID is UNTOUCHED (live escrows keep their gate).
+//   - v2 helpers are ADDITIVE; nothing in this file calls them yet.
+//   - Live MilestoneEscrowV2 cannot decode v2 payloads (mismatched length), so
+//     v2 attestations are only useful when paired with V3 escrows.
+//
+// Reference: pcc-oracle branch `feat/oracle-evidence-v2-fee` @ d8df8ce.
+
+/** The `oracle.evidence.v2` EAS schema string (v1 fields + feeBps + feeRecipient). */
+export const PCC_EVIDENCE_SCHEMA_V2 =
+  "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId, uint16 feeBps, address feeRecipient";
+
+/** viem ABI parameters for the v2 schema (order matches a future V3 Solidity decode). */
+const PCC_EVIDENCE_SCHEMA_V2_PARAMS = [
+  { name: "jobId", type: "string" },
+  { name: "kernelId", type: "bytes32" },
+  { name: "evidenceBundleHash", type: "bytes32" },
+  { name: "ipfsCid", type: "string" },
+  { name: "assuranceTier", type: "uint8" },
+  { name: "oracleVerified", type: "bool" },
+  { name: "stepId", type: "bytes32" },
+  { name: "feeBps", type: "uint16" },
+  { name: "feeRecipient", type: "address" },
+] as const;
+
+/** Decoded `oracle.evidence.v2` attestation payload. */
+export interface EasEvidencePayloadV2 extends EasEvidencePayload {
+  /** Fee in basis points (oracle-set). MilestoneEscrowV3 will cap with MAX_FEE_BPS. */
+  feeBps: number;
+  /** Fee recipient address (PCC treasury or fee router). */
+  feeRecipient: Hex;
+}
+
+/** ABI-encode an `oracle.evidence.v2` payload (what the oracle attests to). */
+export function encodeEasEvidencePayloadV2(p: EasEvidencePayloadV2): Hex {
+  return encodeAbiParameters(PCC_EVIDENCE_SCHEMA_V2_PARAMS, [
+    p.jobId,
+    p.kernelId,
+    p.evidenceBundleHash,
+    p.ipfsCid,
+    p.assuranceTier,
+    p.oracleVerified,
+    p.stepId,
+    p.feeBps,
+    p.feeRecipient,
+  ]);
+}
+
+/** Decode an `oracle.evidence.v2` payload (the `data` field of an EAS attestation). */
+export function decodeEasEvidencePayloadV2(data: Hex): EasEvidencePayloadV2 {
+  const [
+    jobId,
+    kernelId,
+    evidenceBundleHash,
+    ipfsCid,
+    assuranceTier,
+    oracleVerified,
+    stepId,
+    feeBps,
+    feeRecipient,
+  ] = decodeAbiParameters(PCC_EVIDENCE_SCHEMA_V2_PARAMS, data);
+  return {
+    jobId,
+    kernelId,
+    evidenceBundleHash,
+    ipfsCid,
+    assuranceTier: Number(assuranceTier),
+    oracleVerified,
+    stepId,
+    feeBps: Number(feeBps),
+    feeRecipient,
+  };
+}
+
+export interface BuildEasAttestationInputV2 extends BuildEasAttestationInput {
+  /** Fee in basis points the oracle signs into the attestation. Required for V2. */
+  feeBps: number;
+  /** Fee recipient address the oracle signs into the attestation. Required for V2. */
+  feeRecipient: string;
+  /** Pre-registered `oracle.evidence.v2` schema UID, if known. */
+  schemaUidV2?: string;
+}
+
+export interface EasAttestationMetadataV2 {
+  schema: string;
+  schemaUid: string | null;
+  recipient: string | null;
+  payload: EasEvidencePayloadV2;
+  /** ABI-encoded payload — the exact bytes the oracle attests to / V3 decodes. */
+  encoded: Hex;
+  /** Always "v2" — disambiguates from `EasAttestationMetadata` at call sites. */
+  schemaVersion: "v2";
+}
+
+/**
+ * V2 enable flag. When false, callers should fall back to v1 (the legacy path).
+ * Default: false (no behavioral change without explicit opt-in).
+ */
+export function isEvidenceV2Enabled(): boolean {
+  const v = process.env.PCC_EVIDENCE_V2_ENABLED;
+  return v === "true" || v === "1" || v === "yes";
+}
+
+/**
+ * Build the `oracle.evidence.v2` attestation metadata for a completed job.
+ *
+ * V2 differs from V1 by carrying `feeBps` + `feeRecipient` in the signed payload,
+ * so MilestoneEscrowV3 can decode the fee from the attestation rather than
+ * trusting constructor-time root state. This is purely additive — v1 is
+ * untouched. The function does NOT check `isEvidenceV2Enabled()` itself; the
+ * caller decides when to use v2 vs v1.
+ */
+export function buildEasAttestationMetadataV2(
+  input: BuildEasAttestationInputV2,
+): EasAttestationMetadataV2 {
+  // Normalize feeRecipient to 0x-hex address (defensive).
+  const feeRecipientHex = (input.feeRecipient.startsWith("0x")
+    ? input.feeRecipient
+    : `0x${input.feeRecipient}`) as Hex;
+
+  const payload: EasEvidencePayloadV2 = {
+    jobId: input.jobId,
+    kernelId: stringToBytes32Id(input.kernelId),
+    evidenceBundleHash: bundleHashToBytes32(input.evidenceBundleHash),
+    ipfsCid: input.ipfsCid,
+    assuranceTier: input.assuranceTier,
+    oracleVerified: input.oracleVerified,
+    stepId: stringToBytes32Id(input.stepId),
+    feeBps: input.feeBps,
+    feeRecipient: feeRecipientHex,
+  };
+
+  return {
+    schema: PCC_EVIDENCE_SCHEMA_V2,
+    schemaUid:
+      input.schemaUidV2 ?? process.env.PCC_EVIDENCE_SCHEMA_V2_UID ?? null,
+    recipient: input.recipient ?? null,
+    payload,
+    encoded: encodeEasEvidencePayloadV2(payload),
+    schemaVersion: "v2",
+  };
+}

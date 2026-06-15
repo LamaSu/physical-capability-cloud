@@ -111,6 +111,7 @@ export class RealLitEncryptionService {
   private readonly apiKey: string;
   private readonly chain: string;
   private readonly network: string;
+  private readonly pccOperatorAddress?: string;
   private connected = false;
   private pkp: ChipotlePKP | null = null;
 
@@ -131,9 +132,10 @@ export class RealLitEncryptionService {
     this.apiKey = process.env.LIT_USAGE_KEY ?? process.env.LIT_API_KEY ?? options.apiKey ?? "";
     this.chain = options.chain ?? "baseSepolia";
     this.network = options.network ?? "chipotle";
+    this.pccOperatorAddress = options.pccOperatorAddress;
 
     console.log(
-      `[LIT] RealLitEncryptionService constructed — network=${this.network} chain=${this.chain} apiUrl=${this.apiUrl} apiKeyPresent=${!!this.apiKey}`,
+      `[LIT] RealLitEncryptionService constructed — network=${this.network} chain=${this.chain} apiUrl=${this.apiUrl} apiKeyPresent=${!!this.apiKey} pccInACL=${this.pccOperatorAddress ? "yes" : "no"}`,
     );
   }
 
@@ -294,7 +296,33 @@ export class RealLitEncryptionService {
       },
     };
 
-    return [buyerCondition, orOperator, verifierCondition];
+    const chain: AccessControlConditionChain = [
+      buyerCondition,
+      orOperator,
+      verifierCondition,
+    ];
+
+    // Optional PCC operator clause (#058 — encrypt-by-default ensures PCC's
+    // key is in the ACL so the gateway can read for verification +
+    // observability). Cheap evmBasic address-equality check; added only when
+    // the service was constructed with `pccOperatorAddress`.
+    if (this.pccOperatorAddress) {
+      const pccOrOperator = { operator: "or" as const };
+      const pccCondition = {
+        conditionType: "evmBasic" as const,
+        chain: this.chain,
+        standardContractType: "",
+        method: "",
+        parameters: [":userAddress"],
+        returnValueTest: {
+          comparator: "=",
+          value: this.pccOperatorAddress,
+        },
+      };
+      chain.push(pccOrOperator, pccCondition);
+    }
+
+    return chain;
   }
 
   /**

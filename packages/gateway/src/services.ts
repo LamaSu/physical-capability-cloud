@@ -174,9 +174,16 @@ export const encryptionService = new EncryptionService();
 // Use createLitEncryptionService() factory — resolves real vs mock via LIT_PROTOCOL_REAL env var.
 // Chipotle v3 REST API: set LIT_API_KEY for authenticated access (PKP key management).
 // Default: mock mode (local AES-256-GCM, same cryptography, no network required).
+//
+// pccOperatorAddress (PCC_ENCRYPTION_OPERATOR_ADDRESS env) — when set, PCC's own
+// key is added to encrypted-evidence access conditions so the gateway can read
+// bundles later for verification + observability. Per pcc-deliberation #058
+// gateway item: "Lit encrypt-by-default — ensure PCC's own key is in the ACL".
+// When unset, the legacy 2-condition ACL (buyer OR verifier) stands.
 export const litEncryptionService = createLitEncryptionService({
   network: "chipotle",
   chain: "baseSepolia",
+  pccOperatorAddress: process.env.PCC_ENCRYPTION_OPERATOR_ADDRESS,
 });
 
 // Connect Lit service (non-blocking — will be ready by first request)
