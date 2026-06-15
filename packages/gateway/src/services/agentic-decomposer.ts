@@ -451,16 +451,18 @@ function calculateParallelTracks(nodes: CapabilityNode[]): string[][] {
 // ---------------------------------------------------------------------------
 
 export function loadCandidatesFromRepo(repo: ICapabilityRepository): CandidateCapability[] {
-  return repo.findAll().map((row) => rowToCandidate(row));
+  return repo.findAll().map((row) => rowToCandidate(row as Record<string, unknown>));
 }
 
-function rowToCandidate(row: any): CandidateCapability {
-  const pricing = row.pricing ?? {};
+function rowToCandidate(row: Record<string, unknown>): CandidateCapability {
+  const pricing = (row.pricing && typeof row.pricing === "object"
+    ? row.pricing as Record<string, unknown>
+    : {});
   const baseCost = parseAmount(pricing.baseCost);
   const minimum = parseAmount(pricing.minimum);
   return {
     id: String(row.id),
-    kernelId: String(row.kernelId ?? row.kernel_id ?? ""),
+    kernelId: String(row.kernelId ?? (row as Record<string, unknown>).kernel_id ?? ""),
     type: String(row.type ?? ""),
     name: String(row.name ?? row.type ?? row.id),
     description: typeof row.description === "string" ? row.description : undefined,
@@ -468,7 +470,9 @@ function rowToCandidate(row: any): CandidateCapability {
     minimumUSDC: minimum,
     assuranceTiers: Array.isArray(row.assuranceTiers)
       ? row.assuranceTiers as number[]
-      : Array.isArray(row.assurance_tiers) ? row.assurance_tiers as number[] : [],
+      : Array.isArray((row as Record<string, unknown>).assurance_tiers)
+        ? (row as Record<string, unknown>).assurance_tiers as number[]
+        : [],
     materials: Array.isArray(row.materials) ? row.materials as string[] : [],
     tags: Array.isArray(row.tags) ? row.tags as string[] : undefined,
   };
