@@ -154,6 +154,12 @@ export const deployments: Record<string, ChainDeployment> = {
       // Base Sepolia USDC (Circle testnet faucet)
       usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       milestoneEscrowFactory: "0x10059efeeab1ddf013489e9597a3aec4480d95e1",
+      // PCCProtocolV2 factory — deploys EAS-gated MilestoneEscrowV2 instances via
+      // createEscrowV2(payer,arbiter,token,cwmId). Threaded into the V2 settlement
+      // path (paid-job-flow) when PCC_USE_EAS_V2=true. Deployment record:
+      // deployments/base-sepolia/PCCProtocolV2.json. (Retired per-instance factory
+      // 0x5810Bf is superseded by this one — see coord CANONICAL STATE.)
+      milestoneEscrowFactoryV2: "0x39F6958b132c0972Ce8f5658A3F8F16491395642",
       mockUSDC: "0x18bef3dee9f4f97f7cec16db0c4a0a930f478470",
       // PCCProtocol v2 — 2.35% fee, oracle-gated settlement (deployed 2026-03-31)
       pccProtocol: "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23",
