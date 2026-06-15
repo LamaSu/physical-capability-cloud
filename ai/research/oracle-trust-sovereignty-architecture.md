@@ -20,8 +20,14 @@ at the end: during bootstrap PCC **keeps the fee and keeps centralized data — 
 - **Oracle: centralized.** The single PCC `authorizedOracle` attests all jobs. **No m-of-n, no
   EigenLayer AVS, no bond-slashing for the oracle.** (Operator bonds STAY — they secure the
   *doer*; only oracle-staking is excluded.)
-- **Fee: PCC collects it.** Stays `PCCProtocolV2.protocolFeeBps` → PCC treasury; users can't set
-  it (`onlyGovernor`). **No fee-in-attestation change yet.**
+- **Fee: moves into the oracle's signed attestation NOW.** The centralized (PCC-run) oracle
+  signs `feeBps`/`feeRecipient` into the EAS payload; users *and* PCC-governance can't set it.
+  This REPLACES the `protocolFeeBps` governor knob. `feeRecipient` = PCC treasury (you still
+  collect it) — only the *recipient* flips later. The fee mechanism is oracle-owned now.
+- **Oracle attestation infra: oracle-repo-owned NOW.** Even with a centralized oracle, its signer
+  key + EAS schema (`pcc.evidence.v1` → `oracle.evidence.v2`, with the fee fields) + the
+  attestation logic live in the oracle repo (`src/eas-minter.ts`), not PCC's contracts repo.
+  `authorizedOracle` resolves from an oracle-controlled registry.
 - **Data: PCC collects system-wide — "no matter what."** Centralized telemetry / demand-intel /
   reputation is the data foundation and a bootstrap necessity. This **reverses** the earlier
   "observability off PCC" stance *for the platform's own collection*. Users still see only their
@@ -44,11 +50,16 @@ EigenLayer AVS restaking; bond-slashing for the oracle. Rationale: judging **phy
 domain-expertise problem — human jurors fit it better than restaked-ETH validators, and the fee
 is the natural funding for that human-verification labor.
 
-### Therefore
-Concerns 1–3 below (and the handoff matrix) are the **Phase 1+ reference roadmap, not Phase 0
-work.** Keep the current centralized implementation now. The schema/fee/quorum reference code
-applies when a sector crosses critical mass. The only Phase-0-compatible item is *optional*
-user-facing per-job access control (users see their own jobs; PCC still collects all).
+### Therefore (corrected phasing)
+**NOW (Phase 0):** Concern 1 (fee → oracle attestation) + Concern 2 **Phase A** (oracle owns
+key/schema/registry) + the gateway items in Concern 3 (SSE per-job scoping; encrypt-by-default
+with PCC in the ACL; `datil-dev` label cleanup; on-chain-outcome reputation as an *added* signal).
+The fee + oracle-infra changes ship as a **coordinated cutover** — new `oracle.evidence.v2`
+schema + `MilestoneEscrowV3` (fee-decode) + the oracle daemon signing the new payload — not
+editable in place on the live V1/V2 stack.
+**LATER (Phase 1+):** Concern 2 **Phase B** (m-of-n quorum) + the fee-recipient flip (PCC → human
+jurors) + ZK process attestation.
+**EXCLUDED (owner directive):** EigenLayer AVS restaking; bond-slashing for the oracle.
 
 ## The principle
 
@@ -222,6 +233,58 @@ schema/fee so they survive the move to a committee (they do — attester set is 
 **Oracle lane** owns moving verification telemetry off PCC.
 
 ---
+
+## Scaling the oracle to millions (at-scale path)
+
+From the 5-lens panel deliberation (workflow `wf_1256d20c-d61`, 2026-06-14). Fits the owner
+constraints (centralized oracle, oracle-set fee, private DB, no restaking). **PHASED:** the
+current per-job-on-chain model works at today's volume; this batched/sampled path phases in
+when volume demands it — it is NOT a Phase-0-now change.
+
+### Two departures from the current per-job-on-chain model
+1. **Off-chain attestations + on-chain Merkle roots.** Today the oracle mints ONE *on-chain* EAS
+   attestation per job and the escrow gates on `eas.getAttestation(uid)`. At scale, issue
+   attestations **off-chain** (signed, free — the canonical verdict object carrying fee/tier/
+   bundle-hash/model-version) and anchor **one Merkle root per ~8k jobs** on Base.
+   `escrow.release` takes (off-chain attestation + Merkle proof + root-UID) and verifies sig +
+   proof on-chain. ~1000× gas amortization; only jobs that actually settle ever touch chain.
+   **The #058 fee-in-attestation mechanism is unchanged — the signed fee rides the off-chain
+   object; only the GATING shifts (proof+root vs on-chain UID).**
+2. **Sampling, not verify-every-job.** Cannot deep-verify millions. ~95% get cheap checks
+   (hash/sig/schema/provenance, batch-attested); deep verification is **risk-scored + sampled**
+   (random honeypot ε ~1-2% + force-escalate on low-rep operator / evidence anomaly / high
+   value), trigger function private + per-epoch-seeded (unpredictable). **Tradeoff to own: most
+   jobs are not deeply inspected** — a scaling necessity; honeypot + EAS-revoke bound abuse.
+
+### Pipeline
+- **Decouple submit from verify.** Dumb-fast ingest: validate envelope → private store (Postgres
+  + S3/R2 blobs) → durable queue → "submitted" receipt (>10k req/s). Attestation async/eventual.
+- **Tier by verification cost.** Ingest classifier stamps tier (0-3) + cost estimate. Fast lane
+  (~95%, sub-100ms, batch-attested) vs heavy lane (~1%, CV/video/LLM) on autoscale-to-zero GPU.
+  Most of millions never touch a GPU.
+- **CV as a cascade (heavy lane).** pHash/dHash → CLIP-cosine (one ViT pass, batched) → escalate
+  ONLY the ambiguous band (e.g. 0.82-0.94) → SigLIP/DINO → 7B VLM → frontier only for tier-3
+  contested. ~98% of GPU-seconds eliminated. **Cache every embedding in pgvector** keyed by
+  content hash (reverification/near-dup ≈ free). Video = shot-cut + 1fps keyframes, not full
+  decode. Keep a frozen hard-negative eval set so the cascade can't be gamed into the cheap lane.
+
+### Integrity at scale
+- Risk-scored sampling (above) is the honesty lever.
+- Bind every bundle to a server nonce + monotonic timestamp; content-hash dedup; reject bundles
+  whose C2PA chain doesn't anchor to a known capture root.
+- **Hash-chained append-only audit** in the private DB (each verdict row: input-hash, model+
+  version, sampling-decision, confidence, prev-row-hash); periodically commit the chain head
+  on-chain → the closed-source DB is **tamper-evident without revealing contents.**
+- **HSM-held signing key + two-key split for high-value** attestations; pre-wire EAS `revoke` so
+  a honeypot-caught bad verdict can be unwound before the human-juror layer exists.
+
+### Cost model
+~95% fast / 4% mid / 1% heavy → blended **~$17k/mo compute at 10M tx/mo** (fast ~$0.0003, mid
+~$0.006, heavy ~$0.12 per job). Owned Spark-class GPU baseload (~$0.30-0.60/GPU-hr amortized) +
+cloud burst at the margin (spot); break-even ~40-50% duty cycle. Per-epoch GPU budget caps
+heavy-lane spend; over-budget contested jobs defer to the paid-human-juror queue. pgvector cache
+hits ≈ $0 reverification (target >30% hit rate). The oracle-**signed per-tier fee** funds it —
+heavy jobs priced at true marginal cost so the cheap cascade can't subsidize abuse.
 
 ## Tensions (decide deliberately)
 
