@@ -181,8 +181,9 @@ export async function statusRoutes(app: FastifyInstance) {
           details: litReal
             ? "Chipotle threshold encryption — decryption requires on-chain access conditions"
             : "Local AES-256-GCM — no network, no access control enforcement",
-          // Was previously hardcoded to "datil-dev" — the live network is
-          // "chipotle" (matches lit-provision.ts:134 / services.ts:178).
+          // Live Lit network is "chipotle" (matches lit-provision.ts:134 /
+          // services.ts:178). #058 cleanup: previously this branch reported
+          // an older network label that diverged from the rest of the stack.
           network: litReal ? "chipotle" : "none",
           live: litEncryptionService.getStatus(),
         },
