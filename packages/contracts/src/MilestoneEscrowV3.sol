@@ -153,6 +153,22 @@ contract MilestoneEscrowV3 {
         bytes32 ipId;
     }
 
+    /**
+     * @notice Internal bundle of release-time args. Packed into one memory
+     *         struct so the distribute helpers stay under solc's stack-depth
+     *         limit without enabling `--via-ir` (which would slow CI builds
+     *         and is not yet needed for V2). Lifetime = single release() call.
+     */
+    struct ReleaseArgs {
+        uint256 milestoneIndex;
+        uint256 amount;
+        address operator;
+        uint256 operatorBond;
+        IERC20 tok;
+        uint16 feeBps;
+        address feeRecipient;
+    }
+
     // ── State ────────────────────────────────────────────────────────────
 
     address public payer;
@@ -771,19 +787,24 @@ contract MilestoneEscrowV3 {
 
         m.status = MilestoneStatus.Released;
 
-        address operator = m.operator;
-        uint256 amount = m.amount;
-        uint256 operatorBond = m.operatorBond;
-        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
-        uint16 feeBps = m.attestedFeeBps;
-        address feeRecipient = m.attestedFeeRecipient;
+        // Pack release args into a single memory struct to keep stack depth
+        // under solc's limit (avoids stack-too-deep without --via-ir).
+        ReleaseArgs memory args = ReleaseArgs({
+            milestoneIndex: milestoneIndex,
+            amount: m.amount,
+            operator: m.operator,
+            operatorBond: m.operatorBond,
+            tok: IERC20(tokenForMilestone(milestoneIndex)),
+            feeBps: m.attestedFeeBps,
+            feeRecipient: m.attestedFeeRecipient
+        });
 
-        emit MilestoneReleased(milestoneIndex, operator, amount);
+        emit MilestoneReleased(milestoneIndex, args.operator, args.amount);
 
         if (payoutMapSet[milestoneIndex]) {
-            _distributeWithMap(milestoneIndex, amount, operator, operatorBond, tok, feeBps, feeRecipient);
+            _distributeWithMap(args);
         } else {
-            _distributeLegacy(amount, operator, operatorBond, tok, feeBps, feeRecipient);
+            _distributeLegacy(args);
         }
     }
 
@@ -851,64 +872,72 @@ contract MilestoneEscrowV3 {
      * @dev Legacy single-operator distribution path. V3 reads fee from
      *      the per-milestone attested values (passed in by caller).
      */
-    function _distributeLegacy(
-        uint256 amount,
-        address operator,
-        uint256 operatorBond,
-        IERC20 tok,
-        uint16 feeBps,
-        address feeRecipient
-    ) internal {
-        if (feeBps > 0 && feeRecipient != address(0)) {
-            uint256 fee = (amount * feeBps) / 10000;
+    function _distributeLegacy(ReleaseArgs memory args) internal {
+        if (args.feeBps > 0 && args.feeRecipient != address(0)) {
+            uint256 fee = (args.amount * args.feeBps) / 10000;
 
-            tok.safeTransfer(feeRecipient, fee);
+            args.tok.safeTransfer(args.feeRecipient, fee);
 
-            uint256 operatorPayout = amount - fee + operatorBond;
-            tok.safeTransfer(operator, operatorPayout);
+            uint256 operatorPayout = args.amount - fee + args.operatorBond;
+            args.tok.safeTransfer(args.operator, operatorPayout);
 
             // Optional accounting hook: notify protocol root (if set) of the fee.
             if (protocolRoot != address(0)) {
-                IPCCProtocolV2(protocolRoot).collectFee(address(tok), fee);
+                IPCCProtocolV2(protocolRoot).collectFee(address(args.tok), fee);
             }
         } else {
             // Zero-fee path: operator gets everything.
-            uint256 payout = amount + operatorBond;
-            tok.safeTransfer(operator, payout);
+            uint256 payout = args.amount + args.operatorBond;
+            args.tok.safeTransfer(args.operator, payout);
         }
     }
 
     /**
      * @dev splitPayout distribution path. V3 fee is from the attestation,
-     *      not from the protocol root.
+     *      not from the protocol root. The inner split loop is split out to
+     *      `_runSplitPayouts` to keep this function under solc's stack limit
+     *      (avoiding `--via-ir`).
      */
-    function _distributeWithMap(
-        uint256 milestoneIndex,
-        uint256 amount,
-        address operator,
-        uint256 operatorBond,
-        IERC20 tok,
-        uint16 feeBps,
-        address feeRecipient
-    ) internal {
+    function _distributeWithMap(ReleaseArgs memory args) internal {
         // 1. Fee on gross — from attestation, not from root.
         uint256 protocolFee = 0;
-        address tokenAddr = address(tok);
-        if (feeBps > 0 && feeRecipient != address(0)) {
-            protocolFee = (amount * feeBps) / 10000;
+        if (args.feeBps > 0 && args.feeRecipient != address(0)) {
+            protocolFee = (args.amount * args.feeBps) / 10000;
             if (protocolFee > 0) {
-                tok.safeTransfer(feeRecipient, protocolFee);
+                args.tok.safeTransfer(args.feeRecipient, protocolFee);
             }
             if (protocolRoot != address(0)) {
-                IPCCProtocolV2(protocolRoot).collectFee(tokenAddr, protocolFee);
+                IPCCProtocolV2(protocolRoot).collectFee(address(args.tok), protocolFee);
             }
         }
 
-        uint256 distributable = amount - protocolFee;
+        uint256 distributable = args.amount - protocolFee;
 
-        // 2. Per-recipient distribution.
+        // 2. Per-recipient distribution. Returns the total actually distributed
+        //    (sum of truncated shares; matches behavior of V2).
+        uint256 distributed = _runSplitPayouts(args.milestoneIndex, distributable, args.tok);
+
+        // 3. Operator residual + bond. Integer-truncation dust from the split
+        //    loop accumulates into the operator residual (intentional — V2 parity).
+        uint256 operatorAmount = (distributable - distributed) + args.operatorBond;
+        if (operatorAmount > 0) {
+            args.tok.safeTransfer(args.operator, operatorAmount);
+        }
+    }
+
+    /**
+     * @dev Inner split-payout loop — extracted to its own function so the
+     *      caller (`_distributeWithMap`) stays under solc's stack-depth limit
+     *      without `--via-ir`. Returns total amount actually distributed
+     *      (sum of truncated shares).
+     */
+    function _runSplitPayouts(
+        uint256 milestoneIndex,
+        uint256 distributable,
+        IERC20 tok
+    ) internal returns (uint256 distributed) {
         Payout[] storage payouts = _payoutMap[milestoneIndex];
-        uint256 distributed = 0;
+        address tokenAddr = address(tok);
         uint256 n = payouts.length;
         for (uint256 i = 0; i < n; i++) {
             Payout memory p = payouts[i];
@@ -925,12 +954,6 @@ contract MilestoneEscrowV3 {
                 tokenAddr,
                 share
             );
-        }
-
-        // 3. Operator residual + bond.
-        uint256 operatorAmount = (distributable - distributed) + operatorBond;
-        if (operatorAmount > 0) {
-            tok.safeTransfer(operator, operatorAmount);
         }
     }
 
