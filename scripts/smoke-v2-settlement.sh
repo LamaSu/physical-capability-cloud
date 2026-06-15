@@ -8,12 +8,15 @@
 # DISTINCT from scripts/smoke-v2.sh (that one smokes the substrate BOOT path:
 # agent-card / CSD / A2A / operator-status). THIS smokes the on-chain SETTLEMENT loop.
 #
-# RUNS GREEN ONLY AFTER:
-#   (a) PR #137 merges — gateway uses createEscrowV2 on the factory + parses the V2
-#       EscrowCreated event (NOT the V1 topics[1] extraction) + chain-config has
-#       milestoneEscrowFactoryV2=0x39F695.
-#   (b) the gateway redeploys on V2.
-#   (c) user-gated infra lands: gas signer 0xB0285a funded + WORKFLOW_DB /app/data volume mounted.
+# RUNS GREEN ONLY AFTER (status 2026-06-15):
+#   (a) [DONE] #142 merged — gateway uses createEscrowV2 + on-chain addMilestone + a
+#       layout-safe EscrowCreated decode (extractEscrowCreatedAddress); chain-config has
+#       milestoneEscrowFactoryV2. (#138 minted EMPTY escrows; #142 fixed it.)
+#   (b) [DONE] #143 merged — Dockerfile runtime-chown so the WORKFLOW_DB volume is writable.
+#   (c) [user-gated] prod redeployed on >=#142+#143 (4e3b73b->:prod fired; verify Railway pull)
+#       + the gateway's on-chain RELAYER funded + WORKFLOW_DB /app/data volume mounted.
+#       RELAYER (#106): live prod relayer is 0xdDF476 (the compromised V1 key — fine for TESTNET).
+#         Option B = run on 0xdDF476 as-is (already funded ~0.03 ETH). Option A = fresh relayer (set RELAYER=).
 # Before that, it FAILS FAST at the precondition gate (by design — the failing gate names
 # exactly what's not ready to close V2).
 #
@@ -107,6 +110,17 @@ ESC_CFG=$(echo "$ST" | jq -r '..|.escrowAddress? // empty' 2>/dev/null | head -1
 [ -n "$ESC_CFG" ] && ok "gateway ESCROW_CONTRACT_ADDRESS configured ($ESC_CFG)" \
   || echo "  WARN: could not read gateway escrow address from /api/status (endpoint shape may differ)"
 
+# 1e. the gateway's on-chain RELAYER is funded — it signs createEscrowV2/submit/release + pays gas.
+#     #106: live prod relayer is 0xdDF476 (compromised V1 key; acceptable for TESTNET = option B).
+#     Override with RELAYER=<addr> for option A (a freshly-retired relayer).
+RELAYER="${RELAYER:-0xdDF476D86afD5e2075b8c95CBFfd3d76aEfa4b6B}"
+RBAL=$(cast balance "$RELAYER" --rpc-url "$RPC_URL" --ether 2>/dev/null || echo 0)
+if awk "BEGIN{exit !($RBAL > 0.005)}" 2>/dev/null; then
+  ok "gateway relayer $RELAYER funded ($RBAL ETH testnet)"
+else
+  die "gateway relayer $RELAYER underfunded ($RBAL ETH) — needs >0.005 testnet ETH to sign the smoke txs"
+fi
+
 # ── On-chain assertion helper: validate any V2 clone escrow ──
 assert_escrow() {
   local E="$1"
@@ -131,15 +145,16 @@ assert_escrow() {
 run_happy_path() {
   local RUN="$1"
   section "Happy path (run $RUN of 2)"
-  echo "  [#137] POST /api/negotiate/session + /commit -> escrow created via createEscrowV2 (clone)"
-  echo "         -> assert the returned id is a REAL @pcc/workflow id (NOT /^wf_/) "
-  echo "  [#137] capture clone addr from the V2 EscrowCreated event -> assert_escrow <clone>"
-  echo "  [#137] POST /api/escrow/fund (USDC) -> assert cast call token.balanceOf(escrow) increased"
-  echo "  [#137] submit job -> evidence -> oracle mints EAS attestation (attester==K, recipient==escrow,"
-  echo "         schema==SCHEMA_UID, stepId bound, oracleVerified==true) -> capture easUid"
-  echo "  [#137] POST /api/escrow/:id/release (submitAttestationV2(easUid)) -> milestone Attested"
-  echo "  [#137] after challenge window -> release -> assert operator USDC balance up by amount*(1-235bps)"
-  echo "  (probe every response with jq -e, never bare HTTP 200)"
+  echo "  [#142] POST /api/jobs/submit-from-discovery -> creates job + escrow via createEscrowV2"
+  echo "         + on-chain addMilestone (NOT empty) -> returns jobId + escrow addr"
+  echo "         -> assert jobId is a REAL @pcc/workflow id; assert_escrow <addr> (on-chain read-backs)"
+  echo "  [#142] fund the escrow with USDC (if the flow requires) -> token.balanceOf(escrow) increased"
+  echo "  [#142] PUT /api/jobs/:jobId/complete -> evidence -> oracle mints EAS attestation"
+  echo "         (attester==K, recipient==escrow, schema==SCHEMA_UID, stepId bound, oracleVerified==true)"
+  echo "         -> submitAttestationV2(easUid) -> milestone Attested"
+  echo "  [#142] after challenge window -> releaseV2 -> operator USDC up by amount*(1-235bps)"
+  echo "  [#142] GET /api/jobs/:jobId/settlement -> assert status settled/released"
+  echo "  (probe every response with jq -e on the JSON body, never a bare HTTP 200)"
 }
 # run_happy_path 1; run_happy_path 2     # enable once #137 endpoints are live
 
