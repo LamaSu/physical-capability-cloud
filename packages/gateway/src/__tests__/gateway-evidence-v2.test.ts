@@ -21,10 +21,12 @@ import { decodeFunctionData } from "viem";
 
 import {
   PCC_EVIDENCE_SCHEMA_V2,
+  PCC_EVIDENCE_SCHEMA_V2_PARAMS,
   encodeEasEvidencePayloadV2,
   decodeEasEvidencePayloadV2,
   buildEasAttestationMetadataV2,
   isEvidenceV2Enabled,
+  assertFeeWithinV3Cap,
   stringToBytes32Id,
   bundleHashToBytes32,
   type EasEvidencePayloadV2,
@@ -36,7 +38,16 @@ import {
   verifyWithMode,
   encodeApproveAndReleaseV3,
   MilestoneEscrowV3ABIStub,
+  MilestoneEscrowV3ABI as MilestoneEscrowV3ABIFromVM,
 } from "../services/verification-mode.js";
+
+// The REAL published artifacts — the parity tests below assert the gateway draft
+// never drifts from what MilestoneEscrowV3 (#139) actually decodes / enforces.
+import {
+  MilestoneEscrowV3ABI,
+  MAX_FEE_BPS_V3,
+  PCC_EVIDENCE_SCHEMA_V2 as CONTRACTS_PCC_EVIDENCE_SCHEMA_V2,
+} from "@pcc/contracts/abi";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -538,5 +549,194 @@ describe("status.ts lit network label (#058 cleanup)", () => {
     // The details string also references "Chipotle" (not "Datil-dev").
     expect(src).toContain("Chipotle threshold encryption");
     expect(src).not.toContain("Datil-dev threshold encryption");
+  });
+});
+
+// ===========================================================================
+// 10 — V3 ABI is published + real (no longer a hand-rolled stub)
+// ===========================================================================
+//
+// Before #139, verification-mode.ts targeted a one-function STUB ABI. Now that
+// MilestoneEscrowV3 has merged, the gateway encodes Mode-A calldata against the
+// REAL ABI published from @pcc/contracts. These tests lock that in.
+
+type AbiEntry = { type: string; name?: string };
+
+describe("MilestoneEscrowV3 ABI is published + real (not a stub)", () => {
+  const abi = MilestoneEscrowV3ABI as readonly AbiEntry[];
+
+  it("exposes the V3 surface: approveAndRelease, submitAttestation, release, disputes, MAX_FEE_BPS", () => {
+    const fnNames = abi.filter((e) => e.type === "function").map((e) => e.name);
+    expect(fnNames).toContain("approveAndRelease"); // Mode A (NEW in V3)
+    expect(fnNames).toContain("submitAttestation"); // Mode B
+    expect(fnNames).toContain("release"); // Mode B release
+    expect(fnNames).toContain("fileDispute"); // Mode C
+    expect(fnNames).toContain("resolveDispute"); // Mode C
+    expect(fnNames).toContain("MAX_FEE_BPS"); // V3 fee cap getter
+  });
+
+  it("declares the V3 events PayerApprovedRelease + fee-carrying AttestationSubmitted", () => {
+    const events = abi.filter((e) => e.type === "event").map((e) => e.name);
+    expect(events).toContain("PayerApprovedRelease"); // Mode A settlement marker
+    expect(events).toContain("AttestationSubmitted");
+  });
+
+  it("is NOT a 1-function stub — it carries the full contract surface", () => {
+    const fnCount = abi.filter((e) => e.type === "function").length;
+    expect(fnCount).toBeGreaterThan(10);
+  });
+
+  it("verification-mode re-exports the real ABI and aliases the deprecated stub name to it", () => {
+    // Same module singleton across import paths → identical reference.
+    expect(MilestoneEscrowV3ABIFromVM).toBe(MilestoneEscrowV3ABI);
+    expect(MilestoneEscrowV3ABIStub).toBe(MilestoneEscrowV3ABI);
+  });
+
+  it("encodeApproveAndReleaseV3 calldata decodes against the REAL published ABI", () => {
+    const data = encodeApproveAndReleaseV3(7);
+    const decoded = decodeFunctionData({ abi: MilestoneEscrowV3ABI, data });
+    expect(decoded.functionName).toBe("approveAndRelease");
+    expect(decoded.args?.[0]).toBe(7n);
+  });
+});
+
+// ===========================================================================
+// 11 — contract ↔ gateway schema parity (the 9-field oracle.evidence.v2 tuple)
+// ===========================================================================
+//
+// MilestoneEscrowV3.submitAttestation decodes
+//   (string, bytes32, bytes32, string, uint8, bool, bytes32, uint16, address)
+// The gateway must mirror that EXACT order or attestations it mints fail to
+// decode on-chain. These tests bind the gateway's schema string + ABI params to
+// the contract's canonical schema string so they can never silently drift.
+
+describe("contract ↔ gateway pcc.evidence.v2 schema parity", () => {
+  const EXPECTED_TYPES = [
+    "string", // jobId
+    "bytes32", // kernelId
+    "bytes32", // evidenceBundleHash
+    "string", // ipfsCid
+    "uint8", // assuranceTier
+    "bool", // oracleVerified
+    "bytes32", // stepId
+    "uint16", // feeBps (V2)
+    "address", // feeRecipient (V2)
+  ];
+
+  /** Parse "type name, type name, ..." into just the ordered type tokens. */
+  function schemaTypes(schema: string): string[] {
+    return schema.split(",").map((pair) => pair.trim().split(/\s+/)[0]);
+  }
+
+  it("gateway PCC_EVIDENCE_SCHEMA_V2 === contracts PCC_EVIDENCE_SCHEMA_V2 (single source of truth)", () => {
+    expect(PCC_EVIDENCE_SCHEMA_V2).toBe(CONTRACTS_PCC_EVIDENCE_SCHEMA_V2);
+  });
+
+  it("PCC_EVIDENCE_SCHEMA_V2_PARAMS types match the contract's 9-field decode order", () => {
+    const paramTypes = PCC_EVIDENCE_SCHEMA_V2_PARAMS.map((p) => p.type);
+    expect(paramTypes).toEqual(EXPECTED_TYPES);
+  });
+
+  it("the schema STRING field-types agree with the ABI PARAMS field-types", () => {
+    // Ties together the human-readable schema and the viem encode params — if
+    // someone edits one without the other, this fails.
+    expect(schemaTypes(PCC_EVIDENCE_SCHEMA_V2)).toEqual(EXPECTED_TYPES);
+    expect(schemaTypes(CONTRACTS_PCC_EVIDENCE_SCHEMA_V2)).toEqual(EXPECTED_TYPES);
+  });
+
+  it("the v1 7-field prefix is preserved (v2 only APPENDS feeBps + feeRecipient)", () => {
+    const types = PCC_EVIDENCE_SCHEMA_V2_PARAMS.map((p) => p.type);
+    expect(types.slice(0, 7)).toEqual([
+      "string",
+      "bytes32",
+      "bytes32",
+      "string",
+      "uint8",
+      "bool",
+      "bytes32",
+    ]);
+    expect(types.slice(7)).toEqual(["uint16", "address"]);
+  });
+});
+
+// ===========================================================================
+// 12 — V3 fee-cap parity (MAX_FEE_BPS) — fail fast off-chain
+// ===========================================================================
+//
+// MilestoneEscrowV3.submitAttestation enforces:
+//   require(attestedFeeBps <= MAX_FEE_BPS, "Fee exceeds MAX_FEE_BPS");
+//   if (attestedFeeBps > 0) require(attestedFeeRecipient != address(0), ...);
+// The gateway mirrors both so it never mints an attestation the contract rejects.
+
+describe("V3 fee cap (MAX_FEE_BPS) parity", () => {
+  it("MAX_FEE_BPS_V3 is 1000 (10%) — matches the contract constant", () => {
+    expect(MAX_FEE_BPS_V3).toBe(1000);
+  });
+
+  it("assertFeeWithinV3Cap accepts a fee at the cap and a zero-fee/zero-recipient", () => {
+    expect(() => assertFeeWithinV3Cap(1000, TREASURY)).not.toThrow();
+    expect(() => assertFeeWithinV3Cap(235, TREASURY)).not.toThrow();
+    // feeBps 0 needs no recipient (Mode-A-style / zero-fee attestation).
+    expect(() => assertFeeWithinV3Cap(0, ZERO_ADDR)).not.toThrow();
+  });
+
+  it("assertFeeWithinV3Cap rejects fee above MAX_FEE_BPS", () => {
+    expect(() => assertFeeWithinV3Cap(1001, TREASURY)).toThrow(/MAX_FEE_BPS/);
+  });
+
+  it("assertFeeWithinV3Cap rejects feeBps > 0 with a zero feeRecipient", () => {
+    expect(() => assertFeeWithinV3Cap(50, ZERO_ADDR)).toThrow(/fee recipient/i);
+  });
+
+  it("assertFeeWithinV3Cap rejects non-integer / negative feeBps", () => {
+    expect(() => assertFeeWithinV3Cap(-1, TREASURY)).toThrow(/non-negative integer/);
+    expect(() => assertFeeWithinV3Cap(1.5, TREASURY)).toThrow(/non-negative integer/);
+  });
+
+  it("buildEasAttestationMetadataV2 builds at the cap (feeBps = 1000)", () => {
+    const meta = buildEasAttestationMetadataV2({
+      jobId: "j",
+      kernelId: "k",
+      stepId: "s",
+      evidenceBundleHash: "sha256:" + "00".repeat(32),
+      ipfsCid: "",
+      assuranceTier: 2,
+      oracleVerified: true,
+      feeBps: 1000,
+      feeRecipient: TREASURY,
+    });
+    expect(decodeEasEvidencePayloadV2(meta.encoded).feeBps).toBe(1000);
+  });
+
+  it("buildEasAttestationMetadataV2 rejects feeBps above the cap", () => {
+    expect(() =>
+      buildEasAttestationMetadataV2({
+        jobId: "j",
+        kernelId: "k",
+        stepId: "s",
+        evidenceBundleHash: "sha256:" + "00".repeat(32),
+        ipfsCid: "",
+        assuranceTier: 2,
+        oracleVerified: true,
+        feeBps: 1001, // > MAX_FEE_BPS
+        feeRecipient: TREASURY,
+      }),
+    ).toThrow(/MAX_FEE_BPS/);
+  });
+
+  it("buildEasAttestationMetadataV2 rejects a fee with a zero recipient", () => {
+    expect(() =>
+      buildEasAttestationMetadataV2({
+        jobId: "j",
+        kernelId: "k",
+        stepId: "s",
+        evidenceBundleHash: "sha256:" + "00".repeat(32),
+        ipfsCid: "",
+        assuranceTier: 1,
+        oracleVerified: true,
+        feeBps: 50,
+        feeRecipient: ZERO_ADDR,
+      }),
+    ).toThrow(/fee recipient/i);
   });
 });
