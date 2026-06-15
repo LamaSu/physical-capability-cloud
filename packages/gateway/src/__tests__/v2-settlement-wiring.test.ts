@@ -168,6 +168,148 @@ describe("escrow-client V2 write dispatch (mocked wallet)", () => {
     expect(call.args).toEqual([1n]);
     expectV2Abi(call.abi);
   });
+
+  it("addMilestoneV2 calls addMilestone(...) with the 7-arg V2 signature", async () => {
+    const { addMilestoneV2 } = await import("../contracts/escrow-client.js");
+    const STEP = ("0x" + "11".repeat(32)) as `0x${string}`;
+    const OPERATOR = ("0x" + "22".repeat(20)) as `0x${string}`;
+    await addMilestoneV2(
+      {
+        stepId: STEP,
+        operator: OPERATOR,
+        amount: 10_000_000n, // 10 USDC (6dp)
+        operatorBond: 0n,
+        challengeWindowSeconds: 0,
+        requiredTier: 0,
+        jobId: "job-abc",
+      },
+      ESCROW,
+    );
+
+    const call = writeContract.mock.calls[0][0];
+    expect(call.functionName).toBe("addMilestone");
+    expect(call.address).toBe(ESCROW);
+    // bytes32 stepId, address operator, amount, bond, windowSecs, tier, jobId
+    expect(call.args).toEqual([STEP, OPERATOR, 10_000_000n, 0n, 0n, 0, "job-abc"]);
+    expectV2Abi(call.abi);
+  });
+
+  it("fundEscrowV2 calls fund() on the V2 ABI", async () => {
+    const { fundEscrowV2 } = await import("../contracts/escrow-client.js");
+    await fundEscrowV2(ESCROW);
+
+    const call = writeContract.mock.calls[0][0];
+    expect(call.functionName).toBe("fund");
+    expect(call.address).toBe(ESCROW);
+    expect(call.args).toEqual([]);
+    expectV2Abi(call.abi);
+  });
+
+  it("depositBondV2 calls depositBond(uint256) on the V2 ABI", async () => {
+    const { depositBondV2 } = await import("../contracts/escrow-client.js");
+    await depositBondV2(3, ESCROW);
+
+    const call = writeContract.mock.calls[0][0];
+    expect(call.functionName).toBe("depositBond");
+    expect(call.args).toEqual([3n]);
+    expectV2Abi(call.abi);
+  });
+
+  it("fileDisputeV2 calls fileDispute(uint256,uint256,bytes32,string) on the V2 ABI", async () => {
+    const { fileDisputeV2 } = await import("../contracts/escrow-client.js");
+    await fileDisputeV2(0, "5.00", HASH, "bad print", ESCROW);
+
+    const call = writeContract.mock.calls[0][0];
+    expect(call.functionName).toBe("fileDispute");
+    // bond "5.00" -> 5_000_000n (6dp)
+    expect(call.args).toEqual([0n, 5_000_000n, HASH, "bad print"]);
+    expectV2Abi(call.abi);
+  });
+});
+
+// ===========================================================================
+// 5 — V2 escrow-client READ fns dispatch the right V2 ABI function
+// ===========================================================================
+
+describe("escrow-client V2 read dispatch (mocked public client)", () => {
+  const ESCROW = ("0x" + "9a".repeat(20)) as `0x${string}`;
+
+  // Capture readContract calls. getEscrowStateV2 reads 7 scalars + N milestones;
+  // we return shaped values per-function so the shaping code doesn't throw.
+  const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+    switch (functionName) {
+      case "payer":
+      case "arbiter":
+      case "token":
+        return "0x" + "00".repeat(20);
+      case "cwmId":
+        return "0x" + "00".repeat(32);
+      case "funded":
+        return false;
+      case "totalAmount":
+        return 0n;
+      case "getMilestoneCount":
+        return 0n; // no milestones -> no getMilestone calls, keeps the read simple
+      case "getDispute":
+        return {
+          challenger: "0x" + "00".repeat(20),
+          challengerBond: 0n,
+          challengerEvidenceHash: "0x" + "00".repeat(32),
+          reason: "",
+          resolved: false,
+          challengerWon: false,
+        };
+      default:
+        return 0n;
+    }
+  });
+
+  const getContractEvents = vi.fn(async () => [] as unknown[]);
+
+  beforeEach(() => {
+    vi.resetModules();
+    readContract.mockClear();
+    getContractEvents.mockClear();
+    vi.doMock("viem", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("viem")>();
+      return {
+        ...actual,
+        createPublicClient: () => ({ readContract, getContractEvents }),
+        createWalletClient: () => ({ writeContract: vi.fn() }),
+      };
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("viem");
+  });
+
+  it("getEscrowStateV2 reads scalars via the V2 ABI (getMilestoneCount on V2 ABI)", async () => {
+    const { getEscrowStateV2 } = await import("../contracts/escrow-client.js");
+    const state = await getEscrowStateV2(ESCROW);
+    expect(state.address).toBe(ESCROW);
+    expect(state.milestoneCount).toBe(0);
+    // Every scalar read must have used the V2 ABI.
+    const countCall = readContract.mock.calls.find((c) => c[0].functionName === "getMilestoneCount");
+    expect(countCall).toBeDefined();
+    expectV2Abi(countCall![0].abi);
+  });
+
+  it("getDisputeV2 reads getDispute via the V2 ABI", async () => {
+    const { getDisputeV2 } = await import("../contracts/escrow-client.js");
+    await getDisputeV2(0, ESCROW);
+    const call = readContract.mock.calls.find((c) => c[0].functionName === "getDispute");
+    expect(call).toBeDefined();
+    expect(call![0].args).toEqual([0n]);
+    expectV2Abi(call![0].abi);
+  });
+
+  it("getEventsV2 reads contract events via the V2 ABI", async () => {
+    const { getEventsV2 } = await import("../contracts/escrow-client.js");
+    await getEventsV2(ESCROW);
+    expect(getContractEvents).toHaveBeenCalledTimes(1);
+    expectV2Abi(getContractEvents.mock.calls[0][0].abi);
+  });
 });
 
 // ===========================================================================
