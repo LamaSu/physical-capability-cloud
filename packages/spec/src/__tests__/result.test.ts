@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ok, err, Errors, type Result } from "../types/result.js";
+import { ok, err, errRich, stampTrace, Errors, type Result } from "../types/result.js";
 
 // ── Helper ─────────────────────────────────────────────────────────────────
 
@@ -294,5 +294,210 @@ describe("TypeScript discriminated union", () => {
     const result: Result<never> = err("E", "m");
     expect(result.success).toBe(false);
     expect("data" in result).toBe(false);
+  });
+});
+
+// ── errRich() ─────────────────────────────────────────────────────────────
+// New in feat/agent-onboarding-observability — rich agent-readable errors
+// with hint + docs + trace_id.
+
+describe("errRich()", () => {
+  it("returns the same shape as err() when no rich opts are passed", () => {
+    const result = errRich("BASIC", "plain old error", 400);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("BASIC");
+      expect(result.error.message).toBe("plain old error");
+      expect(result.error.httpStatus).toBe(400);
+      expect(result.error.retryable).toBe(false);
+      expect(result.error.hint).toBeUndefined();
+      expect(result.error.docs).toBeUndefined();
+      expect(result.error.trace_id).toBeUndefined();
+    }
+  });
+
+  it("attaches hint when provided", () => {
+    const result = errRich("X", "y", 400, { hint: "try Z first" });
+    if (!result.success) {
+      expect(result.error.hint).toBe("try Z first");
+    }
+  });
+
+  it("attaches docs when provided", () => {
+    const result = errRich("X", "y", 400, {
+      hint: "see docs",
+      docs: "/docs/AGENT_INTEGRATION.md#auth",
+    });
+    if (!result.success) {
+      expect(result.error.docs).toBe("/docs/AGENT_INTEGRATION.md#auth");
+    }
+  });
+
+  it("attaches trace_id when provided", () => {
+    const result = errRich("X", "y", 400, { trace_id: "tr_abc123" });
+    if (!result.success) {
+      expect(result.error.trace_id).toBe("tr_abc123");
+    }
+  });
+
+  it("accepts retryable + details just like err()", () => {
+    const result = errRich("X", "y", 500, {
+      retryable: true,
+      details: { foo: "bar" },
+    });
+    if (!result.success) {
+      expect(result.error.retryable).toBe(true);
+      expect(result.error.details).toEqual({ foo: "bar" });
+    }
+  });
+
+  it("backward-compat: PCCError consumers that destructure {code,message,httpStatus} still work", () => {
+    const result = errRich("OLD_CONSUMER", "msg", 422, {
+      hint: "this is ignored by old code",
+    });
+    if (!result.success) {
+      const { code, message, httpStatus } = result.error;
+      expect(code).toBe("OLD_CONSUMER");
+      expect(message).toBe("msg");
+      expect(httpStatus).toBe(422);
+    }
+  });
+});
+
+// ── stampTrace() ──────────────────────────────────────────────────────────
+
+describe("stampTrace()", () => {
+  it("adds trace_id to an Err result", () => {
+    const before = err("CODE", "msg", 400);
+    const after = stampTrace(before, "tr_xyz");
+    if (!after.success) {
+      expect(after.error.trace_id).toBe("tr_xyz");
+      expect(after.error.code).toBe("CODE");
+      expect(after.error.message).toBe("msg");
+    }
+  });
+
+  it("preserves all other fields on the error", () => {
+    const before = err("CODE", "msg", 422, {
+      details: { foo: "bar" },
+      retryable: true,
+    });
+    const after = stampTrace(before, "tr_xyz");
+    if (!after.success) {
+      expect(after.error.code).toBe("CODE");
+      expect(after.error.httpStatus).toBe(422);
+      expect(after.error.details).toEqual({ foo: "bar" });
+      expect(after.error.retryable).toBe(true);
+    }
+  });
+
+  it("does not mutate the original Err", () => {
+    const before = err("CODE", "msg", 400);
+    stampTrace(before, "tr_mutated");
+    if (!before.success) {
+      expect(before.error.trace_id).toBeUndefined();
+    }
+  });
+
+  it("overwrites an existing trace_id", () => {
+    const before = errRich("CODE", "msg", 400, { trace_id: "tr_old" });
+    const after = stampTrace(before, "tr_new");
+    if (!after.success) {
+      expect(after.error.trace_id).toBe("tr_new");
+    }
+  });
+
+  it("returns Ok unchanged (no trace_id on the success branch)", () => {
+    const before = ok({ hello: "world" });
+    const after = stampTrace(before, "tr_xyz");
+    expect(after).toBe(before); // same reference
+    if (after.success) {
+      expect(after.data).toEqual({ hello: "world" });
+    }
+  });
+
+  it("preserves the original timestamp", () => {
+    const before = err("CODE", "msg");
+    const after = stampTrace(before, "tr_xyz");
+    expect(after.timestamp).toBe(before.timestamp);
+  });
+});
+
+// ── Errors.notFoundWithHint() ─────────────────────────────────────────────
+
+describe("Errors.notFoundWithHint()", () => {
+  it("returns code=ENTITY_NOT_FOUND + hint + docs", () => {
+    const result = Errors.notFoundWithHint(
+      "capability",
+      "cap-001",
+      "Call list_capability_types first to find valid IDs.",
+      "/docs/AGENT_INTEGRATION.md#capabilities",
+    );
+    if (!result.success) {
+      expect(result.error.code).toBe("CAPABILITY_NOT_FOUND");
+      expect(result.error.httpStatus).toBe(404);
+      expect(result.error.hint).toContain("list_capability_types");
+      expect(result.error.docs).toBe("/docs/AGENT_INTEGRATION.md#capabilities");
+    }
+  });
+
+  it("docs is optional", () => {
+    const result = Errors.notFoundWithHint("job", "job-x", "Check ID format.");
+    if (!result.success) {
+      expect(result.error.hint).toBe("Check ID format.");
+      expect(result.error.docs).toBeUndefined();
+    }
+  });
+});
+
+// ── Errors.badRequestWithHint() ───────────────────────────────────────────
+
+describe("Errors.badRequestWithHint()", () => {
+  it("returns BAD_REQUEST + 400 + hint + docs + details", () => {
+    const result = Errors.badRequestWithHint(
+      "missing capability type",
+      "Pass `type` in the body — e.g. {\"type\": \"3d-printing\"}.",
+      "/docs/AGENT_INTEGRATION.md#contract-building",
+      { received_keys: ["selections"] },
+    );
+    if (!result.success) {
+      expect(result.error.code).toBe("BAD_REQUEST");
+      expect(result.error.httpStatus).toBe(400);
+      expect(result.error.hint).toContain("type");
+      expect(result.error.docs).toContain("contract-building");
+      expect(result.error.details).toEqual({ received_keys: ["selections"] });
+    }
+  });
+});
+
+// ── Errors.unauthorizedWithHint() / forbiddenWithHint() ───────────────────
+
+describe("Errors.unauthorizedWithHint()", () => {
+  it("401 + hint pointing at auth flow", () => {
+    const result = Errors.unauthorizedWithHint(
+      "Provision an API key via POST /api/auth/provision first.",
+      "/docs/AGENT_INTEGRATION.md#auth",
+    );
+    if (!result.success) {
+      expect(result.error.code).toBe("UNAUTHORIZED");
+      expect(result.error.httpStatus).toBe(401);
+      expect(result.error.hint).toContain("provision");
+    }
+  });
+});
+
+describe("Errors.forbiddenWithHint()", () => {
+  it("403 + hint + docs", () => {
+    const result = Errors.forbiddenWithHint(
+      "Operator role required for this route",
+      "Call provision_api_key to upgrade your role.",
+      "/docs/AGENT_INTEGRATION.md#roles",
+    );
+    if (!result.success) {
+      expect(result.error.code).toBe("FORBIDDEN");
+      expect(result.error.httpStatus).toBe(403);
+      expect(result.error.message).toContain("Operator role");
+      expect(result.error.hint).toContain("provision_api_key");
+    }
   });
 });

@@ -108,6 +108,13 @@ export async function provisionRoutes(app: FastifyInstance) {
         userAgent: req.headers["user-agent"],
       });
       trackServerEvent("api_key_provisioned", { email: body.email, capability: body.capability });
+      // Surface the trace_id (stamped by `middleware/trace-id.ts`) so the
+      // agent can echo it on every subsequent call via `x-pcc-trace-id`.
+      // The trace-id middleware also sets it on the response header — the
+      // body field is here for clients that read JSON bodies more easily
+      // than headers.
+      // See docs/AGENT_ONBOARDING_OBSERVABILITY.md.
+      const trace_id = (req as unknown as { traceId?: string }).traceId;
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,
@@ -117,9 +124,13 @@ export async function provisionRoutes(app: FastifyInstance) {
         expires_at: record.expiresAt,
         created_at: record.createdAt,
         warning: "Save this API key now — it will not be shown again.",
+        trace_id,
         usage: {
           header: `Authorization: Bearer ${rawKey}`,
-          example: `curl -H "Authorization: Bearer ${rawKey}" ${req.protocol}://${req.hostname}/api/capabilities/types`,
+          trace_header: `x-pcc-trace-id: ${trace_id ?? "<trace_id>"}`,
+          example: `curl -H "Authorization: Bearer ${rawKey}" -H "x-pcc-trace-id: ${trace_id ?? "<trace_id>"}" ${req.protocol}://${req.hostname}/api/capabilities/types`,
+          trace_hint:
+            "Echo `x-pcc-trace-id` on every subsequent request so PCC can correlate your onboarding journey. Quote it when filing `pcc_report` feedback.",
         },
       });
     } catch (err: unknown) {

@@ -127,6 +127,8 @@ import { commentaryRoutes } from "./routes/commentary.js";
 import { visualizerEvents } from "./routes/visualizer-events.js";
 import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
+import { traceIdPlugin } from "./middleware/trace-id.js";
+import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -322,6 +324,13 @@ export async function createGateway(port = 3200) {
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
 
+  // Trace-ID middleware — agent-onboarding observability piece 1.
+  // Registers an onRequest hook that mints / echoes x-pcc-trace-id so
+  // every per-agent onboarding journey can be correlated across calls.
+  // Registered BEFORE the session decorator so req.traceId is available
+  // to every other middleware + route.
+  await app.register(traceIdPlugin);
+
   // Session middleware
   app.decorateRequest("pccSession", null);
   app.addHook("onRequest", async (req) => {
@@ -342,6 +351,8 @@ export async function createGateway(port = 3200) {
   await app.register(contextPackRoutes);
   // Bug reports / feedback (public, before auth)
   await app.register(feedbackRoutes);
+  // Agent friction reports — observability piece 3 (public, before auth)
+  await app.register(agentFeedbackRoutes);
   await app.register(identifyDeviceRoutes);
 
   // Health check
