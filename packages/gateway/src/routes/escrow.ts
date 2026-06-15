@@ -12,6 +12,21 @@ import {
   submitEvidenceActivity,
   FacadeError,
 } from "../activities/escrow.js";
+import {
+  submitEvidenceV2,
+  submitAttestationV2,
+  releaseMilestoneV2,
+  isWriteEnabled as escrowWriteEnabled,
+} from "../contracts/escrow-client.js";
+
+/**
+ * Whether to route the direct escrow chain routes through the EAS-gated
+ * MilestoneEscrowV2 path. Mirrors paid-job-flow's flag — default OFF so the V1
+ * (attestation-struct) routes are unchanged for existing callers.
+ */
+function useEasV2(): boolean {
+  return process.env.PCC_USE_EAS_V2 === "true";
+}
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -261,6 +276,21 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
       }
+      // V2 (EAS) path: release takes ONLY the milestone index — the binding
+      // attestation was supplied at submitAttestation time (by UID), so no
+      // attestation struct is re-passed here (unlike V1). Challenge window must
+      // have expired (the contract enforces this and reverts otherwise).
+      if (useEasV2()) {
+        if (!escrowWriteEnabled()) {
+          return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
+        }
+        try {
+          const result = await releaseMilestoneV2(idx, address as Address);
+          return { ...result, action: "release", escrow: address, milestoneIndex: idx, path: "eas-v2" };
+        } catch (err) {
+          return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
+        }
+      }
       const body = req.body as { attestation?: OracleAttestation } | undefined;
       if (!body?.attestation || !body.attestation.escrowAddress) {
         return reply.status(400).send({
@@ -382,6 +412,19 @@ export async function escrowRoutes(app: FastifyInstance) {
       if (!body?.evidenceBundleHash) {
         return reply.status(400).send({ error: "evidenceBundleHash is required" });
       }
+      // V2 (EAS) path: submitEvidence has the SAME wire signature in V2, but must
+      // be sent through the V2 ABI against a MilestoneEscrowV2 address.
+      if (useEasV2()) {
+        if (!escrowWriteEnabled()) {
+          return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
+        }
+        try {
+          const result = await submitEvidenceV2(idx, body.evidenceBundleHash as `0x${string}`, address as Address);
+          return { ...result, action: "submitEvidence", escrow: address, milestoneIndex: idx, path: "eas-v2" };
+        } catch (err) {
+          return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
+        }
+      }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
       const activityResult = await submitEvidenceActivity.invoke({
         workflowRunId: `escrow:${address}`,
@@ -418,6 +461,28 @@ export async function escrowRoutes(app: FastifyInstance) {
       const idx = parseInt(milestoneIndex, 10);
       if (isNaN(idx) || idx < 0) {
         return reply.status(400).send({ error: "Invalid milestone index" });
+      }
+      // V2 (EAS) path: the body carries an EAS UID (bytes32) instead of the full
+      // oracle attestation struct. The contract validates the UID against EAS
+      // on-chain. Accept `easUid` (preferred) or legacy `attestationHash`.
+      if (useEasV2()) {
+        const v2body = req.body as { easUid?: string; attestationHash?: string } | undefined;
+        const easUid = v2body?.easUid ?? v2body?.attestationHash;
+        if (!easUid || !easUid.startsWith("0x")) {
+          return reply.status(400).send({
+            error: "eas_uid_required",
+            message: "V2 attestation requires an EAS UID (bytes32) in `easUid` (or `attestationHash`).",
+          });
+        }
+        if (!escrowWriteEnabled()) {
+          return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
+        }
+        try {
+          const result = await submitAttestationV2(idx, easUid as `0x${string}`, address as Address);
+          return { ...result, action: "submitAttestation", escrow: address, milestoneIndex: idx, easUid, path: "eas-v2" };
+        } catch (err) {
+          return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
+        }
       }
       const body = req.body as { attestation?: OracleAttestation } | undefined;
       if (!body?.attestation || !body.attestation.escrowAddress) {
