@@ -16,9 +16,9 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { createWalletClient, createPublicClient, http, keccak256, toBytes } from "viem";
+import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { PCCProtocolABI, getDeployment, getContractAddress } from "@pcc/contracts";
+import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
 import { getStore, getRepos } from "../db.js";
 import { getSettlementFacade } from "../facades/index.js";
 
@@ -41,7 +41,12 @@ import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
-import { submitAttestationV2, isWriteEnabled as escrowWriteEnabled } from "../contracts/escrow-client.js";
+import {
+  submitAttestationV2,
+  submitEvidenceV2,
+  getMilestoneV2,
+  isWriteEnabled as escrowWriteEnabled,
+} from "../contracts/escrow-client.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -125,6 +130,43 @@ function getWriteToolsForDeviceType(capabilityType: string): string[] {
   ];
 }
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Pull the newly-created escrow address out of a tx receipt's EscrowCreated
+ * event. Both PCCProtocol (V1) and PCCProtocolV2 emit EscrowCreated with
+ * `escrow` as the first indexed param, so decodeEventLog gives a layout-safe
+ * read instead of a positional topics[1] slice. Throws a descriptive error if
+ * no EscrowCreated log decodes or the decoded address is zero — a silent
+ * zero-address escrow would poison every downstream settlement step.
+ */
+function extractEscrowCreatedAddress(
+  logs: readonly { topics: readonly `0x${string}`[] | `0x${string}`[]; data: `0x${string}` }[],
+  abi: typeof PCCProtocolV2ABI | typeof PCCProtocolABI,
+): `0x${string}` {
+  for (const log of logs) {
+    try {
+      const decoded = decodeEventLog({
+        abi,
+        data: log.data,
+        topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      });
+      if (decoded.eventName === "EscrowCreated") {
+        const addr = (decoded.args as { escrow?: `0x${string}` }).escrow;
+        if (addr && addr.toLowerCase() !== ZERO_ADDRESS) {
+          return addr;
+        }
+      }
+    } catch {
+      // Not an EscrowCreated log (or doesn't match this ABI) — keep scanning.
+    }
+  }
+  throw new Error(
+    "createEscrow receipt had no decodable EscrowCreated log with a non-zero escrow address " +
+      "(EscrowCreated topic layout may have changed, or the factory address/ABI is wrong)",
+  );
+}
+
 /**
  * Create escrow + job + scope from a committed negotiation session.
  * This is the core wiring logic shared by the commit handler and the fast-track endpoint.
@@ -166,8 +208,6 @@ export async function createJobFromSession(
     if (!pk) throw new Error("PCC_GATEWAY_PRIVATE_KEY required for real settlement");
 
     const deployment = getDeployment(network);
-    const protocolAddr = getContractAddress(network, "pccProtocol");
-    const tokenAddr = getContractAddress(network, "mockUSDC");
     const account = privateKeyToAccount(pk);
     const walletClient = createWalletClient({
       account,
@@ -179,21 +219,40 @@ export async function createJobFromSession(
       transport: http(deployment.rpcUrl),
     });
 
+    // Token: from chain-config mockUSDC (or MOCK_USDC_ADDRESS override) — never
+    // hardcoded. Both V1 createEscrow and V2 createEscrowV2 take the same
+    // (payer, arbiter, token, cwmId) shape; only the factory + fn name differ.
+    const tokenAddr = (process.env.MOCK_USDC_ADDRESS as `0x${string}` | undefined)
+      ?? getContractAddress(network, "mockUSDC");
     const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
+
+    // V2 (EAS): deploy an EAS-gated MilestoneEscrowV2 via the V2 factory.
+    // V1 (default): legacy createEscrow on the V1 protocol. Branch-by-abstraction
+    // on useEasV2() so existing deployments are untouched.
+    const v2 = useEasV2();
+    const factoryAddr = v2
+      ? getContractAddress(network, "milestoneEscrowFactoryV2")
+      : getContractAddress(network, "pccProtocol");
+    const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
+    const createFn = v2 ? "createEscrowV2" : "createEscrow";
+
     const txHash = await walletClient.writeContract({
-      address: protocolAddr,
-      abi: PCCProtocolABI,
-      functionName: "createEscrow",
+      address: factoryAddr,
+      abi: factoryAbi,
+      functionName: createFn,
       args: [account.address, account.address, tokenAddr, cwmIdBytes],
     });
 
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-    const escrowLog = receipt.logs.find((l) => l.topics.length >= 2);
-    escrowAddress = escrowLog
-      ? ("0x" + (escrowLog.topics[1]?.slice(26) ?? ""))
-      : "0x0000000000000000000000000000000000000000";
+
+    // Extract the new escrow address from the EscrowCreated event rather than a
+    // positional topics[1] guess. `escrow` is the FIRST indexed param in both V1
+    // and V2 EscrowCreated, so decodeEventLog gives us a typed, layout-safe read.
+    escrowAddress = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
     escrowStatus = "created";
-    console.log(`[paid-job] Created on-chain escrow: ${escrowAddress} (tx: ${txHash})`);
+    console.log(
+      `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${escrowAddress} (tx: ${txHash}, token: ${tokenAddr})`,
+    );
   }
 
   const totalPrice = quote?.totalPrice as string ?? "10.00";
@@ -732,9 +791,34 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
+      // ── 4a-V2. On-chain evidence submit + stepId read (V2 path only) ──
+      // V2 binds the EAS attestation to the milestone's REAL on-chain stepId, so
+      // we (a) submit the evidence hash on-chain via MilestoneEscrowV2 and
+      // (b) read the milestone's stepId back from chain before asking the oracle
+      // to mint. Best-effort: any failure here leaves V1-style settlement intact.
+      const hasRealEscrow =
+        !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
+      let onChainStepId: `0x${string}` | undefined;
+      let evidenceTxHash: string | null = null;
+      if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
+        try {
+          const ev = await submitEvidenceV2(0, bundleHash as `0x${string}`, escrowAddress as `0x${string}`);
+          evidenceTxHash = ev.transactionHash;
+          const ms = await getMilestoneV2(0, escrowAddress as `0x${string}`);
+          onChainStepId = ms.stepId as `0x${string}`;
+        } catch (evErr) {
+          console.warn(
+            "[complete] V2 on-chain evidence submit / stepId read failed (best-effort):",
+            evErr instanceof Error ? evErr.message : evErr,
+          );
+        }
+      }
+
       // ── 4b. Oracle verification ─────────────────────────────────────
       // Every settlement must pass through the PCC Verification Oracle.
       // If PCC_ORACLE_KEY is not set, falls back to mock (dev/test).
+      // V2: ask the oracle to MINT an on-chain EAS attestation bound to the
+      // real milestone stepId; the returned UID is bound on-chain below.
       const oracleResponse = await verifyWithOracle({
         escrowAddress: escrowAddress ?? "0x0000000000000000000000000000000000000000",
         jobId,
@@ -742,6 +826,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         evidenceHash: bundleHash,
         assuranceTier: 0,
         chainId: resolveChainId(),
+        ...(useEasV2()
+          ? {
+              mintEasAttestation: true,
+              schemaUid: process.env.PCC_EVIDENCE_SCHEMA_UID,
+              // Prefer the real on-chain stepId; fall back to the job's stepId
+              // string (hashed by the oracle) when no real escrow is available.
+              stepId: onChainStepId ?? job.stepId,
+            }
+          : {}),
       });
 
       if (!oracleResponse.result.verified) {
@@ -782,17 +875,25 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             schemaUid: easMeta.schemaUid,
             recipient: easMeta.recipient,
             encoded: easMeta.encoded,
+            evidenceTxHash,
             submitted: false,
             attestationUid: null as string | null,
             attestationTxHash: null as string | null,
           };
 
-          // Oracle-minted EAS UID, if the caller supplied one to bind on-chain.
-          const easUid = typeof body.easUid === "string" ? (body.easUid as `0x${string}`) : undefined;
-          if (easUid && escrowWriteEnabled() && escrowAddress && escrowAddress.startsWith("0x")) {
+          // EAS UID to bind on-chain: prefer the oracle-minted UID (orchestrated
+          // path), fall back to a caller-supplied body.easUid (explicit bind).
+          const oracleEasUid = oracleResponse.easAttestation?.easUid;
+          const bodyEasUid = typeof body.easUid === "string" ? body.easUid : undefined;
+          const easUid = (oracleEasUid ?? bodyEasUid) as `0x${string}` | undefined;
+
+          if (easUid) easBridge.attestationUid = easUid;
+
+          // Bind on-chain only against a REAL escrow with write enabled. The
+          // mock/dev easUid (0xea…) is returned but not submitted to a live chain.
+          if (easUid && hasRealEscrow && escrowWriteEnabled()) {
             const submitted = await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
             easBridge.submitted = true;
-            easBridge.attestationUid = easUid;
             easBridge.attestationTxHash = submitted.transactionHash;
           }
 
@@ -801,6 +902,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               path: "eas-v2",
               easSchema: easMeta.schema,
               easSubmitted: easBridge.submitted,
+              easUid: easBridge.attestationUid ?? null,
             },
           });
         } catch (easErr) {

@@ -18,6 +18,7 @@ export {
   ATTESTATION_SCHEMA_VERSION,
   ATTESTATION_V1_EMPTY_EXTRA_DATA,
 } from "./PCCProtocol.js";
+export { PCCProtocolV2ABI } from "./PCCProtocolV2.js";
 
 // Contributor economics
 export { RateScheduleRegistryABI } from "./RateScheduleRegistry.js";

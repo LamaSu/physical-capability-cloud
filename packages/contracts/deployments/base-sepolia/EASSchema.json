@@ -1,0 +1,9 @@
+{
+  "uid": "0x5acb07db80019928f2aa8798cb0bebaee46a863f28d4b5aaf5a9e04902be8b93",
+  "chainId": 84532,
+  "contract": "EASSchema",
+  "schema": "string jobId, bytes32 kernelId, bytes32 evidenceBundleHash, string ipfsCid, uint8 assuranceTier, bool oracleVerified, bytes32 stepId",
+  "schemaRegistry": "0x4200000000000000000000000000000000000020",
+  "eas": "0x4200000000000000000000000000000000000021",
+  "revocable": true
+}

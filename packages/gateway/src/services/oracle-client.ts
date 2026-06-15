@@ -29,6 +29,22 @@ export interface OracleVerifyRequest {
   evidenceHash: string;
   assuranceTier: number;
   chainId: number;
+  /**
+   * V2 (EAS) path: when true, ask the oracle to MINT a real on-chain EAS
+   * attestation (recipient = escrow) and return its UID in
+   * `OracleResponse.easAttestation`. Default/omitted = V1 behaviour (the oracle
+   * only signs the EIP-712 attestation struct, no on-chain EAS write).
+   */
+  mintEasAttestation?: boolean;
+  /** V2: pcc.evidence.v1 schema UID the minted attestation should use. */
+  schemaUid?: string;
+  /**
+   * V2: the milestone's on-chain stepId (bytes32, as stored on the escrow). The
+   * minted EAS payload binds this so MilestoneEscrowV2.submitAttestation can
+   * validate the attested stepId against the milestone. MUST be the real
+   * on-chain stepId, not a placeholder — a mismatch reverts submitAttestation.
+   */
+  stepId?: string;
 }
 
 export interface OracleAttestation {
@@ -54,6 +70,16 @@ export interface OracleResponse {
     checks: Record<string, boolean>;
   };
   attestation: OracleAttestation | null;
+  /**
+   * V2 (EAS) path: present only when the request set `mintEasAttestation:true`
+   * AND the oracle successfully minted an on-chain EAS attestation. `easUid` is
+   * the bytes32 attestation UID to pass into
+   * MilestoneEscrowV2.submitAttestation(milestoneIndex, easUid). Null/absent on
+   * the V1 path or if minting failed (caller falls back to non-bridged
+   * settlement). The oracle server already returns this field; the gateway
+   * previously discarded it at deserialization.
+   */
+  easAttestation?: { easUid: string; schemaUid: string } | null;
   oracle: string;
   chainId: number;
 }
@@ -138,6 +164,16 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
       extraData: "0x",
       signature: "0x" + "0".repeat(130),
     },
+    // V2: mirror the live oracle's behaviour — when minting is requested, return
+    // a deterministic mock EAS UID so the orchestration path is exercisable in
+    // dev/test without a real EAS write. A live oracle replaces this with the
+    // real on-chain UID. Absent (null) on the V1 path.
+    easAttestation: request.mintEasAttestation
+      ? {
+          easUid: "0x" + "ea".repeat(32),
+          schemaUid: request.schemaUid ?? process.env.PCC_EVIDENCE_SCHEMA_UID ?? "0x" + "00".repeat(32),
+        }
+      : null,
     oracle: "0x0000000000000000000000000000000000000000",
     chainId: request.chainId,
   };
