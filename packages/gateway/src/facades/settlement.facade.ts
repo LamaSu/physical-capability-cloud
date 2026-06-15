@@ -52,6 +52,15 @@ import {
   submitAttestation as chainSubmitAttestation,
   isWriteEnabled,
   getSignerAddress,
+  // V2 (EAS-gated) reads + writes — used under useEasV2(). The V2 milestone tuple
+  // and some V2 events carry extra fields the V1 ABI cannot decode, so a V2 escrow
+  // MUST be read/written through the V2 ABI or the call decode-mismatches (→ 500).
+  getEscrowStateV2,
+  getDisputeV2,
+  getEventsV2,
+  fundEscrowV2 as chainFundEscrowV2,
+  depositBondV2 as chainDepositBondV2,
+  fileDisputeV2 as chainFileDisputeV2,
 } from "../contracts/escrow-client.js";
 import {
   isBatchEnabled,
@@ -62,6 +71,17 @@ import {
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
 import { swfAccrue } from "../routes/swf.js";
+
+/**
+ * Whether on-chain escrow operations route through the EAS-gated
+ * MilestoneEscrowV2 ABI. Mirrors paid-job-flow + escrow routes — default OFF so
+ * V1 (attestation-struct) escrows are read/written unchanged. When a deployment
+ * opts in (PCC_USE_EAS_V2=true), every escrow it creates is a V2 clone, so the
+ * read/write helpers must dispatch against the V2 ABI.
+ */
+function useEasV2(): boolean {
+  return process.env.PCC_USE_EAS_V2 === "true";
+}
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -144,9 +164,13 @@ export class SettlementFacade extends BaseFacade {
     ctx?: Partial<PopulationContext>,
   ): Promise<Result<{ escrow: unknown; source: "on-chain" | "db" }>> {
     return this.execute("getEscrow", async () => {
-      // On-chain path: if escrowId looks like an Ethereum address
+      // On-chain path: if escrowId looks like an Ethereum address.
+      // Under V2, read via the V2 ABI — readEscrow() uses the V1 ABI and would
+      // decode-mismatch a MilestoneEscrowV2 once it has a milestone.
       if (isAddress(escrowId)) {
-        const escrow = await readEscrow(escrowId as Address);
+        const escrow = useEasV2()
+          ? await getEscrowStateV2(escrowId as Address)
+          : await readEscrow(escrowId as Address);
         return { escrow, source: "on-chain" as const };
       }
 
@@ -176,7 +200,10 @@ export class SettlementFacade extends BaseFacade {
   ): Promise<Result<unknown[]>> {
     return this.execute("getChainEvents", async () => {
       this.validateAddress(address);
-      return getEscrowEvents(address, fromBlock);
+      // V2 emits events (e.g. MilestoneAdded w/ token) the V1 ABI mis-decodes.
+      return useEasV2()
+        ? getEventsV2(address, fromBlock)
+        : getEscrowEvents(address, fromBlock);
     });
   }
 
@@ -225,7 +252,9 @@ export class SettlementFacade extends BaseFacade {
     return this.execute("getDispute", async () => {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
-      const dispute = await getDispute(milestoneIndex, address);
+      const dispute = useEasV2()
+        ? await getDisputeV2(milestoneIndex, address)
+        : await getDispute(milestoneIndex, address);
       return { dispute, milestoneIndex, source: "on-chain" as const };
     });
   }
@@ -239,7 +268,11 @@ export class SettlementFacade extends BaseFacade {
   ): Promise<Result<{ escrow: unknown; source: "on-chain" }>> {
     return this.execute("getChainState", async () => {
       this.validateAddress(address);
-      const state = await getEscrowState(address);
+      // V2 escrows expose a wider milestone tuple (requiredTier/jobIdHash/
+      // verifierAttestationUid). Reading them with the V1 ABI decode-mismatches.
+      const state = useEasV2()
+        ? await getEscrowStateV2(address)
+        : await getEscrowState(address);
       return { escrow: state, source: "on-chain" as const };
     });
   }
@@ -275,7 +308,10 @@ export class SettlementFacade extends BaseFacade {
     return this.execute("fundEscrow", async () => {
       this.validateAddress(address);
       this.requireWriteEnabled();
-      const result = await chainFundEscrow(address);
+      // V2 fund() lives on the V2 ABI and requires >=1 on-chain milestone.
+      const result = useEasV2()
+        ? await chainFundEscrowV2(address)
+        : await chainFundEscrow(address);
       pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
       trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
       auditService.log({
@@ -372,13 +408,21 @@ export class SettlementFacade extends BaseFacade {
           { name: "BadRequestError" },
         );
       }
-      const result = await chainFileDispute(
-        milestoneIndex,
-        body.challengerBond,
-        body.challengerEvidenceHash as `0x${string}`,
-        body.reason,
-        address,
-      );
+      const result = useEasV2()
+        ? await chainFileDisputeV2(
+            milestoneIndex,
+            body.challengerBond,
+            body.challengerEvidenceHash as `0x${string}`,
+            body.reason,
+            address,
+          )
+        : await chainFileDispute(
+            milestoneIndex,
+            body.challengerBond,
+            body.challengerEvidenceHash as `0x${string}`,
+            body.reason,
+            address,
+          );
       pipelineTelemetry.emit(address, "verification_result", "completed", {
         metadata: { escrow: address, milestoneIndex, dispute: true, reason: body.reason },
       });
@@ -411,7 +455,9 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
-      const result = await chainDepositBond(milestoneIndex, address);
+      const result = useEasV2()
+        ? await chainDepositBondV2(milestoneIndex, address)
+        : await chainDepositBond(milestoneIndex, address);
       pipelineTelemetry.emit(address, "escrow_fund", "completed", {
         metadata: { escrow: address, milestoneIndex, action: "depositBond" },
       });

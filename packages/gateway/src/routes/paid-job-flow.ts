@@ -16,9 +16,10 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog } from "viem";
+import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
+import { MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
 import { getStore, getRepos } from "../db.js";
 import { getSettlementFacade } from "../facades/index.js";
 
@@ -193,6 +194,30 @@ export async function createJobFromSession(
     challengeWindowSeconds: number;
   }>;
 
+  const totalPriceForMs = (quote?.totalPrice as string) ?? "10.00";
+  const assuranceTier = Number((contractTerms?.assuranceTier as number | undefined) ?? 0);
+
+  // Normalize the milestone set ONCE so the on-chain V2 escrow, the DB rows, and
+  // the job all reference the same milestones. When contract terms define none,
+  // synthesize a single full-amount milestone (mirrors the historical DB default).
+  const normalizedMilestones: Array<{
+    stepId: string;
+    amount: string;
+    bondAmount: string;
+    challengeWindowSeconds: number;
+  }> = milestones.length > 0
+    ? milestones
+    : [{
+        stepId: `step-${crypto.randomUUID().slice(0, 8)}`,
+        amount: totalPriceForMs,
+        bondAmount: (quote?.bondAmount as string) ?? "0.00",
+        challengeWindowSeconds: 0,
+      }];
+
+  // Job id is needed BEFORE escrow creation so V2 milestones can bind it on-chain
+  // (keccak256(bytes(jobId)) is stored per-milestone for EAS payload validation).
+  const jobId = session.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
+
   // ── 1. Create or reference escrow ──────────────────────────────────
   const escrowId = `esc-${crypto.randomUUID().slice(0, 12)}`;
   let escrowAddress: string;
@@ -253,6 +278,38 @@ export async function createJobFromSession(
     console.log(
       `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${escrowAddress} (tx: ${txHash}, token: ${tokenAddr})`,
     );
+
+    // ── V2: add milestone(s) ON-CHAIN ──────────────────────────────────
+    // createEscrowV2 mints an EMPTY escrow. Without at least one on-chain
+    // milestone, fund() reverts ("No milestones") and every downstream step
+    // (getMilestone(0), /state, submitEvidence, attestation, release) fails.
+    // Add each normalized milestone via the V2 ABI, in sequence on the same
+    // wallet client so nonces stay ordered. Must happen BEFORE fund() — the
+    // contract requires !funded when adding milestones (we leave funding to the
+    // caller's /fund step, so escrowStatus stays "created" here).
+    if (v2) {
+      for (const ms of normalizedMilestones) {
+        const stepIdBytes = keccak256(toBytes(ms.stepId));
+        const addTx = await walletClient.writeContract({
+          address: escrowAddress as `0x${string}`,
+          abi: MilestoneEscrowV2ABI,
+          functionName: "addMilestone",
+          args: [
+            stepIdBytes,
+            account.address, // operator = gateway signer (receives release payout)
+            parseUnits(ms.amount, 6),
+            parseUnits(ms.bondAmount ?? "0.00", 6),
+            BigInt(ms.challengeWindowSeconds ?? 0),
+            assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
+            jobId,
+          ],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: addTx });
+        console.log(
+          `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+        );
+      }
+    }
   }
 
   const totalPrice = quote?.totalPrice as string ?? "10.00";
@@ -271,8 +328,8 @@ export async function createJobFromSession(
     deadline,
   });
 
-  // Insert milestones
-  for (const ms of milestones) {
+  // Insert milestones (DB rows mirror the normalized set used on-chain above).
+  for (const ms of normalizedMilestones) {
     repos.escrows.insertMilestone({
       id: `ms-${crypto.randomUUID().slice(0, 12)}`,
       escrowId,
@@ -283,27 +340,17 @@ export async function createJobFromSession(
     });
   }
 
-  // If no milestones were defined in contract terms, create a default one
-  if (milestones.length === 0) {
-    repos.escrows.insertMilestone({
-      id: `ms-${crypto.randomUUID().slice(0, 12)}`,
-      escrowId,
-      stepId: `step-${crypto.randomUUID().slice(0, 8)}`,
-      amount: totalPrice,
-      status: escrowStatus === "funded" ? "funded" : "pending",
-      bondAmount: quote?.bondAmount as string ?? "0.00",
-    });
-  }
-
   // ── 2. Create the job ──────────────────────────────────────────────
-  const jobId = session.jobId ?? `job-${crypto.randomUUID().slice(0, 12)}`;
+  // (jobId was computed above, before escrow creation, so V2 milestones could
+  // bind it on-chain.)
 
   // Resolve capability ID for this kernel + type
   const caps = repos.capabilities.findByKernel(session.kernelId);
   const matchingCap = caps.find((c) => c.type === session.capabilityType) ?? caps[0];
   const capabilityId = matchingCap?.id ?? "cap-default";
 
-  const stepId = milestones[0]?.stepId ?? `step-${crypto.randomUUID().slice(0, 8)}`;
+  // Job stepId mirrors the first normalized milestone (== on-chain milestone 0).
+  const stepId = normalizedMilestones[0].stepId;
 
   // Check if this kernel is externally-managed (daemon-polled)
   const svc = getKernelService();

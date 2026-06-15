@@ -760,6 +760,70 @@ export async function getEscrowStateV2(contractAddress?: Address): Promise<OnCha
 }
 
 /**
+ * Read dispute state for a V2 milestone. The Dispute struct shape is identical
+ * to V1, but we read through the V2 ABI so the call dispatches against a
+ * MilestoneEscrowV2 clone (decode-safe regardless of which stack deployed it).
+ */
+export async function getDisputeV2(
+  milestoneIndex: number,
+  contractAddress?: Address,
+): Promise<OnChainDispute> {
+  const address = resolveAddress(contractAddress);
+  const client = getPublicClient();
+
+  const raw = await client.readContract({
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "getDispute",
+    args: [BigInt(milestoneIndex)],
+  });
+
+  const d = raw as unknown as {
+    challenger: Address;
+    challengerBond: bigint;
+    challengerEvidenceHash: string;
+    reason: string;
+    resolved: boolean;
+    challengerWon: boolean;
+  };
+
+  return {
+    challenger: d.challenger,
+    challengerBond: formatUnits(d.challengerBond, 6),
+    challengerEvidenceHash: d.challengerEvidenceHash,
+    reason: d.reason,
+    resolved: d.resolved,
+    challengerWon: d.challengerWon,
+  };
+}
+
+/**
+ * Read contract events for a V2 escrow through the V2 ABI. V2 emits some events
+ * (e.g. MilestoneAdded with a token param) the V1 ABI cannot decode, so reading a
+ * V2 escrow's logs with the V1 ABI would silently drop or mis-decode them.
+ */
+export async function getEventsV2(
+  contractAddress?: Address,
+  fromBlock?: bigint,
+): Promise<EscrowEvent[]> {
+  const address = resolveAddress(contractAddress);
+  const client = getPublicClient();
+
+  const logs = await client.getContractEvents({
+    address,
+    abi: MilestoneEscrowV2ABI,
+    fromBlock: fromBlock ?? 0n,
+  });
+
+  return logs.map((log) => ({
+    eventName: log.eventName,
+    args: log.args as unknown as Record<string, unknown>,
+    blockNumber: Number(log.blockNumber),
+    transactionHash: log.transactionHash,
+  }));
+}
+
+/**
  * True if the EAS UID has already released a milestone in this escrow.
  * Mirrors the on-chain single-use guard (security review C1).
  */
@@ -816,6 +880,130 @@ export async function readEasAttestation(uid: Hex, easAddress?: Address): Promis
 }
 
 // ── Write operations (V2) ──────────────────────────────────────────────────
+
+/**
+ * Add a milestone to a V2 escrow (must be called by the payer, BEFORE fund()).
+ *
+ * This is the missing on-chain step in the per-job V2 flow: createEscrowV2 mints
+ * an EMPTY escrow, so every downstream step (fund / submitEvidence / attestation /
+ * release / getMilestone / state-read) requires at least one milestone to exist
+ * on-chain first. V2 milestones carry two extra binding params beyond V1:
+ *   - requiredTier: minimum assurance tier the EAS attestation must report (0-3).
+ *   - jobId:        bound on-chain as keccak256(bytes(jobId)) for EAS payload checks.
+ *
+ * Wire signature: addMilestone(bytes32 stepId, address operator, uint256 amount,
+ *                              uint256 operatorBond, uint256 challengeWindowSeconds,
+ *                              uint8 requiredTier, string jobId).
+ */
+export async function addMilestoneV2(
+  params: {
+    stepId: Hex;
+    operator: Address;
+    amount: bigint;
+    operatorBond: bigint;
+    challengeWindowSeconds: number;
+    requiredTier: number;
+    jobId: string;
+  },
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "addMilestone",
+    args: [
+      params.stepId,
+      params.operator,
+      params.amount,
+      params.operatorBond,
+      BigInt(params.challengeWindowSeconds),
+      params.requiredTier,
+      params.jobId,
+    ],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Fund a V2 escrow. The payer must have approved the token transfer for
+ * totalAmount first. Same wire shape as V1 fund(), but routed through the V2 ABI
+ * so it dispatches against a MilestoneEscrowV2 clone. Requires milestones.length > 0
+ * on-chain (the contract reverts with "No milestones" otherwise).
+ */
+export async function fundEscrowV2(contractAddress?: Address): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "fund",
+    args: [],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Deposit operator bond for a V2 milestone. Same wire shape as V1, V2 ABI.
+ */
+export async function depositBondV2(
+  milestoneIndex: number,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "depositBond",
+    args: [BigInt(milestoneIndex)],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * File a dispute against a V2 milestone. Same wire shape as V1
+ * (uint256, uint256, bytes32, string), V2 ABI.
+ */
+export async function fileDisputeV2(
+  milestoneIndex: number,
+  challengerBond: string,
+  challengerEvidenceHash: Hex,
+  reason: string,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV2ABI,
+    functionName: "fileDispute",
+    args: [
+      BigInt(milestoneIndex),
+      parseUnits(challengerBond, 6),
+      challengerEvidenceHash,
+      reason,
+    ],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
 
 /**
  * Bind a validated EAS attestation (by UID) to a V2 milestone, opening the
