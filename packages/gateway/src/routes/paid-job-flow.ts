@@ -49,6 +49,7 @@ import {
   isWriteEnabled as escrowWriteEnabled,
   resolveMockUSDCAddress,
 } from "../contracts/escrow-client.js";
+import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -273,94 +274,96 @@ export async function createJobFromSession(
     const factoryAbi = v2 ? PCCProtocolV2ABI : PCCProtocolABI;
     const createFn = v2 ? "createEscrowV2" : "createEscrow";
 
-    // P0-1 fix: explicit sequential nonce management. The single hot key does two
-    // ordered writes (createEscrowV2, then addMilestone). On a laggy / rate-limited
-    // public RPC, eth_getTransactionCount can still report the pre-create count even
-    // after the create receipt is mined, so viem's auto-nonce hands addMilestone the
-    // SAME nonce -> it is dropped/replaced and the escrow comes back with
-    // milestoneCount 0 (the intermittent "milestone flaky" blocker). Pin explicit,
-    // monotonically increasing nonces so the sequence cannot collide regardless of
-    // RPC propagation lag.
-    let nonce = await publicClient.getTransactionCount({
-      address: account.address,
-      blockTag: "pending",
-    });
+    // P0-1 fix: explicit sequential nonce management WITHIN this tx sequence. The
+    // single hot key does ordered writes (createEscrowV2, then addMilestone). On a
+    // laggy / rate-limited public RPC, eth_getTransactionCount can report the
+    // pre-create count even after the create receipt is mined, so viem's auto-nonce
+    // hands addMilestone the SAME nonce -> dropped/replaced -> milestoneCount 0.
+    //
+    // P2 fix (board #126 concurrency): wrap the WHOLE create->addMilestone sequence
+    // in the global signer lock so CONCURRENT createJobFromSession requests cannot
+    // each read getTransactionCount(pending) at the same value and collide on the
+    // nonce window across jobs (the concurrent failure mode that surfaces as
+    // fast_track_failed). One signer tx-sequence runs at a time; the explicit nonce
+    // still orders the writes within this now-exclusive sequence.
+    escrowAddress = await withSignerLock(async () => {
+      let nonce = await publicClient.getTransactionCount({
+        address: account.address,
+        blockTag: "pending",
+      });
 
-    const txHash = await walletClient.writeContract({
-      address: factoryAddr,
-      abi: factoryAbi,
-      functionName: createFn,
-      args: [account.address, account.address, tokenAddr, cwmIdBytes],
-      nonce: nonce++,
-    });
+      const txHash = await walletClient.writeContract({
+        address: factoryAddr,
+        abi: factoryAbi,
+        functionName: createFn,
+        args: [account.address, account.address, tokenAddr, cwmIdBytes],
+        nonce: nonce++,
+      });
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-    // Extract the new escrow address from the EscrowCreated event rather than a
-    // positional topics[1] guess. `escrow` is the FIRST indexed param in both V1
-    // and V2 EscrowCreated, so decodeEventLog gives us a typed, layout-safe read.
-    escrowAddress = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
-    escrowStatus = "created";
-    console.log(
-      `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${escrowAddress} (tx: ${txHash}, token: ${tokenAddr})`,
-    );
+      // Extract the new escrow address from the EscrowCreated event — `escrow` is the
+      // FIRST indexed param in both V1 and V2 EscrowCreated (typed, layout-safe read).
+      const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
+      console.log(
+        `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${addr} (tx: ${txHash}, token: ${tokenAddr})`,
+      );
 
-    // ── V2: add milestone(s) ON-CHAIN ──────────────────────────────────
-    // createEscrowV2 mints an EMPTY escrow. Without at least one on-chain
-    // milestone, fund() reverts ("No milestones") and every downstream step
-    // (getMilestone(0), /state, submitEvidence, attestation, release) fails.
-    // Add each normalized milestone via the V2 ABI, in sequence on the same
-    // wallet client so nonces stay ordered. Must happen BEFORE fund() — the
-    // contract requires !funded when adding milestones (we leave funding to the
-    // caller's /fund step, so escrowStatus stays "created" here).
-    if (v2) {
-      for (const ms of normalizedMilestones) {
-        const stepIdBytes = keccak256(toBytes(ms.stepId));
-        const addTx = await walletClient.writeContract({
-          address: escrowAddress as `0x${string}`,
+      // ── V2: add milestone(s) ON-CHAIN ──────────────────────────────────
+      // createEscrowV2 mints an EMPTY escrow; without >=1 milestone, fund() reverts
+      // ("No milestones") and every downstream step fails. Add each milestone in
+      // sequence on the same signer, BEFORE fund() (the contract requires !funded).
+      if (v2) {
+        for (const ms of normalizedMilestones) {
+          const stepIdBytes = keccak256(toBytes(ms.stepId));
+          const addTx = await walletClient.writeContract({
+            address: addr as `0x${string}`,
+            abi: MilestoneEscrowV2ABI,
+            functionName: "addMilestone",
+            args: [
+              stepIdBytes,
+              account.address, // operator = gateway signer (receives release payout)
+              parseUnits(ms.amount, 6),
+              parseUnits(ms.bondAmount ?? "0.00", 6),
+              BigInt(ms.challengeWindowSeconds ?? 0),
+              assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
+              jobId,
+            ],
+            nonce: nonce++, // P0-1: explicit sequential nonce within the locked sequence
+          });
+          const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx });
+          if (addReceipt.status !== "success") {
+            throw new Error(
+              `addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}); escrow ${addr} would have 0 milestones`,
+            );
+          }
+          console.log(
+            `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+          );
+        }
+
+        // P0-1 verification: confirm the milestones actually landed on-chain before
+        // leaving the create step — fail LOUD on a silent drop instead of opaquely
+        // downstream (the board's "milestoneCount flaky" symptom).
+        const onChainCount = (await publicClient.readContract({
+          address: addr as `0x${string}`,
           abi: MilestoneEscrowV2ABI,
-          functionName: "addMilestone",
-          args: [
-            stepIdBytes,
-            account.address, // operator = gateway signer (receives release payout)
-            parseUnits(ms.amount, 6),
-            parseUnits(ms.bondAmount ?? "0.00", 6),
-            BigInt(ms.challengeWindowSeconds ?? 0),
-            assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
-            jobId,
-          ],
-          nonce: nonce++, // P0-1: explicit sequential nonce (see createEscrowV2 above)
-        });
-        const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx });
-        if (addReceipt.status !== "success") {
+          functionName: "getMilestoneCount",
+        })) as bigint;
+        if (onChainCount < BigInt(normalizedMilestones.length)) {
           throw new Error(
-            `addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}); escrow ${escrowAddress} would have 0 milestones`,
+            `On-chain milestoneCount=${onChainCount} < expected ${normalizedMilestones.length} ` +
+              `for escrow ${addr} — addMilestone did not land (P0-1 nonce/RPC race)`,
           );
         }
         console.log(
-          `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+          `[paid-job] V2 milestones confirmed on-chain: count=${onChainCount} (escrow ${addr})`,
         );
       }
 
-      // P0-1 verification: confirm the milestones actually landed on-chain before
-      // leaving the create step. If the RPC silently dropped an addMilestone despite
-      // the explicit nonce, fail LOUD here rather than letting fund()/getMilestone(0)/
-      // attestation fail opaquely downstream (the board's "milestoneCount flaky" symptom).
-      const onChainCount = (await publicClient.readContract({
-        address: escrowAddress as `0x${string}`,
-        abi: MilestoneEscrowV2ABI,
-        functionName: "getMilestoneCount",
-      })) as bigint;
-      if (onChainCount < BigInt(normalizedMilestones.length)) {
-        throw new Error(
-          `On-chain milestoneCount=${onChainCount} < expected ${normalizedMilestones.length} ` +
-            `for escrow ${escrowAddress} — addMilestone did not land (P0-1 nonce/RPC race)`,
-        );
-      }
-      console.log(
-        `[paid-job] V2 milestones confirmed on-chain: count=${onChainCount} (escrow ${escrowAddress})`,
-      );
-    }
+      return addr;
+    });
+    escrowStatus = "created";
   }
 
   const totalPrice = quote?.totalPrice as string ?? "10.00";
