@@ -55,6 +55,19 @@ export interface CapabilityNode {
   bountyId?: string;
   materials: MaterialRequirement[];
   evidenceRequirements: string[];
+  /**
+   * Matched capability id from the registry, set by the agentic decomposer when
+   * a concrete capability satisfies this node. Absent when match:none — the
+   * node still stands as the desired step, awaiting an operator/capability
+   * to fulfill via the bounty flow.
+   */
+  matchedCapabilityId?: string;
+  /** Kernel that owns the matched capability (mirrored for convenience). */
+  matchedKernelId?: string;
+  /** How many units of the matched capability are needed (drives cost derivation). */
+  quantity?: number;
+  /** "agentic" when produced by the LLM decomposer, "template" for legacy fallback. */
+  decompositionSource?: "agentic" | "template";
 }
 
 export interface MaterialRequirement {
@@ -71,4 +84,10 @@ export interface DecompositionResult {
   totalEstimatedHours: number;
   criticalPath: string[];
   parallelTracks: string[][];
+  /** Which decomposer produced this result. Defaults to "template" when absent. */
+  source?: "agentic" | "template";
+  /** Total node count whose capabilityType matched a live capability in the registry. */
+  matchCount?: number;
+  /** Aggregate evidence requirements across all matched capability nodes (deduped). */
+  evidenceRequirements?: string[];
 }
