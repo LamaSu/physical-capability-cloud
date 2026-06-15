@@ -10,17 +10,28 @@
  * even declare maxAssuranceTier, so TS couldn't catch the silent drop.
  */
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { kernelRoutes } from "../routes/kernels.js";
+import { initStore, closeStore } from "../db.js";
 
 describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", () => {
   let app: FastifyInstance;
 
-  beforeEach(async () => {
-    app = Fastify();
+  beforeAll(async () => {
+    // In-memory SQLite per the canonical pattern in routes.test.ts.
+    // initStore() is what wires the facades' repos; without it
+    // KernelFacade.register() can't write and returns 500 instead of 201.
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    app = Fastify({ logger: false });
     await app.register(kernelRoutes);
     await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    closeStore();
   });
 
   it("[a8207dfa] persists submitted location {lat, lng} object — not 0,0", async () => {
