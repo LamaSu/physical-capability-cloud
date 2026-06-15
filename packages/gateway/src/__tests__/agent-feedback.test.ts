@@ -106,28 +106,31 @@ describe("POST /api/feedback/agent-report", () => {
   // ── trace_id handling ───────────────────────────────────────────────────
 
   it("body trace_id wins over header trace_id", async () => {
+    const headerTrace = "tr_aaaaaaaaaaaaaaaa";
+    const bodyTrace = "tr_bbbbbbbbbbbbbbbb";
     const res = await app.inject({
       method: "POST",
       url: "/api/feedback/agent-report",
-      headers: { [TRACE_ID_HEADER]: "tr_headeronly0000" },
+      headers: { [TRACE_ID_HEADER]: headerTrace },
       payload: {
-        trace_id: "tr_bodyonly00000000",
+        trace_id: bodyTrace,
         summary: "test conflict resolution",
       },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json().trace_id).toBe("tr_bodyonly00000000");
+    expect(res.json().trace_id).toBe(bodyTrace);
   });
 
   it("falls back to header trace_id when body omits it", async () => {
+    const headerTrace = "tr_ccccccccccccdddd";
     const res = await app.inject({
       method: "POST",
       url: "/api/feedback/agent-report",
-      headers: { [TRACE_ID_HEADER]: "tr_fromheader00000" },
+      headers: { [TRACE_ID_HEADER]: headerTrace },
       payload: { summary: "no body trace_id case" },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json().trace_id).toBe("tr_fromheader00000");
+    expect(res.json().trace_id).toBe(headerTrace);
   });
 
   // ── Validation: summary ─────────────────────────────────────────────────

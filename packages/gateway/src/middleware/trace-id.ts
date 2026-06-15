@@ -67,10 +67,15 @@ declare module "fastify" {
  * before any route plugin that may want to read `req.traceId`. Order it
  * after the session decorator but before `apiGate`.
  *
- * Idempotent — re-registering this plugin has no effect (Fastify's
- * plugin scope guarantees this).
+ * Marked as NON-ENCAPSULATED (skip-override symbol below) so the
+ * onRequest + onSend hooks apply to every sibling route plugin
+ * registered against the parent app, not just routes registered inside
+ * this plugin's scope.
+ *
+ * Equivalent to wrapping with `fastify-plugin(fn)` without adding the
+ * runtime dep (mirrors the existing pattern in `middleware/api-gate.ts`).
  */
-export const traceIdPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
+const traceIdPluginImpl: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.decorateRequest("traceId", "");
 
   app.addHook("onRequest", async (req) => {
@@ -98,3 +103,12 @@ export const traceIdPlugin: FastifyPluginAsync = async (app: FastifyInstance) =>
     return payload;
   });
 };
+
+// Mark the plugin as non-encapsulated. Without these symbols Fastify
+// isolates the hooks to the plugin's own scope, leaving every sibling
+// route effectively un-traced. See middleware/api-gate.ts for the same
+// pattern with regression test coverage.
+(traceIdPluginImpl as unknown as Record<symbol, unknown>)[Symbol.for("skip-override")] = true;
+(traceIdPluginImpl as unknown as Record<symbol, unknown>)[Symbol.for("fastify.display-name")] = "traceIdPlugin";
+
+export const traceIdPlugin = traceIdPluginImpl;
