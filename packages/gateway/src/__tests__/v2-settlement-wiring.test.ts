@@ -313,6 +313,234 @@ describe("escrow-client V2 read dispatch (mocked public client)", () => {
 });
 
 // ===========================================================================
+// 6 — Token resolution: chain-config FIRST, MOCK_USDC_ADDRESS env fallback only.
+//
+// Regression guard for the live-smoke step-2 stall: the escrow was minted with
+// _token = 0x5f2eb54d… (the Flow-EVM mockUSDC, leaked into MOCK_USDC_ADDRESS on
+// a base-sepolia deployment) while the payer holds its balance in base-sepolia's
+// chain-config mockUSDC 0x18bef3…. fund() then reverts. The resolver must prefer
+// chain-config for a deployed network and only fall back to env where the
+// network has no chain-config token (e.g. localhost forge deploys).
+// ===========================================================================
+
+describe("escrow-client resolveMockUSDCAddress (token precedence)", () => {
+  const BASE_SEPOLIA_MOCK_USDC = "0x18bef3dee9f4f97f7cec16db0c4a0a930f478470";
+  const FLOW_MOCK_USDC = "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9";
+  const ORIG_ENV = process.env.MOCK_USDC_ADDRESS;
+  const ORIG_NET = process.env.PCC_NETWORK;
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (ORIG_ENV === undefined) delete process.env.MOCK_USDC_ADDRESS;
+    else process.env.MOCK_USDC_ADDRESS = ORIG_ENV;
+    if (ORIG_NET === undefined) delete process.env.PCC_NETWORK;
+    else process.env.PCC_NETWORK = ORIG_NET;
+  });
+
+  it("prefers chain-config mockUSDC for base-sepolia EVEN when MOCK_USDC_ADDRESS env is the Flow token", async () => {
+    // The exact polluted-env condition from the live smoke.
+    process.env.MOCK_USDC_ADDRESS = FLOW_MOCK_USDC;
+    const { resolveMockUSDCAddress } = await import("../contracts/escrow-client.js");
+    const token = resolveMockUSDCAddress("base-sepolia");
+    expect(token?.toLowerCase()).toBe(BASE_SEPOLIA_MOCK_USDC.toLowerCase());
+    // NOT the Flow token the payer holds 0 of.
+    expect(token?.toLowerCase()).not.toBe(FLOW_MOCK_USDC.toLowerCase());
+  });
+
+  it("returns chain-config mockUSDC for base-sepolia when env is unset", async () => {
+    delete process.env.MOCK_USDC_ADDRESS;
+    const { resolveMockUSDCAddress } = await import("../contracts/escrow-client.js");
+    expect(resolveMockUSDCAddress("base-sepolia")?.toLowerCase()).toBe(
+      BASE_SEPOLIA_MOCK_USDC.toLowerCase(),
+    );
+  });
+
+  it("falls back to MOCK_USDC_ADDRESS env for localhost (no chain-config token)", async () => {
+    const LOCAL_TOKEN = "0x1111111111111111111111111111111111111111";
+    process.env.MOCK_USDC_ADDRESS = LOCAL_TOKEN;
+    const { resolveMockUSDCAddress } = await import("../contracts/escrow-client.js");
+    // localhost chain-config has mockUSDC: undefined -> env fallback.
+    expect(resolveMockUSDCAddress("localhost")?.toLowerCase()).toBe(LOCAL_TOKEN.toLowerCase());
+  });
+
+  it("returns undefined for localhost when neither chain-config nor env has a token", async () => {
+    delete process.env.MOCK_USDC_ADDRESS;
+    const { resolveMockUSDCAddress } = await import("../contracts/escrow-client.js");
+    expect(resolveMockUSDCAddress("localhost")).toBeUndefined();
+  });
+
+  it("flow-evm-testnet resolves its OWN chain-config token (the Flow one), not base-sepolia's", async () => {
+    delete process.env.MOCK_USDC_ADDRESS;
+    const { resolveMockUSDCAddress } = await import("../contracts/escrow-client.js");
+    // Proves the resolver is network-parameterized, not globally pinned.
+    expect(resolveMockUSDCAddress("flow-evm-testnet")?.toLowerCase()).toBe(
+      FLOW_MOCK_USDC.toLowerCase(),
+    );
+  });
+});
+
+// ===========================================================================
+// 7 — createJobFromSession real-settlement V2 path: createEscrowV2 with the
+// chain-config token, THEN addMilestone (the smoke's step-1→step-2 fix).
+//
+// Drives the actual SUT (paid-job-flow.createJobFromSession) with the real
+// in-memory store + a viem wallet spy. Asserts the on-chain call sequence the
+// smoke needs: createEscrowV2(payer, arbiter, CHAIN-CONFIG-token, cwmId) →
+// addMilestone(...) on the new escrow, so /state reads milestoneCount>=1 and
+// the escrow's token == the one the payer holds.
+// ===========================================================================
+
+describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", () => {
+  const BASE_SEPOLIA_MOCK_USDC = "0x18bef3dee9f4f97f7cec16db0c4a0a930f478470";
+  const FLOW_MOCK_USDC = "0x5f2eb54dc5cb9a6bfff58222c672e73e16e763e9";
+  const NEW_ESCROW = ("0x" + "5e".repeat(20)) as `0x${string}`;
+
+  const ORIG = {
+    pk: process.env.PCC_GATEWAY_PRIVATE_KEY,
+    mock: process.env.MOCK_SETTLEMENT,
+    v2: process.env.PCC_USE_EAS_V2,
+    net: process.env.PCC_NETWORK,
+    env: process.env.MOCK_USDC_ADDRESS,
+    db: process.env.PCC_DB_PATH,
+  };
+
+  // Capture all on-chain writes in order.
+  const writeContract = vi.fn().mockResolvedValue("0x" + "a".repeat(64));
+  // EscrowCreated receipt: `escrow` is the first indexed topic. We feed a log
+  // whose decode yields NEW_ESCROW so extractEscrowCreatedAddress returns it.
+  const waitForTransactionReceipt = vi.fn();
+
+  beforeEach(() => {
+    vi.resetModules();
+    writeContract.mockClear();
+    waitForTransactionReceipt.mockReset();
+
+    process.env.PCC_GATEWAY_PRIVATE_KEY =
+      "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+    process.env.MOCK_SETTLEMENT = "false"; // exercise the REAL on-chain branch
+    process.env.PCC_USE_EAS_V2 = "true"; // V2 (createEscrowV2 + addMilestone)
+    process.env.PCC_NETWORK = "base-sepolia";
+    // Polluted env: the Flow token. The fix must IGNORE this in favor of
+    // chain-config for base-sepolia.
+    process.env.MOCK_USDC_ADDRESS = FLOW_MOCK_USDC;
+    process.env.PCC_DB_PATH = ":memory:";
+
+    vi.doMock("viem", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("viem")>();
+      // Build a real EscrowCreated log for NEW_ESCROW so the route's
+      // decodeEventLog-based extractor returns it (no positional guessing).
+      const topics = actual.encodeEventTopics({
+        abi: PCCProtocolV2ABI,
+        eventName: "EscrowCreated",
+        args: {
+          escrow: NEW_ESCROW,
+          payer: ("0x" + "00".repeat(20)) as Hex,
+          arbiter: ("0x" + "00".repeat(20)) as Hex,
+        },
+      });
+      const data = actual.encodeAbiParameters(
+        [{ type: "address" }, { type: "bytes32" }],
+        [BASE_SEPOLIA_MOCK_USDC as Hex, ("0x" + "00".repeat(32)) as Hex],
+      );
+      waitForTransactionReceipt.mockResolvedValue({
+        logs: [{ topics, data, address: NEW_ESCROW }],
+      });
+      return {
+        ...actual,
+        createWalletClient: () => ({ writeContract }),
+        createPublicClient: () => ({ waitForTransactionReceipt }),
+      };
+    });
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries({
+      PCC_GATEWAY_PRIVATE_KEY: ORIG.pk,
+      MOCK_SETTLEMENT: ORIG.mock,
+      PCC_USE_EAS_V2: ORIG.v2,
+      PCC_NETWORK: ORIG.net,
+      MOCK_USDC_ADDRESS: ORIG.env,
+      PCC_DB_PATH: ORIG.db,
+    })) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    vi.doUnmock("viem");
+  });
+
+  it("createEscrowV2 uses the chain-config token (0x18bef3…), NOT the Flow env token, then addMilestone", async () => {
+    const { initStore, closeStore } = await import("../db.js");
+    initStore({ seed: true });
+    try {
+      const { createJobFromSession } = await import("../routes/paid-job-flow.js");
+
+      // Minimal committed session row (the shape createJobFromSession reads).
+      const session = {
+        id: "sess-v2-token",
+        status: "committed",
+        userAgentId: "0x" + "11".repeat(20),
+        kernelId: "kernel-nyc",
+        capabilityType: "liquid-handler",
+        capabilityId: null,
+        network: null,
+        selections: {},
+        operatorConstraints: {},
+        scheduling: {},
+        quote: { totalPrice: "10.00", currency: "USDC", bondAmount: "0.00" },
+        contractTerms: {
+          milestones: [
+            { stepId: "step-aaa", amount: "10.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
+          ],
+          deadline: new Date(Date.now() + 86_400_000).toISOString(),
+          assuranceTier: 0,
+        },
+        jobId: "job-v2-token",
+        escrowAddress: null,
+        cwmId: "cwm-v2-token",
+        transitions: [],
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 1_800_000).toISOString(),
+        committedAt: new Date().toISOString(),
+      } as any;
+
+      const result = await createJobFromSession(session);
+      expect(result.escrowAddress).toBe(NEW_ESCROW);
+
+      // First write = createEscrowV2 carrying the CHAIN-CONFIG token.
+      const createCall = writeContract.mock.calls.find(
+        (c) => c[0].functionName === "createEscrowV2",
+      );
+      expect(createCall).toBeDefined();
+      // args: [payer, arbiter, token, cwmId]
+      const tokenArg = (createCall![0].args[2] as string).toLowerCase();
+      expect(tokenArg).toBe(BASE_SEPOLIA_MOCK_USDC.toLowerCase());
+      expect(tokenArg).not.toBe(FLOW_MOCK_USDC.toLowerCase());
+
+      // A subsequent write = addMilestone on the new escrow (the step-2 fix:
+      // an empty escrow's fund() reverts "No milestones").
+      const addCall = writeContract.mock.calls.find(
+        (c) => c[0].functionName === "addMilestone",
+      );
+      expect(addCall).toBeDefined();
+      expect(addCall![0].address).toBe(NEW_ESCROW);
+      // V2 addMilestone is 7-arg: [stepId, operator, amount, bond, window, tier, jobId]
+      expect(addCall![0].args).toHaveLength(7);
+      expect(addCall![0].args[6]).toBe("job-v2-token");
+
+      // Ordering: createEscrowV2 must come before addMilestone.
+      const createIdx = writeContract.mock.calls.findIndex((c) => c[0].functionName === "createEscrowV2");
+      const addIdx = writeContract.mock.calls.findIndex((c) => c[0].functionName === "addMilestone");
+      expect(createIdx).toBeLessThan(addIdx);
+    } finally {
+      closeStore();
+    }
+  });
+});
+
+// ===========================================================================
 // 4 — Oracle client V2 round-trip (the previously-dropped easAttestation field)
 // ===========================================================================
 

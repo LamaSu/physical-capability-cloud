@@ -78,14 +78,33 @@ function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
 const DEFAULT_ESCROW_ADDRESS = process.env.ESCROW_CONTRACT_ADDRESS as Address | undefined;
 const GATEWAY_PRIVATE_KEY = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
 
-/** Resolve MockUSDC address: env var > chain-config > undefined */
-function resolveMockUSDCAddress(): Address | undefined {
-  if (process.env.MOCK_USDC_ADDRESS) {
-    return process.env.MOCK_USDC_ADDRESS as Address;
-  }
+/**
+ * Resolve the MockUSDC token address for a given network.
+ *
+ * Precedence: chain-config `mockUSDC` FIRST, `MOCK_USDC_ADDRESS` env as a
+ * fallback ONLY when the network has no chain-config token (e.g. localhost,
+ * where forge-deploy writes the freshly-deployed token into the env line).
+ *
+ * The env was previously preferred, but a polluted deployment env
+ * (MOCK_USDC_ADDRESS set to the Flow-EVM mockUSDC 0x5f2eb54d… while running on
+ * base-sepolia) caused escrows to be minted against a token the payer holds 0
+ * of — fund() then reverts. Chain-config is the per-network source of truth for
+ * a deployed network; env only fills the gap where chain-config is empty.
+ *
+ * This is the single resolver shared by the escrow-create path
+ * (paid-job-flow.createJobFromSession) and the approve default (approveToken),
+ * so the escrow's `_token`, the approve target, and the fund pull all reference
+ * the same token.
+ */
+export function resolveMockUSDCAddress(network: string = PCC_NETWORK): Address | undefined {
   try {
-    return getContractAddress(PCC_NETWORK, "mockUSDC");
+    return getContractAddress(network, "mockUSDC");
   } catch {
+    // No chain-config token for this network (e.g. localhost) — fall back to
+    // the env override if one is set.
+    if (process.env.MOCK_USDC_ADDRESS) {
+      return process.env.MOCK_USDC_ADDRESS as Address;
+    }
     return undefined;
   }
 }
