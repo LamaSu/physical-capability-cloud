@@ -1,6 +1,6 @@
 # PCC Oracle Trust & Sovereignty Architecture
 
-**Status:** design + reference implementation, ready for lane pickup
+**Status:** PHASED — Phase 0 **centralized** (NOW, ≈ current V2 stack); Phase 1+ decentralization **DEFERRED** to per-sector critical mass (owner directive 2026-06-14). See "Phasing decision" below — it governs the rest of this doc.
 **Date:** 2026-06-14
 **Author:** /go (CDP-onramp session, handed off)
 **Constraint:** the V2 stack is **LIVE** on capability.network (escrow `0xbC1576…`, live oracle).
@@ -9,6 +9,46 @@ contracts/oracle/gateway in place. Each change below names the owning lane and w
 is safe-additive or needs a coordinated redeploy.
 
 ---
+
+## Phasing decision (AUTHORITATIVE — owner directive, 2026-06-14)
+
+**Centralize now; decentralize per economic sector once it reaches critical mass.** This
+supersedes the "do it now" framing of the handoff matrix below and resolves the three tensions
+at the end: during bootstrap PCC **keeps the fee and keeps centralized data — deliberately.**
+
+### Phase 0 — NOW (centralized; ≈ current V2 stack, kept as-is)
+- **Oracle: centralized.** The single PCC `authorizedOracle` attests all jobs. **No m-of-n, no
+  EigenLayer AVS, no bond-slashing for the oracle.** (Operator bonds STAY — they secure the
+  *doer*; only oracle-staking is excluded.)
+- **Fee: PCC collects it.** Stays `PCCProtocolV2.protocolFeeBps` → PCC treasury; users can't set
+  it (`onlyGovernor`). **No fee-in-attestation change yet.**
+- **Data: PCC collects system-wide — "no matter what."** Centralized telemetry / demand-intel /
+  reputation is the data foundation and a bootstrap necessity. This **reverses** the earlier
+  "observability off PCC" stance *for the platform's own collection*. Users still see only their
+  OWN jobs (multi-tenant access control), but PCC the platform sees all.
+- **Disputes: current centralized `arbiter`.**
+
+### Phase 1+ — LATER (per sector, at critical mass)
+- **Decentralize verification of CONTESTED jobs via PAID HUMAN JURORS.** The fee funds a pool of
+  **domain-expert human verifiers** who adjudicate disputed jobs (Kleros-like), rolled out one
+  economic sector at a time once that sector has enough qualified verifiers. Evolves the existing
+  `arbiter` seam — NOT the routine attestation path, and NOT crypto-economic restaking.
+- **Fee recipient flips PCC treasury → human-verifier pool** when a sector decentralizes
+  (compensation for adjudication labor). Positioned now; only the recipient changes.
+- **Routine attestation** may stay oracle-based or decentralize per-sector — decided at the time.
+- **Data stays centralized even here** ("no matter what") — the data layer is not on the
+  decentralization path.
+
+### Excluded (owner directive)
+EigenLayer AVS restaking; bond-slashing for the oracle. Rationale: judging **physical** work is a
+domain-expertise problem — human jurors fit it better than restaked-ETH validators, and the fee
+is the natural funding for that human-verification labor.
+
+### Therefore
+Concerns 1–3 below (and the handoff matrix) are the **Phase 1+ reference roadmap, not Phase 0
+work.** Keep the current centralized implementation now. The schema/fee/quorum reference code
+applies when a sector crosses critical mass. The only Phase-0-compatible item is *optional*
+user-facing per-job access control (users see their own jobs; PCC still collects all).
 
 ## The principle
 
