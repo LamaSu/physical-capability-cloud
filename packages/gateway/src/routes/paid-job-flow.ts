@@ -41,7 +41,12 @@ import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
-import { submitAttestationV2, isWriteEnabled as escrowWriteEnabled } from "../contracts/escrow-client.js";
+import {
+  submitAttestationV2,
+  submitEvidenceV2,
+  getMilestoneV2,
+  isWriteEnabled as escrowWriteEnabled,
+} from "../contracts/escrow-client.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -732,9 +737,34 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
+      // ── 4a-V2. On-chain evidence submit + stepId read (V2 path only) ──
+      // V2 binds the EAS attestation to the milestone's REAL on-chain stepId, so
+      // we (a) submit the evidence hash on-chain via MilestoneEscrowV2 and
+      // (b) read the milestone's stepId back from chain before asking the oracle
+      // to mint. Best-effort: any failure here leaves V1-style settlement intact.
+      const hasRealEscrow =
+        !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
+      let onChainStepId: `0x${string}` | undefined;
+      let evidenceTxHash: string | null = null;
+      if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
+        try {
+          const ev = await submitEvidenceV2(0, bundleHash as `0x${string}`, escrowAddress as `0x${string}`);
+          evidenceTxHash = ev.transactionHash;
+          const ms = await getMilestoneV2(0, escrowAddress as `0x${string}`);
+          onChainStepId = ms.stepId as `0x${string}`;
+        } catch (evErr) {
+          console.warn(
+            "[complete] V2 on-chain evidence submit / stepId read failed (best-effort):",
+            evErr instanceof Error ? evErr.message : evErr,
+          );
+        }
+      }
+
       // ── 4b. Oracle verification ─────────────────────────────────────
       // Every settlement must pass through the PCC Verification Oracle.
       // If PCC_ORACLE_KEY is not set, falls back to mock (dev/test).
+      // V2: ask the oracle to MINT an on-chain EAS attestation bound to the
+      // real milestone stepId; the returned UID is bound on-chain below.
       const oracleResponse = await verifyWithOracle({
         escrowAddress: escrowAddress ?? "0x0000000000000000000000000000000000000000",
         jobId,
@@ -742,6 +772,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         evidenceHash: bundleHash,
         assuranceTier: 0,
         chainId: resolveChainId(),
+        ...(useEasV2()
+          ? {
+              mintEasAttestation: true,
+              schemaUid: process.env.PCC_EVIDENCE_SCHEMA_UID,
+              // Prefer the real on-chain stepId; fall back to the job's stepId
+              // string (hashed by the oracle) when no real escrow is available.
+              stepId: onChainStepId ?? job.stepId,
+            }
+          : {}),
       });
 
       if (!oracleResponse.result.verified) {
@@ -782,17 +821,25 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             schemaUid: easMeta.schemaUid,
             recipient: easMeta.recipient,
             encoded: easMeta.encoded,
+            evidenceTxHash,
             submitted: false,
             attestationUid: null as string | null,
             attestationTxHash: null as string | null,
           };
 
-          // Oracle-minted EAS UID, if the caller supplied one to bind on-chain.
-          const easUid = typeof body.easUid === "string" ? (body.easUid as `0x${string}`) : undefined;
-          if (easUid && escrowWriteEnabled() && escrowAddress && escrowAddress.startsWith("0x")) {
+          // EAS UID to bind on-chain: prefer the oracle-minted UID (orchestrated
+          // path), fall back to a caller-supplied body.easUid (explicit bind).
+          const oracleEasUid = oracleResponse.easAttestation?.easUid;
+          const bodyEasUid = typeof body.easUid === "string" ? body.easUid : undefined;
+          const easUid = (oracleEasUid ?? bodyEasUid) as `0x${string}` | undefined;
+
+          if (easUid) easBridge.attestationUid = easUid;
+
+          // Bind on-chain only against a REAL escrow with write enabled. The
+          // mock/dev easUid (0xea…) is returned but not submitted to a live chain.
+          if (easUid && hasRealEscrow && escrowWriteEnabled()) {
             const submitted = await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
             easBridge.submitted = true;
-            easBridge.attestationUid = easUid;
             easBridge.attestationTxHash = submitted.transactionHash;
           }
 
@@ -801,6 +848,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
               path: "eas-v2",
               easSchema: easMeta.schema,
               easSubmitted: easBridge.submitted,
+              easUid: easBridge.attestationUid ?? null,
             },
           });
         } catch (easErr) {
