@@ -234,6 +234,43 @@ schema/fee so they survive the move to a committee (they do — attester set is 
 
 ---
 
+## Verification modes — who attests (owner refinement 2026-06-14)
+
+Not every job needs the oracle. Route by **who can judge the evidence** — this is the single
+biggest oracle-load reducer.
+
+### Mode A — user-attested (default for user-verifiable evidence; oracle-FREE)
+Photo proof / live stream goes **directly operator → user** (participant-scoped, P2P or relayed).
+The user **checks off** (approves) → escrow releases. **No oracle, no heavy CV.** This removes
+the oracle's biggest cost (semantic image/video) for the large class of jobs the buyer can judge.
+- **Escrow:** add a payer-approval release path (`approveAndRelease` by the buyer) alongside the
+  oracle-attested `release`. Safe — the buyer is releasing their OWN escrowed funds to the operator.
+
+### Mode B — oracle-attested (evidence the user CAN'T judge, or regulated tiers)
+Tier 2-3 / ALCOA+ / sensor / compliance / liability — where an independent, *recorded*
+attestation is required (the user's say-so isn't enough for the audit trail). Runs the tiered/
+sampled pipeline in the scaling section below.
+
+### Mode C — dispute / juror (fallback for A and B)
+User rejects (Mode A), operator contests, or the user goes silent past timeout → escalate:
+centralized oracle now, paid human jurors later.
+
+### Guardrails (so Mode A isn't a hole)
+- **Timeout:** user neither approves nor disputes within window W → auto-release OR escalate to
+  Mode C (configurable per tier). Stops a buyer stiffing the operator by going silent.
+- **Operator-initiated dispute:** a rejected job the operator believes is valid escalates to
+  Mode C — the user can't unilaterally reject good work.
+- **Tier-gating:** Mode A allowed for **tier 0-1 / subjective / low-stakes**; **tier 2-3 /
+  regulated REQUIRE Mode B** (you can't self-attest a compliance bundle).
+- **Evidence still collected:** the photo/stream still flows to the **private DB** (data moat,
+  dispute record, reputation) even though the oracle didn't verify it. "Avoid oracle
+  *verification*" ≠ "avoid data *collection*."
+
+### Effect on scaling
+Mode A pulls the oracle out of the loop for everything a buyer can judge. The oracle's tiered/
+sampled pipeline below now serves only **Mode B (regulated/expert) + Mode C (disputes)** — a large
+cut in oracle compute at millions of tx.
+
 ## Scaling the oracle to millions (at-scale path)
 
 From the 5-lens panel deliberation (workflow `wf_1256d20c-d61`, 2026-06-14). Fits the owner
