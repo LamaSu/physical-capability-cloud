@@ -595,6 +595,10 @@ export async function onboardRoutes(app: FastifyInstance) {
       const kc = new UnifiedKeychain();
       const keys = kc.generate();
 
+      // Surface the trace_id so the agent can echo it on every subsequent
+      // call via `x-pcc-trace-id`. Stamped by middleware/trace-id.ts.
+      const trace_id = (req as unknown as { traceId?: string }).traceId;
+
       return reply.send({
         success: true,
         message: "Your agent is provisioned. Everything is ready.",
@@ -602,6 +606,9 @@ export async function onboardRoutes(app: FastifyInstance) {
         // Identity
         token: gc.token,
         user_id: gc.userId,
+        trace_id,
+        trace_hint:
+          "Echo `x-pcc-trace-id` on every subsequent request. Quote it when filing `pcc_report` feedback so PCC can replay your full onboarding journey.",
 
         // Wallet (microdollars)
         wallet_balance_usd: gc.walletBalance / 1_000_000,
