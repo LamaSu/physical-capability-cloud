@@ -33,14 +33,34 @@ import type {
   CapabilityNode,
   RequestStatus,
   CapabilityNodeStatus,
+  DecompositionResult,
   DemandEnvelope,
   IntentSource,
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { decomposeRequest } from "../services/request-decomposer.js";
+import {
+  tryAgenticDecompose,
+  loadCandidatesFromRepo,
+  type CandidateCapability,
+  type LLMClient,
+} from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
 import { schema } from "@pcc/store";
+
+// ---------------------------------------------------------------------------
+// LLM client wiring — overridable for tests via _setLLMClientForTests().
+// In production, undefined means "let the agentic decomposer build the
+// default Anthropic client (or fall back if SDK/key missing)".
+// ---------------------------------------------------------------------------
+
+let _llmClientOverride: LLMClient | null | undefined = undefined;
+
+/** Test hook: pass a stub client, or pass `null` to force fallback. */
+export function _setLLMClientForTests(client: LLMClient | null | undefined): void {
+  _llmClientOverride = client;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,6 +143,43 @@ function buildEnvelopeFromRequest(
     requesterIdHash,
     createdAt: request.createdAt,
   };
+}
+
+/**
+ * Run the agentic decomposer with capability matching against the live registry.
+ * Falls back to the legacy template decomposer when the LLM is unavailable
+ * (no API key / SDK missing / call failed / JSON unparseable / empty DAG).
+ *
+ * This is the composition keystone — the route layer always goes through here
+ * so the agentic path is the default and the template path is the safety net.
+ */
+async function runDecomposition(request: CapabilityRequest): Promise<DecompositionResult> {
+  // Snapshot capabilities at decompose time so the matcher reflects what's
+  // currently live (including caps added since the gateway boot).
+  let candidates: CandidateCapability[] = [];
+  try {
+    const repos = getRepos();
+    candidates = loadCandidatesFromRepo(repos.capabilities);
+  } catch {
+    // Repo missing in some test paths — agentic still runs against [].
+  }
+
+  // Skip the LLM call entirely when override is `null` (test forces fallback)
+  // OR when there are no candidates AND no override — the agentic path's
+  // whole point is matching against live caps, so falling back is fine.
+  const skipAgentic = _llmClientOverride === null;
+  if (!skipAgentic) {
+    const agentic = await tryAgenticDecompose(
+      request,
+      () => candidates,
+      { client: _llmClientOverride ?? undefined },
+    );
+    if (agentic) return agentic;
+  }
+
+  // Template fallback — same shape as before.
+  const fallback = decomposeRequest(request);
+  return { ...fallback, source: "template" };
 }
 
 function emitIntent(envelope: DemandEnvelope, actor: string, actorType: "requestor" | "agent") {
@@ -266,7 +323,7 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     };
 
-    const result = decomposeRequest(request);
+    const result = await runDecomposition(request);
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
@@ -341,7 +398,7 @@ export async function requestRoutes(app: FastifyInstance) {
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
 
-    const result = decomposeRequest(request);
+    const result = await runDecomposition(request);
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
