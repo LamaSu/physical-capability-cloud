@@ -18,6 +18,64 @@ import {
 const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://localhost:4100";
 const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
 
+const ORACLE_TIMEOUT_MS = Number.parseInt(process.env.PCC_ORACLE_TIMEOUT_MS ?? "10000", 10);
+const ORACLE_RETRY_COUNT = Number.parseInt(process.env.PCC_ORACLE_RETRY_COUNT ?? "2", 10);
+const ORACLE_RETRY_DELAY_MS = Number.parseInt(process.env.PCC_ORACLE_RETRY_DELAY_MS ?? "200", 10);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export interface FetchRetryOptions {
+  /** Per-attempt timeout in ms (default PCC_ORACLE_TIMEOUT_MS / 10s). */
+  timeoutMs?: number;
+  /** Retry attempts after the first (default PCC_ORACLE_RETRY_COUNT / 2). */
+  retries?: number;
+  /** Base backoff in ms; doubled per attempt (default PCC_ORACLE_RETRY_DELAY_MS / 200). */
+  retryDelayMs?: number;
+}
+
+/**
+ * `fetch` with a per-attempt AbortController timeout and retry/backoff. The
+ * oracle call previously used a bare `fetch` with no timeout and no retry — a
+ * slow or briefly-unavailable oracle then hung (or failed) settlement. Retries on
+ * network errors, aborts (timeout), and transient HTTP (429 / 5xx); a 4xx other
+ * than 429 returns immediately (deterministic, not worth retrying). Backoff is
+ * exponential from `retryDelayMs`. Exported for unit testing.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: FetchRetryOptions = {},
+): Promise<Response> {
+  const timeoutMs = opts.timeoutMs ?? ORACLE_TIMEOUT_MS;
+  const retries = opts.retries ?? ORACLE_RETRY_COUNT;
+  const retryDelayMs = opts.retryDelayMs ?? ORACLE_RETRY_DELAY_MS;
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        lastErr = new Error(`oracle transient HTTP ${res.status}`);
+        await sleep(retryDelayMs * 2 ** attempt);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err;
+      if (attempt < retries) {
+        await sleep(retryDelayMs * 2 ** attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -106,7 +164,7 @@ export async function verifyWithOracle(request: OracleVerifyRequest): Promise<Or
     return mockVerification(request);
   }
 
-  const res = await fetch(`${ORACLE_URL}/verify`, {
+  const res = await fetchWithRetry(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
