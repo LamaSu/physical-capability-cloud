@@ -14,6 +14,10 @@ export {
   ValidationRegistryABI,
   VerifierRegistryABI,
   PCCProtocolABI,
+  PCCProtocolV2ABI,
+  MilestoneEscrowV2ABI,
+  MilestoneStatusV2,
+  milestoneStatusV2Name,
   PCC_FEE_RECIPIENT,
   PCC_DEFAULT_FEE_BPS,
   PCC_FEE_BPS_MIN,
@@ -23,7 +27,7 @@ export {
   ATTESTATION_SCHEMA_VERSION,
   ATTESTATION_V1_EMPTY_EXTRA_DATA,
 } from "./abi/index.js";
-export type { MilestoneStatusName, EntityTypeName, EntityStatusName } from "./abi/index.js";
+export type { MilestoneStatusName, MilestoneStatusV2Name, EntityTypeName, EntityStatusName } from "./abi/index.js";
 
 // Chain config
 export {
