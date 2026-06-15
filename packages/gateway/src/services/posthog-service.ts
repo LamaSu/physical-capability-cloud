@@ -46,6 +46,36 @@ export function trackServerEvent(
   }
 }
 
+/**
+ * Anchor a PostHog person profile for an agent journey.
+ *
+ * PostHog funnel *conversion* requires identified events — anonymous
+ * `capture()` alone under-counts. The funnel tracker (observability piece 4)
+ * calls this once, at the `provision` stage, with distinctId = trace_id so
+ * the subsequent `onboarding_*` events drive the funnel chart correctly.
+ *
+ * No-op (silent) when posthog-node is not installed / POSTHOG_API_KEY unset.
+ */
+export function identifyAgent(
+  distinctId: string,
+  properties?: Record<string, unknown>,
+): void {
+  if (!posthog) return;
+  try {
+    posthog.identify({
+      distinctId,
+      properties: {
+        ...properties,
+        kind: "agent_journey",
+        source: "gateway",
+        environment: process.env.NODE_ENV,
+      },
+    });
+  } catch {
+    /* never crash on analytics */
+  }
+}
+
 export function shutdownPostHog(): Promise<void> {
   return posthog?.shutdown?.() ?? Promise.resolve();
 }
