@@ -37,7 +37,7 @@ interface CopyableCodeProps {
   code: string;
 }
 
-function CopyableCode({ label, code }: CopyableCodeProps): JSX.Element {
+function CopyableCode({ label, code }: CopyableCodeProps): React.ReactElement {
   const [copied, setCopied] = useState(false);
   const handleCopy = async (): Promise<void> => {
     try {
@@ -95,7 +95,7 @@ interface HeroCardProps {
   cta?: { label: string; onClick: () => void };
 }
 
-function HeroCard({ badge, title, subtitle, glow, children, cta }: HeroCardProps): JSX.Element {
+function HeroCard({ badge, title, subtitle, glow, children, cta }: HeroCardProps): React.ReactElement {
   return (
     <GlassPanel padding="lg" glow={glow} className="space-y-4 h-full flex flex-col">
       <div>
@@ -156,7 +156,7 @@ const secondaryPathways = [
   },
 ];
 
-export function OnboardLandingPage(): JSX.Element {
+export function OnboardLandingPage(): React.ReactElement {
   const navigate = useNavigate();
   const setPageMeta = useUIStore((s) => s.setPageMeta);
 
