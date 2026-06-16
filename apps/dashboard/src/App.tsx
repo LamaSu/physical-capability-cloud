@@ -40,6 +40,7 @@ const AgentLogPage = lazy(() => import("./pages/AgentLogPage.js").then(m => ({ d
 const SettingsPage = lazy(() => import("./pages/SettingsPage.js").then(m => ({ default: m.SettingsPage })));
 const OnboardLandingPage = lazy(() => import("./pages/OnboardLandingPage.js").then(m => ({ default: m.OnboardLandingPage })));
 const OnboardWizardPage = lazy(() => import("./pages/OnboardWizardPage.js").then(m => ({ default: m.OnboardWizardPage })));
+const OnboardChatPage = lazy(() => import("./pages/OnboardChatPage.js").then(m => ({ default: m.OnboardChatPage })));
 const MarketplacePage = lazy(() => import("./pages/MarketplacePage.js").then(m => ({ default: m.MarketplacePage })));
 const MarketplaceDetailPage = lazy(() => import("./pages/MarketplaceDetailPage.js").then(m => ({ default: m.MarketplaceDetailPage })));
 const ROICalculatorPage = lazy(() => import("./pages/ROICalculatorPage.js").then(m => ({ default: m.ROICalculatorPage })));
@@ -288,7 +289,7 @@ function Shell() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   // Public pages that don't require auth
-  const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn"];
+  const publicPaths = ["/", "/start", "/whitepaper", "/go", "/earn", "/onboard/chat"];
   const isPublicPage = publicPaths.includes(location.pathname);
 
   // Login page at /login
@@ -347,6 +348,17 @@ function Shell() {
     return (
       <Suspense fallback={<PageLoader />}>
         <AgentLinkPage />
+      </Suspense>
+    );
+  }
+
+  // Conversational no-code onboarding (coord dc4d1ec8). Public so a layperson
+  // can reach it from a marketing link without first signing in. The chat
+  // page talks to POST /api/onboard/chat which is itself public on the gateway.
+  if (location.pathname === "/onboard/chat") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <OnboardChatPage />
       </Suspense>
     );
   }
