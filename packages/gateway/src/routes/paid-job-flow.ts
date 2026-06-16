@@ -354,21 +354,23 @@ export async function createJobFromSession(
         }
 
         if (!dropped) {
-          const onChainCount = (await publicClient.readContract({
-            address: addr as `0x${string}`,
-            abi: MilestoneEscrowV2ABI,
-            functionName: "getMilestoneCount",
-          })) as bigint;
-          if (onChainCount >= BigInt(normalizedMilestones.length)) {
-            console.log(
-              `[paid-job] V2 milestones confirmed on-chain: count=${onChainCount} (escrow ${addr})`,
-            );
-            return addr; // success — milestones landed
-          }
+          // Every addMilestone receipt mined with status "success" -> the milestones
+          // ARE on-chain. Do NOT re-read getMilestoneCount to "confirm": the public
+          // load-balanced RPC serves reads from a replica that lags the just-mined
+          // write, returning a phantom 0 that falsely abandons a VALID escrow (verified
+          // 2026-06-15 — 4/4 such "abandoned" escrows read getMilestoneCount=1 on-chain
+          // moments later). The mined receipts are the authoritative confirmation;
+          // read-lag is a consumer concern (/state + the smoke poll the count).
+          console.log(
+            `[paid-job] V2 escrow ${addr}: ${normalizedMilestones.length} milestone(s) added, receipts confirmed (attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+          );
+          return addr;
         }
 
+        // Only reached when an addMilestone tx was genuinely DROPPED (its receipt timed
+        // out) -> that escrow is missing a milestone, so abandon it and mint a fresh one.
         console.warn(
-          `[paid-job] escrow ${addr} milestones did not land (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — abandoning it + minting a fresh escrow`,
+          `[paid-job] escrow ${addr} had a dropped addMilestone tx (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
         );
       }
       throw new Error(
