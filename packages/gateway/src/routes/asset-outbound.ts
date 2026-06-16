@@ -380,7 +380,7 @@ export async function assetOutboundRoutes(app: FastifyInstance) {
       //    gate above already guaranteed headroom for `maxPriceUSD`, which is
       //    handed to the planner as its budget — so any returned plan is within
       //    the asset's ceiling.
-      const composition = planComposition(toComposeRequest(request));
+      const composition = await planComposition(toComposeRequest(request));
 
       // 4a. No capability covers the demand at the required tier → reject,
       //     without touching the spend counters.

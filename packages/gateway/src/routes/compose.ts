@@ -8,8 +8,9 @@
  * Storage: SQLite via @pcc/store (compositions + composition_candidates +
  * composition_executions tables), following the marketplace / requests
  * persistence pattern. State survives gateway redeploys. The candidate provider
- * is still the dev-injected pool for the scaffold; production wiring swaps it to
- * CapabilityFacade without changing the persisted shape.
+ * is the dev-injected SQLite pool by default; set PCC_COMPOSE_USE_FACADE=true to
+ * draw real registered capabilities from CapabilityFacade (production wiring)
+ * without changing the persisted shape.
  *
  * Execute wiring: executeComposition submits real jobs via JobFacade and
  * registers a durable workflow run via @pcc/workflow. The production binding
@@ -29,6 +30,7 @@ import {
   type CompositionOptimization,
   type CompositionStep,
   type CompositionStatus,
+  type AssuranceTier,
   type ExecuteCompositionResponse,
   type LocationConstraint,
   type GraphSearchRequest,
@@ -44,8 +46,8 @@ import { searchGraph } from "./graph-search.js";
 import { recordStepOutcome, finalizeReputation } from "./reputation.js";
 import { openSqliteStore, WorkflowEngine, Workflow } from "@pcc/workflow";
 import type { WorkflowContext } from "@pcc/workflow";
-import { getJobFacade } from "../facades/index.js";
-import type { SubmitJobInput, JobSubmitResult } from "../facades/index.js";
+import { getJobFacade, getCapabilityFacade, getKernelFacade } from "../facades/index.js";
+import type { SubmitJobInput, JobSubmitResult, CapabilityDTO } from "../facades/index.js";
 import type { Result } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
@@ -167,8 +169,11 @@ function saveExecution(r: ExecuteCompositionResponse): void {
 
 /**
  * Pluggable provider that returns capability candidates matching a step's
- * constraints. The scaffold uses a SQLite-backed implementation; production
- * wires this to CapabilityFacade.list({ capabilityType, ... }).
+ * constraints. The scaffold/dev default is a SQLite-backed in-memory pool;
+ * production wires this to {@link facadeProvider}, which draws real registered
+ * capabilities from CapabilityFacade.listByType(). Implementations may resolve
+ * synchronously (in-memory pool) or asynchronously (facade layer), so callers
+ * MUST await the result.
  */
 export interface CapabilityProvider {
   findByType(
@@ -177,7 +182,7 @@ export interface CapabilityProvider {
       minAssuranceTier: number;
       location?: LocationConstraint;
     },
-  ): CompositionCandidate[];
+  ): CompositionCandidate[] | Promise<CompositionCandidate[]>;
 }
 
 const inMemoryProvider: CapabilityProvider = {
@@ -214,6 +219,115 @@ function haversineKm(
 }
 
 // ---------------------------------------------------------------------------
+// Production candidate provider — CapabilityFacade-backed (the production gap
+// this module documents). Selected at runtime by {@link activeProvider}.
+// ---------------------------------------------------------------------------
+
+/**
+ * Capability DTOs carry no per-job duration estimate — duration is a property
+ * of a submitted job, not the capability SKU. Until the catalog models it,
+ * facade-sourced candidates use this placeholder; `speed` optimization
+ * therefore can't yet differentiate facade candidates (the dev pool still
+ * carries explicit per-candidate durations and is unaffected).
+ */
+const FACADE_DEFAULT_DURATION_MS = 60 * 60 * 1000; // 1h placeholder
+
+/** Highest assurance tier a capability advertises (0 when none declared). */
+function maxAssuranceTier(tiers: readonly number[] | undefined): AssuranceTier {
+  if (!tiers || tiers.length === 0) return 0;
+  const max = Math.max(...tiers);
+  return (max >= 0 && max <= 3 ? max : 0) as AssuranceTier;
+}
+
+/**
+ * Parse a capability's USD price from its pricing model. Prefers `baseCost`,
+ * falls back to `minimum`, then 0. PricingModel amounts are strings.
+ */
+function priceFromPricing(pricing: CapabilityDTO["pricing"] | undefined): number {
+  const base = Number.parseFloat(String(pricing?.baseCost ?? ""));
+  if (Number.isFinite(base)) return base;
+  const min = Number.parseFloat(String(pricing?.minimum ?? ""));
+  return Number.isFinite(min) ? min : 0;
+}
+
+/** Map an enriched CapabilityDTO + resolved operator → a planner candidate. */
+function dtoToCandidate(
+  dto: CapabilityDTO,
+  operatorAddress: string,
+): CompositionCandidate {
+  return {
+    capabilityId: dto.id,
+    kernelId: dto.kernelId,
+    operatorAddress,
+    capabilityType: dto.type,
+    estimatedPriceUSD: priceFromPricing(dto.pricing),
+    estimatedDurationMs: FACADE_DEFAULT_DURATION_MS,
+    assuranceTier: maxAssuranceTier(dto.assuranceTiers),
+    reputation: dto.reputation,
+    location: dto.location,
+    available: dto.available,
+  };
+}
+
+/**
+ * Production provider: draws real registered capabilities from CapabilityFacade
+ * (the same source as `/api/capabilities`). It applies the SAME constraint
+ * filter the in-memory provider does (availability, min assurance tier, and
+ * location radius) and resolves each candidate's operatorAddress via
+ * KernelFacade. Async because the facade layer is async — {@link plan} awaits it.
+ */
+const facadeProvider: CapabilityProvider = {
+  findByType: async (capabilityType, constraints) => {
+    const res = await getCapabilityFacade().listByType(capabilityType, {
+      includeReputation: true,
+    });
+    if (!res.success) return [];
+
+    const eligible = res.data.filter((dto) => {
+      if (dto.type !== capabilityType) return false; // defensive (facade pre-filters)
+      if (!dto.available) return false;
+      if (maxAssuranceTier(dto.assuranceTiers) < constraints.minAssuranceTier) {
+        return false;
+      }
+      if (constraints.location && dto.location) {
+        const km = haversineKm(constraints.location, dto.location);
+        const radius = constraints.location.radiusKm ?? 50;
+        if (km > radius) return false;
+      }
+      return true;
+    });
+
+    // Resolve operatorAddress once per unique kernel (KernelFacade), batched.
+    const kernelFacade = getKernelFacade();
+    const kernelIds = [...new Set(eligible.map((d) => d.kernelId))];
+    const opEntries = await Promise.all(
+      kernelIds.map(async (kid) => {
+        const k = await kernelFacade.getById(kid);
+        return [kid, k.success ? k.data.operatorAddress : ""] as const;
+      }),
+    );
+    const operatorByKernel = new Map<string, string>(opEntries);
+
+    return eligible.map((dto) =>
+      dtoToCandidate(dto, operatorByKernel.get(dto.kernelId) ?? ""),
+    );
+  },
+};
+
+/**
+ * Provider selection — the production wiring switch. Test/dev default is the
+ * in-memory candidate pool (filled via `_dev/register-candidate` /
+ * `_registerCandidateForTests`); production sets PCC_COMPOSE_USE_FACADE=true so
+ * /api/compose draws real registered capabilities through {@link facadeProvider}.
+ * The dev endpoint + pool are retained either way (tests rely on them).
+ */
+function activeProvider(): CapabilityProvider {
+  return process.env.PCC_COMPOSE_USE_FACADE === "true"
+    ? facadeProvider
+    : inMemoryProvider;
+}
+
+// ---------------------------------------------------------------------------
 // Planner — picks one candidate per step under the chosen optimization
 // ---------------------------------------------------------------------------
 
@@ -232,17 +346,17 @@ function scoreCandidate(
   }
 }
 
-function plan(
+async function plan(
   req: ComposeRequest,
   provider: CapabilityProvider,
-): { steps: CompositionStep[]; status: CompositionStatus; rejection?: string } {
+): Promise<{ steps: CompositionStep[]; status: CompositionStatus; rejection?: string }> {
   const stepTypes = req.steps ?? [req.outcomeType];
   const optimization = req.optimizeFor ?? "price";
 
   const chosen: CompositionStep[] = [];
   for (let i = 0; i < stepTypes.length; i++) {
     const capType = stepTypes[i]!;
-    const matches = provider.findByType(capType, {
+    const matches = await provider.findByType(capType, {
       minAssuranceTier: req.minAssuranceTier,
       location: req.location,
     });
@@ -415,7 +529,7 @@ function planViaGraphSearch(req: ComposeRequest, outcomeType: string): PlanResul
  *   3. Only when the direct provider finds NO candidate does graph-search take
  *      over, searching for a multi-step path to `outcomeType`.
  */
-function planSteps(req: ComposeRequest): PlanResult {
+async function planSteps(req: ComposeRequest): Promise<PlanResult> {
   // (1) Explicit chain → graph-search on the final outcome type.
   if (req.outcomeChain && req.outcomeChain.length > 0) {
     const finalType = req.outcomeChain[req.outcomeChain.length - 1]!;
@@ -423,8 +537,10 @@ function planSteps(req: ComposeRequest): PlanResult {
   }
 
   // (2) Direct provider first — preserves the backwards-compatible 1-step
-  //     (and explicit `steps`) behaviour exactly.
-  const direct = plan(req, inMemoryProvider);
+  //     (and explicit `steps`) behaviour exactly. The active provider is the
+  //     in-memory dev pool by default, or the CapabilityFacade-backed provider
+  //     in production (PCC_COMPOSE_USE_FACADE=true) — see {@link activeProvider}.
+  const direct = await plan(req, activeProvider());
   if (direct.status !== "no_path_found") {
     return direct;
   }
@@ -442,8 +558,9 @@ function planSteps(req: ComposeRequest): PlanResult {
  * exposed for in-process callers that need a composition object directly (e.g.
  * the asset-outbound demand route).
  *
- * Picks one of two planners (see {@link planSteps}): the in-memory candidate
- * provider for direct single-step / `steps` requests, or graph-search's
+ * Picks one of two planners (see {@link planSteps}): the active candidate
+ * provider (in-memory dev pool or CapabilityFacade) for direct single-step /
+ * `steps` requests, or graph-search's
  * Dijkstra traversal for an explicit `outcomeChain` or when no direct provider
  * matches. Either way the result is summarized identically and persisted to the
  * same store as the HTTP route, so the returned `compositionId` remains
@@ -452,8 +569,8 @@ function planSteps(req: ComposeRequest): PlanResult {
  * Returns a full {@link ComposeResponse}; inspect `.status` to distinguish
  * `proposed` (plan ready) from `over_budget` / `no_path_found` (rejections).
  */
-export function planComposition(req: ComposeRequest): ComposeResponse {
-  const result = planSteps(req);
+export async function planComposition(req: ComposeRequest): Promise<ComposeResponse> {
+  const result = await planSteps(req);
   const response = summarize(req, result.steps, result.status, result.rejection);
   saveComposition(response);
   return response;
@@ -697,7 +814,7 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const response = planComposition(parsed.data);
+    const response = await planComposition(parsed.data);
     return reply.code(response.status === "proposed" ? 201 : 200).send(response);
   });
 
@@ -787,10 +904,10 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /api/compose/_dev/register-candidate — scaffold-only candidate injection
+  // POST /api/compose/_dev/register-candidate — dev/test-only candidate injection
   //
-  // Production replaces the in-memory provider with CapabilityFacade and
-  // this endpoint goes away. Keep it gated for dev/test only.
+  // Production draws candidates from CapabilityFacade (PCC_COMPOSE_USE_FACADE=true);
+  // this endpoint + the in-memory pool are retained for dev/test, which rely on them.
   app.post(
     "/api/compose/_dev/register-candidate",
     async (req, reply) => {

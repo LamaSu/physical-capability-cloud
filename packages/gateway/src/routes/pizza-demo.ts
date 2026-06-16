@@ -376,7 +376,7 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
       location: { lat: loc.lat, lng: loc.lng, radiusKm: 25 },
     };
 
-    const planned = planComposition(composeReq);
+    const planned = await planComposition(composeReq);
     if (planned.status !== "proposed" || planned.steps.length < 2) {
       return reply.status(planned.status === "over_budget" ? 402 : 404).send({
         error: planned.status,

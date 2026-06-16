@@ -26,6 +26,7 @@ import {
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
 import { reputationRoutes, _clearReputationForTests } from "../routes/reputation.js";
+import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
 
 function makeApp() {
@@ -940,5 +941,153 @@ describe("createProductionBinding", () => {
     expect(result.stepsExecuted).toBe(1); // short-circuited after first failure
     // Only one submit call — second step was never reached
     expect(submitMock).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production wiring — CapabilityFacade-backed provider
+// (PCC_COMPOSE_USE_FACADE=true). Verifies /api/compose draws REAL registered
+// capabilities through the facade path, not the dev candidate pool.
+// ---------------------------------------------------------------------------
+
+describe("POST /api/compose — CapabilityFacade-backed provider (production wiring)", () => {
+  beforeEach(() => {
+    _clearComposeForTests();
+    _clearGraphSearchForTests();
+    process.env.PCC_COMPOSE_USE_FACADE = "true";
+  });
+
+  afterEach(() => {
+    delete process.env.PCC_COMPOSE_USE_FACADE;
+    _clearComposeForTests();
+  });
+
+  /** Register a kernel + a capability through the REAL facade write path so the
+   *  facade-backed provider can read them back via CapabilityFacade.listByType. */
+  async function registerRealCapability(opts: {
+    kernelId: string;
+    operatorAddress: string;
+    capabilityId: string;
+    type: string;
+    baseCostUSD: number;
+  }): Promise<void> {
+    const kernel = await getKernelFacade().register({
+      id: opts.kernelId,
+      name: `Kernel ${opts.kernelId}`,
+      operatorAddress: opts.operatorAddress,
+      location: { lat: 37.77, lng: -122.42 },
+      maxAssuranceTier: 2,
+    });
+    expect(kernel.success).toBe(true);
+
+    const cap = await getCapabilityFacade().create({
+      id: opts.capabilityId,
+      kernelId: opts.kernelId,
+      type: opts.type,
+      name: `${opts.type} @ ${opts.kernelId}`,
+      pricing: {
+        currency: "USDC",
+        baseCost: String(opts.baseCostUSD),
+        minimum: String(opts.baseCostUSD),
+      },
+      assuranceTiers: [0, 1, 2],
+      location: { lat: 37.77, lng: -122.42 },
+    });
+    expect(cap.success).toBe(true);
+  }
+
+  it("draws a single real registered capability (not the dev pool) and proposes it", async () => {
+    await registerRealCapability({
+      kernelId: "kernel-facade-1",
+      operatorAddress: "op-facade-1@example.com",
+      capabilityId: "cap-facade-print",
+      type: "facade-3d-printing",
+      baseCostUSD: 18,
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "facade-3d-printing", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(1);
+    expect(body.steps[0].capabilityId).toBe("cap-facade-print");
+    // operatorAddress resolved via KernelFacade, not present on CapabilityDTO.
+    expect(body.steps[0].operatorAddress).toBe("op-facade-1@example.com");
+    expect(body.steps[0].estimatedPriceUSD).toBe(18);
+    expect(body.totalPriceUSD).toBe(18);
+  });
+
+  it("plans a multi-step DAG (make-pizza → deliver-pizza) from real facade capabilities", async () => {
+    await registerRealCapability({
+      kernelId: "kernel-pizzeria",
+      operatorAddress: "op-pizzeria@example.com",
+      capabilityId: "cap-make-pizza",
+      type: "make-pizza",
+      baseCostUSD: 12,
+    });
+    await registerRealCapability({
+      kernelId: "kernel-courier",
+      operatorAddress: "op-courier@example.com",
+      capabilityId: "cap-deliver-pizza",
+      type: "deliver-pizza",
+      baseCostUSD: 7,
+    });
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "deliver-pizza",
+        steps: ["make-pizza", "deliver-pizza"],
+        budgetUSD: 50,
+        minAssuranceTier: 1,
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(2);
+    expect(body.steps.map((s: { capabilityId: string }) => s.capabilityId)).toEqual([
+      "cap-make-pizza",
+      "cap-deliver-pizza",
+    ]);
+    expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
+      "make-pizza",
+      "deliver-pizza",
+    ]);
+    // Linear DAG dependsOn wiring.
+    expect(body.steps[0].dependsOn).toEqual([]);
+    expect(body.steps[1].dependsOn).toEqual([0]);
+    // Operators resolved per step via KernelFacade.
+    expect(body.steps[0].operatorAddress).toBe("op-pizzeria@example.com");
+    expect(body.steps[1].operatorAddress).toBe("op-courier@example.com");
+    expect(body.totalPriceUSD).toBe(19);
+  });
+
+  it("ignores the dev candidate pool while the facade provider is active", async () => {
+    // A candidate injected into the dev pool must NOT surface via the facade path.
+    _registerCandidateForTests(
+      makeCandidate({ capabilityId: "dev-pool-only", capabilityType: "facade-only-type" }),
+    );
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "facade-only-type", budgetUSD: 100, minAssuranceTier: 1 },
+    });
+
+    // No REAL capability of this type exists → facade finds nothing,
+    // graph-search has no node → no_path_found (the dev pool was ignored).
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("no_path_found");
   });
 });
