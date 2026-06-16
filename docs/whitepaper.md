@@ -461,6 +461,14 @@ PCC's network treasury receives 10% of every job's royalty payment. These funds 
 
 Treasury flows are on-chain and auditable.
 
+### 7.6 Composition, Orchestration, and DAO-Native Ownership
+
+The composition engine treats a capability and an orchestrator as the same primitive. A composition step's capability type may resolve either to a leaf operator that performs work directly, or to an *orchestrator* — a capability whose execution is itself a sub-composition. Layers of orchestration are therefore nested compositions, resolved recursively, with the escrow's split-payout distributing settlement down the entire tree to every asset owner and every intermediating orchestrator's margin in a single pass. This closes composition under orchestration: the output of an orchestrator is a composition, and a composition is itself composable. No node imports an "orchestrator SDK"; orchestration is a property of the engine, instanced by each participant — a digital-science orchestrator, a federated wet-lab hub, a meta-agent composing several.
+
+Because settlement routes to an `operatorAddress` and the protocol is indifferent to what owns it, that address may be an individual, a multi-signature wallet, a revenue splitter, or a DAO treasury. Ownership is a deployment choice at the settlement slot, not a protocol primitive — and the contract nest already supplies the organs a DAO needs: ERC-8004 identity (membership), Royalty Tokens and contributor NFTs (equity), the reputation registry (track record), split-payout escrow and the network treasury (treasury and profit distribution), reward epochs (baseline income), and the validation and dispute path (arbitration). A node that distributes these to token holders is a DAO; under recursive composition, a meta-orchestrator whose suppliers are themselves DAOs is a DAO-of-DAOs, its cap table expressed as the composition's settlement tree.
+
+Verifiable evidence changes what such governance must decide. Because the oracle attests on-chain whether work occurred, and payment releases automatically against that attestation, governance is relieved of the disputes that dominate conventional DAOs — *did the work happen?* becomes a proof, not a vote — and narrows to genuinely discretionary parameters: pricing margin, routing preference, quality thresholds, treasury allocation. Governance itself stratifies into two credibly-neutral tiers that mirror the protocol's trust boundary: a protocol tier governs the shared trust root (the oracle, the escrow contracts, protocol fees, the registries), while node tiers govern only their own parameters and treasuries. A node may govern its margin; it may not govern the oracle. The economic substrate and the governance substrate are the same graph.
+
 ---
 
 ## 8. Setup Agent: Zero-Config Onboarding
