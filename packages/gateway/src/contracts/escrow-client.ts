@@ -53,6 +53,17 @@ import {
   MilestoneStatusV2,
   milestoneStatusV2Name,
 } from "@pcc/contracts/abi";
+// V3 (oracle.evidence.v2 / payer-approval) ABI — additive alongside V1/V2.
+// MilestoneEscrowV3 is the fee-from-attestation + Mode-A escrow (NOT YET
+// DEPLOYED). Only the pure calldata encoders below consume it; no V3 write
+// (wallet) ops are added because there is no deployed V3 address to target —
+// callers (verification-mode Mode A, a future paid-job-flow wiring) submit the
+// encoded calldata themselves.
+import {
+  MilestoneEscrowV3ABI,
+  MilestoneStatusV3,
+  milestoneStatusV3Name,
+} from "@pcc/contracts/abi";
 
 // ---------------------------------------------------------------------------
 // Network-aware configuration
@@ -1097,3 +1108,71 @@ export async function releaseMilestoneV2(
 
 /** Re-export V2 status utilities for convenience. */
 export { MilestoneStatusV2, milestoneStatusV2Name };
+
+// ===========================================================================
+// V3 / oracle.evidence.v2 path (MilestoneEscrowV3)
+// ---------------------------------------------------------------------------
+// MilestoneEscrowV3 is a parallel stack alongside V1/V2 (see #139 / #140). It
+// differs from V2 in three ways: (1) submitAttestation decodes feeBps +
+// feeRecipient from the pcc.evidence.v2 EAS payload and uses them in release;
+// (2) a NEW approveAndRelease(uint256) lets the PAYER settle Mode-A
+// (user-attested) milestones with no oracle attestation, no challenge window,
+// no fee; (3) the oracle-attested (Mode B) and dispute (Mode C) paths are
+// inherited from V2.
+//
+// These are PURE calldata encoders only — no wallet, no network. V3 is not yet
+// deployed, so there is no V3 address to send to; the caller (the payer's
+// wallet for Mode A, the gateway signer for Mode B once V3 ships) submits the
+// returned calldata. The wire signatures match V2 exactly for submitAttestation
+// + release, so encodeSubmitAttestationV2 / encodeReleaseV2 would also work
+// against a V3 clone — these V3-named variants exist so call sites are explicit
+// about which stack they target and dispatch through the V3 ABI.
+//
+// V1/V2 helpers above are untouched.
+// ===========================================================================
+
+/**
+ * Encode calldata for MilestoneEscrowV3.approveAndRelease(uint256) — Mode A.
+ *
+ * The PAYER (buyer) calls this to settle a user-attested milestone after
+ * inspecting the deliverable off-chain. No oracle attestation, no challenge
+ * window, no protocol fee. The gateway never sends this itself (it does not hold
+ * the payer's key) — it returns the calldata for the payer's wallet to submit.
+ */
+export function encodeApproveAndReleaseV3(milestoneIndex: number): Hex {
+  return encodeFunctionData({
+    abi: MilestoneEscrowV3ABI,
+    functionName: "approveAndRelease",
+    args: [BigInt(milestoneIndex)],
+  });
+}
+
+/**
+ * Encode calldata for MilestoneEscrowV3.submitAttestation(uint256, bytes32) —
+ * Mode B. The bytes32 is the pcc.evidence.v2 EAS UID; the contract decodes the
+ * 9-field tuple (incl. feeBps + feeRecipient) on-chain and caps the fee at
+ * MAX_FEE_BPS. Same wire signature as V2, dispatched through the V3 ABI.
+ */
+export function encodeSubmitAttestationV3(milestoneIndex: number, easUid: Hex): Hex {
+  return encodeFunctionData({
+    abi: MilestoneEscrowV3ABI,
+    functionName: "submitAttestation",
+    args: [BigInt(milestoneIndex), easUid],
+  });
+}
+
+/**
+ * Encode calldata for MilestoneEscrowV3.release(uint256) — Mode B release after
+ * the challenge window. V3 fee math reads the attested feeBps/feeRecipient bound
+ * at submitAttestation time (not protocol-root state). Index-only, like V2.
+ */
+export function encodeReleaseV3(milestoneIndex: number): Hex {
+  return encodeFunctionData({
+    abi: MilestoneEscrowV3ABI,
+    functionName: "release",
+    args: [BigInt(milestoneIndex)],
+  });
+}
+
+/** Re-export V3 status utilities for convenience. */
+export { MilestoneStatusV3, milestoneStatusV3Name };

@@ -5,6 +5,13 @@ import { useUIStore } from "../stores/ui-store.js";
 
 const pathways = [
   {
+    title: "Chat to Register",
+    description: "No CLI, no API keys, no wizard forms. Just describe what you do in plain English and an AI agent registers you live on the network. Works for pizza shops, couriers, lab work, 3D printers — anything you sell.",
+    path: "/onboard/chat",
+    icon: "M2 5a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2h-3l-3 3-3-3H4a2 2 0 01-2-2V5z",
+    glow: "green" as const,
+  },
+  {
     title: "Add a Machine",
     description: "Register any machine — from desktop 3D printers to industrial bio-reactors. Our AI assistant will help extract capabilities from your documentation.",
     path: "/onboard/wizard",

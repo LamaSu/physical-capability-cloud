@@ -24,6 +24,7 @@ import { pccProtocolRoutes } from "./routes/pcc-protocol.js";
 import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
+import { onboardChatRoutes } from "./routes/onboard-chat.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -130,6 +131,8 @@ import { apiGate } from "./middleware/api-gate.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
+import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
+import { adminObservabilityRoutes } from "./routes/admin-observability.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -332,6 +335,11 @@ export async function createGateway(port = 3200) {
   // to every other middleware + route.
   await app.register(traceIdPlugin);
 
+  // Onboarding funnel tracker — observability piece 4. Registered right after
+  // the trace-id plugin so req.traceId is populated. Non-encapsulated, so its
+  // onResponse hook fires for every route. INERT unless PCC_FUNNEL_ENABLED=true.
+  await app.register(funnelTrackerPlugin);
+
   // Session middleware
   app.decorateRequest("pccSession", null);
   app.addHook("onRequest", async (req) => {
@@ -443,6 +451,11 @@ export async function createGateway(port = 3200) {
   // Audit log routes
   await app.register(auditRoutes);
 
+  // Admin observability views — piece 5 troubleshooting-view bridge. AFTER
+  // apiGate (caller is authenticated) + admin-allowlisted. 404 unless
+  // PCC_FUNNEL_ENABLED=true.
+  await app.register(adminObservabilityRoutes);
+
   // REST routes
   await app.register(capabilityRoutes);
   // Capability graph search — Dijkstra over the capability graph (under
@@ -457,6 +470,11 @@ export async function createGateway(port = 3200) {
   await app.register(pccProtocolRoutes);
   await app.register(agentRoutes);
   await app.register(onboardRoutes);
+  // Conversational no-code onboarding chat (coord dc4d1ec8). Layperson-facing
+  // chat backed by the v3 agent-pack system_prompt. Registered after
+  // onboardRoutes so the chat tool execution can self-inject against the
+  // /api/onboard/* surface.
+  await app.register(onboardChatRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);

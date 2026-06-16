@@ -420,11 +420,13 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
   // EscrowCreated receipt: `escrow` is the first indexed topic. We feed a log
   // whose decode yields NEW_ESCROW so extractEscrowCreatedAddress returns it.
   const waitForTransactionReceipt = vi.fn();
-  // P0-1: createJobFromSession now pins explicit nonces (getTransactionCount) and
-  // verifies milestones landed on-chain (readContract -> getMilestoneCount). Mock
-  // both so the public client exposes the methods the new sequencing logic calls.
+  // P0-1: createJobFromSession pins explicit nonces (getTransactionCount). It trusts
+  // the addMilestone receipts (status:"success") as the landing confirmation and does
+  // NOT re-read getMilestoneCount — the public RPC serves reads from a replica that
+  // lags the just-mined write, returning a phantom 0. Mock getTransactionCount so the
+  // public client exposes it; readContract stays mocked for getEscrowStateV2 elsewhere.
   const getTransactionCount = vi.fn().mockResolvedValue(5);
-  const readContract = vi.fn().mockResolvedValue(1n); // getMilestoneCount >= the 1 milestone
+  const readContract = vi.fn().mockResolvedValue(1n); // for the getEscrowStateV2 reads
 
   beforeEach(async () => {
     vi.resetModules();

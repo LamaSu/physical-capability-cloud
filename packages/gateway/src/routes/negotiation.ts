@@ -35,6 +35,32 @@ import type {
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
+import {
+  getCapabilityDescriptor,
+  checkKernelOffersCapability,
+} from "../services/ad-hoc-pricing.js";
+
+/**
+ * Serialize a WorkflowChallenge for the wire — converts the BigInt
+ * blockNumber + timestamp inside `anchor` to decimal strings so
+ * Fastify's default JSON serializer doesn't throw
+ * "Do not know how to serialize a BigInt".
+ *
+ * The receiver can BigInt() the strings back when verifying.
+ */
+function serializeChallenge(
+  c: WorkflowChallenge | null,
+): Record<string, unknown> | null {
+  if (!c) return null;
+  return {
+    ...c,
+    anchor: {
+      ...c.anchor,
+      blockNumber: c.anchor.blockNumber.toString(),
+      timestamp: c.anchor.timestamp.toString(),
+    },
+  };
+}
 
 const challengeService = new ChallengeService();
 
@@ -56,6 +82,39 @@ export async function negotiationRoutes(app: FastifyInstance) {
       });
     }
 
+    // ── Up-front validation (4xx, not 500) ─────────────────────────
+    // Wrong-kernel check: refuse if the chosen kernel doesn't actually
+    // offer this capability type. Today the only signal we had was a
+    // foreign-key constraint blowing up downstream in 500. Now the
+    // buyer gets a clear 404 with which capability types the kernel
+    // does offer.
+    const kernelMismatch = checkKernelOffersCapability(
+      body.kernelId,
+      body.capabilityType,
+    );
+    if (kernelMismatch) {
+      return reply.status(404).send({
+        error: "kernel_capability_mismatch",
+        message: kernelMismatch,
+      });
+    }
+
+    // Capability-resolution check: either there's a built-in template
+    // for the type, or a registered capability row of that type. If
+    // neither: 404. (We still allow session creation in this case —
+    // wrong-kernel above is the harder gate.) This second check exists
+    // to surface "you can't get a quote for this" early.
+    const desc = getCapabilityDescriptor(
+      body.capabilityType,
+      body.capabilityId ?? undefined,
+    );
+    if (desc.kind === "missing") {
+      return reply.status(404).send({
+        error: "capability_not_buildable",
+        message: desc.reason,
+      });
+    }
+
     try {
       const { db } = getStore();
       const now = new Date();
@@ -71,7 +130,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         return reply.status(503).send({ error: "Operator has activated emergency stop" });
       }
 
-      // Load capability template
+      // Load capability template (built-in only; ad-hoc handled via desc)
       const template = getTemplate(body.capabilityType);
 
       // Snapshot operator constraints
@@ -117,10 +176,15 @@ export async function negotiationRoutes(app: FastifyInstance) {
 
       db.insert(negotiationSessions).values(session as any).run();
 
-      // Resolve template options for the user
+      // Resolve template options for the user. Built-in templates go
+      // through the resolver as before; ad-hoc capability types get a
+      // synthesized view model from the descriptor so the configurator
+      // UI still has groups to render.
       const resolvedOptions = template
         ? resolver.resolve(template, session.selections)
-        : null;
+        : desc.kind === "ad-hoc"
+          ? desc.descriptor.resolved
+          : null;
 
       // Issue a WorkflowChallenge anchored to a mock block (no live RPC in gateway by default).
       // This proves the session was created after a specific block, preventing replay attacks.
@@ -175,18 +239,36 @@ export async function negotiationRoutes(app: FastifyInstance) {
       return {
         session,
         resolvedOptions,
-        challenge,
+        // Serialize the challenge so the BigInt anchor fields don't
+        // throw "Do not know how to serialize a BigInt" in Fastify's
+        // default JSON serializer (the production 500 root cause).
+        challenge: serializeChallenge(challenge),
         template: template ? {
           capabilityType: template.capabilityType,
           name: template.name,
           description: template.description,
           paramCount: template.params.length,
           groups: [...new Set(template.params.map((p) => p.group))],
+        } : desc.kind === "ad-hoc" ? {
+          capabilityType: desc.descriptor.capabilityType,
+          name: desc.descriptor.name,
+          description: "Ad-hoc capability — pricing from operator's pricingModel.",
+          paramCount: desc.descriptor.resolved.allParams.length,
+          groups: desc.descriptor.resolved.groups.map((g) => g.name),
+          kind: "ad-hoc",
         } : null,
       };
     } catch (err) {
+      // Log the underlying error so future regressions are visible in
+      // the gateway logs instead of opaque 500s. We still return a
+      // generic body to the caller (don't leak stack/internals).
+      req.log.error(
+        { err: err instanceof Error ? err.message : String(err), kernelId: body.kernelId, capabilityType: body.capabilityType },
+        "[negotiation] session create failed",
+      );
       return reply.status(500).send({
-        error: "Failed to create session",
+        error: "session_create_failed",
+        message: err instanceof Error ? err.message : "Failed to create session",
       });
     }
   });
@@ -303,11 +385,29 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
         const policy = (policyRow?.policy ?? DEFAULT_OPERATOR_POLICY) as unknown as OperatorPolicy;
 
-        // Compute base price from template
+        // Compute base price. Built-in templates use basePricingHints;
+        // ad-hoc capabilities derive baseCost from the capability row's
+        // pricingModel (the operator's own pricing) — falling back to 10
+        // only when neither source has a number.
         const template = getTemplate(row.capabilityType);
-        const basePrice = template?.basePricingHints?.basePrice
-          ? parseFloat(template.basePricingHints.basePrice)
-          : 10;
+        let basePrice: number;
+        let quoteCurrency = "USDC";
+        if (template?.basePricingHints?.basePrice) {
+          basePrice = parseFloat(template.basePricingHints.basePrice);
+          quoteCurrency = template.basePricingHints.currency ?? "USDC";
+        } else {
+          // Ad-hoc path. Look up the capability row to find pricing.
+          const adHoc = getCapabilityDescriptor(
+            row.capabilityType,
+            row.capabilityId ?? undefined,
+          );
+          if (adHoc.kind === "ad-hoc") {
+            basePrice = parseFloat(adHoc.descriptor.basePrice);
+            quoteCurrency = adHoc.descriptor.currency;
+          } else {
+            basePrice = 10;
+          }
+        }
 
         // Apply operator pricing rules
         const selections = row.selections as Record<string, unknown>;
@@ -330,7 +430,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
             impact: a.amount.toFixed(2),
           })),
           totalPrice: adjustedPrice.toFixed(2),
-          currency: template?.basePricingHints?.currency ?? "USDC",
+          currency: quoteCurrency,
           bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
           challengeWindowSeconds,
           validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),

@@ -2,6 +2,14 @@ export { MilestoneEscrowABI, MilestoneStatus, milestoneStatusName } from "./Mile
 export type { MilestoneStatusName } from "./MilestoneEscrow.js";
 export { MilestoneEscrowV2ABI, MilestoneStatusV2, milestoneStatusV2Name } from "./MilestoneEscrowV2.js";
 export type { MilestoneStatusV2Name } from "./MilestoneEscrowV2.js";
+export {
+  MilestoneEscrowV3ABI,
+  MilestoneStatusV3,
+  milestoneStatusV3Name,
+  MAX_FEE_BPS_V3,
+  PCC_EVIDENCE_SCHEMA_V2,
+} from "./MilestoneEscrowV3.js";
+export type { MilestoneStatusV3Name } from "./MilestoneEscrowV3.js";
 export { MockUSDCABI } from "./MockUSDC.js";
 export { PCCForwarderABI } from "./PCCForwarder.js";
 export { IdentityRegistryABI, EntityType, EntityStatus, entityTypeName, entityStatusName } from "./IdentityRegistry.js";

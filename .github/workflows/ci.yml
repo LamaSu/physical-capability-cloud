@@ -36,6 +36,17 @@ jobs:
       - name: Type check
         run: pnpm -r exec tsc --noEmit
 
+      - name: Agent-pack onboarding smoke (skipped when ANTHROPIC_API_KEY absent)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PCC_GATEWAY_URL: https://capability.network
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY not set — skipping onboarding smoke (PASS for branches without the secret)"
+            exit 0
+          fi
+          pnpm --filter @pcc/gateway exec tsx scripts/smoke-onboarding-prompt.ts
+
   forge-tests:
     runs-on: ubuntu-latest
 
