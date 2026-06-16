@@ -25,6 +25,7 @@ import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { onboardChatRoutes } from "./routes/onboard-chat.js";
+import { snippetRoutes } from "./routes/snippet.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -475,6 +476,9 @@ export async function createGateway(port = 3200) {
   // onboardRoutes so the chat tool execution can self-inject against the
   // /api/onboard/* surface.
   await app.register(onboardChatRoutes);
+  // /snippet.md, /onboard/snippet, /onboard/snippet.json — copy-paste prompt for
+  // any tool-using LLM (Claude.ai, ChatGPT, Gemini, Cursor). Owner ask #178.
+  await app.register(snippetRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);
