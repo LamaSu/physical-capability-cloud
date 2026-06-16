@@ -14,6 +14,10 @@ const PUBLIC_PREFIXES = [
   "/api/health",
   "/api/auth/provision",        // Key provisioning is public
   "/api/auth/validate",         // Key validation is public (checks key itself)
+  "/api/waitlist",              // Public beta waitlist — signup (POST) + count (GET).
+                                // apiGate is non-encapsulated, so registration order does
+                                // NOT exempt routes; public paths must be allowlisted here.
+  "/api/beta-apply",            // Public beta-tester application (POST).
   "/api/feedback",
   "/api/onboard/identify-device", // Device identification is public (install.html landing)
   "/api/onboard/check/",        // Invite code validation is public
