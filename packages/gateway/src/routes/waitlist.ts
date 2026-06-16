@@ -17,7 +17,7 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // accepted are exempt — only NEW leads count toward the window.
 const hits = new Map<string, number[]>();
 const seenLeads = new Map<string, number>();
-function rateLimited(ip: string, leadId: string | null, max = 80, windowMs = 60_000): boolean {
+function rateLimited(ip: string, leadId: string | null = null, max = 80, windowMs = 60_000): boolean {
   if (leadId && seenLeads.has(leadId)) return false; // progressive update — always allow
   const now = Date.now();
   const arr = (hits.get(ip) ?? []).filter((t) => now - t < windowMs);
