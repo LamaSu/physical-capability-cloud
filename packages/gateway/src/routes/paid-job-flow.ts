@@ -318,26 +318,33 @@ export async function createJobFromSession(
         let dropped = false;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
-          const addTx = await walletClient.writeContract({
-            address: addr as `0x${string}`,
-            abi: MilestoneEscrowV2ABI,
-            functionName: "addMilestone",
-            args: [
-              stepIdBytes,
-              account.address, // operator = gateway signer (receives release payout)
-              parseUnits(ms.amount, 6),
-              parseUnits(ms.bondAmount ?? "0.00", 6),
-              BigInt(ms.challengeWindowSeconds ?? 0),
-              assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
-              jobId,
-            ],
-            nonce: nonce++,
-          });
-          // Drop vs revert: a dropped tx never produces a receipt -> waitForTransactionReceipt
-          // times out (caught -> retry with a fresh escrow). A mined-but-reverted tx is a real
-          // contract error -> throw immediately.
+          // The write AND its receipt are both inside the try. Under burst concurrency the
+          // addMilestone writeContract itself can throw BEFORE the tx is broadcast:
+          // eth_estimateGas runs against the just-created escrow and hits a load-balanced
+          // RPC replica that hasn't synced the createEscrowV2 yet -> "execution reverted".
+          // Same read-lag class as the old getMilestoneCount bug, on a different call.
+          // Treat a write throw exactly like a dropped receipt: abandon this escrow and mint
+          // a fresh one (the next attempt re-reads the nonce, and the createEscrowV2
+          // round-trip gives the RPC time to sync). A mined-but-reverted tx is still a real
+          // contract error and throws immediately below.
           let addReceipt;
+          let addTx;
           try {
+            addTx = await walletClient.writeContract({
+              address: addr as `0x${string}`,
+              abi: MilestoneEscrowV2ABI,
+              functionName: "addMilestone",
+              args: [
+                stepIdBytes,
+                account.address, // operator = gateway signer (receives release payout)
+                parseUnits(ms.amount, 6),
+                parseUnits(ms.bondAmount ?? "0.00", 6),
+                BigInt(ms.challengeWindowSeconds ?? 0),
+                assuranceTier, // requiredTier (0-3); the smoke quote uses tier 0
+                jobId,
+              ],
+              nonce: nonce++,
+            });
             addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
           } catch {
             dropped = true;
