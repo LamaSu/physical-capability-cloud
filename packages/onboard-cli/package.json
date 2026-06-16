@@ -1,0 +1,75 @@
+{
+  "name": "@pcc/onboard",
+  "version": "0.1.0",
+  "description": "Conversational PCC onboarding CLI. `npx @pcc/onboard` walks you through registering a capability on Physical Capability Cloud, end-to-end, in your terminal.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
+  "bin": {
+    "onboard": "dist/cli.js",
+    "pcc-onboard-chat": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./lib/onboard-loop": {
+      "types": "./dist/lib/onboard-loop.d.ts",
+      "import": "./dist/lib/onboard-loop.js"
+    },
+    "./lib/agent-package": {
+      "types": "./dist/lib/agent-package.d.ts",
+      "import": "./dist/lib/agent-package.js"
+    },
+    "./lib/tool-execute": {
+      "types": "./dist/lib/tool-execute.d.ts",
+      "import": "./dist/lib/tool-execute.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "kleur": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pcc",
+    "physical-capability-cloud",
+    "onboarding",
+    "agent",
+    "anthropic",
+    "claude",
+    "llm-tools",
+    "capability-network"
+  ],
+  "homepage": "https://capability.network",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LamaSu/physical-capability-cloud.git",
+    "directory": "packages/onboard-cli"
+  },
+  "bugs": "https://github.com/LamaSu/physical-capability-cloud/issues"
+}
