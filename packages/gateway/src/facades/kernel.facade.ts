@@ -36,9 +36,22 @@ export interface CreateKernelInput {
   id?: string;
   name?: string;
   operatorAddress?: string;
-  /** physicalAddress string (legacy alias) */
-  location?: string;
+  /**
+   * Location. Two accepted shapes (both persisted to their respective columns):
+   *   1. `{ lat, lng }` object — geo-coordinates persisted to the `location` column
+   *      (used by the dashboard map + by-location queries)
+   *   2. `string` — freeform postal address, persisted to `physicalAddress` only
+   *      (legacy alias kept for older onboarding flows)
+   * Both can be sent together; they populate different DB columns.
+   */
+  location?: string | { lat: number; lng: number };
   physicalAddress?: string;
+  /**
+   * Maximum assurance tier the operator claims they can sustain (0-3).
+   * Submitted value is persisted as-is — no silent override. Defaults to 2
+   * when omitted (most operators support tier 0/1/2 evidence by default).
+   */
+  maxAssuranceTier?: 0 | 1 | 2 | 3;
 }
 
 export interface HeartbeatInput {
@@ -209,8 +222,21 @@ export class KernelFacade extends BaseFacade {
           status: "online",
         };
         if (body.name) updates.name = body.name;
-        if (body.physicalAddress || body.location) {
-          updates.physicalAddress = body.physicalAddress || body.location;
+        // Upsert: physicalAddress accepts the literal string OR the legacy string
+        // form of `location`. Object location goes to the `location` column below.
+        if (body.physicalAddress) {
+          updates.physicalAddress = body.physicalAddress;
+        } else if (typeof body.location === "string" && body.location.length > 0) {
+          updates.physicalAddress = body.location;
+        }
+        if (typeof body.location === "object" && body.location !== null) {
+          const loc = body.location as { lat?: number; lng?: number };
+          if (typeof loc.lat === "number" && typeof loc.lng === "number") {
+            updates.location = { lat: loc.lat, lng: loc.lng };
+          }
+        }
+        if (typeof body.maxAssuranceTier === "number") {
+          updates.maxAssuranceTier = body.maxAssuranceTier;
         }
         const updated = repos.kernels.update(id, updates);
         const kernel = updated ?? existing;
@@ -221,20 +247,39 @@ export class KernelFacade extends BaseFacade {
         };
       }
 
+      // Location: accept either { lat, lng } object (geo) OR a string (address)
+      // OR both. Object goes to `location`, string goes to `physicalAddress`.
+      // Fix for coord task a8207dfa: previously hardcoded { lat: 0, lng: 0 }
+      // regardless of input, silently dropping any submitted coordinates.
+      let geoLocation: { lat: number; lng: number } = { lat: 0, lng: 0 };
+      let addressString = body.physicalAddress ?? "";
+      if (typeof body.location === "object" && body.location !== null) {
+        const loc = body.location as { lat?: number; lng?: number };
+        if (typeof loc.lat === "number" && typeof loc.lng === "number") {
+          geoLocation = { lat: loc.lat, lng: loc.lng };
+        }
+      } else if (typeof body.location === "string" && body.location.length > 0) {
+        // Legacy alias: string location populates physicalAddress only.
+        addressString = addressString || body.location;
+      }
+
       const kernelData = {
         id,
         name: body.name || "New Kernel",
         operatorAddress: body.operatorAddress || "0x0000000000000000000000000000000000000000",
         publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
-        location: { lat: 0, lng: 0 } as { lat: number; lng: number },
-        physicalAddress: body.physicalAddress || body.location || "",
+        location: geoLocation,
+        physicalAddress: addressString,
         status: "online",
         registeredAt: new Date().toISOString(),
         lastHeartbeat: new Date().toISOString(),
         version: "0.1.0",
         reputation: 0,
         totalJobsCompleted: 0,
-        maxAssuranceTier: 2,
+        // Fix for coord task c6b48ca1: respect the operator's submitted tier
+        // instead of hardcoding 2. Default to 2 when omitted (most operators
+        // sustain tier 0/1/2 evidence by default).
+        maxAssuranceTier: body.maxAssuranceTier ?? 2,
       };
 
       const inserted = repos.kernels.insert(kernelData);
