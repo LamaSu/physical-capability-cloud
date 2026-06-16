@@ -12,9 +12,13 @@ const BETA_FILE = `${DATA_DIR}/beta-applications.jsonl`;
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
-// Light per-IP sliding-window limit (the global rate limiter still applies on top).
+// Per-IP sliding-window limit. Generous: the summit signup is progressive (one POST
+// per step) and a packed room shares NAT'd IPs. Updates to a lead we've already
+// accepted are exempt — only NEW leads count toward the window.
 const hits = new Map<string, number[]>();
-function rateLimited(ip: string, max = 5, windowMs = 60_000): boolean {
+const seenLeads = new Map<string, number>();
+function rateLimited(ip: string, leadId: string | null = null, max = 80, windowMs = 60_000): boolean {
+  if (leadId && seenLeads.has(leadId)) return false; // progressive update — always allow
   const now = Date.now();
   const arr = (hits.get(ip) ?? []).filter((t) => now - t < windowMs);
   arr.push(now);
@@ -41,6 +45,29 @@ function readAll(file: string): unknown[] {
     .filter(Boolean);
 }
 
+// Progressive capture appends one row per step. Coalesce by leadId (fallback id/email)
+// so each lead is ONE record with the fullest data entered. Last non-empty value wins.
+// Old rows (no leadId) keep their own id key, so they stay distinct — no data loss.
+function readCoalesced(file: string): Record<string, any>[] {
+  const byKey = new Map<string, Record<string, any>>();
+  const order: string[] = [];
+  let anon = 0;
+  for (const raw of readAll(file)) {
+    const row = raw as Record<string, any>;
+    const key = String(row.leadId ?? row.id ?? row.email ?? `anon-${anon++}`);
+    if (!byKey.has(key)) {
+      byKey.set(key, {});
+      order.push(key);
+    }
+    const merged = byKey.get(key)!;
+    for (const k of Object.keys(row)) {
+      const v = row[k];
+      if (v !== null && v !== undefined && v !== "") merged[k] = v;
+    }
+  }
+  return order.map((k) => byKey.get(k)!);
+}
+
 function rid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -63,11 +90,14 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     return reply.header("content-type", "text/html; charset=utf-8").send(SUMMIT_HTML);
   });
 
-  // Low-friction waitlist signup (PUBLIC). Only requirement: a valid email.
+  // Low-friction, progressive waitlist signup (PUBLIC). Only requirement: a valid email.
+  // Send a stable `leadId` with every step and each call upserts one record (coalesced
+  // on read), so partial signups (email only, email+name, ...) are still captured.
   app.post("/api/waitlist", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, any>;
     if (b.website || b.hp) return { status: "ok" }; // honeypot — accept silently, drop
-    if (rateLimited(req.ip)) {
+    const leadId = b.leadId ? String(b.leadId).trim().slice(0, 64) : null;
+    if (rateLimited(req.ip, leadId)) {
       return reply.code(429).send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
     }
     const email = String(b.email ?? "").trim().toLowerCase();
@@ -76,6 +106,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
     }
     const rec = {
       id: rid("wl"),
+      leadId,
       kind: "waitlist",
       email,
       name: b.name ?? null,
@@ -85,13 +116,15 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
       useCase: b.useCase ?? null,
       inviteCode: b.inviteCode ? String(b.inviteCode).trim() : null,
       referral: b.referral ?? null,
-      source: b.source ?? b.ref ? String(b.source ?? b.ref).trim() : null,
+      source: (b.source ?? b.ref) ? String(b.source ?? b.ref).trim() : null,
+      completed: b.completed === true ? true : null,
       status: "new",
       createdAt: new Date().toISOString(),
       ip: req.ip,
     };
     append(WAITLIST_FILE, rec);
-    return { status: "ok", id: rec.id, message: "You're on the waitlist — we'll be in touch." };
+    if (leadId) seenLeads.set(leadId, Date.now());
+    return { status: "ok", id: rec.id, leadId, message: "You're on the waitlist — we'll be in touch." };
   });
 
   // Full beta-tester application (PUBLIC). Required: email, name, company.
@@ -157,7 +190,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
 
   // Public live counter for the signup page (#N social proof + open-mic read-out). No auth.
   app.get("/api/waitlist/count", async () => {
-    const count = readAll(WAITLIST_FILE).length;
+    const count = readCoalesced(WAITLIST_FILE).length; // distinct leads, not raw rows
     const beta = readAll(BETA_FILE).length;
     return { count, beta };
   });
@@ -165,7 +198,7 @@ export async function waitlistRoutes(app: FastifyInstance): Promise<void> {
   // Admin review / export (gated by X-Admin-Token).
   app.get("/api/admin/waitlist", async (req, reply) => {
     if (!adminOk(req, reply)) return;
-    const items = readAll(WAITLIST_FILE);
+    const items = readCoalesced(WAITLIST_FILE); // one merged record per lead
     return { total: items.length, items };
   });
   app.get("/api/admin/beta-apply", async (req, reply) => {
