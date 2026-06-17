@@ -255,7 +255,17 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       });
       if (commit.statusCode !== 200) console.error("[commit]", commit.statusCode, commit.body);
       expect(commit.statusCode).toBe(200);
-      expect(commit.json().session.status).toBe("committed");
+      const commitJson = commit.json();
+      expect(commitJson.session.status).toBe("committed");
+      // Commit must actually wire an escrow + job + scope, not just flip the
+      // session to committed. Previously this was swallowed as "best-effort"
+      // (kernel-service threw), leaving the buyer with a committed session but
+      // no job — a silent dead-end the green test never caught.
+      expect(commitJson.jobId).toMatch(/^job-/);
+      expect(commitJson.escrowId).toMatch(/^esc-/);
+      expect(commitJson.scopeId).toMatch(/^scope_/);
+      expect(commitJson.escrowAddress).toBeTruthy();
+      expect(commitJson.escrowStatus).toBe("funded");
     });
 
     it("advances AD-HOC pizza session through full flow including commit", async () => {
@@ -292,8 +302,19 @@ describe("Ad-hoc capability negotiate + build/options", () => {
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/commit`,
       });
+      if (commit.statusCode !== 200) console.error("[pizza commit]", commit.statusCode, commit.body);
       expect(commit.statusCode).toBe(200);
-      expect(commit.json().session.status).toBe("committed");
+      const commitJson = commit.json();
+      expect(commitJson.session.status).toBe("committed");
+      // BUG 2 acceptance: a buyer can commit an escrow + job against an AD-HOC
+      // capability. Prove the wiring actually ran (escrow + job + scope), not
+      // just that the session flipped to committed.
+      expect(commitJson.jobId).toMatch(/^job-/);
+      expect(commitJson.escrowId).toMatch(/^esc-/);
+      expect(commitJson.scopeId).toMatch(/^scope_/);
+      expect(commitJson.escrowAddress).toBeTruthy();
+      expect(commitJson.escrowStatus).toBe("funded");
+      expect(commitJson.message).toMatch(/escrow/i);
     });
   });
 
