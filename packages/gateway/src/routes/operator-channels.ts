@@ -34,6 +34,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
+import { getEmailTransport } from "../services/email-transport.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -217,7 +218,16 @@ interface ChannelDispatchResult {
   channelId: string;
   transport: ChannelTransport;
   delivered: boolean;
+  /** Provider message id on a real send (e.g. the Resend id). Absent on failure. */
   ref?: string;
+  /**
+   * Machine-readable failure code when `delivered` is false. Lets the
+   * operator's agent and the dashboard distinguish an honest "not configured"
+   * (`email_not_configured`) from a transport that isn't wired
+   * (`transport_not_implemented`), a bad endpoint (`invalid_endpoint`), or a
+   * provider rejection (`send_failed`).
+   */
+  error?: string;
   warning?: string;
 }
 
@@ -336,25 +346,29 @@ async function dispatchOne(
       case "webhook":
         return await sendWebhook(ch, p);
       case "email":
+        return await sendEmail(ch, p);
       case "sms":
       case "voice":
       case "push":
       case "mqtt":
       case "file":
-        // Demo-mode: log the intended payload + composer hint. A follow-on
-        // PR wires real providers; the operator's agent will plug those in
-        // by-conversation, not by-code-change.
+        // These transports have no real provider wired yet. Be honest:
+        // delivered=false with a clear code — NOT a fake success. (The old
+        // code returned delivered:true + ref "stub:transport-not-wired" here,
+        // which told operators a message sent when none did — bug B5.) Each
+        // provider is a per-transport follow-on with the same shape as the
+        // email path below.
         console.log(
-          `[op-channel] would dispatch via ${ch.transport} to operator=${ch.operatorSlug} ` +
-            `endpoint=${JSON.stringify(ch.endpoint)} describe="${ch.describe.slice(0, 80)}" ` +
-            `payload=${JSON.stringify(p)}`,
+          `[op-channel] ${ch.transport} transport not implemented; would dispatch to ` +
+            `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` +
+            `describe="${ch.describe.slice(0, 80)}" payload=${JSON.stringify(p)}`,
         );
         return {
           channelId: ch.id,
           transport: ch.transport,
-          delivered: true,
-          ref: "stub:transport-not-wired",
-          warning: `${ch.transport} provider not configured; logged only`,
+          delivered: false,
+          error: "transport_not_implemented",
+          warning: `${ch.transport} transport is not wired yet; nothing was sent`,
         };
     }
   } catch (e) {
@@ -362,9 +376,69 @@ async function dispatchOne(
       channelId: ch.id,
       transport: ch.transport,
       delivered: false,
+      error: "send_failed",
       warning: (e as Error).message,
     };
   }
+}
+
+/**
+ * Email dispatch — the wired path (bug B5 fix).
+ *
+ *   - No `endpoint.address`            → delivered:false, error invalid_endpoint.
+ *   - No provider configured           → delivered:false, error email_not_configured
+ *                                        (honest: this build env has no key).
+ *   - Provider configured + send OK    → delivered:true, ref = provider message id.
+ *   - Provider rejects the send        → throws; caught by dispatchOne as send_failed.
+ *
+ * The transport is resolved through `getEmailTransport()`, the mockable seam:
+ * tests inject a fake transport, production reads RESEND_API_KEY from env.
+ */
+async function sendEmail(
+  ch: ChannelRecord,
+  p: ChannelDispatchPayload,
+): Promise<ChannelDispatchResult> {
+  const address = (ch.endpoint as { address?: string }).address;
+  if (!address) {
+    return {
+      channelId: ch.id,
+      transport: "email",
+      delivered: false,
+      error: "invalid_endpoint",
+      warning: "email channel has no endpoint.address",
+    };
+  }
+  const transport = getEmailTransport();
+  if (!transport) {
+    return {
+      channelId: ch.id,
+      transport: "email",
+      delivered: false,
+      error: "email_not_configured",
+      warning:
+        "no email provider configured — set RESEND_API_KEY to enable email delivery; nothing was sent",
+    };
+  }
+  const result = await transport.send({
+    to: address,
+    subject: emailSubject(p),
+    text: emailBody(ch, p),
+  });
+  return { channelId: ch.id, transport: "email", delivered: true, ref: result.id };
+}
+
+/** One-line subject for the notification email. */
+function emailSubject(p: ChannelDispatchPayload): string {
+  return `PCC job ${p.jobId}: ${p.summary}`.slice(0, 200);
+}
+
+/** Plain-text body — the obvious naive composer, same role as sendWebhook's JSON. */
+function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
+  const lines = [p.summary, "", `Job: ${p.jobId}`, `Context: ${p.contextRef}`];
+  if (typeof p.priceUSD === "number") lines.push(`Price: $${p.priceUSD} USD`);
+  if (typeof p.deadlineSec === "number") lines.push(`Respond within: ${p.deadlineSec}s`);
+  lines.push("", `— PCC (channel: ${ch.label})`);
+  return lines.join("\n");
 }
 
 async function sendWebhook(
