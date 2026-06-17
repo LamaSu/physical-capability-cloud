@@ -7,8 +7,7 @@
 
 import type { Capability, ShopKernel } from "@pcc/spec";
 import type { CapabilityDTO, PopulationContext } from "../types.js";
-
-const STALE_HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes
+import { isKernelStale } from "./staleness.js";
 
 /**
  * Populate a single Capability model into a CapabilityDTO.
@@ -18,12 +17,11 @@ export function populateCapabilityDTO(
   kernel: ShopKernel | undefined,
   ctx: PopulationContext,
 ): CapabilityDTO {
-  const now = Date.now();
-  const heartbeatAge = kernel?.lastHeartbeat
-    ? now - new Date(kernel.lastHeartbeat).getTime()
-    : Infinity;
-
-  const isStale = kernel?.status === "online" && heartbeatAge > STALE_HEARTBEAT_MS;
+  // The capability being populated is itself an active listing, so its kernel
+  // qualifies for the keepalive grace: a listed kernel stays available past the
+  // bare 5-minute heartbeat threshold without an operator daemon. The grace is
+  // finite, so a long-dead listed kernel still goes stale (→ unavailable).
+  const isStale = isKernelStale(kernel?.status, kernel?.lastHeartbeat, /* hasActiveListing */ true);
   const kernelStatus = isStale ? "stale" as const : (kernel?.status as any);
   const available = kernelStatus === "online" && model.queueDepth < 10;
 
