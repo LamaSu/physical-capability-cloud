@@ -659,6 +659,84 @@ export function decomposeRequest(req: CapabilityRequest): DecompositionResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Direct-match decomposition (single registered listing)
+// ---------------------------------------------------------------------------
+
+/**
+ * A registered capability listing a request is routed directly to. Mirrors
+ * `RoutedListing` in request-matcher; kept as a local input type so this module
+ * stays pure (no DB access — the caller resolves the listing and passes it in).
+ */
+export interface DirectMatchListing {
+  capabilityType: string;
+  capabilityId: string;
+  kernelId: string;
+  name: string;
+  /** Base price as a dollar-string, from the listing's pricing model. */
+  basePrice: string;
+  currency: string;
+}
+
+/**
+ * A capability node that resolved to a specific listing. The optional
+ * `kernelId` / `capabilityId` carry the routed operator + capability row so a
+ * downstream step can fund an escrow against them. These are additive — generic
+ * (template-decomposed) nodes simply omit them.
+ */
+export type RoutedCapabilityNode = CapabilityNode & {
+  kernelId?: string;
+  capabilityId?: string;
+};
+
+/**
+ * Decompose a request that targets ONE registered capability listing into a
+ * single direct-match node.
+ *
+ * Used for atomic ad-hoc orders (a ride, a pizza, a delivery) where there is no
+ * multi-step build to plan — the request routes straight to the operator's
+ * listing. Cost comes from the listing's OWN pricing model (basePrice * qty),
+ * NOT the request budget or a composite template. The node carries the kernel +
+ * capability id so the order/escrow path can settle against that operator.
+ */
+export function decomposeDirectMatch(
+  req: CapabilityRequest,
+  listing: DirectMatchListing,
+  quantity = 1,
+): DecompositionResult {
+  const qty = Number.isFinite(quantity) && quantity > 0 ? Math.floor(quantity) : 1;
+  const unit = Number(listing.basePrice);
+  const estimatedCost = Math.round((Number.isFinite(unit) ? unit : 0) * qty * 100) / 100;
+
+  const node: RoutedCapabilityNode = {
+    id: `${req.id}-match`,
+    requestId: req.id,
+    name: listing.name,
+    description: req.description,
+    capabilityType: listing.capabilityType,
+    category: "fulfillment",
+    estimatedCost,
+    estimatedHours: 1,
+    dependencies: [],
+    parallel: false,
+    status: "pending",
+    assignedOperator: undefined,
+    bountyId: undefined,
+    materials: [],
+    evidenceRequirements: ["photo_of_completed_work"],
+    kernelId: listing.kernelId,
+    capabilityId: listing.capabilityId,
+  };
+
+  return {
+    nodes: [node],
+    totalEstimatedCost: estimatedCost,
+    totalEstimatedHours: node.estimatedHours,
+    criticalPath: [node.id],
+    parallelTracks: [],
+  };
+}
+
 /**
  * Expose template detection so tests can verify keyword routing.
  */
