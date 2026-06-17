@@ -22,9 +22,11 @@
  *     - with channels[] + availability           — kernel + capability + channels
  *                                                  attached in one shot, slug derived
  *
- * Dispatch behaviour for non-webhook transports is implementation-stubbed
- * (logs only); covered by attaching + checking dispatchToChannels return shape,
- * not by hitting a real provider.
+ * Dispatch behaviour for the email transport (real provider, gated on config)
+ * and the honest not-configured / not-implemented paths is covered separately
+ * in email-delivery.test.ts, which mocks the transport seam so no live provider
+ * is hit. This file covers attach/list/patch/delete + the manual/webhook return
+ * shapes.
  */
 
 import { describe, it, expect, beforeEach, afterAll, beforeAll } from "vitest";
