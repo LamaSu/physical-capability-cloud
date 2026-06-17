@@ -422,10 +422,21 @@ export async function createJobFromSession(
   // Job stepId mirrors the first normalized milestone (== on-chain milestone 0).
   const stepId = normalizedMilestones[0].stepId;
 
-  // Check if this kernel is externally-managed (daemon-polled)
-  const svc = getKernelService();
-  const localKernelId = (svc as any).config?.kernelId;
-  const isExternal = localKernelId && session.kernelId !== localKernelId;
+  // Check if this kernel is externally-managed (daemon-polled).
+  // isExternal is a best-effort routing hint (queued vs active), never a
+  // correctness gate — so a missing/uninitialised kernel-service must NOT
+  // abort escrow+job creation. Both callers wrap createJobFromSession (the
+  // negotiate commit handler swallows throws as "best-effort"; the fast-track
+  // route turns them into a 500), so an unguarded getKernelService() throw
+  // here silently strands the buyer with a committed session but no job or
+  // escrow. Default to "local" when the service isn't available.
+  let localKernelId: string | undefined;
+  try {
+    localKernelId = (getKernelService() as any).config?.kernelId;
+  } catch {
+    localKernelId = undefined;
+  }
+  const isExternal = !!localKernelId && session.kernelId !== localKernelId;
 
   repos.jobs.insert({
     id: jobId,
