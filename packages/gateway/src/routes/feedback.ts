@@ -1,45 +1,133 @@
-import type { FastifyInstance } from "fastify";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+/**
+ * Agent + human feedback sink.
+ *
+ * POST /api/feedback        (PUBLIC) — cold, unauthenticated agents (and the
+ *                            dashboard bug-report form / install.html) post here.
+ * GET  /api/admin/feedback  (X-Admin-Token gated) — review / export all reports.
+ *
+ * Storage mirrors routes/waitlist.ts EXACTLY: one JSONL line per submission on
+ * the mounted volume (DATA_DIR = dirname(PCC_DB_PATH)). Churn-proof — unknown
+ * fields ride along in the record, so the form/tool can add or remove fields
+ * with no migration. Light per-IP rate limit + honeypot guard the public surface.
+ *
+ * Onboarding agents that hit a bug, friction, or dead-end call the `pcc_report`
+ * tool (wired to this route in agent-package.json) so the team learns about
+ * agent friction without the agent needing a key or a human relay.
+ */
 
-const FEEDBACK_FILE = process.env.PCC_FEEDBACK_PATH ?? "./data/feedback.json";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
-interface FeedbackEntry {
-  id: string;
-  type: "bug" | "comment" | "difficulty" | "suggestion";
-  message: string;
-  page?: string;
-  userAgent?: string;
-  timestamp: string;
-  walletAddress?: string;
-  email?: string;
+// Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
+// Migrate to a table later if volume warrants it.
+const DATA_DIR = dirname(process.env.PCC_DB_PATH ?? "/app/data/pcc.sqlite");
+const FEEDBACK_FILE = `${DATA_DIR}/feedback.jsonl`;
+
+// Per-IP sliding-window limit (mirrors waitlist.ts). Generous default for a packed
+// onboarding session behind NAT, but a stuck agent retry-looping can't flood the
+// volume. Tunable via env for ops + tests.
+const RATE_MAX = Number.parseInt(process.env.PCC_FEEDBACK_RATE_MAX ?? "60", 10);
+const RATE_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_RATE_WINDOW_MS ?? "60000", 10);
+const hits = new Map<string, number[]>();
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const arr = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  arr.push(now);
+  hits.set(ip, arr);
+  return arr.length > RATE_MAX;
 }
 
-// Discord webhook for live feedback notifications. Reuses the same env var
-// /api/operator/support uses so all feedback shows up in one channel.
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
+/** Reset the in-memory rate-limit counter. Test-only export. */
+export function __resetFeedbackRateLimit(): void {
+  hits.clear();
+}
 
-async function notifyDiscord(entry: FeedbackEntry): Promise<void> {
+function append(file: string, rec: unknown): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  appendFileSync(file, JSON.stringify(rec) + "\n", "utf8");
+}
+function readAll(file: string): unknown[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function rid(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Admin review is gated by a shared token (X-Admin-Token === WAITLIST_ADMIN_TOKEN),
+// independent of the API-key scope system. Mirrors routes/waitlist.ts adminOk so
+// the two admin surfaces share one operator token. Fails closed when the env var
+// is unset.
+function adminOk(req: FastifyRequest, reply: FastifyReply): boolean {
+  const token = process.env.WAITLIST_ADMIN_TOKEN;
+  const provided = (req.headers["x-admin-token"] as string | undefined) ?? "";
+  if (!token || provided !== token) {
+    reply.code(403).send({ error: "forbidden", message: "Admin token required (X-Admin-Token)." });
+    return false;
+  }
+  return true;
+}
+
+// Canonical agent categories + the legacy dashboard categories. Unknown values
+// fall back to "bug" rather than 400 — a stuck agent's report should never be
+// rejected on a taxonomy quibble.
+const FEEDBACK_TYPES = new Set(["bug", "friction", "idea", "comment", "difficulty", "suggestion"]);
+const SEVERITIES = new Set(["low", "medium", "high", "critical"]);
+
+const SUMMARY_MAX = 5000; // keeps the prior /api/feedback message ceiling
+const DETAIL_MAX = 20000;
+const FIELD_MAX = 2000;
+
+function clampStr(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (!t) return null;
+  return t.length > max ? t.slice(0, max) : t;
+}
+
+// Discord webhook for live feedback notifications — preserved from the prior
+// /api/feedback so the team keeps getting alerts (the dashboard modal +
+// install.html both rely on it). Best-effort; no-op if the env var is unset.
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
+async function notifyDiscord(rec: Record<string, unknown>): Promise<void> {
   if (!DISCORD_WEBHOOK_URL) return;
   try {
     const fields: { name: string; value: string; inline?: boolean }[] = [
-      { name: "Type", value: entry.type, inline: true },
-      { name: "Page", value: entry.page ?? "—", inline: true },
+      { name: "Type", value: String(rec.type ?? "—"), inline: true },
     ];
-    if (entry.email) fields.push({ name: "Email", value: entry.email, inline: true });
-    if (entry.walletAddress) fields.push({ name: "Wallet", value: entry.walletAddress, inline: true });
-    fields.push({ name: "Message", value: entry.message.slice(0, 1024) });
-    fields.push({ name: "ID", value: entry.id, inline: true });
+    if (rec.severity) fields.push({ name: "Severity", value: String(rec.severity), inline: true });
+    if (rec.endpoint) fields.push({ name: "Endpoint", value: String(rec.endpoint), inline: true });
+    if (rec.traceId) fields.push({ name: "Trace", value: String(rec.traceId), inline: true });
+    if (rec.agentId) fields.push({ name: "Agent", value: String(rec.agentId), inline: true });
+    if (rec.email) fields.push({ name: "Email", value: String(rec.email), inline: true });
+    if (rec.walletAddress) fields.push({ name: "Wallet", value: String(rec.walletAddress), inline: true });
+    fields.push({ name: "Summary", value: String(rec.summary ?? "").slice(0, 1024) });
+    if (rec.detail) fields.push({ name: "Detail", value: String(rec.detail).slice(0, 1024) });
+    fields.push({ name: "ID", value: String(rec.id), inline: true });
 
     const payload = {
       username: "PCC Feedback",
-      embeds: [{
-        title: `New ${entry.type}`,
-        color: 0x2563eb,
-        fields,
-        footer: { text: (entry.userAgent ?? "").slice(0, 200) },
-        timestamp: entry.timestamp,
-      }],
+      embeds: [
+        {
+          title: `New ${rec.type}`,
+          color: 0x2563eb,
+          fields,
+          footer: { text: String(rec.userAgent ?? "").slice(0, 200) },
+          timestamp: rec.createdAt,
+        },
+      ],
     };
     const res = await fetch(DISCORD_WEBHOOK_URL, {
       method: "POST",
@@ -52,111 +140,79 @@ async function notifyDiscord(entry: FeedbackEntry): Promise<void> {
   }
 }
 
-function loadFeedback(): FeedbackEntry[] {
-  try {
-    if (existsSync(FEEDBACK_FILE)) {
-      return JSON.parse(readFileSync(FEEDBACK_FILE, "utf-8"));
-    }
-  } catch { /* ignore parse errors */ }
-  return [];
-}
-
-function saveFeedback(entries: FeedbackEntry[]): void {
-  const dir = dirname(FEEDBACK_FILE);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(FEEDBACK_FILE, JSON.stringify(entries, null, 2));
-}
-
 export async function feedbackRoutes(app: FastifyInstance) {
-  // Per-IP rate limiter for feedback (max 10 per hour)
-  const feedbackRateMap = new Map<string, { count: number; windowStart: number }>();
-  setInterval(() => {
-    const now = Date.now();
-    for (const [ip, e] of feedbackRateMap) if (now - e.windowStart > 3600_000) feedbackRateMap.delete(ip);
-  }, 600_000);
+  // Submit feedback (PUBLIC — agents are unauthenticated/cold). Mirrors
+  // routes/waitlist.ts: honeypot, per-IP rate limit, JSONL append on DATA_DIR,
+  // optional fields tolerated with no migration.
+  app.post("/api/feedback", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, any>;
+    if (b.website || b.hp) return { status: "ok" }; // honeypot — accept silently, drop
 
-  // Submit feedback (public — no auth required, but rate limited + file size capped)
-  app.post("/api/feedback", async (request, reply) => {
-    // Rate limit: 10 feedback per IP per hour
-    const now = Date.now();
-    const ipEntry = feedbackRateMap.get(request.ip);
-    if (ipEntry && now - ipEntry.windowStart < 3600_000 && ipEntry.count >= 10) {
-      return reply.status(429).send({ error: "Too many feedback submissions" });
-    }
-    if (!ipEntry || now - ipEntry.windowStart > 3600_000) {
-      feedbackRateMap.set(request.ip, { count: 1, windowStart: now });
-    } else {
-      ipEntry.count++;
+    if (rateLimited(req.ip)) {
+      return reply
+        .code(429)
+        .send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
     }
 
-    // Cap feedback file size at 5MB to prevent disk exhaustion
-    try {
-      if (existsSync(FEEDBACK_FILE) && statSync(FEEDBACK_FILE).size > 5 * 1024 * 1024) {
-        return reply.status(507).send({ error: "Feedback storage full" });
-      }
-    } catch { /* ignore */ }
-    const body = request.body as {
-      type?: string;
-      message?: string;
-      page?: string;
-      walletAddress?: string;
-      email?: string;
-    };
-
-    if (!body.message || body.message.trim().length === 0) {
-      return reply.status(400).send({ error: "Message is required" });
+    // Accept the canonical agent shape AND tolerate the legacy dashboard shape
+    // and the /api/feedback/agent-report aliases — no migration, fields ride along:
+    //   agent:        { type, summary, detail, endpoint, traceId, severity, agentId }
+    //   dashboard:    { type, message, page, walletAddress, email }
+    //   agent-report: { trace_id, last_endpoint, last_error_code, agent_kind }
+    const summary = clampStr(b.summary ?? b.message, SUMMARY_MAX);
+    if (!summary) {
+      return reply
+        .code(400)
+        .send({ error: "bad_request", message: "`summary` (or `message`) is required." });
     }
 
-    if (body.message.length > 5000) {
-      return reply.status(400).send({ error: "Message too long (max 5000 chars)" });
+    const typeRaw = String(b.type ?? "").trim().toLowerCase();
+    const type = FEEDBACK_TYPES.has(typeRaw) ? typeRaw : "bug";
+    const severityRaw = String(b.severity ?? "").trim().toLowerCase();
+    const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
+
+    const email = clampStr(b.email, 256);
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }
 
-    let email: string | undefined;
-    if (body.email && body.email.trim().length > 0) {
-      const trimmed = body.email.trim();
-      if (trimmed.length > 256) {
-        return reply.status(400).send({ error: "Email too long" });
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-        return reply.status(400).send({ error: "Invalid email format" });
-      }
-      email = trimmed;
-    }
-
-    const entry: FeedbackEntry = {
-      id: `fb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-      type: (["bug", "comment", "difficulty", "suggestion"].includes(body.type ?? "")
-        ? body.type
-        : "comment") as FeedbackEntry["type"],
-      message: body.message.trim(),
-      page: body.page,
-      userAgent: request.headers["user-agent"],
-      timestamp: new Date().toISOString(),
-      walletAddress: body.walletAddress,
+    const rec = {
+      id: rid("fb"),
+      kind: "feedback",
+      type,
+      summary,
+      detail: clampStr(b.detail, DETAIL_MAX),
+      endpoint: clampStr(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
+      traceId: clampStr(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
+      severity,
+      agentId: clampStr(b.agentId ?? b.agent_kind, FIELD_MAX),
+      errorCode: clampStr(b.errorCode ?? b.last_error_code, FIELD_MAX),
+      // Legacy dashboard fields ride along (no migration).
+      page: clampStr(b.page, FIELD_MAX),
       email,
+      walletAddress: clampStr(b.walletAddress, 128),
+      status: "new",
+      createdAt: new Date().toISOString(),
+      ip: req.ip,
+      userAgent: (req.headers["user-agent"] as string | undefined) ?? null,
     };
 
-    const entries = loadFeedback();
-    entries.push(entry);
-    saveFeedback(entries);
+    append(FEEDBACK_FILE, rec);
+    // Live-notify the team via Discord webhook (best-effort, non-blocking).
+    notifyDiscord(rec).catch(() => {});
 
-    // Live-notify the team via Discord webhook (best-effort, non-blocking)
-    notifyDiscord(entry).catch(() => {});
-
-    return reply.status(201).send({ id: entry.id, submitted: true });
+    return reply.code(201).send({
+      status: "ok",
+      id: rec.id,
+      submitted: true,
+      message: "Thanks — your feedback was recorded. We read every report.",
+    });
   });
 
-  // Read feedback — requires auth. Previously unauthenticated (red team: all
-  // submitted bug reports were world-readable, including wallet addresses).
-  app.get("/api/feedback", async (request, reply) => {
-    const operatorId = (request as any).operatorId ?? (request as any).userId;
-    if (!operatorId) {
-      return reply.status(401).send({ error: "authentication_required" });
-    }
-    const entries = loadFeedback();
-    return reply.send({
-      count: entries.length,
-      entries: entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
-    });
+  // Admin review / export (gated by X-Admin-Token === WAITLIST_ADMIN_TOKEN).
+  app.get("/api/admin/feedback", async (req, reply) => {
+    if (!adminOk(req, reply)) return;
+    const items = readAll(FEEDBACK_FILE);
+    return { total: items.length, items };
   });
 }

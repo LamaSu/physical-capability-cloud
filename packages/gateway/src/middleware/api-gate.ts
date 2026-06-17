@@ -18,7 +18,12 @@ const PUBLIC_PREFIXES = [
                                 // apiGate is non-encapsulated, so registration order does
                                 // NOT exempt routes; public paths must be allowlisted here.
   "/api/beta-apply",            // Public beta-tester application (POST).
-  "/api/feedback",
+  "/api/feedback",              // Public feedback sink (POST) — cold agents have no key.
+                                // GET /api/feedback stays a no-op (route removed); the
+                                // admin export below carries its own X-Admin-Token gate.
+  "/api/admin/feedback",        // Admin feedback export — gated by X-Admin-Token (adminOk),
+                                // NOT the API-key system, so it must bypass apiGate here.
+                                // Mirrors the waitlist admin-token pattern.
   "/api/onboard/identify-device", // Device identification is public (install.html landing)
   "/api/onboard/check/",        // Invite code validation is public
   "/api/onboard/chat",          // Layperson conversational onboarding (coord dc4d1ec8)
