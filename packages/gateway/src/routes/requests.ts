@@ -35,9 +35,11 @@ import type {
   CapabilityNodeStatus,
   DemandEnvelope,
   IntentSource,
+  DecompositionResult,
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
-import { decomposeRequest } from "../services/request-decomposer.js";
+import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
+import { matchListings } from "../services/request-matcher.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
 import { schema } from "@pcc/store";
@@ -231,7 +233,17 @@ export async function requestRoutes(app: FastifyInstance) {
   // ── POST /api/requests ────────────────────────────────────────────
   // Submit a new request and auto-decompose it
   app.post("/api/requests", async (req, reply) => {
-    const body = (req.body ?? {}) as Partial<CapabilityRequest>;
+    const body = (req.body ?? {}) as Partial<CapabilityRequest> & {
+      /** When set, route the request directly to a registered listing of this
+       *  capability type (ad-hoc or built-in) instead of NL template decomposition. */
+      capabilityType?: string;
+      /** Pin the direct match to a specific capability row. */
+      capabilityId?: string;
+      /** Constrain the direct match to a specific kernel. */
+      kernelId?: string;
+      /** Units to order (direct-match pricing = basePrice * quantity). */
+      quantity?: number;
+    };
 
     if (!body.title || !body.description) {
       return reply.status(400).send({
@@ -266,7 +278,29 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     };
 
-    const result = decomposeRequest(request);
+    // Routing decision: if the buyer named a capability type, route the request
+    // straight to a matching registered listing (keyed off the capability's own
+    // type + pricing model — ad-hoc types match exactly like built-in ones).
+    // Otherwise fall back to natural-language composite decomposition.
+    let result: DecompositionResult;
+    if (body.capabilityType) {
+      const match = matchListings(body.capabilityType, {
+        capabilityId: body.capabilityId,
+        kernelId: body.kernelId,
+      });
+      if (match.matches.length === 0) {
+        return reply.status(404).send({
+          error: "no_matching_listing",
+          message:
+            match.reason ??
+            `No registered listing offers capability type "${body.capabilityType}"`,
+        });
+      }
+      result = decomposeDirectMatch(request, match.matches[0], body.quantity);
+    } else {
+      result = decomposeRequest(request);
+    }
+
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
@@ -300,6 +334,44 @@ export async function requestRoutes(app: FastifyInstance) {
     emitIntent(envelope, actor, "requestor");
 
     return reply.status(201).send({ request, decomposition: result });
+  });
+
+  // ── POST /api/requests/match ──────────────────────────────────────
+  // Resolve a buyer's capability-type request to the operator listings that can
+  // fulfil it — WITHOUT creating a request. This is the routing primitive behind
+  // POST /api/requests's direct-match path: it keys off the capability's own type
+  // + pricing model, so ad-hoc types (rideshare-driver, wood-fired-pizza) resolve
+  // to their listing exactly like built-in ones. Lets an agent confirm an operator
+  // is reachable (and at what price) before committing to an order.
+  app.post("/api/requests/match", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      capabilityType?: string;
+      capabilityId?: string;
+      kernelId?: string;
+    };
+
+    if (!body.capabilityType) {
+      return reply.status(400).send({
+        error: "bad_request",
+        message: "capabilityType is required",
+      });
+    }
+
+    const match = matchListings(body.capabilityType, {
+      capabilityId: body.capabilityId,
+      kernelId: body.kernelId,
+    });
+
+    if (match.matches.length === 0) {
+      return reply.status(404).send({
+        error: "no_matching_listing",
+        message: match.reason,
+        matches: [],
+        count: 0,
+      });
+    }
+
+    return { matches: match.matches, count: match.matches.length };
   });
 
   // ── GET /api/requests ─────────────────────────────────────────────
