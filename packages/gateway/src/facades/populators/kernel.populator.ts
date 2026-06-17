@@ -14,9 +14,7 @@ import type {
   PopulationContext,
 } from "../types.js";
 import { getReputationService } from "../../services/reputation-service.js";
-
-/** Staleness threshold — 5 minutes */
-const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
+import { isKernelStale } from "./staleness.js";
 
 /**
  * Raw kernel DB row — matches what KernelRepository.findById/findAll returns.
@@ -88,14 +86,13 @@ export function populateKernelDTO(
   ctx: PopulationContext,
   activeJobCount?: number,
 ): KernelDTO {
-  const now = Date.now();
-  const heartbeatAge = model.lastHeartbeat
-    ? now - new Date(model.lastHeartbeat).getTime()
-    : Infinity;
-
-  const isStale = model.status === "online" && heartbeatAge > STALE_HEARTBEAT_MS;
   const capabilityTypes = capabilities.map((c) => c.type);
   const capabilityCount = capabilities.length;
+
+  // A kernel with an active listing (≥1 capability) is open for business and
+  // gets a keepalive grace, so low-traffic operators stay available without
+  // periodic heartbeats. Kernels with no listing keep the bare 5-min threshold.
+  const isStale = isKernelStale(model.status, model.lastHeartbeat, capabilityCount > 0);
 
   const reputationService = getReputationService();
   const totalJobsCompleted = model.totalJobsCompleted ?? 0;

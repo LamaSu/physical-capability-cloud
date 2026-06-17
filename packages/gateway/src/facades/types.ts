@@ -166,7 +166,11 @@ export interface KernelDTO {
   reputation?: number;
   /** Total completed jobs */
   totalJobsCompleted: number;
-  /** Is the kernel stale? (heartbeat >5min old while status=online) */
+  /**
+   * Is the kernel stale? Online kernels go stale after 5min without a
+   * heartbeat; a kernel with an active listing (≥1 capability) gets a 24h
+   * keepalive grace so low-traffic operators stay available without a daemon.
+   */
   isStale: boolean;
   /** Active job count */
   activeJobCount?: number;

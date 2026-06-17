@@ -49,14 +49,6 @@ function makeKernel(overrides: Partial<ShopKernel> = {}): ShopKernel {
   } as unknown as ShopKernel;
 }
 
-function makeStaleKernel(overrides: Partial<ShopKernel> = {}): ShopKernel {
-  return makeKernel({
-    status: "online",
-    lastHeartbeat: new Date(Date.now() - 6 * 60 * 1000).toISOString(), // 6 min ago
-    ...overrides,
-  });
-}
-
 function makeCtx(overrides: Partial<PopulationContext> = {}): PopulationContext {
   return {
     currency: "USDC",
@@ -102,8 +94,26 @@ describe("populateCapabilityDTO()", () => {
     expect(dto.available).toBe(false);
   });
 
-  it("kernelStatus='stale' when status=online and heartbeat > 5 minutes old", () => {
-    const kernel = makeStaleKernel();
+  it("active listing stays available past the 5-minute threshold (keepalive grace)", () => {
+    // Bug fix: a kernel with an active listing must NOT silently drop to
+    // unavailable just because it has not sent a heartbeat in the last 5 min.
+    // The capability being populated is itself an active listing.
+    const kernel = makeKernel({
+      status: "online",
+      lastHeartbeat: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour ago
+    });
+    const model = makeCapability({ queueDepth: 0 });
+    const dto = populateCapabilityDTO(model, kernel, makeCtx());
+    expect(dto.kernelStatus).toBe("online");
+    expect(dto.available).toBe(true);
+  });
+
+  it("kernelStatus='stale' once the heartbeat exceeds the 24h keepalive grace", () => {
+    // The grace is generous but finite — a long-dead listed kernel is still flagged.
+    const kernel = makeKernel({
+      status: "online",
+      lastHeartbeat: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), // 25 hours ago
+    });
     const model = makeCapability();
     const dto = populateCapabilityDTO(model, kernel, makeCtx());
     expect(dto.kernelStatus).toBe("stale");

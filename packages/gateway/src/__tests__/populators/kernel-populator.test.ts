@@ -95,9 +95,30 @@ describe("populateKernelDTO()", () => {
     expect(dto.isStale).toBe(false);
   });
 
-  it("isStale=true when status=online and heartbeat > 5 minutes ago", () => {
+  it("isStale=true when online + heartbeat > 5min ago and NO active listing", () => {
+    // No listing → bare 5-minute threshold applies.
     const model = makeStaleKernel();
     const dto = populateKernelDTO(model, [], makeCtx());
+    expect(dto.isStale).toBe(true);
+  });
+
+  it("isStale=false when online + heartbeat > 5min ago BUT kernel has an active listing", () => {
+    // Bug fix: a listed kernel stays available without periodic heartbeats.
+    const model = makeRawKernel({
+      status: "online",
+      lastHeartbeat: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour ago
+    });
+    const dto = populateKernelDTO(model, mockCapabilities, makeCtx());
+    expect(dto.isStale).toBe(false);
+  });
+
+  it("isStale=true when a listed kernel's heartbeat exceeds the 24h keepalive grace", () => {
+    // The grace is finite — a long-dead listed kernel is still flagged.
+    const model = makeRawKernel({
+      status: "online",
+      lastHeartbeat: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), // 25 hours ago
+    });
+    const dto = populateKernelDTO(model, mockCapabilities, makeCtx());
     expect(dto.isStale).toBe(true);
   });
 
