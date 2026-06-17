@@ -1,11 +1,16 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { DocumentAnalysisResult, MachineRegistration } from "@pcc/spec";
+import type { MachineRegistration } from "@pcc/spec";
 import { UnifiedKeychain } from "@pcc/agent-runtime";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { Sentry } from "../sentry.js";
 import { getRepos } from "../db.js";
+import {
+  analyzeOnboardingText,
+  coalesceAnalysisText,
+  coalesceSourceDocumentId,
+} from "./onboard-analysis.js";
 // Wave 4.1 — TENANT_ENFORCE feature flag. Default OFF; when on, the listing
 // route filters registrations by req.tenantId (from T1.9 tenantContext
 // middleware). The /register handler always backfills tenant_id at insert
@@ -16,35 +21,41 @@ import { tenantOpts } from "../config/tenant-enforce.js";
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
 export async function onboardRoutes(app: FastifyInstance) {
-  // Upload document and return mock AI analysis
-  app.post("/api/onboard/analyze", async (req) => {
-    const result: DocumentAnalysisResult = {
-      suggestedCapabilities: [
-        {
-          id: `sug-${Date.now()}`,
-          type: "fdm",
-          name: "Standard FDM Printing",
-          description: "Layer-by-layer extrusion with 0.4mm nozzle",
-          materials: ["PLA", "PETG", "ABS", "TPU"],
-          tolerances: { linear: "±0.2mm", surface: "Ra 12.5" },
-          envelope: { x: 250, y: 210, z: 210, unit: "mm" },
-          suggestedParams: [],
-          confidence: 0.92,
-          sourceReason: "Extracted from manufacturer datasheet",
-        },
-      ],
-      extractedSpecs: {
-        "build-volume": "250 x 210 x 210 mm",
-        "layer-height": "0.05 - 0.30 mm",
-        "nozzle-temp-max": "300°C",
-        "bed-temp-max": "120°C",
-      },
-      extractedMaterials: ["PLA", "PETG", "ABS", "TPU", "ASA", "PC"],
-      extractedTolerances: [{ linear: "±0.2mm", surface: "Ra 12.5" }],
-      confidence: 0.89,
-      sourceDocumentId: "doc-uploaded",
-    };
-    return { status: "ok", analysis: result };
+  // Analyze an operator/machine description and return an input-derived
+  // capability analysis. Routes through the same agentic path as the live v3
+  // onboard-chat endpoint (an Anthropic model primed with PCC capability
+  // context), with a deterministic keyword-classifier fallback when no
+  // ANTHROPIC_API_KEY is set. See routes/onboard-analysis.ts.
+  //
+  // This replaced a stub that returned hardcoded FDM 3D-printer specs for
+  // every input — a rideshare description now yields a rideshare analysis,
+  // not build-volume + nozzle temps + PLA.
+  app.post("/api/onboard/analyze", async (req, reply) => {
+    const text = coalesceAnalysisText(req.body);
+    if (!text) {
+      return reply.status(400).send({
+        error: "text_required",
+        message:
+          "Provide the operator or machine description to analyze. Send { text } " +
+          "(also accepts description / content / documentText / documents[]).",
+      });
+    }
+
+    try {
+      const sourceDocumentId = coalesceSourceDocumentId(req.body);
+      const { analysis, mode, warning } = await analyzeOnboardingText(text, { sourceDocumentId });
+      trackServerEvent("document_analyzed", {
+        mode,
+        type: analysis.suggestedCapabilities[0]?.type ?? "unknown",
+      });
+      return { status: "ok", analysis, mode, ...(warning ? { warning } : {}) };
+    } catch (e) {
+      req.log.error(e, "[onboard] analyze failed");
+      return reply.status(500).send({
+        error: "analysis_failed",
+        message: (e as Error).message,
+      });
+    }
   });
 
   // Submit machine registration
