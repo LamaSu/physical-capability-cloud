@@ -22,14 +22,18 @@ export type AssuranceTier = 0 | 1 | 2 | 3;
 
 export type CapabilityType = string; // e.g. "3d-printing", "cnc"
 
+// Canonical job-status vocabulary — mirrors the gateway's allowlist on
+// PATCH /api/jobs/:id/status. The API canonicalised on `in_progress`; the
+// legacy `running` value is accepted there only as an input alias and is
+// never returned, so it is not part of this union.
 export type StepStatus =
   | "pending"
   | "queued"
-  | "running"
+  | "in_progress"
+  | "paused"
   | "completed"
   | "failed"
-  | "cancelled"
-  | "disputed";
+  | "cancelled";
 
 export type EscrowStatus =
   | "pending"
