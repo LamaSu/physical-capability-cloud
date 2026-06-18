@@ -48,6 +48,23 @@ import { schema } from "@pcc/store";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Snapshot the live capability-registry `type` column. Used by
+ * decomposeRequest() to bias template selection toward kernels that are
+ * actually registered RIGHT NOW (the B1 fix from 2026-06-17). Returns
+ * an empty array if the repo is unavailable -- decomposeRequest() then
+ * falls back to its hardcoded vocabulary safely.
+ */
+function liveCapabilityTypes(): string[] {
+  try {
+    const repos = getRepos();
+    const all = repos.capabilities.findAll();
+    return [...new Set(all.map((c) => c.type))];
+  } catch {
+    return [];
+  }
+}
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -281,7 +298,9 @@ export async function requestRoutes(app: FastifyInstance) {
     // Routing decision: if the buyer named a capability type, route the request
     // straight to a matching registered listing (keyed off the capability's own
     // type + pricing model — ad-hoc types match exactly like built-in ones).
-    // Otherwise fall back to natural-language composite decomposition.
+    // Otherwise fall back to natural-language composite decomposition with
+    // live-vocab-aware DAG construction (B1 fix from 2026-06-17 — see romeo's
+    // food_delivery template).
     let result: DecompositionResult;
     if (body.capabilityType) {
       const match = matchListings(body.capabilityType, {
@@ -298,8 +317,9 @@ export async function requestRoutes(app: FastifyInstance) {
       }
       result = decomposeDirectMatch(request, match.matches[0], body.quantity);
     } else {
-      result = decomposeRequest(request);
+      result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
     }
+
 
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
@@ -413,7 +433,7 @@ export async function requestRoutes(app: FastifyInstance) {
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
 
-    const result = decomposeRequest(request);
+    const result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
@@ -554,7 +574,7 @@ export async function requestRoutes(app: FastifyInstance) {
       return { requestId: request.id, criticalPath: [], totalHours: 0 };
     }
 
-    const result = decomposeRequest(request);
+    const result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
     const criticalNodes = result.criticalPath
       .map((id) => request.capabilityDag.find((n) => n.id === id))
       .filter(Boolean) as CapabilityNode[];

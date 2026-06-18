@@ -411,6 +411,97 @@ const TEMPLATES: Record<string, TemplateFactory> = {
     }),
   ],
 
+  // -- Food delivery (pizza/carryout + courier) -----------
+  // Live-vocab-aware template. Uses pcc-dominos (pizza.*) + pcc-courier
+  // (courier.*) capability types directly so a 'pizza delivery' request
+  // decomposes to the correct kernels, not document-printing or CNC.
+  food_delivery: (req, cost, hours) => [
+    makeNode(req.id, {
+      id: `${req.id}-find-store`,
+      name: "Find pizza store",
+      description: "Locate the nearest orderable store for the delivery address",
+      capabilityType: "pizza.findStore",
+      category: "discovery",
+      estimatedCost: cost(0.02),
+      estimatedHours: hours(0.02),
+      dependencies: [],
+      parallel: false,
+      evidenceRequirements: ["store_locator_response"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-menu`,
+      name: "Fetch menu",
+      description: "Pull the structured menu (variants, sizes, toppings, coupons) for the chosen store",
+      capabilityType: "pizza.menu",
+      category: "discovery",
+      estimatedCost: cost(0.02),
+      estimatedHours: hours(0.02),
+      dependencies: [`${req.id}-find-store`],
+      parallel: false,
+      evidenceRequirements: ["menu_response"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-quote`,
+      name: "Quote pizza order",
+      description: "Validate the basket against the store + menu and price it (no charge)",
+      capabilityType: "pizza.quote",
+      category: "discovery",
+      estimatedCost: cost(0.03),
+      estimatedHours: hours(0.03),
+      dependencies: [`${req.id}-menu`],
+      parallel: false,
+      evidenceRequirements: ["quote_response"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-courier-quote`,
+      name: "Quote courier delivery",
+      description: "Vendor-neutral courier quote against the pickup window from pizza.quote",
+      capabilityType: "courier.quote",
+      category: "logistics",
+      estimatedCost: cost(0.03),
+      estimatedHours: hours(0.02),
+      dependencies: [`${req.id}-quote`],
+      parallel: false,
+      evidenceRequirements: ["courier_quote_response"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-order`,
+      name: "Place pizza order (gated)",
+      description: "Place the real pizza order. Gated -- only runs when payment, customer, env switch, and per-call confirm are all set.",
+      capabilityType: "pizza.order",
+      category: "fulfilment",
+      estimatedCost: cost(0.55),
+      estimatedHours: hours(0.05),
+      dependencies: [`${req.id}-courier-quote`],
+      parallel: false,
+      evidenceRequirements: ["order_placed_response", "redacted_payment_receipt"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-courier-dispatch`,
+      name: "Dispatch courier",
+      description: "Dispatch a courier to arrive in the readyWindow. dispatchAt = readyAt - driverETA.",
+      capabilityType: "courier.dispatch",
+      category: "logistics",
+      estimatedCost: cost(0.25),
+      estimatedHours: hours(0.30),
+      dependencies: [`${req.id}-order`],
+      parallel: false,
+      evidenceRequirements: ["courier_dispatched_response"],
+    }),
+    makeNode(req.id, {
+      id: `${req.id}-track`,
+      name: "Track pizza + courier",
+      description: "Poll pizza.track + courier.track until delivered.",
+      capabilityType: "pizza.track",
+      category: "fulfilment",
+      estimatedCost: cost(0.05),
+      estimatedHours: hours(0.30),
+      dependencies: [`${req.id}-courier-dispatch`],
+      parallel: false,
+      evidenceRequirements: ["delivery_confirmation"],
+    }),
+  ],
+
   // ── Custom fabricated product (default fallback) ────────────────
   custom_product: (req, cost, hours) => [
     makeNode(req.id, {
@@ -507,8 +598,18 @@ const TEMPLATE_KEYWORDS: Record<string, string[]> = {
     "synthesize", "synthesis", "compound", "reagent", "reaction", "prepare",
     "formulate", "molecule", "organic", "chemical", "extract", "ferment",
   ],
+  // food_delivery is checked BEFORE print_deliver so a tie between them on
+  // a "Pizza delivery to ..." request (1 hit each) goes to food_delivery.
+  // detectTemplate keeps the FIRST highest-scoring template (`>` not `>=`).
+  food_delivery: [
+    "pizza", "pizzeria", "pie", "slice", "domino", "dominos", "papa john",
+    "pizza hut", "carryout", "carry-out", "carry out", "takeout", "take-out",
+    "take out", "order food", "order pizza", "food delivery",
+    "deliver pizza", "deliver food", "doordash", "uber eats", "ubereats",
+    "grubhub", "courier",
+  ],
   print_deliver: [
-    "print", "document", "deliver", "mail", "courier", "invoice",
+    "print", "document", "deliver", "mail", "invoice",
     "letter", "brochure", "flyer", "poster",
   ],
   custom_product: [
@@ -517,13 +618,40 @@ const TEMPLATE_KEYWORDS: Record<string, string[]> = {
   ],
 };
 
-function detectTemplate(description: string): string {
+/**
+ * Detect which template best fits the request description.
+ *
+ * When `availableTypes` is supplied (a snapshot of the live capability
+ * registry's `type` column), templates whose nodes reference at least one
+ * live type get a strong score boost. This is what lets a fresh-from-the-
+ * registry capability like `pizza.order` win the template race over the
+ * hardcoded fallback (`print_deliver` / `custom_product`) just because
+ * the keyword "deliver" or "build" appears.
+ *
+ * The hardcoded vocabulary is preserved as a fallback for cold-start /
+ * test setups where the registry is empty.
+ */
+function detectTemplate(description: string, availableTypes?: string[]): string {
   const lower = description.toLowerCase();
   let bestTemplate = "custom_product";
   let bestScore = 0;
 
+  const liveTypes = new Set((availableTypes ?? []).map((t) => t.toLowerCase()));
+
   for (const [template, keywords] of Object.entries(TEMPLATE_KEYWORDS)) {
-    const score = keywords.filter((kw) => lower.includes(kw)).length;
+    let score = keywords.filter((kw) => lower.includes(kw)).length;
+
+    // Live-vocabulary boost: if this template's node graph references at
+    // least one capability type that is actually registered RIGHT NOW,
+    // strongly prefer it. This is the core of the B1 fix -- the decomposer
+    // is no longer blind to non-hardware capabilities that came online via
+    // POST /api/capabilities after the templates were written.
+    if (liveTypes.size > 0) {
+      const templateCapTypes = templateNodeCapabilityTypes(template);
+      const liveHit = templateCapTypes.some((t) => liveTypes.has(t.toLowerCase()));
+      if (liveHit && score > 0) score += 10;
+    }
+
     if (score > bestScore) {
       bestScore = score;
       bestTemplate = template;
@@ -531,6 +659,33 @@ function detectTemplate(description: string): string {
   }
 
   return bestTemplate;
+}
+
+/**
+ * Static index of the capability types each template's nodes produce.
+ * Used by the live-vocabulary boost in detectTemplate(). Kept hand-written
+ * so it stays in sync with TEMPLATES above when a template is added.
+ */
+function templateNodeCapabilityTypes(template: string): string[] {
+  switch (template) {
+    case "robotics_build":
+      return ["cad", "fdm", "pcb", "laser-cut", "procurement", "embedded-software", "assembly", "qa", "pattern-design"];
+    case "lab_analysis":
+      return ["liquid-handling", "hplc", "data-analysis", "documentation"];
+    case "synthesis":
+      return ["documentation", "procurement", "chemistry", "hplc"];
+    case "print_deliver":
+      return ["documentation", "ipp", "logistics"];
+    case "food_delivery":
+      return [
+        "pizza.findStore", "pizza.menu", "pizza.quote", "pizza.order", "pizza.track",
+        "courier.quote", "courier.dispatch", "courier.track",
+      ];
+    case "custom_product":
+      return ["cad", "procurement", "cnc", "assembly", "qa", "logistics"];
+    default:
+      return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -630,8 +785,23 @@ function calculateParallelTracks(nodes: CapabilityNode[]): string[][] {
  * Decompose a capability request into a dependency DAG.
  * Scales costs and hours to fit the request budget and urgency.
  */
-export function decomposeRequest(req: CapabilityRequest): DecompositionResult {
-  const templateName = detectTemplate(req.description);
+export interface DecomposeOptions {
+  /**
+   * Snapshot of the live capability registry's `type` column.
+   * When provided, templates whose nodes reference a live type get a
+   * scoring boost so a 'pizza delivery' request decomposes to
+   * pizza.order + courier.dispatch (not document-printing) the moment
+   * those kernels are registered. Cold-start safe: omit and the
+   * hardcoded vocabulary still works.
+   */
+  availableTypes?: string[];
+}
+
+export function decomposeRequest(
+  req: CapabilityRequest,
+  opts: DecomposeOptions = {},
+): DecompositionResult {
+  const templateName = detectTemplate(req.description, opts.availableTypes);
   const templateFn = TEMPLATES[templateName] ?? TEMPLATES.custom_product;
 
   const urgency = req.urgency ?? "standard";
@@ -740,6 +910,6 @@ export function decomposeDirectMatch(
 /**
  * Expose template detection so tests can verify keyword routing.
  */
-export function detectTemplateName(description: string): string {
-  return detectTemplate(description);
+export function detectTemplateName(description: string, availableTypes?: string[]): string {
+  return detectTemplate(description, availableTypes);
 }
