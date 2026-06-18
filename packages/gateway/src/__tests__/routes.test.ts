@@ -139,6 +139,16 @@ describe("Gateway Routes", () => {
       expect(body.kernel.id).toBe("kernel-nyc");
     });
 
+    it("reports discoveryStatus=discoverable for a seeded kernel with capabilities", async () => {
+      // kernel-nyc is seeded with multiple capabilities — it should be
+      // discoverable and have no further actionable nextStep.
+      const res = await app.inject({ method: "GET", url: "/api/kernels/kernel-nyc" });
+      const body = res.json();
+      expect(body.kernel.capabilityCount).toBeGreaterThanOrEqual(1);
+      expect(body.kernel.discoveryStatus).toBe("discoverable");
+      expect(body.kernel.nextStep).toBeUndefined();
+    });
+
     it("returns 404 for unknown kernel", async () => {
       const res = await app.inject({ method: "GET", url: "/api/kernels/kernel-nonexistent" });
       expect(res.statusCode).toBe(404);
