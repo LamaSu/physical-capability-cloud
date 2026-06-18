@@ -114,4 +114,71 @@ export async function kernelRoutes(app: FastifyInstance) {
     const result = await facade.announceCapabilities(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });
+
+  /**
+   * Per-capability heartbeat (feat/ed25519-keys-and-kernel-ttl).
+   *
+   * Single-row heartbeat for clients that already announced their kernel
+   * but want to refresh ONE capability's TTL without re-sending the
+   * whole catalog. Authentication follows the same Bearer-token model as
+   * other write routes — the gateway middleware gate ensures the caller
+   * has a valid API key before the handler runs.
+   *
+   * Returns 200 with { acknowledged, capabilityId, kernelId, validUntil,
+   *   timestamp, resurrected }, or 404 if the capability id is unknown.
+   */
+  app.post<{
+    Params: { capId: string };
+    Body: { signature?: string };
+  }>("/api/capabilities/:capId/heartbeat", async (req, reply) => {
+    const { getRepos } = await import("../db.js");
+    const { computeValidUntilIso, emitKernelLifecycleEvent } = await import(
+      "../facades/kernel.facade.js"
+    );
+    const repos = getRepos();
+    const cap = (repos.capabilities as any).findById(req.params.capId);
+    if (!cap) {
+      return reply.status(404).send({ error: "capability_not_found" });
+    }
+    const nowDate = new Date();
+    const nowIso = nowDate.toISOString();
+    const validUntil = computeValidUntilIso(nowDate);
+
+    // Detect resurrection at the capability level.
+    const priorValidUntil = cap.validUntil ?? cap.valid_until;
+    let resurrected = false;
+    if (priorValidUntil) {
+      const parsed = Date.parse(priorValidUntil);
+      if (Number.isFinite(parsed) && parsed < nowDate.getTime()) {
+        resurrected = true;
+      }
+    }
+
+    try {
+      (repos.capabilities as any).update(req.params.capId, {
+        lastHeartbeatAt: nowIso,
+        validUntil,
+      });
+    } catch {
+      return reply.status(500).send({ error: "update_failed" });
+    }
+    try {
+      emitKernelLifecycleEvent({
+        event: "kernel.heartbeat.received",
+        kernelId: cap.kernelId,
+        capabilityId: cap.id,
+      });
+    } catch {
+      // telemetry shouldn't block the response
+    }
+
+    return reply.status(200).send({
+      acknowledged: true,
+      capabilityId: cap.id,
+      kernelId: cap.kernelId,
+      validUntil,
+      resurrected,
+      timestamp: nowIso,
+    });
+  });
 }

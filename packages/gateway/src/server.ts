@@ -732,6 +732,23 @@ export async function createGateway(port = 3200) {
       // Start mock streaming producers
       producerManager?.startAll();
 
+      // Start kernel + capability TTL sweeper (feat/ed25519-keys-and-kernel-ttl).
+      // Runs on KERNEL_SWEEP_INTERVAL_SEC (default 300s = 5min) and marks
+      // expired rows so the catalog stops returning ghost capabilities.
+      // The interval timer is unref'd so it doesn't keep the process alive
+      // by itself.
+      try {
+        const { startKernelTtlSweeper } = await import(
+          "./services/kernel-ttl-sweeper.js"
+        );
+        const handle = startKernelTtlSweeper(() => getRepos());
+        console.log(
+          `[gateway] kernel-ttl-sweeper started (interval=${handle.intervalSec}s)`,
+        );
+      } catch (err) {
+        console.warn("[gateway] kernel-ttl-sweeper start failed:", err);
+      }
+
       const address = await app.listen({ port, host: "0.0.0.0" });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
