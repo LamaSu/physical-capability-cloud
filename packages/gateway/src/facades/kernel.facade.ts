@@ -25,6 +25,7 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { geocode } from "../services/geocode.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -261,6 +262,16 @@ export class KernelFacade extends BaseFacade {
       } else if (typeof body.location === "string" && body.location.length > 0) {
         // Legacy alias: string location populates physicalAddress only.
         addressString = addressString || body.location;
+      }
+
+      // Geocode fallback: an operator gave us a postal address but no explicit
+      // { lat, lng }. Resolve the address to coordinates so delivery-distance +
+      // location-aware matching work (previously every such kernel persisted as
+      // {0,0}). Soft-fail — geocode() returns null on any error and we keep the
+      // {0,0} sentinel, leaving the prior behaviour unchanged on miss.
+      if (geoLocation.lat === 0 && geoLocation.lng === 0 && addressString) {
+        const resolved = await geocode(addressString);
+        if (resolved) geoLocation = resolved;
       }
 
       const kernelData = {
