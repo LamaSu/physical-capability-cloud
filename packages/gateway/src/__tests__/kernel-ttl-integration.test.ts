@@ -13,12 +13,18 @@
  * Uses :memory: SQLite (same pattern as kernel-register-data-bugs.test.ts).
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { kernelRoutes } from "../routes/kernels.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { runOneSweep } from "../services/kernel-ttl-sweeper.js";
+
+// Mock telemetry (used by BaseFacade.execute) — matches the canonical
+// pattern in capability-facade.test.ts.
+vi.mock("../telemetry.js", () => ({
+  pipelineTelemetry: { emit: vi.fn() },
+}));
 
 describe("kernel + capability TTL — end-to-end", () => {
   let app: FastifyInstance;

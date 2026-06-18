@@ -13,7 +13,7 @@
  *   - Unknown agent id → 404.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { provisionRoutes } from "../routes/provision.js";
 import { initStore, closeStore } from "../db.js";
@@ -21,6 +21,22 @@ import {
   generateEd25519Keypair,
   signWithPrivateKeyHex,
 } from "../auth/ed25519.js";
+
+// Mock telemetry + audit + posthog so the provision flow doesn't try to
+// reach external services during the test. Matches the canonical pattern
+// in capability-facade.test.ts.
+vi.mock("../telemetry.js", () => ({
+  pipelineTelemetry: { emit: vi.fn() },
+}));
+vi.mock("../services/audit-service.js", () => ({
+  auditService: { log: vi.fn() },
+}));
+vi.mock("../services/posthog-service.js", () => ({
+  trackServerEvent: vi.fn(),
+}));
+vi.mock("../middleware/security-hardening.js", () => ({
+  canProvision: vi.fn(() => true),
+}));
 
 describe("POST /api/auth/provision — Ed25519 issuance + verify roundtrip", () => {
   let app: FastifyInstance;
