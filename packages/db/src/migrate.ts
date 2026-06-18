@@ -1447,6 +1447,30 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("capabilities", "sla", "TEXT");
   safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
 
+  // ── feat/ed25519-keys-and-kernel-ttl (Skylar's audit) ──────────────────
+  //
+  // Capability + kernel registry hygiene. Every capability and kernel has a
+  // soft expiry that the announcer extends via heartbeat. Listings drop
+  // expired rows by default so the catalog stops returning ghost capabilities.
+  //
+  //   last_heartbeat_at — ISO timestamp of the most recent heartbeat.
+  //   valid_until       — ISO timestamp after which the row stops appearing
+  //                       in default listings (default = now + 24h on insert).
+  //
+  // Both columns are nullable for backward compat: rows that pre-date this
+  // migration default to "always live" (null treated as not-expired) until
+  // the next heartbeat or sweep sets the columns. See docs/kernel-lifecycle.md.
+  safeAddColumn("capabilities", "last_heartbeat_at", "TEXT");
+  safeAddColumn("capabilities", "valid_until", "TEXT");
+  safeAddColumn("shop_kernels", "valid_until", "TEXT");
+
+  // public_key on api_keys — the Ed25519 public key the agent uses to sign
+  // evidence + heartbeats + handshakes. Set at provision time (server-
+  // generated OR bring-your-own from the request body). Stored as raw
+  // 32-byte hex. Nullable so pre-migration keys still resolve. The
+  // verification route refuses when null.
+  safeAddColumn("api_keys", "public_key", "TEXT");
+
   // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
   // Application-layer filtering, gated by TENANT_ENFORCE env flag.
   safeAddColumn("machine_registrations", "tenant_id", "TEXT");
