@@ -66,6 +66,48 @@ export interface HeartbeatResult {
   status: string;
   capabilitiesReceived: number;
   timestamp: string;
+  /** ISO timestamp the kernel + its capabilities are valid until. */
+  validUntil: string;
+  /** True if the heartbeat resurrected a previously expired kernel. */
+  resurrected: boolean;
+  /** Seconds since the prior heartbeat (null on first heartbeat). */
+  sinceLastHeartbeatSec: number | null;
+}
+
+/**
+ * Kernel + capability TTL configuration. Reads from env at module load.
+ *
+ *   KERNEL_TTL_HOURS — default 24, clamped to [6, 168] (1 week max).
+ *
+ * Anything outside the band falls back to the default with a console
+ * warning so a misconfigured deploy doesn't silently DoS the catalog by
+ * setting TTL=0 or TTL=10000.
+ */
+const KERNEL_TTL_LOWER_BOUND_HOURS = 6;
+const KERNEL_TTL_UPPER_BOUND_HOURS = 168;
+const KERNEL_TTL_DEFAULT_HOURS = 24;
+
+export function resolveKernelTtlHours(): number {
+  const raw = process.env.KERNEL_TTL_HOURS;
+  if (!raw) return KERNEL_TTL_DEFAULT_HOURS;
+  const parsed = parseInt(raw, 10);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < KERNEL_TTL_LOWER_BOUND_HOURS ||
+    parsed > KERNEL_TTL_UPPER_BOUND_HOURS
+  ) {
+    console.warn(
+      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+    );
+    return KERNEL_TTL_DEFAULT_HOURS;
+  }
+  return parsed;
+}
+
+/** Returns the ISO timestamp for `now + KERNEL_TTL_HOURS`. */
+export function computeValidUntilIso(now: Date = new Date()): string {
+  const ttlMs = resolveKernelTtlHours() * 3600 * 1000;
+  return new Date(now.getTime() + ttlMs).toISOString();
 }
 
 export interface CapabilityAnnouncementInput {
@@ -263,6 +305,7 @@ export class KernelFacade extends BaseFacade {
         addressString = addressString || body.location;
       }
 
+      const now = new Date();
       const kernelData = {
         id,
         name: body.name || "New Kernel",
@@ -271,8 +314,8 @@ export class KernelFacade extends BaseFacade {
         location: geoLocation,
         physicalAddress: addressString,
         status: "online",
-        registeredAt: new Date().toISOString(),
-        lastHeartbeat: new Date().toISOString(),
+        registeredAt: now.toISOString(),
+        lastHeartbeat: now.toISOString(),
         version: "0.1.0",
         reputation: 0,
         totalJobsCompleted: 0,
@@ -280,6 +323,11 @@ export class KernelFacade extends BaseFacade {
         // instead of hardcoding 2. Default to 2 when omitted (most operators
         // sustain tier 0/1/2 evidence by default).
         maxAssuranceTier: body.maxAssuranceTier ?? 2,
+        // feat/ed25519-keys-and-kernel-ttl — set initial soft expiry.
+        // Without this, a registered-but-never-heartbeated kernel would
+        // never appear in default listings (sweeper would mark expired
+        // on its first run). One heartbeat extends to now + TTL.
+        validUntil: computeValidUntilIso(now),
       };
 
       const inserted = repos.kernels.insert(kernelData);
@@ -319,16 +367,45 @@ export class KernelFacade extends BaseFacade {
   ): Promise<Result<HeartbeatResult>> {
     return this.execute("heartbeat", async () => {
       const { status = "online", capabilities } = body ?? {};
-      const now = new Date().toISOString();
+      const nowDate = new Date();
+      const now = nowDate.toISOString();
+      const validUntil = computeValidUntilIso(nowDate);
       const repos = this.repos;
 
-      const kernel = repos.kernels.findById(kernelId);
+      // Resurrection detection: compare prior validUntil to "now" — if it
+      // had already passed, this heartbeat brings the kernel back from
+      // expired status. Emit telemetry so the dashboard can show it.
+      const kernel = repos.kernels.findById(kernelId) as any;
+      let resurrected = false;
+      let sinceLastHeartbeatSec: number | null = null;
+      let wasExpiredForMinutes: number | null = null;
+
       if (kernel) {
+        const priorHeartbeat = kernel.lastHeartbeat
+          ? Date.parse(kernel.lastHeartbeat as string)
+          : NaN;
+        if (Number.isFinite(priorHeartbeat)) {
+          sinceLastHeartbeatSec = Math.floor((nowDate.getTime() - priorHeartbeat) / 1000);
+        }
+        const priorValidUntil = kernel.validUntil
+          ? Date.parse(kernel.validUntil as string)
+          : NaN;
+        if (Number.isFinite(priorValidUntil) && priorValidUntil < nowDate.getTime()) {
+          resurrected = true;
+          wasExpiredForMinutes = Math.floor(
+            (nowDate.getTime() - priorValidUntil) / 60000,
+          );
+        }
+
         try {
           repos.kernels.update(kernelId, {
+            // The sweeper marks expired kernels status=expired; an
+            // incoming heartbeat brings them back online unless the
+            // operator explicitly sent status=offline.
             status: status === "offline" ? "offline" : "online",
             lastHeartbeat: now,
-          });
+            validUntil,
+          } as any);
         } catch {
           // soft fail
         }
@@ -355,13 +432,65 @@ export class KernelFacade extends BaseFacade {
                 pricing: (cap.pricing as any) ?? { currency: "USDC", baseCost: "0", minimum: "0" },
                 availability: (cap.availability as any) ?? {},
                 location: (cap.location as any) ?? { lat: 0, lng: 0 },
+                lastHeartbeatAt: now,
+                validUntil,
               } as any);
+            } else {
+              // Existing capability — refresh its TTL.
+              try {
+                repos.capabilities.update(capId, {
+                  lastHeartbeatAt: now,
+                  validUntil,
+                } as any);
+              } catch {
+                // soft fail
+              }
             }
           } catch {
             // non-fatal
           }
           capabilitiesReceived++;
         }
+      } else {
+        // Heartbeat with no capabilities body — refresh TTL on EVERY
+        // capability this kernel currently exposes. Operators that beat
+        // without an explicit list expect their whole catalog to stay
+        // live, not just rows touched by an old announce. The query is
+        // cheap (one indexed select + N updates per kernel).
+        try {
+          const existingCaps = repos.capabilities.findByKernel(kernelId);
+          for (const c of existingCaps as any[]) {
+            try {
+              repos.capabilities.update(c.id, {
+                lastHeartbeatAt: now,
+                validUntil,
+              } as any);
+            } catch {
+              // soft fail
+            }
+          }
+        } catch {
+          // soft fail
+        }
+      }
+
+      // Telemetry — feed kernel.heartbeat.received, and kernel.resurrected
+      // when applicable. See docs/kernel-lifecycle.md.
+      try {
+        emitKernelLifecycleEvent({
+          event: "kernel.heartbeat.received",
+          kernelId,
+          sinceLastHeartbeatSec,
+        });
+        if (resurrected) {
+          emitKernelLifecycleEvent({
+            event: "kernel.resurrected",
+            kernelId,
+            wasExpiredForMinutes: wasExpiredForMinutes ?? 0,
+          });
+        }
+      } catch {
+        // never let telemetry failure break a heartbeat
       }
 
       return {
@@ -370,6 +499,9 @@ export class KernelFacade extends BaseFacade {
         status,
         capabilitiesReceived,
         timestamp: now,
+        validUntil,
+        resurrected,
+        sinceLastHeartbeatSec,
       };
     });
   }
@@ -427,4 +559,35 @@ class NotFoundError extends Error {
     super(`${entity} '${id}' not found`);
     this.name = "NotFoundError";
   }
+}
+
+// ── Lifecycle telemetry ───────────────────────────────────────────────────
+//
+// One JSON line per event to stdout. The dashboard tails this in the
+// existing OTLP path; on local dev it shows up in the gateway's console.
+// Stays alongside the facade so the heartbeat and sweeper share one
+// emitter without an external service indirection.
+
+export interface KernelLifecycleEvent {
+  event:
+    | "kernel.heartbeat.received"
+    | "kernel.expired"
+    | "kernel.resurrected"
+    | "capability.expired";
+  kernelId: string;
+  capabilityId?: string;
+  sinceLastHeartbeatSec?: number | null;
+  wasExpiredForMinutes?: number;
+  lastHeartbeatAt?: string | null;
+  ageMinutes?: number;
+}
+
+export function emitKernelLifecycleEvent(evt: KernelLifecycleEvent): void {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    ...evt,
+  });
+  // Use stderr so it doesn't collide with Fastify request logs on stdout.
+  // Dashboard collector reads both.
+  process.stderr.write(`[kernel-lifecycle] ${line}\n`);
 }
