@@ -20,6 +20,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { planComposition } from "./compose.js";
+import { geocode } from "../services/geocode.js";
 import type { ComposeRequest } from "@pcc/spec";
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -362,7 +363,16 @@ export async function pizzaDemoRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const loc = body.deliveryLocation ?? { lat: 37.77, lng: -122.42 };
+    // Resolve the drop point: prefer explicit coords, else geocode the address
+    // the buyer typed, else fall back to the demo's default SF drop point. The
+    // resolved point flows into the compose location filter (radiusKm below), so
+    // shop/driver matching is anchored to the real delivery address rather than
+    // a hardcoded constant when only an address string is supplied.
+    let loc = body.deliveryLocation;
+    if (!loc && body.deliveryAddress) {
+      loc = (await geocode(body.deliveryAddress)) ?? undefined;
+    }
+    loc = loc ?? { lat: 37.77, lng: -122.42 };
     const maxPrice = body.maxPriceUSD ?? 30;
 
     // Plan a 2-step composition: make-pizza → deliver-pizza via graph-search.
