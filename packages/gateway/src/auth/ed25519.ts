@@ -18,7 +18,13 @@
  * same one the @noble/curves verifier (used elsewhere in PCC) expects.
  */
 
-import { generateKeyPairSync, sign, verify, createPublicKey } from "node:crypto";
+import {
+  generateKeyPairSync,
+  sign,
+  verify,
+  createPublicKey,
+  createPrivateKey,
+} from "node:crypto";
 
 /** A freshly minted keypair. Both halves are hex-encoded raw bytes. */
 export interface Ed25519Keypair {
@@ -153,7 +159,6 @@ export function signWithPrivateKeyHex(
     // Reconstruct PKCS8 DER from the raw private seed.
     const pkcs8Prefix = Buffer.from("302e020100300506032b657004220420", "hex");
     const pkcs8Der = Buffer.concat([pkcs8Prefix, Buffer.from(clean, "hex")]);
-    const { createPrivateKey } = require("node:crypto") as typeof import("node:crypto");
     const keyObject = createPrivateKey({ key: pkcs8Der, format: "der", type: "pkcs8" });
     const msg = Buffer.isBuffer(message) ? message : Buffer.from(message);
     return sign(null, msg, keyObject).toString("hex");
