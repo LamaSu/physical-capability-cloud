@@ -14,6 +14,38 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 
+/**
+ * Build a "next step" hint pointing operators at POST /api/capabilities.
+ *
+ * Discovery context: POST /api/kernels creates a kernel row but does NOT make
+ * the operator discoverable. The catalog (GET /api/capabilities) filters on
+ * capabilities, not kernels — a kernel with zero capabilities is correctly
+ * invisible to user-agents browsing for skills. This hint tells the operator
+ * that an additional POST is required.
+ *
+ * See docs/DEPLOY.md (Runtime Env Semantics) and
+ * pcc-operator-onboarding-and-categories.md (Part A item 14).
+ *
+ * agent: implementer-victor (cherry-picked via implementer-whiskey integration)
+ */
+function buildCapabilityRegistrationHint(kernelId: string) {
+  return {
+    action: "POST /api/capabilities",
+    explanation:
+      `Your kernel is registered but is not yet discoverable. ` +
+      `PCC catalog discovery filters on capabilities, not kernels. ` +
+      `POST at least one capability tied to this kernel via ` +
+      `{ kernelId: "${kernelId}", type: "<category.action>", name: "<human-name>", ... } ` +
+      `to appear in GET /api/capabilities and become discoverable to user-agents.`,
+    documentationUrl: "/docs/onboarding/capability-registration",
+    exampleCurl:
+      `curl -X POST <gateway>/api/capabilities ` +
+      `-H 'Authorization: Bearer <key>' ` +
+      `-H 'Content-Type: application/json' ` +
+      `-d '{"kernelId":"${kernelId}","type":"pizza.order","name":"..."}'`,
+  };
+}
+
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
 
@@ -33,13 +65,26 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Get a single kernel by ID with full health snapshot (capabilities + devices).
-   * Returns { kernel: KernelHealthSnapshot } for backward compat.
-   * Returns 404 when not found (previously returned 200 with { error: "not_found" }).
+   * Returns { kernel: KernelHealthSnapshot } with extra discoveryStatus +
+   * nextStep hint when the kernel has zero capabilities (purely additive —
+   * existing clients that only consume kernel.id keep working).
+   * Returns 404 when not found.
    */
   app.get<{ Params: { kernelId: string } }>("/api/kernels/:kernelId", async (req, reply) => {
     const result = await facade.getById(req.params.kernelId);
-    if (result.success) return { kernel: result.data };
-    return sendResult(reply, result);
+    if (!result.success) return sendResult(reply, result);
+    const snapshot = result.data;
+    const capabilityCount = snapshot.capabilityCount ?? 0;
+    const discoveryStatus =
+      capabilityCount >= 1 ? "discoverable" : "kernel-registered-not-discoverable";
+    const responseKernel: Record<string, unknown> = {
+      ...snapshot,
+      discoveryStatus,
+    };
+    if (discoveryStatus === "kernel-registered-not-discoverable") {
+      responseKernel.nextStep = buildCapabilityRegistrationHint(snapshot.id);
+    }
+    return { kernel: responseKernel };
   });
 
   /**
@@ -70,7 +115,10 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Register (upsert) a kernel.
-   * Returns 201 + { kernel, created: true } on creation.
+   * Returns 201 + { kernel, created: true, discoveryStatus, nextStep } on creation
+   * (freshly registered kernels have zero capabilities → not yet discoverable;
+   * the nextStep hint tells the operator to POST /api/capabilities — Victor's
+   * onboarding-clarity fix, integrated via implementer-whiskey).
    * Returns 200 + { kernel, created: false } when already exists (heartbeat update).
    */
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
@@ -84,7 +132,13 @@ export async function kernelRoutes(app: FastifyInstance) {
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
     if (created) {
-      return reply.code(201).send({ kernel, created: true });
+      return reply.code(201).send({
+        kernel,
+        created: true,
+        capabilities: [],
+        discoveryStatus: "kernel-registered-not-discoverable",
+        nextStep: buildCapabilityRegistrationHint(kernel.id),
+      });
     }
     return { kernel, created: false };
   });
