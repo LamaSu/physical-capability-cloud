@@ -34,6 +34,11 @@
 
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
+import {
+  sendEmail,
+  type EmailSendStatus,
+  type ResendClient,
+} from "../services/channel-email.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -219,6 +224,14 @@ interface ChannelDispatchResult {
   delivered: boolean;
   ref?: string;
   warning?: string;
+  /**
+   * Per-transport delivery status. Real transports (email via Resend, future
+   * webhook/SMS providers) populate this with `queued`/`sent`/`bounced`/
+   * `skipped`. Stub transports may leave it undefined for back-compat. The
+   * key distinction the B5 finding cares about: `skipped` (no config) is
+   * NOT the same as `sent`, and the substrate must never conflate them.
+   */
+  status?: EmailSendStatus | "logged-stub";
 }
 
 // In-memory store. The substrate-wide SQLite layer will absorb this; the
@@ -308,9 +321,21 @@ export function getChannelsByOperator(operatorSlug: string): ChannelRecord[] {
  * thing per transport. The richer LLM-driven composer is a follow-on and can
  * be swapped in without changing this surface.
  */
+/**
+ * Optional dependency-injection slot for per-transport clients (currently
+ * just email). Tests pass a fake here so they never hit a real provider; in
+ * production the defaults pull from env vars. New transports as they get
+ * wired (sms via Twilio, push via APNS/FCM) extend this surface, NOT the
+ * envelope contract on the route.
+ */
+export interface DispatchOptions {
+  emailClient?: ResendClient;
+}
+
 export async function dispatchToChannels(
   operatorSlug: string,
   payload: ChannelDispatchPayload,
+  options: DispatchOptions = {},
 ): Promise<ChannelDispatchResult[]> {
   const ids = byOperator.get(operatorSlug);
   if (!ids || ids.size === 0) {
@@ -320,7 +345,7 @@ export async function dispatchToChannels(
   for (const id of ids) {
     const ch = channels.get(id);
     if (!ch || !ch.enabled) continue;
-    results.push(await dispatchOne(ch, payload));
+    results.push(await dispatchOne(ch, payload, options));
   }
   return results;
 }
@@ -328,6 +353,7 @@ export async function dispatchToChannels(
 async function dispatchOne(
   ch: ChannelRecord,
   p: ChannelDispatchPayload,
+  options: DispatchOptions,
 ): Promise<ChannelDispatchResult> {
   try {
     switch (ch.transport) {
@@ -336,6 +362,7 @@ async function dispatchOne(
       case "webhook":
         return await sendWebhook(ch, p);
       case "email":
+        return await sendChannelEmail(ch, p, options.emailClient);
       case "sms":
       case "voice":
       case "push":
@@ -344,6 +371,12 @@ async function dispatchOne(
         // Demo-mode: log the intended payload + composer hint. A follow-on
         // PR wires real providers; the operator's agent will plug those in
         // by-conversation, not by-code-change.
+        //
+        // For these transports we are honest about the stub state: the ref
+        // explicitly says `noconfig:` and delivered is FALSE. The B5 finding
+        // ("every channel send is a lie") is that earlier code returned
+        // `delivered: true, ref: "stub:transport-not-wired"` for these —
+        // claiming success without doing anything. We fix that here.
         console.log(
           `[op-channel] would dispatch via ${ch.transport} to operator=${ch.operatorSlug} ` +
             `endpoint=${JSON.stringify(ch.endpoint)} describe="${ch.describe.slice(0, 80)}" ` +
@@ -352,8 +385,9 @@ async function dispatchOne(
         return {
           channelId: ch.id,
           transport: ch.transport,
-          delivered: true,
-          ref: "stub:transport-not-wired",
+          delivered: false,
+          status: "skipped",
+          ref: `ref:noconfig:${ch.transport}-transport-not-implemented`,
           warning: `${ch.transport} provider not configured; logged only`,
         };
     }
@@ -365,6 +399,70 @@ async function dispatchOne(
       warning: (e as Error).message,
     };
   }
+}
+
+/**
+ * Compose an email from the dispatch payload and send via the configured
+ * transport (Resend). The envelope subject + body are derived from the
+ * channel's `describe` slot + payload — a deliberately naive composer.
+ * Later PR can swap in an LLM-driven composer without changing this surface.
+ *
+ * Operator endpoint shape for email: `{address: string, from?: string, replyTo?: string}`.
+ * If `address` is missing, this fails fast with `delivered: false`.
+ */
+async function sendChannelEmail(
+  ch: ChannelRecord,
+  p: ChannelDispatchPayload,
+  emailClient?: ResendClient,
+): Promise<ChannelDispatchResult> {
+  const endpoint = ch.endpoint as {
+    address?: string;
+    from?: string;
+    replyTo?: string;
+  };
+  if (!endpoint.address) {
+    return {
+      channelId: ch.id,
+      transport: "email",
+      delivered: false,
+      status: "bounced",
+      ref: "ref:error:no-endpoint-address",
+      warning: "email channel missing endpoint.address",
+    };
+  }
+
+  const subject = `[PCC ${p.jobId}] ${p.summary.slice(0, 120)}`;
+  const body =
+    `PCC capability network — new job for operator "${ch.operatorSlug}"\n\n` +
+    `Job ID: ${p.jobId}\n` +
+    `Context: ${p.contextRef}\n` +
+    `Summary: ${p.summary}\n` +
+    (p.priceUSD !== undefined ? `Price (USD): ${p.priceUSD}\n` : "") +
+    (p.deadlineSec !== undefined
+      ? `Accept-by deadline: ${p.deadlineSec} seconds from now\n`
+      : "") +
+    `\n— Channel: ${ch.label}\n` +
+    `Integration notes (from operator):\n${ch.describe}\n`;
+
+  const r = await sendEmail(
+    {
+      to: endpoint.address,
+      subject,
+      body,
+      from: endpoint.from,
+      replyTo: endpoint.replyTo,
+    },
+    emailClient,
+  );
+
+  return {
+    channelId: ch.id,
+    transport: "email",
+    delivered: r.delivered,
+    ref: r.ref,
+    status: r.status,
+    warning: r.error,
+  };
 }
 
 async function sendWebhook(
