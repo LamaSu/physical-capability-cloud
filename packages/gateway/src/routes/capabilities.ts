@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { getAllTemplates, getRegisteredTypes, getTemplate } from "@pcc/contract-builder";
 import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
+import { JOB_STATUSES } from "../config/job-status.js";
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -416,7 +417,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
           jobId: { type: "string", description: "ID of the submitted job" },
           status: {
             type: "string",
-            enum: ["queued", "running", "completed", "failed", "cancelled"],
+            enum: [...JOB_STATUSES],
           },
           escrowId: { type: "string", description: "ID of the on-chain escrow (set after commit)" },
         },
