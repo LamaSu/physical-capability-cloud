@@ -25,6 +25,7 @@ import {
   _clearGraphSearchForTests,
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
+import { pizzaDemoRoutes, _clearPizzaDemoForTests } from "../routes/pizza-demo.js";
 import { reputationRoutes, _clearReputationForTests } from "../routes/reputation.js";
 import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
 
@@ -637,6 +638,135 @@ describe("POST /api/compose — graph-search integration (PR #92 wiring)", () =>
     const body = res.json();
     expect(body.status).toBe("over_budget");
     expect(body.steps).toEqual([]);
+  });
+});
+
+describe("POST /api/compose — known outcome chains (delivered-pizza)", () => {
+  beforeEach(() => {
+    _clearComposeForTests();
+    _clearGraphSearchForTests();
+    _clearPizzaDemoForTests();
+  });
+
+  /** Register the two providers a delivered-pizza chain resolves to. */
+  function registerPizzaProviders(): void {
+    _registerCandidateForTests(
+      makeCandidate({
+        capabilityId: "cap_shop-roma",
+        capabilityType: "wood-fired-pizza",
+        estimatedPriceUSD: 15,
+      }),
+    );
+    _registerCandidateForTests(
+      makeCandidate({
+        capabilityId: "cap_driver-alex",
+        capabilityType: "local-courier-delivery",
+        estimatedPriceUSD: 5,
+      }),
+    );
+  }
+
+  it("composes a 2-step delivered-pizza plan from wood-fired-pizza + local-courier-delivery providers", async () => {
+    registerPizzaProviders();
+
+    const app = makeApp();
+    // Mirror the pizza-demo order payload: outcomeType + the documenting
+    // outcomeChain. The known-chain map (step 0 of planSteps) resolves the
+    // concrete provider types before the graph-search path is consulted.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "delivered-pizza",
+        outcomeChain: ["make-pizza", "delivered-pizza"],
+        budgetUSD: 30,
+        minAssuranceTier: 1,
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(2);
+    expect(body.steps.map((s: { capabilityType: string }) => s.capabilityType)).toEqual([
+      "wood-fired-pizza",
+      "local-courier-delivery",
+    ]);
+    expect(body.steps[0].capabilityId).toBe("cap_shop-roma");
+    expect(body.steps[1].capabilityId).toBe("cap_driver-alex");
+    expect(body.steps[0].dependsOn).toEqual([]);
+    expect(body.steps[1].dependsOn).toEqual([0]);
+    expect(body.totalPriceUSD).toBe(20);
+  });
+
+  it("also resolves the chain from outcomeType alone (no outcomeChain supplied)", async () => {
+    registerPizzaProviders();
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: { outcomeType: "delivered-pizza", budgetUSD: 30, minAssuranceTier: 1 },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.status).toBe("proposed");
+    expect(body.steps).toHaveLength(2);
+  });
+
+  it("returns a clean no_path_found (200, not 500) when a chain provider is missing", async () => {
+    // Only the shop exists — no local-courier-delivery provider to deliver.
+    _registerCandidateForTests(
+      makeCandidate({
+        capabilityId: "cap_shop-roma",
+        capabilityType: "wood-fired-pizza",
+        estimatedPriceUSD: 15,
+      }),
+    );
+
+    const app = makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "delivered-pizza",
+        outcomeChain: ["make-pizza", "delivered-pizza"],
+        budgetUSD: 30,
+        minAssuranceTier: 1,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe("no_path_found");
+    expect(body.steps).toEqual([]);
+  });
+
+  it("POST /api/demo/pizza-order returns a proposed 2-step composition end-to-end", async () => {
+    registerPizzaProviders();
+
+    const app = Fastify({ logger: false });
+    void app.register(pizzaDemoRoutes);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/demo/pizza-order",
+      payload: {
+        userId: "agent-hungry",
+        description: "1 margherita",
+        deliveryAddress: "123 Test St, SF CA",
+        deliveryLocation: { lat: 37.77, lng: -122.42 },
+        maxPriceUSD: 30,
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const { order } = res.json();
+    expect(order.status).toBe("proposed");
+    expect(order.composition.shop.capabilityId).toBe("cap_shop-roma");
+    expect(order.composition.driver.capabilityId).toBe("cap_driver-alex");
+    expect(order.composition.totalPriceUSD).toBe(20);
   });
 });
 
