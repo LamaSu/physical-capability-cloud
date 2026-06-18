@@ -194,6 +194,82 @@ export async function provisionRoutes(app: FastifyInstance) {
     return { valid: true, operatorId: keyRecord.operatorId };
   });
 
+  // ── POST /api/agents/:id/verify ────────────────────────────────────
+  //
+  // Verify that a signature was produced by the agent identified by `:id`.
+  // The agent's public key was set at provision time (server-minted OR
+  // BYOK). Body: { message: string, signature: string }. Returns
+  // { valid: bool, keyId, operatorId } on success. Returns 404 when the
+  // key doesn't exist or has no public_key on file (e.g. legacy rows).
+  //
+  // PUBLIC: signature verification by definition needs no auth — anyone
+  // can verify a signed evidence bundle against the issuing agent's key.
+  //
+  // Wire format: the message is interpreted as UTF-8 by default. Callers
+  // can opt into base64 by passing { message_base64: "..." } instead.
+  app.post<{
+    Params: { id: string };
+    Body: {
+      message?: string;
+      message_base64?: string;
+      signature?: string;
+    };
+  }>("/api/agents/:id/verify", async (req, reply) => {
+    const { id } = req.params;
+    const body = req.body ?? {};
+
+    if (typeof body.signature !== "string" || body.signature.length === 0) {
+      return reply.status(400).send({
+        error: "invalid_body",
+        message: "signature (hex string) is required",
+      });
+    }
+    if (
+      (body.message === undefined || typeof body.message !== "string") &&
+      (body.message_base64 === undefined || typeof body.message_base64 !== "string")
+    ) {
+      return reply.status(400).send({
+        error: "invalid_body",
+        message: "Provide either message (utf-8) or message_base64",
+      });
+    }
+
+    let messageBuffer: Buffer;
+    if (typeof body.message === "string") {
+      messageBuffer = Buffer.from(body.message, "utf-8");
+    } else {
+      try {
+        messageBuffer = Buffer.from(body.message_base64 as string, "base64");
+      } catch {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message: "message_base64 must be valid base64",
+        });
+      }
+    }
+
+    const repo = getRepos().apiKeys;
+    const key = repo.findById(id);
+    // Unify "not found" + "no public key" + "revoked" so the verify
+    // endpoint never leaks key existence.
+    if (!key || !key.publicKey || key.revokedAt) {
+      return reply.status(404).send({
+        error: "key_not_found",
+        message:
+          "No verifiable public key on file for this agent. Re-provision with publicKey or as server-minted.",
+      });
+    }
+
+    const { verifyEd25519Signature } = await import("../auth/ed25519.js");
+    const valid = verifyEd25519Signature(key.publicKey, messageBuffer, body.signature);
+
+    return reply.status(200).send({
+      valid,
+      key_id: key.id,
+      operator_id: key.operatorId,
+    });
+  });
+
   // ── GET /api/auth/keys ────────────────────────────────────────────
   // List active keys for the authenticated operator.
   // Requires existing API key or SIWE session.
