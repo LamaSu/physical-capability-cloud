@@ -4,6 +4,36 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 
+/**
+ * Build a "next step" hint pointing operators at POST /api/capabilities.
+ *
+ * Discovery context: POST /api/kernels creates a kernel row but does NOT make
+ * the operator discoverable. The catalog (GET /api/capabilities) filters on
+ * capabilities, not kernels — a kernel with zero capabilities is correctly
+ * invisible to user-agents browsing for skills. This hint tells the operator
+ * that an additional POST is required.
+ *
+ * See docs/DEPLOY.md (Runtime Env Semantics) and
+ * pcc-operator-onboarding-and-categories.md (Part A item 14).
+ */
+function buildCapabilityRegistrationHint(kernelId: string) {
+  return {
+    action: "POST /api/capabilities",
+    explanation:
+      `Your kernel is registered but is not yet discoverable. ` +
+      `PCC catalog discovery filters on capabilities, not kernels. ` +
+      `POST at least one capability tied to this kernel via ` +
+      `{ kernelId: "${kernelId}", type: "<category.action>", name: "<human-name>", ... } ` +
+      `to appear in GET /api/capabilities and become discoverable to user-agents.`,
+    documentationUrl: "/docs/onboarding/capability-registration",
+    exampleCurl:
+      `curl -X POST <gateway>/api/capabilities ` +
+      `-H 'Authorization: Bearer <key>' ` +
+      `-H 'Content-Type: application/json' ` +
+      `-d '{"kernelId":"${kernelId}","type":"pizza.order","name":"..."}'`,
+  };
+}
+
 export async function kernelRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { status?: string } }>(
     "/api/kernels",
@@ -40,7 +70,31 @@ export async function kernelRoutes(app: FastifyInstance) {
       const capabilities = repos.capabilities.findByKernel(kernel.id);
       const devices = repos.kernels.findDevicesByKernel(kernel.id);
 
-      return { kernel: { ...kernel, capabilities, devices } };
+      // Discovery status: kernel-only rows are not catalog-visible.
+      // A kernel with >= 1 capability is discoverable; otherwise the operator
+      // still needs to POST /api/capabilities.
+      const capabilityCount = capabilities.length;
+      const discoveryStatus =
+        capabilityCount >= 1
+          ? "discoverable"
+          : "kernel-registered-not-discoverable";
+
+      const responseKernel: Record<string, unknown> = {
+        ...kernel,
+        capabilities,
+        devices,
+        capabilityCount,
+        discoveryStatus,
+      };
+
+      // Surface the same hint on GET when the kernel is still not discoverable,
+      // so an operator polling /api/kernels/:id after registration sees what to
+      // do next — not just on the POST response that may have been lost.
+      if (discoveryStatus === "kernel-registered-not-discoverable") {
+        responseKernel.nextStep = buildCapabilityRegistrationHint(kernel.id);
+      }
+
+      return { kernel: responseKernel };
     } catch {
       return { error: "db_unavailable" };
     }
@@ -109,6 +163,16 @@ export async function kernelRoutes(app: FastifyInstance) {
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    return reply.code(201).send({ kernel: inserted });
+
+    // A freshly registered kernel has no capabilities yet, so it is not
+    // discoverable via GET /api/capabilities. Tell the operator the next
+    // step explicitly — this is purely additive; existing clients that
+    // only consume `kernel.id` keep working.
+    return reply.code(201).send({
+      kernel: inserted,
+      capabilities: [],
+      discoveryStatus: "kernel-registered-not-discoverable",
+      nextStep: buildCapabilityRegistrationHint(kernel.id),
+    });
   });
 }
