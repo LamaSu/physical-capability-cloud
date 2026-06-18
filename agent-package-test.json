@@ -243,7 +243,7 @@
         "type": "object",
         "properties": {
           "kernelId": { "type": "string", "description": "Filter by kernel ID" },
-          "status": { "type": "string", "description": "Filter by status (pending, running, completed, failed)" }
+          "status": { "type": "string", "description": "Filter by status (pending, queued, in_progress, paused, completed, failed, cancelled)" }
         },
         "required": []
       },
@@ -268,7 +268,7 @@
         "type": "object",
         "properties": {
           "jobId": { "type": "string", "description": "Job ID" },
-          "status": { "type": "string", "description": "New status (pending, running, completed, failed, cancelled)" },
+          "status": { "type": "string", "description": "New status (pending, queued, in_progress, paused, completed, failed, cancelled)" },
           "progress": { "type": "number", "description": "Progress percentage 0-100 (optional)" }
         },
         "required": ["jobId", "status"]
