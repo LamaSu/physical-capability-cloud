@@ -22,6 +22,28 @@ import {
   populateCapabilityList,
 } from "./populators/capability.populator.js";
 
+/**
+ * Filter expired rows out of a capability list (feat/ed25519-keys-and-kernel-ttl).
+ *
+ * A row is "expired" iff `validUntil` is set AND parses to a timestamp
+ * strictly before `now`. NULL or empty `validUntil` is treated as
+ * "no opinion" (legacy pre-migration rows stay visible until they get a
+ * heartbeat). Unparseable timestamps also keep the row — we don't want
+ * a corrupted column to silently DoS the catalog.
+ */
+export function filterCapabilitiesByTtl<
+  T extends { validUntil?: string | null; valid_until?: string | null },
+>(rows: T[], now: Date = new Date()): T[] {
+  const nowMs = now.getTime();
+  return rows.filter((r) => {
+    const raw = r.validUntil ?? r.valid_until;
+    if (raw == null || raw === "") return true;
+    const parsed = Date.parse(raw);
+    if (!Number.isFinite(parsed)) return true;
+    return parsed > nowMs;
+  });
+}
+
 /** Input shape for creating a new capability instance */
 export interface CreateCapabilityInput {
   id?: string;
@@ -68,9 +90,12 @@ export class CapabilityFacade extends BaseFacade {
   /**
    * List all capabilities with enrichment.
    * Replaces: GET /api/capabilities (inline enrichment)
+   *
+   * Filters expired rows by default (feat/ed25519-keys-and-kernel-ttl).
+   * Pass `includeExpired: true` via ctx for debug / sweeper queries.
    */
   async list(
-    ctx?: Partial<PopulationContext>,
+    ctx?: Partial<PopulationContext> & { includeExpired?: boolean },
     pagination?: PaginationParams,
   ): Promise<Result<PaginatedResult<CapabilityDTO>>> {
     return this.execute("list", async () => {
@@ -83,7 +108,12 @@ export class CapabilityFacade extends BaseFacade {
       // once the schema migration adds `tenant_id` columns. Capability LISTING
       // is intentionally cross-tenant (buyer marketplace surfacing) — confirm
       // that opt-out is still desired vs scope to ctx.tenantId at that time.
-      const allCapabilities = this.repos.capabilities.findAll();
+      const allCapabilitiesRaw = this.repos.capabilities.findAll();
+      // Drop expired rows from the default response. Caller can opt back
+      // in (debug / sweeper / migration scripts) via includeExpired:true.
+      const allCapabilities = ctx?.includeExpired
+        ? allCapabilitiesRaw
+        : filterCapabilitiesByTtl(allCapabilitiesRaw as any);
       const total = allCapabilities.length;
       const page = allCapabilities.slice(offset, offset + limit);
 
@@ -212,14 +242,19 @@ export class CapabilityFacade extends BaseFacade {
   /**
    * Get capabilities for a specific kernel.
    * Replaces: GET /api/capabilities/by-kernel/:kernelId
+   *
+   * Honors the same TTL filter as `list()`.
    */
   async listByKernel(
     kernelId: string,
-    ctx?: Partial<PopulationContext>,
+    ctx?: Partial<PopulationContext> & { includeExpired?: boolean },
   ): Promise<Result<CapabilityDTO[]>> {
     return this.execute("listByKernel", async () => {
       const context = this.defaultContext(ctx);
-      const capabilities = this.repos.capabilities.findByKernel(kernelId);
+      const capabilitiesRaw = this.repos.capabilities.findByKernel(kernelId);
+      const capabilities = ctx?.includeExpired
+        ? capabilitiesRaw
+        : filterCapabilitiesByTtl(capabilitiesRaw as any);
       const kernel = this.repos.kernels.findById(kernelId);
       const kernelMap = new Map<string, any>();
       if (kernel) kernelMap.set(kernelId, kernel);
@@ -230,15 +265,20 @@ export class CapabilityFacade extends BaseFacade {
   /**
    * Get capabilities by type.
    * Replaces: GET /api/capabilities/by-type/:type
+   *
+   * Honors the same TTL filter as `list()`.
    */
   async listByType(
     type: string,
-    ctx?: Partial<PopulationContext>,
+    ctx?: Partial<PopulationContext> & { includeExpired?: boolean },
   ): Promise<Result<CapabilityDTO[]>> {
     return this.execute("listByType", async () => {
       const context = this.defaultContext(ctx);
-      const capabilities = this.repos.capabilities.findByType(type);
-      const kernelIds = [...new Set(capabilities.map((c) => c.kernelId))];
+      const capabilitiesRaw = this.repos.capabilities.findByType(type);
+      const capabilities = ctx?.includeExpired
+        ? capabilitiesRaw
+        : filterCapabilitiesByTtl(capabilitiesRaw as any);
+      const kernelIds = [...new Set(capabilities.map((c: any) => c.kernelId))];
       const kernelMap = this.loadKernelMap(kernelIds);
       return populateCapabilityList(capabilities as any, kernelMap as any, context);
     });
@@ -266,6 +306,12 @@ export class CapabilityFacade extends BaseFacade {
         return { capability: dto, created: false };
       }
 
+      // feat/ed25519-keys-and-kernel-ttl — stamp the soft expiry at create
+      // time so a never-heartbeated capability still appears in the catalog
+      // for the first TTL window. The kernel facade's heartbeat handler
+      // extends it from there.
+      const nowIso = new Date().toISOString();
+      const { computeValidUntilIso } = await import("./kernel.facade.js");
       const cap = this.repos.capabilities.insert({
         id,
         kernelId,
@@ -278,7 +324,9 @@ export class CapabilityFacade extends BaseFacade {
         assuranceTiers: body.assuranceTiers || [0, 1],
         availability: body.availability ?? {},
         sla: body.sla ?? null,
-      });
+        lastHeartbeatAt: nowIso,
+        validUntil: computeValidUntilIso(new Date()),
+      } as any);
       const kernel = this.repos.kernels.findById(kernelId);
       const dto = populateCapabilityDTO(cap as any, kernel as any ?? undefined, context);
       return { capability: dto, created: true };
