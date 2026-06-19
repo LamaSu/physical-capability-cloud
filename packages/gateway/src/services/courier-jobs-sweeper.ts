@@ -1,13 +1,11 @@
 /**
- * Background sweeper for courier-jobs. Runs every 60s in production.
+ * Background sweeper for courier-jobs.
  *
- * Each tick calls store.sweep(), which handles:
- *   • TTL expiry (validUntil past)
- *   • Heartbeat-loss expiry (when requireHeartbeat=true and >5min gap)
- *   • Periodic re-verify against sourceVerifyUrl
- *
- * The sweep itself lives on CourierJobsStore so tests can call it
- * deterministically without waiting on the timer.
+ * DEPRECATED in favor of services/job-offers-sweeper.ts. The generic sweeper
+ * covers ALL capability types (courier.dispatch, pizza.order, lab.hplc,
+ * opentrons.runProtocol, ...) by sweeping the unified JobOffersStore. This
+ * file remains as a thin alias so external imports stay source-compatible
+ * during the cutover window. Internally we delegate to the generic sweeper.
  *
  * Pattern mirrors startDemandSnapshotCron (admin-demand.ts):
  *   - module-level state with idempotent start
@@ -15,7 +13,7 @@
  *   - explicit stop for test cleanup
  */
 
-import { getCourierJobsStore } from "./courier-jobs-store.js";
+import { getJobOffersStore } from "./job-offers-store.js";
 
 interface SweeperState {
   timer: NodeJS.Timeout | null;
@@ -29,16 +27,16 @@ async function runSweep(
   logger?: { info: (msg: string) => void; warn: (msg: string) => void },
 ): Promise<void> {
   try {
-    const store = getCourierJobsStore();
+    const store = getJobOffersStore();
     const result = await store.sweep();
     if (result.expired || result.reverified || result.autoCancelled) {
       logger?.info?.(
-        `[courier-jobs] sweep: expired=${result.expired} reverified=${result.reverified} autoCancelled=${result.autoCancelled}`,
+        `[courier-jobs/shim] sweep via generic store: expired=${result.expired} reverified=${result.reverified} autoCancelled=${result.autoCancelled}`,
       );
     }
   } catch (err) {
     logger?.warn?.(
-      `[courier-jobs] sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      `[courier-jobs/shim] sweep failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }

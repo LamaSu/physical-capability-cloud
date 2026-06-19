@@ -85,8 +85,12 @@ import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
 import { courierJobsRoutes } from "./routes/courier-jobs.js";
-import { initCourierJobsStore } from "./services/courier-jobs-store.js";
-import { startCourierJobsSweeper } from "./services/courier-jobs-sweeper.js";
+import { jobOffersRoutes } from "./routes/job-offers.js";
+import { initJobOffersStore } from "./services/job-offers-store.js";
+import { startJobOffersSweeper } from "./services/job-offers-sweeper.js";
+// Note: courier-jobs-store is now a shim over job-offers-store; the legacy
+// courier-jobs-sweeper still ships but is a no-op since the generic sweeper
+// covers all capability types. Kept imports only for source-compat.
 import { assetOutboundRoutes } from "./routes/asset-outbound.js";
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
 import { intentIngestRoutes } from "./routes/intent-ingest.js";
@@ -428,33 +432,39 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
-  // Courier-jobs — folded pcc-courier-jobs v0.2 standalone matching layer
-  // (https://web-production-3c660.up.railway.app). Per coord bulletin #207
-  // option (a): live in the gateway so the matching surface inherits auth,
-  // observability, and catalog discovery. The store uses the same SQLite
-  // file (via @pcc/store -> drizzle .$client raw handle) for write-through
-  // persistence across restart. Tables are created by db/src/migrate.ts.
+  // Job-offers — generic /api/job-offers/* matching primitive. Replaces
+  // the courier-specific store wiring with a category-agnostic version that
+  // every PCC adapter (pcc-courier, pcc-dominos, pcc-hamilton, pcc-kdense,
+  // pcc-opentrons, ...) shares. The legacy /api/courier-jobs/* routes also
+  // route here — courier-jobs-store.ts is now a thin shim translating the
+  // v0.2 courier shape to/from the generic JobOffer shape.
+  //
+  // Per coord bulletin #207, this lives in the gateway so the matching
+  // surface inherits auth, observability, and catalog discovery. The store
+  // uses the same SQLite file (via @pcc/store -> drizzle .$client raw
+  // handle) for write-through persistence across restart. Tables are
+  // created by db/src/migrate.ts.
   try {
     // Pull the raw better-sqlite3 handle from drizzle (.$client). We use a
     // structural cast (no better-sqlite3 type import) so the gateway's
     // dependency surface stays unchanged.
     const rawSqlite = (getStore().db as unknown as {
-      $client?: import("./services/courier-jobs-store.js").SqliteDatabaseLike;
+      $client?: import("./services/job-offers-store.js").SqliteDatabaseLike;
     }).$client;
-    initCourierJobsStore(rawSqlite ? { sqlite: rawSqlite } : {});
-    startCourierJobsSweeper({
+    initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    startJobOffersSweeper({
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
     });
   } catch (err) {
     // Best-effort wiring — if the store handle is shaped differently in some
     // environments (e.g. tests that build the app without initStore), fall
-    // back to a pure in-memory courier-jobs store so routes still respond.
+    // back to a pure in-memory job-offers store so routes still respond.
     app.log.warn(
-      `[courier-jobs] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
     );
-    initCourierJobsStore({});
-    startCourierJobsSweeper({
+    initJobOffersStore({});
+    startJobOffersSweeper({
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
     });
@@ -568,6 +578,10 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Generic /api/job-offers/* surface — every PCC adapter shares this.
+  await app.register(jobOffersRoutes);
+  // Legacy /api/courier-jobs/* shim — kept for backward compat through the
+  // pcc-courier migration window (target: 30 days from 2026-06-19).
   await app.register(courierJobsRoutes);
   await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);

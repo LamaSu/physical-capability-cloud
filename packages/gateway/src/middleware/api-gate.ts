@@ -48,9 +48,11 @@ const PUBLIC_EXACT = [
   "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
   "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
   "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
-  "/api/courier-jobs/open",       // Open courier-jobs feed — driver agents poll without API key
-  "/api/courier-jobs/jobs/open",  // v0.2 compat alias for the open feed
-  "/api/courier-jobs/healthz",    // Courier-jobs liveness — public for monitoring
+  "/api/courier-jobs/open",       // Open courier-jobs feed — driver agents poll without API key (legacy shim)
+  "/api/courier-jobs/jobs/open",  // v0.2 compat alias for the open feed (legacy shim)
+  "/api/courier-jobs/healthz",    // Courier-jobs liveness — public for monitoring (legacy shim)
+  "/api/job-offers/open",         // Generic open-offers feed — operator agents poll without API key (PRIMARY)
+  "/api/job-offers/healthz",      // Job-offers liveness — public for monitoring (PRIMARY)
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
@@ -66,13 +68,27 @@ const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
 // any remote A2A agent.
 const PUBLIC_KERNEL_AGENT_CARD_RE = /^\/api\/kernels\/[^/]+\/agent-card\.json$/;
 
-function isPublicRoute(url: string): boolean {
+// Generic /api/job-offers/:id GET is public so operator agents can fetch
+// offer detail without holding a gateway API key. POST/PATCH/DELETE on the
+// same path stays auth-gated by the route handler (requirePoster). The
+// regex matches /api/job-offers/<anything-without-slash> — excluding the
+// /open and /healthz exact entries above (those are matched first).
+const PUBLIC_JOB_OFFERS_DETAIL_RE = /^\/api\/job-offers\/[^/]+$/;
+
+// Same for /api/courier-jobs/:id (legacy shim — preserve v0.2's public-GET
+// behavior).
+const PUBLIC_COURIER_JOBS_DETAIL_RE = /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/;
+
+function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
   if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;
+  // Only GET on the offer/job detail routes is public.
+  if (method === "GET" && PUBLIC_JOB_OFFERS_DETAIL_RE.test(path)) return true;
+  if (method === "GET" && PUBLIC_COURIER_JOBS_DETAIL_RE.test(path)) return true;
   return false;
 }
 
@@ -82,7 +98,7 @@ async function apiGateImpl(app: FastifyInstance) {
     if (!req.url.startsWith("/api/")) return;
 
     // Skip public routes
-    if (isPublicRoute(req.url)) return;
+    if (isPublicRoute(req.url, req.method)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
