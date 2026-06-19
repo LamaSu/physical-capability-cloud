@@ -38,10 +38,11 @@ const PUBLIC_PREFIXES = [
   "/docs",                      // Docs hub + Swagger UI (/docs/api) are public
 ];
 
+// Public for ANY HTTP method (read + write both unauth — use with care).
+// Most write surfaces (`POST` creates, `PATCH` updates, `DELETE` removes) must
+// stay auth-gated; prefer PUBLIC_GET_EXACT or PUBLIC_GET_PREFIXES below.
 const PUBLIC_EXACT = [
   "/api/capabilities/types",   // Discovery is public (see what's available)
-  "/api/capabilities",         // Capability listing is public
-  "/api/kernels",              // Kernel listing is public (find operators)
   "/api/agents/status",        // Network status is public
   "/api/onboard/registrations", // EXACT match only — GET listing is public, but
                                 // sub-paths like /approve, /reject, /activate require auth
@@ -50,9 +51,32 @@ const PUBLIC_EXACT = [
   "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
 ];
 
+// Public for GET only — the catalog/discovery surface that prospective operators
+// browse pre-signup. Write operations (POST/PATCH/DELETE) on these paths stay
+// auth-gated so a third party can't mutate the catalog.
+//
+// CapabilityDTO + KernelDTO carry only catalog-discovery fields (type, materials,
+// pricing, location, queueDepth, reputation, operatorAddress). No apiKeys, no
+// secrets. Confirmed by reading packages/gateway/src/facades/types.ts.
+const PUBLIC_GET_EXACT = [
+  "/api/capabilities",                  // List capability instances (paginated)
+  "/api/capabilities/templates",        // Template catalog with pricing hints
+  "/api/capabilities/search",           // Full-text catalog search
+  "/api/kernels",                       // Kernel listing (find operators)
+];
+
 // Capability detail routes are public — discovery, widget embedding, etc.
 // Covers: /api/capabilities/:id, /api/capabilities/:id/button, /api/capabilities/:id/td
 const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/;
+
+// Filtered catalog reads are public — prospective operators browse by type or
+// kernel before signing up. GET-only; POST/PATCH/DELETE on these paths stay
+// auth-gated. Same DTO shape and field set as the list endpoint.
+//
+// Covers:
+//   GET /api/capabilities/by-kernel/:kernelId
+//   GET /api/capabilities/by-type/:type
+const PUBLIC_GET_CAPABILITY_FILTER_RE = /^\/api\/capabilities\/by-(?:kernel|type)\/[^/]+$/;
 
 // T2.7 — operator rating reads are public (reputation surface). The POST
 // /rate route remains auth-gated because it falls outside this regex.
@@ -63,13 +87,18 @@ const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
 // any remote A2A agent.
 const PUBLIC_KERNEL_AGENT_CARD_RE = /^\/api\/kernels\/[^/]+\/agent-card\.json$/;
 
-function isPublicRoute(url: string): boolean {
+function isPublicRoute(method: string, url: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
   if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;
+  // GET-only branches — POST/PATCH/PUT/DELETE stay gated.
+  if (method === "GET" || method === "HEAD") {
+    if (PUBLIC_GET_EXACT.includes(path)) return true;
+    if (PUBLIC_GET_CAPABILITY_FILTER_RE.test(path)) return true;
+  }
   return false;
 }
 
@@ -79,7 +108,7 @@ async function apiGateImpl(app: FastifyInstance) {
     if (!req.url.startsWith("/api/")) return;
 
     // Skip public routes
-    if (isPublicRoute(req.url)) return;
+    if (isPublicRoute(req.method, req.url)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
