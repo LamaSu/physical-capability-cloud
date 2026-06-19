@@ -1,5 +1,16 @@
 # Courier Matching — PCC's Open Driver Network
 
+> **NOTICE (2026-06-19)**: The standalone courier-specific surface
+> documented below has been generalized into a category-agnostic
+> matching primitive. **Read `docs/JOB_OFFERS.md` first** — that's the
+> primary surface every PCC adapter (courier, pizza, lab, opentrons,
+> ...) shares. The `/api/courier-jobs/*` routes documented here still
+> work as a backward-compat shim that internally delegates to
+> `/api/job-offers` with `capability_type = "courier.dispatch"`.
+> Migration plan: `docs/JOB_OFFERS.md` → "Migration from
+> /api/courier-jobs/*" section. Sunset target: ~30 days from
+> 2026-06-19.
+
 The PCC gateway hosts a public matching layer between `pcc-courier`'s `manual`
 provider dispatches and registered driver-agents. Any `pcc-courier` deployment
 that points its `COURIER_JOBS_URL` env at the gateway (or any system POSTing
