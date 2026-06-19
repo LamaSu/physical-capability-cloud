@@ -13,7 +13,7 @@ import fastifyStatic from "@fastify/static";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
-import { initStore, closeStore, getRepos } from "./db.js";
+import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -84,6 +84,9 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+import { courierJobsRoutes } from "./routes/courier-jobs.js";
+import { initCourierJobsStore } from "./services/courier-jobs-store.js";
+import { startCourierJobsSweeper } from "./services/courier-jobs-sweeper.js";
 import { assetOutboundRoutes } from "./routes/asset-outbound.js";
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
 import { intentIngestRoutes } from "./routes/intent-ingest.js";
@@ -425,6 +428,34 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+  // Courier-jobs — folded pcc-courier-jobs v0.2 standalone matching layer
+  // (https://web-production-3c660.up.railway.app). Per coord bulletin #207
+  // option (a): live in the gateway so the matching surface inherits auth,
+  // observability, and catalog discovery. The store uses the same SQLite
+  // file (via @pcc/store -> drizzle .$client raw handle) for write-through
+  // persistence across restart. Tables are created by db/src/migrate.ts.
+  try {
+    const rawSqlite =
+      (getStore().db as unknown as { $client?: import("better-sqlite3").Database }).$client;
+    initCourierJobsStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    startCourierJobsSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  } catch (err) {
+    // Best-effort wiring — if the store handle is shaped differently in some
+    // environments (e.g. tests that build the app without initStore), fall
+    // back to a pure in-memory courier-jobs store so routes still respond.
+    app.log.warn(
+      `[courier-jobs] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+    );
+    initCourierJobsStore({});
+    startCourierJobsSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  }
+
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -533,6 +564,7 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  await app.register(courierJobsRoutes);
   await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);
   await app.register(intentIngestRoutes);

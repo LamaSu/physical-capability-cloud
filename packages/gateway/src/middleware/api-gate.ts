@@ -48,6 +48,8 @@ const PUBLIC_EXACT = [
   "/api/orchestrator/templates", // Template directory is public for unauth landing-page discovery
   "/api/capabilities/templates/match", // Heuristic template-matcher is public for landing-page picker
   "/openapi.json",             // OpenAPI 3.x spec is public (APIs.guru, Smithery, mcp.so)
+  "/api/courier-jobs/open",    // Open courier-jobs feed — driver agents poll without API key
+  "/api/courier-jobs/healthz", // Courier-jobs liveness — public for monitoring
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
