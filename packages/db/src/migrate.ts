@@ -1074,4 +1074,33 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS audit_log_resource_type ON audit_log(resource_type);
     CREATE INDEX IF NOT EXISTS audit_log_timestamp ON audit_log(timestamp);
   `);
+
+  // ── ALTER TABLE migrations ──────────────────────────────────────
+  // SQLite has no ALTER COLUMN; new columns are appended idempotently
+  // via safeAddColumn (no-op if column already exists).
+  safeAddColumn(sqlite, "api_keys", "onchain_agent_id", "TEXT");
+  safeAddColumn(sqlite, "api_keys", "onchain_status", "TEXT DEFAULT 'pending'");
+  safeAddColumn(sqlite, "api_keys", "onchain_tx_hash", "TEXT");
+  safeAddColumn(sqlite, "api_keys", "onchain_registry_address", "TEXT");
+  safeAddColumn(sqlite, "api_keys", "onchain_chain_id", "INTEGER");
+  safeAddColumn(sqlite, "api_keys", "onchain_attempted_at", "TEXT");
+  safeAddColumn(sqlite, "api_keys", "onchain_error", "TEXT");
+}
+
+/**
+ * Add a column to an existing table only if not already present.
+ * SQLite's `ALTER TABLE ADD COLUMN` is non-idempotent and throws on
+ * re-run; the pragma_table_info query lets us skip if present.
+ */
+function safeAddColumn(
+  sqlite: Database.Database,
+  table: string,
+  column: string,
+  type: string,
+): void {
+  const cols = sqlite
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === column)) return;
+  sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
