@@ -377,6 +377,13 @@ export async function createGateway(port = 3200) {
           console.warn("[gateway] Batch settlement init failed:", err),
         );
 
+      // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
+      import("./services/erc8004-identity-sweeper.js")
+        .then(({ startIdentitySweeper }) => startIdentitySweeper())
+        .catch((err) =>
+          console.warn("[gateway] ERC-8004 sweeper init failed:", err),
+        );
+
       // Start mock streaming producers
       producerManager?.startAll();
 

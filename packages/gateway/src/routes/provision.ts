@@ -11,6 +11,11 @@ import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import {
+  registerAgentOnChain,
+  isIdentityWriteEnabled,
+  getIdentityRegistryAddress,
+} from "../services/erc8004-identity-write.js";
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -77,6 +82,76 @@ export async function provisionRoutes(app: FastifyInstance) {
         userAgent: req.headers["user-agent"],
       });
       trackServerEvent("api_key_provisioned", { email: body.email, capability: body.capability });
+
+      // ── ERC-8004 on-chain identity write (best-effort) ────────────
+      // The off-chain DB row is the source of truth at this moment; the
+      // on-chain identity is eventually-consistent. If this write fails
+      // (network, gas, RPC), the row stays onchain_status='pending' and
+      // the retry sweeper will pick it up. Never fail the HTTP request.
+      let onchainAttempted = false;
+      let onchainResult:
+        | { agentId: string; txHash: string; registryAddress: string; chainId: number }
+        | undefined;
+      if (isIdentityWriteEnabled()) {
+        onchainAttempted = true;
+        const gatewayUrl =
+          process.env.PCC_GATEWAY_URL ?? `${req.protocol}://${req.hostname}`;
+        const agentDid =
+          operatorId.startsWith("0x") && /^0x[0-9a-fA-F]{40}$/.test(operatorId)
+            ? `did:pcc:${operatorId.toLowerCase()}`
+            : `did:pcc:${record.id}`;
+        try {
+          const onchain = await registerAgentOnChain({
+            agentDid,
+            agentUrl: gatewayUrl,
+          });
+          getRepos().apiKeys.recordOnchainSuccess(record.id, {
+            agentId: onchain.agentId,
+            txHash: onchain.txHash,
+            registryAddress: onchain.registryAddress,
+            chainId: onchain.chainId,
+          });
+          onchainResult = {
+            agentId: String(onchain.agentId),
+            txHash: onchain.txHash,
+            registryAddress: onchain.registryAddress,
+            chainId: onchain.chainId,
+          };
+          auditService.log({
+            eventType: "auth.onchain_identity_written",
+            actor: operatorId,
+            resourceType: "api_key",
+            resourceId: record.id,
+            action: "create",
+            metadata: onchainResult,
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+        } catch (onchainErr) {
+          const errMsg =
+            onchainErr instanceof Error ? onchainErr.message : String(onchainErr);
+          try {
+            getRepos().apiKeys.recordOnchainFailure(record.id, errMsg);
+          } catch {
+            // Non-fatal: DB write failure doesn't block HTTP response
+          }
+          req.log?.warn(
+            { keyId: record.id, error: errMsg },
+            "ERC-8004 on-chain identity write failed — will retry",
+          );
+          auditService.log({
+            eventType: "auth.onchain_identity_failed",
+            actor: operatorId,
+            resourceType: "api_key",
+            resourceId: record.id,
+            action: "create",
+            metadata: { error: errMsg.slice(0, 256) },
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+        }
+      }
+
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,
@@ -90,6 +165,11 @@ export async function provisionRoutes(app: FastifyInstance) {
           header: `Authorization: Bearer ${rawKey}`,
           example: `curl -H "Authorization: Bearer ${rawKey}" ${req.protocol}://${req.hostname}/api/capabilities/types`,
         },
+        onchain: onchainAttempted
+          ? onchainResult
+            ? { status: "written", ...onchainResult }
+            : { status: "pending", registryAddress: getIdentityRegistryAddress() }
+          : { status: "disabled" },
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to provision key";
