@@ -50,6 +50,7 @@
     "@pcc/demand-intel": "workspace:*",
     "@pcc/dht": "workspace:*",
     "@pcc/evidence-embeddings": "workspace:*",
+    "@pcc/identity-8004": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/orchestrator": "workspace:*",
     "@pcc/orchestrator-sdk": "workspace:*",
