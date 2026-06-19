@@ -61,6 +61,15 @@ function requirePoster(req: FastifyRequest, reply: FastifyReply): string | null 
 const VALID_EVENT_TYPES = new Set(["pickup", "delivered", "cancelled", "note"]);
 
 export async function courierJobsRoutes(app: FastifyInstance) {
+  // ── v0.2 compatibility aliases ───────────────────────────────────────────
+  // pcc-courier's `manual.ts` broadcasts to `${COURIER_JOBS_URL}/jobs`.
+  // Setting COURIER_JOBS_URL=https://<gateway>/api/courier-jobs makes the
+  // alias resolve to /api/courier-jobs/jobs — same handler as POST /
+  // The /open + /:id GETs mirror v0.2 paths too so legacy driver agents work.
+  const aliasCreate = "/api/courier-jobs/jobs";
+  const aliasOpen = "/api/courier-jobs/jobs/open";
+  const aliasDetail = "/api/courier-jobs/jobs/:id";
+
   // ── GET /api/courier-jobs/healthz ───────────────────────────────────────
   app.get("/api/courier-jobs/healthz", async () => {
     const store = getCourierJobsStore();
@@ -305,4 +314,108 @@ export async function courierJobsRoutes(app: FastifyInstance) {
       };
     },
   );
+
+  // ── v0.2 compat: /jobs aliases (pcc-courier broadcasts to this path) ────
+  // pcc-courier's manual.ts appends `/jobs` to COURIER_JOBS_URL. Setting
+  // that env to https://capability.network/api/courier-jobs (the gateway
+  // base) makes the broadcast hit the alias below — zero client change.
+  app.post<{
+    Body: {
+      deliveryId?: string;
+      pickup?: Record<string, unknown>;
+      dropoff?: Record<string, unknown>;
+      pickupReadyAt?: string;
+      feeUSD?: number;
+      tipUSD?: number;
+      externalRef?: string;
+      description?: string;
+      raw?: unknown;
+      sourceVerifyUrl?: string;
+      requireHeartbeat?: boolean;
+    };
+  }>(aliasCreate, async (req, reply) => {
+    // Forward to the canonical create handler. Re-emit the same response shape.
+    const b = req.body || {};
+    if (!b.deliveryId || !b.pickup || !b.dropoff) {
+      return reply.code(400).send({
+        error: "missing_fields",
+        required: ["deliveryId", "pickup", "dropoff"],
+      });
+    }
+    const poster = resolvePoster(req);
+    const store = getCourierJobsStore();
+    const result = await store.create({
+      deliveryId: b.deliveryId,
+      pickup: b.pickup,
+      dropoff: b.dropoff,
+      pickupReadyAt: b.pickupReadyAt ?? null,
+      feeUSD: typeof b.feeUSD === "number" ? b.feeUSD : null,
+      tipUSD: typeof b.tipUSD === "number" ? b.tipUSD : null,
+      externalRef: b.externalRef ?? null,
+      description: b.description ?? null,
+      raw: b.raw ?? null,
+      sourceVerifyUrl: b.sourceVerifyUrl ?? null,
+      requireHeartbeat: !!b.requireHeartbeat,
+      postedBy: poster,
+    });
+    if (!result.ok) {
+      return reply.code(400).send({
+        error: "source_verify_failed",
+        reason: result.reason,
+        sourceStatus: result.status ?? null,
+        sourceBody: result.body ?? null,
+      });
+    }
+    if (!result.created) {
+      return reply.code(200).send({
+        ok: true,
+        id: result.job.id,
+        status: result.job.status,
+        note: "already posted",
+      });
+    }
+    return reply.code(201).send({
+      ok: true,
+      id: result.job.id,
+      status: result.job.status,
+      verified: result.job.verified,
+      validUntil: result.job.validUntil,
+      feedUrl: "/api/courier-jobs/open",
+    });
+  });
+
+  app.get<{
+    Querystring: {
+      verified?: string;
+      minFeeUSD?: string;
+      maxFeeUSD?: string;
+      within?: string;
+    };
+  }>(aliasOpen, async (req) => {
+    const q = req.query || {};
+    let within: { lat: number; lng: number; miles: number } | null = null;
+    if (q.within) {
+      const parts = String(q.within).split(",").map((s) => Number(s.trim()));
+      if (parts.length === 3 && parts.every(Number.isFinite)) {
+        within = { lat: parts[0]!, lng: parts[1]!, miles: parts[2]! };
+      }
+    }
+    const minFee = q.minFeeUSD != null ? Number(q.minFeeUSD) : null;
+    const maxFee = q.maxFeeUSD != null ? Number(q.maxFeeUSD) : null;
+    const store = getCourierJobsStore();
+    const open = store.listOpen({
+      verified: q.verified === "true",
+      minFeeUSD: minFee != null && Number.isFinite(minFee) ? minFee : null,
+      maxFeeUSD: maxFee != null && Number.isFinite(maxFee) ? maxFee : null,
+      within,
+    });
+    return { jobs: open, count: open.length, ts: new Date().toISOString() };
+  });
+
+  app.get<{ Params: { id: string } }>(aliasDetail, async (req, reply) => {
+    const store = getCourierJobsStore();
+    const j = store.get(req.params.id);
+    if (!j) return reply.code(404).send({ error: "not_found" });
+    return { job: j, events: store.getEvents(j.id) };
+  });
 }
