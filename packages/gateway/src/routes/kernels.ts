@@ -77,8 +77,14 @@ export async function kernelRoutes(app: FastifyInstance) {
     const capabilityCount = snapshot.capabilityCount ?? 0;
     const discoveryStatus =
       capabilityCount >= 1 ? "discoverable" : "kernel-registered-not-discoverable";
+    // Backward-compat alias: tests + dashboard read `kernel.capabilities`
+    // (a string[] of types). The KernelHealthSnapshot stores them as
+    // `capabilityTypes`; expose both shapes for callers that haven't
+    // migrated yet. Purely additive — KernelHealthSnapshot fields are
+    // preserved.
     const responseKernel: Record<string, unknown> = {
       ...snapshot,
+      capabilities: snapshot.capabilityTypes ?? [],
       discoveryStatus,
     };
     if (discoveryStatus === "kernel-registered-not-discoverable") {
