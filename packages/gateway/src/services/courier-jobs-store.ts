@@ -155,22 +155,8 @@ function offerToCourierJob(o: JobOffer): CourierJob {
   const raw = r.raw ?? null;
   const pickupReadyAt = typeof r.pickupReadyAt === "string" ? r.pickupReadyAt : null;
 
-  // Map generic status back to v0.2's slightly different vocab. The only
-  // semantic difference: generic uses "in_progress", v0.2 used "in_transit".
-  let status: CourierJobStatus;
-  switch (o.status) {
-    case "open": status = "open"; break;
-    case "claimed": status = "claimed"; break;
-    case "in_progress": status = "in_transit"; break;
-    case "delivered": status = "delivered"; break;
-    case "cancelled": status = "cancelled"; break;
-    case "expired": status = "expired"; break;
-    // settled / disputed are post-MVI generic statuses; collapse to
-    // delivered for legacy callers (they won't dispatch new actions on these).
-    case "settled": status = "delivered"; break;
-    case "disputed": status = "delivered"; break;
-    default: status = "open";
-  }
+  // Map generic status back to v0.2's slightly different vocab.
+  const status = genericStatusToCourier(o.status);
 
   const feeUSD = o.pricing.currency === "USD" && o.pricing.model === "fixed"
     ? o.pricing.amount
@@ -203,6 +189,25 @@ function offerToCourierJob(o: JobOffer): CourierJob {
     cancelledAt: o.cancelledAt,
     expiredAt: o.expiredAt,
   };
+}
+
+/**
+ * Map a generic JobOfferStatus string back to v0.2 CourierJobStatus vocab
+ * (in_progress → in_transit, settled/disputed → delivered as a safe collapse).
+ * Pure string lookup — no offer object required.
+ */
+function genericStatusToCourier(status: string): CourierJobStatus {
+  switch (status) {
+    case "open": return "open";
+    case "claimed": return "claimed";
+    case "in_progress": return "in_transit";
+    case "delivered": return "delivered";
+    case "cancelled": return "cancelled";
+    case "expired": return "expired";
+    case "settled": return "delivered";
+    case "disputed": return "delivered";
+    default: return "open";
+  }
 }
 
 function eventsToCourier(events: JobOfferEvent[]): CourierJobEvent[] {
@@ -339,7 +344,9 @@ export class CourierJobsStore {
         return {
           ok: false,
           reason: "not_open",
-          currentStatus: offerToCourierJob({ ...result, status: result.currentStatus } as unknown as JobOffer).status,
+          // Map generic status name back to v0.2 vocab without round-tripping
+          // a synthetic offer (which would fail on requirements.pickup access).
+          currentStatus: genericStatusToCourier(result.currentStatus),
           claimedBy: result.claimedBy,
         };
       }
@@ -392,7 +399,7 @@ export class CourierJobsStore {
         return {
           ok: false,
           reason: "not_editable",
-          currentStatus: offerToCourierJob({ status: result.currentStatus } as unknown as JobOffer).status,
+          currentStatus: genericStatusToCourier(result.currentStatus),
         };
       }
     }
