@@ -35,6 +35,7 @@
     "@pcc/contract-builder": "workspace:*",
     "@pcc/dht": "workspace:*",
     "@pcc/contracts": "workspace:*",
+    "@pcc/identity-8004": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/orchestrator": "workspace:*",
     "@pcc/payments": "workspace:*",
