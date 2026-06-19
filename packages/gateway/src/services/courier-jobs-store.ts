@@ -26,7 +26,18 @@
  *   - claim/events/get are open to any authenticated caller (driver agents).
  */
 
-import type Database from "better-sqlite3";
+// Structural type for the raw better-sqlite3 handle we get from
+// drizzle's `db.$client`. Avoiding a direct better-sqlite3 import keeps
+// the gateway's dependency surface unchanged (it pulls better-sqlite3
+// transitively through @pcc/store).
+export interface SqliteDatabaseLike {
+  prepare(sql: string): {
+    run(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+    get(...params: unknown[]): unknown;
+  };
+  exec?(sql: string): unknown;
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -202,7 +213,7 @@ const defaultVerifyFn: VerifyFn = async (url) => {
 
 export interface CourierJobsStoreOptions {
   /** Provide a sqlite db for persistent storage; omit for pure in-memory. */
-  sqlite?: Database.Database;
+  sqlite?: SqliteDatabaseLike;
   /** Override the source-verify implementation (tests inject a stub). */
   verify?: VerifyFn;
   /** Override "now" for tests. */
@@ -220,7 +231,7 @@ export class CourierJobsStore {
   private readonly claimLocks = new Map<string, Promise<void>>();
   private readonly verify: VerifyFn;
   private readonly nowFn: () => Date;
-  private readonly sqlite: Database.Database | undefined;
+  private readonly sqlite: SqliteDatabaseLike | undefined;
 
   constructor(opts: CourierJobsStoreOptions = {}) {
     this.sqlite = opts.sqlite;
@@ -488,7 +499,7 @@ export class CourierJobsStore {
     const changed: Record<string, unknown> = {};
     for (const f of ["pickupReadyAt", "feeUSD", "description", "validUntil"] as const) {
       if (patch[f] !== undefined) {
-        (j as Record<string, unknown>)[f] = patch[f];
+        (j as unknown as Record<string, unknown>)[f] = patch[f];
         changed[f] = patch[f];
       }
     }

@@ -435,8 +435,12 @@ export async function createGateway(port = 3200) {
   // file (via @pcc/store -> drizzle .$client raw handle) for write-through
   // persistence across restart. Tables are created by db/src/migrate.ts.
   try {
-    const rawSqlite =
-      (getStore().db as unknown as { $client?: import("better-sqlite3").Database }).$client;
+    // Pull the raw better-sqlite3 handle from drizzle (.$client). We use a
+    // structural cast (no better-sqlite3 type import) so the gateway's
+    // dependency surface stays unchanged.
+    const rawSqlite = (getStore().db as unknown as {
+      $client?: import("./services/courier-jobs-store.js").SqliteDatabaseLike;
+    }).$client;
     initCourierJobsStore(rawSqlite ? { sqlite: rawSqlite } : {});
     startCourierJobsSweeper({
       info: (msg) => app.log.info(msg),
