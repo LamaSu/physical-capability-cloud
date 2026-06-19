@@ -217,16 +217,20 @@ All endpoints are under `https://capability.network`. All require `Authorization
 
 ### Discovery & Capabilities
 
+The catalog/discovery surface is PUBLIC (GET only — no Bearer required) so
+prospective operators can browse what PCC supports BEFORE signing up. Write
+ops (POST/PATCH/DELETE) on the same paths stay auth-gated.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/capabilities/types` | List all capability type strings (PUBLIC). Returns `{types: string[]}`. |
-| GET | `/api/capabilities/templates` | List all templates with pricing hints and parameter metadata. |
-| GET | `/api/capabilities` | List all capability instances. Supports `?offset=&limit=`. Returns `PaginatedResult<CapabilityDTO>`. |
-| GET | `/api/capabilities/by-kernel/:kernelId` | Capabilities for a specific kernel. Returns `{capabilities: CapabilityDTO[]}`. |
-| GET | `/api/capabilities/by-type/:type` | Filter by capability type. Returns `{capabilities: CapabilityDTO[]}`. |
-| GET | `/api/capabilities/search?q=` | Full-text search across names, types, materials. Returns `CapabilityDTO[]`. |
-| GET | `/api/capabilities/:capId` | Single capability with full enrichment (reputation, availability, queue depth). |
-| POST | `/api/capabilities` | Create/upsert a capability instance. Body: `{kernelId, type, name, ...}`. |
+| GET | `/api/capabilities/templates` | List all templates with pricing hints and parameter metadata (PUBLIC). |
+| GET | `/api/capabilities` | List all capability instances. Supports `?offset=&limit=` (max 200). Returns `PaginatedResult<CapabilityDTO>` (PUBLIC). |
+| GET | `/api/capabilities/by-kernel/:kernelId` | Capabilities for a specific kernel. Returns `{capabilities: CapabilityDTO[]}` (PUBLIC). |
+| GET | `/api/capabilities/by-type/:type` | Filter by capability type. Returns `{capabilities: CapabilityDTO[]}` (PUBLIC). |
+| GET | `/api/capabilities/search?q=` | Full-text search across names, types, materials. Returns `CapabilityDTO[]` (PUBLIC). |
+| GET | `/api/capabilities/:capId` | Single capability with full enrichment (reputation, availability, queue depth) (PUBLIC). |
+| POST | `/api/capabilities` | Create/upsert a capability instance. Body: `{kernelId, type, name, ...}`. Requires Bearer. |
 | GET | `/api/capabilities/:id/button` | Embeddable button (PUBLIC, CORS *). See Section 3.1 below. |
 
 #### 3.1 Embeddable Button Endpoint
