@@ -1,4 +1,4 @@
-import { sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 /** User sessions */
 export const sessions = sqliteTable("sessions", {
@@ -42,4 +42,14 @@ export const apiKeys = sqliteTable("api_keys", {
    * See `POST /api/agents/:id/verify` for the verification surface.
    */
   publicKey: text("public_key"),
+  // ERC-8004 IdentityRegistry write tracking (added 2026-06-19).
+  // Eventually-consistent: provision returns 201 before on-chain write,
+  // background sweeper retries failed writes.
+  onchainAgentId: text("onchain_agent_id"),                  // bigint stored as decimal string
+  onchainStatus: text("onchain_status").default("pending"),  // pending | written | failed
+  onchainTxHash: text("onchain_tx_hash"),
+  onchainRegistryAddress: text("onchain_registry_address"),
+  onchainChainId: integer("onchain_chain_id"),
+  onchainAttemptedAt: text("onchain_attempted_at"),
+  onchainError: text("onchain_error"),
 });
