@@ -142,6 +142,120 @@ PCC's catalog spans 15 categories. \`capabilityType\` is free-form text, but sta
 14. **C.14 Sensory** — \`sensory.drone\`, \`sensory.soil\`, \`sensory.air\`
 15. **C.15 Creative** — \`creative.commission\`, \`design.logo\`, \`music.track\`
 
+## Response shapes (what you read back)
+
+When you GET a capability or job-offer, expect these fields. Don't invent field names — when in doubt, log the response and tell the user "I'm reading X back from the gateway and don't recognize field Y."
+
+**CapabilityDTO** (catalog row from \`GET /api/capabilities\`):
+\`\`\`
+{
+  id: "cap_…",                // capability id
+  kernelId: "kernel_…",       // operator's kernel id
+  type: "pizza.order",        // capabilityType string
+  name: "Domino's #7764",     // display name
+  description: "…",
+  pricing: { currency: "USD", baseCost: 18.50, minimum: 15.00 },
+  location: { lat: 37.78, lng: -122.43 },
+  materials: ["pepperoni", "cheese", "vegan"],  // category-dependent
+  reputation: 873,            // 0-1000, may be absent if no completions
+  queueDepth: 2,              // jobs currently waiting
+  available: true,            // currently taking work?
+  estimatedWaitMinutes: 25,
+  // category-specific extras (operator opts in):
+  driverETA?: 18,             // for courier.dispatch capabilities only
+  serviceRadiusMiles?: 5
+}
+\`\`\`
+
+**JobOffer** (returned from \`POST /api/job-offers\` and \`GET /api/job-offers/:id\`):
+\`\`\`
+{
+  id: "offer-…",
+  capabilityType: "pizza.order",
+  status: "open" | "claimed" | "in_progress" | "delivered" | "settled"
+        | "cancelled" | "expired" | "disputed",
+  requirements: { /* echoed back */ },
+  pricing: { amount: 18.50, currency: "USD", model: "fixed" },
+  verified: true,             // source-verify passed (if sourceVerifyUrl set)
+  validUntil: "2026-06-19T20:30:00Z",
+  postedAt: "2026-06-19T18:00:00Z",
+  claimedBy?: "kernel_…",     // present after claim
+  claimedAt?: "…",
+  pickupReadyAt?: "…",        // set by gateway from requirements.pickupReadyAt
+                              // OR added by operator after claim (category-specific)
+  evidence?: { cid: "…", description: "…" },  // present after operator submits
+  externalRef?: "…"           // if integrated with an external system
+}
+\`\`\`
+
+**Status transitions** — what the values mean:
+- \`open\` → on the board, nobody claimed yet. Waiting for an operator poll.
+- \`claimed\` → operator accepted. Work hasn't started or hasn't reported yet.
+- \`in_progress\` → operator reported work started. Photo evidence is in flight.
+- \`delivered\` → operator reported done + evidence submitted.
+- \`settled\` → settlement released on-chain. **This is the only terminal "ordered = arrived" state.**
+- \`cancelled\` / \`expired\` / \`disputed\` → bad ending. Read the response's \`error\` or \`disputeReason\`.
+
+For polling: keep going while status is in \`{open, claimed, in_progress}\`. Treat \`delivered\` as "almost done" — call it complete only at \`settled\` (or \`delivered\` if the category doesn't go on-chain). Treat \`open\` past \`validUntil\` as "nobody took it" — tell the user, offer to repost.
+
+Recommended polling: every 30 seconds for the first 5 minutes, every 2 minutes after that. Give up at \`validUntil + 10 minutes\`.
+
+## Worked \`requirements\` shapes per category
+
+The system doesn't enforce a strict schema per category yet (graceful degrade: opaque JSON accepted). But these are the shapes the existing adapters expect. When in doubt, match these.
+
+**pizza.order** (C.6):
+\`\`\`
+{
+  shopId: "kernel_dominos_7764",                  // from the catalog row
+  items: [
+    { name: "12in pepperoni", size: "medium", qty: 1, toppings: ["pepperoni"] }
+  ],
+  deliveryAddress: { line1: "728 Geary St", city: "SF", state: "CA", zip: "94109" },
+  customer: { name: "Test User", email: "user@example.com", phone: "415-555-0100" },
+  externalRef?: "dominos-order-xyz",              // shop's POS reference
+  tipUSD?: 3.00,
+  pickupReadyAt?: "2026-06-19T18:30:00Z"          // shop's stated ready time
+}
+\`\`\`
+
+**courier.dispatch** (C.7):
+\`\`\`
+{
+  pickup:  { name: "Domino's #7764", line1: "1234 Mission St", lat: 37.78, lng: -122.43 },
+  dropoff: { name: "Frontier Tower", line1: "728 Geary St",    lat: 37.78, lng: -122.41 },
+  pickupReadyAt: "2026-06-19T18:30:00Z",           // when the package is ready
+  dispatchAt?: "2026-06-19T18:12:00Z",             // optional — when courier should leave
+  tipUSD?: 1.00,
+  externalRef?: "dominos-order-xyz",               // chain to upstream order
+  packageDescription?: "1 large pizza, hot bag"
+}
+\`\`\`
+
+**manufacturing.fdm** (C.4):
+\`\`\`
+{
+  stl_cid: "bafybei…",                            // CID from POST /api/storage
+  material: "PLA",
+  infill: 0.20,
+  layer_height: 0.2,
+  color?: "black",
+  finish?: "supports-removed"
+}
+\`\`\`
+
+**lab.hplc** (C.5):
+\`\`\`
+{
+  samples: [{ id: "S1", description: "compound X" }, ...],
+  method_cid: "bafybei…",                         // CID for the method file
+  reportFormat: "pdf",
+  tier_required: 2
+}
+\`\`\`
+
+For any category not listed here, look at \`materials\` on the matched CapabilityDTO and ask the operator (via the gateway's quote-required flow) what their shape is. The gateway will accept opaque JSON with a \`requirementsValidated: false\` flag — the operator decides whether to claim.
+
 ## When the user is an operator, not a buyer
 
 If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (\`POST /api/kernels\`), then a capability per offering (\`POST /api/capabilities\`). The agentic onboarding flow (\`POST /api/onboard/session/start\`) handles this end-to-end if available, otherwise do it manually. Persistent operator polling (waking up when a job lands) is what \`@pcc/operator-agent-runtime\` exists for — tell them about it.
@@ -237,6 +351,103 @@ const AUTH = {
 // Lets Claude pick the right capabilityType when matching user requests.
 // ────────────────────────────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────────────────────────────
+// DTOs — response shapes Claude reads back. Documenting these here means
+// the user-agent doesn't have to guess field names when polling. Sourced
+// from packages/spec + packages/gateway/src/services/job-offers-store.ts
+// (sibling branch feat/generic-job-offers-from-courier-jobs).
+// ────────────────────────────────────────────────────────────────────────
+
+const DTOS = {
+  CapabilityDTO: {
+    description: "Returned from GET /api/capabilities and GET /api/capabilities/:id. The catalog row.",
+    shape: {
+      id: "string (cap_…)",
+      kernelId: "string (kernel_…)",
+      type: "string (capabilityType, e.g. 'pizza.order')",
+      name: "string",
+      description: "string",
+      pricing: { currency: "USD|USDC|ETH", baseCost: "number", minimum: "number" },
+      location: { lat: "number", lng: "number" },
+      materials: "string[]",
+      assuranceTiers: "(0|1|2|3)[]",
+      reputation: "number 0-1000 (may be absent)",
+      queueDepth: "number",
+      available: "boolean",
+      estimatedWaitMinutes: "number",
+      // category-specific extras:
+      driverETA: "number minutes (courier.dispatch only)",
+      serviceRadiusMiles: "number (location-bound categories)"
+    }
+  },
+  JobOffer: {
+    description: "Returned from POST /api/job-offers and GET /api/job-offers/:id. Echo of your offer plus lifecycle state.",
+    shape: {
+      id: "string (offer-…)",
+      capabilityType: "string",
+      status: "open|claimed|in_progress|delivered|settled|cancelled|expired|disputed",
+      requirements: "object (echoed)",
+      pricing: { amount: "number", currency: "string", model: "fixed|quote-required|per-unit" },
+      verified: "boolean (sourceVerifyUrl passed)",
+      validUntil: "ISO timestamp",
+      postedAt: "ISO timestamp",
+      claimedBy: "string (kernelId, present after claim)",
+      claimedAt: "ISO timestamp",
+      pickupReadyAt: "ISO timestamp (set by gateway from requirements, or added by operator)",
+      evidence: { cid: "string", description: "string" },
+      externalRef: "string (if integrated with upstream system)"
+    },
+    status_meanings: {
+      open: "On the board, nobody claimed yet.",
+      claimed: "Operator accepted. Work hasn't started or hasn't reported yet.",
+      in_progress: "Operator reported work started.",
+      delivered: "Operator reported done + evidence submitted.",
+      settled: "Settlement released on-chain — terminal 'ordered = arrived' state.",
+      cancelled: "Poster or operator cancelled before completion.",
+      expired: "Past validUntil without claim or completion.",
+      disputed: "Outcome challenged — read disputeReason field."
+    },
+    polling_recommendation: "Every 30s for first 5 minutes, then every 2 minutes. Give up at validUntil + 10 minutes. Stop on status in {settled, delivered, cancelled, expired, disputed}."
+  },
+  RequirementsByCategory: {
+    description: "Per-category requirements shapes. The gateway accepts opaque JSON (graceful degrade) but operator adapters expect these.",
+    examples: {
+      "pizza.order": {
+        shopId: "string (from catalog row)",
+        items: "[{ name, size?, qty, toppings? }]",
+        deliveryAddress: "{ line1, city, state, zip }",
+        customer: "{ name, email, phone? }",
+        externalRef: "string (POS reference)",
+        tipUSD: "number",
+        pickupReadyAt: "ISO timestamp (shop's stated ready time, optional)"
+      },
+      "courier.dispatch": {
+        pickup: "{ name, line1, lat, lng }",
+        dropoff: "{ name, line1, lat, lng }",
+        pickupReadyAt: "ISO timestamp",
+        dispatchAt: "ISO timestamp (optional — when courier should leave)",
+        tipUSD: "number",
+        externalRef: "string (chain to upstream order)",
+        packageDescription: "string"
+      },
+      "manufacturing.fdm": {
+        stl_cid: "string (from POST /api/storage)",
+        material: "PLA|PETG|ABS|...",
+        infill: "number 0-1",
+        layer_height: "number mm",
+        color: "string (optional)",
+        finish: "string (optional)"
+      },
+      "lab.hplc": {
+        samples: "[{ id, description }]",
+        method_cid: "string",
+        reportFormat: "pdf|csv",
+        tier_required: "number 0-3"
+      }
+    }
+  }
+};
+
 const CATEGORIES = [
   { id: "C.1", name: "Software / API services", capability_type_examples: ["text.translate", "image.ocr", "code.review"] },
   { id: "C.2", name: "Info / knowledge work", capability_type_examples: ["research.report", "legal.search", "market.analysis"] },
@@ -263,10 +474,12 @@ function main() {
   const raw = readFileSync(PKG_PATH, "utf-8");
   const pkg = JSON.parse(raw);
 
-  // Bump minor version (additive change).
+  // Bump minor version (additive change). Idempotent re-runs keep
+  // version stable once it matches the script-target (2.16.0 for the
+  // dtos-and-requirements pass).
+  const TARGET_VERSION = "2.16.0";
   const oldVersion = pkg.version || "2.14.0";
-  const [maj, min] = oldVersion.split(".").map(Number);
-  pkg.version = `${maj}.${min + 1}.0`;
+  pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
 
   // ADDITIVE: new top-level fields.
@@ -280,6 +493,7 @@ function main() {
   pkg.examples = EXAMPLES;
   pkg.auth = AUTH;
   pkg.categories = CATEGORIES;
+  pkg.dtos = DTOS;
 
   // Tool count + metadata refresh (additive — does NOT touch tools).
   pkg.metadata = pkg.metadata || {};
@@ -296,6 +510,7 @@ function main() {
   console.log(`  examples: ${pkg.examples.length}`);
   console.log(`  categories: ${pkg.categories.length}`);
   console.log(`  auth modes: ${pkg.auth.modes.join(", ")}`);
+  console.log(`  dtos: ${Object.keys(pkg.dtos).join(", ")}`);
 }
 
 main();
