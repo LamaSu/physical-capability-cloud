@@ -154,10 +154,6 @@ describe("storage — upload", () => {
       headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
-    if (res.statusCode !== 201) {
-      // eslint-disable-next-line no-console
-      console.log("DEBUG upload body:", res.body);
-    }
     expect(res.statusCode).toBe(201);
     const body = res.json();
     expect(typeof body.cid).toBe("string");
