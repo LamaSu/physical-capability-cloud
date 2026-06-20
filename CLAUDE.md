@@ -846,6 +846,8 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
+> **Claude Max quickstart**: see `docs/quickstart/claude-desktop.md` (also linked at `https://capability.network/quickstart/claude-desktop` and visible on `https://capability.network/start`). Claude Code users with the PCC skill installed get a lighter-weight surface — see `docs/quickstart/claude-code.md`.
+
 **Configuration** (add to Claude Code settings or `~/.claude/settings.json`):
 ```json
 {
@@ -915,20 +917,34 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (218 Tools)
+## 10. Agent Package (249 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 218 tools with input schemas and endpoint mappings.
+The agent package is a single JSON file any LLM can consume, containing 249 tools with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+
+> **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 
 **Fetch it**:
 ```bash
 curl https://capability.network/agent-package.json
 ```
 
-**Format**: Each tool has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`).
+**Top-level shape** (v2.15+, polished 2026-06-19 for Claude Max front door):
 
-**How to use**: Load the JSON, present tool descriptions to your LLM, and when the LLM selects a tool, make the corresponding HTTP request to `https://capability.network` + the endpoint path, passing the input as the request body (POST/PUT/PATCH) or query params (GET).
+| Field | Purpose |
+|-------|---------|
+| `title`, `description` | Human-friendly product framing |
+| `system_prompt` | ~9000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
+| `tools` | 249 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
+| `examples` | 3 worked examples — pizza, STL print, operator browse. Each lists user_request + step-by-step what_claude_does + tools_used. |
+| `auth` | `modes`, `provision_endpoint`, `public_endpoints_no_auth`, `bearer_header`, `trace_header`. |
+| `categories` | 15 PCC categories (C.1..C.15) with canonical `capabilityType` examples. |
+| `quickstart` | Code snippets for Claude SDK + OpenAI SDK consumers. |
 
-The `system_prompt` field in the package contains bootstrap instructions including the 5-step self-onboarding flow.
+**How to use it**:
+- **Claude Max (the easy path)**: paste the JSON URL into a conversation, or install the skill at `https://capability.network/skills/pcc.md`. The polished `system_prompt` plus the catalog + examples is enough context.
+- **Other LLMs**: load the JSON, present `tools[].description` to your model, when it picks a tool make the corresponding HTTP request to `https://capability.network` + `endpoint.path`, passing input as JSON body (POST/PUT/PATCH) or query params (GET).
+
+**Polish script**: `scripts/polish-agent-package-claude-max.mjs` rewrites the system_prompt + adds top-level fields. Idempotent. Re-run when the framing changes.
 
 ---
 
