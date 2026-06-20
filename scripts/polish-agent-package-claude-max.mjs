@@ -156,11 +156,12 @@ When you GET a capability or job-offer, expect these fields. Don't invent field 
   description: "…",
   pricing: { currency: "USD", baseCost: 18.50, minimum: 15.00 },
   location: { lat: 37.78, lng: -122.43 },
+  physicalAddress: "1234 Mission St, SF CA",  // not always present
   materials: ["pepperoni", "cheese", "vegan"],  // category-dependent
   reputation: 873,            // 0-1000, may be absent if no completions
   queueDepth: 2,              // jobs currently waiting
   available: true,            // currently taking work?
-  estimatedWaitMinutes: 25,
+  estimatedWaitMinutes: 25,   // use this to set requirements.pickupReadyAt yourself
   // category-specific extras (operator opts in):
   driverETA?: 18,             // for courier.dispatch capabilities only
   serviceRadiusMiles?: 5
@@ -199,6 +200,8 @@ When you GET a capability or job-offer, expect these fields. Don't invent field 
 For polling: keep going while status is in \`{open, claimed, in_progress}\`. Treat \`delivered\` as "almost done" — call it complete only at \`settled\` (or \`delivered\` if the category doesn't go on-chain). Treat \`open\` past \`validUntil\` as "nobody took it" — tell the user, offer to repost.
 
 Recommended polling: every 30 seconds for the first 5 minutes, every 2 minutes after that. Give up at \`validUntil + 10 minutes\`.
+
+**Composition timing**: when posting two offers that share a handoff (pizza shop + courier), DON'T wait for the pizza's status to advance before posting the courier. Set \`requirements.pickupReadyAt\` yourself on the pizza offer using \`now + CapabilityDTO.estimatedWaitMinutes + 5min buffer\`, then immediately post the courier with \`dispatchAt = pickupReadyAt - courier CapabilityDTO.driverETA\`. Fire-and-poll-both in parallel — serial wait inflates total time for no gain.
 
 ## Worked \`requirements\` shapes per category
 
@@ -363,18 +366,19 @@ const DTOS = {
     description: "Returned from GET /api/capabilities and GET /api/capabilities/:id. The catalog row.",
     shape: {
       id: "string (cap_…)",
-      kernelId: "string (kernel_…)",
+      kernelId: "string (kernel_…) — use this as `requirements.shopId` / `requirements.kernelId` when posting an offer that targets this operator.",
       type: "string (capabilityType, e.g. 'pizza.order')",
       name: "string",
       description: "string",
       pricing: { currency: "USD|USDC|ETH", baseCost: "number", minimum: "number" },
       location: { lat: "number", lng: "number" },
+      physicalAddress: "string (street address — e.g. '1234 Mission St, SF CA'; not always present, falls back to location coords)",
       materials: "string[]",
       assuranceTiers: "(0|1|2|3)[]",
       reputation: "number 0-1000 (may be absent)",
       queueDepth: "number",
       available: "boolean",
-      estimatedWaitMinutes: "number",
+      estimatedWaitMinutes: "number — for time-bound categories. Use to compute pickupReadyAt yourself when composing (see JobOffer.composition_timing).",
       // category-specific extras:
       driverETA: "number minutes (courier.dispatch only)",
       serviceRadiusMiles: "number (location-bound categories)"
@@ -407,28 +411,36 @@ const DTOS = {
       expired: "Past validUntil without claim or completion.",
       disputed: "Outcome challenged — read disputeReason field."
     },
-    polling_recommendation: "Every 30s for first 5 minutes, then every 2 minutes. Give up at validUntil + 10 minutes. Stop on status in {settled, delivered, cancelled, expired, disputed}."
+    polling_recommendation: "Every 30s for first 5 minutes, then every 2 minutes. Give up at validUntil + 10 minutes. Stop on status in {settled, delivered, cancelled, expired, disputed}.",
+    composition_timing: "When composing pizza.order + courier.dispatch (or any two offers that share a handoff), DO NOT wait for the first offer's status change to post the second. Set requirements.pickupReadyAt yourself on the pizza offer using `now + capability.estimatedWaitMinutes + 5min buffer`, then immediately post the courier offer with `dispatchAt = pickupReadyAt - capability.driverETA`. Fire-and-poll-both is the right pattern; serial wait inflates total time for no gain."
   },
   RequirementsByCategory: {
     description: "Per-category requirements shapes. The gateway accepts opaque JSON (graceful degrade) but operator adapters expect these.",
+    common_optional_fields: {
+      deadline: "ISO timestamp — set on any time-bound request. Operators see this and decline if they can't meet it. Strongly recommended.",
+      idempotencyKey: "string — stable enough that you can regenerate it. Pattern: '{user-email}-{YYYY-MM-DD}-{request-shortname}'.",
+      assuranceTier: "0|1|2|3 — defaults to 1 (verified). Use 2+ for high-stakes."
+    },
     examples: {
       "pizza.order": {
-        shopId: "string (from catalog row)",
+        shopId: "string — same value as the catalog row's CapabilityDTO.kernelId.",
         items: "[{ name, size?, qty, toppings? }]",
         deliveryAddress: "{ line1, city, state, zip }",
         customer: "{ name, email, phone? }",
         externalRef: "string (POS reference)",
         tipUSD: "number",
-        pickupReadyAt: "ISO timestamp (shop's stated ready time, optional)"
+        pickupReadyAt: "ISO timestamp — preferred to set this yourself from CapabilityDTO.estimatedWaitMinutes + buffer; otherwise the operator may set it after claim, which delays courier composition.",
+        deadline: "ISO timestamp (optional, recommended for time-bound)"
       },
       "courier.dispatch": {
-        pickup: "{ name, line1, lat, lng }",
+        pickup: "{ name, line1, lat, lng } — derive from the pizza shop's CapabilityDTO (use physicalAddress for line1, location for lat/lng).",
         dropoff: "{ name, line1, lat, lng }",
-        pickupReadyAt: "ISO timestamp",
-        dispatchAt: "ISO timestamp (optional — when courier should leave)",
+        pickupReadyAt: "ISO timestamp — copy from the upstream offer's requirements.pickupReadyAt to keep them in sync.",
+        dispatchAt: "ISO timestamp (optional — when courier should leave; default: pickupReadyAt - courier CapabilityDTO.driverETA).",
         tipUSD: "number",
         externalRef: "string (chain to upstream order)",
-        packageDescription: "string"
+        packageDescription: "string",
+        deadline: "ISO timestamp (optional, recommended)"
       },
       "manufacturing.fdm": {
         stl_cid: "string (from POST /api/storage)",
@@ -436,13 +448,15 @@ const DTOS = {
         infill: "number 0-1",
         layer_height: "number mm",
         color: "string (optional)",
-        finish: "string (optional)"
+        finish: "string (optional)",
+        deadline: "ISO timestamp (optional, recommended)"
       },
       "lab.hplc": {
         samples: "[{ id, description }]",
         method_cid: "string",
         reportFormat: "pdf|csv",
-        tier_required: "number 0-3"
+        tier_required: "number 0-3",
+        deadline: "ISO timestamp (optional, recommended)"
       }
     }
   }
@@ -477,7 +491,7 @@ function main() {
   // Bump minor version (additive change). Idempotent re-runs keep
   // version stable once it matches the script-target (2.16.0 for the
   // dtos-and-requirements pass).
-  const TARGET_VERSION = "2.16.0";
+  const TARGET_VERSION = "2.17.0";
   const oldVersion = pkg.version || "2.14.0";
   pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
