@@ -240,7 +240,10 @@ export class HeliaBlobBackend implements ICidBlobStorage {
 
   async init(): Promise<void> {
     if (this.helia) return;
+    // Dynamic imports — helia is transitively available via @pcc/kernel.
+    // @ts-expect-error helia is a peer dep through @pcc/kernel
     const { createHelia } = await import("helia");
+    // @ts-expect-error @helia/unixfs is a peer dep through @pcc/kernel
     const { unixfs } = await import("@helia/unixfs");
     this.helia = await createHelia();
     this.fs = unixfs(this.helia);

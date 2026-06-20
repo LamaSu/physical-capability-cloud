@@ -67,9 +67,9 @@ interface StorageBlobRow {
 
 function findBlob(cid: string): StorageBlobRow | undefined {
   const db = getStore().db;
-  const rows = db.all<StorageBlobRow[]>(
+  const rows = db.all(
     sql`SELECT * FROM storage_blobs WHERE cid = ${cid} LIMIT 1`,
-  );
+  ) as StorageBlobRow[];
   return rows[0];
 }
 
