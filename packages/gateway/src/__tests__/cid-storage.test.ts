@@ -105,7 +105,7 @@ describe("storage — auth", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: Buffer.from("private-content"),
     });
     expect(up.statusCode).toBe(201);
@@ -125,7 +125,7 @@ describe("storage — auth", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: Buffer.from("to-delete"),
     });
     const { cid } = up.json();
@@ -151,9 +151,13 @@ describe("storage — upload", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/storage?label=test-blob&category=manufacturing",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
+    if (res.statusCode !== 201) {
+      // eslint-disable-next-line no-console
+      console.log("DEBUG upload body:", res.body);
+    }
     expect(res.statusCode).toBe(201);
     const body = res.json();
     expect(typeof body.cid).toBe("string");
@@ -189,7 +193,7 @@ describe("storage — upload", () => {
     const r1 = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     expect(r1.statusCode).toBe(201);
@@ -198,7 +202,7 @@ describe("storage — upload", () => {
     const r2 = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     expect(r2.statusCode).toBe(200);
@@ -233,7 +237,7 @@ describe("storage — retrieve", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     const { cid } = up.json();
@@ -252,7 +256,7 @@ describe("storage — retrieve", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage?label=meta-test",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     const { cid } = up.json();
@@ -273,7 +277,7 @@ describe("storage — retrieve", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     const { cid } = up.json();
@@ -317,7 +321,7 @@ describe("storage — delete", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: Buffer.from("delete-me"),
     });
     const { cid } = up.json();
@@ -341,7 +345,7 @@ describe("storage — delete", () => {
     const up = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: Buffer.from("owner-only-delete"),
     });
     const { cid } = up.json();
@@ -360,7 +364,7 @@ describe("storage — delete", () => {
     const up1 = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     const { cid } = up1.json();
@@ -370,7 +374,7 @@ describe("storage — delete", () => {
     const up2 = await app.inject({
       method: "POST",
       url: "/api/storage",
-      headers: { "content-type": "text/plain" },
+      headers: { "content-type": "application/octet-stream" },
       payload: bytes,
     });
     expect(up2.statusCode).toBe(201);

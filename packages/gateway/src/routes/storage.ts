@@ -122,12 +122,13 @@ function callerIdentity(req: FastifyRequest): {
 // ---------------------------------------------------------------------------
 
 export async function storageRoutes(app: FastifyInstance): Promise<void> {
-  // Register a content-type parser for binary uploads. We buffer the raw
-  // request body into a Uint8Array for the put handler. For files near the
-  // upper limit we accept the memory cost — chunked streaming via Helia's
-  // unixfs.addFile() is a follow-up.
+  // Register a wildcard content-type parser that returns the raw body as a
+  // Buffer for any non-JSON content-type a client sends to /api/storage.
+  // Fastify's default JSON parser still wins for application/json on other
+  // routes (decided when a specific parser matches). The "*" parser only
+  // fires for content-types that have no registered parser.
   app.addContentTypeParser(
-    BINARY_CT_PATTERN,
+    "*",
     { parseAs: "buffer", bodyLimit: MAX_UPLOAD_BYTES },
     (_req, body, done) => {
       done(null, body);
