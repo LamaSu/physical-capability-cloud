@@ -1474,6 +1474,41 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_operator_ratings_buyer ON operator_ratings(buyer_id);
   `);
 
+  // ── CID Blob Storage (generic, content-addressable) ─────────────────
+  // Distinct from evidence_bundles — this stores ARBITRARY binary artifacts
+  // (manufacturing photos, lab raw files, portfolio samples, drone imagery,
+  // booking confirmations) keyed by CIDv1. The blob bytes themselves live
+  // in the backend (local fs / Helia / Storacha); this table is the index.
+  // Soft-delete only (deleted_at). Hard-delete is a separate ops job.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS storage_blobs (
+      cid TEXT PRIMARY KEY,
+      size_bytes INTEGER NOT NULL,
+      media_type TEXT NOT NULL,
+      backend TEXT NOT NULL,           -- "local" | "helia" | "storacha"
+      uploaded_by TEXT NOT NULL,       -- operator id (email/wallet) of uploader
+      uploaded_by_agent_id TEXT,       -- optional agent identifier
+      related_offer_id TEXT,           -- optional link to an offer/job for public-read gating
+      label TEXT,                      -- caller-supplied human label
+      category TEXT,                   -- caller-supplied tag (manufacturing | lab | brokerage | sensory | creative | ...)
+      public_read INTEGER NOT NULL DEFAULT 0,  -- 0=auth required, 1=public read allowed
+      created_at TEXT NOT NULL,
+      deleted_at TEXT                  -- soft-delete tombstone
+    );
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_uploaded_by ON storage_blobs(uploaded_by);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_offer ON storage_blobs(related_offer_id);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_category ON storage_blobs(category);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_created ON storage_blobs(created_at);
+  `);
+  // Forward-compat: in case the table existed without these columns yet,
+  // ALTER them in idempotently.
+  safeAddColumn("storage_blobs", "uploaded_by_agent_id", "TEXT");
+  safeAddColumn("storage_blobs", "related_offer_id", "TEXT");
+  safeAddColumn("storage_blobs", "label", "TEXT");
+  safeAddColumn("storage_blobs", "category", "TEXT");
+  safeAddColumn("storage_blobs", "public_read", "INTEGER DEFAULT 0");
+  safeAddColumn("storage_blobs", "deleted_at", "TEXT");
+
   // Wave 5 — demand-intent capture: capability requests previously lived in
   // an in-memory Map inside the gateway. Persist them and index the
   // compositionSignature so @pcc/demand-intel can fold many envelopes that
