@@ -46,6 +46,7 @@ import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
 import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
+import { storageRoutes } from "./routes/storage.js";
 // import { evidenceSearchRoutes } from "./routes/evidence-search.js"; // TODO: Agent B — file not created yet
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
@@ -549,6 +550,7 @@ export async function createGateway(port = 3200) {
   await app.register(sensorRoutes);
   await app.register(batchRoutes);
   await app.register(evidenceEncryptedRoutes);
+  await app.register(storageRoutes);
   // await app.register(evidenceSearchRoutes); // TODO: Agent B — file not created yet
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
