@@ -7,6 +7,11 @@ Story Protocol royalties, fiat on/off-ramps — over the standard MCP stdio
 transport. Any MCP-compatible client speaks to it: Claude Desktop, Claude
 Code CLI, Cursor, Goose, ChatGPT Apps, your own MCP host.
 
+> **Looking for the lightest path?** If you have Claude Max, the
+> agent-package + skill is enough — no MCP server needed. See
+> `docs/quickstart/` (visualized at https://capability.network/start).
+> Use this MCP install if you want the 63 typed tools in your palette.
+
 This page is the 5-minute install. The detailed package README lives at
 `C:\Users\globa\pcc-onboard-ui\packages\mcp-server\README.md` (or
 [GitHub](https://github.com/LamaSu/physical-capability-cloud/tree/master/packages/mcp-server)).

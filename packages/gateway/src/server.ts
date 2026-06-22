@@ -26,6 +26,7 @@ import { onboardRoutes } from "./routes/onboard.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { onboardChatRoutes } from "./routes/onboard-chat.js";
 import { snippetRoutes } from "./routes/snippet.js";
+import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -525,6 +526,9 @@ export async function createGateway(port = 3200) {
   // /snippet.md, /onboard/snippet, /onboard/snippet.json — copy-paste prompt for
   // any tool-using LLM (Claude.ai, ChatGPT, Gemini, Cursor). Owner ask #178.
   await app.register(snippetRoutes);
+  // /start, /quickstart/* — three-card landing for Claude Max users.
+  // Claude Max front-door reframe (2026-06-19).
+  await app.register(startRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);
