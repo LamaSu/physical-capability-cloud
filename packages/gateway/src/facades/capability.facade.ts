@@ -118,7 +118,7 @@ export class CapabilityFacade extends BaseFacade {
       const page = allCapabilities.slice(offset, offset + limit);
 
       // Batch-load kernels to avoid N+1
-      const kernelIds = [...new Set(page.map((c) => c.kernelId))];
+      const kernelIds = [...new Set(page.map((c: any) => c.kernelId))];
       const kernelMap = this.loadKernelMap(kernelIds);
 
       // Pre-load reputations if requested
