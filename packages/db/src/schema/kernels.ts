@@ -17,6 +17,15 @@ export const shopKernels = sqliteTable("shop_kernels", {
   registeredAt: text("registered_at").notNull(),
   lastHeartbeat: text("last_heartbeat").notNull(),
   version: text("version").notNull(),
+  /**
+   * Soft expiry. ISO timestamp after which this kernel stops appearing in
+   * default catalog listings (the sweeper marks it `status="expired"`).
+   * Extended on every heartbeat to `now + 24h` (configurable via
+   * KERNEL_TTL_HOURS env). Nullable for backward compat — rows without it
+   * are treated as never-expiring until the next heartbeat.
+   * See docs/kernel-lifecycle.md.
+   */
+  validUntil: text("valid_until"),
 });
 
 /** A device registered within a kernel */

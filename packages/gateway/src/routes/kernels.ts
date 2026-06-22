@@ -14,6 +14,38 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 
+/**
+ * Build a "next step" hint pointing operators at POST /api/capabilities.
+ *
+ * Discovery context: POST /api/kernels creates a kernel row but does NOT make
+ * the operator discoverable. The catalog (GET /api/capabilities) filters on
+ * capabilities, not kernels — a kernel with zero capabilities is correctly
+ * invisible to user-agents browsing for skills. This hint tells the operator
+ * that an additional POST is required.
+ *
+ * See docs/DEPLOY.md (Runtime Env Semantics) and
+ * pcc-operator-onboarding-and-categories.md (Part A item 14).
+ *
+ * agent: implementer-victor (cherry-picked via implementer-whiskey integration)
+ */
+function buildCapabilityRegistrationHint(kernelId: string) {
+  return {
+    action: "POST /api/capabilities",
+    explanation:
+      `Your kernel is registered but is not yet discoverable. ` +
+      `PCC catalog discovery filters on capabilities, not kernels. ` +
+      `POST at least one capability tied to this kernel via ` +
+      `{ kernelId: "${kernelId}", type: "<category.action>", name: "<human-name>", ... } ` +
+      `to appear in GET /api/capabilities and become discoverable to user-agents.`,
+    documentationUrl: "/docs/onboarding/capability-registration",
+    exampleCurl:
+      `curl -X POST <gateway>/api/capabilities ` +
+      `-H 'Authorization: Bearer <key>' ` +
+      `-H 'Content-Type: application/json' ` +
+      `-d '{"kernelId":"${kernelId}","type":"pizza.order","name":"..."}'`,
+  };
+}
+
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
 
@@ -33,13 +65,32 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Get a single kernel by ID with full health snapshot (capabilities + devices).
-   * Returns { kernel: KernelHealthSnapshot } for backward compat.
-   * Returns 404 when not found (previously returned 200 with { error: "not_found" }).
+   * Returns { kernel: KernelHealthSnapshot } with extra discoveryStatus +
+   * nextStep hint when the kernel has zero capabilities (purely additive —
+   * existing clients that only consume kernel.id keep working).
+   * Returns 404 when not found.
    */
   app.get<{ Params: { kernelId: string } }>("/api/kernels/:kernelId", async (req, reply) => {
     const result = await facade.getById(req.params.kernelId);
-    if (result.success) return { kernel: result.data };
-    return sendResult(reply, result);
+    if (!result.success) return sendResult(reply, result);
+    const snapshot = result.data;
+    const capabilityCount = snapshot.capabilityCount ?? 0;
+    const discoveryStatus =
+      capabilityCount >= 1 ? "discoverable" : "kernel-registered-not-discoverable";
+    // Backward-compat alias: tests + dashboard read `kernel.capabilities`
+    // (a string[] of types). The KernelHealthSnapshot stores them as
+    // `capabilityTypes`; expose both shapes for callers that haven't
+    // migrated yet. Purely additive — KernelHealthSnapshot fields are
+    // preserved.
+    const responseKernel: Record<string, unknown> = {
+      ...snapshot,
+      capabilities: snapshot.capabilityTypes ?? [],
+      discoveryStatus,
+    };
+    if (discoveryStatus === "kernel-registered-not-discoverable") {
+      responseKernel.nextStep = buildCapabilityRegistrationHint(snapshot.id);
+    }
+    return { kernel: responseKernel };
   });
 
   /**
@@ -70,7 +121,10 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Register (upsert) a kernel.
-   * Returns 201 + { kernel, created: true } on creation.
+   * Returns 201 + { kernel, created: true, discoveryStatus, nextStep } on creation
+   * (freshly registered kernels have zero capabilities → not yet discoverable;
+   * the nextStep hint tells the operator to POST /api/capabilities — Victor's
+   * onboarding-clarity fix, integrated via implementer-whiskey).
    * Returns 200 + { kernel, created: false } when already exists (heartbeat update).
    */
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
@@ -84,7 +138,13 @@ export async function kernelRoutes(app: FastifyInstance) {
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
     if (created) {
-      return reply.code(201).send({ kernel, created: true });
+      return reply.code(201).send({
+        kernel,
+        created: true,
+        capabilities: [],
+        discoveryStatus: "kernel-registered-not-discoverable",
+        nextStep: buildCapabilityRegistrationHint(kernel.id),
+      });
     }
     return { kernel, created: false };
   });
@@ -113,5 +173,72 @@ export async function kernelRoutes(app: FastifyInstance) {
   }>("/api/kernels/:kernelId/capabilities", async (req, reply) => {
     const result = await facade.announceCapabilities(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
+  });
+
+  /**
+   * Per-capability heartbeat (feat/ed25519-keys-and-kernel-ttl).
+   *
+   * Single-row heartbeat for clients that already announced their kernel
+   * but want to refresh ONE capability's TTL without re-sending the
+   * whole catalog. Authentication follows the same Bearer-token model as
+   * other write routes — the gateway middleware gate ensures the caller
+   * has a valid API key before the handler runs.
+   *
+   * Returns 200 with { acknowledged, capabilityId, kernelId, validUntil,
+   *   timestamp, resurrected }, or 404 if the capability id is unknown.
+   */
+  app.post<{
+    Params: { capId: string };
+    Body: { signature?: string };
+  }>("/api/capabilities/:capId/heartbeat", async (req, reply) => {
+    const { getRepos } = await import("../db.js");
+    const { computeValidUntilIso, emitKernelLifecycleEvent } = await import(
+      "../facades/kernel.facade.js"
+    );
+    const repos = getRepos();
+    const cap = (repos.capabilities as any).findById(req.params.capId);
+    if (!cap) {
+      return reply.status(404).send({ error: "capability_not_found" });
+    }
+    const nowDate = new Date();
+    const nowIso = nowDate.toISOString();
+    const validUntil = computeValidUntilIso(nowDate);
+
+    // Detect resurrection at the capability level.
+    const priorValidUntil = cap.validUntil ?? cap.valid_until;
+    let resurrected = false;
+    if (priorValidUntil) {
+      const parsed = Date.parse(priorValidUntil);
+      if (Number.isFinite(parsed) && parsed < nowDate.getTime()) {
+        resurrected = true;
+      }
+    }
+
+    try {
+      (repos.capabilities as any).update(req.params.capId, {
+        lastHeartbeatAt: nowIso,
+        validUntil,
+      });
+    } catch {
+      return reply.status(500).send({ error: "update_failed" });
+    }
+    try {
+      emitKernelLifecycleEvent({
+        event: "kernel.heartbeat.received",
+        kernelId: cap.kernelId,
+        capabilityId: cap.id,
+      });
+    } catch {
+      // telemetry shouldn't block the response
+    }
+
+    return reply.status(200).send({
+      acknowledged: true,
+      capabilityId: cap.id,
+      kernelId: cap.kernelId,
+      validUntil,
+      resurrected,
+      timestamp: nowIso,
+    });
   });
 }

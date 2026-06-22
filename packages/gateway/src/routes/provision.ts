@@ -32,6 +32,12 @@ export async function provisionRoutes(app: FastifyInstance) {
       walletAddress?: string;
       name?: string;
       capability?: string;
+      /**
+       * Optional Ed25519 public key (BYOK). 64 hex chars, optional 0x prefix.
+       * Omitted → gateway mints a fresh keypair and returns the private
+       * key in this response ONCE.
+       */
+      publicKey?: string;
     };
 
     let operatorId: string;
@@ -48,6 +54,9 @@ export async function provisionRoutes(app: FastifyInstance) {
     }
     if (body.capability !== undefined && typeof body.capability !== "string") {
       return reply.status(400).send({ error: "invalid_type", message: "capability must be a string" });
+    }
+    if (body.publicKey !== undefined && typeof body.publicKey !== "string") {
+      return reply.status(400).send({ error: "invalid_type", message: "publicKey must be a string" });
     }
 
     if (body.walletAddress) {
@@ -82,7 +91,7 @@ export async function provisionRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { rawKey, record } = provisionApiKey({
+      const { rawKey, record, ed25519 } = provisionApiKey({
         operatorId,
         name: body.name,
         description: body.capability
@@ -94,6 +103,7 @@ export async function provisionRoutes(app: FastifyInstance) {
           provisionedAt: new Date().toISOString(),
           source: "landing-page",
         },
+        publicKey: body.publicKey,
       });
 
       if (!record) return reply.status(500).send({ error: "provision_failed" });
@@ -103,11 +113,19 @@ export async function provisionRoutes(app: FastifyInstance) {
         resourceType: "api_key",
         resourceId: record.id,
         action: "create",
-        metadata: { name: body.name, capability: body.capability },
+        metadata: {
+          name: body.name,
+          capability: body.capability,
+          ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+        },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      trackServerEvent("api_key_provisioned", { email: body.email, capability: body.capability });
+      trackServerEvent("api_key_provisioned", {
+        email: body.email,
+        capability: body.capability,
+        ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+      });
       // Surface the trace_id (stamped by `middleware/trace-id.ts`) so the
       // agent can echo it on every subsequent call via `x-pcc-trace-id`.
       // The trace-id middleware also sets it on the response header — the
@@ -115,6 +133,21 @@ export async function provisionRoutes(app: FastifyInstance) {
       // than headers.
       // See docs/AGENT_ONBOARDING_OBSERVABILITY.md.
       const trace_id = (req as unknown as { traceId?: string }).traceId;
+      // Ed25519 surfacing: ALWAYS return the public key; return the private
+      // key ONLY when the gateway minted it. BYOK keys never round-trip.
+      const ed25519Response = ed25519
+        ? {
+            public_key: ed25519.publicKeyHex,
+            private_key: ed25519.privateKeyHex,
+            private_key_pkcs8_base64: ed25519.privateKeyPkcs8B64,
+            source: "server-minted",
+            warning:
+              "Store the private_key now — it will not be shown again. Anyone holding it can sign as this agent.",
+          }
+        : {
+            public_key: record.publicKey ?? null,
+            source: "byok",
+          };
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,
@@ -125,6 +158,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         created_at: record.createdAt,
         warning: "Save this API key now — it will not be shown again.",
         trace_id,
+        ed25519: ed25519Response,
         usage: {
           header: `Authorization: Bearer ${rawKey}`,
           trace_header: `x-pcc-trace-id: ${trace_id ?? "<trace_id>"}`,
@@ -137,6 +171,12 @@ export async function provisionRoutes(app: FastifyInstance) {
       const message = err instanceof Error ? err.message : "Failed to provision key";
       if (message.includes("Maximum 5")) {
         return reply.status(429).send({ error: "too_many_keys", message });
+      }
+      if (
+        err instanceof Error &&
+        (err as Error & { code?: string }).code === "invalid_public_key"
+      ) {
+        return reply.status(400).send({ error: "invalid_public_key", message });
       }
       return reply.status(500).send({ error: "provision_failed", message });
     }
@@ -152,6 +192,82 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(401).send({ error: "invalid_key" });
     }
     return { valid: true, operatorId: keyRecord.operatorId };
+  });
+
+  // ── POST /api/agents/:id/verify ────────────────────────────────────
+  //
+  // Verify that a signature was produced by the agent identified by `:id`.
+  // The agent's public key was set at provision time (server-minted OR
+  // BYOK). Body: { message: string, signature: string }. Returns
+  // { valid: bool, keyId, operatorId } on success. Returns 404 when the
+  // key doesn't exist or has no public_key on file (e.g. legacy rows).
+  //
+  // PUBLIC: signature verification by definition needs no auth — anyone
+  // can verify a signed evidence bundle against the issuing agent's key.
+  //
+  // Wire format: the message is interpreted as UTF-8 by default. Callers
+  // can opt into base64 by passing { message_base64: "..." } instead.
+  app.post<{
+    Params: { id: string };
+    Body: {
+      message?: string;
+      message_base64?: string;
+      signature?: string;
+    };
+  }>("/api/agents/:id/verify", async (req, reply) => {
+    const { id } = req.params;
+    const body = req.body ?? {};
+
+    if (typeof body.signature !== "string" || body.signature.length === 0) {
+      return reply.status(400).send({
+        error: "invalid_body",
+        message: "signature (hex string) is required",
+      });
+    }
+    if (
+      (body.message === undefined || typeof body.message !== "string") &&
+      (body.message_base64 === undefined || typeof body.message_base64 !== "string")
+    ) {
+      return reply.status(400).send({
+        error: "invalid_body",
+        message: "Provide either message (utf-8) or message_base64",
+      });
+    }
+
+    let messageBuffer: Buffer;
+    if (typeof body.message === "string") {
+      messageBuffer = Buffer.from(body.message, "utf-8");
+    } else {
+      try {
+        messageBuffer = Buffer.from(body.message_base64 as string, "base64");
+      } catch {
+        return reply.status(400).send({
+          error: "invalid_body",
+          message: "message_base64 must be valid base64",
+        });
+      }
+    }
+
+    const repo = getRepos().apiKeys;
+    const key = repo.findById(id);
+    // Unify "not found" + "no public key" + "revoked" so the verify
+    // endpoint never leaks key existence.
+    if (!key || !key.publicKey || key.revokedAt) {
+      return reply.status(404).send({
+        error: "key_not_found",
+        message:
+          "No verifiable public key on file for this agent. Re-provision with publicKey or as server-minted.",
+      });
+    }
+
+    const { verifyEd25519Signature } = await import("../auth/ed25519.js");
+    const valid = verifyEd25519Signature(key.publicKey, messageBuffer, body.signature);
+
+    return reply.status(200).send({
+      valid,
+      key_id: key.id,
+      operator_id: key.operatorId,
+    });
   });
 
   // ── GET /api/auth/keys ────────────────────────────────────────────
