@@ -13,7 +13,7 @@ import fastifyStatic from "@fastify/static";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
-import { initStore, closeStore, getRepos } from "./db.js";
+import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -84,6 +84,13 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+import { courierJobsRoutes } from "./routes/courier-jobs.js";
+import { jobOffersRoutes } from "./routes/job-offers.js";
+import { initJobOffersStore } from "./services/job-offers-store.js";
+import { startJobOffersSweeper } from "./services/job-offers-sweeper.js";
+// Note: courier-jobs-store is now a shim over job-offers-store; the legacy
+// courier-jobs-sweeper still ships but is a no-op since the generic sweeper
+// covers all capability types. Kept imports only for source-compat.
 import { assetOutboundRoutes } from "./routes/asset-outbound.js";
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
 import { intentIngestRoutes } from "./routes/intent-ingest.js";
@@ -425,6 +432,44 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+  // Job-offers — generic /api/job-offers/* matching primitive. Replaces
+  // the courier-specific store wiring with a category-agnostic version that
+  // every PCC adapter (pcc-courier, pcc-dominos, pcc-hamilton, pcc-kdense,
+  // pcc-opentrons, ...) shares. The legacy /api/courier-jobs/* routes also
+  // route here — courier-jobs-store.ts is now a thin shim translating the
+  // v0.2 courier shape to/from the generic JobOffer shape.
+  //
+  // Per coord bulletin #207, this lives in the gateway so the matching
+  // surface inherits auth, observability, and catalog discovery. The store
+  // uses the same SQLite file (via @pcc/store -> drizzle .$client raw
+  // handle) for write-through persistence across restart. Tables are
+  // created by db/src/migrate.ts.
+  try {
+    // Pull the raw better-sqlite3 handle from drizzle (.$client). We use a
+    // structural cast (no better-sqlite3 type import) so the gateway's
+    // dependency surface stays unchanged.
+    const rawSqlite = (getStore().db as unknown as {
+      $client?: import("./services/job-offers-store.js").SqliteDatabaseLike;
+    }).$client;
+    initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    startJobOffersSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  } catch (err) {
+    // Best-effort wiring — if the store handle is shaped differently in some
+    // environments (e.g. tests that build the app without initStore), fall
+    // back to a pure in-memory job-offers store so routes still respond.
+    app.log.warn(
+      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+    );
+    initJobOffersStore({});
+    startJobOffersSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  }
+
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -533,6 +578,11 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Generic /api/job-offers/* surface — every PCC adapter shares this.
+  await app.register(jobOffersRoutes);
+  // Legacy /api/courier-jobs/* shim — kept for backward compat through the
+  // pcc-courier migration window (target: 30 days from 2026-06-19).
+  await app.register(courierJobsRoutes);
   await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);
   await app.register(intentIngestRoutes);

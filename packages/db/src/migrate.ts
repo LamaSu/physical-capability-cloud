@@ -1774,4 +1774,68 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS csd_usage_count_idx ON csd_usage(count DESC);
   `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // Courier-jobs — folded pcc-courier-jobs v0.2 standalone matching layer
+  // (https://web-production-3c660.up.railway.app) into the gateway. JSON
+  // blob per row (stored in `data`) plus indexed columns for the
+  // hot-path filters (status, valid_until). Routes live in
+  // routes/courier-jobs.ts; store in services/courier-jobs-store.ts.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS courier_jobs (
+      id           TEXT PRIMARY KEY,
+      status       TEXT NOT NULL,
+      data         TEXT NOT NULL,  -- JSON CourierJob
+      posted_at    TEXT NOT NULL,
+      posted_by    TEXT,
+      valid_until  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS courier_jobs_status_idx ON courier_jobs(status);
+    CREATE INDEX IF NOT EXISTS courier_jobs_valid_until_idx ON courier_jobs(valid_until);
+    CREATE INDEX IF NOT EXISTS courier_jobs_posted_at_idx ON courier_jobs(posted_at);
+
+    CREATE TABLE IF NOT EXISTS courier_job_events (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id   TEXT NOT NULL,
+      at       TEXT NOT NULL,
+      data     TEXT NOT NULL  -- JSON CourierJobEvent
+    );
+    CREATE INDEX IF NOT EXISTS courier_job_events_job_idx ON courier_job_events(job_id);
+  `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // Job-offers — generic matching primitive at /api/job-offers/*.
+  // Replaces the courier-specific courier_jobs tables with a category-
+  // agnostic schema (capability_type first-class, requirements opaque
+  // JSON). EVERY PCC adapter (courier, dominos, hamilton, kdense,
+  // opentrons, ...) writes here. The courier_jobs tables above remain
+  // for backward compat — courier-shim routes also write to job_offers
+  // so new posts immediately appear in the generic feed.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS job_offers (
+      id               TEXT PRIMARY KEY,
+      capability_type  TEXT NOT NULL,                -- e.g. courier.dispatch, pizza.order, lab.hplc, opentrons.runProtocol
+      status           TEXT NOT NULL,
+      data             TEXT NOT NULL,                -- JSON JobOffer (full object)
+      posted_at        TEXT NOT NULL,
+      poster_did       TEXT,                         -- DID of poster (user-agent or kernel)
+      valid_until      TEXT NOT NULL,
+      idempotency_key  TEXT UNIQUE                   -- caller idempotency
+    );
+    CREATE INDEX IF NOT EXISTS job_offers_capability_type_idx ON job_offers(capability_type);
+    CREATE INDEX IF NOT EXISTS job_offers_status_idx ON job_offers(status);
+    CREATE INDEX IF NOT EXISTS job_offers_valid_until_idx ON job_offers(valid_until);
+    CREATE INDEX IF NOT EXISTS job_offers_posted_at_idx ON job_offers(posted_at);
+    CREATE INDEX IF NOT EXISTS job_offers_poster_did_idx ON job_offers(poster_did);
+
+    CREATE TABLE IF NOT EXISTS job_offer_events (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      offer_id  TEXT NOT NULL,
+      at        TEXT NOT NULL,
+      data      TEXT NOT NULL                        -- JSON JobOfferEvent
+    );
+    CREATE INDEX IF NOT EXISTS job_offer_events_offer_idx ON job_offer_events(offer_id);
+  `);
 }
