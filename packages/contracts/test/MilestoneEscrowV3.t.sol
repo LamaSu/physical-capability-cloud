@@ -545,4 +545,195 @@ contract MilestoneEscrowV3Test is Test {
         // (We don't check exact balance here — the V2-inherited dispute path is
         // covered by V2 tests; we only assert the path WORKS and ends Released.)
     }
+
+    // ═══ Mode D — reclaimAfterDeadline (locked-funds-gap fix) ════════════════
+
+    event MilestoneRefunded(uint256 indexed milestoneIndex, uint256 amount);
+
+    /// @dev Deploy + fund a fresh single-milestone escrow, stopping at a chosen
+    ///      pre-settlement stage. bond>0 + depositBond_=false => Funded; +deposit => Locked;
+    ///      +submitEvidence_ => Evidenced.
+    function _freshFundedEscrow(uint256 bond, bool depositBond_, bool submitEvidence_)
+        internal
+        returns (MilestoneEscrowV3 esc, MockUSDC tok)
+    {
+        tok = new MockUSDC(1_000_000e6);
+        MockEAS eas2 = new MockEAS();
+        esc = _deployEscrow(payer, arbiter, address(tok), CWM_ID, address(0), address(eas2), SCHEMA_V2_UID, oracle);
+        tok.mint(payer, 500_000e6);
+        tok.mint(operator, 50_000e6);
+
+        vm.prank(payer);
+        esc.addMilestone(STEP_ID, operator, AMOUNT, bond, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
+
+        vm.startPrank(payer);
+        tok.approve(address(esc), AMOUNT);
+        esc.fund();
+        vm.stopPrank();
+
+        if (depositBond_ && bond > 0) {
+            vm.startPrank(operator);
+            tok.approve(address(esc), bond);
+            esc.depositBond(0);
+            vm.stopPrank();
+        }
+        if (submitEvidence_) {
+            vm.prank(operator);
+            esc.submitEvidence(0, EVIDENCE_HASH);
+        }
+    }
+
+    function _warpPastDeadline(MilestoneEscrowV3 esc) internal {
+        vm.warp(esc.fundedAt() + esc.DEFAULT_RECLAIM_DEADLINE() + 1);
+    }
+
+    // D1: reclaim at Evidenced (bond posted in setUp) → payer gets amount, operator gets bond.
+    function test_reclaim_atEvidenced_refundsPayerAndBond() public {
+        uint256 payerBefore    = usdc.balanceOf(payer);
+        uint256 operatorBefore = usdc.balanceOf(operator);
+
+        _warpPastDeadline(escrow);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit MilestoneRefunded(0, AMOUNT);
+        vm.prank(payer);
+        escrow.reclaimAfterDeadline(0);
+
+        assertEq(uint8(escrow.getMilestone(0).status), 7, "Status should be Refunded");
+        assertEq(usdc.balanceOf(payer) - payerBefore, AMOUNT, "Payer refunded amount");
+        assertEq(usdc.balanceOf(operator) - operatorBefore, OPERATOR_BOND, "Operator bond returned");
+    }
+
+    // D2: reclaim at Funded (no bond deposited) → payer gets amount, operator gets nothing.
+    function test_reclaim_atFunded_refundsPayerOnly() public {
+        (MilestoneEscrowV3 esc, MockUSDC tok) = _freshFundedEscrow(OPERATOR_BOND, false, false);
+        uint256 payerBefore    = tok.balanceOf(payer);
+        uint256 operatorBefore = tok.balanceOf(operator);
+
+        _warpPastDeadline(esc);
+        vm.prank(payer);
+        esc.reclaimAfterDeadline(0);
+
+        assertEq(uint8(esc.getMilestone(0).status), 7, "Refunded");
+        assertEq(tok.balanceOf(payer) - payerBefore, AMOUNT, "Payer refunded amount");
+        assertEq(tok.balanceOf(operator) - operatorBefore, 0, "Operator gets nothing (no bond posted)");
+    }
+
+    // D3: reclaim at Locked (bond deposited, no evidence) → payer amount, operator bond.
+    function test_reclaim_atLocked_refundsPayerAndBond() public {
+        (MilestoneEscrowV3 esc, MockUSDC tok) = _freshFundedEscrow(OPERATOR_BOND, true, false);
+        uint256 payerBefore    = tok.balanceOf(payer);
+        uint256 operatorBefore = tok.balanceOf(operator);
+
+        _warpPastDeadline(esc);
+        vm.prank(payer);
+        esc.reclaimAfterDeadline(0);
+
+        assertEq(uint8(esc.getMilestone(0).status), 7, "Refunded");
+        assertEq(tok.balanceOf(payer) - payerBefore, AMOUNT, "Payer refunded amount");
+        assertEq(tok.balanceOf(operator) - operatorBefore, OPERATOR_BOND, "Operator bond returned");
+    }
+
+    // D4: reclaim before the deadline reverts.
+    function test_revert_reclaimBeforeDeadline() public {
+        vm.prank(payer);
+        vm.expectRevert("Deadline not reached");
+        escrow.reclaimAfterDeadline(0);
+    }
+
+    // D5: an Attested milestone can NEVER be clawed back (operator earned it).
+    function test_revert_reclaimAttested() public {
+        _buildValidAttestation(VALID_UID, ATTESTED_FEE_BPS, feeRecipient);
+        escrow.submitAttestation(0, VALID_UID); // → Attested
+
+        _warpPastDeadline(escrow);
+        vm.prank(payer);
+        vm.expectRevert("Not reclaimable");
+        escrow.reclaimAfterDeadline(0);
+    }
+
+    // D6: a Released milestone is not reclaimable.
+    function test_revert_reclaimReleased() public {
+        vm.prank(payer);
+        escrow.approveAndRelease(0); // Mode A → Released
+
+        _warpPastDeadline(escrow);
+        vm.prank(payer);
+        vm.expectRevert("Not reclaimable");
+        escrow.reclaimAfterDeadline(0);
+    }
+
+    // D7: only the payer may reclaim.
+    function test_revert_reclaimByNonPayer() public {
+        _warpPastDeadline(escrow);
+
+        vm.prank(operator);
+        vm.expectRevert("Only payer");
+        escrow.reclaimAfterDeadline(0);
+
+        vm.prank(arbiter);
+        vm.expectRevert("Only payer");
+        escrow.reclaimAfterDeadline(0);
+
+        vm.prank(address(0xDEAD));
+        vm.expectRevert("Only payer");
+        escrow.reclaimAfterDeadline(0);
+    }
+
+    // D8: idempotent — a second reclaim reverts (Refunded is terminal).
+    function test_revert_reclaimTwice() public {
+        _warpPastDeadline(escrow);
+        vm.prank(payer);
+        escrow.reclaimAfterDeadline(0);
+
+        vm.prank(payer);
+        vm.expectRevert("Not reclaimable");
+        escrow.reclaimAfterDeadline(0);
+    }
+
+    // D9: payer-set custom (shorter) deadline takes effect.
+    function test_reclaim_customDeadline() public {
+        MockUSDC tok = new MockUSDC(1_000_000e6);
+        MockEAS eas2 = new MockEAS();
+        MilestoneEscrowV3 esc = _deployEscrow(payer, arbiter, address(tok), CWM_ID, address(0), address(eas2), SCHEMA_V2_UID, oracle);
+        tok.mint(payer, 500_000e6);
+
+        vm.startPrank(payer);
+        esc.addMilestone(STEP_ID, operator, AMOUNT, 0, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
+        esc.setReclaimDeadline(1 hours);
+        tok.approve(address(esc), AMOUNT);
+        esc.fund();
+        vm.stopPrank();
+
+        // Before the custom 1h window → revert.
+        vm.warp(esc.fundedAt() + 1 hours - 1);
+        vm.prank(payer);
+        vm.expectRevert("Deadline not reached");
+        esc.reclaimAfterDeadline(0);
+
+        // After it → succeeds (well before the 30-day default).
+        vm.warp(esc.fundedAt() + 1 hours + 1);
+        uint256 payerBefore = tok.balanceOf(payer);
+        vm.prank(payer);
+        esc.reclaimAfterDeadline(0);
+        assertEq(tok.balanceOf(payer) - payerBefore, AMOUNT, "Payer refunded after custom deadline");
+    }
+
+    // D10: reclaim-first blocks a later oracle attestation (race safety).
+    function test_reclaimThenAttestationReverts() public {
+        _warpPastDeadline(escrow);
+        vm.prank(payer);
+        escrow.reclaimAfterDeadline(0); // → Refunded
+
+        _buildValidAttestation(VALID_UID, ATTESTED_FEE_BPS, feeRecipient);
+        vm.expectRevert("Evidence not submitted");
+        escrow.submitAttestation(0, VALID_UID);
+    }
+
+    // D11: setReclaimDeadline after funding reverts.
+    function test_revert_setReclaimDeadlineAfterFunded() public {
+        vm.prank(payer);
+        vm.expectRevert("Already funded");
+        escrow.setReclaimDeadline(1 hours);
+    }
 }
