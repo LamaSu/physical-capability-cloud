@@ -10,6 +10,14 @@
 
 import nacl from "tweetnacl";
 import type { EncryptedEnvelope, CapabilityAnnouncement } from "@pcc/spec";
+// Canonicalization unification (RTP-absorption doc 02, open Q1).
+// a2a previously signed over `JSON.stringify(obj, Object.keys(obj).sort())`, which does
+// NOT recursively sort nested keys and silently DROPS nested-only keys (the array-replacer
+// footgun — the key list is applied at every depth). @pcc/spec signs over recursive
+// RFC-8785-style `canonicalize()` (JCS). The two disagreed, breaking cross-transport
+// signature verification. a2a now uses the SAME canonicalization as the spec, so a
+// signature produced on either path verifies on the other.
+import { canonicalize } from "@pcc/spec";
 
 // ── Key Generation ─────────────────────────────────────────────────
 
@@ -92,12 +100,16 @@ export function verify(data: string, signature: string, publicKey: string): bool
 
 // ── Capability Announcements ───────────────────────────────────────
 
-/** Sign a capability announcement (signs canonical JSON without the signature field) */
+/**
+ * Sign a capability announcement. Signs the spec's canonical JSON (JCS) of the
+ * announcement without the signature field. Uses the SAME `canonicalize` as
+ * @pcc/spec evidence/job-spec hashing so signatures interoperate across transports.
+ */
 export function signAnnouncement(
   announcement: Omit<CapabilityAnnouncement, "signature">,
   secretKey: string,
 ): string {
-  const canonical = JSON.stringify(announcement, Object.keys(announcement).sort());
+  const canonical = canonicalize(announcement);
   return sign(canonical, secretKey);
 }
 
@@ -107,6 +119,6 @@ export function verifyAnnouncement(
   publicKey: string,
 ): boolean {
   const { signature, ...rest } = announcement;
-  const canonical = JSON.stringify(rest, Object.keys(rest).sort());
+  const canonical = canonicalize(rest);
   return verify(canonical, signature, publicKey);
 }
