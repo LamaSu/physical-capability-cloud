@@ -25,13 +25,14 @@ import { MilestoneEscrowV3ABI } from "@pcc/contracts/abi";
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const TEST_ESCROW = "0xDeAdBeEf00000000000000000000000000000010";
+// viem's isAddress is strict by default — an upper/mixed-case hex must pass
+// EIP-55 checksum. Using all-lowercase sidesteps the checksum requirement.
+const TEST_ESCROW = "0xdeadbeef00000000000000000000000000000010";
 const TEST_MILESTONE = 3;
 
 const ORIG_FLAG = process.env.VERIFICATION_MODE_A_ENABLED;
 
 async function buildApp(): Promise<FastifyInstance> {
-  process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: false });
 
   const app = Fastify({ logger: false });
