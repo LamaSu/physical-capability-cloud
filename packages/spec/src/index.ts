@@ -1,6 +1,8 @@
 export * from "./types/index.js";
 export * from "./schemas/index.js";
 export { canonicalize, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEventHash } from "./util/canonical.js";
+// RTP-absorption doc 03 — job lifecycle reducer + in-memory timeout registry (transport-independent)
+export * from "./util/job-lifecycle.js";
 export { ids, generateId } from "./util/ids.js";
 // Identity types and browser-safe functions (no node:crypto)
 export * from "./identity/types.js";
