@@ -17,6 +17,7 @@ import {
   submitAttestationV2,
   releaseMilestoneV2,
   isWriteEnabled as escrowWriteEnabled,
+  encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
 
 /**
@@ -26,6 +27,21 @@ import {
  */
 function useEasV2(): boolean {
   return process.env.PCC_USE_EAS_V2 === "true";
+}
+
+/**
+ * Whether the Mode-A (user-attested, payer-approval) settlement HTTP surface
+ * is exposed. Separate from PCC_EVIDENCE_V2_ENABLED so the schema/encoders
+ * can be exercised + tested independently of the route shipping live.
+ *
+ * Default: OFF. Per coord task 20c68ba9 + #066 deliberation, the gateway
+ * cannot SEND approveAndRelease (it does not hold the payer's key); when this
+ * flag is on, the route returns the calldata + target so the payer's wallet
+ * can submit it.
+ */
+function isModeAEnabled(): boolean {
+  const v = process.env.VERIFICATION_MODE_A_ENABLED;
+  return v === "true" || v === "1" || v === "yes";
 }
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
@@ -502,6 +518,70 @@ export async function escrowRoutes(app: FastifyInstance) {
         req.headers["user-agent"],
       );
       return sendResult(reply, result);
+    },
+  );
+
+  // ── Mode A — payer-approval release (MilestoneEscrowV3) ────────────────
+  //
+  // POST /api/escrow/chain/:address/approve-release/:milestoneIndex
+  //
+  // Returns calldata for MilestoneEscrowV3.approveAndRelease(milestoneIndex)
+  // for the PAYER's wallet to submit. The gateway DOES NOT send this
+  // transaction itself — it does not hold the payer's key, and Mode A is by
+  // definition a buyer-direct settlement (no oracle attestation, no challenge
+  // window, no protocol fee).
+  //
+  // Gated by VERIFICATION_MODE_A_ENABLED. Default OFF so the route is invisible
+  // until the operator opts in. When OFF, returns 503.
+  //
+  // Response shape (200):
+  //   {
+  //     action: "approveAndRelease",
+  //     escrow: <address>,
+  //     milestoneIndex: <number>,
+  //     calldata: "0x...",
+  //     target: <same as escrow>,
+  //     valueWei: "0",
+  //     instruction: "Submit `calldata` to `target` from the payer wallet.",
+  //     path: "v3-mode-a"
+  //   }
+  app.post<{
+    Params: { address: string; milestoneIndex: string };
+  }>(
+    "/api/escrow/chain/:address/approve-release/:milestoneIndex",
+    async (req, reply) => {
+      if (!isModeAEnabled()) {
+        return reply.status(503).send({
+          error: "mode_a_disabled",
+          message:
+            "Mode A (payer-approval release) is not enabled. Set VERIFICATION_MODE_A_ENABLED=true to expose this route.",
+        });
+      }
+
+      const { address, milestoneIndex } = req.params;
+      if (!isAddress(address)) {
+        return reply.status(400).send({ error: "Invalid address" });
+      }
+      const idx = parseInt(milestoneIndex, 10);
+      if (isNaN(idx) || idx < 0) {
+        return reply.status(400).send({ error: "Invalid milestone index" });
+      }
+
+      // Pure encode — no network, no wallet. The PAYER submits this from
+      // their own wallet (MilestoneEscrowV3 enforces onlyPayerEffective).
+      const calldata = encodeApproveAndReleaseV3(idx);
+
+      return {
+        action: "approveAndRelease",
+        escrow: address,
+        milestoneIndex: idx,
+        calldata,
+        target: address,
+        valueWei: "0",
+        instruction:
+          "Submit `calldata` to `target` from the payer wallet. MilestoneEscrowV3.approveAndRelease is restricted to the payer (onlyPayerEffective); any other sender will revert.",
+        path: "v3-mode-a",
+      };
     },
   );
 }

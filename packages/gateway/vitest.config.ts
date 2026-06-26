@@ -100,6 +100,7 @@ export default defineConfig({
     alias: buildWorkspaceAliases(),
   },
   test: {
+    setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.ts"],
     exclude: [
       // Temporarily excluded — facade rewrite changed route behavior.
