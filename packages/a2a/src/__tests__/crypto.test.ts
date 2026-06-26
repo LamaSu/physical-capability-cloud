@@ -9,6 +9,7 @@ import {
   signAnnouncement,
   verifyAnnouncement,
 } from "../crypto.js";
+import { canonicalize } from "@pcc/spec";
 import { EncryptedBus } from "../encrypted-bus.js";
 import type { BusLike } from "../encrypted-bus.js";
 import type { A2AMessage } from "../types.js";
@@ -221,6 +222,66 @@ describe("signAnnouncement / verifyAnnouncement", () => {
 
     const valid = verifyAnnouncement(signed, kp2.publicKey);
     expect(valid).toBe(false);
+  });
+});
+
+// ── Canonicalization unification (cross-transport signature interop) ─
+
+describe("canonicalization unification (RTP doc 02 open Q1)", () => {
+  // Doc 02 open Q1: a2a previously signed over `JSON.stringify(obj, keys.sort())`,
+  // which (a) does not recursively sort nested keys and (b) silently DROPS nested-only
+  // keys (the array-replacer is applied at every depth). @pcc/spec signs over recursive
+  // `canonicalize()` (JCS). They disagreed → cross-transport verify broke. a2a now uses
+  // the SAME `canonicalize` as the spec. These tests prove a signature produced via one
+  // path verifies via the other, using a NESTED announcement that the old path mangled.
+  const nestedAnnouncement: Omit<CapabilityAnnouncement, "signature"> = {
+    kernelDid: "did:pcc:kernel-xtransport",
+    kernelId: "kernel-xtransport",
+    capabilities: [
+      { type: "fdm_print", materials: ["PLA", "PETG"], queueDepth: 3 },
+      { type: "cnc_mill", materials: ["AL6061"], queueDepth: 0 },
+    ],
+    endpoints: [
+      { transport: "websocket-direct", url: "wss://k.local:8443", priority: 1 },
+    ],
+    ttlSeconds: 3600,
+    timestamp: "2026-06-24T00:00:00Z",
+  };
+
+  it("signAnnouncement == sign(canonicalize(obj)) byte-for-byte (same canonical bytes)", () => {
+    const kp = generateSigningKeyPair();
+    const viaA2a = signAnnouncement(nestedAnnouncement, kp.secretKey);
+    // The spec/kernel-sdk path: hash/sign over the recursive canonical JSON.
+    const viaSpec = sign(canonicalize(nestedAnnouncement), kp.secretKey);
+    expect(viaA2a).toBe(viaSpec);
+  });
+
+  it("a signature produced via the SPEC path verifies via the a2a verifyAnnouncement path", () => {
+    const kp = generateSigningKeyPair();
+    const sig = sign(canonicalize(nestedAnnouncement), kp.secretKey);
+    const signed: CapabilityAnnouncement = { ...nestedAnnouncement, signature: sig };
+    expect(verifyAnnouncement(signed, kp.publicKey)).toBe(true);
+  });
+
+  it("a signature produced via the a2a path verifies via the spec verify(canonicalize()) path", () => {
+    const kp = generateSigningKeyPair();
+    const sig = signAnnouncement(nestedAnnouncement, kp.secretKey);
+    expect(verify(canonicalize(nestedAnnouncement), sig, kp.publicKey)).toBe(true);
+  });
+
+  it("the unified canonical form retains nested keys the old array-replacer dropped", () => {
+    const canonical = canonicalize(nestedAnnouncement);
+    expect(canonical).toContain("materials");
+    expect(canonical).toContain("queueDepth");
+    expect(canonical).toContain("priority");
+
+    // Demonstrate the bug the fix closes: the old path drops nested-only keys.
+    const legacy = JSON.stringify(
+      nestedAnnouncement,
+      Object.keys(nestedAnnouncement).sort(),
+    );
+    expect(legacy).not.toContain("materials");
+    expect(canonical).not.toBe(legacy);
   });
 });
 

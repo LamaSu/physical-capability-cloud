@@ -46,6 +46,7 @@ import type {
 } from "./common.js";
 import type { Capability } from "./capability.js";
 import type { DIDString, DIDDocument, CapabilityCredential } from "../identity/types.js";
+import type { KernelJobStatus, JobTimeoutMeta } from "./job-lifecycle.js";
 
 /** Shop Kernel identity and metadata */
 export interface ShopKernel {
@@ -122,9 +123,10 @@ export interface KernelJob {
   stepId: Id;
   cwmId: Id;
   capabilityId: Id;
-  /** Current status */
-  status: "queued" | "preparing" | "executing" | "collecting_evidence" |
-          "awaiting_pickup" | "completed" | "failed" | "cancelled";
+  /** Current status (extended with the doc-03 timeout lifecycle states). */
+  status: KernelJobStatus;
+  /** Populated iff status === "timed_out" — why/when the job timed out. */
+  timeout?: JobTimeoutMeta;
   /** Assigned devices */
   assignedDevices: Id[];
   /** Start time */
