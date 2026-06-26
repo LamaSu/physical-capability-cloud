@@ -14,11 +14,14 @@
  *   "pcc": { "command": "node", "args": ["packages/mcp-server/dist/index.js"] }
  */
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { PCC_URL, pccFetch } from "./api.js";
 import { registerCaptureTools } from "./tools/capture.js";
+import { registerNegotiateTools } from "./tools/negotiate.js";
 
 // ---------------------------------------------------------------------------
 // Tool result helper
@@ -34,7 +37,7 @@ function toolResult(data: unknown): { content: Array<{ type: "text"; text: strin
 // Server setup
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({
+export const server = new McpServer({
   name: "pcc",
   version: "0.1.0",
 });
@@ -224,6 +227,47 @@ server.tool(
   },
   async ({ status }: { status?: string }) => {
     const data = await pccFetch("/api/escrow", { query: { status } });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 10b. pcc_get_escrow — settlement status for one escrow
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_escrow",
+  "Get the settlement status of a single escrow by its escrow ID or on-chain contract address. Returns the escrow with milestones, released/disputed counts, challenge-window state, total/currency, and a `source` of 'db' or 'on-chain' (an 0x address triggers a live chain read). This is the primary settlement-status read for a committed job.",
+  {
+    escrowId: z
+      .string()
+      .describe("Escrow ID (e.g. 'escrow-...') OR an on-chain escrow contract address (0x...)"),
+  },
+  async ({ escrowId }: { escrowId: string }) => {
+    const data = await pccFetch(`/api/escrow/${encodeURIComponent(escrowId)}`);
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 10c. pcc_get_escrow_events — on-chain settlement event log
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "pcc_get_escrow_events",
+  "Get the on-chain event log for an escrow contract by address (Funded, MilestoneReleased, Disputed, EvidenceSubmitted, etc.). Optionally start from a block number to page through history. Read-only chain query.",
+  {
+    address: z.string().describe("On-chain escrow contract address (0x...)"),
+    fromBlock: z
+      .string()
+      .optional()
+      .describe("Optional start block number (decimal string) to read events from"),
+  },
+  async ({ address, fromBlock }: { address: string; fromBlock?: string }) => {
+    const data = await pccFetch(
+      `/api/escrow/chain/${encodeURIComponent(address)}/events`,
+      { query: { fromBlock } },
+    );
     return toolResult(data);
   },
 );
@@ -1521,6 +1565,14 @@ server.tool(
 registerCaptureTools(server);
 
 // ---------------------------------------------------------------------------
+// Negotiation tools — the structured create → select → quote → review → commit
+// lifecycle. Registered out-of-line (src/tools/negotiate.ts) to keep this file
+// slim; the module owns its own Zod shapes + endpoint metadata for tests.
+// ---------------------------------------------------------------------------
+
+registerNegotiateTools(server);
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
@@ -1532,7 +1584,26 @@ async function main() {
   console.error(`[pcc-mcp] PCC MCP server running (gateway: ${PCC_URL})`);
 }
 
-main().catch((err) => {
-  console.error("[pcc-mcp] Fatal:", err);
-  process.exit(1);
-});
+/**
+ * Only boot the stdio transport when this file is executed directly (as the
+ * `pcc-mcp` bin or via `node dist/index.js`). When imported as a library — by
+ * the smoke test, or an embedding host — registration still happens but no
+ * transport is connected, so `server` can be introspected/connected by the
+ * caller. realpath both sides so an npm bin symlink still matches.
+ */
+function isDirectRun(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) {
+  main().catch((err) => {
+    console.error("[pcc-mcp] Fatal:", err);
+    process.exit(1);
+  });
+}

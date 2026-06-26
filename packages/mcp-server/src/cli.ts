@@ -3,9 +3,11 @@
 /**
  * PCC CLI — command-line interface to the Physical Capability Cloud gateway.
  *
- * All 63 tools from the MCP server are available as subcommands. (49 base
- * + 7 contributor-economics tools added in feat/contributor-economics
- * + 7 CVP capture tools registered via registerCaptureTools.)
+ * Core gateway tools are available as subcommands across 19 groups
+ * (capabilities, kernels, jobs, build, negotiate, workflows, escrow, evidence,
+ * protocols, sensors, agents, reputation, depin, setup, csd, discover, ip,
+ * swf, wallet). The MCP server (index.ts) additionally exposes
+ * contributor-economics and CVP capture tools not yet mirrored as CLI groups.
  * Output is JSON by default (for piping/jq). Use --pretty for human-readable.
  *
  * Usage:
@@ -127,8 +129,9 @@ Groups:
   kernels       Shop kernel management
   jobs          Manufacturing job management
   build         Contract builder (options, pricing, contracts)
+  negotiate     Negotiation sessions (create → select → quote → review → commit)
   workflows     Workflow compiler
-  escrow        Escrow contracts
+  escrow        Escrow contracts + settlement status
   evidence      Evidence bundles
   protocols     Protocol templates
   sensors       Sensor data
@@ -181,6 +184,29 @@ pcc build contract <type> --selections='{}' --tier=<0-3> [--profileId=<id>]
   Build a complete capability contract. Tiers: 0=none, 1=basic, 2=standard, 3=full.
 `.trim(),
 
+  negotiate: `
+pcc negotiate create --userAgentId=<id> --kernelId=<id> --capabilityType=<type> [--capabilityId=<id>] [--network=<net>] [--selections='{}']
+  Open a negotiation session. Returns session id (sess-...), resolved options, challenge.
+
+pcc negotiate get <sessionId>
+  Get session state: status, selections, quote, contract terms, transitions.
+
+pcc negotiate select <sessionId> --selections='{}'
+  Merge parameter selections into the session (→ configuring).
+
+pcc negotiate quote <sessionId>
+  Lock params and compute a binding quote (→ quoted).
+
+pcc negotiate review <sessionId>
+  Generate on-chain-ready contract terms from the quote (→ reviewing).
+
+pcc negotiate commit <sessionId>
+  Commit the session — creates job + escrow + scope (→ committed).
+
+pcc negotiate cancel <sessionId>
+  Cancel a non-committed session.
+`.trim(),
+
   workflows: `
 pcc workflows compile --steps='[{"id":"s1","capabilityType":"fdm-printer","dependsOn":[],"parameters":{}}]'
   Compile a multi-step workflow into an execution DAG.
@@ -189,6 +215,12 @@ pcc workflows compile --steps='[{"id":"s1","capabilityType":"fdm-printer","depen
   escrow: `
 pcc escrow list [--status=<status>]
   List escrow contracts. Filter by status (funded, active, completed, disputed).
+
+pcc escrow get <escrowId>
+  Get settlement status for one escrow by ID or 0x on-chain address.
+
+pcc escrow events <address> [--fromBlock=<n>]
+  Get the on-chain event log for an escrow contract address.
 `.trim(),
 
   evidence: `
@@ -434,6 +466,75 @@ const commands: Record<string, Record<string, Handler>> = {
     },
   },
 
+  // ---------- negotiate -----------------------------------------------------
+
+  negotiate: {
+    create: async (_pos, flags, pretty) => {
+      const userAgentId = flagStr(flags, "userAgentId");
+      if (!userAgentId) err("--userAgentId is required");
+      const kernelId = flagStr(flags, "kernelId");
+      if (!kernelId) err("--kernelId is required");
+      const capabilityType = flagStr(flags, "capabilityType");
+      if (!capabilityType) err("--capabilityType is required");
+      const capabilityId = flagStr(flags, "capabilityId");
+      const network = flagStr(flags, "network");
+      const initialSelections = flagJSON(flags, "selections") as
+        | Record<string, unknown>
+        | undefined;
+      const data = await pccFetch("/api/negotiate/session", {
+        method: "POST",
+        body: { userAgentId, kernelId, capabilityType, capabilityId, network, initialSelections },
+      });
+      out(data, pretty);
+    },
+    get: async (pos, _flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const data = await pccFetch(`/api/negotiate/session/${encodeURIComponent(sessionId)}`);
+      out(data, pretty);
+    },
+    select: async (pos, flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const rawSelections = flagJSON(flags, "selections");
+      if (rawSelections === undefined) err("--selections is required for 'negotiate select'");
+      const data = await pccFetch(
+        `/api/negotiate/session/${encodeURIComponent(sessionId)}/select`,
+        { method: "PATCH", body: { selections: rawSelections } },
+      );
+      out(data, pretty);
+    },
+    quote: async (pos, _flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const data = await pccFetch(
+        `/api/negotiate/session/${encodeURIComponent(sessionId)}/quote`,
+        { method: "POST", body: {} },
+      );
+      out(data, pretty);
+    },
+    review: async (pos, _flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const data = await pccFetch(
+        `/api/negotiate/session/${encodeURIComponent(sessionId)}/review`,
+        { method: "POST", body: {} },
+      );
+      out(data, pretty);
+    },
+    commit: async (pos, _flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const data = await pccFetch(
+        `/api/negotiate/session/${encodeURIComponent(sessionId)}/commit`,
+        { method: "POST", body: {} },
+      );
+      out(data, pretty);
+    },
+    cancel: async (pos, _flags, pretty) => {
+      const sessionId = requireArg(pos, 0, "sessionId");
+      const data = await pccFetch(`/api/negotiate/session/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+      out(data, pretty);
+    },
+  },
+
   // ---------- workflows -----------------------------------------------------
 
   workflows: {
@@ -460,6 +561,20 @@ const commands: Record<string, Record<string, Handler>> = {
     list: async (_pos, flags, pretty) => {
       const status = flagStr(flags, "status");
       const data = await pccFetch("/api/escrow", { query: { status } });
+      out(data, pretty);
+    },
+    get: async (pos, _flags, pretty) => {
+      const escrowId = requireArg(pos, 0, "escrowId");
+      const data = await pccFetch(`/api/escrow/${encodeURIComponent(escrowId)}`);
+      out(data, pretty);
+    },
+    events: async (pos, flags, pretty) => {
+      const address = requireArg(pos, 0, "address");
+      const fromBlock = flagStr(flags, "fromBlock");
+      const data = await pccFetch(
+        `/api/escrow/chain/${encodeURIComponent(address)}/events`,
+        { query: { fromBlock } },
+      );
       out(data, pretty);
     },
   },
