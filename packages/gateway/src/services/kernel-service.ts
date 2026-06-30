@@ -72,6 +72,11 @@ export class KernelService {
   /** Cache of finalized evidence bundles, keyed by jobId */
   private completedBundles: Map<string, EvidenceBundle> = new Map();
 
+  /** Sensors loaded from KERNEL_CONFIG; used when wiring DB-loaded machines. */
+  private sensors: ReturnType<typeof createAdaptersFromConfig>["sensors"] = [];
+  /** Cameras loaded from KERNEL_CONFIG; used when wiring DB-loaded machines. */
+  private cameras: ReturnType<typeof createAdaptersFromConfig>["cameras"] = [];
+
   constructor(config?: KernelConfig) {
     this.config = config ?? loadKernelConfig();
     this.emitter = new EvidenceEmitter(this.config.kernelId);
@@ -79,6 +84,9 @@ export class KernelService {
     // This guarantees the singleton exists before submitJob can be called.
     initSafetyGateway();
     this.initAdapters();
+    // Also load any DB-registered devices for this kernel so test-job lands
+    // on the operator's REAL device, not the KERNEL_CONFIG mock fallback.
+    this.loadDbDevicesIntoRuntime();
     // Cache finalized bundles so we can pass them to the settlement service
     this.emitter.onBundle((bundle) => {
       this.completedBundles.set(bundle.jobId, bundle);
@@ -87,6 +95,8 @@ export class KernelService {
 
   private initAdapters(): void {
     const adapters = createAdaptersFromConfig(this.config);
+    this.sensors = adapters.sensors;
+    this.cameras = adapters.cameras;
     for (const machine of adapters.machines) {
       this.machines.set(machine.id, machine);
       const runner = new JobRunner(
@@ -97,6 +107,95 @@ export class KernelService {
       );
       this.runners.set(machine.id, runner);
     }
+  }
+
+  /**
+   * Build a single-device adapter from a DB row + add it to the running
+   * machines/runners maps. Idempotent — calling twice on the same id
+   * replaces the previous adapter (so register-device upsert flows
+   * through cleanly).
+   *
+   * Failure here is non-fatal — invalid adapter configs are logged and
+   * skipped. The DB row stays put for later retry / inspection.
+   */
+  private installMachineFromDbRow(row: {
+    id: string;
+    type: string;
+    adapterType: string | null;
+    adapterConfig: string | null;
+  }): { installed: boolean; reason?: string } {
+    if (row.type !== "machine") {
+      // sensors + cameras don't need a runner of their own.
+      return { installed: false, reason: "non_machine" };
+    }
+    if (!row.adapterType) {
+      return { installed: false, reason: "missing_adapter_type" };
+    }
+    let cfg: Record<string, unknown> = {};
+    if (row.adapterConfig) {
+      try {
+        const parsed = JSON.parse(row.adapterConfig);
+        if (parsed && typeof parsed === "object") {
+          cfg = parsed as Record<string, unknown>;
+        }
+      } catch {
+        return { installed: false, reason: "invalid_adapter_config_json" };
+      }
+    }
+    try {
+      const tinyConfig: KernelConfig = {
+        kernelId: this.config.kernelId,
+        devices: [
+          {
+            id: row.id,
+            type: "machine",
+            adapterType: row.adapterType as any,
+            config: cfg,
+          },
+        ],
+      };
+      const { machines } = createAdaptersFromConfig(tinyConfig);
+      for (const m of machines) {
+        this.machines.set(m.id, m);
+        const runner = new JobRunner(
+          m,
+          this.sensors,
+          this.cameras[0] ?? null,
+          this.emitter,
+        );
+        this.runners.set(m.id, runner);
+      }
+      return { installed: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { installed: false, reason: `factory_error: ${msg}` };
+    }
+  }
+
+  /**
+   * Load every DB-registered device for this kernel into the running
+   * runtime. Called once during construction; safe to re-call.
+   */
+  private loadDbDevicesIntoRuntime(): void {
+    try {
+      const rows = getRepos().kernels.findDevicesByKernel(this.config.kernelId);
+      for (const row of rows) {
+        this.installMachineFromDbRow(row);
+      }
+    } catch {
+      // DB may not be initialized in test paths; ignore.
+    }
+  }
+
+  /**
+   * Public: re-read a single DB device row and install it into the running
+   * runtime. Called by setup/register-device after a successful upsert so
+   * the very next test-job uses the real device.
+   */
+  refreshDeviceFromDb(deviceId: string): { installed: boolean; reason?: string } {
+    const row = getRepos().kernels.findDeviceById(deviceId);
+    if (!row) return { installed: false, reason: "row_not_found" };
+    return this.installMachineFromDbRow(row);
   }
 
   /**
