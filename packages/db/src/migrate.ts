@@ -1874,16 +1874,16 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS job_offer_events_offer_idx ON job_offer_events(offer_id);
   `);
 
-  // ── ALTER TABLE migrations ──────────────────────────────────────
-  // SQLite has no ALTER COLUMN; new columns are appended idempotently
-  // via safeAddColumn (no-op if column already exists).
-  safeAddColumn(sqlite, "api_keys", "onchain_agent_id", "TEXT");
-  safeAddColumn(sqlite, "api_keys", "onchain_status", "TEXT DEFAULT 'pending'");
-  safeAddColumn(sqlite, "api_keys", "onchain_tx_hash", "TEXT");
-  safeAddColumn(sqlite, "api_keys", "onchain_registry_address", "TEXT");
-  safeAddColumn(sqlite, "api_keys", "onchain_chain_id", "INTEGER");
-  safeAddColumn(sqlite, "api_keys", "onchain_attempted_at", "TEXT");
-  safeAddColumn(sqlite, "api_keys", "onchain_error", "TEXT");
+  // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────
+  // Use the in-scope 3-arg safeAddColumn (closure captures sqlite).
+  // SQLite has no ALTER COLUMN; new columns are appended idempotently.
+  safeAddColumn("api_keys", "onchain_agent_id", "TEXT");
+  safeAddColumn("api_keys", "onchain_status", "TEXT DEFAULT 'pending'");
+  safeAddColumn("api_keys", "onchain_tx_hash", "TEXT");
+  safeAddColumn("api_keys", "onchain_registry_address", "TEXT");
+  safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
+  safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
+  safeAddColumn("api_keys", "onchain_error", "TEXT");
 }
 
 /**
