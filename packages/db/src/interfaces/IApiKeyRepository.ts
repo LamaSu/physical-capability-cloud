@@ -13,4 +13,16 @@ export interface IApiKeyRepository {
   revoke(id: string): ApiKeyRow | undefined;
   listActive(): ApiKeyRow[];
   countByOperator(operatorId: string): number;
+  // ── ERC-8004 IdentityRegistry write tracking ──────────────────────
+  recordOnchainSuccess(
+    id: string,
+    onchain: {
+      agentId: bigint | string;
+      txHash: string;
+      registryAddress: string;
+      chainId: number;
+    },
+  ): ApiKeyRow | undefined;
+  recordOnchainFailure(id: string, error: string): ApiKeyRow | undefined;
+  listPendingOnchain(limit?: number): ApiKeyRow[];
 }
