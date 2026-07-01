@@ -18,6 +18,19 @@ export class EscrowRepository implements IEscrowRepository {
     return this.db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).get();
   }
 
+  /**
+   * Look up an escrow by its on-chain contract address. Used by routes/facades
+   * to dispatch submitAttestation/release to the V2 or V3 write helpers based
+   * on the row's `version` column.
+   */
+  findByContractAddress(contractAddress: string) {
+    return this.db
+      .select()
+      .from(escrows)
+      .where(eq(escrows.contractAddress, contractAddress))
+      .get();
+  }
+
   findByStatus(status: string) {
     return this.db.select().from(escrows).where(eq(escrows.status, status)).all();
   }

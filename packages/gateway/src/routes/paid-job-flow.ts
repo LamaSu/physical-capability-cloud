@@ -44,6 +44,7 @@ import { getEvidenceStorage, commitmentService, zkProofService } from "../servic
 import { StarknetProofAnchoringService } from "@pcc/verifier";
 import {
   submitAttestationV2,
+  submitAttestationV3,
   submitEvidenceV2,
   getMilestoneV2,
   isWriteEnabled as escrowWriteEnabled,
@@ -543,6 +544,9 @@ export async function createJobFromSession(
     status: escrowStatus,
     createdAt: now,
     deadline,
+    // V3 dispatch: settled-later routes/facades read this and pick the V3
+    // write helpers (submitAttestationV3 / releaseMilestoneV3) vs V2.
+    version: useV3ModeA() ? "v3" : "v2",
   });
 
   // Insert milestones (DB rows mirror the normalized set used on-chain above).
@@ -1249,15 +1253,26 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
           // Bind on-chain only against a REAL escrow with write enabled. The
           // mock/dev easUid (0xea…) is returned but not submitted to a live chain.
-          if (easUid && hasRealEscrow && escrowWriteEnabled()) {
-            const submitted = await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
+          if (easUid && hasRealEscrow && escrowWriteEnabled() && escrowAddress) {
+            // V3 dispatch: escrows created via the V3 factory carry version="v3"
+            // in the DB, so the write path targets submitAttestationV3 (which
+            // dispatches through MilestoneEscrowV3ABI). V2 escrows keep the V2
+            // helper. Falls back to V2 if the row is missing.
+            const escrowRow = repos.escrows.findByContractAddress(escrowAddress);
+            const escrowVersion =
+              (escrowRow?.version as "v2" | "v3" | null | undefined) ?? "v2";
+            const submitted =
+              escrowVersion === "v3"
+                ? await submitAttestationV3(0, easUid, escrowAddress as `0x${string}`)
+                : await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
             easBridge.submitted = true;
             easBridge.attestationTxHash = submitted.transactionHash;
+            easBridge.escrowVersion = escrowVersion;
           }
 
           pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
             metadata: {
-              path: "eas-v2",
+              path: easBridge.escrowVersion === "v3" ? "eas-v3-mode-b" : "eas-v2",
               easSchema: easMeta.schema,
               easSubmitted: easBridge.submitted,
               easUid: easBridge.attestationUid ?? null,

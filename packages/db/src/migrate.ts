@@ -1891,6 +1891,8 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "agent_wallet_onchain_status", "TEXT DEFAULT 'pending'");
   safeAddColumn("api_keys", "agent_wallet_onchain_tx_hash", "TEXT");
   safeAddColumn("api_keys", "agent_wallet_onchain_error", "TEXT");
+  // V3 Mode-B dispatch: version column on escrows.
+  safeAddColumn("escrows", "version", "TEXT DEFAULT 'v2'");
 }
 
 /**
