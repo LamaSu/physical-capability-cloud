@@ -52,4 +52,18 @@ export const apiKeys = sqliteTable("api_keys", {
   onchainChainId: integer("onchain_chain_id"),
   onchainAttemptedAt: text("onchain_attempted_at"),
   onchainError: text("onchain_error"),
+  // ── Operator operational wallet (option A ownership stopgap) ──────
+  // Per-operator EOA generated at provision. Gateway custodies the key
+  // at bootstrap (`operatorWalletCustody = "gateway"`) so the operator
+  // never touches a private key; the wallet address gets written to the
+  // ERC-8004 `agentWallet` field via best-effort setAgentWallet.
+  // A future export endpoint lets the operator claim their key + move
+  // to `operatorWalletCustody = "operator"`; a future v2 replaces this
+  // with an ERC-4337 smart wallet + passkey (see coord bulletin 235).
+  operatorWalletAddress: text("operator_wallet_address"),
+  operatorWalletPrivateKey: text("operator_wallet_private_key"), // hex, custodial at bootstrap
+  operatorWalletCustody: text("operator_wallet_custody").default("gateway"), // gateway | operator
+  agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
+  agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),
+  agentWalletOnchainError: text("agent_wallet_onchain_error"),
 });

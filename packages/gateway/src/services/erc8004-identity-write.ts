@@ -356,6 +356,132 @@ export async function readAgentURI(agentId: bigint): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Option A ownership stopgap — per-operator operational wallet + setAgentWallet
+// See coord bulletin 234 (A/B/C debate) and 235 (strategic alignment).
+//
+// Flow:
+//   1. Gateway generates a fresh EOA per operator at provision time.
+//   2. Gateway custodies the private key at bootstrap (stored on api_keys row).
+//   3. After `register()` mints the identity to the gateway signer, gateway
+//      calls `setAgentWallet(agentId, operatorEOA, deadline, signature)` where
+//      the signature is an EIP-712 typed-data signature from the operator EOA
+//      (gateway holds the key so gateway signs on the operator's behalf).
+//   4. On-chain: agentId → agentWallet points at the operator's per-operator
+//      EOA (independently claimable/exportable). NFT owner stays the gateway
+//      (v2 via ERC-4337 passkey smart wallet will fix that — bulletin 235).
+//
+// Failure is non-fatal: if the setAgentWallet call reverts (e.g. the EIP-712
+// domain/typehash doesn't exactly match the deployed contract), we log it and
+// keep the operator's off-chain wallet — provisioning still succeeds.
+// ---------------------------------------------------------------------------
+
+export interface OperatorWallet {
+  address: `0x${string}`;
+  privateKey: `0x${string}`;
+}
+
+/**
+ * Generate a fresh operator operational wallet (random EOA). The gateway
+ * custodies the key at bootstrap; the operator can later claim it via a
+ * future export endpoint.
+ */
+export async function generateOperatorWallet(): Promise<OperatorWallet> {
+  const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
+  const privateKey = generatePrivateKey() as `0x${string}`;
+  const account = privateKeyToAccount(privateKey);
+  return { address: account.address, privateKey };
+}
+
+export interface SetAgentWalletInput {
+  agentId: bigint;
+  /** New agentWallet (the operator's operational EOA). */
+  newWallet: `0x${string}`;
+  /** Private key of newWallet — used to produce the EIP-712 signature. */
+  newWalletPrivateKey: `0x${string}`;
+  /** Optional deadline override (unix seconds). Default: now + 1 hour. */
+  deadline?: bigint;
+}
+
+export interface SetAgentWalletResult {
+  txHash: `0x${string}`;
+  registryAddress: `0x${string}`;
+  chainId: number;
+  agentWallet: `0x${string}`;
+}
+
+/**
+ * Call `setAgentWallet(agentId, newWallet, deadline, signature)` on the
+ * IdentityRegistry, transferring the on-chain `agentWallet` mapping to the
+ * operator's operational EOA. The EIP-712 signature is from the newWallet
+ * (per ERC-8004 spec — the newWallet proves consent to receive the role).
+ */
+export async function setAgentWalletOnChain(
+  input: SetAgentWalletInput,
+): Promise<SetAgentWalletResult> {
+  if (!isIdentityWriteEnabled()) {
+    throw new Error(
+      "ERC-8004 identity write is disabled — set PCC_GATEWAY_PRIVATE_KEY",
+    );
+  }
+  const chainId = resolveChainId();
+  const registryAddress = resolveRegistryAddress(chainId);
+  const deadline =
+    input.deadline ?? BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+  // EIP-712 typed-data signature from the newWallet key.
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const newAccount = privateKeyToAccount(input.newWalletPrivateKey);
+  const signature = await newAccount.signTypedData({
+    domain: {
+      name: "AgentIdentity",
+      version: "1",
+      chainId,
+      verifyingContract: registryAddress,
+    },
+    types: {
+      SetAgentWallet: [
+        { name: "agentId", type: "uint256" },
+        { name: "newWallet", type: "address" },
+        { name: "deadline", type: "uint256" },
+      ],
+    },
+    primaryType: "SetAgentWallet",
+    message: {
+      agentId: input.agentId,
+      newWallet: input.newWallet,
+      deadline,
+    },
+  });
+
+  const walletClient = getWalletClient();
+  const publicClient = getPublicClient();
+  const { identityRegistryAbi } = await import("@pcc/identity-8004");
+
+  const txHash = await walletClient.writeContract({
+    chain: walletClient.chain ?? null,
+    account: walletClient.account!,
+    address: registryAddress,
+    abi: identityRegistryAbi,
+    functionName: "setAgentWallet",
+    args: [input.agentId, input.newWallet, deadline, signature],
+  });
+
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  if (receipt.status !== "success") {
+    throw new Error(
+      `setAgentWallet reverted (tx ${txHash}, status ${receipt.status})`,
+    );
+  }
+
+  return {
+    txHash,
+    registryAddress,
+    chainId,
+    agentWallet: input.newWallet,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

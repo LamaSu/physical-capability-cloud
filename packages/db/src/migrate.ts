@@ -1884,6 +1884,13 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
   safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
   safeAddColumn("api_keys", "onchain_error", "TEXT");
+  // Option A ownership stopgap: per-operator operational wallet.
+  safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
+  safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
+  safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
+  safeAddColumn("api_keys", "agent_wallet_onchain_status", "TEXT DEFAULT 'pending'");
+  safeAddColumn("api_keys", "agent_wallet_onchain_tx_hash", "TEXT");
+  safeAddColumn("api_keys", "agent_wallet_onchain_error", "TEXT");
 }
 
 /**

@@ -129,4 +129,34 @@ export class ApiKeyRepository implements IApiKeyRepository {
       .limit(limit)
       .all();
   }
+
+  /**
+   * Record the per-operator operational wallet (option A ownership stopgap).
+   * Persists the wallet address + custodied private key + on-chain assignment
+   * status from the best-effort setAgentWallet call. See coord bulletin 235.
+   */
+  recordOperatorWallet(
+    id: string,
+    wallet: {
+      address: string;
+      privateKey: string;
+      onchainStatus: "written" | "failed" | "pending";
+      onchainTxHash: string | null;
+      onchainError: string | null;
+    },
+  ) {
+    return this.db
+      .update(apiKeys)
+      .set({
+        operatorWalletAddress: wallet.address,
+        operatorWalletPrivateKey: wallet.privateKey,
+        operatorWalletCustody: "gateway",
+        agentWalletOnchainStatus: wallet.onchainStatus,
+        agentWalletOnchainTxHash: wallet.onchainTxHash,
+        agentWalletOnchainError: wallet.onchainError,
+      })
+      .where(eq(apiKeys.id, id))
+      .returning()
+      .get();
+  }
 }
