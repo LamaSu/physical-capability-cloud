@@ -26,6 +26,7 @@ import {
   createWalletClient,
   http,
   encodeFunctionData,
+  decodeEventLog,
   type Address,
   type Hex,
   type PublicClient,
@@ -54,11 +55,13 @@ import {
   milestoneStatusV2Name,
 } from "@pcc/contracts/abi";
 // V3 (oracle.evidence.v2 / payer-approval) ABI — additive alongside V1/V2.
-// MilestoneEscrowV3 is the fee-from-attestation + Mode-A escrow (NOT YET
-// DEPLOYED). Only the pure calldata encoders below consume it; no V3 write
-// (wallet) ops are added because there is no deployed V3 address to target —
-// callers (verification-mode Mode A, a future paid-job-flow wiring) submit the
-// encoded calldata themselves.
+// MilestoneEscrowV3 is the fee-from-attestation + Mode-A escrow. The PCCProtocolV3
+// factory is deployed on base-sepolia (0x786E85B1…5534, chain-config
+// milestoneEscrowFactoryV3); MilestoneEscrowV3 clones are minted from it. The
+// pure calldata encoders below (for the payer's own wallet in a future Mode-B
+// flow) AND the wallet writers further down (createEscrowV3 / approveAndReleaseV3,
+// used by the gateway-driven Mode-A settlement ceremony where payer == arbiter ==
+// the gateway signer) both target this stack.
 import {
   MilestoneEscrowV3ABI,
   MilestoneStatusV3,
@@ -1172,6 +1175,162 @@ export function encodeReleaseV3(milestoneIndex: number): Hex {
     functionName: "release",
     args: [BigInt(milestoneIndex)],
   });
+}
+
+// ── PCCProtocolV3 factory (wallet writers for the gateway-driven Mode-A rail) ──
+//
+// @pcc/contracts exports MilestoneEscrowV3ABI (the escrow instance) but NOT a
+// PCCProtocolV3ABI (the factory) — the factory ABI has no committed TS source on
+// master. The gateway only needs two members of the factory to run Mode A:
+// createEscrowV3(payer,arbiter,token,cwmId)→address and the EscrowCreated event
+// (escrow = topics[1]). Both are copied verbatim from the deployed factory
+// (packages/contracts/src/PCCProtocolV3.sol createEscrowV3 @ L259, event @ L137;
+// compiled artifact out/PCCProtocolV3.sol/PCCProtocolV3.json). The wire signature
+// is identical to V2's createEscrowV2, so the DB/EscrowCreated decode contract is
+// unchanged — this fragment simply lets viem dispatch through the V3 factory.
+
+/**
+ * Minimal PCCProtocolV3 factory ABI — only createEscrowV3 + EscrowCreated.
+ * (The V3 factory is not exported by @pcc/contracts; this is the copy the
+ * gateway's Mode-A create path dispatches against.)
+ */
+export const PCCProtocolV3FactoryABI = [
+  {
+    name: "createEscrowV3",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "payer", type: "address" },
+      { name: "arbiter", type: "address" },
+      { name: "token", type: "address" },
+      { name: "cwmId", type: "bytes32" },
+    ],
+    outputs: [{ name: "escrow", type: "address" }],
+  },
+  {
+    name: "EscrowCreated",
+    type: "event",
+    inputs: [
+      { name: "escrow", type: "address", indexed: true },
+      { name: "payer", type: "address", indexed: true },
+      { name: "arbiter", type: "address", indexed: true },
+      { name: "token", type: "address", indexed: false },
+      { name: "cwmId", type: "bytes32", indexed: false },
+    ],
+  },
+] as const;
+
+/**
+ * Deploy a MilestoneEscrowV3 clone via the PCCProtocolV3 factory (Mode A).
+ *
+ * Writes createEscrowV3(payer, arbiter, token, cwmId) to the factory, waits for
+ * the receipt, decodes the EscrowCreated event (escrow = first indexed arg), and
+ * returns the new escrow Address. Mirrors the inline createEscrowV2 logic in
+ * paid-job-flow but returns the address directly for callers that don't need the
+ * per-attempt retry loop.
+ *
+ * For the gateway-driven Mode-A ceremony, payer == arbiter == the gateway signer
+ * (getAccount().address); the caller passes them explicitly so this stays a thin
+ * factory wrapper.
+ *
+ * @param factoryAddress PCCProtocolV3 factory (chain-config milestoneEscrowFactoryV3).
+ * @throws if no EscrowCreated log decodes with a non-zero escrow address.
+ */
+export async function createEscrowV3(
+  payer: Address,
+  arbiter: Address,
+  token: Address,
+  cwmId: Hex,
+  factoryAddress: Address,
+): Promise<Address> {
+  const wallet = getWalletClient();
+  const client = getPublicClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address: factoryAddress,
+    abi: PCCProtocolV3FactoryABI,
+    functionName: "createEscrowV3",
+    args: [payer, arbiter, token, cwmId],
+  });
+
+  const receipt = await client.waitForTransactionReceipt({ hash });
+
+  for (const log of receipt.logs) {
+    try {
+      const decoded = decodeEventLog({
+        abi: PCCProtocolV3FactoryABI,
+        data: log.data,
+        topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+      });
+      if (decoded.eventName === "EscrowCreated") {
+        const addr = (decoded.args as { escrow?: Address }).escrow;
+        if (addr && addr.toLowerCase() !== "0x0000000000000000000000000000000000000000") {
+          return addr;
+        }
+      }
+    } catch {
+      // Not an EscrowCreated log for this ABI — keep scanning.
+    }
+  }
+
+  throw new Error(
+    "createEscrowV3 receipt had no decodable EscrowCreated log with a non-zero escrow " +
+      `address (tx ${hash}); the factory address ${factoryAddress} or ABI may be wrong.`,
+  );
+}
+
+/**
+ * Settle a Mode-A milestone: MilestoneEscrowV3.approveAndRelease(uint256).
+ *
+ * The PAYER calls this to release a user-attested milestone with no oracle
+ * attestation, no challenge window, and no protocol fee. In the gateway-driven
+ * Mode-A ceremony the gateway signer IS the payer, so — unlike Mode B, where the
+ * gateway only returns encodeApproveAndReleaseV3 calldata for the buyer's wallet
+ * — the gateway can and does send this transaction itself.
+ *
+ * Dispatches through MilestoneEscrowV3ABI (the same ABI encodeApproveAndReleaseV3
+ * encodes against), so the on-chain call is byte-identical.
+ */
+export async function approveAndReleaseV3(
+  milestoneIndex: number,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "approveAndRelease",
+    args: [BigInt(milestoneIndex)],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/** Submit evidence bundle hash for a V3 milestone (same shape as V1/V2, V3 ABI). */
+export async function submitEvidenceV3(
+  milestoneIndex: number,
+  evidenceBundleHash: Hex,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "submitEvidence",
+    args: [BigInt(milestoneIndex), evidenceBundleHash],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
 }
 
 /** Re-export V3 status utilities for convenience. */
