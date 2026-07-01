@@ -137,8 +137,7 @@ async function tryAgenticDecompose(
   request: CapabilityRequest,
 ): Promise<DecompositionResult | null> {
   if (!agenticEnabled()) return null;
-  const candidates = loadCapabilityCandidates();
-  const matcher = createMatcher(candidates);
+  const matcher = createMatcher(loadCapabilityCandidates);
   const llm = await resolveLLMClient();
   const legacyFallback = (r: CapabilityRequest): DecompositionResult =>
     decomposeRequest(r, { availableTypes: liveCapabilityTypes() });
