@@ -51,6 +51,7 @@ import {
   createEscrowV3,
   approveAndReleaseV3,
   submitEvidenceV3,
+  GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
@@ -328,6 +329,7 @@ export async function createJobFromSession(
               assuranceTier,
               jobId,
             ],
+            gas: GAS_LIMITS.addMilestone,
           });
           const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
           if (addReceipt.status !== "success") {
@@ -348,6 +350,7 @@ export async function createJobFromSession(
           abi: MockUSDCABI,
           functionName: "approve",
           args: [addr as `0x${string}`, totalFundAmount],
+          gas: GAS_LIMITS.approve,
         });
         const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 90_000 });
         if (approveReceipt.status !== "success") {
@@ -359,6 +362,7 @@ export async function createJobFromSession(
           abi: MilestoneEscrowV3ABI,
           functionName: "fund",
           args: [],
+          gas: GAS_LIMITS.fund,
         });
         const fundReceipt = await publicClient.waitForTransactionReceipt({ hash: fundTx, timeout: 90_000 });
         if (fundReceipt.status !== "success") {
@@ -411,6 +415,7 @@ export async function createJobFromSession(
           functionName: createFn,
           args: [account.address, account.address, tokenAddr, cwmIdBytes],
           nonce: nonce++,
+          gas: GAS_LIMITS.createEscrow,
         });
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
         const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
@@ -441,6 +446,7 @@ export async function createJobFromSession(
               jobId,
             ],
             nonce: nonce++,
+            gas: GAS_LIMITS.addMilestone,
           });
           // Drop vs revert: a dropped tx never produces a receipt -> waitForTransactionReceipt
           // times out (caught -> retry with a fresh escrow). A mined-but-reverted tx is a real
