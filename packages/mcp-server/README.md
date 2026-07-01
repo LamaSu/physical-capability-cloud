@@ -2,7 +2,7 @@
 
 MCP server for the Physical Capability Cloud — invoke physical capabilities, query Shop Kernels, build contracts, manage milestone escrow, and run the full Capture Verification Protocol from any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Goose, ChatGPT Apps).
 
-PCC is AWS for the physical world. Shop Kernels are availability zones. Capabilities are billable units (3D printing, CNC milling, HPLC analysis). Assurance Tiers are SLAs. Settlement happens on-chain (Base Sepolia) when evidence meets tier requirements. This MCP server exposes 63 of the gateway's most-used endpoints over stdio so any agent can drive the network the same way a human dashboard would.
+PCC is AWS for the physical world. Shop Kernels are availability zones. Capabilities are billable units (3D printing, CNC milling, HPLC analysis). Assurance Tiers are SLAs. Settlement happens on-chain (Base Sepolia) when evidence meets tier requirements. This MCP server exposes 72 of the gateway's most-used endpoints over stdio so any agent can drive the network the same way a human dashboard would — discover a capability, negotiate a deal, commit it to escrow, and track settlement, all as tool calls.
 
 Live gateway: **https://capability.network**
 
@@ -66,10 +66,16 @@ PCC_URL=http://localhost:3200 pcc jobs list
 The server logs the resolved gateway URL to stderr on boot. MCP protocol
 traffic uses stdin/stdout — stderr is safe for logs.
 
-## Tool catalog (63 tools)
+## Tool catalog (72 tools)
 
 Organized by capability domain. Every tool name is prefixed `pcc_` so it does
 not collide with other MCP servers in the same client.
+
+The four **core agent-facing groups** — the surface most agents need to
+transact end-to-end — are Discovery, Contract building, **Negotiation**, and
+**Escrow & settlement**. A typical flow: `pcc_list_capabilities` →
+`pcc_build_contract` (or the negotiation lifecycle) → `pcc_negotiate_commit` →
+`pcc_get_escrow` to watch settlement.
 
 ### Discovery (8)
 
@@ -92,6 +98,23 @@ not collide with other MCP servers in the same client.
 | `pcc_calculate_price` | Price quote for a complete parameter selection. |
 | `pcc_build_contract` | Full contract object ready for escrow funding. |
 
+### Negotiation (7)
+
+The structured pre-commit lifecycle between a user agent and an operator's
+kernel: `CREATED → CONFIGURING → QUOTED → REVIEWING → COMMITTED`. Sessions
+auto-expire after 30 minutes; committed sessions are immutable. Requires
+`PCC_API_KEY` for authenticated kernels.
+
+| Tool | One-line |
+|---|---|
+| `pcc_negotiate_create` | Open a session for one capability type; snapshots operator constraints, issues a replay-resistant challenge. |
+| `pcc_negotiate_get` | Read session state: status, selections, quote, contract terms, transitions. |
+| `pcc_negotiate_select` | Merge parameter selections (→ configuring). |
+| `pcc_negotiate_quote` | Lock params and compute a binding quote (→ quoted). |
+| `pcc_negotiate_review` | Generate on-chain-ready contract terms from the quote (→ reviewing). |
+| `pcc_negotiate_commit` | Lock in — creates the job, execution scope, and milestone escrow (→ committed). |
+| `pcc_negotiate_cancel` | Cancel a non-committed session. |
+
 ### Workflows (1)
 
 | Tool | One-line |
@@ -108,11 +131,13 @@ not collide with other MCP servers in the same client.
 | `pcc_list_evidence` | List all evidence bundles. |
 | `pcc_get_evidence` | A specific bundle's IPFS CID, ZK proof status, Bittensor verification scores, evaluator attestations. |
 
-### Escrow and settlement (1)
+### Escrow and settlement (3)
 
 | Tool | One-line |
 |---|---|
 | `pcc_list_escrows` | List on-chain escrow contracts with milestone state. |
+| `pcc_get_escrow` | Settlement status for one escrow by ID or 0x address — milestones, released/disputed counts, challenge-window state, `source` db/on-chain. |
+| `pcc_get_escrow_events` | On-chain event log for an escrow contract address (Funded, MilestoneReleased, Disputed, …). |
 
 ### DePIN and reputation (4)
 
@@ -214,8 +239,8 @@ allowlist:
 | Class | Tools | Notes |
 |---|---|---|
 | **read** | All `list_*`, `get_*`, `search_*`, `*_detect`, `*_status`, `*_health`, `*_lineage`, `*_summary`, `pcc_list_verdicts`, `pcc_capture_status`, `pcc_verifier_health` | Open. No side effects. |
-| **write** | `pcc_setup_register_device`, `pcc_setup_generate_config`, `pcc_csd_register`, `pcc_contributor_register`, `pcc_schedule_publish`, `pcc_training_manifest_set`, `pcc_capture_upload`, `pcc_capture_anchor` | DB / on-chain state change. Gate behind operator approval. |
-| **exec** | `pcc_setup_test_job`, `pcc_discover_onboard`, `pcc_build_contract`, `pcc_compile_workflow`, `pcc_capture_challenge` | Triggers gateway-side execution or compilation. |
+| **write** | `pcc_setup_register_device`, `pcc_setup_generate_config`, `pcc_csd_register`, `pcc_contributor_register`, `pcc_schedule_publish`, `pcc_training_manifest_set`, `pcc_capture_upload`, `pcc_capture_anchor`, `pcc_negotiate_select`, `pcc_negotiate_quote`, `pcc_negotiate_review`, `pcc_negotiate_cancel` | DB / on-chain state change. Gate behind operator approval. |
+| **exec** | `pcc_setup_test_job`, `pcc_discover_onboard`, `pcc_build_contract`, `pcc_compile_workflow`, `pcc_capture_challenge`, `pcc_negotiate_create`, `pcc_negotiate_commit` | Triggers gateway-side execution or compilation. `pcc_negotiate_commit` also creates a milestone escrow — treat as money-adjacent. |
 | **credential / network** | `pcc_create_onramp_session`, `pcc_submit_withdrawal`, `pcc_send_enterprise_payout`, `pcc_ip_claim`, `pcc_ip_set_splits`, `pcc_ip_register_capability` | Moves real money or sets royalty splits. Always require explicit user approval. |
 
 Tool inputs are validated twice — by Zod schemas in this server (which

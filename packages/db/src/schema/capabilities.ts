@@ -46,4 +46,21 @@ export const capabilities = sqliteTable("capabilities", {
     onTimeout?: string;
     onDeadlineMiss?: string;
   }>(),
+  /**
+   * ISO timestamp of the most recent heartbeat for THIS capability.
+   * Distinct from the parent kernel's last_heartbeat because a kernel may
+   * announce a subset of its capabilities on any given beat. Set by
+   * `POST /api/kernels/:kernelId/heartbeat` (for every capability in the
+   * heartbeat payload) and `POST /api/capabilities/:capId/heartbeat`.
+   */
+  lastHeartbeatAt: text("last_heartbeat_at"),
+  /**
+   * Soft expiry. ISO timestamp after which this capability stops appearing
+   * in default catalog listings. Extended on every heartbeat to `now + 24h`
+   * (configurable via CAPABILITY_TTL_HOURS env). Nullable for backward
+   * compat — rows without it are treated as never-expiring until the next
+   * heartbeat or sweeper run sets it.
+   * See docs/kernel-lifecycle.md.
+   */
+  validUntil: text("valid_until"),
 });

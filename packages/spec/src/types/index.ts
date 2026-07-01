@@ -8,6 +8,8 @@ export * from "./capture.js";
 export * from "./simulation.js";
 export * from "./cwm.js";
 export * from "./kernel.js";
+// RTP-absorption doc 03 — first-class job timeout lifecycle (states/causes/policy)
+export * from "./job-lifecycle.js";
 export * from "./kernel-manifest.js";
 export * from "./settlement.js";
 export * from "./verifier.js";

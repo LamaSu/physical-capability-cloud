@@ -180,23 +180,43 @@ export async function capabilityRoutes(app: FastifyInstance) {
    *
    * PUBLIC — no auth required (see middleware/api-gate.ts PUBLIC_EXACT).
    */
-  app.get<{ Querystring: { offset?: number; limit?: number } }>(
+  app.get<{ Querystring: { offset?: number; limit?: number; type?: string } }>(
     "/api/capabilities",
     {
       schema: {
         tags: ["discovery"],
-        summary: "List capability instances (paginated)",
+        summary: "List capability instances (paginated, optionally filtered by type)",
         description:
           "Returns a paginated set of CapabilityDTO records spanning all " +
           "registered kernels. Each record includes type, materials, " +
           "tolerances, pricing, location, plus enrichment fields " +
-          "(reputation, queueDepth, available, kernelStatus). PUBLIC.",
+          "(reputation, queueDepth, available, kernelStatus). PUBLIC. " +
+          "Optional ?type= narrows the set. The match is BOTH exact " +
+          "(`type=pizza.order` returns only `pizza.order` caps) and " +
+          "prefix-based (`type=courier` returns `courier.dispatch`, " +
+          "`courier.quote`, `courier.track`, etc.). This lets agents query " +
+          "by a coarse scope (`courier`, `pizza`, `compute`, `manufacturing`, " +
+          "`lab`, `food`, `software-service`, `sensor`, `robot`, `custom`) " +
+          "without hard-coding the vendor-specific suffixes. The list " +
+          "endpoint is the discovery surface — driver/operator agents poll " +
+          "it to find jobs they can claim, so filtering must be honoured.",
         querystring: {
           type: "object",
-          additionalProperties: false,
+          // additionalProperties tolerated: this is a PUBLIC discovery
+          // surface, third-party agents may pass extra harmless params
+          // (e.g. cache busters, telemetry tags). Do not 400 them.
+          additionalProperties: true,
           properties: {
             offset: { type: "integer", minimum: 0, default: 0 },
             limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+            type: {
+              type: "string",
+              minLength: 1,
+              maxLength: 128,
+              description:
+                "Filter by capability type. Matches either exactly " +
+                "(`pizza.order`) or by prefix (`courier` => all `courier.*`).",
+            },
           },
         },
         response: {
@@ -215,13 +235,41 @@ export async function capabilityRoutes(app: FastifyInstance) {
       },
     },
     async (req, reply) => {
-      const result = await facade.list({}, {
-        offset: req.query.offset,
-        limit: req.query.limit,
-      });
-      return sendResult(reply, result);
+      const offset = req.query.offset;
+      const limit = req.query.limit;
+      const typeFilter = req.query.type?.trim();
+
+      if (!typeFilter) {
+        const result = await facade.list({}, { offset, limit });
+        return sendResult(reply, result);
+      }
+
+      // ?type= filter: BOTH exact match (`pizza.order`) and prefix match
+      // (`courier` -> all `courier.*`). The facade.search() path only does
+      // exact match, so we filter at the route layer instead. Public
+      // marketplace cardinality is small enough to do this in-memory; if
+      // it ever grows past O(thousands), push the filter into the repo as
+      // `WHERE type = ? OR type LIKE ? || '.%'`.
+      const allResult = await facade.list({}, { offset: 0, limit: 100000 });
+      if (!allResult.success) return sendResult(reply, allResult);
+      const all = allResult.data.items;
+      const filtered = all.filter(
+        (c) => c.type === typeFilter || c.type.startsWith(typeFilter + "."),
+      );
+      const total = filtered.length;
+      const startOffset = offset ?? 0;
+      const pageLimit = limit ?? 50;
+      const page = filtered.slice(startOffset, startOffset + pageLimit);
+      return {
+        items: page,
+        total,
+        offset: startOffset,
+        limit: pageLimit,
+        hasMore: startOffset + pageLimit < total,
+      };
     },
   );
+
 
   /**
    * Capabilities for a specific kernel.

@@ -209,6 +209,20 @@ contract MilestoneEscrowV3 {
     bool public funded;
     uint256 public totalAmount;
 
+    // ── Timeout Reclaim (V3 — closes the V1/V2 locked-funds gap) ─────────
+
+    /// @notice Block timestamp when fund() was called; anchors the reclaim clock. 0 until funded.
+    uint256 public fundedAt;
+
+    /// @notice Per-escrow window (seconds after fund()) before the payer may reclaim a
+    ///         milestone still stuck pre-settlement. Payer-settable before fund() via
+    ///         setReclaimDeadline; 0 falls back to DEFAULT_RECLAIM_DEADLINE.
+    uint256 public reclaimDeadlineSeconds;
+
+    /// @notice Default reclaim window when the payer sets none. Deliberately generous so a
+    ///         legitimately long-running job is never clawed back mid-execution.
+    uint256 public constant DEFAULT_RECLAIM_DEADLINE = 30 days;
+
     // ── splitPayout State (ADR-11) — identical to V2 ─────────────────────
 
     mapping(uint256 => Payout[]) private _payoutMap;
@@ -608,6 +622,14 @@ contract MilestoneEscrowV3 {
 
     // ── Funding — identical to V2 ────────────────────────────────────────
 
+    /// @notice Set the per-escrow reclaim window (seconds after fund()). Payer-only, pre-fund.
+    /// @dev 0 means "use DEFAULT_RECLAIM_DEADLINE". Lets the buyer match recovery latency to
+    ///      the workflow's expected duration. Immutable once funded.
+    function setReclaimDeadline(uint256 _seconds) external onlyPayer {
+        require(!funded, "Already funded");
+        reclaimDeadlineSeconds = _seconds;
+    }
+
     function fund() external onlyPayer {
         require(!funded, "Already funded");
         require(milestones.length > 0, "No milestones");
@@ -623,6 +645,7 @@ contract MilestoneEscrowV3 {
         for (uint256 i = 0; i < milestones.length; i++) {
             milestones[i].status = MilestoneStatus.Funded;
         }
+        fundedAt = block.timestamp;
         funded = true;
         emit EscrowFunded(cwmId, totalAmount);
     }
@@ -1024,6 +1047,83 @@ contract MilestoneEscrowV3 {
             emit DisputeResolved(milestoneIndex, _challengerWon);
             uint256 payout = milestoneAmount + operatorBond + challengerBond;
             tok.safeTransfer(operator, payout);
+        }
+    }
+
+    // ── Timeout Reclaim (Mode D — closes the locked-funds gap) ───────────
+
+    /**
+     * @notice Reclaim a milestone's funds to the payer when a job has hung past the
+     *         reclaim deadline without ever reaching settlement.
+     *
+     * @dev THE FIX for the V1/V2 locked-funds gap. Earlier versions had no reclaim,
+     *      cancel, or expire path, so a milestone stuck at Funded/Locked/Evidenced
+     *      (operator offline, device dead, oracle never attests) locked the payer's
+     *      funds forever. This is the missing terminal exit.
+     *
+     *      Safety properties:
+     *        - PAYER-ONLY (forwarder-aware). Funds return to the depositor; no third
+     *          party can redirect a refund.
+     *        - Reclaimable ONLY from pre-settlement {Funded, Locked, Evidenced}. An
+     *          Attested milestone (operator holds a valid oracle verdict, in its
+     *          challenge window) can NEVER be clawed back here — use fileDispute.
+     *          Released/Disputed/Refunded/Slashed are terminal and rejected.
+     *        - Deadline-gated: only after fundedAt + (reclaimDeadlineSeconds or
+     *          DEFAULT_RECLAIM_DEADLINE).
+     *        - A pre-settlement timeout is NOT proven fraud, so the operator's bond
+     *          (if posted) is RETURNED to the operator, not slashed. Slashing requires
+     *          a dispute finding.
+     *        - CEI + nonReentrant; status set Refunded BEFORE any transfer; a second
+     *          call reverts (Refunded is not reclaimable) — idempotent.
+     *        - Race with submitAttestation is safe both ways: attestation-first makes
+     *          the milestone Attested (not reclaimable); reclaim-first makes it Refunded
+     *          and submitAttestation then reverts (it requires Evidenced).
+     *
+     * @param milestoneIndex Index of the milestone in milestones[].
+     */
+    function reclaimAfterDeadline(uint256 milestoneIndex)
+        external
+        nonReentrant
+        onlyPayerEffective
+        milestoneExists(milestoneIndex)
+    {
+        require(funded, "Not funded");
+
+        Milestone storage m = milestones[milestoneIndex];
+        MilestoneStatus s = m.status;
+        require(
+            s == MilestoneStatus.Funded ||
+            s == MilestoneStatus.Locked ||
+            s == MilestoneStatus.Evidenced,
+            "Not reclaimable"
+        );
+
+        uint256 window = reclaimDeadlineSeconds == 0
+            ? DEFAULT_RECLAIM_DEADLINE
+            : reclaimDeadlineSeconds;
+        require(block.timestamp >= fundedAt + window, "Deadline not reached");
+
+        // ── Effects (CEI): mark terminal BEFORE any external call ──
+        m.status = MilestoneStatus.Refunded;
+
+        // The operator's bond is held only once a milestone passed through Locked
+        // (depositBond). True at status Locked, or at Evidenced with a non-zero bond
+        // (Evidenced is reachable from Locked only when operatorBond > 0; the
+        // Funded->Evidenced shortcut requires operatorBond == 0, so no bond was posted).
+        bool bondHeld = (s == MilestoneStatus.Locked) ||
+            (s == MilestoneStatus.Evidenced && m.operatorBond > 0);
+
+        address operator = m.operator;
+        uint256 amount = m.amount;
+        uint256 bond = m.operatorBond;
+        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
+
+        emit MilestoneRefunded(milestoneIndex, amount);
+
+        // ── Interactions ──
+        tok.safeTransfer(payer, amount);
+        if (bondHeld && bond > 0) {
+            tok.safeTransfer(operator, bond);
         }
     }
 

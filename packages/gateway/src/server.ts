@@ -13,7 +13,7 @@ import fastifyStatic from "@fastify/static";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
-import { initStore, closeStore, getRepos } from "./db.js";
+import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -26,6 +26,7 @@ import { onboardRoutes } from "./routes/onboard.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { onboardChatRoutes } from "./routes/onboard-chat.js";
 import { snippetRoutes } from "./routes/snippet.js";
+import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
@@ -46,6 +47,7 @@ import { sdkRoutes } from "./routes/sdk.js";
 import { sensorRoutes } from "./routes/sensors.js";
 import { batchRoutes } from "./routes/batches.js";
 import { evidenceEncryptedRoutes } from "./routes/evidence-encrypted.js";
+import { storageRoutes } from "./routes/storage.js";
 // import { evidenceSearchRoutes } from "./routes/evidence-search.js"; // TODO: Agent B — file not created yet
 import { zkProofRoutes } from "./routes/zk-proofs.js";
 import { logisticsRoutes } from "./routes/logistics.js";
@@ -84,6 +86,13 @@ import { fiatRampRoutes } from "./routes/fiat-ramp.js";
 import { anomalyRoutes } from "./routes/anomaly.js";
 import { requestRoutes } from "./routes/requests.js";
 import { adminDemandRoutes, startDemandSnapshotCron } from "./routes/admin-demand.js";
+import { courierJobsRoutes } from "./routes/courier-jobs.js";
+import { jobOffersRoutes } from "./routes/job-offers.js";
+import { initJobOffersStore } from "./services/job-offers-store.js";
+import { startJobOffersSweeper } from "./services/job-offers-sweeper.js";
+// Note: courier-jobs-store is now a shim over job-offers-store; the legacy
+// courier-jobs-sweeper still ships but is a no-op since the generic sweeper
+// covers all capability types. Kept imports only for source-compat.
 import { assetOutboundRoutes } from "./routes/asset-outbound.js";
 import { toolSearchRoutes, prewarmToolIndex } from "./routes/tool-search.js";
 import { intentIngestRoutes } from "./routes/intent-ingest.js";
@@ -425,6 +434,44 @@ export async function createGateway(port = 3200) {
     warn: (msg) => app.log.warn(msg),
   });
 
+  // Job-offers — generic /api/job-offers/* matching primitive. Replaces
+  // the courier-specific store wiring with a category-agnostic version that
+  // every PCC adapter (pcc-courier, pcc-dominos, pcc-hamilton, pcc-kdense,
+  // pcc-opentrons, ...) shares. The legacy /api/courier-jobs/* routes also
+  // route here — courier-jobs-store.ts is now a thin shim translating the
+  // v0.2 courier shape to/from the generic JobOffer shape.
+  //
+  // Per coord bulletin #207, this lives in the gateway so the matching
+  // surface inherits auth, observability, and catalog discovery. The store
+  // uses the same SQLite file (via @pcc/store -> drizzle .$client raw
+  // handle) for write-through persistence across restart. Tables are
+  // created by db/src/migrate.ts.
+  try {
+    // Pull the raw better-sqlite3 handle from drizzle (.$client). We use a
+    // structural cast (no better-sqlite3 type import) so the gateway's
+    // dependency surface stays unchanged.
+    const rawSqlite = (getStore().db as unknown as {
+      $client?: import("./services/job-offers-store.js").SqliteDatabaseLike;
+    }).$client;
+    initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    startJobOffersSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  } catch (err) {
+    // Best-effort wiring — if the store handle is shaped differently in some
+    // environments (e.g. tests that build the app without initStore), fall
+    // back to a pure in-memory job-offers store so routes still respond.
+    app.log.warn(
+      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
+    );
+    initJobOffersStore({});
+    startJobOffersSweeper({
+      info: (msg) => app.log.info(msg),
+      warn: (msg) => app.log.warn(msg),
+    });
+  }
+
   // BigTool-style retrieval substrate — pre-warm the tool index at boot so
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
@@ -479,6 +526,9 @@ export async function createGateway(port = 3200) {
   // /snippet.md, /onboard/snippet, /onboard/snippet.json — copy-paste prompt for
   // any tool-using LLM (Claude.ai, ChatGPT, Gemini, Cursor). Owner ask #178.
   await app.register(snippetRoutes);
+  // /start, /quickstart/* — three-card landing for Claude Max users.
+  // Claude Max front-door reframe (2026-06-19).
+  await app.register(startRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);
@@ -504,6 +554,7 @@ export async function createGateway(port = 3200) {
   await app.register(sensorRoutes);
   await app.register(batchRoutes);
   await app.register(evidenceEncryptedRoutes);
+  await app.register(storageRoutes);
   // await app.register(evidenceSearchRoutes); // TODO: Agent B — file not created yet
   await app.register(zkProofRoutes);
   await app.register(logisticsRoutes);
@@ -533,6 +584,11 @@ export async function createGateway(port = 3200) {
   await app.register(anomalyRoutes);
   await app.register(requestRoutes);
   await app.register(adminDemandRoutes);
+  // Generic /api/job-offers/* surface — every PCC adapter shares this.
+  await app.register(jobOffersRoutes);
+  // Legacy /api/courier-jobs/* shim — kept for backward compat through the
+  // pcc-courier migration window (target: 30 days from 2026-06-19).
+  await app.register(courierJobsRoutes);
   await app.register(assetOutboundRoutes);
   await app.register(toolSearchRoutes);
   await app.register(intentIngestRoutes);
@@ -731,6 +787,23 @@ export async function createGateway(port = 3200) {
 
       // Start mock streaming producers
       producerManager?.startAll();
+
+      // Start kernel + capability TTL sweeper (feat/ed25519-keys-and-kernel-ttl).
+      // Runs on KERNEL_SWEEP_INTERVAL_SEC (default 300s = 5min) and marks
+      // expired rows so the catalog stops returning ghost capabilities.
+      // The interval timer is unref'd so it doesn't keep the process alive
+      // by itself.
+      try {
+        const { startKernelTtlSweeper } = await import(
+          "./services/kernel-ttl-sweeper.js"
+        );
+        const handle = startKernelTtlSweeper(() => getRepos());
+        console.log(
+          `[gateway] kernel-ttl-sweeper started (interval=${handle.intervalSec}s)`,
+        );
+      } catch (err) {
+        console.warn("[gateway] kernel-ttl-sweeper start failed:", err);
+      }
 
       const address = await app.listen({ port, host: "0.0.0.0" });
       console.log(`PCC Gateway listening on ${address}`);

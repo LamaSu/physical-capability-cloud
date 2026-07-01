@@ -11,6 +11,11 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { getRepos } from "../db.js";
+import {
+  generateEd25519Keypair,
+  normalizePublicKeyHex,
+  type Ed25519Keypair,
+} from "./ed25519.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -63,6 +68,25 @@ export function resolveApiKey(req: FastifyRequest) {
 // Per-operator provisioning lock to prevent TOCTOU race on concurrent requests
 const provisioningLocks = new Set<string>();
 
+/**
+ * Result of provisioning an API key.
+ *
+ * `rawKey` is the bearer token (shown ONCE, then forgotten).
+ *
+ * `record` is the persisted row, including the agent's Ed25519 public key
+ * if one was provided/generated.
+ *
+ * `ed25519` is populated iff this provision call MINTED a keypair (caller
+ * didn't bring their own). It is the one and only chance the caller has
+ * to capture the matching private key — surface it to the agent in the
+ * HTTP response and forget it.
+ */
+export interface ProvisionResult {
+  rawKey: string;
+  record: ReturnType<ReturnType<typeof getRepos>["apiKeys"]["insert"]>;
+  ed25519?: Ed25519Keypair;
+}
+
 export function provisionApiKey(opts: {
   operatorId: string;
   name?: string;
@@ -71,7 +95,21 @@ export function provisionApiKey(opts: {
   rateLimit?: string;
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
-}) {
+  /**
+   * Optional caller-provided Ed25519 public key (hex, 64 chars, no 0x).
+   * When set, the gateway stores it AS-IS and does NOT generate one or
+   * return any private material — the agent already has the matching
+   * private key.
+   *
+   * When omitted, the gateway generates a fresh Ed25519 keypair, stores
+   * the public half, and returns the private half in the ProvisionResult
+   * (only chance to capture it).
+   *
+   * Invalid input (non-hex, wrong length) throws — the route layer maps
+   * that to HTTP 400.
+   */
+  publicKey?: string;
+}): ProvisionResult {
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
     throw new Error("Key provisioning in progress — try again in a moment");
@@ -87,27 +125,45 @@ export function provisionApiKey(opts: {
       throw new Error("Maximum 5 active API keys per operator");
     }
 
-  const { rawKey, keyHash, keyPrefix } = generateApiKey();
-  const now = new Date();
+    // Ed25519: BYOK or mint
+    let storedPublicKeyHex: string | null = null;
+    let mintedKeypair: Ed25519Keypair | undefined;
+    if (opts.publicKey !== undefined) {
+      const cleaned = normalizePublicKeyHex(opts.publicKey);
+      if (cleaned === null) {
+        throw Object.assign(
+          new Error("publicKey must be a 32-byte Ed25519 public key (64 hex chars, optional 0x prefix)"),
+          { code: "invalid_public_key" },
+        );
+      }
+      storedPublicKeyHex = cleaned;
+    } else {
+      mintedKeypair = generateEd25519Keypair();
+      storedPublicKeyHex = mintedKeypair.publicKeyHex;
+    }
 
-  const record = repo.insert({
-    id: randomUUID(),
-    keyHash,
-    keyPrefix,
-    operatorId: opts.operatorId,
-    name: opts.name ?? null,
-    description: opts.description ?? null,
-    scopes: JSON.stringify(opts.scopes ?? ["*"]),
-    rateLimit: opts.rateLimit ?? "1000/hour",
-    usageCount: "0",
-    createdAt: now.toISOString(),
-    expiresAt: opts.expiresInDays
-      ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
-      : null,
-    metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
-  });
+    const { rawKey, keyHash, keyPrefix } = generateApiKey();
+    const now = new Date();
 
-    return { rawKey, record };
+    const record = repo.insert({
+      id: randomUUID(),
+      keyHash,
+      keyPrefix,
+      operatorId: opts.operatorId,
+      name: opts.name ?? null,
+      description: opts.description ?? null,
+      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      rateLimit: opts.rateLimit ?? "1000/hour",
+      usageCount: "0",
+      createdAt: now.toISOString(),
+      expiresAt: opts.expiresInDays
+        ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
+        : null,
+      metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
+      publicKey: storedPublicKeyHex,
+    });
+
+    return { rawKey, record, ed25519: mintedKeypair };
   } finally {
     provisioningLocks.delete(opts.operatorId);
   }

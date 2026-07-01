@@ -21,6 +21,21 @@ export {
   signAnnouncement,
   verifyAnnouncement,
 } from "./crypto.js";
+// Signed request-freshness envelope (RTP-absorption doc 03 §6.7/§7.5)
+export {
+  createFreshnessEnvelope,
+  verifyFreshnessEnvelope,
+  freshnessSigningInput,
+  computePayloadHash,
+  ConsumedNonceSet,
+} from "./freshness.js";
+export type {
+  FreshnessEnvelope,
+  FreshnessVerdict,
+  FreshnessRejectReason,
+  CreateFreshnessInput,
+  VerifyFreshnessOptions,
+} from "./freshness.js";
 export { EncryptedBus } from "./encrypted-bus.js";
 export type { BusLike } from "./encrypted-bus.js";
 export { PersistentMessageBus } from "./persistent-bus.js";

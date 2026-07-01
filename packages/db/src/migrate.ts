@@ -1447,6 +1447,30 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("capabilities", "sla", "TEXT");
   safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
 
+  // ── feat/ed25519-keys-and-kernel-ttl (Skylar's audit) ──────────────────
+  //
+  // Capability + kernel registry hygiene. Every capability and kernel has a
+  // soft expiry that the announcer extends via heartbeat. Listings drop
+  // expired rows by default so the catalog stops returning ghost capabilities.
+  //
+  //   last_heartbeat_at — ISO timestamp of the most recent heartbeat.
+  //   valid_until       — ISO timestamp after which the row stops appearing
+  //                       in default listings (default = now + 24h on insert).
+  //
+  // Both columns are nullable for backward compat: rows that pre-date this
+  // migration default to "always live" (null treated as not-expired) until
+  // the next heartbeat or sweep sets the columns. See docs/kernel-lifecycle.md.
+  safeAddColumn("capabilities", "last_heartbeat_at", "TEXT");
+  safeAddColumn("capabilities", "valid_until", "TEXT");
+  safeAddColumn("shop_kernels", "valid_until", "TEXT");
+
+  // public_key on api_keys — the Ed25519 public key the agent uses to sign
+  // evidence + heartbeats + handshakes. Set at provision time (server-
+  // generated OR bring-your-own from the request body). Stored as raw
+  // 32-byte hex. Nullable so pre-migration keys still resolve. The
+  // verification route refuses when null.
+  safeAddColumn("api_keys", "public_key", "TEXT");
+
   // Wave 4.1 — tenant_id on machine_registrations (interim multitenancy).
   // Application-layer filtering, gated by TENANT_ENFORCE env flag.
   safeAddColumn("machine_registrations", "tenant_id", "TEXT");
@@ -1473,6 +1497,41 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_operator_ratings_job ON operator_ratings(job_id);
     CREATE INDEX IF NOT EXISTS idx_operator_ratings_buyer ON operator_ratings(buyer_id);
   `);
+
+  // ── CID Blob Storage (generic, content-addressable) ─────────────────
+  // Distinct from evidence_bundles — this stores ARBITRARY binary artifacts
+  // (manufacturing photos, lab raw files, portfolio samples, drone imagery,
+  // booking confirmations) keyed by CIDv1. The blob bytes themselves live
+  // in the backend (local fs / Helia / Storacha); this table is the index.
+  // Soft-delete only (deleted_at). Hard-delete is a separate ops job.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS storage_blobs (
+      cid TEXT PRIMARY KEY,
+      size_bytes INTEGER NOT NULL,
+      media_type TEXT NOT NULL,
+      backend TEXT NOT NULL,           -- "local" | "helia" | "storacha"
+      uploaded_by TEXT NOT NULL,       -- operator id (email/wallet) of uploader
+      uploaded_by_agent_id TEXT,       -- optional agent identifier
+      related_offer_id TEXT,           -- optional link to an offer/job for public-read gating
+      label TEXT,                      -- caller-supplied human label
+      category TEXT,                   -- caller-supplied tag (manufacturing | lab | brokerage | sensory | creative | ...)
+      public_read INTEGER NOT NULL DEFAULT 0,  -- 0=auth required, 1=public read allowed
+      created_at TEXT NOT NULL,
+      deleted_at TEXT                  -- soft-delete tombstone
+    );
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_uploaded_by ON storage_blobs(uploaded_by);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_offer ON storage_blobs(related_offer_id);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_category ON storage_blobs(category);
+    CREATE INDEX IF NOT EXISTS idx_storage_blobs_created ON storage_blobs(created_at);
+  `);
+  // Forward-compat: in case the table existed without these columns yet,
+  // ALTER them in idempotently.
+  safeAddColumn("storage_blobs", "uploaded_by_agent_id", "TEXT");
+  safeAddColumn("storage_blobs", "related_offer_id", "TEXT");
+  safeAddColumn("storage_blobs", "label", "TEXT");
+  safeAddColumn("storage_blobs", "category", "TEXT");
+  safeAddColumn("storage_blobs", "public_read", "INTEGER DEFAULT 0");
+  safeAddColumn("storage_blobs", "deleted_at", "TEXT");
 
   // Wave 5 — demand-intent capture: capability requests previously lived in
   // an in-memory Map inside the gateway. Persist them and index the
@@ -1749,5 +1808,69 @@ export function migrateDatabase(sqlite: Database.Database): void {
       last_used_at      TEXT
     );
     CREATE INDEX IF NOT EXISTS csd_usage_count_idx ON csd_usage(count DESC);
+  `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // Courier-jobs — folded pcc-courier-jobs v0.2 standalone matching layer
+  // (https://web-production-3c660.up.railway.app) into the gateway. JSON
+  // blob per row (stored in `data`) plus indexed columns for the
+  // hot-path filters (status, valid_until). Routes live in
+  // routes/courier-jobs.ts; store in services/courier-jobs-store.ts.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS courier_jobs (
+      id           TEXT PRIMARY KEY,
+      status       TEXT NOT NULL,
+      data         TEXT NOT NULL,  -- JSON CourierJob
+      posted_at    TEXT NOT NULL,
+      posted_by    TEXT,
+      valid_until  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS courier_jobs_status_idx ON courier_jobs(status);
+    CREATE INDEX IF NOT EXISTS courier_jobs_valid_until_idx ON courier_jobs(valid_until);
+    CREATE INDEX IF NOT EXISTS courier_jobs_posted_at_idx ON courier_jobs(posted_at);
+
+    CREATE TABLE IF NOT EXISTS courier_job_events (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id   TEXT NOT NULL,
+      at       TEXT NOT NULL,
+      data     TEXT NOT NULL  -- JSON CourierJobEvent
+    );
+    CREATE INDEX IF NOT EXISTS courier_job_events_job_idx ON courier_job_events(job_id);
+  `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // Job-offers — generic matching primitive at /api/job-offers/*.
+  // Replaces the courier-specific courier_jobs tables with a category-
+  // agnostic schema (capability_type first-class, requirements opaque
+  // JSON). EVERY PCC adapter (courier, dominos, hamilton, kdense,
+  // opentrons, ...) writes here. The courier_jobs tables above remain
+  // for backward compat — courier-shim routes also write to job_offers
+  // so new posts immediately appear in the generic feed.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS job_offers (
+      id               TEXT PRIMARY KEY,
+      capability_type  TEXT NOT NULL,                -- e.g. courier.dispatch, pizza.order, lab.hplc, opentrons.runProtocol
+      status           TEXT NOT NULL,
+      data             TEXT NOT NULL,                -- JSON JobOffer (full object)
+      posted_at        TEXT NOT NULL,
+      poster_did       TEXT,                         -- DID of poster (user-agent or kernel)
+      valid_until      TEXT NOT NULL,
+      idempotency_key  TEXT UNIQUE                   -- caller idempotency
+    );
+    CREATE INDEX IF NOT EXISTS job_offers_capability_type_idx ON job_offers(capability_type);
+    CREATE INDEX IF NOT EXISTS job_offers_status_idx ON job_offers(status);
+    CREATE INDEX IF NOT EXISTS job_offers_valid_until_idx ON job_offers(valid_until);
+    CREATE INDEX IF NOT EXISTS job_offers_posted_at_idx ON job_offers(posted_at);
+    CREATE INDEX IF NOT EXISTS job_offers_poster_did_idx ON job_offers(poster_did);
+
+    CREATE TABLE IF NOT EXISTS job_offer_events (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      offer_id  TEXT NOT NULL,
+      at        TEXT NOT NULL,
+      data      TEXT NOT NULL                        -- JSON JobOfferEvent
+    );
+    CREATE INDEX IF NOT EXISTS job_offer_events_offer_idx ON job_offer_events(offer_id);
   `);
 }

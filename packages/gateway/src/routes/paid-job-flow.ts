@@ -19,7 +19,7 @@ import type { Result } from "@pcc/spec";
 import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
-import { MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
+import { MilestoneEscrowV2ABI, MilestoneEscrowV3ABI, MockUSDCABI } from "@pcc/contracts/abi";
 import { getStore, getRepos } from "../db.js";
 import { getSettlementFacade } from "../facades/index.js";
 
@@ -48,6 +48,9 @@ import {
   getMilestoneV2,
   isWriteEnabled as escrowWriteEnabled,
   resolveMockUSDCAddress,
+  createEscrowV3,
+  approveAndReleaseV3,
+  submitEvidenceV3,
 } from "../contracts/escrow-client.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
@@ -78,6 +81,21 @@ function isMockSettlement(): boolean {
  */
 function useEasV2(): boolean {
   return process.env.PCC_USE_EAS_V2 === "true";
+}
+
+/**
+ * Whether to route settlement through the MilestoneEscrowV3 Mode-A path
+ * (payer-approval, oracle-free). Default OFF. Opt in per-deployment with
+ * PCC_USE_V3_MODE_A=true.
+ *
+ * Mode A is the gateway-driven ceremony where payer == arbiter == operator ==
+ * the gateway signer, so the gateway holds the payer key and settles via
+ * approveAndRelease itself — no oracle attestation, no EAS bridge, no challenge
+ * window, no protocol fee. Takes precedence over useEasV2() when both are set
+ * (a deployment picks one settlement rail). The V1/V2 branches are untouched.
+ */
+function useV3ModeA(): boolean {
+  return process.env.PCC_USE_V3_MODE_A === "true";
 }
 
 /** Resolve chain ID from PCC_NETWORK env var */
@@ -264,6 +282,97 @@ export async function createJobFromSession(
     }
     const cwmIdBytes = keccak256(toBytes(`pcc-session-${session.id}-${Date.now()}`));
 
+    if (useV3ModeA()) {
+      // ── V3 Mode-A (payer-approval, oracle-free) ─────────────────────────
+      // Deploy a MilestoneEscrowV3 clone via the V3 factory, add each milestone
+      // (V2 ABI works on V3 — identical addMilestone shape), THEN fund the escrow
+      // upfront (approveToken + fund) so it is ready for approveAndRelease at
+      // /complete. payer == arbiter == operator == the gateway signer, same as V2.
+      // Funding upfront (unlike V1/V2, which fund elsewhere) matches Mode A: the
+      // gateway holds the payer key and releases its own escrowed USDC on approval.
+      const factoryAddrV3 = getContractAddress(network, "milestoneEscrowFactoryV3");
+
+      let totalFundAmount = 0n;
+      for (const ms of normalizedMilestones) {
+        totalFundAmount += parseUnits(ms.amount, 6);
+      }
+
+      escrowAddress = await withSignerLock(async () => {
+        // createEscrowV3 handles the factory write + EscrowCreated decode.
+        const addr = await createEscrowV3(
+          account.address, // payer  = gateway signer
+          account.address, // arbiter = gateway signer
+          tokenAddr,
+          cwmIdBytes,
+          factoryAddrV3,
+        );
+        console.log(
+          `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
+        );
+
+        // Add each milestone (V2 ABI is byte-identical on V3). operator = gateway
+        // signer receives the release payout. requiredTier is carried for parity;
+        // Mode A ignores it at release (no attestation gate).
+        for (const ms of normalizedMilestones) {
+          const stepIdBytes = keccak256(toBytes(ms.stepId));
+          const addTx = await walletClient.writeContract({
+            address: addr as `0x${string}`,
+            abi: MilestoneEscrowV2ABI,
+            functionName: "addMilestone",
+            args: [
+              stepIdBytes,
+              account.address,
+              parseUnits(ms.amount, 6),
+              parseUnits(ms.bondAmount ?? "0.00", 6),
+              BigInt(ms.challengeWindowSeconds ?? 0),
+              assuranceTier,
+              jobId,
+            ],
+          });
+          const addReceipt = await publicClient.waitForTransactionReceipt({ hash: addTx, timeout: 90_000 });
+          if (addReceipt.status !== "success") {
+            throw new Error(
+              `V3 addMilestone reverted (stepId=${ms.stepId}, tx=${addTx}, escrow ${addr})`,
+            );
+          }
+          console.log(
+            `[paid-job] V3 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} (tx: ${addTx})`,
+          );
+        }
+
+        // Fund the escrow upfront: approve the escrow to pull totalFundAmount of
+        // the token, then fund(). Both use the MockUSDC / V2-fund ABIs which are
+        // byte-identical on V3. The escrow is now settle-ready for /complete.
+        const approveTx = await walletClient.writeContract({
+          address: tokenAddr,
+          abi: MockUSDCABI,
+          functionName: "approve",
+          args: [addr as `0x${string}`, totalFundAmount],
+        });
+        const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 90_000 });
+        if (approveReceipt.status !== "success") {
+          throw new Error(`V3 approve reverted (tx=${approveTx}, escrow ${addr})`);
+        }
+
+        const fundTx = await walletClient.writeContract({
+          address: addr as `0x${string}`,
+          abi: MilestoneEscrowV3ABI,
+          functionName: "fund",
+          args: [],
+        });
+        const fundReceipt = await publicClient.waitForTransactionReceipt({ hash: fundTx, timeout: 90_000 });
+        if (fundReceipt.status !== "success") {
+          throw new Error(`V3 fund reverted (tx=${fundTx}, escrow ${addr})`);
+        }
+        console.log(
+          `[paid-job] V3 escrow ${addr} funded upfront (${normalizedMilestones.length} milestone(s), ${totalFundAmount} base units)`,
+        );
+
+        return addr;
+      });
+      escrowStatus = "funded";
+    } else {
+
     // V2 (EAS): deploy an EAS-gated MilestoneEscrowV2 via the V2 factory.
     // V1 (default): legacy createEscrow on the V1 protocol. Branch-by-abstraction
     // on useEasV2() so existing deployments are untouched.
@@ -380,6 +489,7 @@ export async function createJobFromSession(
       );
     });
     escrowStatus = "created";
+    } // end V1/V2 branch (else of useV3ModeA)
   }
 
   const totalPrice = quote?.totalPrice as string ?? "10.00";
@@ -926,6 +1036,89 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // to mint. Best-effort: any failure here leaves V1-style settlement intact.
       const hasRealEscrow =
         !!escrowAddress && escrowAddress.startsWith("0x") && !escrowAddress.startsWith("mock");
+
+      // ── V3 Mode-A settlement (payer-approval, oracle-free) ───────────────
+      // When the V3 Mode-A rail is on and a real funded escrow exists, the
+      // gateway (which IS the payer) settles directly: submitEvidence(0) then
+      // approveAndRelease(0). No oracle verification, no EAS attestation, no
+      // challenge window (Mode A is oracle-free). Returns early so the V1/V2
+      // oracle + EAS blocks below are skipped entirely for this path.
+      if (useV3ModeA() && hasRealEscrow && escrowWriteEnabled()) {
+        // On-chain bytes32: the evidence digest is the 64-hex-char sha256 (32
+        // bytes). bundleHash carries a "sha256:" prefix for the DB/API; the chain
+        // wants the raw 0x form. (The V2 path's cast of the prefixed string is a
+        // best-effort no-op; Mode A must actually land, so use the correct form.)
+        const bundleHashBytes32 = `0x${hashBuffer}` as `0x${string}`;
+
+        let evidenceTx: string | null = null;
+        let releaseTx: string | null = null;
+        try {
+          const ev = await submitEvidenceV3(0, bundleHashBytes32, escrowAddress as `0x${string}`);
+          evidenceTx = ev.transactionHash;
+          const rel = await approveAndReleaseV3(0, escrowAddress as `0x${string}`);
+          releaseTx = rel.transactionHash;
+          console.log(
+            `[complete] V3 Mode-A settled escrow ${escrowAddress}: submitEvidence tx=${evidenceTx}, approveAndRelease tx=${releaseTx}`,
+          );
+        } catch (settleErr) {
+          // Unlike the V1/V2 best-effort evidence submit, Mode-A settlement IS the
+          // settlement — a failure here must surface (no silent fallthrough to an
+          // oracle path that doesn't apply to this rail).
+          console.error(
+            "[complete] V3 Mode-A settlement failed:",
+            settleErr instanceof Error ? settleErr.message : settleErr,
+          );
+          return reply.status(502).send({
+            error: "v3_mode_a_settlement_failed",
+            details: settleErr instanceof Error ? settleErr.message : String(settleErr),
+            escrowAddress,
+          });
+        }
+
+        // Mark settled in the DB (job + escrow + milestones).
+        repos.jobs.updateStatus(jobId, "settled");
+        if (escrowId) {
+          repos.escrows.updateStatus(escrowId, "completed");
+          const msRows = repos.escrows.findMilestonesByEscrow(escrowId);
+          for (const ms of msRows) {
+            repos.escrows.updateMilestoneStatus(ms.id, "released");
+          }
+        }
+
+        pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+          metadata: {
+            path: "v3-mode-a",
+            bundleId,
+            bundleHash,
+            escrowAddress,
+            settlementStatus: "settled",
+            evidenceTxHash: evidenceTx,
+            releaseTxHash: releaseTx,
+            toolCallCount: auditTrail.length,
+          },
+        });
+
+        return {
+          jobId,
+          status: "settled",
+          evidenceBundleId: bundleId,
+          evidenceHash: bundleHash,
+          escrowAddress,
+          escrowId,
+          settledAt: now,
+          ipfsCid,
+          starknetAnchorTxHash: starknetTxHash,
+          eas: null,
+          scopesRevoked: 0,
+          toolCallsRecorded: auditTrail.length,
+          settlementMode: "v3-mode-a",
+          evidenceTxHash: evidenceTx,
+          releaseTxHash: releaseTx,
+          message:
+            "Job completed and settled via MilestoneEscrowV3 Mode-A (payer approveAndRelease). No oracle attestation required.",
+        };
+      }
+
       let onChainStepId: `0x${string}` | undefined;
       let evidenceTxHash: string | null = null;
       if (useEasV2() && hasRealEscrow && escrowWriteEnabled()) {
