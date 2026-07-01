@@ -333,19 +333,24 @@ describe("Operator Relay Routes", () => {
       const body = res.json();
       expect(body.updated).toBe(true);
       expect(body.jobId).toBe(jobId);
-      expect(body.status).toBe("running");
+      // `running` is a tolerated input alias, normalised to the canonical value.
+      expect(body.status).toBe("in_progress");
     });
 
-    it("accepts all valid statuses", async () => {
-      const VALID = ["queued", "running", "completed", "failed", "cancelled"];
-      for (const status of VALID) {
+    it("accepts all canonical statuses plus the `running` alias", async () => {
+      const ACCEPTED = [
+        "pending", "queued", "in_progress", "paused",
+        "completed", "failed", "cancelled",
+        "running", // tolerated alias → in_progress
+      ];
+      for (const status of ACCEPTED) {
         const res = await app.inject({
           method: "POST",
           url: "/api/operator/job-status",
           payload: { jobId: "j-fake-" + status, status },
         });
         // May be 200 with updated:false (unknown job), but must not be 400
-        expect(res.statusCode).not.toBe(400);
+        expect(res.statusCode, `status ${status}`).not.toBe(400);
       }
     });
   });

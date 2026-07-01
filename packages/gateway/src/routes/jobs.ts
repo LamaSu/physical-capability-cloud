@@ -3,12 +3,7 @@ import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
 import { getRepos } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
-
-// Valid job status transitions (prevent arbitrary status injection)
-const VALID_STATUSES = new Set([
-  "pending", "queued", "in_progress", "paused",
-  "completed", "failed", "cancelled",
-]);
+import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -75,11 +70,13 @@ export async function jobRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const { status, progress } = req.body;
 
-      // Validate status against allowlist (prevents status injection attacks)
-      if (!VALID_STATUSES.has(status)) {
+      // Validate against the canonical allowlist (prevents status injection),
+      // tolerating documented input aliases (e.g. "running" → "in_progress").
+      const canonicalStatus = normalizeJobStatus(status);
+      if (!canonicalStatus) {
         return reply.code(400).send({
           error: "invalid_status",
-          message: `Status must be one of: ${[...VALID_STATUSES].join(", ")}`,
+          message: `Status must be one of: ${JOB_STATUSES.join(", ")}`,
         });
       }
 
@@ -103,7 +100,7 @@ export async function jobRoutes(app: FastifyInstance) {
 
       const result = await facade.updateStatus(
         req.params.jobId,
-        status,
+        canonicalStatus,
         progress,
       );
       if (result.success) return { job: result.data };

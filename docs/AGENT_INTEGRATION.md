@@ -453,7 +453,7 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   capabilityId: string;
   kernelId: string;
-  status: "queued"|"running"|"completed"|"failed"|"cancelled";
+  status: "pending"|"queued"|"in_progress"|"paused"|"completed"|"failed"|"cancelled";
   progress?: number;                 // 0-100
   assuranceTier: 0|1|2|3;
   createdAt: string;                 // ISO timestamp

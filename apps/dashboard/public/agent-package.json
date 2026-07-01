@@ -449,7 +449,7 @@
           },
           "status": {
             "type": "string",
-            "description": "Filter by status (pending, running, completed, failed)"
+            "description": "Filter by status (pending, queued, in_progress, paused, completed, failed, cancelled)"
           }
         },
         "required": []
@@ -491,7 +491,7 @@
           },
           "status": {
             "type": "string",
-            "description": "New status (pending, running, completed, failed, cancelled)"
+            "description": "New status (pending, queued, in_progress, paused, completed, failed, cancelled). 'running' is accepted as a legacy alias for in_progress."
           },
           "progress": {
             "type": "number",
@@ -4655,7 +4655,7 @@
     },
     {
       "name": "operator_update_job_status",
-      "description": "Operator updates job status during execution (running, completed, failed). Called by pcc-node as jobs progress.",
+      "description": "Operator updates job status during execution (in_progress, completed, failed). Called by pcc-node as jobs progress.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4668,7 +4668,7 @@
           "status": {
             "type": "string",
             "enum": [
-              "running",
+              "in_progress",
               "completed",
               "failed"
             ]

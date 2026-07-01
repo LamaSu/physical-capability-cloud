@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
+import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
@@ -198,24 +199,26 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "status required" });
     }
 
-    const VALID_STATUSES = ["queued", "running", "completed", "failed", "cancelled"];
-    if (!VALID_STATUSES.includes(status)) {
+    // Same canonical vocabulary as PATCH /api/jobs/:id/status — tolerate the
+    // documented `running` alias, normalise to `in_progress` before storing.
+    const canonicalStatus = normalizeJobStatus(status);
+    if (!canonicalStatus) {
       return reply.code(400).send({
         error: "invalid_status",
-        valid: VALID_STATUSES,
+        valid: [...JOB_STATUSES],
       });
     }
 
     try {
       const repos = getRepos();
-      const updated = repos.jobs.updateStatus(jobId, status);
+      const updated = repos.jobs.updateStatus(jobId, canonicalStatus);
 
       if (!updated) {
         // Job not found — return 200 so the node doesn't fail hard
         return {
           updated: false,
           jobId,
-          status,
+          status: canonicalStatus,
           warning: "job_not_found",
           timestamp: new Date().toISOString(),
         };
@@ -224,7 +227,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       return {
         updated: true,
         jobId,
-        status,
+        status: canonicalStatus,
         metadata: metadata ?? null,
         timestamp: new Date().toISOString(),
       };
