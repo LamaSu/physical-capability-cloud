@@ -94,6 +94,14 @@ export interface ChainDeployment {
      * hand-added here after `forge script DeployProtocolV2.s.sol` (no automated ingestion).
      */
     milestoneEscrowFactoryV2?: Address;
+    /**
+     * PCCProtocolV3 factory — deploys MilestoneEscrowV3 instances (fee-from-attestation
+     * Mode B + payer-approval Mode A). createEscrowV3(payer,arbiter,token,cwmId) has the
+     * same wire shape as createEscrowV2. Threaded into the gateway's Mode-A settlement
+     * path (paid-job-flow) when PCC_USE_V3_MODE_A=true. Hand-added after
+     * `forge script DeployProtocolV3.s.sol` (no automated ingestion).
+     */
+    milestoneEscrowFactoryV3?: Address;
     mockUSDC?: Address;
     /** Real USDC on base-sepolia (Circle-deployed) */
     usdc?: Address;
@@ -160,6 +168,13 @@ export const deployments: Record<string, ChainDeployment> = {
       // deployments/base-sepolia/PCCProtocolV2.json. (Retired per-instance factory
       // 0x5810Bf is superseded by this one — see coord CANONICAL STATE.)
       milestoneEscrowFactoryV2: "0x39F6958b132c0972Ce8f5658A3F8F16491395642",
+      // PCCProtocolV3 factory — deploys MilestoneEscrowV3 instances via
+      // createEscrowV3(payer,arbiter,token,cwmId). Powers the gateway's Mode-A
+      // (payer-approval, oracle-free) settlement rail when PCC_USE_V3_MODE_A=true.
+      // Deployed 2026-06-30 (impl 0x19b0b1eF…C32c, authorizedOracle 0x3e9cf724…,
+      // pcc.evidence.v2 schema baked). Deployment record:
+      // deployments/base-sepolia/PCCProtocolV3.json.
+      milestoneEscrowFactoryV3: "0x786E85B17B288115E2F9230868e0BC94cBff5534",
       mockUSDC: "0x18bef3dee9f4f97f7cec16db0c4a0a930f478470",
       // PCCProtocol v2 — 2.35% fee, oracle-gated settlement (deployed 2026-03-31)
       pccProtocol: "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23",
