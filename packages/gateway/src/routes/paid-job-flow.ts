@@ -44,6 +44,7 @@ import { getEvidenceStorage, commitmentService, zkProofService } from "../servic
 import { StarknetProofAnchoringService } from "@pcc/verifier";
 import {
   submitAttestationV2,
+  submitAttestationV3,
   submitEvidenceV2,
   getMilestoneV2,
   isWriteEnabled as escrowWriteEnabled,
@@ -193,6 +194,34 @@ function extractEscrowCreatedAddress(
  * Create escrow + job + scope from a committed negotiation session.
  * This is the core wiring logic shared by the commit handler and the fast-track endpoint.
  */
+/**
+ * Resolve the per-operator payout address for a kernel (option A revenue routing).
+ * Looks up the kernel's operator, then finds the api_keys row with the operator's
+ * per-operator EOA (set by /api/auth/provision + best-effort setAgentWallet). If
+ * none found, returns null so callers can fall back to the gateway signer
+ * (preserves existing behavior for legacy operators not yet migrated).
+ *
+ * Cf. coord bulletin 235: without this, V3 releases route funds to the gateway
+ * signer (self-pay). With this, funds route to the operator's operational EOA.
+ */
+function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
+  try {
+    const repos = getRepos();
+    const kernel = repos.kernels.findById(kernelId);
+    if (!kernel?.operatorAddress) return null;
+    const keys = repos.apiKeys.findByOperator(kernel.operatorAddress);
+    for (const k of keys) {
+      const addr = (k as { operatorWalletAddress?: string | null }).operatorWalletAddress;
+      if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
+        return addr as `0x${string}`;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function createJobFromSession(
   session: typeof negotiationSessions.$inferSelect,
 ): Promise<{
@@ -311,9 +340,13 @@ export async function createJobFromSession(
           `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
         );
 
-        // Add each milestone (V2 ABI is byte-identical on V3). operator = gateway
-        // signer receives the release payout. requiredTier is carried for parity;
-        // Mode A ignores it at release (no attestation gate).
+        // Add each milestone (V2 ABI is byte-identical on V3). Operator payout
+        // address prefers the per-operator EOA from option A (revenue routes to
+        // the operator's own wallet, not the gateway signer). Falls back to
+        // account.address for legacy operators that haven't been minted A yet.
+        // requiredTier is carried for parity; Mode A ignores it at release.
+        const v3OperatorPayout =
+          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
           const addTx = await walletClient.writeContract({
@@ -322,7 +355,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              account.address,
+              v3OperatorPayout,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -429,6 +462,11 @@ export async function createJobFromSession(
 
         // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
         // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
+        // Operator payout prefers the per-operator EOA from option A (revenue
+        // routes to the operator, not the gateway); falls back to account.address
+        // for legacy operators. Cf. coord bulletin 235.
+        const v2OperatorPayout =
+          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
         let dropped = false;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
@@ -438,7 +476,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              account.address, // operator = gateway signer (receives release payout)
+              v2OperatorPayout,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -512,6 +550,9 @@ export async function createJobFromSession(
     status: escrowStatus,
     createdAt: now,
     deadline,
+    // V3 dispatch: settled-later routes/facades read this and pick the V3
+    // write helpers (submitAttestationV3 / releaseMilestoneV3) vs V2.
+    version: useV3ModeA() ? "v3" : "v2",
   });
 
   // Insert milestones (DB rows mirror the normalized set used on-chain above).
@@ -1218,15 +1259,26 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
           // Bind on-chain only against a REAL escrow with write enabled. The
           // mock/dev easUid (0xea…) is returned but not submitted to a live chain.
-          if (easUid && hasRealEscrow && escrowWriteEnabled()) {
-            const submitted = await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
+          if (easUid && hasRealEscrow && escrowWriteEnabled() && escrowAddress) {
+            // V3 dispatch: escrows created via the V3 factory carry version="v3"
+            // in the DB, so the write path targets submitAttestationV3 (which
+            // dispatches through MilestoneEscrowV3ABI). V2 escrows keep the V2
+            // helper. Falls back to V2 if the row is missing.
+            const escrowRow = repos.escrows.findByContractAddress(escrowAddress);
+            const escrowVersion =
+              (escrowRow?.version as "v2" | "v3" | null | undefined) ?? "v2";
+            const submitted =
+              escrowVersion === "v3"
+                ? await submitAttestationV3(0, easUid, escrowAddress as `0x${string}`)
+                : await submitAttestationV2(0, easUid, escrowAddress as `0x${string}`);
             easBridge.submitted = true;
             easBridge.attestationTxHash = submitted.transactionHash;
+            easBridge.escrowVersion = escrowVersion;
           }
 
           pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
             metadata: {
-              path: "eas-v2",
+              path: easBridge.escrowVersion === "v3" ? "eas-v3-mode-b" : "eas-v2",
               easSchema: easMeta.schema,
               easSubmitted: easBridge.submitted,
               easUid: easBridge.attestationUid ?? null,

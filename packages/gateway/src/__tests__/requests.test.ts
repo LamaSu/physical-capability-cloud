@@ -117,7 +117,9 @@ describe("POST /api/requests", () => {
     expect(body.decomposition).toBeDefined();
     expect(body.request.id).toBeTruthy();
     expect(body.request.title).toBe(ROBOT_REQUEST.title);
-    expect(body.request.status).toBe("published");
+    // Composite decompose no longer auto-publishes (composition-keystone fix
+     // per coord bulletin 223 / inbox lane 133). Buyer explicitly publishes.
+     expect(body.request.status).toBe("decomposed");
     expect(body.request.capabilityDag).toBeInstanceOf(Array);
     expect(body.request.capabilityDag.length).toBeGreaterThan(0);
     expect(body.request.totalEstimatedCost).toBeGreaterThan(0);
@@ -329,7 +331,9 @@ describe("POST /api/requests/:id/decompose", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.request.status).toBe("published");
+    // Composite decompose no longer auto-publishes (composition-keystone fix
+     // per coord bulletin 223 / inbox lane 133). Buyer explicitly publishes.
+     expect(body.request.status).toBe("decomposed");
     expect(body.decomposition).toBeDefined();
     expect(body.decomposition.nodes.length).toBeGreaterThan(0);
   });

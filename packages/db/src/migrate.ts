@@ -1873,4 +1873,42 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS job_offer_events_offer_idx ON job_offer_events(offer_id);
   `);
+
+  // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────
+  // Use the in-scope 3-arg safeAddColumn (closure captures sqlite).
+  // SQLite has no ALTER COLUMN; new columns are appended idempotently.
+  safeAddColumn("api_keys", "onchain_agent_id", "TEXT");
+  safeAddColumn("api_keys", "onchain_status", "TEXT DEFAULT 'pending'");
+  safeAddColumn("api_keys", "onchain_tx_hash", "TEXT");
+  safeAddColumn("api_keys", "onchain_registry_address", "TEXT");
+  safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
+  safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
+  safeAddColumn("api_keys", "onchain_error", "TEXT");
+  // Option A ownership stopgap: per-operator operational wallet.
+  safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
+  safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
+  safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
+  safeAddColumn("api_keys", "agent_wallet_onchain_status", "TEXT DEFAULT 'pending'");
+  safeAddColumn("api_keys", "agent_wallet_onchain_tx_hash", "TEXT");
+  safeAddColumn("api_keys", "agent_wallet_onchain_error", "TEXT");
+  // V3 Mode-B dispatch: version column on escrows.
+  safeAddColumn("escrows", "version", "TEXT DEFAULT 'v2'");
+}
+
+/**
+ * Add a column to an existing table only if not already present.
+ * SQLite's `ALTER TABLE ADD COLUMN` is non-idempotent and throws on
+ * re-run; the pragma_table_info query lets us skip if present.
+ */
+function safeAddColumn(
+  sqlite: Database.Database,
+  table: string,
+  column: string,
+  type: string,
+): void {
+  const cols = sqlite
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === column)) return;
+  sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }

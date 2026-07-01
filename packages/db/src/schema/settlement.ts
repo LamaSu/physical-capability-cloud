@@ -11,6 +11,14 @@ export const escrows = sqliteTable("escrows", {
   status: text("status").notNull(), // "created" | "funded" | "active" | "completing" | "completed" | "disputed" | "refunded"
   createdAt: text("created_at").notNull(),
   deadline: text("deadline").notNull(),
+  /**
+   * Which escrow contract version was used at createEscrow* time. Determines
+   * the dispatch target at submitAttestation/release (V2 uses submitAttestationV2
+   * + releaseMilestoneV2; V3 uses submitAttestationV3 + releaseMilestoneV3).
+   * Defaults to "v2" for existing rows (they were created via V2 factory before
+   * this column existed). New V3-created rows explicitly set "v3".
+   */
+  version: text("version").default("v2"),
 });
 
 /** A milestone in the escrow — corresponds to one CWM step */

@@ -11,6 +11,7 @@ export interface IEscrowRepository {
   findAll(): EscrowRow[];
   findById(id: string): EscrowRow | undefined;
   findByCwm(cwmId: string): EscrowRow | undefined;
+  findByContractAddress(contractAddress: string): EscrowRow | undefined;
   findByStatus(status: string): EscrowRow[];
   insert(escrow: EscrowInsert): EscrowRow | undefined;
   updateStatus(id: string, status: string): EscrowRow | undefined;

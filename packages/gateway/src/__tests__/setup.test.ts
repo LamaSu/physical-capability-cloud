@@ -491,9 +491,10 @@ describe("Setup API", () => {
           adapterType: "mock",
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       const body = res.json();
       expect(body.registered).toBe(true);
+      expect(body.action).toBe("created");
       expect(body.device).toBeDefined();
       expect(body.device.id).toBe(deviceId);
       expect(body.device.kernelId).toBe("kernel-nyc");
@@ -514,7 +515,7 @@ describe("Setup API", () => {
           capabilities: ["cap-nyc-fdm"],
         },
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       const body = res.json();
       expect(body.device.adapterType).toBe("octoprint");
     });
@@ -559,7 +560,7 @@ describe("Setup API", () => {
       expect(res.json().error).toBe("invalid_adapter_type");
     });
 
-    it("returns 409 for duplicate deviceId", async () => {
+    it("is idempotent on duplicate deviceId (upsert, no 409)", async () => {
       const deviceId = `dev-dup-setup-${Date.now()}`;
       const payload = {
         kernelId: "kernel-nyc",
@@ -568,19 +569,22 @@ describe("Setup API", () => {
         adapterType: "mock",
       };
 
-      await app.inject({
+      const first = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
         payload,
       });
+      expect(first.statusCode).toBe(201);
+      expect(first.json().action).toBe("created");
 
-      const res = await app.inject({
+      const second = await app.inject({
         method: "POST",
         url: "/api/setup/register-device",
         payload,
       });
-      expect(res.statusCode).toBe(409);
-      expect(res.json().error).toBe("device_already_exists");
+      expect(second.statusCode).toBe(200);
+      expect(second.json().action).toBe("updated");
+      expect(second.json().registered).toBe(true);
     });
   });
 

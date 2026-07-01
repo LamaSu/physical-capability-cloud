@@ -16,9 +16,26 @@ import {
   submitEvidenceV2,
   submitAttestationV2,
   releaseMilestoneV2,
+  submitAttestationV3,
+  releaseMilestoneV3,
   isWriteEnabled as escrowWriteEnabled,
   encodeApproveAndReleaseV3,
 } from "../contracts/escrow-client.js";
+import { getRepos } from "../db.js";
+
+/**
+ * Look up an escrow row by its on-chain contract address to determine the
+ * dispatch target (V2 or V3 write helpers). Returns "v2" by default when the
+ * row is missing (pre-migration rows had no version column and default to v2).
+ */
+function resolveEscrowVersion(contractAddress: string): "v2" | "v3" {
+  try {
+    const row = getRepos().escrows.findByContractAddress(contractAddress);
+    return (row?.version as "v2" | "v3" | null | undefined) === "v3" ? "v3" : "v2";
+  } catch {
+    return "v2";
+  }
+}
 
 /**
  * Whether to route the direct escrow chain routes through the EAS-gated
@@ -301,8 +318,18 @@ export async function escrowRoutes(app: FastifyInstance) {
           return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
         }
         try {
-          const result = await releaseMilestoneV2(idx, address as Address);
-          return { ...result, action: "release", escrow: address, milestoneIndex: idx, path: "eas-v2" };
+          const version = resolveEscrowVersion(address);
+          const result =
+            version === "v3"
+              ? await releaseMilestoneV3(idx, address as Address)
+              : await releaseMilestoneV2(idx, address as Address);
+          return {
+            ...result,
+            action: "release",
+            escrow: address,
+            milestoneIndex: idx,
+            path: version === "v3" ? "eas-v3-mode-b" : "eas-v2",
+          };
         } catch (err) {
           return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
         }
@@ -494,8 +521,19 @@ export async function escrowRoutes(app: FastifyInstance) {
           return reply.status(503).send({ error: "write_disabled", message: "Chain write not enabled (no gateway private key)." });
         }
         try {
-          const result = await submitAttestationV2(idx, easUid as `0x${string}`, address as Address);
-          return { ...result, action: "submitAttestation", escrow: address, milestoneIndex: idx, easUid, path: "eas-v2" };
+          const version = resolveEscrowVersion(address);
+          const result =
+            version === "v3"
+              ? await submitAttestationV3(idx, easUid as `0x${string}`, address as Address)
+              : await submitAttestationV2(idx, easUid as `0x${string}`, address as Address);
+          return {
+            ...result,
+            action: "submitAttestation",
+            escrow: address,
+            milestoneIndex: idx,
+            easUid,
+            path: version === "v3" ? "eas-v3-mode-b" : "eas-v2",
+          };
         } catch (err) {
           return reply.status(502).send({ error: "chain_write_failed", message: err instanceof Error ? err.message : String(err) });
         }

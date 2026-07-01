@@ -1198,6 +1198,70 @@ export function encodeReleaseV3(milestoneIndex: number): Hex {
   });
 }
 
+// ── V3 Mode-B write helpers (gateway-signer) ─────────────────────────────
+//
+// Once oracle mints pcc.evidence.v2 attestations (bulletin 231: V3 factory
+// deployed 0x786E85 + v2 schema; bulletin 240: V3 lane owns oracle-v2 upgrade),
+// the gateway signer's Mode-B revenue path is: (1) submitEvidenceV3, (2)
+// submitAttestationV3 with the EAS UID, (3) wait challenge window, (4)
+// releaseMilestoneV3. These mirror the V2 pattern exactly — the wire
+// signatures are byte-identical — but dispatch through the V3 ABI so the V3
+// escrow's decode reads feeBps + feeRecipient from the v2 attestation payload
+// (not the V2 root state). Per bulletin 239, once oracle-v2 activates, revenue
+// routes to the per-operator wallet at args.operator (option A wire-up).
+
+/**
+ * Bind a validated EAS attestation (by UID) to a V3 milestone, opening the
+ * challenge window. The contract decodes the pcc.evidence.v2 payload on-chain
+ * (9-field tuple including feeBps + feeRecipient, capped at MAX_FEE_BPS) and
+ * validates provenance against the authorized oracle.
+ */
+export async function submitAttestationV3(
+  milestoneIndex: number,
+  easUid: Hex,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "submitAttestation",
+    args: [BigInt(milestoneIndex), easUid],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
+/**
+ * Release a V3 milestone after its challenge window expires (Mode B).
+ * V3 release takes ONLY the index — the binding attestation was supplied to
+ * submitAttestationV3, so no attestation struct is re-passed here. Distribution
+ * reads feeBps + feeRecipient from the attested payload and routes to
+ * args.operator (per-operator wallet from option A).
+ */
+export async function releaseMilestoneV3(
+  milestoneIndex: number,
+  contractAddress?: Address,
+): Promise<WriteResult> {
+  const address = resolveAddress(contractAddress);
+  const wallet = getWalletClient();
+
+  const hash = await wallet.writeContract({
+    chain: resolveChainConfig().chain,
+    account: getAccount(),
+    address,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "release",
+    args: [BigInt(milestoneIndex)],
+  });
+
+  return { transactionHash: hash, status: "submitted" };
+}
+
 // ── PCCProtocolV3 factory (wallet writers for the gateway-driven Mode-A rail) ──
 //
 // @pcc/contracts exports MilestoneEscrowV3ABI (the escrow instance) but NOT a

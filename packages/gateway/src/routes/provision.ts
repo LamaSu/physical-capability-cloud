@@ -12,6 +12,13 @@ import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import {
+  registerAgentOnChain,
+  isIdentityWriteEnabled,
+  getIdentityRegistryAddress,
+  generateOperatorWallet,
+  setAgentWalletOnChain,
+} from "../services/erc8004-identity-write.js";
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -148,6 +155,168 @@ export async function provisionRoutes(app: FastifyInstance) {
             public_key: record.publicKey ?? null,
             source: "byok",
           };
+
+      // ── ERC-8004 on-chain identity write (best-effort) ────────────
+      // The off-chain DB row is the source of truth at this moment; the
+      // on-chain identity is eventually-consistent. If this write fails
+      // (network, gas, RPC), the row stays onchain_status='pending' and
+      // the retry sweeper will pick it up. Never fail the HTTP request.
+      let onchainAttempted = false;
+      let onchainResult:
+        | { agentId: string; txHash: string; registryAddress: string; chainId: number }
+        | undefined;
+      // Option A operator wallet response (populated inside the mint branch).
+      let operatorWalletResponse:
+        | {
+            address: string;
+            private_key: string;
+            source: "server-minted";
+            custody: "gateway";
+            warning: string;
+            onchain_status?: "written" | "failed" | "pending";
+            onchain_tx_hash?: string;
+            onchain_error?: string;
+          }
+        | undefined;
+      if (isIdentityWriteEnabled()) {
+        onchainAttempted = true;
+        const gatewayUrl =
+          process.env.PCC_GATEWAY_URL ?? `${req.protocol}://${req.hostname}`;
+        const agentDid =
+          operatorId.startsWith("0x") && /^0x[0-9a-fA-F]{40}$/.test(operatorId)
+            ? `did:pcc:${operatorId.toLowerCase()}`
+            : `did:pcc:${record.id}`;
+        try {
+          const onchain = await registerAgentOnChain({
+            agentDid,
+            agentUrl: gatewayUrl,
+          });
+          getRepos().apiKeys.recordOnchainSuccess(record.id, {
+            agentId: onchain.agentId,
+            txHash: onchain.txHash,
+            registryAddress: onchain.registryAddress,
+            chainId: onchain.chainId,
+          });
+          onchainResult = {
+            agentId: String(onchain.agentId),
+            txHash: onchain.txHash,
+            registryAddress: onchain.registryAddress,
+            chainId: onchain.chainId,
+          };
+          auditService.log({
+            eventType: "auth.onchain_identity_written",
+            actor: operatorId,
+            resourceType: "api_key",
+            resourceId: record.id,
+            action: "create",
+            metadata: onchainResult,
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+
+          // ── Option A: per-operator operational wallet + setAgentWallet ──
+          // Generate a fresh EOA for THIS operator (gateway-custodied at
+          // bootstrap), then best-effort assign it as the on-chain
+          // agentWallet. Entire block is defensively wrapped so any failure
+          // (viem import, EIP-712 domain mismatch vs deployed Daydreams
+          // contract, RPC blip) NEVER leaks into the outer catch and reverts
+          // the sponsored-mint success record.
+          try {
+            const opWallet = await generateOperatorWallet();
+            operatorWalletResponse = {
+              address: opWallet.address,
+              private_key: opWallet.privateKey,
+              source: "server-minted",
+              custody: "gateway",
+              warning:
+                "Store the private_key now — it will not be shown again. This wallet " +
+                "controls your ERC-8004 agentWallet; anyone holding it can sign as this agent.",
+            };
+            try {
+              const walletResult = await setAgentWalletOnChain({
+                agentId: onchain.agentId,
+                newWallet: opWallet.address,
+                newWalletPrivateKey: opWallet.privateKey,
+              });
+              getRepos().apiKeys.recordOperatorWallet(record.id, {
+                address: opWallet.address,
+                privateKey: opWallet.privateKey,
+                onchainStatus: "written",
+                onchainTxHash: walletResult.txHash,
+                onchainError: null,
+              });
+              operatorWalletResponse.onchain_status = "written";
+              operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
+              auditService.log({
+                eventType: "auth.agent_wallet_written",
+                actor: operatorId,
+                resourceType: "api_key",
+                resourceId: record.id,
+                action: "update",
+                metadata: {
+                  agent_wallet: opWallet.address,
+                  tx_hash: walletResult.txHash,
+                  agent_id: String(onchain.agentId),
+                },
+                ip: req.ip,
+                userAgent: req.headers["user-agent"],
+              });
+            } catch (walletErr) {
+              const walletErrMsg =
+                walletErr instanceof Error ? walletErr.message : String(walletErr);
+              try {
+                getRepos().apiKeys.recordOperatorWallet(record.id, {
+                  address: opWallet.address,
+                  privateKey: opWallet.privateKey,
+                  onchainStatus: "failed",
+                  onchainTxHash: null,
+                  onchainError: walletErrMsg.slice(0, 1024),
+                });
+              } catch {
+                // Non-fatal.
+              }
+              operatorWalletResponse.onchain_status = "failed";
+              operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+              req.log?.warn(
+                { keyId: record.id, error: walletErrMsg },
+                "setAgentWallet best-effort failed — off-chain wallet preserved",
+              );
+            }
+          } catch (opWalletErr) {
+            // generateOperatorWallet failed (e.g. viem import glitch in a
+            // test env). Do NOT let this leak into the outer catch and
+            // revert the sponsored-mint success record. Off-chain identity
+            // continues to work; operator wallet is a future retry.
+            req.log?.warn(
+              { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
+              "operator wallet generation failed — sponsored mint still succeeded",
+            );
+          }
+        } catch (onchainErr) {
+          const errMsg =
+            onchainErr instanceof Error ? onchainErr.message : String(onchainErr);
+          try {
+            getRepos().apiKeys.recordOnchainFailure(record.id, errMsg);
+          } catch {
+            // Non-fatal: DB write failure doesn't block HTTP response
+          }
+          req.log?.warn(
+            { keyId: record.id, error: errMsg },
+            "ERC-8004 on-chain identity write failed — will retry",
+          );
+          auditService.log({
+            eventType: "auth.onchain_identity_failed",
+            actor: operatorId,
+            resourceType: "api_key",
+            resourceId: record.id,
+            action: "create",
+            metadata: { error: errMsg.slice(0, 256) },
+            ip: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+        }
+      }
+
       return reply.status(201).send({
         api_key: rawKey,
         key_id: record.id,
@@ -159,6 +328,13 @@ export async function provisionRoutes(app: FastifyInstance) {
         warning: "Save this API key now — it will not be shown again.",
         trace_id,
         ed25519: ed25519Response,
+        // Option A ownership stopgap: operator's operational wallet address
+        // (independently claimable EOA that will be set as the ERC-8004
+        // `agentWallet` on-chain via best-effort setAgentWallet). If the
+        // on-chain assignment fails, the off-chain wallet is still yours.
+        // See coord bulletin 235 for the migration path to full smart-wallet
+        // ownership (B).
+        operator_wallet: operatorWalletResponse ?? { source: "none" },
         usage: {
           header: `Authorization: Bearer ${rawKey}`,
           trace_header: `x-pcc-trace-id: ${trace_id ?? "<trace_id>"}`,
@@ -166,6 +342,11 @@ export async function provisionRoutes(app: FastifyInstance) {
           trace_hint:
             "Echo `x-pcc-trace-id` on every subsequent request so PCC can correlate your onboarding journey. Quote it when filing `pcc_report` feedback.",
         },
+        onchain: onchainAttempted
+          ? onchainResult
+            ? { status: "written", ...onchainResult }
+            : { status: "pending", registryAddress: getIdentityRegistryAddress() }
+          : { status: "disabled" },
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to provision key";

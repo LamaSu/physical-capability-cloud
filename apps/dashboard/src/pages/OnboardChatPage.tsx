@@ -146,6 +146,50 @@ export function OnboardChatPage() {
     void sendMessage(line);
   };
 
+  // Surface structured highlights from new tool call results so the user
+  // can see the 4-step onboarding journey (describe → register → identity
+  // → test-job) progress without digging into raw responses.
+  const renderHighlight = (call: ToolCallTrace): React.ReactNode => {
+    const r = call.result as Record<string, unknown> | null | undefined;
+    if (!r || typeof r !== "object") return null;
+    if (call.name.includes("auth/provision") || call.name.includes("auth_provision")) {
+      const oc = r.onchain_identity as
+        | { status?: string; agent_id?: string; tx_hash?: string; chain_id?: number }
+        | undefined;
+      if (oc?.status === "minted" && oc.agent_id) {
+        return (
+          <span className="ml-2 text-purple-300/80">
+            🆔 agentId: <span className="font-bold">{oc.agent_id}</span>
+            {oc.tx_hash && (
+              <span className="text-white/30"> · tx: {oc.tx_hash.slice(0, 10)}…</span>
+            )}
+          </span>
+        );
+      }
+      if (oc?.status === "error") {
+        return <span className="ml-2 text-amber-400/80">⚠ identity mint deferred</span>;
+      }
+    }
+    if (call.name.includes("register-device") || call.name.includes("register_device")) {
+      const action = r.action as string | undefined;
+      if (action === "created") return <span className="ml-2 text-emerald-300/80">✨ device created</span>;
+      if (action === "updated") return <span className="ml-2 text-blue-300/80">↻ device updated (idempotent)</span>;
+    }
+    if (call.name.includes("test-job") || call.name.includes("test_job")) {
+      const status = r.status as string | undefined;
+      const bundle = r.evidenceBundleId as string | undefined;
+      if (status === "completed" && bundle) {
+        return (
+          <span className="ml-2 text-emerald-300/80">
+            ✓ verified · evidence: <span className="font-mono">{bundle.slice(0, 12)}…</span>
+          </span>
+        );
+      }
+      if (status) return <span className="ml-2 text-white/40">status: {status}</span>;
+    }
+    return null;
+  };
+
   const renderToolCalls = (calls?: ToolCallTrace[]) => {
     if (!calls || calls.length === 0) return null;
     if (!showToolCalls) return null;
@@ -159,6 +203,7 @@ export function OnboardChatPage() {
               {c.status}
             </span>
             <span className="text-white/20"> ({c.durationMs}ms)</span>
+            {renderHighlight(c)}
           </div>
         ))}
       </div>
@@ -167,6 +212,43 @@ export function OnboardChatPage() {
 
   const isReady =
     health === null || (health.hasApiKey && health.hasSdk && health.agentPackageStatus?.loaded);
+
+  // Compute progress through the 4-step unified onboarding flow:
+  // describe → register → sponsored-identity → verified-test-job.
+  // Each step is "done" when a tool call confirming it shows up in any
+  // assistant message.
+  const stepStatus = (() => {
+    const flat = messages.flatMap((m) => m.toolCalls ?? []);
+    const done = {
+      describe: messages.some((m) => m.role === "user"),
+      register: flat.some(
+        (c) =>
+          (c.name.includes("register-device") ||
+            c.name.includes("register_device") ||
+            c.name.includes("/api/kernels")) &&
+          c.status >= 200 &&
+          c.status < 300,
+      ),
+      identity: flat.some((c) => {
+        if (!c.name.includes("auth/provision") && !c.name.includes("auth_provision"))
+          return false;
+        const r = c.result as { onchain_identity?: { status?: string } } | null | undefined;
+        return r?.onchain_identity?.status === "minted";
+      }),
+      verified: flat.some((c) => {
+        if (!c.name.includes("test-job") && !c.name.includes("test_job")) return false;
+        const r = c.result as { status?: string } | null | undefined;
+        return r?.status === "completed";
+      }),
+    };
+    return done;
+  })();
+  const steps: Array<{ key: keyof typeof stepStatus; label: string }> = [
+    { key: "describe", label: "Describe" },
+    { key: "register", label: "Register" },
+    { key: "identity", label: "On-chain identity" },
+    { key: "verified", label: "Test job" },
+  ];
 
   return (
     <div className="flex flex-col h-screen bg-gradient-to-b from-black via-zinc-950 to-black text-white/90">
@@ -210,6 +292,44 @@ export function OnboardChatPage() {
               </span>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* 4-step unified flow progress */}
+      <div className="px-6 py-2 bg-black/30 border-b border-white/[0.04]">
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-2">
+          {steps.map((s, i) => {
+            const done = stepStatus[s.key];
+            const active =
+              !done &&
+              (i === 0 || stepStatus[steps[i - 1]!.key]);
+            return (
+              <React.Fragment key={s.key}>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      done
+                        ? "bg-emerald-400"
+                        : active
+                        ? "bg-amber-400 animate-pulse"
+                        : "bg-white/20"
+                    }`}
+                    aria-hidden
+                  />
+                  <span
+                    className={`text-[11px] ${
+                      done ? "text-emerald-300/80" : active ? "text-white/70" : "text-white/30"
+                    }`}
+                  >
+                    {s.label}
+                  </span>
+                </div>
+                {i < steps.length - 1 && (
+                  <span className="flex-1 h-px bg-white/[0.06]" aria-hidden />
+                )}
+              </React.Fragment>
+            );
+          })}
         </div>
       </div>
 

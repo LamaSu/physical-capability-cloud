@@ -558,28 +558,64 @@ export async function setupRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: "kernel_not_found" });
         }
 
-        const device = repos.kernels.insertDevice({
-          id: deviceId,
-          kernelId,
-          type,
-          model: model ?? "unknown",
-          firmware: "unknown",
-          status: "idle",
-          contributesToCapabilities: capabilities ?? [],
-          lastUpdated: new Date().toISOString(),
-          adapterType,
-          adapterConfig: adapterConfig ? JSON.stringify(adapterConfig) : undefined,
-          capabilities: capabilities ?? [],
-          healthStatus: "healthy",
-        });
+        // Idempotent upsert — never 409 a re-registration. If the device
+        // exists, update its mutable fields; otherwise insert.
+        const existing = repos.kernels.findDeviceById(deviceId);
+        const now = new Date().toISOString();
+        let device: any;
+        let action: "created" | "updated";
+        if (existing) {
+          device = repos.kernels.updateDevice(deviceId, {
+            kernelId,
+            type,
+            model: model ?? existing.model ?? "unknown",
+            status: existing.status ?? "idle",
+            contributesToCapabilities: capabilities ?? existing.contributesToCapabilities ?? [],
+            lastUpdated: now,
+            adapterType,
+            adapterConfig: adapterConfig
+              ? JSON.stringify(adapterConfig)
+              : existing.adapterConfig,
+            capabilities: capabilities ?? existing.capabilities ?? [],
+            healthStatus: existing.healthStatus ?? "healthy",
+          });
+          action = "updated";
+        } else {
+          device = repos.kernels.insertDevice({
+            id: deviceId,
+            kernelId,
+            type,
+            model: model ?? "unknown",
+            firmware: "unknown",
+            status: "idle",
+            contributesToCapabilities: capabilities ?? [],
+            lastUpdated: now,
+            adapterType,
+            adapterConfig: adapterConfig ? JSON.stringify(adapterConfig) : undefined,
+            capabilities: capabilities ?? [],
+            healthStatus: "healthy",
+          });
+          action = "created";
+        }
+
+        // Wire the device into the running KernelService runtime so the
+        // very next test-job lands on THIS device, not a fallback mock.
+        // Failure here is non-fatal — DB write already succeeded.
+        try {
+          getKernelService().refreshDeviceFromDb(deviceId);
+        } catch (e) {
+          // Service may not be initialized in some test paths; ignore.
+          const msg = e instanceof Error ? e.message : String(e);
+          (req as any).log?.warn?.({ err: msg, deviceId }, "kernel-service refresh failed");
+        }
 
         // Auto-create capability rows for each capability the device contributes to
         if (capabilities && capabilities.length > 0) {
           for (const capType of capabilities) {
             const capId = `cap-${kernelId}-${capType}`;
             // Only insert if it doesn't already exist
-            const existing = repos.capabilities.findById(capId);
-            if (!existing) {
+            const existingCap = repos.capabilities.findById(capId);
+            if (!existingCap) {
               try {
                 repos.capabilities.insert({
                   id: capId,
@@ -606,25 +642,27 @@ export async function setupRoutes(app: FastifyInstance) {
           type,
           adapterType,
           model,
+          action,
           capabilitiesRegistered: capabilities?.length ?? 0,
         }, (req as any).operatorId ?? (req as any).apiKeyId);
         auditService.log({
-          eventType: "device.registered",
+          eventType: action === "created" ? "device.registered" : "device.updated",
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
           resourceType: "device",
           resourceId: deviceId,
-          action: "create",
+          action: action === "created" ? "create" : "update",
           metadata: { kernelId, type, adapterType, model },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
-        return { device, registered: true };
+        return reply.code(action === "created" ? 201 : 200).send({
+          device,
+          registered: true,
+          action,
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
-        if (message.includes("UNIQUE") || message.includes("unique")) {
-          return reply.code(409).send({ error: "device_already_exists" });
-        }
-        return reply.code(500).send({ error: "insert_failed", message });
+        return reply.code(500).send({ error: "upsert_failed", message });
       }
     },
   );
