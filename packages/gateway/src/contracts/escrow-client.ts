@@ -26,6 +26,7 @@ import {
   createWalletClient,
   http,
   encodeFunctionData,
+  decodeEventLog,
   type Address,
   type Hex,
   type PublicClient,
