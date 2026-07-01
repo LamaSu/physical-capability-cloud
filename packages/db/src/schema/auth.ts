@@ -87,3 +87,22 @@ export const apiKeys = sqliteTable("api_keys", {
   passkeyPublicKey: text("passkey_public_key"),
   passkeyRpId: text("passkey_rp_id"),
 });
+
+/**
+ * Passkey challenge sessions — durable challenge cache for the WebAuthn
+ * register-challenge -> verify-attestation round trip. Replaces the
+ * in-memory Map that shipped with the option B stub in PR #197.
+ *
+ * Rows live for ~60s (the WebAuthn ceremony completes in seconds); a
+ * sweeper deletes expired rows on a timer. Survives process restarts +
+ * multi-instance deployments (the point of moving off the in-memory Map).
+ */
+export const passkeySessions = sqliteTable("passkey_sessions", {
+  sessionId: text("session_id").primaryKey(),
+  challenge: text("challenge").notNull(),        // base64url of 32 random bytes
+  rpId: text("rp_id").notNull(),
+  expectedOrigin: text("expected_origin").notNull(),
+  operatorId: text("operator_id"),                // optional binding to an existing api-key
+  createdAt: integer("created_at").notNull(),     // ms epoch — cheap integer, no ISO parse
+  expiresAt: integer("expires_at").notNull(),     // ms epoch; enforced at read time
+});

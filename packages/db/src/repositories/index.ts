@@ -26,6 +26,7 @@ import { ContributorRepository } from "./contributor.js";
 import { RequestRepository } from "./requests.js";
 import { InvocationReceiptRepository } from "./invocation-receipts.js";
 import { CsdUsageRepository } from "./csd-usage.js";
+import { PasskeySessionRepository } from "./passkey-sessions.js";
 
 export {
   KernelRepository,
@@ -57,6 +58,7 @@ export {
   RequestRepository,
   InvocationReceiptRepository,
   CsdUsageRepository,
+  PasskeySessionRepository,
 };
 
 export function buildRepositories(db: StoreDB) {
@@ -90,6 +92,7 @@ export function buildRepositories(db: StoreDB) {
     requests: new RequestRepository(db),
     invocationReceipts: new InvocationReceiptRepository(db),
     csdUsage: new CsdUsageRepository(db),
+    passkeySessions: new PasskeySessionRepository(db),
   };
 }
 

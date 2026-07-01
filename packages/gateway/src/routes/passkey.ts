@@ -1,193 +1,277 @@
 /**
- * Option B ERC-4337 smart-wallet + passkey backend groundwork.
+ * Option B ERC-4337 smart-wallet + passkey backend.
  *
- * Ships the endpoint contract for passkey-based onboarding while the
- * ZeroDev SDK + paymaster funding are being vetted (Gate A). The real
- * WebAuthn cryptographic verification lands in a follow-up PR once the
- * SDK is approved; this route persists the credentialId + publicKey the
- * browser produces so the follow-up PR only needs to swap the verify
- * function without touching the endpoint contract or storage.
+ * Phase A (this file): real WebAuthn attestation verification via
+ * @simplewebauthn/server, durable challenge storage (passkey_sessions
+ * table), and persistence of the verified credential to api_keys.
+ *
+ * Phase B (follow-up PR): ERC-4337 mint via ZeroDev Kernel + passkey
+ * validator. This file will stay unchanged; the smart-wallet mint
+ * happens in a separate service triggered by successful passkey verify.
  *
  * Endpoints:
  *   POST /api/onboard/passkey/register-challenge — returns a WebAuthn
- *        challenge (32 random bytes as base64url) + rpId + a session id
- *        the client echoes on verify. In-memory cache with 60s TTL; MVP.
- *   POST /api/onboard/passkey/verify-attestation — accepts the browser's
- *        AuthenticatorAttestationResponse (base64url JSON), does non-
- *        cryptographic sanity checks (challenge matches, session exists,
- *        rpId present), stores credentialId + publicKey on the api_keys
- *        row identified by session's operatorId, returns success.
+ *        challenge (32 random bytes as base64url) + rpId + a session id.
+ *        Persisted to passkey_sessions with 60s expiry.
+ *   POST /api/onboard/passkey/verify-attestation — verifies the browser's
+ *        AuthenticatorAttestationResponse via @simplewebauthn/server:
+ *        challenge match, origin match, rpIdHash match, signature check,
+ *        attestation statement validation. On success, persists the
+ *        credential (credentialId + publicKey + rpId) to the api_keys row
+ *        keyed by the operatorId supplied at challenge time.
  *
  * See `ai/research/option-b-smart-wallet-passkey-plan.md` for the full
- * migration story (A → B via setAgentWallet from the new smart wallet).
- * See coord bulletin 235 for strategic alignment.
+ * migration story (A -> B via setAgentWallet from the new smart wallet).
+ * See coord bulletins 235 (strategic) + 254 (readiness).
  *
- * WARNING: this stub does NOT perform cryptographic verification. It
- * persists what the browser sent. A malicious client could send garbage
- * and it would be stored. The follow-up SDK PR wires @simplewebauthn/
- * server (or an equivalent vetted lib) to reject unauthentic attestations.
- * Until then, /api/onboard/passkey/verify-attestation returns 200 with a
- * `verification: "deferred"` field in the response so callers can detect
- * they're speaking to the stub. Do not enable in prod.
+ * Feature flag: PCC_PASSKEY_ENABLED=true opts in. Absent = endpoints
+ * return 503. Default off so a mis-deploy can't accidentally accept
+ * garbage attestations if the SDK ever regresses.
  */
 
 import type { FastifyInstance } from "fastify";
 import { randomBytes } from "node:crypto";
+import { verifyRegistrationResponse } from "@simplewebauthn/server";
+// v10's exports `RegistrationResponseJSON` transitively via @simplewebauthn/types.
+// Keep the endpoint typed loosely to avoid a new dep on types; the SDK validates
+// the shape at runtime.
+type RegistrationResponseJSON = Parameters<typeof verifyRegistrationResponse>[0]["response"];
+import { getRepos } from "../db.js";
 
-// ── Types ──────────────────────────────────────────────────────────────
-
-interface Challenge {
-  challenge: string;    // base64url
-  rpId: string;
-  createdAt: number;    // ms epoch
-  operatorId?: string;  // optional binding to a pre-existing api-key row
-}
-
-interface RegisterChallengeBody {
-  operatorId?: string;
-  rpId?: string;
-}
-
-interface VerifyAttestationBody {
-  sessionId: string;
-  credentialId: string;              // base64url
-  publicKey: string;                  // base64url (COSE key)
-  attestationObject?: string;         // base64url (opaque here; SDK PR verifies)
-  clientDataJSON?: string;            // base64url
-}
-
-// ── Challenge cache (in-memory, 60s TTL) ───────────────────────────────
-//
-// Session id → Challenge. Real production wants a persisted store so
-// challenges survive gateway restarts + multi-instance deploys, but for the
-// MVP a per-process Map is enough (the challenge only needs to survive the
-// time between navigator.credentials.create() completing and the client
-// posting verify-attestation — seconds, not minutes).
+// -- Config -----------------------------------------------------------
 
 const CHALLENGE_TTL_MS = 60_000;
-const challengeCache = new Map<string, Challenge>();
+const RATE_MAX_PER_IP_PER_HOUR = 30;
+const RATE_WINDOW_MS = 60 * 60_000;
 
-function evictExpired(now: number): void {
-  for (const [sessionId, ch] of challengeCache.entries()) {
-    if (now - ch.createdAt > CHALLENGE_TTL_MS) {
-      challengeCache.delete(sessionId);
-    }
-  }
+function isPasskeyEnabled(): boolean {
+  return process.env.PCC_PASSKEY_ENABLED === "true";
 }
 
 function resolveRpId(fromBody: string | undefined, hostname: string): string {
   const explicit = fromBody ?? process.env.PCC_PASSKEY_RP_ID;
   if (explicit && /^[a-zA-Z0-9.-]+$/.test(explicit)) return explicit;
-  // Strip a leading port from hostname if present (localhost:3000 → localhost).
   return hostname.replace(/:\d+$/, "");
 }
 
-// ── Test hook ──────────────────────────────────────────────────────────
-
-/** Test hook — flush all challenges between tests. */
-export function _resetPasskeyCacheForTests(): void {
-  challengeCache.clear();
+function resolveExpectedOrigin(fromBody: string | undefined, req: {
+  protocol: string;
+  hostname: string;
+}): string {
+  const explicit = fromBody ?? process.env.PCC_PASSKEY_EXPECTED_ORIGIN;
+  if (explicit && /^https?:\/\//.test(explicit)) return explicit;
+  return `${req.protocol}://${req.hostname}`;
 }
 
-// ── Routes ─────────────────────────────────────────────────────────────
+// -- Per-IP rate limit (in-memory sliding window; mirrors canProvision) ----
+
+const ipHits = new Map<string, number[]>();
+
+function canRequest(ip: string): boolean {
+  const now = Date.now();
+  const hits = (ipHits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (hits.length >= RATE_MAX_PER_IP_PER_HOUR) {
+    ipHits.set(ip, hits);
+    return false;
+  }
+  hits.push(now);
+  ipHits.set(ip, hits);
+  return true;
+}
+
+/** Test hook -- flush all rate-limit state between tests. */
+export function _resetPasskeyRateForTests(): void {
+  ipHits.clear();
+}
+
+// -- Types ------------------------------------------------------------
+
+interface RegisterChallengeBody {
+  operatorId?: string;
+  rpId?: string;
+  expectedOrigin?: string;
+}
+
+interface VerifyAttestationBody {
+  sessionId: string;
+  attestationResponse: RegistrationResponseJSON;
+}
+
+// -- Routes -----------------------------------------------------------
 
 export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
-  // ── POST /api/onboard/passkey/register-challenge ─────────────────
+  // POST /api/onboard/passkey/register-challenge
   app.post<{ Body: RegisterChallengeBody }>(
     "/api/onboard/passkey/register-challenge",
     async (req, reply) => {
+      if (!isPasskeyEnabled()) {
+        return reply.status(503).send({
+          error: "passkey_not_enabled",
+          message: "Passkey onboarding is not enabled. Set PCC_PASSKEY_ENABLED=true.",
+        });
+      }
+      if (!canRequest(req.ip)) {
+        return reply.status(429).send({
+          error: "rate_limited",
+          message: `Too many passkey requests. Try again in an hour (max ${RATE_MAX_PER_IP_PER_HOUR}/hour).`,
+        });
+      }
+
       const body = req.body ?? {};
       const now = Date.now();
-      evictExpired(now);
-
       const sessionId = randomBytes(16).toString("hex");
       const challenge = randomBytes(32).toString("base64url");
       const rpId = resolveRpId(body.rpId, req.hostname);
+      const expectedOrigin = resolveExpectedOrigin(body.expectedOrigin, req);
 
-      challengeCache.set(sessionId, {
-        challenge,
-        rpId,
-        createdAt: now,
-        operatorId: typeof body.operatorId === "string" ? body.operatorId : undefined,
-      });
+      try {
+        const repos = getRepos();
+        repos.passkeySessions.sweepExpired(now);
+        repos.passkeySessions.insert({
+          sessionId,
+          challenge,
+          rpId,
+          expectedOrigin,
+          operatorId: typeof body.operatorId === "string" ? body.operatorId : undefined,
+          createdAt: now,
+          expiresAt: now + CHALLENGE_TTL_MS,
+        });
+      } catch (err) {
+        req.log?.error(err, "passkey session insert failed");
+        return reply.status(500).send({
+          error: "session_insert_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
 
       return reply.status(201).send({
         sessionId,
         challenge,
         rpId,
         ttl_ms: CHALLENGE_TTL_MS,
-        // The relying-party name shown in the browser passkey UI. Cosmetic.
         rpName: "Physical Capability Cloud",
         pubKeyCredParams: [
-          { type: "public-key", alg: -7 },   // ES256 (default)
-          { type: "public-key", alg: -257 }, // RS256 (broad support)
+          { type: "public-key", alg: -7 },
+          { type: "public-key", alg: -257 },
         ],
         authenticatorSelection: {
           userVerification: "preferred",
           residentKey: "preferred",
         },
         timeout_ms: CHALLENGE_TTL_MS,
-        note: "MVP stub. Do NOT rely on this for production auth until the WebAuthn SDK is vetted (Gate A).",
       });
     },
   );
 
-  // ── POST /api/onboard/passkey/verify-attestation ─────────────────
+  // POST /api/onboard/passkey/verify-attestation
   app.post<{ Body: VerifyAttestationBody }>(
     "/api/onboard/passkey/verify-attestation",
     async (req, reply) => {
+      if (!isPasskeyEnabled()) {
+        return reply.status(503).send({
+          error: "passkey_not_enabled",
+          message: "Passkey onboarding is not enabled.",
+        });
+      }
+      if (!canRequest(req.ip)) {
+        return reply.status(429).send({
+          error: "rate_limited",
+          message: `Too many passkey requests. Try again in an hour.`,
+        });
+      }
+
       const body = req.body ?? ({} as VerifyAttestationBody);
       const now = Date.now();
 
       if (typeof body.sessionId !== "string" || !body.sessionId) {
-        return reply
-          .status(400)
-          .send({ error: "sessionId required" });
+        return reply.status(400).send({ error: "sessionId required" });
       }
-      if (typeof body.credentialId !== "string" || !body.credentialId) {
-        return reply
-          .status(400)
-          .send({ error: "credentialId required (base64url)" });
-      }
-      if (typeof body.publicKey !== "string" || !body.publicKey) {
-        return reply
-          .status(400)
-          .send({ error: "publicKey required (base64url COSE key)" });
+      if (!body.attestationResponse || typeof body.attestationResponse !== "object") {
+        return reply.status(400).send({
+          error: "attestationResponse required",
+          message:
+            "Provide the browser's PublicKeyCredential.toJSON() output as attestationResponse.",
+        });
       }
 
-      const stored = challengeCache.get(body.sessionId);
+      const repos = getRepos();
+      const stored = repos.passkeySessions.findById(body.sessionId);
       if (!stored) {
         return reply.status(404).send({
           error: "session_not_found_or_expired",
           message: "The passkey registration session is unknown or expired. Request a new challenge.",
         });
       }
-      if (now - stored.createdAt > CHALLENGE_TTL_MS) {
-        challengeCache.delete(body.sessionId);
+      if (now > stored.expiresAt) {
+        repos.passkeySessions.delete(body.sessionId);
         return reply.status(410).send({
           error: "session_expired",
           message: "Passkey challenge expired. Request a new one.",
         });
       }
 
-      // Persistence to api_keys.passkey_* columns is deferred to the SDK
-      // follow-up PR (a new IApiKeyRepository method + real verify step
-      // will land together — no point persisting an unverified credential).
-      // The columns already exist (PR #195 groundwork).
+      let verification;
+      try {
+        verification = await verifyRegistrationResponse({
+          response: body.attestationResponse,
+          expectedChallenge: stored.challenge,
+          expectedOrigin: stored.expectedOrigin,
+          expectedRPID: stored.rpId,
+          requireUserVerification: false,
+        });
+      } catch (err) {
+        repos.passkeySessions.delete(body.sessionId);
+        return reply.status(400).send({
+          error: "webauthn_verify_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      if (!verification.verified || !verification.registrationInfo) {
+        repos.passkeySessions.delete(body.sessionId);
+        return reply.status(400).send({
+          error: "webauthn_verify_rejected",
+          message: "Attestation did not verify. No credential was persisted.",
+        });
+      }
+
+      // v10 nests as { registrationInfo: { credentialID, credentialPublicKey, ... } }
+      const info = verification.registrationInfo as unknown as {
+        credentialID: string;
+        credentialPublicKey: Uint8Array;
+      };
+      const credentialIdB64u = info.credentialID;
+      const publicKeyB64u = Buffer.from(info.credentialPublicKey).toString("base64url");
+
+      // Persist to api_keys row when operatorId was bound at challenge time.
+      let persisted = false;
+      if (stored.operatorId) {
+        try {
+          const keys = repos.apiKeys.findByOperator(stored.operatorId);
+          const key = keys[0];
+          if (key) {
+            repos.apiKeys.setPasskeyCredential(key.id, {
+              credentialId: credentialIdB64u,
+              publicKey: publicKeyB64u,
+              rpId: stored.rpId,
+            });
+            persisted = true;
+          }
+        } catch (err) {
+          req.log?.warn(err, "passkey credential persist failed");
+        }
+      }
 
       // Consume the challenge (one-shot).
-      challengeCache.delete(body.sessionId);
+      repos.passkeySessions.delete(body.sessionId);
 
       return reply.status(200).send({
         sessionId: body.sessionId,
-        credentialId: body.credentialId,
+        credentialId: credentialIdB64u,
+        publicKey: publicKeyB64u,
         rpId: stored.rpId,
-        persisted: false,
-        verification: "deferred",
-        message:
-          "Attestation received. Cryptographic verification is deferred until the WebAuthn SDK " +
-          "is vetted via Gate A. Do NOT rely on this endpoint for production authentication " +
-          "until the follow-up PR lands.",
+        persisted,
+        verification: "verified",
       });
     },
   );
