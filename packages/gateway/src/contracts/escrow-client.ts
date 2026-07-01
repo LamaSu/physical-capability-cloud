@@ -92,6 +92,13 @@ function resolveChainConfig(): { chain: Chain; rpcUrl: string } {
 const DEFAULT_ESCROW_ADDRESS = process.env.ESCROW_CONTRACT_ADDRESS as Address | undefined;
 const GATEWAY_PRIVATE_KEY = process.env.PCC_GATEWAY_PRIVATE_KEY as `0x${string}` | undefined;
 
+/** Explicit gas limits for on-chain writes — skip the flaky public-RPC estimateGas (OutOfGas fix). Generous (~2-3x actual). */
+export const GAS_LIMITS = {
+  createEscrow: 900000n, addMilestone: 500000n, fund: 500000n, approve: 150000n,
+  release: 1200000n, approveAndRelease: 1000000n, submitEvidence: 300000n,
+  submitAttestation: 500000n, depositBond: 400000n, fileDispute: 500000n,
+} as const;
+
 /**
  * Resolve the MockUSDC token address for a given network.
  *
@@ -387,6 +394,7 @@ export async function fundEscrow(contractAddress?: Address): Promise<WriteResult
     abi: MilestoneEscrowABI,
     functionName: "fund",
     args: [],
+    gas: GAS_LIMITS.fund,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -414,6 +422,7 @@ export async function approveToken(
     abi: MockUSDCABI,
     functionName: "approve",
     args: [spender, parseUnits(amount, 6)],
+    gas: GAS_LIMITS.approve,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -447,6 +456,7 @@ export async function releaseMilestone(
     abi: MilestoneEscrowABI,
     functionName: "release",
     args: [BigInt(milestoneIndex), attestation],
+    gas: GAS_LIMITS.release,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -480,6 +490,7 @@ export async function fileDispute(
       challengerEvidenceHash,
       reason,
     ],
+    gas: GAS_LIMITS.fileDispute,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -503,6 +514,7 @@ export async function depositBond(
     abi: MilestoneEscrowABI,
     functionName: "depositBond",
     args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.depositBond,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -527,6 +539,7 @@ export async function submitEvidence(
     abi: MilestoneEscrowABI,
     functionName: "submitEvidence",
     args: [BigInt(milestoneIndex), evidenceBundleHash],
+    gas: GAS_LIMITS.submitEvidence,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -561,6 +574,7 @@ export async function submitAttestation(
     abi: MilestoneEscrowABI,
     functionName: "submitAttestation",
     args: [BigInt(milestoneIndex), attestation],
+    gas: GAS_LIMITS.submitAttestation,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -958,6 +972,7 @@ export async function addMilestoneV2(
       params.requiredTier,
       params.jobId,
     ],
+    gas: GAS_LIMITS.addMilestone,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -980,6 +995,7 @@ export async function fundEscrowV2(contractAddress?: Address): Promise<WriteResu
     abi: MilestoneEscrowV2ABI,
     functionName: "fund",
     args: [],
+    gas: GAS_LIMITS.fund,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1002,6 +1018,7 @@ export async function depositBondV2(
     abi: MilestoneEscrowV2ABI,
     functionName: "depositBond",
     args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.depositBond,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1033,6 +1050,7 @@ export async function fileDisputeV2(
       challengerEvidenceHash,
       reason,
     ],
+    gas: GAS_LIMITS.fileDispute,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1059,6 +1077,7 @@ export async function submitAttestationV2(
     abi: MilestoneEscrowV2ABI,
     functionName: "submitAttestation",
     args: [BigInt(milestoneIndex), easUid],
+    gas: GAS_LIMITS.submitAttestation,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1080,6 +1099,7 @@ export async function submitEvidenceV2(
     abi: MilestoneEscrowV2ABI,
     functionName: "submitEvidence",
     args: [BigInt(milestoneIndex), evidenceBundleHash],
+    gas: GAS_LIMITS.submitEvidence,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1104,6 +1124,7 @@ export async function releaseMilestoneV2(
     abi: MilestoneEscrowV2ABI,
     functionName: "release",
     args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.release,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1253,6 +1274,7 @@ export async function createEscrowV3(
     abi: PCCProtocolV3FactoryABI,
     functionName: "createEscrowV3",
     args: [payer, arbiter, token, cwmId],
+    gas: GAS_LIMITS.createEscrow,
   });
 
   const receipt = await client.waitForTransactionReceipt({ hash });
@@ -1307,6 +1329,7 @@ export async function approveAndReleaseV3(
     abi: MilestoneEscrowV3ABI,
     functionName: "approveAndRelease",
     args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.approveAndRelease,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1328,6 +1351,7 @@ export async function submitEvidenceV3(
     abi: MilestoneEscrowV3ABI,
     functionName: "submitEvidence",
     args: [BigInt(milestoneIndex), evidenceBundleHash],
+    gas: GAS_LIMITS.submitEvidence,
   });
 
   return { transactionHash: hash, status: "submitted" };
