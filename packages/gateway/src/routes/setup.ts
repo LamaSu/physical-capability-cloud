@@ -734,12 +734,36 @@ export async function setupRoutes(app: FastifyInstance) {
       }
     }
     if (isDeviceless) {
-      // Self-attested completion — no device to invoke. The evidence bundle
-      // id is generated but not persisted here (schema requires kernelSignature
-      // which the deviceless path doesn't have). Real self-attest bundle
-      // generation + persistence is a followup; this stopgap satisfies the
-      // response contract and unblocks the deviceless onboarding demo.
+      // Self-attested completion — no device to invoke. Persist a real
+      // evidence bundle row so downstream consumers (compliance facade,
+      // dashboard evidence list, /api/jobs/:id/evidence) see the same
+      // shape as evidence from real devices — just with algorithm:"none"
+      // + signer:"self-attest" on the kernelSignature JSON to make the
+      // self-attest provenance explicit.
       const evidenceBundleId = `bundle-self-attest-${uuidv4().slice(0, 12)}`;
+      const now = new Date().toISOString();
+      const bundleHash = `sha256:self-attest:${stepId}`;
+      try {
+        getRepos().evidence.insert({
+          id: evidenceBundleId,
+          jobId,
+          stepId,
+          kernelId: resolvedKernelId,
+          assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
+          bundleHash,
+          kernelSignature: {
+            signer: "self-attest",
+            algorithm: "none",
+            value: `self-attested by kernel ${resolvedKernelId} at ${now}`,
+          },
+          createdAt: now,
+        });
+      } catch {
+        // Bundle persistence is best-effort. If it fails (e.g. the parent
+        // job row was never inserted because the kernel has no capabilities),
+        // the response still returns the id + status. A follow-up can add
+        // the missing job row here + retry.
+      }
       try {
         getRepos().jobs.updateStatus(jobId, "completed");
       } catch {
