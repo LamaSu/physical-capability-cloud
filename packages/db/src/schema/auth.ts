@@ -66,4 +66,24 @@ export const apiKeys = sqliteTable("api_keys", {
   agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
   agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),
   agentWalletOnchainError: text("agent_wallet_onchain_error"),
+  // ── Option B ERC-4337 smart wallet + passkey (groundwork) ────────
+  // Groundwork columns for the v2 ownership path (ai/research/
+  // option-b-smart-wallet-passkey-plan.md). Wire-up is a follow-up PR
+  // that fills in these values via ZeroDev Kernel + passkey validator:
+  //   - smart_wallet_address = counterfactual SW address derived from
+  //     the passkey credentialId; NFT ownership sits here (true operator
+  //     ownership, unlike option A where NFT stays with the gateway)
+  //   - passkey_credential_id = WebAuthn credential ID (base64url)
+  //     returned by the browser during passkey registration
+  //   - passkey_public_key = WebAuthn COSE public key (base64url) for
+  //     verifying subsequent passkey signatures
+  //   - passkey_rp_id = the relying-party domain the passkey is bound to
+  //     (e.g. "capability.network")
+  // Nullable while option A remains the primary path; a migration entry
+  // ("gateway" → "smart_wallet") flips `operatorWalletCustody` when an A
+  // operator upgrades to B via setAgentWallet from the new SW.
+  smartWalletAddress: text("smart_wallet_address"),
+  passkeyCredentialId: text("passkey_credential_id"),
+  passkeyPublicKey: text("passkey_public_key"),
+  passkeyRpId: text("passkey_rp_id"),
 });
