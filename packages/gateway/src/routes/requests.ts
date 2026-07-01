@@ -40,6 +40,13 @@ import type {
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
 import { matchListings } from "../services/request-matcher.js";
+import {
+  decomposeAgentic,
+  createMatcher,
+  createAnthropicDecomposer,
+  type CapabilityLite,
+  type DecomposerLLM,
+} from "../services/agentic-decomposer.js";
 import { getRepos, getStore } from "../db.js";
 import { getEventBus } from "../services/event-bus.js";
 import { schema } from "@pcc/store";
@@ -62,6 +69,83 @@ function liveCapabilityTypes(): string[] {
     return [...new Set(all.map((c) => c.type))];
   } catch {
     return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agentic decompose wiring — LLM planner + semantic capability matcher.
+// Composition-keystone fix per coord bulletin 223 / inbox lane 133.
+//
+// Off-by-default via PCC_AGENTIC_DECOMPOSE_DISABLED=1. When on, the LLM
+// (Anthropic) plans steps from natural language, and each step is matched to
+// a registered capability. Legacy template decomposer stays available as a
+// fallback for cold-start / when neither LLM nor match grounded the plan.
+// ---------------------------------------------------------------------------
+
+let _llmClient: DecomposerLLM | null | undefined; // undefined = never resolved
+
+/** Test hook — override the LLM planner used by agentic decompose. */
+export function _setLLMClientForTests(client: DecomposerLLM | null | undefined): void {
+  _llmClient = client;
+}
+
+async function resolveLLMClient(): Promise<DecomposerLLM | null> {
+  if (_llmClient !== undefined) return _llmClient ?? null;
+  const created = await createAnthropicDecomposer().catch(() => undefined);
+  _llmClient = created ?? null;
+  return _llmClient;
+}
+
+function agenticEnabled(): boolean {
+  return process.env.PCC_AGENTIC_DECOMPOSE_DISABLED !== "1";
+}
+
+/**
+ * Build CapabilityLite candidates for the matcher from the live registry.
+ * Returns [] if the repo is unreachable — the caller falls back to templates.
+ */
+function loadCapabilityCandidates(): CapabilityLite[] {
+  try {
+    const rows = getRepos().capabilities.findAll();
+    return rows.map<CapabilityLite>((r) => ({
+      id: r.id,
+      type: r.type,
+      name: r.name,
+      description: (r.description as string | undefined) ?? undefined,
+      kernelId: r.kernelId,
+      tags: (r.tags as string[] | undefined) ?? undefined,
+      materials: r.materials ?? undefined,
+      pricing: r.pricing
+        ? {
+            currency: r.pricing.currency,
+            baseCost: r.pricing.baseCost,
+            minimum: r.pricing.minimum,
+          }
+        : undefined,
+      assuranceTiers: r.assuranceTiers,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Run agentic decompose against the current registry. Returns null when
+ * the feature is off — caller falls back to `decomposeRequest`.
+ */
+async function tryAgenticDecompose(
+  request: CapabilityRequest,
+): Promise<DecompositionResult | null> {
+  if (!agenticEnabled()) return null;
+  const candidates = loadCapabilityCandidates();
+  const matcher = createMatcher(candidates);
+  const llm = await resolveLLMClient();
+  const legacyFallback = (r: CapabilityRequest): DecompositionResult =>
+    decomposeRequest(r, { availableTypes: liveCapabilityTypes() });
+  try {
+    return await decomposeAgentic(request, { llm, matcher, legacyFallback });
+  } catch {
+    return null;
   }
 }
 
@@ -302,6 +386,7 @@ export async function requestRoutes(app: FastifyInstance) {
     // live-vocab-aware DAG construction (B1 fix from 2026-06-17 — see romeo's
     // food_delivery template).
     let result: DecompositionResult;
+    let publishNow = true;
     if (body.capabilityType) {
       const match = matchListings(body.capabilityType, {
         capabilityId: body.capabilityId,
@@ -317,14 +402,26 @@ export async function requestRoutes(app: FastifyInstance) {
       }
       result = decomposeDirectMatch(request, match.matches[0], body.quantity);
     } else {
-      result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+      // Composite path: try agentic (LLM + semantic matcher) first, else
+      // fall through to the legacy live-vocab-aware template decomposer.
+      // Composite decomposes NEVER auto-publish — buyer explicitly publishes
+      // after reviewing the DAG. This is the composition-keystone fix per
+      // coord bulletin 223 / inbox lane 133.
+      const agentic = await tryAgenticDecompose(request);
+      result =
+        agentic ??
+        decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+      publishNow = false;
     }
 
 
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
-    request.status = "published";
+    request.status = publishNow ? "published" : "decomposed";
+    if (result.derivedBudget !== undefined && result.derivedBudget > 0) {
+      request.budget = result.derivedBudget;
+    }
 
     const signature = signatureFromDag(request.capabilityDag);
 
@@ -433,11 +530,20 @@ export async function requestRoutes(app: FastifyInstance) {
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
 
-    const result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+    // Try agentic (LLM + semantic match) first; fall through to template.
+    // Composition-keystone fix: NEVER auto-publish here; leave the request in
+    // status="decomposed" for the buyer to review + explicit publish.
+    const agentic = await tryAgenticDecompose(request);
+    const result =
+      agentic ??
+      decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
-    request.status = "published";
+    request.status = "decomposed";
+    if (result.derivedBudget !== undefined && result.derivedBudget > 0) {
+      request.budget = result.derivedBudget;
+    }
     request.updatedAt = new Date().toISOString();
 
     const signature = signatureFromDag(request.capabilityDag);
@@ -446,6 +552,7 @@ export async function requestRoutes(app: FastifyInstance) {
       capabilityDag: request.capabilityDag,
       totalEstimatedCost: request.totalEstimatedCost,
       totalEstimatedHours: request.totalEstimatedHours,
+      budget: request.budget,
       compositionSignature: signature,
       updatedAt: request.updatedAt,
     });
