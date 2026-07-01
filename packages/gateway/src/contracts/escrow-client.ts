@@ -1231,6 +1231,7 @@ export async function submitAttestationV3(
     abi: MilestoneEscrowV3ABI,
     functionName: "submitAttestation",
     args: [BigInt(milestoneIndex), easUid],
+    gas: GAS_LIMITS.submitAttestation,
   });
 
   return { transactionHash: hash, status: "submitted" };
@@ -1257,6 +1258,7 @@ export async function releaseMilestoneV3(
     abi: MilestoneEscrowV3ABI,
     functionName: "release",
     args: [BigInt(milestoneIndex)],
+    gas: GAS_LIMITS.release,
   });
 
   return { transactionHash: hash, status: "submitted" };
