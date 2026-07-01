@@ -97,7 +97,11 @@ async function resolveLLMClient(): Promise<DecomposerLLM | null> {
 }
 
 function agenticEnabled(): boolean {
-  return process.env.PCC_AGENTIC_DECOMPOSE_DISABLED !== "1";
+  // Explicit flags win.
+  if (process.env.PCC_AGENTIC_DECOMPOSE_DISABLED === "1") return false;
+  if (process.env.PCC_AGENTIC_DECOMPOSE_ENABLED === "1") return true;
+  // Auto-on when an LLM key is available OR a test hook was installed.
+  return _llmClient !== undefined || !!process.env.ANTHROPIC_API_KEY;
 }
 
 /**
