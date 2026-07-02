@@ -15,6 +15,7 @@ export {
   createKernelHandler,
   verifyBundleSignature,
   KernelAuthError,
+  KernelPreflightError,
   toHex,
   fromHex,
 } from "./job-handler.js";
@@ -22,6 +23,7 @@ export type {
   CreateKernelHandlerOptions,
   KernelJobRequest,
   KernelJobResponse,
+  PreflightCheckResult,
 } from "./job-handler.js";
 
 export { registerKernel, KernelRegistrationError } from "./register.js";

@@ -86,6 +86,22 @@ export interface KernelJobResponse {
   kernelSessionPublicKey: string;
 }
 
+/**
+ * Result of a builder-supplied pre-flight check. Intentionally a plain,
+ * locally-defined shape (not imported from `@pcc/kernel`/
+ * `@pcc/resource-tracker`) — `@pcc/kernel-sdk` is published to npm and
+ * must not gain a workspace dependency on either private package.
+ * Builders backed by a resource-aware adapter (e.g. a `MachineAdapter`
+ * with its own optional `preflight` method) map that adapter's result
+ * into this shape when wiring the `preflight` option below.
+ */
+export interface PreflightCheckResult {
+  ok: boolean;
+  /** Present when ok === false. */
+  reason?: string;
+  details?: Record<string, unknown>;
+}
+
 // ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
@@ -104,6 +120,15 @@ export interface CreateKernelHandlerOptions {
   principalPrivateKey: Uint8Array;
   /** Builder-supplied execution function. Must return a JSON-serialisable value. */
   execute: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /**
+   * Optional pre-flight resource/precondition check. Runs AFTER inbound
+   * auth verification but BEFORE the session key is minted or execute()
+   * is invoked — refuse-to-start before any session/escrow cost, mirroring
+   * the PyLabRobot poka-yoke seam (tracker check before `backend.aspirate`).
+   * Kernels with no resource model to check simply omit this option; the
+   * handler proceeds straight to minting a session key and calling execute().
+   */
+  preflight?: (input: Record<string, unknown>) => Promise<PreflightCheckResult>;
 }
 
 /** Returned when inbound auth fails a check. */
@@ -117,6 +142,18 @@ export class KernelAuthError extends Error {
   }
 }
 
+/** Returned when the optional preflight() check refuses the job. */
+export class KernelPreflightError extends Error {
+  constructor(
+    public readonly reason: string,
+    public readonly details?: Record<string, unknown>,
+    public readonly statusCode = 409,
+  ) {
+    super(reason);
+    this.name = "KernelPreflightError";
+  }
+}
+
 /**
  * Build a kernel handler function.
  *
@@ -125,7 +162,7 @@ export class KernelAuthError extends Error {
  *   fastify.post('/run', async (req) => handler(req.body));
  */
 export function createKernelHandler(opts: CreateKernelHandlerOptions) {
-  const { manifest, principalKey, principalPrivateKey, execute } = opts;
+  const { manifest, principalKey, principalPrivateKey, execute, preflight } = opts;
 
   if (principalPrivateKey.length !== 64) {
     throw new Error(
@@ -171,6 +208,18 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       } catch (err) {
         if (err instanceof KernelAuthError) throw err;
         throw new KernelAuthError("malformed_auth_payload", 400);
+      }
+    }
+
+    // ── Optional pre-flight resource/precondition check ─────────────────
+    // Refuse-to-start BEFORE minting a session key or invoking execute() —
+    // the exact PyLabRobot seam (tracker check before `backend.aspirate`).
+    // Kernels that declare no `preflight` option skip straight to minting.
+
+    if (preflight) {
+      const result = await preflight(request.input);
+      if (!result.ok) {
+        throw new KernelPreflightError(result.reason ?? "preflight_refused", result.details);
       }
     }
 
