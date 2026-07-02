@@ -37,6 +37,31 @@ import { verifyRegistrationResponse } from "@simplewebauthn/server";
 // the shape at runtime.
 type RegistrationResponseJSON = Parameters<typeof verifyRegistrationResponse>[0]["response"];
 import { getRepos } from "../db.js";
+import { resolveApiKey } from "../auth/api-key-auth.js";
+
+/**
+ * Allowlist of PCC-known rpId + origin values. Client-supplied values must
+ * exactly match one of these to be honored (defense-in-depth against
+ * finding vet_20260701_171212_gateway Low-2). Env-configured for staging /
+ * dev overrides.
+ */
+function rpIdAllowlist(): string[] {
+  const extra = process.env.PCC_PASSKEY_RP_ID_ALLOWLIST;
+  const base = ["capability.network", "localhost"];
+  if (!extra) return base;
+  return [...base, ...extra.split(",").map((s) => s.trim()).filter(Boolean)];
+}
+
+function expectedOriginAllowlist(): string[] {
+  const extra = process.env.PCC_PASSKEY_ORIGIN_ALLOWLIST;
+  const base = [
+    "https://capability.network",
+    "http://localhost:3000",
+    "http://localhost:5173",
+  ];
+  if (!extra) return base;
+  return [...base, ...extra.split(",").map((s) => s.trim()).filter(Boolean)];
+}
 
 // -- Config -----------------------------------------------------------
 
@@ -50,7 +75,12 @@ function isPasskeyEnabled(): boolean {
 
 function resolveRpId(fromBody: string | undefined, hostname: string): string {
   const explicit = fromBody ?? process.env.PCC_PASSKEY_RP_ID;
-  if (explicit && /^[a-zA-Z0-9.-]+$/.test(explicit)) return explicit;
+  if (explicit && /^[a-zA-Z0-9.-]+$/.test(explicit)) {
+    // Defense-in-depth: even after regex sanity, must be on the allowlist.
+    // Browser-side WebAuthn already refuses cross-domain credentials, but a
+    // server-side allowlist blocks the "fake rpId in stored session" angle.
+    if (rpIdAllowlist().includes(explicit)) return explicit;
+  }
   return hostname.replace(/:\d+$/, "");
 }
 
@@ -59,7 +89,9 @@ function resolveExpectedOrigin(fromBody: string | undefined, req: {
   hostname: string;
 }): string {
   const explicit = fromBody ?? process.env.PCC_PASSKEY_EXPECTED_ORIGIN;
-  if (explicit && /^https?:\/\//.test(explicit)) return explicit;
+  if (explicit && /^https?:\/\//.test(explicit)) {
+    if (expectedOriginAllowlist().includes(explicit)) return explicit;
+  }
   return `${req.protocol}://${req.hostname}`;
 }
 
@@ -124,6 +156,35 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       const rpId = resolveRpId(body.rpId, req.hostname);
       const expectedOrigin = resolveExpectedOrigin(body.expectedOrigin, req);
 
+      // ── Auth check on operatorId binding (vet finding High-1) ───────
+      // A body-supplied operatorId is ONLY honored when the request also
+      // carries a valid Bearer API key belonging to that operator. Without
+      // this, an unauthenticated caller could bind their own credential to
+      // any existing operator's api_keys row via the verify-attestation
+      // persistence step. Anonymous callers can still get a challenge —
+      // it just isn't bound to any operator, and verify-attestation will
+      // return { persisted: false }.
+      let resolvedOperatorId: string | undefined;
+      if (typeof body.operatorId === "string" && body.operatorId.length > 0) {
+        const keyRecord = resolveApiKey(req);
+        if (!keyRecord) {
+          return reply.status(401).send({
+            error: "authentication_required_to_bind_operator",
+            message:
+              "Supplying operatorId in the challenge request requires a valid Bearer API key. " +
+              "Omit operatorId for an anonymous challenge (verify will succeed but not persist).",
+          });
+        }
+        if (keyRecord.operatorId !== body.operatorId) {
+          return reply.status(403).send({
+            error: "operator_mismatch",
+            message:
+              "The Bearer API key does not belong to the requested operatorId.",
+          });
+        }
+        resolvedOperatorId = keyRecord.operatorId;
+      }
+
       try {
         const repos = getRepos();
         repos.passkeySessions.sweepExpired(now);
@@ -132,7 +193,7 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
           challenge,
           rpId,
           expectedOrigin,
-          operatorId: typeof body.operatorId === "string" ? body.operatorId : undefined,
+          operatorId: resolvedOperatorId,
           createdAt: now,
           expiresAt: now + CHALLENGE_TTL_MS,
         });

@@ -51,6 +51,34 @@ describe("PCC_PASSKEY_ENABLED gate", () => {
   });
 });
 
+describe("POST /api/onboard/passkey/register-challenge — operatorId auth (vet High-1 fix)", () => {
+  beforeEach(() => {
+    process.env.PCC_PASSKEY_ENABLED = "true";
+  });
+
+  it("rejects a body-supplied operatorId when no Bearer key is present (401)", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/onboard/passkey/register-challenge",
+      payload: { operatorId: "victim@example.com" },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("authentication_required_to_bind_operator");
+  });
+
+  it("allows an anonymous challenge (no operatorId) without any auth", async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/onboard/passkey/register-challenge",
+      payload: {},
+    });
+    expect(res.statusCode).toBe(201);
+    expect(typeof res.json().sessionId).toBe("string");
+  });
+});
+
 describe("POST /api/onboard/passkey/register-challenge", () => {
   beforeEach(() => {
     process.env.PCC_PASSKEY_ENABLED = "true";
