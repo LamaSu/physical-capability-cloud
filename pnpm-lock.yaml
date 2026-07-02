@@ -1164,6 +1164,15 @@ importers:
         specifier: ^1.6.0
         version: 1.6.1(@types/node@22.19.19)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
 
+  packages/resource-tracker:
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@22.19.19)(jsdom@24.1.3(bufferutil@4.1.0)(utf-8-validate@6.0.6))(lightningcss@1.31.1)(terser@5.46.0)
+
   packages/scheduler:
     dependencies:
       '@pcc/spec':
