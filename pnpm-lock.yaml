@@ -978,6 +978,9 @@ importers:
       '@pcc/a2a':
         specifier: workspace:*
         version: link:../a2a
+      '@pcc/resource-tracker':
+        specifier: workspace:*
+        version: link:../resource-tracker
       '@pcc/spec':
         specifier: workspace:*
         version: link:../spec

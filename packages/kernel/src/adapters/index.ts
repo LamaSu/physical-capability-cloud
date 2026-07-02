@@ -42,6 +42,15 @@ export { PrinterLogAdapter } from "./printer-log-adapter.js";
 export type { PrinterLogAdapterConfig, LogProvider } from "./printer-log-adapter.js";
 
 // Interfaces
-export type { MachineAdapter, SensorAdapter, CameraAdapter, MachineCommand, MachineCommandResult } from "./types.js";
+export type {
+  MachineAdapter,
+  SensorAdapter,
+  CameraAdapter,
+  MachineCommand,
+  MachineCommandResult,
+  PreflightRequest,
+  PreflightResult,
+  PreflightRefusal,
+} from "./types.js";
 export type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
 export { isUniversalSensor } from "./universal-sensor-adapter.js";

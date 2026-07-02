@@ -24,6 +24,37 @@ export interface MachineCommandResult {
   data?: Record<string, unknown>;
 }
 
+/**
+ * Resource/precondition requirements declared for a job, checked by an
+ * adapter's optional `preflight()` before any hardware dispatch, session
+ * key mint, or escrow cost is incurred.
+ */
+export interface PreflightRequest {
+  /** Named resource requirements, e.g. `{ filamentGrams: 42, buildVolumeMm3: 18000 }`. */
+  requirements: Record<string, number>;
+  /** Optional job id, for diagnostics/correlation only. */
+  jobId?: string;
+}
+
+/** Typed refusal reason — never a bare string. */
+export interface PreflightRefusal {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface PreflightResult {
+  ok: boolean;
+  /** Present when ok === false. */
+  refusal?: PreflightRefusal;
+  /**
+   * Present when ok === true and the adapter is holding a two-phase
+   * reservation the caller must later finalize (commit on success,
+   * rollback if the job never actually runs).
+   */
+  reservationId?: string;
+}
+
 /** Interface every machine adapter must implement */
 export interface MachineAdapter {
   readonly id: string;
@@ -32,6 +63,18 @@ export interface MachineAdapter {
 
   /** Get current status */
   getStatus(): Promise<MachineStatus>;
+
+  /**
+   * Optional pre-flight resource/precondition check — refuse-to-start
+   * BEFORE escrow/session-key/execute cost is incurred (the PyLabRobot
+   * poka-yoke seam: a calibrated capacity check gates hardware dispatch).
+   * Adapters that declare no resource model MAY omit this method
+   * entirely; callers MUST treat a missing `preflight` as "no check
+   * required" and proceed straight to `execute()`. This keeps preflight
+   * strictly additive — existing adapters that don't implement it are
+   * unaffected.
+   */
+  preflight?(input: PreflightRequest): Promise<PreflightResult>;
 
   /** Send a command to the machine */
   execute(command: MachineCommand): Promise<MachineCommandResult>;
