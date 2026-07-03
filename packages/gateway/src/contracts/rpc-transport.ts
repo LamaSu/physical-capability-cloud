@@ -69,3 +69,70 @@ export function buildRpcTransport(urls: string[], opts: RpcTransportOptions = {}
   // failure. This is failover, not duplicated retry storms.
   return fallback(transports, { rank: false, retryCount: 0 });
 }
+
+// ---------------------------------------------------------------------------
+// chainId preflight (security review, PR #157 point 2)
+// ---------------------------------------------------------------------------
+//
+// Reads can fail over across `PCC_RPC_URLS` freely. A PAID WRITE must not — a
+// URL that silently serves a different chain (a misconfigured entry, or a
+// provider that swapped networks) would otherwise be eligible for a settlement
+// broadcast, and a wrong-chain broadcast is a lost tx at best. These helpers
+// verify each endpoint's `eth_chainId` against the expected chain BEFORE it can
+// carry a write; callers gate the write path on `assertRpcChainIds` (awaited
+// once, cached). Reads never call this.
+
+/**
+ * Return the endpoint's chainId (via `eth_chainId`); throw if it doesn't match
+ * `expectedChainId` or the endpoint is unreachable. `fetchImpl` is injectable
+ * for unit tests.
+ */
+export async function assertRpcChainId(
+  url: string,
+  expectedChainId: number,
+  opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<number> {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let chainId: number;
+  try {
+    const res = await doFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+      signal: controller.signal,
+    });
+    const body = (await res.json()) as { result?: string };
+    if (typeof body?.result !== "string") {
+      throw new Error(`eth_chainId returned no result from ${url}`);
+    }
+    chainId = Number.parseInt(body.result, 16);
+    if (!Number.isFinite(chainId)) {
+      throw new Error(`eth_chainId returned an unparseable value from ${url}: ${body.result}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  if (chainId !== expectedChainId) {
+    throw new Error(
+      `RPC ${url} is on chain ${chainId}, expected ${expectedChainId} — refusing it for writes (wrong-chain broadcast risk)`,
+    );
+  }
+  return chainId;
+}
+
+/**
+ * Verify EVERY configured RPC URL is on the expected chain (parallel). Rejects
+ * with the first mismatch/unreachable, so a bad `PCC_RPC_URLS` is caught at
+ * write-client init rather than mid-settlement. Await once and cache the result.
+ */
+export async function assertRpcChainIds(
+  urls: string[],
+  expectedChainId: number,
+  opts?: { timeoutMs?: number; fetchImpl?: typeof fetch },
+): Promise<void> {
+  const cleaned = urls.map((u) => u?.trim()).filter((u): u is string => !!u);
+  await Promise.all(cleaned.map((u) => assertRpcChainId(u, expectedChainId, opts)));
+}

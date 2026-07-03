@@ -47,8 +47,8 @@ import {
   getRpcUrls,
   type OracleAttestation,
 } from "@pcc/contracts";
-import { buildRpcTransport } from "./rpc-transport.js";
-import { getNonceManager, isNonceManagerDisabled } from "./nonce-manager.js";
+import { buildRpcTransport, assertRpcChainIds } from "./rpc-transport.js";
+import { getNonceManager, isNonceManagerDisabled, isNonceError } from "./nonce-manager.js";
 // V2 / EAS-gated escrow ABI lives in the @pcc/contracts/abi subpath export
 // (it is intentionally not on the top-level barrel; the V1 stack is the default).
 import {
@@ -163,11 +163,48 @@ function getWalletClient(): WalletClient {
 function wrapWithNonceManager(client: WalletClient, account: Account): WalletClient {
   const original = client.writeContract.bind(client);
 
-  const wrapped = ((params: Record<string, unknown>) => {
-    if (isNonceManagerDisabled() || params?.nonce !== undefined) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return original(params as any);
+  // One-time, cached chainId preflight (security review #157 point 2): every
+  // configured RPC URL must be on the expected chain before ANY paid write goes
+  // out. A wrong-chain URL in PCC_RPC_URLS would otherwise be eligible for a
+  // settlement broadcast. Reads are unaffected. A transient reachability blip
+  // clears the cache so the next write retries; a real mismatch keeps throwing.
+  let chainIdVerified: Promise<void> | undefined;
+  const ensureChainIds = (): Promise<void> => {
+    if (!chainIdVerified) {
+      const { chain, rpcUrls } = resolveChainConfig();
+      chainIdVerified = assertRpcChainIds(rpcUrls, chain.id).catch((err) => {
+        chainIdVerified = undefined;
+        throw err;
+      });
     }
+    return chainIdVerified;
+  };
+
+  const wrapped = (async (params: Record<string, unknown>) => {
+    await ensureChainIds();
+
+    if (isNonceManagerDisabled() || params?.nonce !== undefined) {
+      // Manager off (or the caller pinned its own nonce): viem auto-nonce +
+      // transport retry. A nonce-shaped error on this path is a REAL race —
+      // surface it loudly (security review #157 point 4). Never let it look like
+      // a benign transient the caller might blindly re-send (a real double-send).
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return await original(params as any);
+      } catch (err) {
+        if (isNonceError(err)) {
+          throw new Error(
+            "nonce race on a paid write while the nonce-manager is disabled " +
+              "(PCC_NONCE_MANAGER_DISABLED) — not retried; re-enable the manager or " +
+              "investigate concurrent signers before resubmitting. Original: " +
+              (err instanceof Error ? err.message : String(err)),
+            { cause: err },
+          );
+        }
+        throw err;
+      }
+    }
+
     const manager = getNonceManager(account.address, () =>
       getPublicClient().getTransactionCount({ address: account.address, blockTag: "pending" }),
     );

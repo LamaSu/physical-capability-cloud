@@ -181,7 +181,34 @@ export async function verifyWithOracle(request: OracleVerifyRequest): Promise<Or
     throw new Error(`Oracle error: ${res.status} ${await res.text()}`);
   }
 
-  return res.json() as Promise<OracleResponse>;
+  const parsed = (await res.json()) as OracleResponse;
+
+  // Security review (PR #157 point 3): fetchWithRetry only guards TRANSPORT; a
+  // healthy-but-stale or wrong-chain oracle read can still pass it. Guard the
+  // RESPONSE so settlement never rides an outdated / off-chain verification:
+  //   - chainId mismatch → the oracle verified on the wrong chain. Reject.
+  //   - stale attestation → verified against outdated state. Reject (configurable
+  //     via PCC_ORACLE_MAX_ATTESTATION_AGE_SEC, default 300s).
+  // NOTE: true block-height freshness needs the oracle to return `verifiedAtBlock`
+  // (an oracle-schema change, tracked separately); these are the in-scope gates.
+  if (typeof parsed.chainId === "number" && parsed.chainId !== request.chainId) {
+    throw new Error(
+      `oracle verified on chain ${parsed.chainId}, expected ${request.chainId} — rejecting (wrong-chain verification)`,
+    );
+  }
+  const maxAgeSec = Number.parseInt(process.env.PCC_ORACLE_MAX_ATTESTATION_AGE_SEC ?? "300", 10);
+  const ts = parsed.attestation?.timestamp;
+  if (parsed.result?.verified && Number.isFinite(maxAgeSec) && typeof ts === "number" && ts > 0) {
+    const ageSec = Math.floor(Date.now() / 1000) - ts;
+    if (ageSec > maxAgeSec) {
+      throw new Error(
+        `oracle attestation is stale (${ageSec}s old > ${maxAgeSec}s max) — ` +
+          `rejecting to avoid settling on outdated verification`,
+      );
+    }
+  }
+
+  return parsed;
 }
 
 /**
