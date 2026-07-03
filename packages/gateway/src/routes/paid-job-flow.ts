@@ -320,7 +320,14 @@ export async function createJobFromSession(
       // /complete. payer == arbiter == operator == the gateway signer, same as V2.
       // Funding upfront (unlike V1/V2, which fund elsewhere) matches Mode A: the
       // gateway holds the payer key and releases its own escrowed USDC on approval.
-      const factoryAddrV3 = getContractAddress(network, "milestoneEscrowFactoryV3");
+      // Per-env V3 factory override (staging isolation): a non-prod deployment can
+      // point at its OWN factory — one bound to a throwaway staging oracle — via
+      // MILESTONE_ESCROW_FACTORY_V3, so the prod oracle trust root is never shared
+      // across environments. Falls back to the chain-config (prod) address when unset.
+      // See docs/ORACLE-TRUST-ARCHITECTURE.md.
+      const factoryAddrV3 =
+        (process.env.MILESTONE_ESCROW_FACTORY_V3 as `0x${string}` | undefined) ??
+        getContractAddress(network, "milestoneEscrowFactoryV3");
 
       let totalFundAmount = 0n;
       for (const ms of normalizedMilestones) {
