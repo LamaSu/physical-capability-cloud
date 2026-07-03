@@ -35,4 +35,12 @@ export interface IApiKeyRepository {
       onchainError: string | null;
     },
   ): ApiKeyRow | undefined;
+  setPasskeyCredential(
+    id: string,
+    passkey: {
+      credentialId: string;
+      publicKey: string;
+      rpId: string;
+    },
+  ): ApiKeyRow | undefined;
 }

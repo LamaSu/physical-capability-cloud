@@ -1898,6 +1898,19 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "passkey_credential_id", "TEXT");
   safeAddColumn("api_keys", "passkey_public_key", "TEXT");
   safeAddColumn("api_keys", "passkey_rp_id", "TEXT");
+  // Option B Phase A: durable challenge-cache table (replaces in-memory Map).
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS passkey_sessions (
+      session_id TEXT PRIMARY KEY,
+      challenge TEXT NOT NULL,
+      rp_id TEXT NOT NULL,
+      expected_origin TEXT NOT NULL,
+      operator_id TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
+  `);
 }
 
 /**

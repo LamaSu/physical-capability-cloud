@@ -159,4 +159,30 @@ export class ApiKeyRepository implements IApiKeyRepository {
       .returning()
       .get();
   }
+
+  /**
+   * Persist a WebAuthn passkey credential onto an api-key row after
+   * successful attestation verify (option B Phase A). See coord bulletin
+   * 254 for the phased rollout. Called by
+   * POST /api/onboard/passkey/verify-attestation.
+   */
+  setPasskeyCredential(
+    id: string,
+    passkey: {
+      credentialId: string;
+      publicKey: string;
+      rpId: string;
+    },
+  ) {
+    return this.db
+      .update(apiKeys)
+      .set({
+        passkeyCredentialId: passkey.credentialId,
+        passkeyPublicKey: passkey.publicKey,
+        passkeyRpId: passkey.rpId,
+      })
+      .where(eq(apiKeys.id, id))
+      .returning()
+      .get();
+  }
 }

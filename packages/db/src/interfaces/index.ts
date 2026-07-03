@@ -314,4 +314,27 @@ export interface IRepositories {
   // PR #118 follow-on — persistent CSD usage attribution (replaces in-memory
   // Map on CsdRegistry). Opt-in via PCC_CSD_PERSIST=true in gateway boot.
   csdUsage: ICsdUsageRepository;
+  // Option B Phase A -- durable WebAuthn challenge cache.
+  passkeySessions: {
+    insert(row: {
+      sessionId: string;
+      challenge: string;
+      rpId: string;
+      expectedOrigin: string;
+      operatorId?: string;
+      createdAt: number;
+      expiresAt: number;
+    }): unknown;
+    findById(sessionId: string): {
+      sessionId: string;
+      challenge: string;
+      rpId: string;
+      expectedOrigin: string;
+      operatorId: string | null;
+      createdAt: number;
+      expiresAt: number;
+    } | undefined;
+    delete(sessionId: string): unknown;
+    sweepExpired(now: number): unknown;
+  };
 }

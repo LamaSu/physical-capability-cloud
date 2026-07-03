@@ -1,0 +1,128 @@
+{
+  "id": "vet_20260701_171212_gateway",
+  "target": "C:/Users/globa/physical-capability-cloud/.claude/worktrees/agent-af31d5b048a75808a/packages/gateway",
+  "date": "2026-07-01T17:20:54-07:00",
+  "focus": "@simplewebauthn/server@10.0.1 (added in commit 0cc2ec79)",
+  "verdict": "WARN",
+  "verdict_reasons": [
+    "high (1) > 0 and warn_on_any_high=true",
+    "injection_signals (1) > 0 and warn_on_any_injection=true"
+  ],
+  "counts": { "critical": 0, "high": 1, "medium": 0, "low": 2, "secrets": 0, "malware": 0, "injection_signals": 1 },
+  "policy": {
+    "max_critical": 0,
+    "max_high": 2,
+    "max_medium": 10,
+    "max_secrets": 0,
+    "warn_on_any_high": true,
+    "warn_on_any_injection": true
+  },
+  "dependency_check": {
+    "package": "@simplewebauthn/server",
+    "requested_range": "^10.0.1",
+    "locked_version": "10.0.1",
+    "repository": "git+https://github.com/MasterKale/SimpleWebAuthn.git",
+    "license": "MIT",
+    "deprecated": false,
+    "registry_latest": "13.3.2",
+    "registry_first_published": "2020-05-26T21:48:54.726Z",
+    "registry_latest_published": "2026-06-24T05:12:30.367Z",
+    "transitive_deps": [
+      "@hexagon/base64@1.1.28",
+      "@levischuck/tiny-cbor@0.2.11",
+      "@peculiar/asn1-android@2.6.0",
+      "@peculiar/asn1-ecc@2.6.1",
+      "@peculiar/asn1-rsa@2.6.1",
+      "@peculiar/asn1-schema@2.6.0",
+      "@peculiar/asn1-x509@2.6.1",
+      "@simplewebauthn/types@10.0.0",
+      "cross-fetch@4.1.0",
+      "encoding@0.1.13"
+    ],
+    "cves_attributable": 0,
+    "note": "pnpm audit is workspace-wide (2047 deps, 7 critical/62 high/90 moderate/17 low total). Zero of those findings reference simplewebauthn or any of its transitive package names above. Pre-existing workspace-wide backlog is out of scope for this vet and excluded from counts above."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "scanner": "manual-sast-substitute-for-semgrep",
+      "severity": "high",
+      "title": "Unauthenticated operatorId binding in passkey registration",
+      "check": "broken-authentication / missing-ownership-check",
+      "files": [
+        "packages/gateway/src/routes/passkey.ts:89-93",
+        "packages/gateway/src/routes/passkey.ts:120-138",
+        "packages/gateway/src/routes/passkey.ts:197-263",
+        "packages/db/src/repositories/api-keys.ts:17-19",
+        "packages/db/src/repositories/api-keys.ts:169-185"
+      ],
+      "description": "POST /api/onboard/passkey/register-challenge accepts a client-supplied operatorId with no authentication check anywhere in the call chain (no preHandler/onRequest in passkey.ts; plain app.register(passkeyRoutes) in server.ts:527; ApiKeyRepository.findByOperator/.setPasskeyCredential perform no ownership check). An unauthenticated caller can bind their own WebAuthn credential to any existing operatorId's api_keys row.",
+      "exploitability_today": "contained — Phase B/C (the consumer of this binding for authorization) is not yet built per the commit message",
+      "recommendation": "Require a valid Bearer/API key for the claimed operatorId (or email verification) before register-challenge accepts an operatorId binding. Fix before Phase B wires this credential into any authorization decision.",
+      "attributable_to_new_dependency": false,
+      "attributable_to_this_commit": true
+    },
+    {
+      "id": "F2",
+      "scanner": "manual-registry-check",
+      "severity": "low",
+      "title": "Deprecated transitive dependency @simplewebauthn/types@10.0.0",
+      "check": "supply-chain-hygiene",
+      "files": ["pnpm-lock.yaml"],
+      "description": "npm registry marks @simplewebauthn/types@10.0.0 (required by @simplewebauthn/server@10.0.1) as no longer supported. The pinned server version is 3 major versions / ~2 years behind registry latest (13.3.2). The monorepo already runs @simplewebauthn/server@13.3.0 + @simplewebauthn/browser@13.3.0 elsewhere, whose dependency tree has dropped this deprecated package.",
+      "recommendation": "Follow-up PR to align packages/gateway on the same major version already used elsewhere in the monorepo.",
+      "attributable_to_new_dependency": true,
+      "attributable_to_this_commit": true
+    },
+    {
+      "id": "F3",
+      "scanner": "manual-sast-substitute-for-semgrep",
+      "severity": "low",
+      "title": "Client-influenced rpId/expectedOrigin without server-side domain allowlist",
+      "check": "defense-in-depth / input-validation",
+      "files": ["packages/gateway/src/routes/passkey.ts:51-64"],
+      "description": "resolveRpId/resolveExpectedOrigin accept client-supplied overrides validated only by loose regexes, not a PCC-domain allowlist. Not independently exploitable (browser-side WebAuthn enforcement blocks rpID/origin mismatch at credential-creation time), but a server-side allowlist is recommended defense-in-depth.",
+      "recommendation": "Add a server-side allowlist of PCC's own known rpIds/origins; keep alongside the fix for F1.",
+      "attributable_to_new_dependency": false,
+      "attributable_to_this_commit": true
+    },
+    {
+      "id": "F4",
+      "scanner": "prompt-injection",
+      "severity": "high",
+      "title": "Pattern match: 'you are now a' framing in context-pack.ts",
+      "check": "pattern-3",
+      "files": ["packages/gateway/src/routes/context-pack.ts:22"],
+      "matched_text": "You are now a PCC interface agent. This context pack gives you everything you need to help your user interact with the Physical Capability Cloud...",
+      "description": "Regex pattern match for injection signal #3. Assessed benign: pre-existing file NOT touched by this commit (confirmed via git show --stat HEAD); first-party 'agent context pack' content analogous to the documented agent-package.json/system_prompt pattern in this repo's own CLAUDE.md Section 10, not adversarial injected content.",
+      "in_scope_for_this_pr": false,
+      "assessed_as_false_positive": true,
+      "counted_toward_verdict": true,
+      "note": "Counted per warn_on_any_injection policy despite benign assessment -- not silently suppressed."
+    }
+  ],
+  "prompt_injection_scan": {
+    "patterns_checked": 7,
+    "patterns_matched": [3],
+    "patterns_clean": [1, 2, 6, 7],
+    "pattern_5_note": "Several loose matches on doc-comments describing PCC's own Authorization/X-PCC-API-Key header convention (context-pack.ts:34, well-known.ts:153, intent-ingest.ts:127 etc). Reviewed individually -- none are exfiltration payloads.",
+    "files_scanned_scope": "packages/gateway (source tree only; node_modules not installed locally, so the new dependency's own README/CHANGELOG could not be scanned -- coverage gap noted in report)"
+  },
+  "secrets_scan": {
+    "tool": "manual regex substitute (gitleaks unavailable)",
+    "patterns_checked": ["PEM headers", "AWS-style keys", "api_key/password/secret assignments", "pcc_live_ prefixed tokens"],
+    "matches": 8,
+    "all_matches_classified": "test fixtures / placeholder tokens in __tests__/*.test.ts or documentation comments -- no real secret material",
+    "real_secrets_found": 0
+  },
+  "scanners": {
+    "trivy": { "status": "skipped", "reason": "not installed locally or on Spark (checked both)" },
+    "gitleaks": { "status": "skipped", "reason": "not installed locally or on Spark (checked both); manual regex substitute run instead", "finding_count": 0 },
+    "clamav": { "status": "skipped", "reason": "not installed locally or on Spark (checked both)" },
+    "npm_audit": { "status": "ran", "tool": "pnpm audit --json", "scope": "workspace-wide (2047 deps)", "workspace_totals": { "critical": 7, "high": 62, "moderate": 90, "low": 17 }, "attributable_to_new_dependency": { "critical": 0, "high": 0, "moderate": 0, "low": 0 }, "duration_ms": null },
+    "pip_audit": { "status": "not_applicable", "reason": "no requirements.txt / Python code in packages/gateway" },
+    "semgrep": { "status": "skipped", "reason": "not installed locally or on Spark; manual code review substituted for the 2 files changed in packages/gateway/src", "finding_count": 2 },
+    "slither": { "status": "not_applicable", "reason": "no .sol files in packages/gateway" },
+    "prompt_injection": { "status": "ran", "available": true, "finding_count": 1 }
+  }
+}
