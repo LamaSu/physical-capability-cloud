@@ -382,6 +382,17 @@ export async function createGateway(port = 3200) {
     version: "0.1.0",
   }));
 
+  // Bare /health alias — monitors and curl-based healthchecks commonly hit
+  // /health directly (not /api/health). Without this, SERVE_DASHBOARD=true's
+  // SPA fallback (setNotFoundHandler below) would catch bare /health and
+  // return index.html — a false-positive 200 for anything watching for a
+  // real healthcheck. Same payload as /api/health.
+  app.get("/health", async () => ({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    version: "0.1.0",
+  }));
+
   // Security monitor — attack detection, honeypots, rate tracking, fingerprinting
   // Must be registered early so the onRequest hook fires before route handlers
   await app.register(securityMonitorPlugin);

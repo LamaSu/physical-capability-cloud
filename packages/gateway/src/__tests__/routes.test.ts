@@ -35,6 +35,13 @@ async function buildApp(): Promise<FastifyInstance> {
     version: "0.1.0",
   }));
 
+  // Bare /health alias (copied from server.ts — no deps)
+  app.get("/health", async () => ({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    version: "0.1.0",
+  }));
+
   // Register route plugins
   await app.register(capabilityRoutes);
   await app.register(kernelRoutes);
@@ -69,6 +76,17 @@ describe("Gateway Routes", () => {
   describe("GET /api/health", () => {
     it("returns status ok", async () => {
       const res = await app.inject({ method: "GET", url: "/api/health" });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.status).toBe("ok");
+      expect(body.version).toBe("0.1.0");
+      expect(body.timestamp).toBeDefined();
+    });
+  });
+
+  describe("GET /health", () => {
+    it("returns status ok (bare alias of /api/health, same JSON payload)", async () => {
+      const res = await app.inject({ method: "GET", url: "/health" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.status).toBe("ok");
