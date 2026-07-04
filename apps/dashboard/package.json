@@ -20,6 +20,7 @@
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
     "@sentry/react": "^8.55.0",
+    "@simplewebauthn/browser": "^13.3.0",
     "@tanstack/react-query": "^5.60.0",
     "@tsparticles/react": "^3.0.0",
     "@tsparticles/slim": "^3.7.0",

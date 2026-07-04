@@ -54,6 +54,9 @@ importers:
       '@sentry/react':
         specifier: ^8.55.0
         version: 8.55.0(react@19.2.4)
+      '@simplewebauthn/browser':
+        specifier: ^13.3.0
+        version: 13.3.0
       '@tanstack/react-query':
         specifier: ^5.60.0
         version: 5.90.21(react@19.2.4)
