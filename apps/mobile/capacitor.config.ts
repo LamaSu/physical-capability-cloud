@@ -29,6 +29,11 @@ const config: CapacitorConfig = {
     androidScheme: "https",
     cleartext: isDev,
     allowNavigation: ["capability.network", "*.capability.network"],
+    // Shown by the WebView when the remote server.url can't be reached (cold
+    // start with no connectivity). Points at the bundled public/index.html
+    // offline fallback so the app has a real minimum-functionality state —
+    // which Google Play review checks for remote-content wrapper apps.
+    errorPath: "index.html",
   },
   ios: {
     contentInset: "automatic",

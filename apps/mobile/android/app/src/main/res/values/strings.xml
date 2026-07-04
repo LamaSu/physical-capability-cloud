@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PCC</string>
+    <string name="title_activity_main">PCC</string>
+    <string name="package_name">network.capability.mobile</string>
+    <string name="custom_url_scheme">network.capability.mobile</string>
+</resources>
