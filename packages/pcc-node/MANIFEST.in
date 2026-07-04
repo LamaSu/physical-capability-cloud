@@ -1,0 +1,1 @@
+recursive-include pcc_node/ui_templates *.html
