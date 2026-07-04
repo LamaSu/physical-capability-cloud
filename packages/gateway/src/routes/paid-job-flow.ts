@@ -52,6 +52,7 @@ import {
   createEscrowV3,
   approveAndReleaseV3,
   submitEvidenceV3,
+  waitForReceipt,
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
@@ -1194,6 +1195,32 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             const escrowRow = repos.escrows.findByContractAddress(escrowAddress);
             const escrowVersion =
               (escrowRow?.version as "v2" | "v3" | null | undefined) ?? "v2";
+            // V3 escrows require the evidence hash on-chain BEFORE the attestation
+            // binds — submitAttestation reverts "Evidence not submitted" otherwise.
+            // (The V2 path submits earlier via submitEvidenceV2.) Submit the bundle
+            // hash as bytes32 — the same 0x<hex> the oracle attests — and wait for
+            // it to mine so the attestation read below sees it.
+            if (escrowVersion === "v3") {
+              try {
+                const evidenceBytes32 = (
+                  bundleHash.startsWith("sha256:")
+                    ? `0x${bundleHash.slice("sha256:".length)}`
+                    : bundleHash
+                ) as `0x${string}`;
+                const evV3 = await submitEvidenceV3(
+                  0,
+                  evidenceBytes32,
+                  escrowAddress as `0x${string}`,
+                );
+                easBridge.evidenceTxHash = evV3.transactionHash;
+                await waitForReceipt(evV3.transactionHash as `0x${string}`);
+              } catch (evErr) {
+                console.warn(
+                  "[complete] V3 on-chain evidence submit failed (attestation will likely revert):",
+                  evErr instanceof Error ? evErr.message : evErr,
+                );
+              }
+            }
             const submitted =
               escrowVersion === "v3"
                 ? await submitAttestationV3(0, easUid, escrowAddress as `0x${string}`)

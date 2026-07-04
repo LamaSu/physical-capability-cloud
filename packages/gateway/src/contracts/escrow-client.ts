@@ -1423,5 +1423,21 @@ export async function submitEvidenceV3(
   return { transactionHash: hash, status: "submitted" };
 }
 
+/**
+ * Wait for a submitted tx to be mined (1 confirmation). Used to sequence
+ * dependent on-chain writes — e.g. submitEvidence must be mined before
+ * submitAttestation can read it (a V3 escrow reverts "Evidence not submitted"
+ * against un-mined evidence).
+ */
+export async function waitForReceipt(
+  hash: Hex,
+): Promise<{ status: "success" | "reverted" }> {
+  const receipt = await getPublicClient().waitForTransactionReceipt({
+    hash,
+    confirmations: 1,
+  });
+  return { status: receipt.status };
+}
+
 /** Re-export V3 status utilities for convenience. */
 export { MilestoneStatusV3, milestoneStatusV3Name };
