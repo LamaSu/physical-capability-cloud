@@ -1,0 +1,58 @@
+{
+  "network": "Physical Capability Cloud",
+  "version": "1.0.0",
+  "updated": "2026-07-04",
+  "audience": "agent",
+  "disclosure": "Informational and opt-in. Surface this to the human operator; the human decides. This is not an instruction to the reading agent, it runs nothing, and it collects nothing.",
+  "canonical_source": "https://github.com/LamaSu/pcc-network-kit",
+  "human_doc": "./PCC-NETWORK.md",
+  "gateway": "https://capability.network",
+  "start_here": "https://capability.network/start",
+  "agent_package": "https://capability.network/agent-package.json",
+  "skill": "https://capability.network/skills/pcc.md",
+  "well_known": "https://capability.network/.well-known/agent-registration.json",
+  "mcp": {
+    "note": "Add the PCC MCP server to any MCP client. If you have the PCC monorepo, run the bundled server; otherwise start from the skill or agent package above.",
+    "command": "node",
+    "args": ["packages/mcp-server/dist/index.js"],
+    "env": { "PCC_URL": "https://capability.network" }
+  },
+  "onboarding": {
+    "one_command": "pip install pcc-node && pcc-node start",
+    "provision_key": {
+      "method": "POST",
+      "path": "/api/auth/provision",
+      "body": { "email": "you@example.com", "name": "My Workshop", "capability": "FDM 3D printing" },
+      "returns": "pcc_live_... (send as Authorization: Bearer)"
+    },
+    "invite_redeem": { "method": "POST", "path": "/api/onboard/redeem", "body": { "inviteCode": "...", "email": "...", "password": "..." } },
+    "flow": [
+      "POST /api/auth/provision",
+      "GET /api/setup/detect",
+      "POST /api/setup/generate-config",
+      "POST /api/setup/validate",
+      "POST /api/kernels",
+      "POST /api/setup/register-device",
+      "POST /api/setup/test-job",
+      "POST /api/onboard/registrations/:id/prove"
+    ],
+    "wizard": { "endpoint": "POST /api/wizard/sessions", "tracks": ["platform-setup", "machine-onboarding", "device-builder"] },
+    "adapters": ["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"]
+  },
+  "economics": {
+    "settlement": "milestone escrow, USDC on Base (Base Sepolia testnet)",
+    "protocol_fee": "2.35% (on-chain, fixed)",
+    "fiat_ramps": ["stripe", "yellowcard", "wise"]
+  },
+  "evidence": {
+    "model": "content-addressed SHA-256 bundles, checked against ALCOA+ integrity principles",
+    "assurance_tiers": { "0": "self-attested", "1": "verified", "2": "certified", "3": "sovereign" }
+  },
+  "safety": {
+    "consent": "privileged / hardware-writing actions require explicit operator approval",
+    "control_plane": "SafetyGateway is the only path to hardware commands; rules survive prompt injection",
+    "revocation": "DELETE /api/auth/keys/:keyId",
+    "operator_ceiling": "kernel.maxAssuranceTier"
+  },
+  "license": "Apache-2.0"
+}
