@@ -116,8 +116,10 @@ jobs:
       # Release 2+ only. Requires the app record to already exist in Play Console
       # (first upload is manual) and a service-account JSON secret. status:draft is
       # required while the app has not yet been published to production.
+      # Gated on manual dispatch only (the `secrets` context is NOT allowed in an
+      # `if:` — a missing service-account secret is handled by the action itself).
       - name: Upload to Play internal track
-        if: ${{ inputs.upload_track == 'internal' && steps.signing.outputs.signed == 'true' && secrets.PCC_PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_track == 'internal' && steps.signing.outputs.signed == 'true' }}
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PCC_PLAY_SERVICE_ACCOUNT_JSON }}
