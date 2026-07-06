@@ -393,10 +393,10 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Gateway healthcheck. |
+| GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 219-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | 249-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
