@@ -25,6 +25,7 @@ import {
   createPublicClient,
   createWalletClient,
   encodeFunctionData,
+  keccak256,
   type Abi,
   type Address,
   type Hex,
@@ -49,6 +50,7 @@ import {
 } from "@pcc/contracts";
 import { buildRpcTransport, assertRpcChainIds } from "./rpc-transport.js";
 import { getNonceManager, isNonceManagerDisabled, isNonceError } from "./nonce-manager.js";
+import { broadcastIdempotent, type IdempotentBroadcast } from "./idempotent-write.js";
 // V2 / EAS-gated escrow ABI lives in the @pcc/contracts/abi subpath export
 // (it is intentionally not on the top-level barrel; the V1 stack is the default).
 import {
@@ -208,8 +210,74 @@ function wrapWithNonceManager(client: WalletClient, account: Account): WalletCli
     const manager = getNonceManager(account.address, () =>
       getPublicClient().getTransactionCount({ address: account.address, blockTag: "pending" }),
     );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return manager.submit((nonce) => original({ ...params, nonce } as any));
+
+    // Managed path (security review #157 point 1): sign the tx LOCALLY so we hold its
+    // deterministic hash BEFORE broadcast, then re-broadcast the byte-identical bytes on
+    // failover — so a benign `already known` (the tx already reached the mempool via the
+    // primary) resolves to that hash idempotently instead of surfacing as a settlement
+    // failure that could trigger a real double-send. Real viem wallet clients expose
+    // prepareTransactionRequest/signTransaction/sendRawTransaction; clients that only
+    // implement writeContract (test mocks, exotic wrappers) fall back to the legacy
+    // broadcast (no pre-broadcast hash → no idempotent recovery). Production always
+    // takes the idempotent path.
+    const raw = client as unknown as {
+      prepareTransactionRequest?: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      signTransaction?: (r: Record<string, unknown>) => Promise<Hex>;
+      sendRawTransaction?: (a: { serializedTransaction: Hex }) => Promise<Hex>;
+    };
+    const canSignLocally =
+      typeof raw.prepareTransactionRequest === "function" &&
+      typeof raw.signTransaction === "function" &&
+      typeof raw.sendRawTransaction === "function";
+
+    if (!canSignLocally) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return manager.submit((nonce) => original({ ...params, nonce } as any));
+    }
+
+    const deps: IdempotentBroadcast = {
+      // Sign ONCE for the assigned nonce; the same bytes are what get (re-)broadcast.
+      sign: async (nonce) => {
+        const data = encodeFunctionData({
+          abi: params.abi as Abi,
+          functionName: params.functionName as string,
+          args: (params.args ?? []) as readonly unknown[],
+        });
+        const request = await raw.prepareTransactionRequest!({
+          account,
+          chain: params.chain,
+          to: params.address,
+          data,
+          ...(params.value !== undefined ? { value: params.value } : {}),
+          nonce,
+        });
+        const serialized = await raw.signTransaction!(request);
+        return { serialized, hash: keccak256(serialized) };
+      },
+      send: async (serialized) => {
+        await raw.sendRawTransaction!({ serializedTransaction: serialized });
+      },
+      // Disambiguate a "nonce too low": is OUR exact tx pending/mined (idempotent
+      // success), or did a different tx take the nonce (real failure)?
+      confirmOnChain: async (hash) => {
+        const pub = getPublicClient() as unknown as {
+          getTransaction: (a: { hash: Hex }) => Promise<unknown>;
+          getTransactionReceipt: (a: { hash: Hex }) => Promise<unknown>;
+        };
+        try {
+          if (await pub.getTransaction({ hash })) return true; // pending or mined
+        } catch {
+          /* TransactionNotFoundError → fall through to the receipt check */
+        }
+        try {
+          if (await pub.getTransactionReceipt({ hash })) return true; // mined
+        } catch {
+          /* not mined yet → treat as not found */
+        }
+        return false;
+      },
+    };
+    return manager.submit((nonce) => broadcastIdempotent(nonce, deps));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any;
 

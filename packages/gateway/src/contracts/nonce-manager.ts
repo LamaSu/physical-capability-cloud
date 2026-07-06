@@ -41,12 +41,33 @@ const NONCE_ERROR_SIGNALS = [
   "tx doesn't have the correct nonce",
 ] as const;
 
-/** True if an error looks like a nonce desync (vs a revert / funds / RPC outage). */
-export function isNonceError(err: unknown): boolean {
-  let blob: string;
+/**
+ * RPC/error substrings that mean the IDENTICAL signed tx is ALREADY known to the
+ * network (in the mempool / imported) — an idempotent result under RPC failover, NOT
+ * a nonce desync. viem's `fallback` re-broadcasts the byte-identical raw tx on
+ * failover, so a rotated retry that lands on a node which already saw the tx reports
+ * one of these. This set is a SUBSET signal of NONCE_ERROR_SIGNALS' intent but is
+ * treated differently by the write path (security review #157 point 1): an
+ * "already known" resolves to the pre-computed hash (the tx will mine), whereas a
+ * bare "nonce too low" is ambiguous and must be confirmed on-chain first.
+ */
+const ALREADY_KNOWN_SIGNALS = [
+  "already known",
+  "already imported",
+  "alreadyknown",
+  "transaction already exists",
+  "known transaction",
+  "duplicate transaction",
+] as const;
+
+/**
+ * Flatten an error (including viem's nested `shortMessage`/`details`/`cause`) to one
+ * lowercased string for substring matching. Shared by the error classifiers below.
+ */
+function errorBlob(err: unknown): string {
   try {
     const e = err as { message?: string; details?: string; shortMessage?: string; cause?: unknown };
-    blob = [
+    return [
       e?.shortMessage,
       e?.message,
       e?.details,
@@ -57,9 +78,27 @@ export function isNonceError(err: unknown): boolean {
       .join(" | ")
       .toLowerCase();
   } catch {
-    blob = String(err).toLowerCase();
+    return String(err).toLowerCase();
   }
-  return NONCE_ERROR_SIGNALS.some((s) => blob.includes(s));
+}
+
+function matchErrorSignals(err: unknown, signals: readonly string[]): boolean {
+  const blob = errorBlob(err);
+  return signals.some((s) => blob.includes(s));
+}
+
+/** True if an error looks like a nonce desync (vs a revert / funds / RPC outage). */
+export function isNonceError(err: unknown): boolean {
+  return matchErrorSignals(err, NONCE_ERROR_SIGNALS);
+}
+
+/**
+ * True if an error means the identical tx is already known/in-mempool — idempotent
+ * under failover (the tx will mine), so the write path resolves with the known hash
+ * instead of rethrowing. Distinct from (and narrower than) `isNonceError`.
+ */
+export function isAlreadyKnownError(err: unknown): boolean {
+  return matchErrorSignals(err, ALREADY_KNOWN_SIGNALS);
 }
 
 /**
