@@ -31,6 +31,12 @@ on:
         options:
           - none
           - internal
+  # Auto-run on pushes to the mobile feature branch so the AAB build self-verifies
+  # in CI. master is intentionally NOT listed here — there it stays manual-only
+  # (workflow_dispatch), consistent with the deploy-pipeline discipline.
+  push:
+    branches:
+      - feat/android-build-publish
 
 concurrency:
   group: android-build-${{ github.ref }}
