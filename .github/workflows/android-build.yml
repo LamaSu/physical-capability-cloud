@@ -49,10 +49,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No version here — the root package.json pins packageManager: pnpm@9.0.0,
+      # and action-setup@v4 errors if a version is specified in both places.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
