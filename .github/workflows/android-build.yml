@@ -37,6 +37,13 @@ on:
   push:
     branches:
       - feat/android-build-publish
+    # Only rebuild when buildable inputs change — docs/runbooks don't trigger CI.
+    paths:
+      - "apps/mobile/android/**"
+      - "apps/mobile/public/**"
+      - "apps/mobile/capacitor.config.ts"
+      - "apps/mobile/package.json"
+      - ".github/workflows/android-build.yml"
 
 concurrency:
   group: android-build-${{ github.ref }}
