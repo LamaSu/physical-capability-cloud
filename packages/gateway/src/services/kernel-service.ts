@@ -15,6 +15,7 @@ import type { MachineAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
+import { settleStepReputationForJob } from "../routes/reputation.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
@@ -33,6 +34,27 @@ export interface SubmitJobParams {
   agentDid?: string;
   /** Execution scope ID (required for class-3 / scoped commands) */
   scopeId?: string;
+  /**
+   * Named resource requirements for the adapter's optional `preflight()` gate
+   * (e.g. `{ filamentGrams: 42, buildVolumeMm3: 18000 }`). When present AND the
+   * selected adapter implements `preflight()`, the job is refused before
+   * execution if the adapter reports insufficient/out-of-range resources.
+   * Absent on every existing job path, so preflight stays strictly additive.
+   */
+  requirements?: Record<string, number>;
+}
+
+/** Typed refusal thrown by {@link KernelService.submitJob} when an adapter's
+ *  `preflight()` gate rejects a requirements-declaring job. */
+export class PreflightRefusedError extends Error {
+  readonly name = "PreflightRefusedError";
+  readonly code: string;
+  readonly details?: Record<string, unknown>;
+  constructor(jobId: string, code: string, details?: Record<string, unknown>) {
+    super(`[preflight] Job ${jobId} refused: ${code}`);
+    this.code = code;
+    this.details = details;
+  }
 }
 
 export interface JobStatusResult {
@@ -229,6 +251,27 @@ export class KernelService {
 
     const runner = this.runners.get(deviceId)!;
 
+    // ── Resource preflight (additive, requirements-gated) ──────────────────
+    // Refuse-to-start BEFORE the safety gateway / execute / escrow cost when the
+    // job declares resource requirements AND the selected adapter implements the
+    // optional preflight() gate (the PyLabRobot poka-yoke seam). Fires ONLY for
+    // requirements-declaring jobs, so every existing job path — which declares
+    // none — is unaffected, and adapters without preflight() proceed unchanged.
+    const requirements = params.requirements;
+    if (requirements && Object.keys(requirements).length > 0) {
+      const machine = this.machines.get(deviceId);
+      if (machine?.preflight) {
+        const pf = await machine.preflight({ requirements, jobId });
+        if (!pf.ok) {
+          throw new PreflightRefusedError(
+            jobId,
+            pf.refusal?.code ?? "insufficient_resource",
+            pf.refusal?.details,
+          );
+        }
+      }
+    }
+
     // ── Safety gateway pre-flight ──────────────────────────────────────────
     // Build a PhysicalCommand descriptor for this job. Jobs submitted without
     // an explicit scopeId use class "safe" (operator-initiated or system jobs).
@@ -330,6 +373,13 @@ export class KernelService {
                 // DB update failure is non-fatal
               }
 
+              // Failed completion → settle the composition step's reputation as
+              // failed (inert for non-composition jobs). Success is settled in
+              // the evidence-to-settlement block below, after processEvidence.
+              if (!result.success) {
+                this.settleStepRep(jobId, "failed");
+              }
+
               // ── Evidence-to-settlement pipeline ──────────────────────────
               if (result.success) {
                 const bundle = this.completedBundles.get(jobId);
@@ -344,6 +394,9 @@ export class KernelService {
                       autoRelease: assuranceTier === 0,
                       contractAddress,
                     });
+                    // Credit the composition step's reputation at completion
+                    // (inert for non-composition jobs).
+                    this.settleStepRep(jobId, "success", result.bundleId);
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
                     console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
@@ -368,6 +421,9 @@ export class KernelService {
               } catch {
                 // DB update failure is non-fatal
               }
+              // Settle the composition step's reputation as failed (inert for
+              // non-composition jobs).
+              this.settleStepRep(jobId, "failed");
               lifecycleSpan.setStatus({ code: 2, message: String(err) });
               lifecycleSpan.end();
               // End local trace span
@@ -408,6 +464,12 @@ export class KernelService {
             // DB update failure is non-fatal
           }
 
+          // Failed completion → settle the composition step's reputation as
+          // failed (inert for non-composition jobs).
+          if (!result.success) {
+            this.settleStepRep(jobId, "failed");
+          }
+
           if (result.success) {
             const bundle = this.completedBundles.get(jobId);
             if (bundle) {
@@ -420,6 +482,9 @@ export class KernelService {
                   autoRelease: assuranceTier === 0,
                   contractAddress,
                 });
+                // Credit the composition step's reputation at completion
+                // (inert for non-composition jobs).
+                this.settleStepRep(jobId, "success", result.bundleId);
               } catch (err) {
                 console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
               } finally {
@@ -440,12 +505,40 @@ export class KernelService {
           } catch {
             // DB update failure is non-fatal
           }
+          // Settle the composition step's reputation as failed (inert for
+          // non-composition jobs).
+          this.settleStepRep(jobId, "failed");
           // End local trace span on error (fallback path)
           endTrace(traceId, lifecycleLocalSpanId, "error");
         });
     }
 
     return { jobId, deviceId, status: "accepted" };
+  }
+
+  /**
+   * Best-effort completion-driven reputation settle for a composition step.
+   * Inert for non-composition jobs (returns nothing to apply). Wrapped so a
+   * reputation hiccup can never break job/settlement completion — same
+   * discipline as the surrounding settlement try/catch blocks.
+   */
+  private settleStepRep(
+    jobId: string,
+    verdict: "success" | "failed",
+    evidenceBundleId?: string,
+  ): void {
+    try {
+      settleStepReputationForJob(
+        jobId,
+        verdict,
+        evidenceBundleId ? { evidenceBundleId } : {},
+      );
+    } catch (err) {
+      console.warn(
+        "[kernel-service] Reputation settle failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   /**

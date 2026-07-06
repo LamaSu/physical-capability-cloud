@@ -46,7 +46,7 @@ import {
 } from "@pcc/spec";
 import { z } from "zod";
 import { schema, eq, and, desc } from "@pcc/store";
-import { getStore, initStore } from "../db.js";
+import { getStore, initStore, getRepos } from "../db.js";
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts for the lazy-init rationale.
@@ -64,6 +64,24 @@ function db() {
       process.env.PCC_DB_PATH = ":memory:";
     }
     return initStore({ seed: false }).db;
+  }
+}
+
+/** Repository access with the same lazy-init fallback as {@link db}. Used by the
+ *  completion seam to read a job's `parameters.__pccStep` bridge. */
+function reposOrInit() {
+  try {
+    return getRepos();
+  } catch {
+    if (
+      (process.env.VITEST || process.env.NODE_ENV === "test") &&
+      !process.env.PCC_DB_PATH &&
+      !process.env.DATABASE_URL
+    ) {
+      process.env.PCC_DB_PATH = ":memory:";
+    }
+    initStore({ seed: false });
+    return getRepos();
   }
 }
 
@@ -475,6 +493,52 @@ export function finalizeReputation(
   }
 
   return deltasApplied;
+}
+
+/**
+ * Completion-driven reputation settle for one composition step — the seam the
+ * physical-completion paths (local `kernel-service`, external
+ * `paid-job-flow` `PUT /complete`) call once a job's real outcome is known.
+ *
+ * Real-execution mode records each step's outcome as `pending` at ack (see
+ * `compose.ts` `executeComposition`) and threads `{compositionId, stepIndex}`
+ * onto the job's `parameters.__pccStep`. This function reads that bridge back,
+ * flips the pending outcome to the completion verdict (`success`/`failed`),
+ * and reuses {@link finalizeReputation} to apply the `+10`/`-15` step delta and
+ * re-check the one-time composition `+5` bonus.
+ *
+ * No-op (returns `[]`) for:
+ *   - jobs that carry no `__pccStep` (single `/api/jobs/submit` jobs, or
+ *     compositions run in ack-finalize/NOOP mode) — reputation stays inert for
+ *     them, exactly as today;
+ *   - an outcome that is already finalized — idempotent, so a second completion
+ *     signal for the same job applies nothing.
+ *
+ * Best-effort by contract: callers wrap it so a settlement/reputation hiccup can
+ * never break job completion.
+ */
+export function settleStepReputationForJob(
+  jobId: string,
+  verdict: "success" | "failed",
+  opts: { evidenceBundleId?: string; finalizerId?: string } = {},
+): ReputationDelta[] {
+  const job = reposOrInit().jobs.findById(jobId);
+  const coords = (job?.parameters as Record<string, unknown> | null | undefined)
+    ?.__pccStep as { compositionId: string; stepIndex: number } | undefined;
+  if (!coords || typeof coords.compositionId !== "string" || typeof coords.stepIndex !== "number") {
+    return []; // not a composition step → inert
+  }
+
+  const outcome = getOutcomeByStep(coords.compositionId, coords.stepIndex);
+  if (!outcome || outcome.finalReputationApplied) {
+    return []; // nothing recorded, or already settled → idempotent
+  }
+
+  outcome.status = verdict; // pending → success | failed
+  if (opts.evidenceBundleId) outcome.evidenceBundleId = opts.evidenceBundleId;
+  saveOutcome(outcome);
+
+  return finalizeReputation(coords.compositionId, opts.finalizerId ?? "settlement-completion");
 }
 
 // ---------------------------------------------------------------------------

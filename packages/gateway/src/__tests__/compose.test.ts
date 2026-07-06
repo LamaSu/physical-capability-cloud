@@ -26,7 +26,7 @@ import {
   _seedGraphSearchForTests,
 } from "../routes/graph-search.js";
 import { reputationRoutes, _clearReputationForTests } from "../routes/reputation.js";
-import type { CompositionCandidate, RegisterGraphNodeInput } from "@pcc/spec";
+import type { CompositionCandidate, RegisterGraphNodeInput, ComposeResponse } from "@pcc/spec";
 
 function makeApp() {
   const app = Fastify({ logger: false });
@@ -940,5 +940,117 @@ describe("createProductionBinding", () => {
     expect(result.stepsExecuted).toBe(1); // short-circuited after first failure
     // Only one submit call — second step was never reached
     expect(submitMock).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real-mode deferral — PCC_COMPOSE_EXECUTE_REAL=true defers reputation to
+// completion (ack records `pending`, no deltas at ack).
+// ---------------------------------------------------------------------------
+
+describe("executeComposition — real-mode deferral (PCC_COMPOSE_EXECUTE_REAL)", () => {
+  const prevReal = process.env.PCC_COMPOSE_EXECUTE_REAL;
+  const prevWf = process.env.WORKFLOW_DB_PATH;
+
+  beforeEach(() => {
+    _clearComposeForTests();
+    _clearReputationForTests();
+    process.env.PCC_COMPOSE_EXECUTE_REAL = "true";
+    // Keep the workflow engine off disk (real mode registers a durable run).
+    process.env.WORKFLOW_DB_PATH = ":memory:";
+  });
+
+  afterEach(() => {
+    if (prevReal === undefined) delete process.env.PCC_COMPOSE_EXECUTE_REAL;
+    else process.env.PCC_COMPOSE_EXECUTE_REAL = prevReal;
+    if (prevWf === undefined) delete process.env.WORKFLOW_DB_PATH;
+    else process.env.WORKFLOW_DB_PATH = prevWf;
+    _clearComposeForTests();
+    _clearReputationForTests();
+  });
+
+  function registerTwoSteps(): void {
+    _registerCandidateForTests(
+      makeCandidate({ capabilityId: "cap-prep", capabilityType: "prep", operatorAddress: "op-prep" }),
+    );
+    _registerCandidateForTests(
+      makeCandidate({ capabilityId: "cap-print", capabilityType: "print", operatorAddress: "op-print" }),
+    );
+  }
+
+  async function proposeTwoStep(app: FastifyInstance): Promise<ComposeResponse> {
+    const prop = await app.inject({
+      method: "POST",
+      url: "/api/compose",
+      payload: {
+        outcomeType: "print",
+        steps: ["prep", "print"],
+        budgetUSD: 100,
+        minAssuranceTier: 1,
+      },
+    });
+    expect(prop.json().status).toBe("proposed");
+    const id = prop.json().compositionId;
+    const got = await app.inject({ method: "GET", url: `/api/compose/${id}` });
+    return got.json() as ComposeResponse;
+  }
+
+  it("acks all steps as pending and applies NO reputation deltas at ack", async () => {
+    registerTwoSteps();
+    const app = makeAppWithReputation();
+    const composition = await proposeTwoStep(app);
+
+    // Explicit runStep stub that acks OK (a real submission would be async).
+    const result = await executeComposition(composition, { runStep: async () => {} });
+
+    // Ack side: every outcome pending, none finalized, no deltas.
+    const outc = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${composition.compositionId}/step-outcomes`,
+    });
+    expect(outc.json().count).toBe(2);
+    expect(
+      outc.json().outcomes.every((o: { status: string }) => o.status === "pending"),
+    ).toBe(true);
+    expect(
+      outc.json().outcomes.every((o: { finalReputationApplied: boolean }) => !o.finalReputationApplied),
+    ).toBe(true);
+    expect(result.deltasApplied).toEqual([]);
+    expect(result.status).toBe("completed"); // acks all succeeded
+
+    // Scores unchanged — credit is deferred to completion.
+    const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
+    expect(prep.json().reputation.score).toBe(500);
+    const print = await app.inject({ method: "GET", url: "/api/reputation/op-print" });
+    expect(print.json().reputation.score).toBe(500);
+  });
+
+  it("settles an ack-FAILED step at ack (-15) and short-circuits (no completion will arrive)", async () => {
+    registerTwoSteps();
+    const app = makeAppWithReputation();
+    const composition = await proposeTwoStep(app);
+
+    // Submission itself throws for step 0 — no job exists, so settle now.
+    const result = await executeComposition(composition, {
+      runStep: (step) => {
+        if (step.index === 0) throw new Error("submission failed");
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepIndex).toBe(0);
+    expect(result.stepsExecuted).toBe(1); // short-circuited
+
+    const outc = await app.inject({
+      method: "GET",
+      url: `/api/compositions/${composition.compositionId}/step-outcomes`,
+    });
+    expect(outc.json().count).toBe(1);
+    expect(outc.json().outcomes[0].status).toBe("failed");
+
+    const prep = await app.inject({ method: "GET", url: "/api/reputation/op-prep" });
+    expect(prep.json().reputation.score).toBe(485); // -15, settled at ack
+    const print = await app.inject({ method: "GET", url: "/api/reputation/op-print" });
+    expect(print.json().reputation.score).toBe(500); // never reached
   });
 });
