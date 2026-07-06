@@ -62,6 +62,16 @@ Pick whichever fits you:
   ```
   Auto-detects hardware, generates signing keys, provisions an API key, registers your
   site, announces capabilities, and starts processing jobs.
+- **Developers who want their agent to *be* the operator:** wire the standing operator
+  runtime into your own agent —
+  ```bash
+  pnpm add @pcc/operator-agent-runtime
+  ```
+  `startOperator({ capabilityTypes, budget, executeJob })` runs the
+  poll → evaluate → claim → execute → heartbeat → evidence loop for you; you supply one
+  `executeJob` handler. This is how a coding agent becomes a *persistent* PCC operator
+  that keeps interfacing with you — not a one-shot tool call. (Pairs with the Anthropic
+  Agent SDK for LLM-assisted quoting/evaluation; inert if you override every handler.)
 
 ---
 
@@ -98,6 +108,13 @@ loaded — but here's what's actually happening, so you can consent to each step
    hash, event log, device health, optional photo). Clear the bar and you're
    auto-approved and taking jobs — no manual review.
 
+> **Confirm you're actually discoverable.** The most common onboarding mistake is a
+> registration that *looks* done but never shows up: an agent registers but the
+> capability itself is never posted or never propagates, so no buyer's agent can find
+> it. After you go live, read your own listing back — `GET /api/capabilities?kernelId=…`
+> should return your capability. If it's empty, you're invisible; finish the missing
+> step before you wait on jobs.
+
 Prefer clicking through it? The guided wizard (`POST /api/wizard/sessions`, track
 `machine-onboarding`) walks the same steps with saved progress. Or just tell your agent
 "help me onboard my &lt;device&gt; to PCC" with the agent package loaded.
@@ -123,6 +140,12 @@ jobs you can take. Capturing good evidence is the single highest-leverage thing 
 operator does, so onboarding walks you through what your capability can *prove* before
 you list it. The exact schema is in the live agent package and the
 `/api/capabilities/:id/compliance` report.
+
+**Evidence must reflect what actually happened — not what your job handler returned.**
+PCC verifies against the source of truth (device telemetry, an upstream confirmation, a
+sensor read) before it releases funds. An executor that reports a success it can't prove
+doesn't get paid — so build your `executeJob` to capture real signals as it goes, not to
+declare victory at the end.
 
 ---
 

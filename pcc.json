@@ -19,6 +19,12 @@
   },
   "onboarding": {
     "one_command": "pip install pcc-node && pcc-node start",
+    "operator_runtime": {
+      "package": "@pcc/operator-agent-runtime",
+      "entry": "startOperator({ capabilityTypes, budget, executeJob })",
+      "loop": "poll -> evaluate -> claim -> execute -> heartbeat -> evidence",
+      "note": "how a developer's own agent becomes a persistent PCC operator (not a one-shot tool call); pairs with the Anthropic Agent SDK for LLM-assisted quoting"
+    },
     "provision_key": {
       "method": "POST",
       "path": "/api/auth/provision",
@@ -37,7 +43,8 @@
       "POST /api/onboard/registrations/:id/prove"
     ],
     "wizard": { "endpoint": "POST /api/wizard/sessions", "tracks": ["platform-setup", "machine-onboarding", "device-builder"] },
-    "adapters": ["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"]
+    "adapters": ["octoprint", "modbus", "opcua", "sila", "generic-http", "mock"],
+    "confirm_discoverable": "after going live, read your listing back (GET /api/capabilities?kernelId=...) — a registration that looks done but never posts/propagates the capability is invisible to buyers; this is the most common onboarding failure"
   },
   "economics": {
     "settlement": "milestone escrow, USDC on Base (Base Sepolia testnet)",
@@ -46,7 +53,8 @@
   },
   "evidence": {
     "model": "content-addressed SHA-256 bundles, checked against ALCOA+ integrity principles",
-    "assurance_tiers": { "0": "self-attested", "1": "verified", "2": "certified", "3": "sovereign" }
+    "assurance_tiers": { "0": "self-attested", "1": "verified", "2": "certified", "3": "sovereign" },
+    "principle": "evidence must reflect what actually happened, not what the job handler returned; verified against source-of-truth (device telemetry / upstream confirmation / sensor) before settlement"
   },
   "safety": {
     "consent": "privileged / hardware-writing actions require explicit operator approval",
