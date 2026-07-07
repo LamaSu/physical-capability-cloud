@@ -39,6 +39,9 @@ import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
 } from "../services/ad-hoc-pricing.js";
+// Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
+// enforces the identical rule — see session-liveness.ts (N1).
+import { assertSessionLive as assertLive } from "./session-liveness.js";
 
 /**
  * Serialize a WorkflowChallenge for the wire — converts the BigInt
@@ -68,38 +71,7 @@ const { negotiationSessions, operatorPolicies } = schema;
 
 const resolver = new TemplateResolver();
 
-/**
- * Liveness gate shared by the state-advancing endpoints (/quote, /review,
- * /commit). A session may only advance while it is inside its TTL and not in a
- * terminal state. Without this, a cancelled or expired session could still be
- * quoted / reviewed / committed — creating real escrow for a dead deal (N1).
- *
- * Mirrors the self-healing expiry write in GET /session/:id: when the TTL has
- * passed we persist status="expired" so the session stops being resurrectable.
- *
- * Returns a {status, body} violation to send back, or null when the session is
- * live and may advance.
- */
-function assertLive(
-  db: ReturnType<typeof getStore>["db"],
-  row: typeof negotiationSessions.$inferSelect,
-): { status: number; body: { error: string } } | null {
-  if (row.status === "committed") {
-    return { status: 409, body: { error: "Session already committed" } };
-  }
-  if (row.status === "cancelled" || row.status === "expired") {
-    return { status: 410, body: { error: `Session ${row.status}` } };
-  }
-  if (new Date(row.expiresAt) < new Date()) {
-    // Self-heal: persist expiry so the session can't be advanced later.
-    db.update(negotiationSessions)
-      .set({ status: "expired" })
-      .where(eq(negotiationSessions.id, row.id))
-      .run();
-    return { status: 410, body: { error: "Session expired" } };
-  }
-  return null;
-}
+// assertLive is imported from ./session-liveness.js (shared with a2a-tasks.ts).
 
 export async function negotiationRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
