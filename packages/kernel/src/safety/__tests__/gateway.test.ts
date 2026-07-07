@@ -386,3 +386,112 @@ describe("SafetyGateway.resetCircuit()", () => {
     expect(allowed.allowed).toBe(true);
   });
 });
+
+// ── validateOnly — admission without executing or recording ───────────────────
+
+describe("SafetyGateway.validateOnly — admits without recording an outcome", () => {
+  it("admits a clean command (allowed=true, executed=false)", async () => {
+    const gw = new SafetyGateway();
+    const result = await gw.validateOnly(makeCmd({ class: "safe" }));
+
+    expect(result.allowed).toBe(true);
+    expect(result.executed).toBe(false);
+    expect(result.verdict?.allowed).toBe(true);
+  });
+
+  it("denies a governor violation (privileged) without executing", async () => {
+    const gw = new SafetyGateway();
+    const result = await gw.validateOnly(makeCmd({ class: "privileged" }));
+
+    expect(result.allowed).toBe(false);
+    expect(result.executed).toBe(false);
+  });
+
+  it("blocks admission when the device breaker is already open", async () => {
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+    // Trip via a real out-of-band failure report.
+    gw.recordDeviceFailure("dev-vo-open");
+
+    const result = await gw.validateOnly(makeCmd({ deviceId: "dev-vo-open" }));
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("circuit_open");
+  });
+
+  it("records NOTHING — repeated admissions never reset an accruing failure count", async () => {
+    // Core regression guard. The removed pre-flight passed a no-op execute to
+    // validateAndRelay, recording a phantom SUCCESS that reset consecutiveFailures
+    // to 0 on every job — so the breaker could never trip from real failures.
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 3, cooldownMs: 60_000 } });
+    const dev = "dev-vo-noreset";
+
+    gw.recordDeviceFailure(dev); // 1
+    gw.recordDeviceFailure(dev); // 2
+    // Interleave admissions the way a busy gateway would between jobs.
+    await gw.validateOnly(makeCmd({ deviceId: dev }));
+    await gw.validateOnly(makeCmd({ deviceId: dev }));
+    // Still 2 consecutive failures — admissions did not reset the count.
+    expect(gw.getStatus().circuits.get(dev)?.state).toBe("closed");
+
+    gw.recordDeviceFailure(dev); // 3 → threshold
+    expect(gw.getStatus().circuits.get(dev)?.state).toBe("open");
+  });
+});
+
+// ── recordDeviceFailure / recordDeviceSuccess — out-of-band outcome reporting ──
+
+describe("SafetyGateway.recordDevice{Failure,Success} — real outcomes trip/reset", () => {
+  it("recordDeviceFailure trips after threshold; validateOnly then blocks the next job", async () => {
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 3, cooldownMs: 60_000 } });
+    const dev = "dev-oob-fail";
+
+    // Next job admitted while healthy.
+    expect((await gw.validateOnly(makeCmd({ deviceId: dev }))).allowed).toBe(true);
+
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceFailure(dev);
+    expect(gw.getStatus().circuits.get(dev)?.state).toBe("closed"); // 2 of 3
+    gw.recordDeviceFailure(dev); // threshold → open
+    expect(gw.getStatus().circuits.get(dev)?.state).toBe("open");
+
+    // The next job is blocked by the tripped breaker.
+    const blocked = await gw.validateOnly(makeCmd({ deviceId: dev }));
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toBe("circuit_open");
+  });
+
+  it("recordDeviceSuccess resets an accruing failure count (device recovered)", async () => {
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 3, cooldownMs: 60_000 } });
+    const dev = "dev-oob-recover";
+
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceSuccess(dev); // reset consecutive count
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceFailure(dev);
+    // Only 2 consecutive failures since the reset — not tripped.
+    expect(gw.getStatus().circuits.get(dev)?.state).toBe("closed");
+  });
+
+  it("recordDeviceSuccess in half_open closes a previously tripped breaker", async () => {
+    vi.useFakeTimers();
+    try {
+      const gw = new SafetyGateway({
+        circuitBreaker: { failureThreshold: 1, cooldownMs: 1_000, successThreshold: 2 },
+      });
+      const dev = "dev-oob-halfopen";
+
+      gw.recordDeviceFailure(dev); // open
+      expect(gw.getStatus().circuits.get(dev)?.state).toBe("open");
+
+      vi.advanceTimersByTime(2_000); // cooldown elapsed
+      // Admission transitions open → half_open and allows a test command.
+      expect((await gw.validateOnly(makeCmd({ deviceId: dev }))).allowed).toBe(true);
+
+      gw.recordDeviceSuccess(dev);
+      gw.recordDeviceSuccess(dev); // successThreshold → closed
+      expect(gw.getStatus().circuits.get(dev)?.state).toBe("closed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
