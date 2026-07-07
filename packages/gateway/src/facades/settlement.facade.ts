@@ -141,14 +141,20 @@ export class SettlementFacade extends BaseFacade {
         ? this.repos.escrows.findByStatus(filters.status)
         : this.repos.escrows.findAll();
 
-      // Batch-load milestones (prevents N+1)
+      // Batch-load milestones (prevents N+1): one IN-list query for all
+      // escrow ids, grouped in memory. Every escrow gets an entry (possibly
+      // empty) so populators never see a missing key.
       const milestoneMap = new Map<string, any[]>();
-      for (const escrow of escrows) {
-        try {
-          milestoneMap.set(escrow.id, this.repos.escrows.findMilestonesByEscrow(escrow.id));
-        } catch {
-          milestoneMap.set(escrow.id, []);
+      for (const escrow of escrows) milestoneMap.set(escrow.id, []);
+      try {
+        const allMilestones = this.repos.escrows.findMilestonesByEscrowIds(
+          escrows.map((e) => e.id),
+        );
+        for (const ms of allMilestones) {
+          milestoneMap.get(ms.escrowId)?.push(ms);
         }
+      } catch {
+        // Milestone enrichment is best-effort — counts default to 0
       }
 
       return populateEscrowList(escrows, milestoneMap, context);

@@ -123,22 +123,21 @@ export abstract class BaseFacade {
 
   /**
    * Pre-load reputation scores for a batch of kernel IDs.
-   * Prevents N+1 queries when populating lists.
+   * Prevents N+1 queries when populating lists: one IN-list query for the
+   * whole id set (chunked inside the repo), then in-memory decay math.
    */
   protected async preloadReputations(kernelIds: string[]): Promise<Map<string, number>> {
     const cache = new Map<string, number>();
     try {
       const reputationService = getReputationService();
-      for (const id of kernelIds) {
-        const kernel = this.repos.kernels.findById(id);
-        if (kernel) {
-          const effective = reputationService.computeEffectiveReputation(
-            kernel.reputation ?? 500,
-            (kernel as Record<string, unknown>).reputationUpdatedAt as string | null | undefined,
-            (kernel.totalJobsCompleted as number | undefined) ?? 0,
-          );
-          cache.set(id, effective);
-        }
+      const kernels = this.repos.kernels.findByIds([...new Set(kernelIds)]);
+      for (const kernel of kernels) {
+        const effective = reputationService.computeEffectiveReputation(
+          kernel.reputation ?? 500,
+          (kernel as Record<string, unknown>).reputationUpdatedAt as string | null | undefined,
+          (kernel.totalJobsCompleted as number | undefined) ?? 0,
+        );
+        cache.set(kernel.id, effective);
       }
     } catch {
       // Reputation is optional enrichment — don't fail on it

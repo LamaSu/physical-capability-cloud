@@ -250,6 +250,9 @@ export class JobFacade extends BaseFacade {
         startedAt: new Date().toISOString(),
         progress: 0,
         parameters: parameters ?? null,
+        // F8 — persist the tier the job was submitted at (default 0 =
+        // self-attested) so JobDTOs report the real value, not a hardcoded 0.
+        assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
       });
 
       // Determine if this is an external kernel (daemon will pick up the job)
@@ -444,26 +447,26 @@ export class JobFacade extends BaseFacade {
 
   private loadKernelMap(kernelIds: string[]): Map<string, any> {
     const map = new Map<string, any>();
-    for (const id of kernelIds) {
-      try {
-        const kernel = this.repos.kernels.findById(id);
-        if (kernel) map.set(id, kernel);
-      } catch {
-        // Non-fatal
+    try {
+      // Single IN-list query (chunked inside the repo) — true N+1 prevention.
+      for (const kernel of this.repos.kernels.findByIds([...new Set(kernelIds)])) {
+        map.set(kernel.id, kernel);
       }
+    } catch {
+      // Non-fatal
     }
     return map;
   }
 
   private loadCapabilityMap(capabilityIds: string[]): Map<string, any> {
     const map = new Map<string, any>();
-    for (const id of capabilityIds) {
-      try {
-        const cap = this.repos.capabilities.findById(id);
-        if (cap) map.set(id, cap);
-      } catch {
-        // Non-fatal
+    try {
+      // Single IN-list query (chunked inside the repo) — true N+1 prevention.
+      for (const cap of this.repos.capabilities.findByIds([...new Set(capabilityIds)])) {
+        map.set(cap.id, cap);
       }
+    } catch {
+      // Non-fatal
     }
     return map;
   }

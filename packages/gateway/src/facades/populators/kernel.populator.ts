@@ -15,6 +15,7 @@ import type {
 } from "../types.js";
 import { getReputationService } from "../../services/reputation-service.js";
 import { isKernelStale } from "./staleness.js";
+import { normalizeAssuranceTier } from "./job.populator.js";
 
 /**
  * Raw kernel DB row — matches what KernelRepository.findById/findAll returns.
@@ -74,6 +75,8 @@ interface RawJob {
   progress: number;
   startedAt: string | null;
   completedAt: string | null;
+  /** Real assurance tier from the jobs row; null/undefined = legacy row (tier 0). */
+  assuranceTier?: number | null;
 }
 
 /**
@@ -210,7 +213,7 @@ function populateJobDTO(job: RawJob, kernel: RawKernel): JobDTO {
     kernelId: kernel.id,
     status: job.status as JobDTO["status"],
     progress: job.progress ?? undefined,
-    assuranceTier: 0 as JobDTO["assuranceTier"],
+    assuranceTier: normalizeAssuranceTier(job.assuranceTier),
     createdAt: job.startedAt ?? new Date().toISOString(),
     updatedAt: job.completedAt ?? undefined,
     kernelName: kernel.name,

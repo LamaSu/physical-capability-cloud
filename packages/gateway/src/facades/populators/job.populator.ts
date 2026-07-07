@@ -28,6 +28,19 @@ export interface RawJob {
   progress: number;
   evidenceBundleId: string | null;
   parameters: Record<string, unknown> | null;
+  /** Real assurance tier from the jobs row. Null/undefined = legacy row
+   *  (pre-column) — treated as tier 0 (self-attested). */
+  assuranceTier?: number | null;
+}
+
+/**
+ * Normalize a raw tier value to the AssuranceTier union (0|1|2|3).
+ * Null/undefined (legacy rows) and non-finite values collapse to tier 0 —
+ * the weakest claim — so the DTO never over-reports an SLA grade.
+ */
+export function normalizeAssuranceTier(raw: number | null | undefined): JobDTO["assuranceTier"] {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+  return Math.min(3, Math.max(0, Math.trunc(raw))) as JobDTO["assuranceTier"];
 }
 
 /** Raw capability row for type lookup */
@@ -74,7 +87,7 @@ export function populateJobDTO(
     kernelId: model.kernelId,
     status: model.status as JobDTO["status"],
     progress: model.progress ?? undefined,
-    assuranceTier: 0 as JobDTO["assuranceTier"],
+    assuranceTier: normalizeAssuranceTier(model.assuranceTier),
     createdAt: model.startedAt ?? new Date().toISOString(),
     updatedAt: model.completedAt ?? undefined,
     // Enrichment

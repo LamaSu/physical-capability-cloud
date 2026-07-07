@@ -22,6 +22,21 @@ import type {
   WizardStepData,
   WizardCompletionResult,
 } from "@pcc/spec";
+import type { IRepositories } from "@pcc/store";
+import { getRepos } from "../db.js";
+
+/**
+ * Z3 — returns repos when the store is initialised, null otherwise (tests /
+ * dev processes without a DB). Callers report honest "skipped" steps in the
+ * null case instead of fabricating backend effects.
+ */
+function tryGetRepos(): IRepositories | null {
+  try {
+    return getRepos();
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Track definitions — step names for each wizard flow
@@ -69,6 +84,25 @@ interface OwnedWizardSession extends WizardSession {
 }
 
 const sessions = new Map<string, OwnedWizardSession>();
+
+/**
+ * Z1 — single-flight guard for /complete.
+ *
+ * The status check and the terminal status write in the /complete handler are
+ * separated by an await (orchestration), so two concurrent calls could both
+ * pass the check and orchestrate twice. Sessions are claimed here
+ * synchronously (no await between check and claim) before orchestrating.
+ */
+const completingSessions = new Set<string>();
+
+/**
+ * Test seam: when set, replaces the per-track orchestration inside
+ * orchestrateCompletion. Lets tests exercise the failure and concurrency
+ * paths deterministically. Never set in production.
+ */
+let completionOverride:
+  | ((session: WizardSession) => Promise<WizardCompletionResult>)
+  | null = null;
 
 function pruneExpiredSessions(): void {
   const now = new Date().toISOString();
@@ -320,15 +354,47 @@ export async function wizardRoutes(app: FastifyInstance) {
         });
       }
 
-      // Orchestrate completion based on track
-      const result = await orchestrateCompletion(session);
+      // Z1 — claim the session before the orchestration await so a second
+      // concurrent /complete cannot also pass the status checks above.
+      if (completingSessions.has(session.id)) {
+        return reply.code(409).send({
+          error: "completion_in_progress",
+          message:
+            "Completion is already running for this session — poll GET /api/wizard/sessions/:id",
+        });
+      }
+      completingSessions.add(session.id);
 
-      const now = new Date().toISOString();
-      session.status = "completed";
-      session.updatedAt = now;
-      session.completionResult = result;
+      try {
+        // Orchestrate completion based on track
+        const result = await orchestrateCompletion(session, {
+          // Wave 4.1 — same tenant backfill as POST /api/onboard/register
+          tenantId: (req as any).tenantId ?? null,
+        });
 
-      return { session, result };
+        const now = new Date().toISOString();
+        session.updatedAt = now;
+        // Record the latest orchestration outcome (success OR failure) so
+        // GET /sessions/:id shows what actually happened.
+        session.completionResult = result;
+
+        // Z1 — only mark the session completed when orchestration actually
+        // succeeded. On failure the session stays in_progress (retryable)
+        // and the failure is surfaced instead of a fabricated success.
+        if (!result.success) {
+          return reply.code(500).send({
+            error: "completion_failed",
+            message: result.error ?? "orchestration_failed",
+            session,
+            result,
+          });
+        }
+
+        session.status = "completed";
+        return { session, result };
+      } finally {
+        completingSessions.delete(session.id);
+      }
     },
   );
 
@@ -369,17 +435,26 @@ export async function wizardRoutes(app: FastifyInstance) {
 // Completion orchestration
 // ---------------------------------------------------------------------------
 
+/** Request-scoped context threaded into orchestration (Wave 4.1 tenancy). */
+interface CompletionContext {
+  tenantId: string | null;
+}
+
 async function orchestrateCompletion(
   session: WizardSession,
+  ctx: CompletionContext = { tenantId: null },
 ): Promise<WizardCompletionResult> {
   const executedSteps: WizardCompletionResult["executedSteps"] = [];
 
   try {
+    if (completionOverride) {
+      return await completionOverride(session);
+    }
     switch (session.track) {
       case "platform-setup":
         return await orchestratePlatformSetup(session, executedSteps);
       case "machine-onboarding":
-        return await orchestrateMachineOnboarding(session, executedSteps);
+        return await orchestrateMachineOnboarding(session, executedSteps, ctx);
       case "device-builder":
         return await orchestrateDeviceBuilder(session, executedSteps);
       default:
@@ -438,9 +513,21 @@ async function orchestratePlatformSetup(
   };
 }
 
+/** Default space requirements — mirrors the POST /api/onboard/register defaults. */
+const DEFAULT_SPACE_REQUIREMENTS = {
+  footprint: { width: 0, depth: 0, height: 0, unit: "mm" },
+  clearances: { front: 0, back: 0, left: 0, right: 0, above: 0, unit: "mm" },
+  weight: { value: 0, unit: "kg" },
+  power: { voltage: 120, amperage: 15, phase: 1 },
+  environmental: { ventilationRequired: false, dustExtraction: false, fumeExtraction: false },
+  utilities: { compressedAir: false, water: false, coolant: false, wasteDrainage: false },
+  vibrationIsolation: false,
+};
+
 async function orchestrateMachineOnboarding(
   session: WizardSession,
   executedSteps: WizardCompletionResult["executedSteps"],
+  ctx: CompletionContext,
 ): Promise<WizardCompletionResult> {
   const allData: Record<string, unknown> = {};
   for (const step of session.steps) {
@@ -463,15 +550,83 @@ async function orchestrateMachineOnboarding(
     data: { capabilityCount: Array.isArray(allData.capabilities) ? allData.capabilities.length : 0 },
   });
 
-  // Step 3: Build registration
+  // Step 3 (Z3): Submit the registration for REAL — the same row the
+  // POST /api/onboard/register route writes, retrievable at
+  // GET /api/onboard/registrations/:id. Never fabricate an id: when the row
+  // cannot be created, the step says so honestly instead.
+  const repos = tryGetRepos();
+  if (!repos) {
+    executedSteps.push({
+      name: "build-registration",
+      status: "skipped",
+      message:
+        "Registration was NOT submitted — no database available. Submit via POST /api/onboard/register.",
+      data: { registrationSubmitted: false },
+    });
+    return { success: true, executedSteps };
+  }
+
+  const registrationId = `reg-${uuidv4()}`;
+  const nowIso = new Date().toISOString();
+  try {
+    repos.registrations.insert({
+      id: registrationId,
+      name: String(allData.name ?? "Unknown"),
+      category: String(allData.category ?? "custom"),
+      manufacturer: String(allData.manufacturer ?? ""),
+      model: String(allData.model ?? ""),
+      serialNumber: typeof allData.serialNumber === "string" ? allData.serialNumber : undefined,
+      description: typeof allData.description === "string" ? allData.description : undefined,
+      photos: Array.isArray(allData.photos) ? (allData.photos as string[]) : [],
+      capabilities: (Array.isArray(allData.capabilities) ? allData.capabilities : []) as never,
+      spaceRequirements: (
+        allData.spaceRequirements && typeof allData.spaceRequirements === "object"
+          ? allData.spaceRequirements
+          : DEFAULT_SPACE_REQUIREMENTS
+      ) as never,
+      pricing: (
+        allData.pricing && typeof allData.pricing === "object"
+          ? allData.pricing
+          : { baseCost: "0", minimum: "0", currency: "USDC" }
+      ) as never,
+      operator: (
+        allData.operator && typeof allData.operator === "object"
+          ? allData.operator
+          : {
+              walletAddress: "0x0000000000000000000000000000000000000000",
+              displayName: "Unknown",
+              certifications: [],
+              trainingAcknowledgments: {},
+            }
+      ) as never,
+      complianceRegulations: Array.isArray(allData.complianceRegulations)
+        ? (allData.complianceRegulations as string[]).filter(
+            (s) => typeof s === "string" && s.length > 0,
+          )
+        : undefined,
+      tenantId: ctx.tenantId,
+      status: "submitted",
+      createdAt: nowIso,
+      submittedAt: nowIso,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[wizard] registration insert failed:", message);
+    executedSteps.push({
+      name: "build-registration",
+      status: "failed",
+      message:
+        "Registration could not be persisted — nothing was submitted. Retry, or submit via POST /api/onboard/register.",
+      data: { registrationSubmitted: false },
+    });
+    return { success: false, executedSteps, error: "registration_persist_failed" };
+  }
+
   executedSteps.push({
     name: "build-registration",
     status: "success",
-    message: "Registration record built from wizard data",
-    data: {
-      registrationId: `reg-${session.id.slice(0, 8)}`,
-      status: "submitted",
-    },
+    message: "Registration submitted — retrievable at GET /api/onboard/registrations/:id",
+    data: { registrationId, status: "submitted" },
   });
 
   return {
@@ -519,19 +674,101 @@ async function orchestrateDeviceBuilder(
     message: "Configuration validated",
   });
 
-  // Step 3: Register devices
+  // Step 3 (Z3): Register devices for REAL — rows in the same store that
+  // POST /api/setup/register-device writes. Only ids of rows that actually
+  // exist are reported; when registration cannot happen, the step says so
+  // honestly instead of fabricating device ids.
   const registeredDevices: string[] = [];
+
+  if (devices.length === 0) {
+    executedSteps.push({
+      name: "register-devices",
+      status: "skipped",
+      message: "No devices to register",
+      data: { deviceIds: [] },
+    });
+    return { success: true, executedSteps, kernelConfig, registeredDevices };
+  }
+
+  const repos = tryGetRepos();
+  if (!repos) {
+    executedSteps.push({
+      name: "register-devices",
+      status: "skipped",
+      message:
+        "Devices were NOT registered — no database available. Register via POST /api/setup/register-device.",
+      data: { deviceIds: [] },
+    });
+    return { success: true, executedSteps, kernelConfig, registeredDevices };
+  }
+
+  const kernel = repos.kernels.findById(kernelConfig.kernelId);
+  if (!kernel) {
+    executedSteps.push({
+      name: "register-devices",
+      status: "skipped",
+      message:
+        `Devices were NOT registered — kernel '${kernelConfig.kernelId}' is not registered yet. ` +
+        "Boot a kernel with the generated config (or POST /api/kernels), then register devices " +
+        "via POST /api/setup/register-device.",
+      data: { deviceIds: [] },
+    });
+    return { success: true, executedSteps, kernelConfig, registeredDevices };
+  }
+
+  const failures: Array<{ deviceId: string; error: string }> = [];
   for (let i = 0; i < devices.length; i++) {
+    const device = devices[i];
     const deviceId = `dev-${kernelConfig.kernelId}-${String(i).padStart(3, "0")}`;
-    registeredDevices.push(deviceId);
+    try {
+      // Idempotent on retry: a device already registered under this id counts
+      // as registered, not as a duplicate-insert failure.
+      const existing = repos.kernels.findDeviceById(deviceId);
+      if (!existing) {
+        repos.kernels.insertDevice({
+          id: deviceId,
+          kernelId: kernelConfig.kernelId,
+          type: String(device.type ?? "machine"),
+          model: String(device.name ?? "unknown"),
+          firmware: "unknown",
+          status: "idle",
+          contributesToCapabilities: [],
+          lastUpdated: new Date().toISOString(),
+          adapterType: String(device.adapterType ?? "generic-http"),
+          capabilities: [],
+          healthStatus: "healthy",
+        } as never);
+      }
+      registeredDevices.push(deviceId);
+    } catch (err) {
+      failures.push({
+        deviceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (failures.length > 0) {
+    console.error("[wizard] device registration failures:", failures);
+    executedSteps.push({
+      name: "register-devices",
+      status: "failed",
+      message: `Registered ${registeredDevices.length} of ${devices.length} device(s); ${failures.length} failed`,
+      data: { deviceIds: registeredDevices, failures },
+    });
+    return {
+      success: false,
+      executedSteps,
+      kernelConfig,
+      registeredDevices,
+      error: "device_registration_failed",
+    };
   }
 
   executedSteps.push({
     name: "register-devices",
-    status: registeredDevices.length > 0 ? "success" : "skipped",
-    message: registeredDevices.length > 0
-      ? `Registered ${registeredDevices.length} device(s)`
-      : "No devices to register",
+    status: "success",
+    message: `Registered ${registeredDevices.length} device(s)`,
     data: { deviceIds: registeredDevices },
   });
 
@@ -555,4 +792,14 @@ export function _clearSessionsForTesting(): void {
 /** Returns current session count (test helper). */
 export function _getSessionCountForTesting(): number {
   return sessions.size;
+}
+
+/**
+ * Overrides completion orchestration (test helper — do not call in
+ * production). Pass null to restore the real per-track orchestration.
+ */
+export function _setCompletionOverrideForTesting(
+  fn: ((session: WizardSession) => Promise<WizardCompletionResult>) | null,
+): void {
+  completionOverride = fn;
 }

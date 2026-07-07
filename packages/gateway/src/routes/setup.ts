@@ -708,6 +708,8 @@ export async function setupRoutes(app: FastifyInstance) {
           assignedDevices: deviceId ? [deviceId] : [],
           startedAt: new Date().toISOString(),
           progress: 0,
+          // F8 — persist the requested tier (defaults to 0 above).
+          assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
         });
       }
     } catch {

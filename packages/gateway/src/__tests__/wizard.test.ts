@@ -7,9 +7,14 @@
  *   DELETE /api/wizard/sessions/:id          — Abandon session
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { wizardRoutes, _clearSessionsForTesting, _getSessionCountForTesting } from "../routes/wizard.js";
+import {
+  wizardRoutes,
+  _clearSessionsForTesting,
+  _getSessionCountForTesting,
+  _setCompletionOverrideForTesting,
+} from "../routes/wizard.js";
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -407,6 +412,207 @@ describe("Wizard API", () => {
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("session_abandoned");
+    });
+  });
+
+  // ── Z3 — no fabricated backend effects (storeless process) ────────────────
+  //
+  // This file runs without initStore(), so completion cannot perform real
+  // registrations. The honest contract: steps report "skipped" and carry NO
+  // invented ids. (The store-backed positive path lives in
+  // wizard-completion-store.test.ts — separate file, separate db singleton.)
+
+  describe("Z3 — completion never fabricates backend effects (storeless)", () => {
+    it("machine-onboarding reports build-registration skipped, with no registrationId", async () => {
+      const sessionId = await createSession(app, "machine-onboarding");
+      await completeAllSteps(app, sessionId, 7);
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.result.success).toBe(true);
+
+      const step = body.result.executedSteps.find(
+        (s: { name: string }) => s.name === "build-registration",
+      );
+      expect(step).toBeDefined();
+      expect(step.status).toBe("skipped");
+      expect(step.data.registrationSubmitted).toBe(false);
+      expect(step.data.registrationId).toBeUndefined();
+      expect(step.message).toContain("NOT submitted");
+    });
+
+    it("device-builder reports register-devices skipped, with no fabricated device ids", async () => {
+      const sessionId = await createSession(app, "device-builder");
+      await app.inject({
+        method: "PUT",
+        url: `/api/wizard/sessions/${sessionId}/steps/0`,
+        payload: { data: { deviceName: "My Printer", deviceType: "machine" } },
+      });
+      await app.inject({
+        method: "PUT",
+        url: `/api/wizard/sessions/${sessionId}/steps/1`,
+        payload: { data: { adapterType: "mock" } },
+      });
+      await app.inject({
+        method: "PUT",
+        url: `/api/wizard/sessions/${sessionId}/steps/2`,
+        payload: { data: { capabilities: ["fdm"] } },
+      });
+      await app.inject({
+        method: "PUT",
+        url: `/api/wizard/sessions/${sessionId}/steps/3`,
+        payload: { data: { connectionTested: true } },
+      });
+      await app.inject({
+        method: "PUT",
+        url: `/api/wizard/sessions/${sessionId}/steps/4`,
+        payload: { data: { kernelId: "kernel_test_builder" } },
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.result.success).toBe(true);
+
+      const step = body.result.executedSteps.find(
+        (s: { name: string }) => s.name === "register-devices",
+      );
+      expect(step).toBeDefined();
+      expect(step.status).toBe("skipped");
+      expect(step.data.deviceIds).toEqual([]);
+      expect(body.result.registeredDevices).toEqual([]);
+      expect(step.message).toContain("NOT registered");
+    });
+  });
+
+  // ── Z1 — completion failure + concurrency guards ──────────────────────────
+
+  describe("POST /complete — Z1 failure and concurrency guards", () => {
+    afterEach(() => {
+      _setCompletionOverrideForTesting(null);
+    });
+
+    it("does NOT mark the session completed when orchestration fails, and allows retry", async () => {
+      const sessionId = await createSession(app);
+      await completeAllSteps(app, sessionId, 5);
+
+      _setCompletionOverrideForTesting(async () => ({
+        success: false,
+        executedSteps: [{ name: "boom", status: "failed", message: "simulated failure" }],
+        error: "orchestration_failed",
+      }));
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toBe("completion_failed");
+
+      // Session must remain retryable — not completed
+      const get = await app.inject({
+        method: "GET",
+        url: `/api/wizard/sessions/${sessionId}`,
+      });
+      expect(get.json().session.status).toBe("in_progress");
+      // The failed outcome is recorded for observability
+      expect(get.json().session.completionResult.success).toBe(false);
+
+      // Retry once the failure cause is gone → succeeds
+      _setCompletionOverrideForTesting(null);
+      const retry = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json().session.status).toBe("completed");
+    });
+
+    it("orchestration throw is surfaced as completion_failed, not completed", async () => {
+      const sessionId = await createSession(app);
+      await completeAllSteps(app, sessionId, 5);
+
+      _setCompletionOverrideForTesting(async () => {
+        throw new Error("kaboom");
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toBe("completion_failed");
+      // Internal error detail must not leak; generic code only
+      expect(res.json().message).toBe("orchestration_failed");
+
+      const get = await app.inject({
+        method: "GET",
+        url: `/api/wizard/sessions/${sessionId}`,
+      });
+      expect(get.json().session.status).toBe("in_progress");
+    });
+
+    it("second concurrent /complete gets 409 while the first is in flight", async () => {
+      const sessionId = await createSession(app);
+      await completeAllSteps(app, sessionId, 5);
+
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      _setCompletionOverrideForTesting(async () => {
+        await gate;
+        return { success: true, executedSteps: [] };
+      });
+
+      const first = app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      // Give the first request a tick to claim the session
+      await new Promise((r) => setTimeout(r, 20));
+
+      const second = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error).toBe("completion_in_progress");
+
+      release();
+      const firstRes = await first;
+      expect(firstRes.statusCode).toBe(200);
+      expect(firstRes.json().session.status).toBe("completed");
+    });
+
+    it("in-flight claim is released after a failure so retry is not blocked", async () => {
+      const sessionId = await createSession(app);
+      await completeAllSteps(app, sessionId, 5);
+
+      _setCompletionOverrideForTesting(async () => ({
+        success: false,
+        executedSteps: [],
+        error: "orchestration_failed",
+      }));
+      await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+
+      // Immediately retryable — no lingering 409 from the failed attempt
+      _setCompletionOverrideForTesting(null);
+      const retry = await app.inject({
+        method: "POST",
+        url: `/api/wizard/sessions/${sessionId}/complete`,
+      });
+      expect(retry.statusCode).toBe(200);
     });
   });
 

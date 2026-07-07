@@ -11,6 +11,8 @@ export interface CapabilityTenantOpts {
 export interface ICapabilityRepository {
   findAll(opts?: CapabilityTenantOpts): CapabilityRow[];
   findById(id: string): CapabilityRow | undefined;
+  /** Batch lookup — one query per ≤500 ids (true N+1 prevention). Empty input → []. */
+  findByIds(ids: string[]): CapabilityRow[];
   findByKernel(kernelId: string, opts?: CapabilityTenantOpts): CapabilityRow[];
   findByType(type: string, opts?: CapabilityTenantOpts): CapabilityRow[];
   search(query: string, opts?: CapabilityTenantOpts): CapabilityRow[];
