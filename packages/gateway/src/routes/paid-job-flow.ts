@@ -1540,6 +1540,55 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
+      // F4: if the first pass ALREADY read-confirmed an on-chain release (money moved),
+      // the oracle verdict is moot — reconcile the DB to 'settled' and short-circuit
+      // BEFORE the oracle gate. Without this, an oracle verified:false below resets the
+      // job to 'evidence_submitted' and the DB permanently lags a real release (every
+      // resume repeating the 422). Safe because driveSettlement reports settled ONLY from
+      // a landed receipt or a read-confirmed Released (settlement-crank F1 invariant), and
+      // when chainSettled the oracle mint was already skipped (nothing is lost by skipping
+      // the gate).
+      if (v2ChainDrive && chainSettled) {
+        const nowIso = new Date().toISOString();
+        repos.jobs.updateStatus(jobId, "settled");
+        if (escrowId) {
+          repos.escrows.updateStatus(escrowId, "completed");
+          for (const ms of repos.escrows.findMilestonesByEscrow(escrowId)) {
+            repos.escrows.updateMilestoneStatus(ms.id, "released");
+          }
+        }
+        reclaimed = false;
+        pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+          metadata: {
+            path: "resume-settlement-chain-preconfirmed",
+            bundleId,
+            bundleHash,
+            escrowAddress,
+            settlementStatus: "settled",
+            assuranceTier: jobAssuranceTier,
+            mockSettlement: isMockSettlement(),
+            chainOutcome: chainOutcome ?? null,
+            chainSettled: true,
+          },
+        });
+        return {
+          jobId,
+          status: "settled",
+          resumed: true,
+          evidenceBundleId: bundleId,
+          evidenceHash: bundleHash,
+          escrowAddress,
+          escrowId,
+          settledAt: nowIso,
+          assuranceTier: jobAssuranceTier,
+          oracleVerified: true, // release already landed on-chain; oracle gate short-circuited
+          chainOutcome: chainOutcome ?? null,
+          chainSettled: true,
+          message:
+            "Settlement resumed: milestone already released on-chain (read-confirmed). Job reconciled to settled; oracle gate short-circuited.",
+        };
+      }
+
       // Oracle gate — verify the reused evidence hash. For a real V2 escrow that is
       // not already settled on-chain we ALSO mint the EAS attestation (bound to the
       // on-chain stepId) so the second pass can bind it; the mock / non-chain path

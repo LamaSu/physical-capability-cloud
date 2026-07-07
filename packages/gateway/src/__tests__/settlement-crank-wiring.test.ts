@@ -79,6 +79,7 @@ vi.mock("../services/settlement-crank.js", () => ({
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
+import { verifyWithOracle } from "../services/oracle-client.js";
 
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
@@ -235,6 +236,35 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
     expect(res.json().status).toBe("evidence_submitted");
     // Still resumable — not prematurely marked settled.
     expect(getRepos().jobs.findById(jobId)!.status).toBe("evidence_submitted");
+  });
+
+  it("F4: reconciles to settled and short-circuits the oracle when the first pass already released", async () => {
+    const { jobId } = await makeJobWithRealEscrow("wire-f4");
+    trap(jobId, "wire-f4");
+
+    h.isWriteEnabled.mockReturnValue(true);
+    process.env.PCC_USE_EAS_V2 = "true";
+    process.env.MOCK_SETTLEMENT = "false"; // real-settlement branch — chain owns the verdict
+
+    // First pass ALREADY read-confirmed an on-chain release (settled:true).
+    h.driveSettlement.mockResolvedValueOnce({
+      escrowAddress: REAL_ESCROW, milestoneIdx: 0, finalStatus: "Released",
+      outcome: "released", settled: true,
+      steps: [{ action: "release", result: "already_done", revert: "Not attested" }],
+      stepId: "0x" + "11".repeat(32),
+    });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement`, payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("settled");
+    expect(res.json().chainSettled).toBe(true);
+    expect(getRepos().jobs.findById(jobId)!.status).toBe("settled");
+    // The whole point of F4: once the chain already released, the oracle gate is BYPASSED
+    // entirely — a real on-chain release is ground truth, so no oracle verdict (pass OR
+    // fail) can un-settle it, and a released job is never 422'd back to evidence_submitted.
+    // Proven by: exactly one drive (no second pass) AND the oracle was never consulted.
+    expect(h.driveSettlement).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(verifyWithOracle)).not.toHaveBeenCalled();
   });
 });
 
