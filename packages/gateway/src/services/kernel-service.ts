@@ -374,8 +374,9 @@ export class KernelService {
               }
 
               // Failed completion → settle the composition step's reputation as
-              // failed (inert for non-composition jobs). Success is settled in
-              // the evidence-to-settlement block below, after processEvidence.
+              // failed (inert for non-composition jobs). Success is settled
+              // unconditionally in the block below — regardless of whether an
+              // in-memory evidence bundle was captured.
               if (!result.success) {
                 this.settleStepRep(jobId, "failed");
               }
@@ -394,9 +395,6 @@ export class KernelService {
                       autoRelease: assuranceTier === 0,
                       contractAddress,
                     });
-                    // Credit the composition step's reputation at completion
-                    // (inert for non-composition jobs).
-                    this.settleStepRep(jobId, "success", result.bundleId);
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
                     console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
@@ -406,6 +404,15 @@ export class KernelService {
                   }
                   this.completedBundles.delete(jobId);
                 }
+                // Credit the composition step's reputation on ANY successful local
+                // completion — not only when an in-memory evidence bundle was
+                // present. A local job can succeed with no in-memory bundle (the
+                // adapter emitted none, or it was drained elsewhere); its step
+                // outcome must still move pending → success rather than hang
+                // forever. Best-effort + inert for non-composition jobs, mirroring
+                // the unconditional failure settle above. result.bundleId is
+                // forwarded when present, else omitted by settleStepRep.
+                this.settleStepRep(jobId, "success", result.bundleId);
               }
 
               lifecycleSpan.setStatus({ code: result.success ? 1 : 2, message: result.error ?? "ok" });
@@ -482,9 +489,6 @@ export class KernelService {
                   autoRelease: assuranceTier === 0,
                   contractAddress,
                 });
-                // Credit the composition step's reputation at completion
-                // (inert for non-composition jobs).
-                this.settleStepRep(jobId, "success", result.bundleId);
               } catch (err) {
                 console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
               } finally {
@@ -493,6 +497,11 @@ export class KernelService {
               }
               this.completedBundles.delete(jobId);
             }
+            // Credit the composition step's reputation on ANY successful local
+            // completion — regardless of in-memory evidence bundle presence (see
+            // the Sentry-wrapped path above for the full rationale). Inert for
+            // non-composition jobs; result.bundleId forwarded when present.
+            this.settleStepRep(jobId, "success", result.bundleId);
           }
           // End local trace span (fallback path)
           endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
