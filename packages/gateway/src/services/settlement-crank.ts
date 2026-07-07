@@ -17,12 +17,23 @@
  * point. It cannot double-fund, double-submit, double-attest, or double-release,
  * because the contract reverts the duplicate and we map that revert to
  * ALREADY-DONE. Correctness under RPC replica lag, concurrent cranks, and
- * mid-sequence crashes comes from ONE property: every call re-reads the
- * receipt-confirmed on-chain state first, so a stale/false step from a previous
- * call is healed by the next call's fresh read. Re-driving converges to Released.
+ * mid-sequence crashes comes from ONE property: every call re-reads the on-chain
+ * state, so a stale/false step from a previous call is healed by the next call's
+ * fresh read. Re-driving converges to Released.
+ *
+ * Some contract guards revert with a STATUS-AGNOSTIC string: release()'s
+ * "Not attested" (:942), submitEvidence()'s "Invalid status" (:814), and
+ * submitAttestation()'s "Evidence not submitted" / per-UID "Attestation already
+ * used" (:862/:864) all fire for a LATERAL Disputed/Slashed just as they do for a
+ * genuine "already advanced". So an already-done revert on those steps is NOT taken
+ * as advancement on its own — the crank does one confirming getMilestoneV2 read and
+ * advances only to the TRUE on-chain status (a lateral state → terminal_other, never
+ * a false forward step that could waterfall into a bogus release). THE INVARIANT:
+ * settled=true is reported ONLY from a landed release receipt OR a read-confirmed
+ * Released status — never from a mapped revert alone.
  *
  * The EXACT revert strings below are read verbatim from
- * packages/contracts/src/MilestoneEscrowV2.sol (fund :750, submitEvidence :817,
+ * packages/contracts/src/MilestoneEscrowV2.sol (fund :750, submitEvidence :814,
  * submitAttestation :862/:864, release :942/:943) — not inferred.
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -68,12 +79,17 @@ const REVERT = {
   fundAlready: ["Already funded"],
   /** depositBond() when status != Funded — i.e. already Locked+ (:791). */
   bondAlready: ["Not funded"],
-  /** submitEvidence() when status != Locked/Funded — i.e. already Evidenced+ (:817). */
+  /** submitEvidence() when status != Locked/Funded (:814) — Evidenced+ (done) OR a
+   *  lateral Disputed/Slashed. AMBIGUOUS: confirm with a read before advancing. */
   evidenceAlready: ["Invalid status"],
-  /** submitAttestation() when status != Evidenced (already Attested+, :862) OR the
-   *  UID already released a milestone (:864) — both mean the attestation is in. */
+  /** submitAttestation() reverts: "Evidence not submitted" (status != Evidenced, :862)
+   *  and "Attestation already used" (:864). The latter is per-UID-per-ESCROW, so it does
+   *  NOT prove THIS milestone is attested. AMBIGUOUS: confirm with a read (and, for
+   *  "already used", that THIS milestone recorded THIS uid) before advancing. */
   attestAlready: ["Evidence not submitted", "Attestation already used"],
-  /** release() when status != Attested — i.e. already Released+ (:942). */
+  /** release() when status != Attested (:942) — Released (money moved) OR a lateral
+   *  Disputed/Slashed (money frozen/refunded). AMBIGUOUS: confirm with a read; only a
+   *  read-confirmed Released may report settled. */
   releaseAlready: ["Not attested"],
   /** release() before the challenge window closes (:943) — NOT done, come back. */
   releaseWindowOpen: ["Challenge window open"],
@@ -189,6 +205,21 @@ function matchesRevert(err: unknown, needles: readonly string[]): string | undef
   return undefined;
 }
 
+/**
+ * The lateral/terminal money states the crank must never advance PAST optimistically:
+ * Disputed (under arbitration), Refunded (funds returned to payer), Slashed (bond
+ * taken). A milestone in any of these has NOT released to the operator, so it must be
+ * reported terminal_other (settled=false), not driven further. Released is terminal too
+ * but is the success terminal, handled separately.
+ */
+function isTerminalOther(status: number): boolean {
+  return (
+    status === MilestoneStatusV2.Disputed ||
+    status === MilestoneStatusV2.Refunded ||
+    status === MilestoneStatusV2.Slashed
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Step executor
 // ---------------------------------------------------------------------------
@@ -214,6 +245,13 @@ async function execWrite(
   try {
     const { transactionHash } = await write();
     const receipt = await waitForReceipt(transactionHash as Hex);
+    if (receipt.status === "timeout") {
+      // The receipt did not land within waitForReceipt's bound — a dropped/underpriced
+      // tx (F3). Do NOT assume success and do NOT keep the signer lock polling: surface
+      // blocked and let the next drive's fresh read be ground truth. The tx may still
+      // mine later; the next drive's revert-map handles that as already-done.
+      return { step: { action, result: "blocked", txHash: transactionHash, revert: "receipt_timeout" }, advanced: false };
+    }
     if (receipt.status !== "success") {
       // Broadcast passed estimation but the tx reverted on-chain (state moved
       // between estimation and mining). The next drive's fresh read is ground
@@ -344,7 +382,19 @@ export async function driveSettlement(
       );
       steps.push(r.step);
       if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "evidence_blocked" });
-      if (r.advanced) statusNum = MilestoneStatusV2.Evidenced;
+      if (r.step.result === "landed") {
+        statusNum = MilestoneStatusV2.Evidenced;
+      } else {
+        // already_done: "Invalid status" is AMBIGUOUS — Evidenced+ (done) OR a lateral
+        // Disputed/Slashed. Confirm with one read so a stale/lateral state cannot
+        // waterfall through the later steps into a false released.
+        const c = await getMilestoneV2(milestoneIdx, escrowAddress);
+        statusNum = c.status;
+        windowEnd = c.challengeWindowEnd;
+        if (isTerminalOther(statusNum)) {
+          return base({ outcome: "terminal_other", reason: milestoneStatusV2Name(statusNum).toLowerCase() });
+        }
+      }
     }
 
     // 4. SUBMIT ATTESTATION — from Evidenced. Needs the oracle-minted EAS UID.
@@ -357,11 +407,30 @@ export async function driveSettlement(
       );
       steps.push(r.step);
       if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "attest_blocked" });
-      if (r.advanced) {
+      if (r.step.result === "landed") {
         statusNum = MilestoneStatusV2.Attested;
-        // The window just opened (or was reopened by a concurrent attest we mapped
-        // to already_done). Recompute its end from the milestone's window length.
+        // The window just opened; its end is now + the milestone's configured length.
         windowEnd = nowSeconds + m.challengeWindowSeconds;
+      } else {
+        // already_done — the attest reverts are AMBIGUOUS; confirm with one read.
+        const c = await getMilestoneV2(milestoneIdx, escrowAddress);
+        if (r.step.revert === "Attestation already used") {
+          // F2: `_attestationUsed` is per-UID-per-ESCROW (:864), NOT "THIS milestone
+          // attested". Treat as done only if THIS milestone actually recorded THIS uid;
+          // otherwise a SIBLING milestone consumed the uid and this one is still blocked
+          // (a stale/wrong uid must never advance us toward release).
+          if (c.verifierAttestationUid.toLowerCase() !== easUid.toLowerCase()) {
+            steps[steps.length - 1] = { action: "submitAttestation", result: "blocked", revert: r.step.revert };
+            return base({ outcome: "blocked", reason: "attestation_uid_mismatch" });
+          }
+        }
+        // "Evidence not submitted", or a confirmed matching-uid "already used": advance to
+        // the TRUE on-chain status, guarding against a lateral/terminal money state.
+        statusNum = c.status;
+        windowEnd = c.challengeWindowEnd;
+        if (isTerminalOther(statusNum)) {
+          return base({ outcome: "terminal_other", reason: milestoneStatusV2Name(statusNum).toLowerCase() });
+        }
       }
     }
 
@@ -374,7 +443,23 @@ export async function driveSettlement(
         const r = await execWrite("release", () => releaseMilestoneV2(milestoneIdx, escrowAddress), REVERT.releaseAlready);
         steps.push(r.step);
         if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "release_blocked" });
-        if (r.advanced) statusNum = MilestoneStatusV2.Released;
+        if (r.step.result === "landed") {
+          // A LANDED release receipt is the only positive proof the money moved.
+          statusNum = MilestoneStatusV2.Released;
+        } else {
+          // already_done: "Not attested" fires for ANY status != Attested — Released
+          // (money moved) but ALSO Disputed/Slashed (money frozen/refunded). NEVER report
+          // released off this revert. Confirm with one read: read-confirmed Released →
+          // settled; Disputed/Slashed → terminal_other; anything else (stale replica lag)
+          // → falls through to awaiting and heals on the next drive. This is the F1 fix
+          // that upholds the settled invariant.
+          const c = await getMilestoneV2(milestoneIdx, escrowAddress);
+          statusNum = c.status;
+          windowEnd = c.challengeWindowEnd;
+          if (isTerminalOther(statusNum)) {
+            return base({ outcome: "terminal_other", reason: milestoneStatusV2Name(statusNum).toLowerCase() });
+          }
+        }
       } catch (err) {
         // Off-chain gate passed but the chain's block.timestamp is still behind
         // challengeWindowEnd (clock skew). The window is genuinely open on-chain —
@@ -387,8 +472,11 @@ export async function driveSettlement(
       }
     }
 
-    // ── Final classification from the (locally-advanced) status ──
+    // ── Final classification from the (confirmed-where-ambiguous) status ──
     if (statusNum === MilestoneStatusV2.Released) return base({ outcome: "released" });
+    if (isTerminalOther(statusNum)) {
+      return base({ outcome: "terminal_other", reason: milestoneStatusV2Name(statusNum).toLowerCase() });
+    }
     if (statusNum === MilestoneStatusV2.Attested) {
       return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: windowEnd });
     }

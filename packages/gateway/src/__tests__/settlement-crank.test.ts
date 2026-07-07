@@ -213,8 +213,12 @@ describe("driveSettlement — revert-map (contract dedups → ALREADY-DONE)", ()
     expect(r.outcome).toBe("released");
   });
 
-  it('maps submitEvidence "Invalid status" to already_done (concurrent evidence)', async () => {
-    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Funded, { challengeWindowEnd: PAST }));
+  it('maps submitEvidence "Invalid status" to already_done, confirms Evidenced, continues', async () => {
+    // Concurrent evidence: our stale read says Funded; the confirming read after the
+    // "Invalid status" revert shows the TRUE state (Evidenced) so the drive continues.
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Funded, { challengeWindowEnd: PAST }))
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }));
     mEvidence.mockRejectedValue(new Error("The contract function reverted with: Invalid status"));
 
     const r = await driveSettlement(ESCROW, 0, fullOpts);
@@ -224,8 +228,10 @@ describe("driveSettlement — revert-map (contract dedups → ALREADY-DONE)", ()
     expect(r.outcome).toBe("released");
   });
 
-  it('maps submitAttestation "Evidence not submitted" to already_done', async () => {
-    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }));
+  it('maps submitAttestation "Evidence not submitted" to already_done, confirms Attested, releases', async () => {
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }))
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }));
     mAttest.mockRejectedValue(new Error("reverted: Evidence not submitted"));
 
     const r = await driveSettlement(ESCROW, 0, fullOpts);
@@ -235,18 +241,28 @@ describe("driveSettlement — revert-map (contract dedups → ALREADY-DONE)", ()
     expect(r.outcome).toBe("released");
   });
 
-  it('maps submitAttestation "Attestation already used" to already_done', async () => {
-    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }));
+  it('maps "Attestation already used" to already_done when THIS milestone recorded THIS uid (F2 match)', async () => {
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }))
+      // Confirming read: this milestone IS attested with the SAME uid we tried → genuinely done.
+      .mockResolvedValueOnce(
+        milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST, verifierAttestationUid: UID }),
+      );
     mAttest.mockRejectedValue(new Error("Attestation already used"));
 
     const r = await driveSettlement(ESCROW, 0, fullOpts);
 
     expect(r.steps[0]).toMatchObject({ action: "submitAttestation", result: "already_done" });
+    expect(mRelease).toHaveBeenCalledTimes(1);
     expect(r.outcome).toBe("released");
+    expect(r.settled).toBe(true);
   });
 
-  it('maps release "Not attested" to already_done → Released (double-release is a no-op)', async () => {
-    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }));
+  it('maps release "Not attested" to released ONLY via a read-confirmed Released (F1 genuine)', async () => {
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }))
+      // Confirming read proves the money actually moved: status is Released on-chain.
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Released, { challengeWindowEnd: PAST }));
     mRelease.mockRejectedValue(new Error("execution reverted: Not attested"));
 
     const r = await driveSettlement(ESCROW, 0, { nowSeconds: NOW });
@@ -267,8 +283,14 @@ describe("driveSettlement — revert-map (contract dedups → ALREADY-DONE)", ()
     expect(r.settled).toBe(false);
   });
 
-  it("every step already_done (fully redundant re-drive) still reaches Released", async () => {
-    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Unfunded, { challengeWindowEnd: PAST }));
+  it("every step already_done (fully redundant re-drive) still reaches Released via confirming reads", async () => {
+    // Each ambiguous already-done triggers a confirming read; the chain is progressively
+    // further along, ending Released. Fund uses the monotonic "Already funded" map (no read).
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Unfunded, { challengeWindowEnd: PAST })) // initial
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST })) // after evidence already_done
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST })) // after attest already_done
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Released, { challengeWindowEnd: PAST })); // after release already_done
     mFund.mockRejectedValue(new Error("Already funded"));
     mEvidence.mockRejectedValue(new Error("Invalid status"));
     mAttest.mockRejectedValue(new Error("Evidence not submitted"));
@@ -277,6 +299,7 @@ describe("driveSettlement — revert-map (contract dedups → ALREADY-DONE)", ()
     const r = await driveSettlement(ESCROW, 0, fullOpts);
 
     expect(r.outcome).toBe("released");
+    expect(r.settled).toBe(true);
     expect(r.steps.every((s) => s.result === "already_done")).toBe(true);
   });
 });
@@ -382,5 +405,117 @@ describe("driveSettlement — unexpected errors propagate (no silent swallow)", 
     mAttest.mockRejectedValue(new Error("execution reverted: Wrong attester"));
 
     await expect(driveSettlement(ESCROW, 0, fullOpts)).rejects.toThrow(/Wrong attester/);
+  });
+});
+
+describe("driveSettlement — chain-authoritative safety (F1/F2/F3 confirming reads)", () => {
+  // THE keeper invariant: settled=true is reported ONLY from a landed release receipt or a
+  // read-confirmed Released status — a status-agnostic revert ("Not attested" etc.) never
+  // settles a milestone whose money is actually frozen (Disputed) or refunded (Slashed).
+
+  it("F1: a Disputed escrow whose release reverts 'Not attested' is terminal_other, NOT settled", async () => {
+    // The exact bug: a dispute lands between our (stale) Attested read and the release write.
+    // release() reverts 'Not attested' (fires for ANY status != Attested). The confirming
+    // read sees Disputed → terminal_other; the money is frozen, so settled MUST stay false.
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST })) // stale read
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Disputed)); // confirming read: money frozen
+    mRelease.mockRejectedValue(new Error("execution reverted: Not attested"));
+
+    const r = await driveSettlement(ESCROW, 0, { nowSeconds: NOW });
+
+    expect(r.outcome).toBe("terminal_other");
+    expect(r.settled).toBe(false); // ← the invariant closed by F1
+    expect(r.finalStatus).toBe("Disputed");
+    expect(r.reason).toBe("disputed");
+    expect(mGet).toHaveBeenCalledTimes(2); // one confirming read was made
+  });
+
+  it("F1: a Slashed escrow whose release reverts 'Not attested' is terminal_other, NOT settled", async () => {
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }))
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Slashed));
+    mRelease.mockRejectedValue(new Error("Not attested"));
+
+    const r = await driveSettlement(ESCROW, 0, { nowSeconds: NOW });
+
+    expect(r.outcome).toBe("terminal_other");
+    expect(r.settled).toBe(false);
+    expect(r.finalStatus).toBe("Slashed");
+  });
+
+  it("F1: evidence 'Invalid status' confirming Disputed does NOT waterfall into a release", async () => {
+    // The earlier-revert waterfall: a stale Funded read + a Disputed chain. The evidence
+    // 'Invalid status' revert must be confirmed (→ terminal_other), never optimistically
+    // advanced to Evidenced then attested then released.
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Funded, { challengeWindowEnd: PAST })) // stale
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Disputed)); // confirming read
+    mEvidence.mockRejectedValue(new Error("Invalid status"));
+
+    const r = await driveSettlement(ESCROW, 0, fullOpts);
+
+    expect(r.outcome).toBe("terminal_other");
+    expect(r.settled).toBe(false);
+    expect(mAttest).not.toHaveBeenCalled();
+    expect(mRelease).not.toHaveBeenCalled();
+  });
+
+  it("F1: attestation 'Evidence not submitted' confirming Slashed does NOT waterfall into a release", async () => {
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST })) // stale
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Slashed)); // confirming read
+    mAttest.mockRejectedValue(new Error("Evidence not submitted"));
+
+    const r = await driveSettlement(ESCROW, 0, fullOpts);
+
+    expect(r.outcome).toBe("terminal_other");
+    expect(r.settled).toBe(false);
+    expect(mRelease).not.toHaveBeenCalled();
+  });
+
+  it("F1: release 'Not attested' whose confirming read still lags at Attested → awaiting (not settled)", async () => {
+    // A stale replica that hasn't caught up: never settle on an unconfirmed release; report
+    // awaiting and let the next drive heal once the replica reflects the real state.
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }))
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }));
+    mRelease.mockRejectedValue(new Error("Not attested"));
+
+    const r = await driveSettlement(ESCROW, 0, { nowSeconds: NOW });
+
+    expect(r.outcome).toBe("awaiting_challenge_window");
+    expect(r.settled).toBe(false);
+  });
+
+  it("F2: 'Attestation already used' by a SIBLING milestone (uid mismatch) is blocked, not advanced", async () => {
+    // _attestationUsed is per-UID-per-ESCROW: a sibling milestone consumed the uid, so THIS
+    // milestone is still Evidenced. Advancing it toward release would settle unattested work.
+    const OTHER_UID = ("0x" + "77".repeat(32)) as `0x${string}`;
+    mGet
+      .mockResolvedValueOnce(milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST }))
+      .mockResolvedValueOnce(
+        milestone(MilestoneStatusV2.Evidenced, { challengeWindowEnd: PAST, verifierAttestationUid: OTHER_UID }),
+      );
+    mAttest.mockRejectedValue(new Error("Attestation already used"));
+
+    const r = await driveSettlement(ESCROW, 0, fullOpts);
+
+    expect(r.outcome).toBe("blocked");
+    expect(r.reason).toBe("attestation_uid_mismatch");
+    expect(r.settled).toBe(false);
+    expect(mRelease).not.toHaveBeenCalled();
+    expect(r.steps[0]).toMatchObject({ action: "submitAttestation", result: "blocked" });
+  });
+
+  it("F3: a receipt-wait timeout classifies the step blocked (never settled)", async () => {
+    mGet.mockResolvedValue(milestone(MilestoneStatusV2.Attested, { challengeWindowEnd: PAST }));
+    mReceipt.mockResolvedValue({ status: "timeout", blockNumber: 0 });
+
+    const r = await driveSettlement(ESCROW, 0, { nowSeconds: NOW });
+
+    expect(r.outcome).toBe("blocked");
+    expect(r.settled).toBe(false);
+    expect(r.steps[0]).toMatchObject({ action: "release", result: "blocked", revert: "receipt_timeout" });
   });
 });

@@ -35,6 +35,7 @@ import {
   type Chain,
   formatUnits,
   parseUnits,
+  WaitForTransactionReceiptTimeoutError,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
@@ -604,10 +605,27 @@ export function isWriteEnabled(): boolean {
  */
 export async function waitForReceipt(
   txHash: Hex,
-): Promise<{ status: "success" | "reverted"; blockNumber: number }> {
+): Promise<{ status: "success" | "reverted" | "timeout"; blockNumber: number }> {
   const client = getPublicClient();
-  const receipt = await client.waitForTransactionReceipt({ hash: txHash });
-  return { status: receipt.status, blockNumber: Number(receipt.blockNumber) };
+  try {
+    // Bound the wait (F3). Without a timeout a dropped/underpriced tx polls forever, and
+    // because settlement runs this inside the in-process signer lock (settlement-crank
+    // withSignerLock) it would wedge ALL settlement + escrow-creation writes behind it.
+    // 90s mirrors the create-leg's addMilestone wait (paid-job-flow.ts).
+    const receipt = await client.waitForTransactionReceipt({ hash: txHash, timeout: 90_000 });
+    return { status: receipt.status, blockNumber: Number(receipt.blockNumber) };
+  } catch (err) {
+    // Timed out waiting for the receipt: the tx has NOT confirmed within the bound.
+    // Report a distinct "timeout" the caller classifies as blocked (never as success) —
+    // the tx may still mine later, and the next drive's fresh read + revert-map heals it.
+    if (
+      err instanceof WaitForTransactionReceiptTimeoutError ||
+      (err instanceof Error && err.name === "WaitForTransactionReceiptTimeoutError")
+    ) {
+      return { status: "timeout", blockNumber: 0 };
+    }
+    throw err;
+  }
 }
 
 /** Get the gateway signer address (if configured) */
