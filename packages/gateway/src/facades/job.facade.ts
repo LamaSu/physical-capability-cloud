@@ -250,6 +250,9 @@ export class JobFacade extends BaseFacade {
         startedAt: new Date().toISOString(),
         progress: 0,
         parameters: parameters ?? null,
+        // F8 — persist the tier the job was submitted at (default 0 =
+        // self-attested) so JobDTOs report the real value, not a hardcoded 0.
+        assuranceTier: typeof assuranceTier === "number" ? assuranceTier : 0,
       });
 
       // Determine if this is an external kernel (daemon will pick up the job)

@@ -16,6 +16,10 @@ export const jobs = sqliteTable("jobs", {
   progress: integer("progress").notNull().default(0),
   evidenceBundleId: text("evidence_bundle_id"),
   parameters: text("parameters", { mode: "json" }).$type<Record<string, unknown>>(),
+  /** Assurance tier (0-3) the job was submitted/contracted at. Null for
+   *  legacy rows written before the column existed — readers treat null as
+   *  tier 0 (self-attested), the weakest honest claim. */
+  assuranceTier: integer("assurance_tier"),
   /** Wave 4.1.x — interim multitenancy. Backfilled from req.tenantId at the
    *  route layer when set; null for legacy/anonymous rows. Filtered by
    *  TENANT_ENFORCE-gated repo opts, same pattern as machine_registrations. */

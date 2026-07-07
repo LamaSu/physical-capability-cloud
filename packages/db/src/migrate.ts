@@ -74,7 +74,8 @@ export function migrateDatabase(sqlite: Database.Database): void {
       completed_at TEXT,
       progress INTEGER NOT NULL DEFAULT 0,
       evidence_bundle_id TEXT,
-      parameters TEXT
+      parameters TEXT,
+      assurance_tier INTEGER
     );
 
     -- ── Evidence ─────────────────────────────────────────────────────
@@ -1439,6 +1440,8 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("machine_registrations", "compliance_regulations", "TEXT");
   // Wave 4.1.x — tenant_id on jobs (additive; same pattern as machine_registrations)
   safeAddColumn("jobs", "tenant_id", "TEXT");
+  // F8 — real assurance tier on jobs (additive). Null = legacy row, read as tier 0.
+  safeAddColumn("jobs", "assurance_tier", "INTEGER");
   // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
   safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
   safeAddColumn("capabilities", "tenant_id", "TEXT");

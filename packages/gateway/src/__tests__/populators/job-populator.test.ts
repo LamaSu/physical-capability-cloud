@@ -136,6 +136,32 @@ describe("populateJobDTO()", () => {
     const dto = populateJobDTO(model, mockKernelMap, mockCapabilityMap, makeCtx(), 0, "funded");
     expect(dto.escrowStatus).toBe("funded");
   });
+
+  // ── F8 — assuranceTier threads from the row, not hardcoded ──────────────
+
+  it("assuranceTier reports the real row value", () => {
+    for (const tier of [0, 1, 2, 3] as const) {
+      const model = makeRawJob({ assuranceTier: tier });
+      const dto = populateJobDTO(model, mockKernelMap, mockCapabilityMap, makeCtx());
+      expect(dto.assuranceTier).toBe(tier);
+    }
+  });
+
+  it("assuranceTier defaults to 0 for legacy rows (null/undefined)", () => {
+    const nullModel = makeRawJob({ assuranceTier: null });
+    expect(populateJobDTO(nullModel, mockKernelMap, mockCapabilityMap, makeCtx()).assuranceTier).toBe(0);
+    const undefModel = makeRawJob(); // fixture omits assuranceTier
+    expect(populateJobDTO(undefModel, mockKernelMap, mockCapabilityMap, makeCtx()).assuranceTier).toBe(0);
+  });
+
+  it("assuranceTier clamps out-of-range values into 0..3", () => {
+    const high = makeRawJob({ assuranceTier: 7 });
+    expect(populateJobDTO(high, mockKernelMap, mockCapabilityMap, makeCtx()).assuranceTier).toBe(3);
+    const negative = makeRawJob({ assuranceTier: -2 });
+    expect(populateJobDTO(negative, mockKernelMap, mockCapabilityMap, makeCtx()).assuranceTier).toBe(0);
+    const nan = makeRawJob({ assuranceTier: Number.NaN });
+    expect(populateJobDTO(nan, mockKernelMap, mockCapabilityMap, makeCtx()).assuranceTier).toBe(0);
+  });
 });
 
 // ── populateJobDetailDTO ───────────────────────────────────────────────────

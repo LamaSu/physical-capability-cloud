@@ -449,6 +449,8 @@ export async function createJobFromSession(
     startedAt: now,
     progress: 0,
     parameters: (session.selections ?? null) as any,
+    // F8 — persist the contracted tier so JobDTOs report the real value.
+    assuranceTier,
   });
 
   // ── 3. Create execution scope ──────────────────────────────────────
