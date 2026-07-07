@@ -55,6 +55,7 @@ import type {
   NegotiationSession,
   SessionStatus,
   SessionTransition,
+  AssuranceTier,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
 
@@ -69,6 +70,13 @@ const resolver = new TemplateResolver();
 /** Whether mock settlement is active (default: true for testnet) */
 function isMockSettlement(): boolean {
   return process.env.MOCK_SETTLEMENT !== "false";
+}
+
+/** Coerce a possibly-loose value to a valid on-chain AssuranceTier (0-3).
+ *  Never over-reports an SLA: NaN / out-of-range → 0. */
+function toTier(v: unknown): AssuranceTier {
+  const n = Math.trunc(Number(v));
+  return (Number.isFinite(n) && n >= 0 && n <= 3 ? n : 0) as AssuranceTier;
 }
 
 /**
@@ -761,7 +769,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         .from(negotiationSessions)
         .where(eq(negotiationSessions.jobId, jobId))
         .get();
-      const jobAssuranceTier = Number(
+      const jobAssuranceTier = toTier(
         (tierSessionRow?.contractTerms as Record<string, unknown> | null)?.assuranceTier ?? 0,
       );
 
@@ -1236,7 +1244,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         .from(negotiationSessions)
         .where(eq(negotiationSessions.jobId, jobId))
         .get();
-      const jobAssuranceTier = Number(
+      const jobAssuranceTier = toTier(
         (tierSessionRow?.contractTerms as Record<string, unknown> | null)?.assuranceTier
           ?? latestBundle.assuranceTier
           ?? 0,
