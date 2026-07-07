@@ -185,4 +185,59 @@ describe("negotiation + settlement correctness", () => {
       expect(res.statusCode).toBe(410);
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // N2 — changing selections after a quote invalidates it (no stale-price commit)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  describe("N2 — selections change invalidates quote + contract terms", () => {
+    it("clears quote/contractTerms on /select so a stale-price commit is rejected", async () => {
+      const id = await createSession(app, "n2-stale");
+
+      // Quote + review at quantity 1 (exact price depends on operator rules).
+      expect((await select(app, id, { quantity: 1 })).statusCode).toBe(200);
+      const q1 = (await quote(app, id)).json();
+      const price1 = q1.quote.totalPrice as string;
+      const r1 = (await review(app, id)).json();
+      expect(r1.contractTerms.milestones[0].amount).toBe(price1);
+
+      // Change the quantity to 1000 AFTER the quote/review.
+      const selRes = await select(app, id, { quantity: 1000 });
+      expect(selRes.statusCode).toBe(200);
+      // The prior quote + terms are invalidated in both the response and the DB.
+      expect(selRes.json().session.quote).toBeNull();
+      expect(selRes.json().session.contractTerms).toBeNull();
+
+      // Committing now is rejected — no locking escrow at the stale price while
+      // the job parameters already say quantity 1000.
+      const commitRes = await commit(app, id);
+      expect(commitRes.statusCode).toBe(400);
+      expect(commitRes.json().error).toContain("review");
+    });
+
+    it("re-quote after a selections change binds escrow to the NEW price", async () => {
+      const id = await createSession(app, "n2-requote");
+
+      expect((await select(app, id, { quantity: 1 })).statusCode).toBe(200);
+      const price1 = (await quote(app, id)).json().quote.totalPrice as string;
+      expect((await review(app, id)).statusCode).toBe(200);
+
+      // Bump quantity, then re-run the full quote -> review -> commit flow.
+      expect((await select(app, id, { quantity: 1000 })).statusCode).toBe(200);
+      const price2 = (await quote(app, id)).json().quote.totalPrice as string;
+      // 1000x the quantity => strictly higher than the qty-1 price.
+      expect(parseFloat(price2)).toBeGreaterThan(parseFloat(price1));
+      expect((await review(app, id)).statusCode).toBe(200);
+
+      const commitRes = await commit(app, id);
+      expect(commitRes.statusCode).toBe(200);
+      const escrowId = commitRes.json().escrowId as string;
+      expect(escrowId).toBeTruthy();
+
+      // Escrow holds the re-quoted price, not the original qty-1 price.
+      const escrow = getRepos().escrows.findById(escrowId);
+      expect(escrow!.totalAmount).toBe(price2);
+      expect(escrow!.totalAmount).not.toBe(price1);
+    });
+  });
 });

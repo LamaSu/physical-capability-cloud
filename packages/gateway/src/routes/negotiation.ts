@@ -380,6 +380,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .set({
             selections: merged as any,
             status: "configuring",
+            // Changing selections invalidates any prior quote + contract terms.
+            // Forcing a re-quote stops /commit from locking escrow at a stale
+            // price while the job runs the new parameters (N2).
+            quote: null,
+            contractTerms: null,
             transitions: transitions as any,
           })
           .where(eq(negotiationSessions.id, req.params.id))
@@ -390,7 +395,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         const resolvedOptions = template ? resolver.resolve(template, merged) : null;
 
         return {
-          session: { ...row, selections: merged, status: "configuring", transitions },
+          session: { ...row, selections: merged, status: "configuring", quote: null, contractTerms: null, transitions },
           resolvedOptions,
         };
       } catch (err) {
