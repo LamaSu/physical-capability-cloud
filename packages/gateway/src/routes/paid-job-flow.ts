@@ -1164,6 +1164,209 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   });
 
   // ═════════════════════════════════════════════════════════════════════
+  // POST /api/jobs/:jobId/resume-settlement — controlled recovery (A-2)
+  // ═════════════════════════════════════════════════════════════════════
+  //
+  // P1 made /complete single-shot by widening the claim guard to also reject
+  // 'evidence_submitted'. That closed the double-settle hole but created a trap:
+  // any failure AFTER the evidence bundle is written (oracle throw, oracle
+  // verified:false → 422, a crash) leaves the job at 'evidence_submitted', and
+  // every /complete retry then 409s forever — in real mode the funds are
+  // app-layer stuck with no recovery path.
+  //
+  // This endpoint is the controlled recovery: it RESUMES settlement (re-runs the
+  // oracle gate + the settlement step) reusing the EXISTING evidence bundle. It
+  // never rebuilds evidence, never creates a second bundle, and never re-submits
+  // on-chain evidence or re-binds the EAS attestation — that would risk a double
+  // on-chain write. Single-winner is preserved by the same atomic CAS pattern:
+  // it reclaims ONLY an 'evidence_submitted' job into 'completing' (the status
+  // /complete already excludes), so a concurrent /complete can't also grab it and
+  // two concurrent resumes collapse to [200, 409].
+  app.post<{ Params: { jobId: string } }>("/api/jobs/:jobId/resume-settlement", async (req, reply) => {
+    const { jobId } = req.params;
+    // Set true once we hold the 'completing' claim, so a later failure can release
+    // it back to 'evidence_submitted' (keeping the job recoverable, never trapped).
+    let reclaimed = false;
+
+    try {
+      const repos = getRepos();
+      const { db } = getStore();
+
+      const job = repos.jobs.findById(jobId);
+      if (!job) {
+        return reply.status(404).send({ error: "Job not found" });
+      }
+
+      // Single-winner reclaim: flip ONLY an 'evidence_submitted' job into
+      // 'completing'. Excludes settled/completed/failed/cancelled/completing, so a
+      // settled job or an in-flight /complete is never disturbed, and two
+      // concurrent resumes can't both win.
+      const claimed = db
+        .update(schema.jobs)
+        .set({ status: "completing" })
+        .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "evidence_submitted")))
+        .returning()
+        .all();
+      if (claimed.length !== 1) {
+        return reply.status(409).send({
+          error: "Job is not in a resumable state (must be 'evidence_submitted' and not already settling/settled)",
+          status: job.status,
+        });
+      }
+      reclaimed = true;
+
+      // Reuse the existing evidence bundle — never rebuild. Its absence means an
+      // inconsistent row; release the claim and refuse rather than settle blind.
+      const bundles = repos.evidence.findByJob(jobId);
+      const latestBundle = bundles[bundles.length - 1] ?? null;
+      if (!latestBundle) {
+        repos.jobs.updateStatus(jobId, "evidence_submitted");
+        reclaimed = false;
+        return reply.status(409).send({
+          error: "No evidence bundle found to resume; cannot settle without evidence",
+          status: "evidence_submitted",
+        });
+      }
+      const bundleId = latestBundle.id;
+      const bundleHash = latestBundle.bundleHash;
+
+      // Real negotiated tier (A-3 consistency): the on-chain milestone requiredTier.
+      const tierSessionRow = db
+        .select()
+        .from(negotiationSessions)
+        .where(eq(negotiationSessions.jobId, jobId))
+        .get();
+      const jobAssuranceTier = Number(
+        (tierSessionRow?.contractTerms as Record<string, unknown> | null)?.assuranceTier
+          ?? latestBundle.assuranceTier
+          ?? 0,
+      );
+
+      // Resolve escrow (same lookup as /complete). If settlement is ALREADY
+      // recorded on-chain (escrow completed or a milestone released), do not
+      // re-settle — reconcile the job to 'settled' and return. This is the
+      // "IFF no settlement recorded" guard.
+      let escrowAddress: string | null = tierSessionRow?.escrowAddress ?? null;
+      let escrowId: string | null = null;
+      if (tierSessionRow?.cwmId) {
+        const escrow = repos.escrows.findByCwm(tierSessionRow.cwmId);
+        if (escrow) {
+          escrowId = escrow.id;
+          escrowAddress = escrow.contractAddress;
+          const milestones = repos.escrows.findMilestonesByEscrow(escrow.id);
+          const alreadyReleased =
+            escrow.status === "completed" || milestones.some((m) => m.status === "released");
+          if (alreadyReleased) {
+            repos.jobs.updateStatus(jobId, "settled");
+            reclaimed = false;
+            return {
+              jobId,
+              status: "settled",
+              resumed: true,
+              alreadySettled: true,
+              evidenceBundleId: bundleId,
+              escrowAddress,
+              escrowId,
+              assuranceTier: jobAssuranceTier,
+              message: "Escrow already settled on-chain; job reconciled to settled (no re-settle).",
+            };
+          }
+        }
+      }
+
+      // Oracle gate — reuse the existing evidence hash. Pure verification (no EAS
+      // mint / no on-chain evidence re-submit): recovery resumes settlement, it
+      // does not restart the on-chain completion writes.
+      const oracleResponse = await verifyWithOracle({
+        escrowAddress: escrowAddress ?? ZERO_ADDRESS,
+        jobId,
+        kernelId: job.kernelId,
+        evidenceHash: bundleHash,
+        assuranceTier: jobAssuranceTier,
+        chainId: resolveChainId(),
+      });
+      if (!oracleResponse.result.verified) {
+        // Not verified: release the claim back to 'evidence_submitted' so a future
+        // resume (e.g. after a transient oracle outage) can try again.
+        repos.jobs.updateStatus(jobId, "evidence_submitted");
+        reclaimed = false;
+        return reply.status(422).send({
+          error: "oracle_verification_failed",
+          reason: oracleResponse.result.reason,
+          checks: oracleResponse.result.checks,
+        });
+      }
+
+      // Settlement — identical semantics to /complete's step 5.
+      const nowIso = new Date().toISOString();
+      let settlementStatus = "evidence_submitted";
+      let settledAt: string | null = null;
+      if (isMockSettlement()) {
+        repos.jobs.updateStatus(jobId, "settled");
+        settledAt = nowIso;
+        settlementStatus = "settled";
+        if (escrowId) {
+          repos.escrows.updateStatus(escrowId, "completed");
+          for (const ms of repos.escrows.findMilestonesByEscrow(escrowId)) {
+            repos.escrows.updateMilestoneStatus(ms.id, "released");
+          }
+        }
+      } else {
+        repos.jobs.updateStatus(jobId, "evidence_submitted");
+        settlementStatus = "evidence_submitted";
+      }
+      reclaimed = false;
+
+      pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+        metadata: {
+          path: "resume-settlement",
+          bundleId,
+          bundleHash,
+          escrowAddress,
+          settlementStatus,
+          assuranceTier: jobAssuranceTier,
+          mockSettlement: isMockSettlement(),
+          oracleVerified: oracleResponse.result.verified,
+        },
+      });
+
+      return {
+        jobId,
+        status: settlementStatus,
+        resumed: true,
+        evidenceBundleId: bundleId,
+        evidenceHash: bundleHash,
+        escrowAddress,
+        escrowId,
+        settledAt,
+        assuranceTier: jobAssuranceTier,
+        oracleVerified: oracleResponse.result.verified,
+        message: isMockSettlement()
+          ? "Settlement resumed from existing evidence (mock settlement). Oracle verification passed."
+          : "Settlement resumed from existing evidence. Oracle verified. Awaiting challenge window expiry.",
+      };
+    } catch (err) {
+      // Release the reclaim so the job stays recoverable (never trapped at
+      // 'completing'). Guarded on the status we set, matching /complete's catch.
+      if (reclaimed) {
+        try {
+          getStore().db
+            .update(schema.jobs)
+            .set({ status: "evidence_submitted" })
+            .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "completing")))
+            .run();
+        } catch {
+          // best-effort — a stuck 'completing' row still blocks double-settle
+        }
+      }
+      return reply.status(500).send({
+        error: "resume_settlement_failed",
+        details: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // ═════════════════════════════════════════════════════════════════════
   // GET /api/jobs/:jobId/settlement — Settlement status
   // ═════════════════════════════════════════════════════════════════════
 
