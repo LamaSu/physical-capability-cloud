@@ -34,7 +34,14 @@ export interface ValidationOptions {
   skipConnectionTest?: boolean;
 }
 
-const VALID_CAPABILITY_TYPES = new Set([
+// Built-in PCC capability types. These are RECOGNIZED (they ship with a
+// contract-builder template), but the set is NOT an allow-list: PCC is an
+// open taxonomy — an operator may register ANY well-formed capability type
+// (wood-fired-pizza, rideshare-driver, pizza.order) and buyers reach it by
+// its own type string + pricing model. So an unrecognized-but-well-formed
+// type is a WARNING (treated as ad-hoc), not an error; only a malformed type
+// (empty, spaces, uppercase, illegal chars) is an error.
+const RECOGNIZED_CAPABILITY_TYPES = new Set([
   "cnc-3axis", "cnc-5axis", "fdm", "sla", "sls", "dmls",
   "lathe", "laser-cut", "waterjet", "edm-wire", "edm-sinker",
   "injection-mold", "sheet-metal-bend", "sheet-metal-punch",
@@ -48,6 +55,28 @@ const VALID_CAPABILITY_TYPES = new Set([
   "flow-cytometry", "centrifuge", "autoclave", "lyophilizer",
   "liquid-handler", "plate-reader", "microscopy", "balance",
 ]);
+
+/**
+ * A well-formed capability type slug: lowercase alphanumeric segments joined
+ * by single hyphens or dots. Matches built-ins (fdm, laser-cut), ad-hoc types
+ * (wood-fired-pizza, rideshare-driver), and dotted namespaced types
+ * (pizza.order, courier.dispatch). Rejects empty, spaces, uppercase, illegal
+ * chars, and leading/trailing/doubled separators — the things that are almost
+ * always a typo rather than a deliberate open-taxonomy type.
+ */
+const WELL_FORMED_TYPE = /^[a-z0-9]+([.-][a-z0-9]+)*$/;
+
+/**
+ * Classify a capability type under the open taxonomy.
+ * - recognized: ships with a built-in template (info)
+ * - ad-hoc:     well-formed but not built-in — allowed, flagged (warning)
+ * - malformed:  not a valid slug — rejected (error)
+ */
+function classifyCapabilityType(type: string): "recognized" | "ad-hoc" | "malformed" {
+  if (RECOGNIZED_CAPABILITY_TYPES.has(type)) return "recognized";
+  if (typeof type === "string" && WELL_FORMED_TYPE.test(type)) return "ad-hoc";
+  return "malformed";
+}
 
 const VALID_CURRENCIES = new Set(["USDC", "ETH", "DAI", "SOL"]);
 const VALID_PROTOCOLS = new Set(["http", "opcua", "modbus", "sila", "mqtt", "serial", "websocket", "custom"]);
@@ -170,19 +199,37 @@ export function validate(options: ValidationOptions): ValidationResult {
   for (const cap of config.capabilities) {
     const prefix = `capability[${cap.type}]`;
 
-    if (!VALID_CAPABILITY_TYPES.has(cap.type)) {
+    const typeClass = classifyCapabilityType(cap.type);
+    if (typeClass === "recognized") {
+      checks.push({
+        name: `${prefix}.type`,
+        passed: true,
+        message: `Recognized capability type: ${cap.type}`,
+        severity: "info",
+      });
+    } else if (typeClass === "ad-hoc") {
+      // Warning (passed:false + severity:"warning") — this codebase surfaces
+      // warnings from failed checks, but a warning-severity check never blocks
+      // `valid` (only severity:"error" does). So an ad-hoc type is allowed AND
+      // flagged, matching the tier-2-camera warning convention above.
       checks.push({
         name: `${prefix}.type`,
         passed: false,
-        message: `Unknown capability type "${cap.type}". See AGENT_INSTRUCTIONS.md for valid types.`,
-        severity: "error",
+        message:
+          `Capability type "${cap.type}" is not a built-in PCC type — treated as ` +
+          `an ad-hoc (open-taxonomy) capability. Buyers reach it by this exact ` +
+          `type string + your pricing model. Double-check for typos.`,
+        severity: "warning",
       });
     } else {
       checks.push({
         name: `${prefix}.type`,
-        passed: true,
-        message: `Valid capability type: ${cap.type}`,
-        severity: "info",
+        passed: false,
+        message:
+          `Invalid capability type "${cap.type}": must be a lowercase slug — ` +
+          `letters, digits, hyphens, and dots (e.g. "wood-fired-pizza", ` +
+          `"pizza.order"). See AGENT_INSTRUCTIONS.md.`,
+        severity: "error",
       });
     }
 
@@ -274,12 +321,26 @@ export function validate(options: ValidationOptions): ValidationResult {
     for (const profile of config.profiles) {
       const prefix = `profile[${profile.profileId}]`;
 
-      if (!VALID_CAPABILITY_TYPES.has(profile.capabilityType)) {
+      const profTypeClass = classifyCapabilityType(profile.capabilityType);
+      if (profTypeClass === "malformed") {
         checks.push({
           name: `${prefix}.capabilityType`,
           passed: false,
-          message: `Profile references unknown capability type "${profile.capabilityType}"`,
+          message:
+            `Profile references invalid capability type "${profile.capabilityType}": ` +
+            `must be a lowercase slug (letters, digits, hyphens, dots).`,
           severity: "error",
+        });
+      } else if (profTypeClass === "ad-hoc") {
+        // Warning severity (passed:false) so it surfaces in `warnings` without
+        // failing `valid` — see the capability-type ad-hoc branch above.
+        checks.push({
+          name: `${prefix}.capabilityType`,
+          passed: false,
+          message:
+            `Profile capability type "${profile.capabilityType}" is ad-hoc ` +
+            `(not a built-in PCC type) — allowed under the open taxonomy.`,
+          severity: "warning",
         });
       }
 
