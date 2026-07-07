@@ -358,6 +358,9 @@ function toStep(node: CapabilityGraphNode): GraphPathStep {
     estimatedDurationMs: node.estimatedDurationMs,
     assuranceTier: node.assuranceTier,
     reputation: node.reputation,
+    ...(node.resourceRequirements
+      ? { resourceRequirements: node.resourceRequirements }
+      : {}),
   };
 }
 
@@ -610,6 +613,9 @@ function upsertNode(input: RegisterGraphNodeInput): CapabilityGraphNode {
     available: input.available ?? true,
     inputTypes: input.inputTypes ?? [],
     outputTypes: input.outputTypes ?? [],
+    ...(input.resourceRequirements
+      ? { resourceRequirements: input.resourceRequirements }
+      : {}),
   };
   persistNode(node); // upsert — re-registering replaces, never dupes
   return node;

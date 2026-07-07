@@ -76,6 +76,21 @@ export interface MachineAdapter {
    */
   preflight?(input: PreflightRequest): Promise<PreflightResult>;
 
+  /**
+   * Optional two-phase finalizers for a hold returned by `preflight()`
+   * (`PreflightResult.reservationId`). `commitReservation` permanently consumes
+   * the held capacity once the job actually ran; `rollbackReservation` releases
+   * the hold (consuming nothing) when the job never ran / was refused upstream.
+   *
+   * An adapter that implements `preflight()` with a two-phase reservation SHOULD
+   * implement both; adapters that hold no reservation MAY omit them. The
+   * composition-layer pre-flight gate finalizes each step's hold through these
+   * (commit on success, rollback on refusal / unreached steps). Additive —
+   * existing adapters that never held a reservation are unaffected.
+   */
+  commitReservation?(reservationId: string): void;
+  rollbackReservation?(reservationId: string): void;
+
   /** Send a command to the machine */
   execute(command: MachineCommand): Promise<MachineCommandResult>;
 

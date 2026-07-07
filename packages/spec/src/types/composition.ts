@@ -154,6 +154,14 @@ export interface CompositionCandidate {
   location?: { lat: number; lng: number };
   /** Whether the capability is currently accepting jobs */
   available: boolean;
+  /**
+   * Optional named resource requirements this candidate consumes when it runs
+   * (e.g. `{ filamentGrams: 42, buildVolumeMm3: 18000 }`). Propagated onto the
+   * planned {@link CompositionStep} so the orchestration-layer whole-plan
+   * pre-flight gate can refuse an infeasible composed job before any step
+   * executes. Absent = the step declares no resources and the gate skips it.
+   */
+  resourceRequirements?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +199,16 @@ export interface CompositionStep {
   dependsOn: number[];
   /** Optional reputation snapshot at planning time */
   reputation?: number;
+  /**
+   * Optional named resource requirements for this step (e.g.
+   * `{ filamentGrams: 42, buildVolumeMm3: 18000 }`), propagated from the chosen
+   * candidate / graph node at planning time. Consumed by the orchestration-layer
+   * whole-plan pre-flight gate (`preflightComposition`), which calls the step
+   * adapter's `preflight()` to hold capacity before execution. Absent = no
+   * resource check for this step (the gate is a no-op for it — backward
+   * compatible with every composition planned before this field existed).
+   */
+  resourceRequirements?: Record<string, number>;
 }
 
 /**
@@ -287,4 +305,6 @@ export const RegisterCandidateRequestSchema = z.object({
     })
     .optional(),
   available: z.boolean().default(true),
+  /** Optional per-step resource requirements, e.g. `{ filamentGrams: 42 }`. */
+  resourceRequirements: z.record(z.number().nonnegative()).optional(),
 });

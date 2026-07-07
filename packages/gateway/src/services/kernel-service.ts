@@ -601,6 +601,19 @@ export class KernelService {
       };
     }
   }
+
+  /**
+   * Read-only accessor for an in-process machine adapter by its device id.
+   * Used by the composition-layer pre-flight resolver
+   * (`createLocalPreflightResolver`) to reach an adapter's optional
+   * `preflight()` / `commitReservation()` / `rollbackReservation()` seam.
+   * Returns `undefined` when no adapter with that id is loaded in this process
+   * (e.g. an external/third-party kernel), so callers fail open — they skip the
+   * resource check for steps they cannot verify in-process.
+   */
+  getMachineAdapter(id: string): MachineAdapter | undefined {
+    return this.machines.get(id);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,12 @@ export interface CapabilityGraphNode {
   inputTypes: string[];
   /** Capability types this node produces */
   outputTypes: string[];
+  /**
+   * Optional named resource requirements this node consumes per run (e.g.
+   * `{ filamentGrams: 42 }`). Flows through graph-planned paths onto the
+   * CompositionStep for the pre-flight gate. Absent = no resource declaration.
+   */
+  resourceRequirements?: Record<string, number>;
 }
 
 export interface CapabilityGraphEdge {
@@ -78,6 +84,13 @@ export interface GraphPathStep {
   estimatedDurationMs: number;
   assuranceTier: 0 | 1 | 2 | 3;
   reputation: number;
+  /**
+   * Optional named resource requirements this step consumes (e.g.
+   * `{ filamentGrams: 42 }`), carried from the graph node. Propagated onto the
+   * planned CompositionStep so the composition-layer pre-flight gate can check
+   * it. Absent = no resource declaration (gate skips this step).
+   */
+  resourceRequirements?: Record<string, number>;
 }
 
 export interface GraphPathOption {
@@ -127,6 +140,7 @@ export interface RegisterGraphNodeRequest {
   available?: boolean;
   inputTypes?: string[];
   outputTypes?: string[];
+  resourceRequirements?: Record<string, number>;
 }
 
 export interface RegisterGraphEdgeRequest {
@@ -190,6 +204,7 @@ export const RegisterGraphNodeSchema = z.object({
   available: z.boolean().optional(),
   inputTypes: z.array(z.string()).optional(),
   outputTypes: z.array(z.string()).optional(),
+  resourceRequirements: z.record(z.number().nonnegative()).optional(),
 });
 
 export const RegisterGraphEdgeSchema = z.object({

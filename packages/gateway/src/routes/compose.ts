@@ -47,6 +47,13 @@ import type { WorkflowContext } from "@pcc/workflow";
 import { getJobFacade } from "../facades/index.js";
 import type { SubmitJobInput, JobSubmitResult } from "../facades/index.js";
 import type { Result } from "@pcc/spec";
+import type {
+  MachineAdapter,
+  PreflightRequest,
+  PreflightResult,
+  PreflightRefusal,
+} from "@pcc/kernel";
+import { getKernelService } from "../services/kernel-service.js";
 
 // ---------------------------------------------------------------------------
 // Store access — getStore() is booted by server.ts in production; tests lazily
@@ -271,6 +278,9 @@ function plan(
       assuranceTier: pick.assuranceTier,
       dependsOn: i === 0 ? [] : [i - 1],
       reputation: pick.reputation,
+      ...(pick.resourceRequirements
+        ? { resourceRequirements: pick.resourceRequirements }
+        : {}),
     });
   }
 
@@ -356,6 +366,9 @@ function graphStepToCompositionStep(
     assuranceTier: s.assuranceTier,
     dependsOn: index === 0 ? [] : [index - 1],
     reputation: s.reputation,
+    ...(s.resourceRequirements
+      ? { resourceRequirements: s.resourceRequirements }
+      : {}),
   };
 }
 
@@ -484,6 +497,17 @@ export interface ExecutorBinding {
     step: CompositionStep,
     ctx?: { compositionId: string },
   ) => Promise<void> | void;
+  /**
+   * Optional resolver for the whole-plan resource pre-flight gate. When present,
+   * `executeComposition` holds a reservation for every step that declares
+   * `resourceRequirements` BEFORE running step 1, and refuses the whole run
+   * (throwing {@link CompositionPreflightError}) if any step is infeasible.
+   * Absent (default) ⇒ the gate is a no-op — every existing composition (which
+   * declares no resources) runs unchanged. In real-execution mode
+   * (`PCC_COMPOSE_EXECUTE_REAL=true`) this defaults to
+   * {@link createLocalPreflightResolver}.
+   */
+  preflightResolver?: PreflightResolver;
 }
 
 /** Structured result of {@link executeComposition}. */
@@ -603,6 +627,179 @@ export function createProductionBinding(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Orchestration-layer resource pre-flight gate (R3 — whole-plan poka-yoke)
+//
+// Moves the per-adapter refuse-to-start gate UP to the composition layer:
+// before the executor runs ANY step of a composed DAG, hold a resource
+// reservation for every step that declares `resourceRequirements` — via each
+// step's adapter `preflight()`, which is the reused @pcc/resource-tracker leaf.
+// If any step is infeasible, roll back the holds already taken and THROW,
+// failing before step 1 spends and before any escrow/oracle. This layer is an
+// aggregator + resolver + typed error around the existing leaf; no tracker
+// logic is re-implemented here.
+// ---------------------------------------------------------------------------
+
+/** A resolved handle to run one step's resource pre-flight + finalize its hold. */
+export interface StepPreflight {
+  /** Hold a reservation for this step's requirements (the adapter leaf call). */
+  preflight(req: PreflightRequest): Promise<PreflightResult>;
+  /** Phase-2 commit: the step ran — permanently consume the held capacity. */
+  commit(reservationId: string): void;
+  /** Phase-2 rollback: the step never ran — release the hold, consume nothing. */
+  rollback(reservationId: string): void;
+}
+
+/**
+ * Maps a composition step to a {@link StepPreflight} handle, or `null` when the
+ * step declares no resources / its adapter is not reachable in-process (skip).
+ * Mirrors {@link ExecutorBinding}: an injectable seam whose default is a no-op,
+ * so every existing composition (which declares no resources) runs unchanged.
+ */
+export interface PreflightResolver {
+  resolve(step: CompositionStep): StepPreflight | null;
+}
+
+/**
+ * Typed refuse-to-start error thrown by {@link preflightComposition} when a
+ * step's resource pre-flight fails. Surfaced by the /execute route as HTTP 409
+ * (matching the per-kernel `KernelPreflightError`), carrying the leaf's own
+ * refusal `{code,message,details}` verbatim.
+ */
+export class CompositionPreflightError extends Error {
+  readonly code = "composition_preflight_refused";
+  constructor(
+    readonly failedStepIndex: number,
+    readonly capabilityId: string,
+    readonly refusal: PreflightRefusal,
+  ) {
+    super(refusal.message);
+    this.name = "CompositionPreflightError";
+  }
+}
+
+/** One held reservation across the plan: which handle owns it + its id. */
+interface HeldReservation {
+  handle: StepPreflight;
+  reservationId: string;
+}
+
+/** Roll back (release) every held reservation, swallowing individual errors. */
+function rollbackAllHolds(held: Map<number, HeldReservation>): void {
+  for (const { handle, reservationId } of held.values()) {
+    try {
+      handle.rollback(reservationId);
+    } catch {
+      // a hold already finalized elsewhere is not fatal to releasing the rest
+    }
+  }
+  held.clear();
+}
+
+/**
+ * Whole-plan pre-flight: hold a reservation for every step that declares
+ * `resourceRequirements`, in order. On the FIRST infeasible step, roll back
+ * every hold already taken and throw {@link CompositionPreflightError} — so
+ * nothing has executed and nothing has escrowed. On success, returns a map of
+ * held reservations keyed by step index; the executor commits each on the
+ * step's success and rolls back any unreached holds on short-circuit.
+ *
+ * Steps with no `resourceRequirements`, or whose resolver returns `null` (no
+ * in-process adapter to verify), are skipped — identical to the adapter-level
+ * "missing preflight = no check" contract. This is what keeps the gate additive.
+ */
+export async function preflightComposition(
+  composition: ComposeResponse,
+  resolver: PreflightResolver,
+): Promise<Map<number, HeldReservation>> {
+  const held = new Map<number, HeldReservation>();
+  for (const step of composition.steps) {
+    const requirements = step.resourceRequirements;
+    if (!requirements || Object.keys(requirements).length === 0) continue;
+
+    const handle = resolver.resolve(step);
+    if (!handle) continue; // no in-process adapter to verify → fail open (skip)
+
+    let result: PreflightResult;
+    try {
+      result = await handle.preflight({
+        requirements,
+        jobId: `${composition.compositionId}:${step.index}`,
+      });
+    } catch (err) {
+      // An adapter that throws instead of returning a typed refusal is treated
+      // as a refusal — roll back holds already taken, then surface it.
+      rollbackAllHolds(held);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new CompositionPreflightError(step.index, step.capabilityId, {
+        code: "preflight_threw",
+        message,
+      });
+    }
+
+    if (!result.ok) {
+      rollbackAllHolds(held);
+      throw new CompositionPreflightError(
+        step.index,
+        step.capabilityId,
+        result.refusal ?? {
+          code: "preflight_refused",
+          message: "step pre-flight refused",
+        },
+      );
+    }
+
+    if (result.reservationId) {
+      held.set(step.index, { handle, reservationId: result.reservationId });
+    }
+  }
+  return held;
+}
+
+/**
+ * Production resolver: map a step to a local in-process adapter via
+ * `getKernelService()` and bind its `preflight` + `commitReservation` +
+ * `rollbackReservation`. Returns `null` when the kernel service is not
+ * initialised, no adapter matches the step, or the adapter declares no
+ * `preflight` — every such case makes the gate skip that step (fail open).
+ * Remote/third-party kernels (whose `preflight` lives behind an HTTPS endpoint)
+ * are intentionally not resolved here; that is a future remote resolver.
+ */
+export function createLocalPreflightResolver(): PreflightResolver {
+  return {
+    resolve(step: CompositionStep): StepPreflight | null {
+      let adapter: MachineAdapter | undefined;
+      try {
+        const svc = getKernelService();
+        // A composition step carries kernelId + capabilityId, not a device id.
+        // Best-effort in-process match against loaded adapters; a miss → skip.
+        adapter =
+          svc.getMachineAdapter(step.kernelId) ??
+          svc.getMachineAdapter(step.capabilityId);
+      } catch {
+        return null; // kernel service not initialised in this process
+      }
+      if (!adapter || typeof adapter.preflight !== "function") return null;
+      const preflight = adapter.preflight.bind(adapter);
+      const commit = adapter.commitReservation?.bind(adapter);
+      const rollback = adapter.rollbackReservation?.bind(adapter);
+      return {
+        preflight,
+        commit: (id: string) => commit?.(id),
+        rollback: (id: string) => rollback?.(id),
+      };
+    },
+  };
+}
+
+/**
+ * Module-level resolver the HTTP execute endpoint uses when no explicit binding
+ * is supplied. Default `null` ⇒ the gate is a no-op (backward compatible).
+ * Tests inject a resolver over mock adapters via
+ * {@link _setPreflightResolverForTests}; reset by {@link _clearComposeForTests}.
+ */
+let preflightResolver: PreflightResolver | null = null;
+
 /**
  * Execute a proposed composition, propagating reputation as it goes: record a
  * step-outcome per step (`success`, or `failed` when the runner throws), then
@@ -651,6 +848,24 @@ export async function executeComposition(
       ? createProductionBinding().runStep!
       : stepRunner);
 
+  // Whole-plan resource pre-flight gate (R3). Resolve the effective resolver:
+  //   - an explicit binding.preflightResolver always wins,
+  //   - else the local in-process resolver when real execution is on,
+  //   - else the module-level resolver (null ⇒ no-op in tests / by default).
+  // Hold a reservation for every step that declares resourceRequirements; a
+  // throw here (CompositionPreflightError) precedes step 1's submit and all
+  // downstream escrow/oracle — the /execute route maps it to HTTP 409. Nothing
+  // below (saveExecution, finalizeReputation, workflow run) is reached on throw.
+  const effectivePreflightResolver: PreflightResolver | null =
+    binding.preflightResolver ??
+    (process.env.PCC_COMPOSE_EXECUTE_REAL === "true"
+      ? createLocalPreflightResolver()
+      : preflightResolver);
+
+  const held: Map<number, HeldReservation> = effectivePreflightResolver
+    ? await preflightComposition(composition, effectivePreflightResolver)
+    : new Map<number, HeldReservation>();
+
   let failedStepIndex: number | null = null;
   let stepsExecuted = 0;
 
@@ -665,6 +880,21 @@ export async function executeComposition(
       ackFailed = true;
     }
     stepsExecuted += 1;
+
+    // Finalize this step's resource hold (if it declared one): commit on a
+    // successful ack (capacity permanently consumed), roll back on ack failure
+    // (hold released). Any holds for steps that never run are released after
+    // the loop by rollbackAllHolds(held).
+    const hold = held.get(step.index);
+    if (hold) {
+      try {
+        if (ackFailed) hold.handle.rollback(hold.reservationId);
+        else hold.handle.commit(hold.reservationId);
+      } catch {
+        // finalizing a hold must never crash execution — leaf errors are benign
+      }
+      held.delete(step.index);
+    }
 
     if (DEFER_TO_COMPLETION) {
       if (ackFailed) {
@@ -719,6 +949,12 @@ export async function executeComposition(
       break; // short-circuit — do not execute downstream steps
     }
   }
+
+  // Release any still-outstanding resource holds. After a clean run this is
+  // empty (every hold committed inside the loop); after a short-circuit it holds
+  // the reservations of steps that never executed — release them (those steps
+  // never ran, so their capacity is returned).
+  rollbackAllHolds(held);
 
   // Settle reputation: in NOOP/test mode this applies +10 per success, -15 on
   // the failed step, and the +5 all-success bonus. In real mode every recorded
@@ -853,7 +1089,24 @@ export async function composeRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const result = await executeComposition(c);
+      let result: CompositionExecutionResult;
+      try {
+        result = await executeComposition(c);
+      } catch (err) {
+        if (err instanceof CompositionPreflightError) {
+          // Whole-plan resource pre-flight refused the job BEFORE any step ran:
+          // no execution row saved, no reputation delta applied, no workflow
+          // run registered. The composition stays "proposed" and can be
+          // re-planned/re-executed later.
+          return reply.code(409).send({
+            error: err.code,
+            failedStepIndex: err.failedStepIndex,
+            capabilityId: err.capabilityId,
+            refusal: err.refusal,
+          });
+        }
+        throw err;
+      }
       const response: ExecuteCompositionResponse = {
         compositionId: result.compositionId,
         workflowId: result.workflowId,
@@ -898,6 +1151,7 @@ export function _clearComposeForTests(): void {
   d.delete(schema.compositions).run();
   d.delete(schema.compositionExecutions).run();
   stepRunner = NOOP_RUNNER;
+  preflightResolver = null;
 }
 
 /** Direct candidate injection for tests (bypass the dev endpoint). */
@@ -915,4 +1169,23 @@ export function _setStepRunnerForTests(
   fn: ((step: CompositionStep) => Promise<void> | void) | null,
 ): void {
   stepRunner = fn ?? NOOP_RUNNER;
+}
+
+/**
+ * Inject a resolver for the whole-plan resource pre-flight gate so the HTTP
+ * execute endpoint runs it (tests supply a resolver over mock adapters). Pass
+ * `null` to restore the no-op (gate disabled). Auto-reset by
+ * {@link _clearComposeForTests}.
+ */
+export function _setPreflightResolverForTests(
+  resolver: PreflightResolver | null,
+): void {
+  preflightResolver = resolver;
+}
+
+/** Read back a stored execution row (test-only assertion helper). */
+export function _getExecutionForTests(
+  id: string,
+): ExecuteCompositionResponse | undefined {
+  return getExecution(id);
 }
