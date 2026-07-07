@@ -52,6 +52,14 @@ const TTL_ONCHAIN_MS = 30 * 24 * 60 * 60 * 1000;      // 30 d
 const TTL_WORKFLOW_MS = 7 * 24 * 60 * 60 * 1000;      // 7 d
 const TTL_EVIDENCE_SENTINEL = '9999-12-31T00:00:00.000Z';
 
+// E2: a FAILED row must NOT inherit the scope TTL. The 30-day on-chain TTL is
+// correct only for a COMPLETED op — applied to a FAILED one it poisons the
+// semantic key for a month after a single transient RPC blip. A failure is
+// retryable-until-proven-otherwise, so a failed row gets this SHORT TTL and
+// becomes reclaimable within minutes. The client Idempotency-Key escape hatch
+// remains the manual override for an immediate retry.
+const DEFAULT_TTL_FAILED_MS = 5 * 60 * 1000;          // 5 min
+
 const DEFAULT_PRUNE_INTERVAL_MS = 60 * 60 * 1000;     // 1 h
 const DEFAULT_STUCK_HTTP_MS = 60 * 1000;              // 60 s
 const DEFAULT_STUCK_ONCHAIN_MS = 10 * 60 * 1000;      // 10 min
@@ -64,6 +72,8 @@ export interface OpenSqliteStoreOptions {
   pruneIntervalMs?: number;
   stuckProcessingHttpMs?: number;
   stuckProcessingOnchainMs?: number;
+  /** E2: TTL applied to a row when it transitions to 'failed' (default 5 min). */
+  failedTtlMs?: number;
 }
 
 // ── Bootstrap SQL ──────────────────────────────────────────────────────────
@@ -430,8 +440,9 @@ class SqliteStore implements Store {
 
     const stuckHttp = opts.stuckProcessingHttpMs ?? DEFAULT_STUCK_HTTP_MS;
     const stuckOnchain = opts.stuckProcessingOnchainMs ?? DEFAULT_STUCK_ONCHAIN_MS;
+    const failedTtl = opts.failedTtlMs ?? DEFAULT_TTL_FAILED_MS;
 
-    this.idempotency = new SqliteIdempotencyStore(this.db, stuckHttp, stuckOnchain);
+    this.idempotency = new SqliteIdempotencyStore(this.db, stuckHttp, stuckOnchain, failedTtl);
     this.events = new SqliteEventStore(this.db);
     this.steps = new SqliteStepResultStore(this.db);
     this.runs = new SqliteWorkflowRunStore(this.db);
@@ -465,16 +476,13 @@ class SqliteIdempotencyStore implements IdempotencyStore {
     private readonly db: BetterSqliteDatabase,
     private readonly stuckHttpMs: number,
     private readonly stuckOnchainMs: number,
+    private readonly failedTtlMs: number,
   ) {}
 
   async claim(args: IdempotencyClaimArgs): Promise<IdempotencyClaim> {
     const expiresAt = args.expiresAtOverride ?? deriveExpiresAt(args.scope);
     const tx = this.db.transaction((a: IdempotencyClaimArgs): IdempotencyClaim => {
-      const existing = this.db
-        .prepare<[string, string]>('SELECT * FROM idempotency_keys WHERE key = ? AND scope = ?')
-        .get(a.key, a.scope) as IdempotencyDbRow | undefined;
-
-      if (!existing) {
+      const insertFresh = (): IdempotencyClaim => {
         this.db
           .prepare(
             `INSERT INTO idempotency_keys
@@ -498,6 +506,29 @@ class SqliteIdempotencyStore implements IdempotencyStore {
           .prepare<[string, string]>('SELECT * FROM idempotency_keys WHERE key = ? AND scope = ?')
           .get(a.key, a.scope) as IdempotencyDbRow;
         return { outcome: 'fresh', row: rowToIdempotencyRow(row) };
+      };
+
+      const existing = this.db
+        .prepare<[string, string]>('SELECT * FROM idempotency_keys WHERE key = ? AND scope = ?')
+        .get(a.key, a.scope) as IdempotencyDbRow | undefined;
+
+      if (!existing) {
+        return insertFresh();
+      }
+
+      // E2: a terminal (completed/failed) row past its expiry is a dead cache
+      // entry — the dedup window has elapsed. Recycle the key as a brand-new
+      // attempt INLINE (don't wait for the hourly prune) so a failed on-chain op
+      // with the short failed-TTL is reclaimable in MINUTES, not up to an hour.
+      // Processing rows are left to the stuck-window reclaim logic below.
+      if (
+        existing.status !== 'processing' &&
+        Date.parse(existing.expires_at) < Date.now()
+      ) {
+        this.db
+          .prepare<[string, string]>('DELETE FROM idempotency_keys WHERE key = ? AND scope = ?')
+          .run(a.key, a.scope);
+        return insertFresh();
       }
 
       if (existing.request_hash !== a.requestHash) {
@@ -568,16 +599,21 @@ class SqliteIdempotencyStore implements IdempotencyStore {
 
   async fail(key: string, scope: string, err: IdempotencyFailArgs): Promise<void> {
     const now = nowIso();
+    // E2: override the scope TTL with the SHORT failed-TTL so a failed row
+    // (esp. an on-chain op after a transient blip) expires in minutes and the
+    // key is reclaimable — not poisoned for the 30-day on-chain window.
+    const failedExpiresAt = addMsIso(now, this.failedTtlMs);
     const info = this.db
       .prepare(
         `UPDATE idempotency_keys
            SET status = 'failed',
                completed_at = ?,
+               expires_at = ?,
                response_code = ?,
                response_body = ?
          WHERE key = ? AND scope = ? AND status = 'processing'`,
       )
-      .run(now, err.code ?? null, err.body, key, scope);
+      .run(now, failedExpiresAt, err.code ?? null, err.body, key, scope);
     if (info.changes === 0) {
       throw new Error(
         `Cannot fail idempotency row (key=${key}, scope=${scope}) — not in 'processing' state`,

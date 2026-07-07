@@ -16,6 +16,7 @@ import type { PopulationContext, AgentContext, AgentRole } from "./types.js";
 import type { IRepositories } from "@pcc/store";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { getReputationService } from "../services/reputation-service.js";
+import { isTransientError, TRANSIENT_ERROR_CODE } from "./transient-error.js";
 
 /** Shared tracer for all facade spans */
 const facadeTracer = trace.getTracer("pcc-gateway-facades", "2.0.0");
@@ -85,6 +86,17 @@ export abstract class BaseFacade {
               span.setAttribute("facade.error_code", "BATCH_DISABLED");
               return err("BATCH_DISABLED", message, 503) as Result<T>;
             }
+          }
+          // E2: a transient transport/RPC/mempool failure is retryable. Tag it
+          // with a distinct code so activity wrappers retry (rather than
+          // wrapping it as a permanent FacadeError). Positive-match only —
+          // reverts / business errors fall through to the permanent path below.
+          if (isTransientError(error)) {
+            span.setAttribute("facade.error_code", TRANSIENT_ERROR_CODE);
+            return err(TRANSIENT_ERROR_CODE, message, 503, {
+              retryable: true,
+              details: { facade: this.facadeName, operation },
+            }) as Result<T>;
           }
           return Errors.internal(message, { facade: this.facadeName, operation });
         } finally {
