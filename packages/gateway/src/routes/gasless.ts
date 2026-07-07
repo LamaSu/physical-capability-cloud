@@ -2,7 +2,8 @@
  * Gasless Onboarding Routes
  *
  * Provides endpoints for ERC-4337 smart account onboarding without requiring
- * agents to hold ETH for gas. Uses Coinbase CDP Paymaster when configured.
+ * agents to hold ETH for gas. Bundler/paymaster is resolved across providers
+ * (ZeroDev, Coinbase CDP, Pimlico, custom) via config/bundler-config.ts.
  *
  * POST /api/gasless/onboard
  *   - Accepts agent's EOA address
@@ -11,6 +12,11 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+
+import {
+  resolveBundlerConfig,
+  redactBundlerUrl,
+} from "../config/bundler-config.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,27 +57,19 @@ function isEthAddress(value: string): boolean {
 }
 
 /**
- * Detect Coinbase Paymaster configuration from environment variables.
- * Returns paymaster info if configured, null otherwise.
+ * Detect paymaster/bundler configuration from the environment via the shared
+ * bundler-config resolver. Recognizes ZeroDev, Coinbase CDP, Pimlico, and
+ * custom bundler URLs. `active` means a paymaster (sponsored gas) is present.
  */
-function detectCoinbasePaymaster(): {
+function detectPaymaster(): {
   active: boolean;
   provider?: string;
   url?: string;
 } {
-  const cdpApiKey = process.env.CDP_API_KEY ?? process.env.COINBASE_API_KEY;
-  const paymasterUrl = process.env.COINBASE_PAYMASTER_URL;
-
-  if (paymasterUrl) {
-    return { active: true, provider: "coinbase-cdp", url: paymasterUrl };
+  const cfg = resolveBundlerConfig();
+  if (cfg.sponsored) {
+    return { active: true, provider: cfg.provider, url: cfg.paymasterUrl };
   }
-
-  if (cdpApiKey) {
-    const chain = process.env.BUNDLER_CHAIN === "base" ? "base" : "base-sepolia";
-    const url = `https://api.developer.coinbase.com/rpc/v1/${chain}/${cdpApiKey}`;
-    return { active: true, provider: "coinbase-cdp", url };
-  }
-
   return { active: false };
 }
 
@@ -106,8 +104,7 @@ async function computeCounterfactualAddress(
     // Here we use the gateway's own key if available, or generate a deterministic one.
     const gatewayKey = process.env.PCC_GATEWAY_PRIVATE_KEY;
     const bundlerUrl =
-      process.env.BUNDLER_URL ??
-      process.env.COINBASE_PAYMASTER_URL ??
+      resolveBundlerConfig().bundlerUrl ??
       "https://api.pimlico.io/v2/base-sepolia/rpc?apikey=placeholder";
     const rpcUrl = process.env.BASE_SEPOLIA_RPC ?? "https://sepolia.base.org";
 
@@ -170,11 +167,11 @@ export async function gaslessRoutes(app: FastifyInstance) {
         });
       }
 
-      // Detect paymaster configuration
-      const paymaster = detectCoinbasePaymaster();
+      // Detect bundler/paymaster configuration (ZeroDev, Coinbase CDP, custom)
+      const paymaster = detectPaymaster();
 
       // Determine which chain and bundler to use
-      const chainName = process.env.BUNDLER_CHAIN === "base" ? "base" : "base-sepolia";
+      const chainName = resolveBundlerConfig().chain;
       const entryPoint = "0.7";
 
       // Try to compute actual counterfactual address
@@ -214,18 +211,9 @@ export async function gaslessRoutes(app: FastifyInstance) {
 
       if (paymaster.active) {
         response.paymasterProvider = paymaster.provider;
-        // Strip API key from URL before exposing
-        if (paymaster.url) {
-          try {
-            const url = new URL(paymaster.url);
-            // Remove last path segment (typically the API key)
-            const parts = url.pathname.split("/").filter(Boolean);
-            parts.pop(); // remove API key
-            response.bundlerEndpoint = `${url.origin}/${parts.join("/")}`;
-          } catch {
-            response.bundlerEndpoint = "configured";
-          }
-        }
+        // Strip secrets from the URL before exposing it
+        const redacted = redactBundlerUrl(paymaster.url);
+        if (redacted) response.bundlerEndpoint = redacted;
       }
 
       return reply.send(response);
@@ -238,21 +226,20 @@ export async function gaslessRoutes(app: FastifyInstance) {
    * Check gasless infrastructure status: bundler reachable, paymaster configured.
    */
   app.get("/api/gasless/status", async (_req: FastifyRequest, reply: FastifyReply) => {
-    const paymaster = detectCoinbasePaymaster();
-    const bundlerUrl =
-      process.env.BUNDLER_URL ??
-      process.env.COINBASE_PAYMASTER_URL ??
-      null;
+    const cfg = resolveBundlerConfig();
 
     return reply.send({
-      bundlerConfigured: !!bundlerUrl,
-      paymasterConfigured: paymaster.active,
-      paymasterProvider: paymaster.provider ?? null,
-      chain: process.env.BUNDLER_CHAIN ?? "base-sepolia",
+      bundlerConfigured: !!cfg.bundlerUrl,
+      paymasterConfigured: cfg.sponsored,
+      paymasterProvider: cfg.sponsored ? cfg.provider : null,
+      provider: cfg.provider,
+      bundlerEndpoint: redactBundlerUrl(cfg.bundlerUrl) ?? null,
+      chain: cfg.chain,
+      chainId: cfg.chainId,
       entryPoint: "0.7",
       features: {
-        gaslessOnboarding: paymaster.active && !!bundlerUrl,
-        batchedTransactions: !!bundlerUrl,
+        gaslessOnboarding: cfg.sponsored && !!cfg.bundlerUrl,
+        batchedTransactions: !!cfg.bundlerUrl,
         sessionKeys: false, // planned
       },
     });
