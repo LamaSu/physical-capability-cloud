@@ -2,9 +2,12 @@
   "buildCommand": "cd ../.. && pnpm build --filter=@pcc/dashboard --concurrency=1",
   "outputDirectory": "dist",
   "framework": "vite",
+  "redirects": [
+    { "source": "/control", "destination": "/control/", "permanent": true }
+  ],
   "rewrites": [
     { "source": "/api/agent/tools", "destination": "/api/agent/tools.json" },
-    { "source": "/((?!api|assets|favicon).*)", "destination": "/index.html" }
+    { "source": "/((?!api|assets|favicon|control).*)", "destination": "/index.html" }
   ],
   "headers": [
     {
