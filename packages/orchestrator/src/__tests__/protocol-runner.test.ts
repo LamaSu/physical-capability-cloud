@@ -14,7 +14,7 @@ import { ResourcePool } from "../resource-pool.js";
 import { SampleTracker } from "../sample-tracker.js";
 import { IntraKernelOrchestrator, type StepExecutor } from "../intra-kernel-orchestrator.js";
 import { AutomationTracker } from "../automation-tracker.js";
-import { ProtocolRunner } from "../protocol-runner.js";
+import { ProtocolRunner, type ProtocolRunnerOptions } from "../protocol-runner.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -311,5 +311,132 @@ describe("ProtocolRunner", () => {
     expect(eventTypes).toContain("protocol_run_started");
     expect(eventTypes).toContain("protocol_step_failed");
     expect(eventTypes).toContain("protocol_run_failed");
+  });
+});
+
+// ── R1 — terminal-run eviction (unbounded Map growth fix) ────────────
+
+describe("ProtocolRunner terminal-run eviction (R1)", () => {
+  function makeRunner(options?: ProtocolRunnerOptions, executor?: StepExecutor) {
+    const graph = buildLinearGraph();
+    const pool = new ResourcePool();
+    const sampleTracker = new SampleTracker();
+    const orchestrator = new IntraKernelOrchestrator(graph, pool, sampleTracker, executor);
+    const autoTracker = new AutomationTracker();
+    return new ProtocolRunner(orchestrator, autoTracker, sampleTracker, options);
+  }
+
+  it("evicts a completed run once its TTL has elapsed", async () => {
+    const runner = makeRunner({ terminalRunTtlMs: 0 });
+    const run = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+    await runner.executeRun(run);
+
+    // Terminal but not yet swept — still readable
+    expect(runner.getRun(run.id)?.status).toBe("completed");
+
+    runner.evictTerminalRuns();
+    expect(runner.getRun(run.id)).toBeUndefined();
+  });
+
+  it("keeps terminal runs inside the grace window (default TTL)", async () => {
+    const runner = makeRunner(); // 15-minute default
+    const run = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+    await runner.executeRun(run);
+
+    runner.evictTerminalRuns();
+    expect(runner.getRun(run.id)?.status).toBe("completed");
+  });
+
+  it("executeRun sweeps expired terminal runs from previous executions", async () => {
+    const runner = makeRunner({ terminalRunTtlMs: 0 });
+    const run1 = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+    await runner.executeRun(run1);
+
+    const run2 = makeProtocolRun([makeRunStep("rs2", "inst_a")]);
+    await runner.executeRun(run2);
+
+    // run1 was terminal + expired → swept on run2's entry; run2 is intact
+    expect(runner.getRun(run1.id)).toBeUndefined();
+    expect(runner.getRun(run2.id)?.status).toBe("completed");
+  });
+
+  it("failed runs are evicted after TTL too", async () => {
+    const failingExecutor: StepExecutor = {
+      async execute() {
+        throw new Error("Instrument malfunction");
+      },
+    };
+    const runner = makeRunner({ terminalRunTtlMs: 0 }, failingExecutor);
+    const run = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+    await runner.executeRun(run);
+    expect(runner.getRun(run.id)?.status).toBe("failed");
+
+    runner.evictTerminalRuns();
+    expect(runner.getRun(run.id)).toBeUndefined();
+  });
+
+  it("never evicts a run that is still active, even with TTL 0", async () => {
+    let resolveStep: (() => void) | undefined;
+    const executor: StepExecutor = {
+      async execute() {
+        await new Promise<void>((r) => {
+          resolveStep = r;
+        });
+        return {};
+      },
+    };
+    const runner = makeRunner({ terminalRunTtlMs: 0 }, executor);
+    const run = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+
+    const execPromise = runner.executeRun(run);
+    await new Promise((r) => setTimeout(r, 10));
+
+    runner.evictTerminalRuns();
+    expect(runner.getRun(run.id)?.status).toBe("running");
+    expect(runner.getActiveRuns()).toHaveLength(1);
+
+    resolveStep!();
+    await execPromise;
+    expect(runner.getRun(run.id)?.status).toBe("completed");
+  });
+
+  it("hard cap evicts the oldest terminal runs first", async () => {
+    const runner = makeRunner({ terminalRunTtlMs: 60 * 60 * 1000, maxTerminalRuns: 1 });
+    const run1 = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+    await runner.executeRun(run1);
+    // Ensure distinct terminal timestamps for deterministic oldest-first order
+    await new Promise((r) => setTimeout(r, 5));
+    const run2 = makeProtocolRun([makeRunStep("rs2", "inst_a")]);
+    await runner.executeRun(run2);
+
+    runner.evictTerminalRuns();
+    // TTL has not elapsed, but the cap (1) drops the older terminal run
+    expect(runner.getRun(run1.id)).toBeUndefined();
+    expect(runner.getRun(run2.id)?.status).toBe("completed");
+  });
+
+  it("cancelled runs are evicted after TTL", async () => {
+    let resolveStep: (() => void) | undefined;
+    const executor: StepExecutor = {
+      async execute() {
+        await new Promise<void>((r) => {
+          resolveStep = r;
+        });
+        return {};
+      },
+    };
+    const runner = makeRunner({ terminalRunTtlMs: 0 }, executor);
+    const run = makeProtocolRun([makeRunStep("rs1", "inst_a")]);
+
+    const execPromise = runner.executeRun(run);
+    await new Promise((r) => setTimeout(r, 10));
+    await runner.cancelRun(run.id);
+
+    resolveStep!();
+    await execPromise;
+
+    // Whichever terminal status won the write, the run is terminal + expired
+    runner.evictTerminalRuns();
+    expect(runner.getRun(run.id)).toBeUndefined();
   });
 });
