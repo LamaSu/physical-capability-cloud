@@ -307,3 +307,150 @@ describe("defineActivity — mismatch & client keys", () => {
     expect(seenAttempt).toBe(1);
   });
 });
+
+// ── E2 (HIGH): the retry policy must actually engage for transient errors, and
+// an exhausted transient failure must NOT poison the on-chain key for 30 days —
+// the failed row is reclaimable in minutes. A permanent (nonRetryable) error
+// still fails once and stays cached within its window.
+describe("defineActivity — E2: transient retries + short failed-TTL", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openSqliteStore({ path: ":memory:", pruneIntervalMs: 0, failedTtlMs: 5 });
+  });
+  afterEach(async () => {
+    await store.close();
+  });
+
+  it("a retryable-named error RETRIES up to maximumAttempts, then the failed row is reclaimable in ms", async () => {
+    let attempts = 0;
+    const def = defineActivity({
+      name: "onchain-flaky",
+      store,
+      sleep: ZERO_SLEEP,
+      rand: CONST_RAND,
+      // Mirrors the real escrow activities: FacadeError is permanent, everything
+      // else (incl. our TransientChainError) is retryable.
+      retryPolicy: { maximumAttempts: 3, nonRetryableErrorPatterns: ["FacadeError"] },
+      deriveKey: () => ({ key: "k-transient", scope: "onchain:escrow" }),
+      handler: async (_input: [number]) => {
+        attempts++;
+        const e = new Error("HTTP request failed"); // transient RPC blip
+        e.name = "TransientChainError";
+        throw e;
+      },
+    });
+    const r = await def.invoke({ workflowRunId: "r", activityId: "a", input: [0], actorId: "x" });
+    expect(r.ok).toBe(false);
+    expect(attempts).toBe(3); // the retry policy ENGAGED (was dead code before E2)
+
+    // The exhausted-transient failure is NOT a 30-day brick — after the short
+    // failed-TTL elapses, the same key is reclaimable as a fresh attempt.
+    await new Promise((res) => setTimeout(res, 25));
+    const reclaim = await store.idempotency.claim({
+      key: "k-transient",
+      scope: "onchain:escrow",
+      requestHash: JSON.stringify([0]),
+      actorId: "x",
+    });
+    expect(reclaim.outcome).toBe("fresh");
+  });
+
+  it("a permanent (FacadeError) failure does NOT retry and stays cached within its window", async () => {
+    const permStore = openSqliteStore({ path: ":memory:", pruneIntervalMs: 0, failedTtlMs: 60_000 });
+    let attempts = 0;
+    const def = defineActivity({
+      name: "onchain-perm",
+      store: permStore,
+      sleep: ZERO_SLEEP,
+      rand: CONST_RAND,
+      retryPolicy: { maximumAttempts: 5, nonRetryableErrorPatterns: ["FacadeError"] },
+      deriveKey: () => ({ key: "k-perm", scope: "onchain:escrow" }),
+      handler: async (_input: [number]) => {
+        attempts++;
+        const e = new Error("milestone not evidenced");
+        e.name = "FacadeError";
+        throw e;
+      },
+    });
+    const r = await def.invoke({ workflowRunId: "r", activityId: "a", input: [0], actorId: "x" });
+    expect(r.ok).toBe(false);
+    expect(attempts).toBe(1); // permanent → no retries, no gas-wasting resends
+
+    const again = await permStore.idempotency.claim({
+      key: "k-perm",
+      scope: "onchain:escrow",
+      requestHash: JSON.stringify([0]),
+      actorId: "x",
+    });
+    expect(again.outcome).toBe("cached");
+    expect(again.row?.status).toBe("failed");
+    await permStore.close();
+  });
+});
+
+// ── W1 (HIGH): after a stuck-row reclaim, the reclaim-LOSER's complete() throws
+// "not in 'processing'". The OLD code treated that as a handler failure and
+// re-ran the side effect (re-sending the on-chain tx up to maximumAttempts
+// times). The fix: the loser returns the WINNER's cached result and does NOT
+// re-run. This test reproduces the exact slow-A / reclaiming-B race.
+describe("defineActivity — W1: reclaim-loser does not re-send its side effect", () => {
+  it("A hangs, B reclaims + completes; A's complete()-conflict returns B's result without re-running", async () => {
+    const store = openSqliteStore({
+      path: ":memory:",
+      pruneIntervalMs: 0,
+      stuckProcessingOnchainMs: 0, // B instantly reclaims A's aged processing row
+    });
+
+    let sideEffectRuns = 0;
+    let handlerCall = 0;
+    let releaseFirst!: () => void;
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((res) => (signalFirstStarted = res));
+    const firstGate = new Promise<void>((res) => (releaseFirst = res));
+
+    const def = defineActivity({
+      name: "onchain-w1",
+      store,
+      sleep: ZERO_SLEEP,
+      rand: CONST_RAND,
+      retryPolicy: { maximumAttempts: 5, nonRetryableErrorPatterns: ["FacadeError"] },
+      // Same key + scope for both callers (they are duplicate requests).
+      deriveKey: () => ({ key: "k-w1", scope: "onchain:escrow" }),
+      handler: async (_input: [number]) => {
+        const call = ++handlerCall;
+        sideEffectRuns++;
+        if (call === 1) {
+          // Runner A: hang mid-side-effect so its row stays 'processing'.
+          signalFirstStarted();
+          await firstGate;
+          return "result-A";
+        }
+        // Runner B: completes immediately.
+        return "result-B";
+      },
+    });
+
+    // A starts and hangs inside the handler (row = processing).
+    const aPromise = def.invoke({ workflowRunId: "r", activityId: "a", input: [0], actorId: "x" });
+    await firstStarted;
+    await new Promise((res) => setTimeout(res, 3)); // age processing_started_at past the 0ms stuck window
+
+    // B arrives (duplicate), reclaims the stuck row, runs, completes.
+    const bResult = await def.invoke({ workflowRunId: "r", activityId: "a", input: [0], actorId: "x" });
+    expect(bResult.ok).toBe(true);
+    if (bResult.ok) expect(bResult.value).toBe("result-B");
+
+    // Release A → its handler returns → A.complete() CONFLICTS (row completed by B).
+    releaseFirst();
+    const aResult = await aPromise;
+
+    // W1 core: A did NOT re-run after the conflict. Side effect ran exactly
+    // twice (A once + B once), NOT 6× (the old amplifier).
+    expect(sideEffectRuns).toBe(2);
+    // A returns the winner's (B's) cached result — not an error, not a resend.
+    expect(aResult.ok).toBe(true);
+    if (aResult.ok) expect(aResult.value).toBe("result-B");
+
+    await store.close();
+  });
+});

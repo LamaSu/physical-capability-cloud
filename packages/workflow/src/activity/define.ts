@@ -17,7 +17,7 @@ import type {
   RetryPolicy,
 } from '../shared/types.js';
 import { applyRetryPolicyDefaults, ok, err } from '../shared/types.js';
-import type { Store } from '../store/types.js';
+import type { IdempotencyRow, Store } from '../store/types.js';
 import { deriveActivityKey } from './idempotency-key.js';
 import { computeBackoffMs, isNonRetryable, shouldRetry } from './retry.js';
 
@@ -157,6 +157,46 @@ export function defineActivity<Args extends readonly unknown[], R>(
       const startingAttempt = claim.outcome === 'reclaimed' ? claim.newAttempt ?? 2 : 1;
       let lastError: Error = new Error('ActivityNotAttempted');
 
+      // W1: resolve a complete()/fail() conflict caused by another runner that
+      // reclaimed this (stuck) row and already finished it. Returns the winner's
+      // terminal outcome so the LOSER returns that instead of re-running — the
+      // side effect (e.g. an on-chain tx) must not fire again.
+      const resolveConflict = async (): Promise<Result<R, Error> | null> => {
+        let row: IdempotencyRow | null;
+        try {
+          row = await opts.store.idempotency.lookup(derived.key, derived.scope);
+        } catch {
+          return null; // secondary store error — caller falls back safely
+        }
+        if (row?.status === 'completed' && row.responseBody !== null) {
+          try {
+            return ok(JSON.parse(row.responseBody) as R);
+          } catch {
+            return ok(row.responseBody as unknown as R);
+          }
+        }
+        if (row?.status === 'failed') {
+          const body = row.responseBody ?? 'activity previously failed';
+          return err(new Error(`ActivityCachedFailure: ${body}`));
+        }
+        return null;
+      };
+
+      // Record a terminal failure. If fail() conflicts (row already finished by
+      // a reclaiming runner), return that winner's outcome rather than crashing
+      // the whole invoke with an unhandled fail()-throw.
+      const finalizeFailure = async (error: Error): Promise<Result<R, Error>> => {
+        try {
+          await opts.store.idempotency.fail(derived.key, derived.scope, {
+            body: error.message,
+          });
+        } catch {
+          const winner = await resolveConflict();
+          if (winner) return winner;
+        }
+        return err(error);
+      };
+
       for (let attempt = startingAttempt; ; attempt++) {
         if (attempt > startingAttempt) {
           const waitMs = computeBackoffMs(retryPolicy, attempt, rand);
@@ -172,28 +212,37 @@ export function defineActivity<Args extends readonly unknown[], R>(
           actorId: a.actorId,
         };
 
+        // Run the handler. A handler THROW is a real failure → retry / fail.
+        let result: R;
         try {
-          const result = await opts.handler(a.input, actCtx);
-          const body = safeStringify(result);
-          await opts.store.idempotency.complete(derived.key, derived.scope, {
-            responseBody: body,
-          });
-          return ok(result);
+          result = await opts.handler(a.input, actCtx);
         } catch (e) {
           lastError = e instanceof Error ? e : new Error(String(e));
-          if (isNonRetryable(retryPolicy, lastError)) {
-            await opts.store.idempotency.fail(derived.key, derived.scope, {
-              body: lastError.message,
-            });
-            return err(lastError);
+          if (
+            isNonRetryable(retryPolicy, lastError) ||
+            !shouldRetry(retryPolicy, attempt, lastError)
+          ) {
+            return await finalizeFailure(lastError);
           }
-          if (!shouldRetry(retryPolicy, attempt, lastError)) {
-            await opts.store.idempotency.fail(derived.key, derived.scope, {
-              body: lastError.message,
-            });
-            return err(lastError);
-          }
-          // otherwise loop
+          continue; // retry
+        }
+
+        // Handler SUCCEEDED. Persist completion OUTSIDE the handler try so a
+        // complete()-conflict is NEVER mistaken for a handler failure. If
+        // another runner reclaimed this stuck row and already completed it,
+        // complete() throws "not in 'processing'" — re-running the handler here
+        // would re-send the side effect. Instead, return the winner's result.
+        try {
+          await opts.store.idempotency.complete(derived.key, derived.scope, {
+            responseBody: safeStringify(result),
+          });
+          return ok(result);
+        } catch {
+          const winner = await resolveConflict();
+          if (winner) return winner;
+          // No definitive winner row (e.g. pruned mid-flight). Our handler DID
+          // succeed exactly once — return its result rather than re-executing.
+          return ok(result);
         }
       }
     },
