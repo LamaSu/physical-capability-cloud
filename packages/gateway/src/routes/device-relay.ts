@@ -333,21 +333,20 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         (req.headers["x-agent-did"] as string | undefined) ??
         callerId;
 
-      const safetyVerdict = await gateway.validateAndRelay(
-        {
-          commandId: generateId("cmd"),
-          deviceId: kernelId,
-          class: scopeId ? "scoped" : "safe",
-          type: toolName,
-          params: (args ?? {}) as Record<string, unknown>,
-          agentDid,
-          scopeId: scopeId ?? undefined,
-        },
-        // No-op execute — for relay calls the actual execution happens on-device
-        // (executor polls tool_call_relay). The gateway only needs to validate;
-        // the DB insert is the relay mechanism, not a direct hardware call.
-        async () => undefined,
-      );
+      // Admission check only (no execution). The actual work happens on-device:
+      // the executor polls tool_call_relay and later reports the outcome to
+      // POST /tool-result, which records the real success/failure to the breaker.
+      // (Passing a no-op execute to validateAndRelay here recorded a phantom
+      // success on every relayed call and kept the breaker permanently closed.)
+      const safetyVerdict = await gateway.validateOnly({
+        commandId: generateId("cmd"),
+        deviceId: kernelId,
+        class: scopeId ? "scoped" : "safe",
+        type: toolName,
+        params: (args ?? {}) as Record<string, unknown>,
+        agentDid,
+        scopeId: scopeId ?? undefined,
+      });
 
       if (!safetyVerdict.allowed) {
         return reply.status(403).send({
@@ -486,6 +485,23 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const now = new Date().toISOString();
     const newStatus = error ? "failed" : "completed";
+
+    // Feed the executor's REAL outcome back into the safety circuit breaker.
+    // The tool-call admission (validateOnly) keyed the breaker by kernelId, so
+    // the outcome MUST be recorded under the same key — this is what lets a
+    // device that keeps failing on the executor actually trip the breaker and
+    // block subsequent relayed commands. (A relayed tool call is kernel-scoped;
+    // the relay row carries no finer deviceId.) Non-fatal if gateway is absent.
+    try {
+      const gateway = getSafetyGateway();
+      if (error) {
+        gateway.recordDeviceFailure(call.kernelId);
+      } else {
+        gateway.recordDeviceSuccess(call.kernelId);
+      }
+    } catch {
+      // Gateway not initialised — result recording proceeds without the breaker.
+    }
 
     // If failed and scope has retries left, update retry count
     if (error && call.scopeId) {

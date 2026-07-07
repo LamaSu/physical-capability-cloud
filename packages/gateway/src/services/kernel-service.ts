@@ -215,9 +215,13 @@ export class KernelService {
    * Submit a job to a device. The actual execution is fire-and-forget;
    * this method returns immediately with { jobId, deviceId, status }.
    *
-   * The job is routed through SafetyGateway.validateAndRelay() before
-   * runner.run() is invoked. If the governor or circuit breaker denies
-   * the command, an error is thrown immediately (before fire-and-forget).
+   * Admission control runs synchronously first via SafetyGateway.validateOnly()
+   * (circuit-breaker fast-fail + governor): if the governor denies the command
+   * or the device's breaker is already open, an error is thrown immediately and
+   * no job is accepted. The real runner.run() executes out-of-band below and
+   * reports its true success/failure back to the breaker via
+   * recordDeviceSuccess()/recordDeviceFailure() — so a device that keeps failing
+   * actually trips the breaker and blocks subsequent jobs.
    */
   async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
@@ -237,8 +241,10 @@ export class KernelService {
     const cmdClass = params.scopeId ? "scoped" : "safe";
 
     // We validate synchronously before accepting the job (not fire-and-forget).
-    // Only the governor check is done here — the circuit breaker wraps the full
-    // runner.run() below in the async execution path so per-run failures are tracked.
+    // This is admission control ONLY — the circuit breaker's fast-fail plus the
+    // governor's 5-check pipeline. The real runner.run() executes out-of-band
+    // below; its true success/failure is fed back to the breaker via
+    // recordDeviceSuccess()/recordDeviceFailure() so real device failures count.
     const preflightCmd = {
       commandId: `preflight:${jobId}`,
       deviceId,
@@ -249,10 +255,10 @@ export class KernelService {
       scopeId: params.scopeId,
     };
 
-    // Run a gateway pre-flight using a no-op execute so the governor + circuit
-    // breaker can reject before we accept the job. The actual runner.run() is
-    // gated separately below inside the fire-and-forget block.
-    const preflight = await gateway.validateAndRelay(preflightCmd, async () => undefined);
+    // Admission check with NO execution. (Previously this passed a no-op execute
+    // to validateAndRelay, which recorded a phantom success on every job and
+    // prevented the breaker from ever tripping on real device failures.)
+    const preflight = await gateway.validateOnly(preflightCmd);
     if (!preflight.allowed) {
       throw new Error(
         `[safety-gateway] Job ${jobId} denied: ${preflight.verdict?.reason ?? preflight.reason ?? "unknown"}`,
@@ -314,6 +320,14 @@ export class KernelService {
             })
             .then(async (result) => {
               this.runningJobs.delete(jobId);
+              // Feed the REAL execution outcome into the safety breaker. Admission
+              // used validateOnly (which records nothing), so this is the only
+              // place a genuine device success/failure reaches the breaker.
+              if (result.success) {
+                gateway.recordDeviceSuccess(deviceId);
+              } else {
+                gateway.recordDeviceFailure(deviceId);
+              }
               try {
                 const repos = getRepos();
                 if (result.success) {
@@ -362,6 +376,8 @@ export class KernelService {
             })
             .catch((err: unknown) => {
               this.runningJobs.delete(jobId);
+              // A rejected runner.run() is a real device failure — record it.
+              gateway.recordDeviceFailure(deviceId);
               try {
                 const repos = getRepos();
                 repos.jobs.updateStatus(jobId, "failed");
@@ -392,6 +408,12 @@ export class KernelService {
         })
         .then(async (result) => {
           this.runningJobs.delete(jobId);
+          // Feed the REAL execution outcome into the safety breaker (fallback path).
+          if (result.success) {
+            gateway.recordDeviceSuccess(deviceId);
+          } else {
+            gateway.recordDeviceFailure(deviceId);
+          }
           try {
             const repos = getRepos();
             if (result.success) {
@@ -434,6 +456,8 @@ export class KernelService {
         })
         .catch(() => {
           this.runningJobs.delete(jobId);
+          // A rejected runner.run() is a real device failure — record it (fallback path).
+          gateway.recordDeviceFailure(deviceId);
           try {
             const repos = getRepos();
             repos.jobs.updateStatus(jobId, "failed");
@@ -478,15 +502,88 @@ export class KernelService {
   }
 
   /**
-   * List all devices that have been initialised from the kernel config.
+   * List all devices from the kernel config with their REAL health status.
+   *
+   * Health is derived from the live machine adapter (getStatus()) and the
+   * safety circuit-breaker state — never hardcoded. See deriveHealthStatus.
    */
   async listDevices(): Promise<DeviceInfo[]> {
-    return this.config.devices.map((d) => ({
-      id: d.id,
-      type: d.type,
-      adapterType: d.adapterType,
-      healthStatus: "healthy",
-    }));
+    // Snapshot circuit-breaker state once (per-device command-path health).
+    let circuits: Map<string, { state: string; failures: number }> | null = null;
+    try {
+      circuits = getSafetyGateway().getStatus().circuits as Map<
+        string,
+        { state: string; failures: number }
+      >;
+    } catch {
+      // Gateway not initialised (some test paths) — fall back to adapter health.
+      circuits = null;
+    }
+
+    return Promise.all(
+      this.config.devices.map(async (d) => ({
+        id: d.id,
+        type: d.type,
+        adapterType: d.adapterType,
+        healthStatus: await this.deriveHealthStatus(d, circuits),
+      })),
+    );
+  }
+
+  /**
+   * Derive a device's health from its live adapter status + circuit-breaker
+   * state. Returns one of the DeviceStatusDTO healthStatus values:
+   * "healthy" | "degraded" | "offline" | "unknown".
+   *
+   * - Machine with a running adapter: map its getStatus() (offline→offline,
+   *   error/maintenance→degraded, idle/busy→healthy; a thrown/unreachable
+   *   adapter→offline).
+   * - Sensor/camera: "healthy" if a live adapter was constructed for the id,
+   *   else "unknown".
+   * - Configured machine with no running adapter: "unknown".
+   *
+   * A tripped (open) or recovering (half_open) breaker never reports "healthy",
+   * because the gateway is refusing / tentatively testing commands to it.
+   */
+  private async deriveHealthStatus(
+    device: { id: string; type: string },
+    circuits: Map<string, { state: string; failures: number }> | null,
+  ): Promise<string> {
+    // 1. Physical / adapter signal.
+    let adapterHealth = "unknown";
+    const machine = this.machines.get(device.id);
+    if (machine) {
+      try {
+        const status = await machine.getStatus();
+        adapterHealth =
+          status === "offline"
+            ? "offline"
+            : status === "error" || status === "maintenance"
+              ? "degraded"
+              : "healthy"; // idle | busy
+      } catch {
+        adapterHealth = "offline"; // adapter unreachable
+      }
+    } else if (device.type !== "machine") {
+      // Sensor/camera: healthy if a live adapter was constructed for this id.
+      const hasAdapter =
+        this.sensors.some((s) => s.id === device.id) ||
+        this.cameras.some((c) => c.id === device.id);
+      adapterHealth = hasAdapter ? "healthy" : "unknown";
+    }
+    // else: configured machine with no running adapter → adapterHealth = "unknown".
+
+    // 2. Circuit-breaker overlay — a tripped breaker after real failures means
+    // the gateway is refusing to relay to this device; never report healthy.
+    const breakerState = circuits?.get(device.id)?.state;
+    if (breakerState === "open") {
+      return adapterHealth === "offline" ? "offline" : "degraded";
+    }
+    if (breakerState === "half_open") {
+      return adapterHealth === "healthy" ? "degraded" : adapterHealth;
+    }
+
+    return adapterHealth;
   }
 
   /**
