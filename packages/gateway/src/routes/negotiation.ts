@@ -472,6 +472,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
           currency: quoteCurrency,
           bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
           challengeWindowSeconds,
+          // Persist the agreed assurance tier (derived from evidenceTier above)
+          // so /review copies it verbatim instead of re-deriving it from the
+          // bond dollar amount — the wrong tier otherwise propagates on-chain
+          // as the milestone's requiredTier (N3).
+          assuranceTier,
           validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
         };
 
@@ -534,7 +539,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
             challengeWindowSeconds: quote.challengeWindowSeconds,
           }],
           deadline: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-          assuranceTier: quote.bondAmount === "0.00" ? 0 : parseFloat(quote.bondAmount) > 5 ? 2 : 1,
+          // Copy the tier the buyer agreed to at /quote — never re-derive it
+          // from the bond dollar amount (that decouples the on-chain
+          // requiredTier from the agreed evidence tier). Fall back to 0 only
+          // for legacy quotes created before the tier was persisted (N3).
+          assuranceTier: typeof quote.assuranceTier === "number" ? quote.assuranceTier : 0,
           payer: "0x0000000000000000000000000000000000000000",
           operator: "0x0000000000000000000000000000000000000000",
           token: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",

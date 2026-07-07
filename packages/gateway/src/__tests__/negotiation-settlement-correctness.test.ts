@@ -240,4 +240,50 @@ describe("negotiation + settlement correctness", () => {
       expect(escrow!.totalAmount).not.toBe(price1);
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // N3 — assurance tier is carried from evidenceTier, never re-derived from bond
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** What the OLD /review derived from the bond dollar amount (the N3 bug). */
+  function oldBondDerivedTier(bondAmount: string): number {
+    return bondAmount === "0.00" ? 0 : parseFloat(bondAmount) > 5 ? 2 : 1;
+  }
+
+  describe("N3 — agreed tier propagates verbatim (not re-derived from bond $)", () => {
+    it("keeps tier 1 for evidenceTier 'basic' even when the bond > $5", async () => {
+      const id = await createSession(app, "n3-basic");
+      // basic => tier 1 (5% bond). High quantity pushes the bond above $5, the
+      // exact input where the old bond-derived logic wrongly jumped to tier 2.
+      expect((await select(app, id, { evidenceTier: "basic", quantity: 20 })).statusCode).toBe(200);
+
+      const quoteBody = (await quote(app, id)).json();
+      expect(quoteBody.quote.assuranceTier).toBe(1); // stored at /quote from evidenceTier
+      expect(parseFloat(quoteBody.quote.bondAmount)).toBeGreaterThan(5);
+      // Confirm this is a genuine divergence case: old logic would have said 2.
+      expect(oldBondDerivedTier(quoteBody.quote.bondAmount)).toBe(2);
+
+      const reviewBody = (await review(app, id)).json();
+      expect(reviewBody.contractTerms.assuranceTier).toBe(1); // verbatim, not 2
+    });
+
+    it("keeps tier 2 for evidenceTier 'full' even when the bond < $5", async () => {
+      const id = await createSession(app, "n3-full");
+      // full => tier 2 (15% bond). At quantity 1 the bond is a few dollars (< $5),
+      // where the old bond-derived logic wrongly dropped to tier 1 — releasing
+      // funds on weaker evidence than the buyer agreed to.
+      expect((await select(app, id, { evidenceTier: "full", quantity: 1 })).statusCode).toBe(200);
+
+      const quoteBody = (await quote(app, id)).json();
+      expect(quoteBody.quote.assuranceTier).toBe(2);
+      const bond = parseFloat(quoteBody.quote.bondAmount);
+      expect(bond).toBeGreaterThan(0);
+      expect(bond).toBeLessThan(5);
+      // Confirm divergence: old logic would have said 1.
+      expect(oldBondDerivedTier(quoteBody.quote.bondAmount)).toBe(1);
+
+      const reviewBody = (await review(app, id)).json();
+      expect(reviewBody.contractTerms.assuranceTier).toBe(2); // verbatim, not 1
+    });
+  });
 });
