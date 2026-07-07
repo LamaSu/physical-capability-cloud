@@ -271,3 +271,115 @@ describe("IdempotencyStore — expires_at policy by scope", () => {
     await store.close();
   });
 });
+
+// ── E2 (HIGH): a FAILED on-chain row must NOT inherit the 30-day scope TTL
+// (that poisons the semantic key for a month after a single transient blip).
+// A failed row gets a SHORT TTL and becomes reclaimable in minutes; a COMPLETED
+// row keeps the long TTL (a successful on-chain op must not re-send).
+describe("IdempotencyStore — E2: failed-row TTL (anti-brick)", () => {
+  it("a FAILED onchain row gets the short failed-TTL, NOT the 30-day scope TTL", async () => {
+    const store = openSqliteStore({ path: ":memory:", pruneIntervalMs: 0 });
+    await store.idempotency.claim({
+      key: "kfo",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    await store.idempotency.fail("kfo", "onchain:escrow", { body: "rpc blip" });
+    const row = await store.idempotency.lookup("kfo", "onchain:escrow");
+    const ttlMs = Date.parse(row!.expiresAt) - Date.parse(row!.completedAt!);
+    // Far below the 30-day onchain TTL, around the 5-min default.
+    expect(ttlMs).toBeGreaterThan(60 * 1000);
+    expect(ttlMs).toBeLessThan(10 * 60 * 1000);
+    await store.close();
+  });
+
+  it("a COMPLETED onchain row KEEPS the ~30-day TTL (successful op must not re-send)", async () => {
+    const store = openSqliteStore({ path: ":memory:", pruneIntervalMs: 0 });
+    const c = await store.idempotency.claim({
+      key: "kco",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    await store.idempotency.complete("kco", "onchain:escrow", { responseBody: '{"ok":true}' });
+    const row = await store.idempotency.lookup("kco", "onchain:escrow");
+    const ttlMs = Date.parse(row!.expiresAt) - Date.parse(c.row!.createdAt);
+    expect(ttlMs).toBeGreaterThan(29 * 24 * 3600 * 1000);
+    await store.close();
+  });
+
+  it("within the failed-TTL window, a re-claim still returns the cached failure", async () => {
+    const store = openSqliteStore({
+      path: ":memory:",
+      pruneIntervalMs: 0,
+      failedTtlMs: 60_000,
+    });
+    await store.idempotency.claim({
+      key: "kfw",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    await store.idempotency.fail("kfw", "onchain:escrow", { body: "boom" });
+    const c = await store.idempotency.claim({
+      key: "kfw",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    expect(c.outcome).toBe("cached");
+    expect(c.row?.status).toBe("failed");
+    await store.close();
+  });
+
+  it("AFTER the failed-TTL elapses, a re-claim recycles the key as 'fresh' (minutes, not 30d)", async () => {
+    const store = openSqliteStore({
+      path: ":memory:",
+      pruneIntervalMs: 0,
+      failedTtlMs: 5, // tiny so the test doesn't wait real minutes
+    });
+    await store.idempotency.claim({
+      key: "kfx",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    await store.idempotency.fail("kfx", "onchain:escrow", { body: "transient" });
+    await new Promise((r) => setTimeout(r, 25)); // let the 5ms failed-TTL elapse
+    const fresh = await store.idempotency.claim({
+      key: "kfx",
+      scope: "onchain:escrow",
+      requestHash: "h",
+      actorId: "a",
+    });
+    expect(fresh.outcome).toBe("fresh");
+    expect(fresh.row?.status).toBe("processing");
+    expect(fresh.row?.attempt).toBe(1); // recycled as a brand-new attempt
+    await store.close();
+  });
+
+  it("recycle-as-fresh works even when the retry carries different args (dead row is dead)", async () => {
+    const store = openSqliteStore({
+      path: ":memory:",
+      pruneIntervalMs: 0,
+      failedTtlMs: 5,
+    });
+    await store.idempotency.claim({
+      key: "kfd",
+      scope: "onchain:escrow",
+      requestHash: "hash-A",
+      actorId: "a",
+    });
+    await store.idempotency.fail("kfd", "onchain:escrow", { body: "transient" });
+    await new Promise((r) => setTimeout(r, 25));
+    const fresh = await store.idempotency.claim({
+      key: "kfd",
+      scope: "onchain:escrow",
+      requestHash: "hash-B", // different, but the old row is expired → recycle wins
+      actorId: "a",
+    });
+    expect(fresh.outcome).toBe("fresh");
+    await store.close();
+  });
+});

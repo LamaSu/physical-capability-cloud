@@ -1,6 +1,8 @@
 import { defineActivity, deriveOnchainOpKey } from "@pcc/workflow";
 import type { OracleAttestation } from "@pcc/contracts";
-import type { Address } from "viem";
+import { keccak256, pad, toBytes, type Address } from "viem";
+import type { Result } from "@pcc/spec";
+import { TRANSIENT_ERROR_CODE } from "../facades/transient-error.js";
 import { getWorkflowStore } from "../workflow-store.js";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
@@ -24,6 +26,36 @@ function throwFacadeError(err: { message: string; httpStatus: number; code: stri
   throw new FacadeError(err);
 }
 
+/**
+ * E2: retryable-named error for transient chain/RPC/mempool failures. Its name
+ * is intentionally NOT in any activity's nonRetryableErrorPatterns, so throwing
+ * it lets the retry loop (initialInterval × backoff, up to maximumAttempts)
+ * engage. If retries still exhaust, define.ts records the row 'failed' and the
+ * store's SHORT failed-TTL makes it reclaimable in minutes — never a 30-day
+ * brick of the on-chain semantic key.
+ */
+export class TransientChainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientChainError";
+  }
+}
+
+/**
+ * Unwrap a settlement-facade Result. On success returns the data. On error,
+ * throws a TransientChainError (retryable) when the facade tagged it transient,
+ * otherwise a FacadeError (permanent — business rule / revert / validation).
+ * This is the single point where the E2 transient-vs-permanent split is applied
+ * to every escrow chain-write activity.
+ */
+function unwrapFacadeResult<T>(result: Result<T>): T {
+  if (result.success) return result.data;
+  if (result.error.code === TRANSIENT_ERROR_CODE) {
+    throw new TransientChainError(result.error.message);
+  }
+  throwFacadeError(result.error);
+}
+
 export const fundEscrowActivity = defineActivity<
   readonly [Address, string | undefined, string | undefined, string | undefined],
   unknown
@@ -44,7 +76,10 @@ export const fundEscrowActivity = defineActivity<
   deriveKey: (ctx) => {
     const [address] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: address as `0x${string}`,
+      // E1: a 20-byte address is left-padded to a canonical bytes32 so the
+      // on-chain semantic-key derivation (which requires exactly 32 bytes) does
+      // not throw. Stable — the same address always pads to the same bytes32.
+      jobId: pad(address as Address, { size: 32 }),
       milestoneIdx: 0,
       action: "fund",
     });
@@ -53,8 +88,7 @@ export const fundEscrowActivity = defineActivity<
     const [address, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.fundEscrow(address, actorId, ip, userAgent);
-    if (!result.success) throwFacadeError(result.error);
-    return result.data;
+    return unwrapFacadeResult(result);
   },
 });
 
@@ -85,7 +119,10 @@ export const releaseMilestoneActivity = defineActivity<
   deriveKey: (ctx) => {
     const [address, milestoneIdx] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: address as `0x${string}`,
+      // E1: a 20-byte address is left-padded to a canonical bytes32 so the
+      // on-chain semantic-key derivation (which requires exactly 32 bytes) does
+      // not throw. Stable — the same address always pads to the same bytes32.
+      jobId: pad(address as Address, { size: 32 }),
       milestoneIdx: Number(milestoneIdx),
       action: "release",
     });
@@ -101,8 +138,7 @@ export const releaseMilestoneActivity = defineActivity<
       ip,
       userAgent,
     );
-    if (!result.success) throwFacadeError(result.error);
-    return result.data;
+    return unwrapFacadeResult(result);
   },
 });
 
@@ -125,7 +161,10 @@ export const fileDisputeActivity = defineActivity<
   deriveKey: (ctx) => {
     const [address, milestoneIdx] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: address as `0x${string}`,
+      // E1: a 20-byte address is left-padded to a canonical bytes32 so the
+      // on-chain semantic-key derivation (which requires exactly 32 bytes) does
+      // not throw. Stable — the same address always pads to the same bytes32.
+      jobId: pad(address as Address, { size: 32 }),
       milestoneIdx: Number(milestoneIdx),
       action: "dispute",
     });
@@ -134,8 +173,7 @@ export const fileDisputeActivity = defineActivity<
     const [address, milestoneIndex, body, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.fileDispute(address, milestoneIndex, body, actorId, ip, userAgent);
-    if (!result.success) throwFacadeError(result.error);
-    return result.data;
+    return unwrapFacadeResult(result);
   },
 });
 
@@ -154,7 +192,10 @@ export const depositBondActivity = defineActivity<
   deriveKey: (ctx) => {
     const [address, milestoneIdx] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: address as `0x${string}`,
+      // E1: a 20-byte address is left-padded to a canonical bytes32 so the
+      // on-chain semantic-key derivation (which requires exactly 32 bytes) does
+      // not throw. Stable — the same address always pads to the same bytes32.
+      jobId: pad(address as Address, { size: 32 }),
       milestoneIdx: Number(milestoneIdx),
       action: "depositBond",
     });
@@ -163,8 +204,7 @@ export const depositBondActivity = defineActivity<
     const [address, milestoneIndex, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.depositBond(address, milestoneIndex, actorId, ip, userAgent);
-    if (!result.success) throwFacadeError(result.error);
-    return result.data;
+    return unwrapFacadeResult(result);
   },
 });
 
@@ -183,7 +223,10 @@ export const submitEvidenceActivity = defineActivity<
   deriveKey: (ctx) => {
     const [address, milestoneIdx] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: address as `0x${string}`,
+      // E1: a 20-byte address is left-padded to a canonical bytes32 so the
+      // on-chain semantic-key derivation (which requires exactly 32 bytes) does
+      // not throw. Stable — the same address always pads to the same bytes32.
+      jobId: pad(address as Address, { size: 32 }),
       milestoneIdx: Number(milestoneIdx),
       action: "submitEvidence",
     });
@@ -192,8 +235,7 @@ export const submitEvidenceActivity = defineActivity<
     const [address, milestoneIndex, evidenceBundleHash, actorId, ip, userAgent] = input;
     const facade = getSettlementFacade();
     const result = await facade.submitEvidenceHash(address, milestoneIndex, evidenceBundleHash, actorId, ip, userAgent);
-    if (!result.success) throwFacadeError(result.error);
-    return result.data;
+    return unwrapFacadeResult(result);
   },
 });
 
@@ -212,7 +254,9 @@ export const releaseMilestoneByJobActivity = defineActivity<
   deriveKey: (ctx) => {
     const [jobId, milestoneIdx] = ctx.args;
     return deriveOnchainOpKey({
-      jobId: jobId as `0x${string}`,
+      // E1: jobId here is a gateway job UUID (not hex). keccak256 it into a
+      // stable bytes32 so the on-chain semantic-key derivation never throws.
+      jobId: keccak256(toBytes(jobId)),
       milestoneIdx: Number(milestoneIdx),
       action: "release",
     });

@@ -177,3 +177,44 @@ describe("encodeOnchainOpArgs", () => {
     expect(bytes.length % 32).toBe(0);
   });
 });
+
+// ── E1 (BLOCKER): escrow activities pass a 20-byte ADDRESS or a non-hex job
+// UUID as `jobId`, which the 32-byte guard rejects → every chain-write route
+// 500s. The gateway fix converts to a canonical bytes32 before derivation:
+// left-pad an address, keccak256 a string UUID. These tests mirror both
+// strategies with the workflow's own helpers (no viem dep) and prove the
+// derivation no longer throws AND is stable (same op → same key).
+describe("deriveOnchainOpKey — E1: address / UUID → bytes32 conversion", () => {
+  const ADDR20 = "0x1234567890abcdef1234567890abcdef12345678"; // 20 bytes
+
+  it("a RAW 20-byte address throws (the exact break the gateway must guard)", () => {
+    expect(() =>
+      deriveOnchainOpKey({ jobId: ADDR20 as `0x${string}`, milestoneIdx: 0, action: "fund" }),
+    ).toThrow(/bytes32/);
+  });
+
+  it("left-padding the address to bytes32 derives a stable key without throwing", () => {
+    // Canonical `address as bytes32` = 12 zero bytes + the 20 address bytes.
+    const padded = ("0x" + "00".repeat(12) + ADDR20.slice(2)) as `0x${string}`;
+    const derive = () => deriveOnchainOpKey({ jobId: padded, milestoneIdx: 0, action: "fund" });
+    expect(derive).not.toThrow();
+    expect(derive().key).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(derive().key).toBe(derive().key); // STABLE — same op → same key
+  });
+
+  it("keccak256 of a non-hex job UUID yields a valid bytes32 → stable key, no throw", () => {
+    const jobId = keccak256Hex("job-abc-123-def-456") as `0x${string}`; // 0x + 64 hex
+    const derive = () => deriveOnchainOpKey({ jobId, milestoneIdx: 2, action: "release" });
+    expect(derive).not.toThrow();
+    expect(derive().key).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(derive().key).toBe(derive().key);
+  });
+
+  it("distinct (padded) addresses derive distinct keys — no cross-escrow collision", () => {
+    const a = ("0x" + "00".repeat(12) + "aa".repeat(20)) as `0x${string}`;
+    const b = ("0x" + "00".repeat(12) + "bb".repeat(20)) as `0x${string}`;
+    const ka = deriveOnchainOpKey({ jobId: a, milestoneIdx: 0, action: "fund" }).key;
+    const kb = deriveOnchainOpKey({ jobId: b, milestoneIdx: 0, action: "fund" }).key;
+    expect(ka).not.toBe(kb);
+  });
+});
