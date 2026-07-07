@@ -589,6 +589,27 @@ export function isWriteEnabled(): boolean {
   return !!GATEWAY_PRIVATE_KEY;
 }
 
+/**
+ * Wait for a transaction to be mined and return its terminal receipt status.
+ *
+ * The V2 write helpers above return as soon as the tx is BROADCAST (viem's
+ * writeContract resolves on the tx hash, not on mining). A crank that submits a
+ * dependent sequence (submitEvidence → submitAttestation → release) must wait for
+ * each step to MINE before the next one's estimation runs against the new state,
+ * otherwise the next estimation can `eth_call` against the pre-write state and
+ * revert spuriously. This is the same "trust the receipt, not a re-read" pattern
+ * the create-leg uses (paid-job-flow createJobFromSession) — we confirm the write
+ * landed via its receipt, we do NOT re-read getMilestone (the load-balanced RPC
+ * replica lags the just-mined write).
+ */
+export async function waitForReceipt(
+  txHash: Hex,
+): Promise<{ status: "success" | "reverted"; blockNumber: number }> {
+  const client = getPublicClient();
+  const receipt = await client.waitForTransactionReceipt({ hash: txHash });
+  return { status: receipt.status, blockNumber: Number(receipt.blockNumber) };
+}
+
 /** Get the gateway signer address (if configured) */
 export function getSignerAddress(): Address | undefined {
   if (!GATEWAY_PRIVATE_KEY) return undefined;
