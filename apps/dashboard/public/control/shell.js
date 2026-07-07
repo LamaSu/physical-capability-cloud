@@ -920,12 +920,18 @@
     // catalog builds itself via CP.catalog.init()
   };
   var built = {};
+  // B3 hook: regions/*.js (loaded after this file, before boot) register
+  // upgraded builders in CP.regionBuilders — they win over the inline
+  // defaults above; absent, the inline builders carry unchanged.
+  function builderFor(id) {
+    return (CP.regionBuilders && CP.regionBuilders[id]) || BUILDERS[id];
+  }
   function buildIfNeeded(id) {
     if (built[id] || !CP.expand.isRevealed(id)) return;
-    var fn = BUILDERS[id];
+    var fn = builderFor(id);
     if (fn) { fn(); built[id] = true; }
   }
-  CP.rebuildRegion = function (id) { if (BUILDERS[id]) { BUILDERS[id](); built[id] = true; } };
+  CP.rebuildRegion = function (id) { var fn = builderFor(id); if (fn) { fn(); built[id] = true; } };
 
   // ── Header wiring ────────────────────────────────────────────────────────
   function wireHeader() {

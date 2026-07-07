@@ -347,5 +347,22 @@
 <script src="./catalog.js"></script>
 <script src="./walkthrough.js"></script>
 <script src="./shell.js"></script>
+<!-- B3 regions: upgraded Activity/Approvals builders (register into
+     CP.regionBuilders + override CP.trackRun/CP.addInterrupt) and the
+     agent-portal mount. Must load AFTER shell.js (overrides land) and
+     before DOMContentLoaded boot. Each fails open if absent. -->
+<script src="./regions/activity.js"></script>
+<script src="./regions/approvals.js"></script>
+<script src="./regions/portal-mount.js"></script>
+<!-- B3 wave 2 regions: full builders for the remaining plane surfaces.
+     Same contract — self-register into CP.regionBuilders, override the inline
+     shell BUILDERS, fail open if absent. catalog-full uses catalog.js (loaded
+     above) as its data engine. -->
+<script src="./regions/catalog-full.js"></script>
+<script src="./regions/compose.js"></script>
+<script src="./regions/ledger.js"></script>
+<script src="./regions/fleet.js"></script>
+<script src="./regions/publish.js"></script>
+<script src="./regions/audit.js"></script>
 </body>
 </html>
