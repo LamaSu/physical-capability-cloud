@@ -144,6 +144,7 @@ import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
 import { funnelTrackerPlugin } from "./services/funnel-tracker.js";
 import { adminObservabilityRoutes } from "./routes/admin-observability.js";
+import { orgRoutes } from "./routes/org.js";
 import { setSessionStore } from "@pcc/orchestrator-sdk";
 import { OrchestratorSessionStore } from "./services/orchestrator-session-store.js";
 import { startEventBusOtelBridge } from "./services/event-bus-otel-bridge.js";
@@ -504,6 +505,12 @@ export async function createGateway(port = 3200) {
   // apiGate (caller is authenticated) + admin-allowlisted. 404 unless
   // PCC_FUNNEL_ENABLED=true.
   await app.register(adminObservabilityRoutes);
+
+  // Org coordination routes — @pcc/coordination's Approvals inbox +
+  // Activity feed contracts, mounted additively (GET/POST /org/approvals,
+  // GET /org/watch SSE). See routes/org.ts docblock for the frame-factory
+  // seam and the documented no-auth-yet gap.
+  await app.register(orgRoutes);
 
   // REST routes
   await app.register(capabilityRoutes);

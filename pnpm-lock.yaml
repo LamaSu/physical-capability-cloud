@@ -790,6 +790,9 @@ importers:
       '@pcc/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@pcc/coordination':
+        specifier: workspace:*
+        version: link:../coordination
       '@pcc/demand-intel':
         specifier: workspace:*
         version: link:../demand-intel
