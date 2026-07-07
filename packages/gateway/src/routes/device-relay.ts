@@ -134,6 +134,44 @@ function hasCameraAccess(
   return !!scope;
 }
 
+/**
+ * Whether `callerId` is authorized to report a result for a relay tool call.
+ * Authorized = the operator of the call's kernel (the on-device executor runs
+ * under the operator), or the creator of the call's execution scope. Mirrors
+ * the ownership gate enforced on POST /tool-call. The caller resolves and
+ * allows the anonymous (unauthenticated relay) case before invoking this.
+ *
+ * Authorization is checked against the call's OWN kernel (`call.kernelId`) —
+ * the resource whose circuit breaker the result mutates — not the URL param,
+ * so a callId cannot be replayed against an unrelated kernel's operator.
+ */
+function callerOwnsCall(
+  call: typeof toolCallRelay.$inferSelect,
+  callerId: string,
+): boolean {
+  const { db } = getStore();
+
+  // Kernel operator may always report outcomes for their own kernel.
+  const kernel = db
+    .select()
+    .from(shopKernels)
+    .where(eq(shopKernels.id, call.kernelId))
+    .get();
+  if (kernel && kernel.operatorAddress === callerId) return true;
+
+  // Otherwise the creator of the call's execution scope may report it.
+  if (call.scopeId) {
+    const scope = db
+      .select()
+      .from(executionScopes)
+      .where(eq(executionScopes.id, call.scopeId))
+      .get();
+    if (scope && scope.createdBy === callerId) return true;
+  }
+
+  return false;
+}
+
 // ── Active SSE clients for camera streams (per kernel) ──────────────────────
 const cameraStreamClients = new Map<string, Set<FastifyReply>>();
 
@@ -483,6 +521,43 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Tool call not found", callId });
     }
 
+    // ── Caller-ownership check (safety review S3, finding F2) ────────────────
+    // Reporting a result mutates the safety circuit breaker for call.kernelId
+    // (recordDeviceFailure/Success below). Only the kernel operator (whose
+    // executor produced this outcome) or the creator of the call's execution
+    // scope may report it. Without this gate, any authenticated caller who
+    // learns a callId could force-trip a kernel's breaker (DoS) or force-reset
+    // it (masking real device failures). Mirrors the ownership gate on POST
+    // /tool-call. Anonymous callers (unauthenticated relay mode) are preserved
+    // for backward-compat, exactly as /tool-call allows.
+    const callerId = (req as any).operatorId ?? "anonymous";
+    if (callerId !== "anonymous" && !callerOwnsCall(call, callerId)) {
+      return reply.status(403).send({
+        error: "tool_result_not_yours",
+        message:
+          "Only the kernel operator or the owning execution scope may report this result.",
+      });
+    }
+
+    // ── Idempotency / breaker-integrity guard (finding F2) ───────────────────
+    // Only the FIRST terminal transition of a call records its outcome. A call
+    // that is already completed/failed/rejected is treated as an idempotent
+    // no-op ack: a poll-based executor retrying its POST after a dropped 200 —
+    // or a replayed callId — must neither double-count a breaker trip nor
+    // spuriously reset a tripped breaker.
+    if (
+      call.status === "completed" ||
+      call.status === "failed" ||
+      call.status === "rejected"
+    ) {
+      return reply.status(200).send({
+        callId,
+        status: call.status,
+        completedAt: call.completedAt ?? null,
+        idempotent: true,
+      });
+    }
+
     const now = new Date().toISOString();
     const newStatus = error ? "failed" : "completed";
 
@@ -492,15 +567,21 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     // device that keeps failing on the executor actually trip the breaker and
     // block subsequent relayed commands. (A relayed tool call is kernel-scoped;
     // the relay row carries no finer deviceId.) Non-fatal if gateway is absent.
-    try {
-      const gateway = getSafetyGateway();
-      if (error) {
-        gateway.recordDeviceFailure(call.kernelId);
-      } else {
-        gateway.recordDeviceSuccess(call.kernelId);
+    //
+    // Guarded on 'claimed': only a call that was admitted AND picked up by an
+    // executor carries a real device outcome. The terminal-state guard above
+    // already excluded replays, so this is the single first-transition record.
+    if (call.status === "claimed") {
+      try {
+        const gateway = getSafetyGateway();
+        if (error) {
+          gateway.recordDeviceFailure(call.kernelId);
+        } else {
+          gateway.recordDeviceSuccess(call.kernelId);
+        }
+      } catch {
+        // Gateway not initialised — result recording proceeds without the breaker.
       }
-    } catch {
-      // Gateway not initialised — result recording proceeds without the breaker.
     }
 
     // If failed and scope has retries left, update retry count

@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { initStore, closeStore, getStore } from "../db.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
+import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
 
 const { shopKernels, kernelDevices, toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages } = schema;
@@ -269,6 +270,194 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(400);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TOOL RESULT — SAFETY (breaker idempotency + caller ownership, finding F2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Build a Fastify app whose requests are authenticated as `operatorId`. */
+async function makeAuthedApp(operatorId: string): Promise<FastifyInstance> {
+  const authed = Fastify({ logger: false });
+  authed.decorateRequest("operatorId", null);
+  authed.decorateRequest("userId", null);
+  authed.decorateRequest("apiKeyId", null);
+  authed.addHook("onRequest", async (req) => {
+    (req as any).operatorId = operatorId;
+  });
+  await authed.register(deviceRelayRoutes);
+  await authed.ready();
+  return authed;
+}
+
+/** Create a tool call and claim it (status -> 'claimed'), returning its id. */
+async function createAndClaim(toolName = "health"): Promise<string> {
+  const createRes = await app.inject({
+    method: "POST",
+    url: "/api/relay/kernel-test-1/tool-call",
+    payload: { toolName },
+  });
+  const callId = createRes.json().id;
+  await app.inject({
+    method: "GET",
+    url: "/api/relay/kernel-test-1/tool-call/pending",
+  });
+  return callId;
+}
+
+describe("POST /api/relay/:kernelId/tool-result — breaker idempotency (F2)", () => {
+  it("records a re-POSTed (dropped-200 retry) result only once to the breaker", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+
+    const failSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceFailure")
+      .mockImplementation(() => {});
+
+    // First terminal transition (claimed -> failed): records once.
+    const res1 = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, error: "device_unreachable" },
+    });
+    expect(res1.statusCode).toBe(200);
+    expect(res1.json().status).toBe("failed");
+
+    // Re-POST the identical result — executor retrying after a lost 200.
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, error: "device_unreachable" },
+    });
+    expect(res2.statusCode).toBe(200);
+    expect(res2.json().idempotent).toBe(true);
+    expect(res2.json().status).toBe("failed");
+
+    // The breaker saw the failure exactly once, not twice.
+    expect(failSpy).toHaveBeenCalledTimes(1);
+    expect(failSpy).toHaveBeenCalledWith("kernel-test-1");
+
+    failSpy.mockRestore();
+  });
+
+  it("does not re-record (nor spuriously reset) a completed call on replay", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+
+    const okSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceSuccess")
+      .mockImplementation(() => {});
+    const failSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceFailure")
+      .mockImplementation(() => {});
+
+    // First success recorded once.
+    await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, result: { ok: true } },
+    });
+    // Replay a *failure* against the already-completed call — must be a no-op
+    // ack (cannot flip a recorded success into a failure on the breaker).
+    const replay = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, error: "late_failure" },
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().idempotent).toBe(true);
+    expect(replay.json().status).toBe("completed");
+
+    expect(okSpy).toHaveBeenCalledTimes(1);
+    expect(failSpy).not.toHaveBeenCalled();
+
+    okSpy.mockRestore();
+    failSpy.mockRestore();
+  });
+});
+
+describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () => {
+  it("rejects a result from a non-owner authenticated caller and records nothing", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+
+    const failSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceFailure")
+      .mockImplementation(() => {});
+    const okSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceSuccess")
+      .mockImplementation(() => {});
+
+    // "mallory" is neither the kernel operator nor the scope owner.
+    const malloryApp = await makeAuthedApp("mallory");
+    const res = await malloryApp.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, error: "spoofed_failure" },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("tool_result_not_yours");
+    // No breaker mutation — cannot force-trip or force-reset the kernel.
+    expect(failSpy).not.toHaveBeenCalled();
+    expect(okSpy).not.toHaveBeenCalled();
+
+    // The call is untouched (still claimable/in-flight), not marked terminal.
+    const check = await app.inject({
+      method: "GET",
+      url: `/api/relay/kernel-test-1/tool-result/${callId}`,
+    });
+    expect(check.json().status).toBe("claimed");
+
+    failSpy.mockRestore();
+    okSpy.mockRestore();
+    await malloryApp.close();
+  });
+
+  it("still records the first result from the kernel operator (legit path works)", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+
+    const okSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceSuccess")
+      .mockImplementation(() => {});
+
+    const operatorApp = await makeAuthedApp("operator-1");
+    const res = await operatorApp.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, result: { ok: true } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("completed");
+    expect(okSpy).toHaveBeenCalledTimes(1);
+    expect(okSpy).toHaveBeenCalledWith("kernel-test-1");
+
+    okSpy.mockRestore();
+    await operatorApp.close();
+  });
+
+  it("allows anonymous (unauthenticated relay mode) to report — backward compat", async () => {
+    getSafetyGateway().resetCircuit("kernel-test-1");
+    const callId = await createAndClaim();
+
+    const okSpy = vi
+      .spyOn(getSafetyGateway(), "recordDeviceSuccess")
+      .mockImplementation(() => {});
+
+    // Default `app` has no auth hook -> operatorId null -> "anonymous".
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-result",
+      payload: { callId, result: { ok: true } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("completed");
+    expect(okSpy).toHaveBeenCalledTimes(1);
+
+    okSpy.mockRestore();
   });
 });
 
