@@ -39,7 +39,8 @@ import type {
 } from "@pcc/spec";
 import { computeCompositionSignature, budgetToBand } from "@pcc/spec";
 import { decomposeRequest, decomposeDirectMatch } from "../services/request-decomposer.js";
-import { matchListings } from "../services/request-matcher.js";
+import type { RoutedCapabilityNode } from "../services/request-decomposer.js";
+import { matchListings, inferListingFromText } from "../services/request-matcher.js";
 import {
   decomposeAgentic,
   createMatcher,
@@ -154,6 +155,24 @@ async function tryAgenticDecompose(
 
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * Resolve the operator handle a direct-match node auto-assigns to. Prefers the
+ * kernel's operatorAddress; falls back to the kernelId when the kernel row or
+ * its operator is unavailable (the assignment still binds to the site). Best-
+ * effort — never throws.
+ */
+function resolveOperatorForKernel(kernelId: string): string {
+  try {
+    const kernel = getRepos().kernels.findById(kernelId) as
+      | { operatorAddress?: string }
+      | undefined;
+    if (kernel?.operatorAddress) return kernel.operatorAddress;
+  } catch {
+    // repo unavailable — bind to the kernel id below
+  }
+  return kernelId;
 }
 
 function sha256Hex(input: string): string {
@@ -390,6 +409,7 @@ export async function requestRoutes(app: FastifyInstance) {
     // food_delivery template).
     let result: DecompositionResult;
     let publishNow = true;
+    let inferredMatch: string | undefined;
     if (body.capabilityType) {
       const match = matchListings(body.capabilityType, {
         capabilityId: body.capabilityId,
@@ -405,15 +425,27 @@ export async function requestRoutes(app: FastifyInstance) {
       }
       result = decomposeDirectMatch(request, match.matches[0], body.quantity);
     } else {
-      // Composite path: try agentic (LLM + semantic matcher) first, else
-      // fall through to the legacy live-vocab-aware template decomposer.
-      // Composite decomposes NEVER auto-publish — buyer explicitly publishes
-      // after reviewing the DAG. This is the composition-keystone fix per
-      // coord bulletin 223 / inbox lane 133.
+      // Composite path: try agentic (LLM + semantic matcher) first. If agentic
+      // is off/failed, try a conservative deterministic inference of a single
+      // registered ad-hoc listing from the free text (so "I want a wood-fired
+      // pizza" reaches the pizzeria's listing on the no-LLM path). Only when
+      // BOTH decline do we fall through to the legacy template decomposer.
+      // A composite decompose (agentic or template) NEVER auto-publishes — the
+      // buyer reviews the DAG first (composition-keystone fix, coord bulletin
+      // 223 / inbox lane 133). An INFERRED direct match also stays unpublished:
+      // inference is a guess, so the buyer confirms before it becomes a bounty.
       const agentic = await tryAgenticDecompose(request);
-      result =
-        agentic ??
-        decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+      if (agentic) {
+        result = agentic;
+      } else {
+        const inferred = inferListingFromText(request.description);
+        if (inferred.listing) {
+          result = decomposeDirectMatch(request, inferred.listing, body.quantity);
+          inferredMatch = inferred.reason;
+        } else {
+          result = decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+        }
+      }
       publishNow = false;
     }
 
@@ -453,7 +485,13 @@ export async function requestRoutes(app: FastifyInstance) {
     const actor = request.requesterEmail ?? request.requesterWallet ?? "anonymous";
     emitIntent(envelope, actor, "requestor");
 
-    return reply.status(201).send({ request, decomposition: result });
+    return reply.status(201).send({
+      request,
+      decomposition: result,
+      // Surface how a no-capabilityType request got routed to a single listing
+      // so the caller (and its logs) can see the inference was a guess to confirm.
+      ...(inferredMatch ? { inferredMatch } : {}),
+    });
   });
 
   // ── POST /api/requests/match ──────────────────────────────────────
@@ -533,13 +571,45 @@ export async function requestRoutes(app: FastifyInstance) {
     request.status = "decomposing";
     request.updatedAt = new Date().toISOString();
 
-    // Try agentic (LLM + semantic match) first; fall through to template.
-    // Composition-keystone fix: NEVER auto-publish here; leave the request in
-    // status="decomposed" for the buyer to review + explicit publish.
-    const agentic = await tryAgenticDecompose(request);
-    const result =
-      agentic ??
-      decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+    // Preserve direct-match routing on re-decompose. A request that was routed
+    // to a single registered listing carries a lone node with kernelId +
+    // capabilityId. Re-running the NL/template decomposer on it would drop that
+    // routing (re-template it into a generic fabrication DAG), stranding the
+    // buyer from the operator they chose. Instead, re-resolve the SAME listing
+    // (picking up any pricing change) and rebuild the direct-match node.
+    const routedFirst = request.capabilityDag[0] as RoutedCapabilityNode | undefined;
+    const isDirectMatch =
+      request.capabilityDag.length === 1 && !!routedFirst?.capabilityId;
+
+    let result: DecompositionResult;
+    if (isDirectMatch && routedFirst) {
+      const rematch = matchListings(routedFirst.capabilityType, {
+        capabilityId: routedFirst.capabilityId,
+        kernelId: routedFirst.kernelId,
+      });
+      if (rematch.matches.length > 0) {
+        // Recover the original quantity from the stored cost (cost = unit * qty).
+        const unit = parseFloat(rematch.matches[0].basePrice);
+        const qty =
+          Number.isFinite(unit) && unit > 0
+            ? Math.max(1, Math.round(routedFirst.estimatedCost / unit))
+            : 1;
+        result = decomposeDirectMatch(request, rematch.matches[0], qty);
+      } else {
+        // Listing was removed — the routed operator is gone. Fall back to
+        // composite decomposition so the request is still fulfillable.
+        result =
+          (await tryAgenticDecompose(request)) ??
+          decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+      }
+    } else {
+      // Composite request: try agentic (LLM + semantic match) first; fall
+      // through to template. Composition-keystone fix: NEVER auto-publish here;
+      // leave the request in status="decomposed" for the buyer to review.
+      result =
+        (await tryAgenticDecompose(request)) ??
+        decomposeRequest(request, { availableTypes: liveCapabilityTypes() });
+    }
     request.capabilityDag = result.nodes;
     request.totalEstimatedCost = result.totalEstimatedCost;
     request.totalEstimatedHours = result.totalEstimatedHours;
@@ -585,9 +655,33 @@ export async function requestRoutes(app: FastifyInstance) {
 
     const now = new Date().toISOString();
     const publishedBounties: Array<{ nodeId: string; bountyId: string }> = [];
+    const autoAssigned: Array<{
+      nodeId: string;
+      kernelId: string;
+      capabilityId?: string;
+      operator: string;
+    }> = [];
 
     for (const node of request.capabilityDag) {
-      if (node.status === "pending") {
+      if (node.status !== "pending") continue;
+      const routed = node as RoutedCapabilityNode;
+      if (routed.kernelId) {
+        // Direct-match node: the buyer already picked this listing, so the
+        // operator is known. Skip the open-bounty auction and assign straight
+        // to that operator — closing the gap where a matched request still
+        // needed a manual /assign before an escrow could be funded.
+        const operator = resolveOperatorForKernel(routed.kernelId);
+        node.assignedOperator = operator;
+        node.status = "assigned";
+        autoAssigned.push({
+          nodeId: node.id,
+          kernelId: routed.kernelId,
+          capabilityId: routed.capabilityId,
+          operator,
+        });
+      } else {
+        // Generic (template-decomposed) node: publish as an open bounty for
+        // operators to bid on. Unchanged behavior for composite requests.
         const bountyId = newId("bounty");
         node.bountyId = bountyId;
         node.status = "bidding";
@@ -604,7 +698,13 @@ export async function requestRoutes(app: FastifyInstance) {
       updatedAt: now,
     });
 
-    return { request, publishedBounties, publishedCount: publishedBounties.length };
+    return {
+      request,
+      publishedBounties,
+      publishedCount: publishedBounties.length,
+      autoAssigned,
+      autoAssignedCount: autoAssigned.length,
+    };
   });
 
   // ── PUT /api/requests/:id ─────────────────────────────────────────

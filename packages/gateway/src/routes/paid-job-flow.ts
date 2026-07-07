@@ -32,10 +32,10 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 import { schema, eq } from "@pcc/store";
-import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { getCapabilityDescriptor } from "../services/ad-hoc-pricing.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -730,11 +730,25 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // Auto-compute quote
-      const template = getTemplate(capabilityType);
-      const basePrice = template?.basePricingHints?.basePrice
-        ? parseFloat(template.basePricingHints.basePrice)
-        : 10;
+      // Auto-compute quote. Derive basePrice from the capability's own
+      // pricing model for ad-hoc types instead of a hardcoded $10 fallback
+      // (previously mispriced every ad-hoc escrow funded through this
+      // fast-track endpoint — see MATCHING-NOTES.md gap #1). A genuinely
+      // unknown type (no template, no registered capability row) is now a
+      // clean 4xx instead of silently quoting $10.
+      const desc = getCapabilityDescriptor(capabilityType);
+      if (desc.kind === "missing") {
+        return reply.status(404).send({
+          error: "capability_not_buildable",
+          message: desc.reason,
+        });
+      }
+      const basePrice = desc.kind === "template"
+        ? (desc.template.basePricingHints?.basePrice ? parseFloat(desc.template.basePricingHints.basePrice) : 10)
+        : parseFloat(desc.descriptor.basePrice);
+      const quoteCurrency = desc.kind === "template"
+        ? (desc.template.basePricingHints?.currency ?? "USDC")
+        : desc.descriptor.currency;
       const quantity = (sanitizedSelections.quantity as number) ?? 1;
       const { adjustedPrice, adjustments } = applyPricingRules(
         basePrice * quantity,
@@ -749,7 +763,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           impact: a.amount.toFixed(2),
         })),
         totalPrice: adjustedPrice.toFixed(2),
-        currency: template?.basePricingHints?.currency ?? "USDC",
+        currency: quoteCurrency,
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
