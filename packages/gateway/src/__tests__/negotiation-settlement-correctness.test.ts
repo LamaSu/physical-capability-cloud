@@ -286,4 +286,53 @@ describe("negotiation + settlement correctness", () => {
       expect(reviewBody.contractTerms.assuranceTier).toBe(2); // verbatim, not 1
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // P1 — PUT /complete is single-shot (no double evidence / double settlement)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  async function fastTrackJob(userAgentId: string): Promise<string> {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/jobs/submit-from-discovery",
+      payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().jobId;
+  }
+  function complete(jobId: string) {
+    return app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+  }
+
+  describe("P1 — completion is idempotent and race-safe", () => {
+    it("rejects a re-run of /complete and does not create a second evidence bundle", async () => {
+      const jobId = await fastTrackJob("p1-rerun");
+
+      const first = await complete(jobId);
+      expect(first.statusCode).toBe(200);
+      expect(first.json().status).toBe("settled");
+
+      const second = await complete(jobId);
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error).toContain("already completed");
+
+      // Only one evidence bundle was ever produced.
+      expect(getRepos().evidence.findByJob(jobId).length).toBe(1);
+    });
+
+    it("rejects a concurrent duplicate /complete (atomic completion claim)", async () => {
+      const jobId = await fastTrackJob("p1-race");
+
+      // Fire two completions at once. The synchronous CAS lets exactly one win.
+      const [a, b] = await Promise.all([complete(jobId), complete(jobId)]);
+      const codes = [a.statusCode, b.statusCode].sort();
+      expect(codes).toEqual([200, 409]);
+
+      // The loser must not have run a second settlement pipeline.
+      expect(getRepos().evidence.findByJob(jobId).length).toBe(1);
+
+      const winner = a.statusCode === 200 ? a : b;
+      expect(winner.json().status).toBe("settled");
+    });
+  });
 });

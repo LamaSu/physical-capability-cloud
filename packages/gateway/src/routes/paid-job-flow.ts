@@ -31,7 +31,7 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
     ...(result.error.details ? { details: result.error.details } : {}),
   });
 }
-import { schema, eq } from "@pcc/store";
+import { schema, eq, and, sql } from "@pcc/store";
 import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
@@ -704,6 +704,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   }>("/api/jobs/:jobId/complete", async (req, reply) => {
     const { jobId } = req.params;
     const body = (req.body ?? {}) as Record<string, unknown>;
+    // Set once we've won the completion claim below, so a failure before
+    // evidence is durably recorded can release the claim (see the catch).
+    let claimedOriginalStatus: string | undefined;
 
     try {
       const repos = getRepos();
@@ -715,12 +718,36 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "Job not found" });
       }
 
-      if (job.status === "settled" || job.status === "completed") {
+      // Atomic completion claim (P1). better-sqlite3 is synchronous, so this
+      // UPDATE ... WHERE ... RETURNING runs to completion without yielding the
+      // event loop — only ONE caller can flip a job into 'completing'. Closes
+      // two holes at once:
+      //   (a) re-runnability — the old guard rejected only settled/completed,
+      //       so a retried PUT on an 'evidence_submitted' job rebuilt the
+      //       evidence bundle and re-ran settlement;
+      //   (b) the check-then-act race — the old read happened many awaits
+      //       before the terminal write, so two concurrent PUTs both passed
+      //       and double-settled.
+      const claimed = db
+        .update(schema.jobs)
+        .set({ status: "completing" })
+        .where(
+          and(
+            eq(schema.jobs.id, jobId),
+            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed')`,
+          ),
+        )
+        .returning()
+        .all();
+      if (claimed.length !== 1) {
+        // Lost the claim: the job is terminal, already has evidence submitted,
+        // or another completion is in flight. Reject rather than double-run.
         return reply.status(409).send({
-          error: "Job already completed",
+          error: "Job already completed or completion in progress",
           status: job.status,
         });
       }
+      claimedOriginalStatus = job.status;
 
       // ── 1. Gather evidence ─────────────────────────────────────────
       // Collect tool call results from the scope's audit trail
@@ -1098,6 +1125,21 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           : "Job completed. Oracle verified. Evidence submitted. Awaiting challenge window expiry for settlement.",
       };
     } catch (err) {
+      // Release the completion claim if we still hold it and hadn't yet recorded
+      // evidence (status still 'completing'), so a legitimate retry can proceed.
+      // Once we've advanced to evidence_submitted the WHERE matches nothing and
+      // the retry stays blocked — the evidence already exists.
+      if (claimedOriginalStatus !== undefined) {
+        try {
+          getStore().db
+            .update(schema.jobs)
+            .set({ status: claimedOriginalStatus })
+            .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "completing")))
+            .run();
+        } catch {
+          // best-effort — a stuck 'completing' row is still safe (blocks double-run)
+        }
+      }
       return reply.status(500).send({
         error: "completion_failed",
         details: err instanceof Error ? err.message : String(err),
