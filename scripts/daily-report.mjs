@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -25,6 +25,28 @@ const STATE_FILE = path.join(__dirname, ".daily-report-state.json");
 const REPORTS_DIR = path.join(PROJECT_ROOT, "ai", "reports");
 
 const BASE = process.env.PCC_URL ?? "https://capability.network";
+
+// The /api/analytics/* endpoints are auth-gated (any valid PCC key passes —
+// see packages/gateway/src/middleware/api-gate.ts). Without a key every fetch
+// returns HTTP 401 and the report is empty. Set PCC_API_KEY (or PCC_ANALYTICS_KEY)
+// to a `pcc_live_...` key. Provision one at POST /api/auth/provision.
+// A local gitignored key file is read as a fallback so you don't have to export
+// the env var every run.
+const KEY_FILE = path.join(REPORTS_DIR, ".analytics-key");
+const PCC_KEY =
+  process.env.PCC_API_KEY ??
+  process.env.PCC_ANALYTICS_KEY ??
+  (fs.existsSync(KEY_FILE) ? fs.readFileSync(KEY_FILE, "utf8").trim() : null);
+
+// GitHub repos to track (stars/forks + 14-day traffic via the `gh` CLI).
+// Override with PCC_GH_REPOS="owner/repo,owner/repo2".
+const GH_REPOS = (
+  process.env.PCC_GH_REPOS ??
+  "LamaSu/physical-capability-cloud,LamaSu/capability-site"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -77,12 +99,83 @@ const TO = todayISO();
 
 async function getJSON(path) {
   try {
-    const res = await fetch(`${BASE}${path}`);
+    const headers = PCC_KEY ? { Authorization: `Bearer ${PCC_KEY}` } : {};
+    const res = await fetch(`${BASE}${path}`, { headers });
     if (!res.ok) return { __error: `HTTP ${res.status}` };
     return await res.json();
   } catch (err) {
     return { __error: err.message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub collector — repo stars/forks + 14-day traffic via the `gh` CLI.
+// `gh` handles auth; traffic endpoints need push access (repo scope), which the
+// CLI already has if `gh auth status` shows the repo owner. Degrades gracefully:
+// a missing `gh`, missing scope, or an inaccessible repo never aborts the run.
+// ---------------------------------------------------------------------------
+
+function ghApi(endpoint) {
+  const out = execFileSync("gh", ["api", endpoint], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return JSON.parse(out);
+}
+
+function collectGitHub() {
+  try {
+    execFileSync("gh", ["--version"], { stdio: "ignore" });
+  } catch {
+    return { __error: "gh CLI not installed or not on PATH", repos: [] };
+  }
+
+  const repos = GH_REPOS.map((full) => {
+    try {
+      const meta = ghApi(`repos/${full}`);
+      const soft = (ep) => {
+        try {
+          return ghApi(ep);
+        } catch {
+          return null;
+        }
+      };
+      const views = soft(`repos/${full}/traffic/views`);
+      const clones = soft(`repos/${full}/traffic/clones`);
+      const paths = soft(`repos/${full}/traffic/popular/paths`) ?? [];
+      const referrers = soft(`repos/${full}/traffic/popular/referrers`) ?? [];
+
+      return {
+        repo: full,
+        url: meta.html_url ?? `https://github.com/${full}`,
+        stars: meta.stargazers_count ?? 0,
+        forks: meta.forks_count ?? 0,
+        watchers: meta.subscribers_count ?? 0,
+        openIssues: meta.open_issues_count ?? 0, // includes open PRs (GitHub quirk)
+        pushedAt: meta.pushed_at ?? null,
+        // 14-day rolling windows (GitHub only retains the last 14 days).
+        views14d: views ? { total: views.count, uniques: views.uniques, series: views.views ?? [] } : null,
+        clones14d: clones ? { total: clones.count, uniques: clones.uniques, series: clones.clones ?? [] } : null,
+        topPaths: (paths || []).slice(0, 5).map((p) => ({
+          path: p.path,
+          title: p.title,
+          views: p.count,
+          uniques: p.uniques,
+        })),
+        topReferrers: (referrers || []).slice(0, 5).map((r) => ({
+          referrer: r.referrer,
+          views: r.count,
+          uniques: r.uniques,
+        })),
+        trafficAvailable: views !== null,
+      };
+    } catch (err) {
+      return { repo: full, __error: (err.message || String(err)).slice(0, 160) };
+    }
+  });
+
+  return { repos };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +215,19 @@ async function main() {
   console.log(c.dim + `  Range: ${FROM} → ${TO}  (${DAYS} day${DAYS === 1 ? "" : "s"})` + c.reset);
   console.log(c.dim + `  Host:  ${BASE}` + c.reset);
   console.log(c.dim + `  Time:  ${new Date().toISOString()}` + c.reset);
+  if (!PCC_KEY) {
+    console.log();
+    console.log(
+      c.yellow +
+        "  ⚠ No PCC_API_KEY set — /api/analytics/* will return HTTP 401 (empty report)." +
+        c.reset,
+    );
+    console.log(
+      c.dim +
+        "    Fix: set PCC_API_KEY=pcc_live_... or write it to ai/reports/.analytics-key" +
+        c.reset,
+    );
+  }
   console.log();
 
   // Fetch everything in parallel
@@ -135,6 +241,9 @@ async function main() {
     getJSON(`/api/analytics/devices?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/geography?from=${FROM}&to=${TO}`),
   ]);
+
+  // GitHub repo traffic + stars (synchronous `gh` calls — fast, degrades safely)
+  const github = collectGitHub();
 
   // Load previous snapshot for comparison
   let prev = null;
@@ -268,6 +377,35 @@ async function main() {
     console.log();
   }
 
+  // ── SECTION: GitHub Repositories ────────────────────────────────────────
+  if ((github.repos ?? []).length > 0) {
+    console.log(c.bold + "GITHUB REPOSITORIES" + c.reset);
+    console.log(line());
+    if (github.__error) {
+      console.log(`  ${c.yellow}${github.__error}${c.reset}`);
+      console.log();
+    }
+    for (const r of github.repos) {
+      if (r.__error) {
+        console.log(`  ${c.dim}${pad(r.repo, 40)}${c.reset} ${c.yellow}${r.__error}${c.reset}`);
+        continue;
+      }
+      const v = r.views14d ? `${num(r.views14d.total)} views / ${num(r.views14d.uniques)} uniq` : c.dim + "traffic n/a" + c.reset;
+      const cl = r.clones14d ? `${num(r.clones14d.total)} clones` : "";
+      console.log(
+        `  ${c.bold}${pad(r.repo, 40)}${c.reset} ` +
+          `${c.yellow}★ ${num(r.stars)}${c.reset}  ` +
+          `${c.dim}⑂ ${num(r.forks)}  ◎ ${num(r.watchers)}  ⊙ ${num(r.openIssues)}${c.reset}`,
+      );
+      console.log(`  ${c.dim}${pad("", 40)}${c.reset} ${c.cyan}${v}${cl ? "  ·  " + cl : ""}${c.reset}  ${c.dim}(14d)${c.reset}`);
+      if ((r.topReferrers ?? []).length > 0) {
+        const refs = r.topReferrers.slice(0, 3).map((x) => `${x.referrer} (${x.views})`).join(", ");
+        console.log(`  ${pad("", 40)} ${c.dim}referrers: ${refs}${c.reset}`);
+      }
+    }
+    console.log();
+  }
+
   // ── Footer ─────────────────────────────────────────────────────────────
   console.log(line(78, "═"));
   const verdict =
@@ -281,7 +419,7 @@ async function main() {
   const snapshot = {
     generatedAt: new Date().toISOString(),
     range: { from: FROM, to: TO },
-    overview, errors, traffic, pages, events, security, devices, geo,
+    overview, errors, traffic, pages, events, security, devices, geo, github,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(snapshot, null, 2));
 
@@ -512,6 +650,37 @@ function render(i) {
       html += '</div>';
     }
     html += '</div>';
+  }
+
+  // GitHub repositories
+  const repos = (d.github?.repos || []).filter(r => !r.__error);
+  if (repos.length > 0) {
+    html += '<h2>GitHub Repositories</h2>';
+    repos.forEach(r => {
+      html += '<div class="panel">';
+      html += '<div class="row" style="border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;margin-bottom:8px;"><span class="name" style="font-size:13px;color:#e6e1dc;">' + esc(r.repo) + '</span><span class="count" style="color:#F2A90E;">&#9733; ' + num(r.stars) + '</span></div>';
+      html += '<div class="grid">';
+      html += '<div class="card"><div class="label">Stars</div><div class="value">' + num(r.stars) + '</div></div>';
+      html += '<div class="card"><div class="label">Forks</div><div class="value">' + num(r.forks) + '</div></div>';
+      html += '<div class="card"><div class="label">Views 14d</div><div class="value">' + (r.views14d ? num(r.views14d.total) : '&mdash;') + '</div></div>';
+      html += '<div class="card"><div class="label">Unique 14d</div><div class="value">' + (r.views14d ? num(r.views14d.uniques) : '&mdash;') + '</div></div>';
+      html += '<div class="card"><div class="label">Clones 14d</div><div class="value">' + (r.clones14d ? num(r.clones14d.total) : '&mdash;') + '</div></div>';
+      html += '<div class="card"><div class="label">Open issues+PRs</div><div class="value">' + num(r.openIssues) + '</div></div>';
+      html += '</div>';
+      if ((r.topReferrers || []).length > 0) {
+        html += '<div class="label" style="font-size:10px;color:rgba(255,255,255,0.4);margin:10px 0 4px;">TOP REFERRERS (14d)</div>';
+        r.topReferrers.forEach(x => {
+          html += '<div class="row"><span class="name">' + esc(x.referrer) + '</span><span class="count">' + num(x.views) + ' &middot; ' + num(x.uniques) + ' uniq</span></div>';
+        });
+      }
+      if ((r.topPaths || []).length > 0) {
+        html += '<div class="label" style="font-size:10px;color:rgba(255,255,255,0.4);margin:10px 0 4px;">TOP PATHS (14d)</div>';
+        r.topPaths.forEach(x => {
+          html += '<div class="row"><span class="name">' + esc(x.path) + '</span><span class="count">' + num(x.views) + '</span></div>';
+        });
+      }
+      html += '</div>';
+    });
   }
 
   content.innerHTML = html || '<div class="empty">Report has no data.</div>';
