@@ -274,6 +274,13 @@ export async function driveSettlement(
   let statusNum = m.status;
   const stepId = m.stepId;
   const hasBond = Number(m.operatorBond) > 0;
+  // The challenge window closes at this unix-second. For a milestone read as
+  // already-Attested this is the real on-chain value. When we attest DURING this
+  // call the on-chain end isn't in our pre-attestation read, so we recompute it as
+  // now + challengeWindowSeconds below — conservative (never releases early: a
+  // zero-second window releases immediately; any positive window defers, and a
+  // stale over-estimate at worst waits one extra drive).
+  let windowEnd = m.challengeWindowEnd;
 
   // Result builder — reads the (locally-advanced) statusNum at call time, so the
   // reported finalStatus always reflects the furthest point the drive reached.
@@ -350,24 +357,40 @@ export async function driveSettlement(
       );
       steps.push(r.step);
       if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "attest_blocked" });
-      if (r.advanced) statusNum = MilestoneStatusV2.Attested;
+      if (r.advanced) {
+        statusNum = MilestoneStatusV2.Attested;
+        // The window just opened (or was reopened by a concurrent attest we mapped
+        // to already_done). Recompute its end from the milestone's window length.
+        windowEnd = nowSeconds + m.challengeWindowSeconds;
+      }
     }
 
     // 5. RELEASE — from Attested, only once the challenge window has closed.
     if (statusNum === MilestoneStatusV2.Attested) {
-      if (nowSeconds < m.challengeWindowEnd) {
-        return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: m.challengeWindowEnd });
+      if (nowSeconds < windowEnd) {
+        return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: windowEnd });
       }
-      const r = await execWrite("release", () => releaseMilestoneV2(milestoneIdx, escrowAddress), REVERT.releaseAlready);
-      steps.push(r.step);
-      if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "release_blocked" });
-      if (r.advanced) statusNum = MilestoneStatusV2.Released;
+      try {
+        const r = await execWrite("release", () => releaseMilestoneV2(milestoneIdx, escrowAddress), REVERT.releaseAlready);
+        steps.push(r.step);
+        if (r.step.result === "blocked") return base({ outcome: "blocked", reason: r.step.revert ?? "release_blocked" });
+        if (r.advanced) statusNum = MilestoneStatusV2.Released;
+      } catch (err) {
+        // Off-chain gate passed but the chain's block.timestamp is still behind
+        // challengeWindowEnd (clock skew). The window is genuinely open on-chain —
+        // not an error, just "come back later" (Step 2's keeper will own this).
+        if (matchesRevert(err, REVERT.releaseWindowOpen)) {
+          steps.push({ action: "release", result: "blocked", revert: "Challenge window open" });
+          return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: windowEnd });
+        }
+        throw err;
+      }
     }
 
     // ── Final classification from the (locally-advanced) status ──
     if (statusNum === MilestoneStatusV2.Released) return base({ outcome: "released" });
     if (statusNum === MilestoneStatusV2.Attested) {
-      return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: m.challengeWindowEnd });
+      return base({ outcome: "awaiting_challenge_window", challengeWindowEnd: windowEnd });
     }
     return base({ outcome: "advanced" });
   });
