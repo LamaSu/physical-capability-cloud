@@ -39,6 +39,9 @@ import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
 } from "../services/ad-hoc-pricing.js";
+// Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
+// enforces the identical rule — see session-liveness.ts (N1).
+import { assertSessionLive as assertLive } from "./session-liveness.js";
 
 /**
  * Serialize a WorkflowChallenge for the wire — converts the BigInt
@@ -67,6 +70,8 @@ const challengeService = new ChallengeService();
 const { negotiationSessions, operatorPolicies } = schema;
 
 const resolver = new TemplateResolver();
+
+// assertLive is imported from ./session-liveness.js (shared with a2a-tasks.ts).
 
 export async function negotiationRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
@@ -347,6 +352,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .set({
             selections: merged as any,
             status: "configuring",
+            // Changing selections invalidates any prior quote + contract terms.
+            // Forcing a re-quote stops /commit from locking escrow at a stale
+            // price while the job runs the new parameters (N2).
+            quote: null,
+            contractTerms: null,
             transitions: transitions as any,
           })
           .where(eq(negotiationSessions.id, req.params.id))
@@ -357,7 +367,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
         const resolvedOptions = template ? resolver.resolve(template, merged) : null;
 
         return {
-          session: { ...row, selections: merged, status: "configuring", transitions },
+          session: { ...row, selections: merged, status: "configuring", quote: null, contractTerms: null, transitions },
           resolvedOptions,
         };
       } catch (err) {
@@ -377,7 +387,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
-        if (row.status === "committed") return reply.status(409).send({ error: "Session already committed" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
 
         // Load operator policy for pricing rules
         const policyRow = db.select().from(operatorPolicies)
@@ -433,6 +444,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
           currency: quoteCurrency,
           bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
           challengeWindowSeconds,
+          // Persist the agreed assurance tier (derived from evidenceTier above)
+          // so /review copies it verbatim instead of re-deriving it from the
+          // bond dollar amount — the wrong tier otherwise propagates on-chain
+          // as the milestone's requiredTier (N3).
+          assuranceTier,
           validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
         };
 
@@ -480,6 +496,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
         if (!row.quote) return reply.status(400).send({ error: "Must compute quote first (POST /quote)" });
 
         const quote = row.quote as any;
@@ -493,7 +511,11 @@ export async function negotiationRoutes(app: FastifyInstance) {
             challengeWindowSeconds: quote.challengeWindowSeconds,
           }],
           deadline: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-          assuranceTier: quote.bondAmount === "0.00" ? 0 : parseFloat(quote.bondAmount) > 5 ? 2 : 1,
+          // Copy the tier the buyer agreed to at /quote — never re-derive it
+          // from the bond dollar amount (that decouples the on-chain
+          // requiredTier from the agreed evidence tier). Fall back to 0 only
+          // for legacy quotes created before the tier was persisted (N3).
+          assuranceTier: typeof quote.assuranceTier === "number" ? quote.assuranceTier : 0,
           payer: "0x0000000000000000000000000000000000000000",
           operator: "0x0000000000000000000000000000000000000000",
           token: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
@@ -535,8 +557,15 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
-        if (row.status === "committed") return reply.status(409).send({ error: "Session already committed" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
         if (!row.contractTerms) return reply.status(400).send({ error: "Must review contract terms first" });
+        // Honor the quote's own validity window: don't lock escrow against a
+        // stale quote. The committed price must still be within validUntil (N1).
+        const commitQuote = row.quote as { validUntil?: string } | null;
+        if (commitQuote?.validUntil && new Date(commitQuote.validUntil) < new Date()) {
+          return reply.status(410).send({ error: "Quote expired — re-quote before commit" });
+        }
 
         const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;

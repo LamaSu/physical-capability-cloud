@@ -53,6 +53,7 @@ import type {
 import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getEventBus } from "../services/event-bus.js";
 import { createJobFromSession } from "./paid-job-flow.js";
+import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import {
@@ -247,7 +248,7 @@ async function handlePccDiscover(params: PccDiscoverParams): Promise<A2AArtifact
   ];
 }
 
-async function createPccQuote(
+export async function createPccQuote(
   params: PccQuoteParams,
 ): Promise<{ sessionId: string; status: SessionStatus; quote: unknown; artifacts: A2AArtifact[] }> {
   if (!params.userAgentId || !params.kernelId || !params.capabilityType) {
@@ -335,6 +336,11 @@ async function createPccQuote(
     currency: template?.basePricingHints?.currency ?? "USDC",
     bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
     challengeWindowSeconds,
+    // Persist the agreed assurance tier (derived from evidenceTier above) so the
+    // commit path copies it verbatim instead of re-deriving it from the bond
+    // dollar amount — the wrong tier otherwise propagates on-chain as the
+    // milestone's requiredTier (N3). Mirrors the negotiation /quote route.
+    assuranceTier,
     validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
   };
 
@@ -388,7 +394,7 @@ async function createPccQuote(
   };
 }
 
-async function commitPccSession(
+export async function commitPccSession(
   sessionId: string,
 ): Promise<{ status: SessionStatus; artifacts: A2AArtifact[] }> {
   const { db } = getStore();
@@ -399,6 +405,7 @@ async function commitPccSession(
     .get();
   if (!row) throw new Error(`Session ${sessionId} not found`);
   if (row.status === "committed") {
+    // Idempotent: return the existing job/escrow instead of re-committing.
     return {
       status: "committed",
       artifacts: [
@@ -410,9 +417,21 @@ async function commitPccSession(
       ],
     };
   }
+  // Liveness gate — the SAME rule the negotiation /commit route enforces. Without
+  // it this A2A commit path is a side-door that mints escrow for a cancelled or
+  // TTL-expired session (N1). assertSessionLive self-heals an expired row. The
+  // 'committed' case is handled above, so it never reaches here.
+  const violation = assertSessionLive(db, row);
+  if (violation) throw new Error(violation.body.error);
   if (!row.quote) throw new Error("Session has no quote; call pcc-quote first");
 
   const quote = row.quote as any;
+  // Honor the quote's own validity window: never lock escrow against a stale
+  // quote. The committed price must still be within validUntil (N1). Mirrors the
+  // negotiation /commit route.
+  if (quote.validUntil && new Date(quote.validUntil) < new Date()) {
+    throw new Error("Quote expired — re-quote before commit");
+  }
   const stepId = `step-${crypto.randomUUID().slice(0, 8)}`;
   const contractTerms = {
     milestones: [
@@ -424,7 +443,11 @@ async function commitPccSession(
       },
     ],
     deadline: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-    assuranceTier: quote.bondAmount === "0.00" ? 0 : parseFloat(quote.bondAmount) > 5 ? 2 : 1,
+    // Copy the tier the buyer agreed to at pcc-quote — never re-derive it from
+    // the bond dollar amount (that decouples the on-chain requiredTier from the
+    // agreed evidence tier). Fall back to 0 only for legacy quotes minted before
+    // the tier was persisted (N3). Mirrors the negotiation /review route.
+    assuranceTier: typeof quote.assuranceTier === "number" ? quote.assuranceTier : 0,
     payer: "0x0000000000000000000000000000000000000000",
     operator: "0x0000000000000000000000000000000000000000",
     token: "0x6c7ce5d5decee9983feaa3e637ea3fe3e6945cdb",
