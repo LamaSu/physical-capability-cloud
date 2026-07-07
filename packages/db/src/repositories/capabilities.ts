@@ -1,7 +1,8 @@
-import { eq, like, and } from "drizzle-orm";
+import { eq, like, and, inArray } from "drizzle-orm";
 import { capabilities } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { ICapabilityRepository, CapabilityTenantOpts } from "../interfaces/ICapabilityRepository.js";
+import { inChunks } from "./batch.js";
 
 export class CapabilityRepository implements ICapabilityRepository {
   constructor(private db: StoreDB) {}
@@ -15,6 +16,12 @@ export class CapabilityRepository implements ICapabilityRepository {
 
   findById(id: string) {
     return this.db.select().from(capabilities).where(eq(capabilities.id, id)).get();
+  }
+
+  findByIds(ids: string[]) {
+    return inChunks(ids, (chunk) =>
+      this.db.select().from(capabilities).where(inArray(capabilities.id, chunk)).all(),
+    );
   }
 
   findByKernel(kernelId: string, opts?: CapabilityTenantOpts) {

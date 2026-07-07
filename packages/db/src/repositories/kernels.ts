@@ -1,7 +1,8 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { shopKernels, kernelDevices } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IKernelRepository } from "../interfaces/IKernelRepository.js";
+import { inChunks } from "./batch.js";
 
 export class KernelRepository implements IKernelRepository {
   constructor(private db: StoreDB) {}
@@ -12,6 +13,12 @@ export class KernelRepository implements IKernelRepository {
 
   findById(id: string) {
     return this.db.select().from(shopKernels).where(eq(shopKernels.id, id)).get();
+  }
+
+  findByIds(ids: string[]) {
+    return inChunks(ids, (chunk) =>
+      this.db.select().from(shopKernels).where(inArray(shopKernels.id, chunk)).all(),
+    );
   }
 
   findByStatus(status: string) {

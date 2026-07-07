@@ -16,6 +16,9 @@ export interface IEscrowRepository {
   updateStatus(id: string, status: string): EscrowRow | undefined;
   // Milestones sub-domain
   findMilestonesByEscrow(escrowId: string): MilestoneRow[];
+  /** Batch milestone load for a set of escrows — one query per ≤500 ids
+   *  (true N+1 prevention; caller groups by escrowId). Empty input → []. */
+  findMilestonesByEscrowIds(escrowIds: string[]): MilestoneRow[];
   insertMilestone(milestone: MilestoneInsert): MilestoneRow | undefined;
   updateMilestoneStatus(id: string, status: string): MilestoneRow | undefined;
   // Disputes sub-domain

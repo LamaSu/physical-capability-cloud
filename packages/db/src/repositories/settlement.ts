@@ -1,7 +1,8 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { escrows, escrowMilestones, disputes } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IEscrowRepository } from "../interfaces/IEscrowRepository.js";
+import { inChunks } from "./batch.js";
 
 export class EscrowRepository implements IEscrowRepository {
   constructor(private db: StoreDB) {}
@@ -34,6 +35,12 @@ export class EscrowRepository implements IEscrowRepository {
 
   findMilestonesByEscrow(escrowId: string) {
     return this.db.select().from(escrowMilestones).where(eq(escrowMilestones.escrowId, escrowId)).all();
+  }
+
+  findMilestonesByEscrowIds(escrowIds: string[]) {
+    return inChunks(escrowIds, (chunk) =>
+      this.db.select().from(escrowMilestones).where(inArray(escrowMilestones.escrowId, chunk)).all(),
+    );
   }
 
   insertMilestone(milestone: typeof escrowMilestones.$inferInsert) {

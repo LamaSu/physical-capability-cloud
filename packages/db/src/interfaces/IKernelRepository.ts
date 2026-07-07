@@ -8,6 +8,8 @@ export type DeviceInsert = typeof kernelDevices.$inferInsert;
 export interface IKernelRepository {
   findAll(): KernelRow[];
   findById(id: string): KernelRow | undefined;
+  /** Batch lookup — one query per ≤500 ids (true N+1 prevention). Empty input → []. */
+  findByIds(ids: string[]): KernelRow[];
   findByStatus(status: string): KernelRow[];
   insert(kernel: KernelInsert): KernelRow | undefined;
   update(id: string, data: Partial<KernelInsert>): KernelRow | undefined;
