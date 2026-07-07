@@ -68,6 +68,39 @@ const { negotiationSessions, operatorPolicies } = schema;
 
 const resolver = new TemplateResolver();
 
+/**
+ * Liveness gate shared by the state-advancing endpoints (/quote, /review,
+ * /commit). A session may only advance while it is inside its TTL and not in a
+ * terminal state. Without this, a cancelled or expired session could still be
+ * quoted / reviewed / committed — creating real escrow for a dead deal (N1).
+ *
+ * Mirrors the self-healing expiry write in GET /session/:id: when the TTL has
+ * passed we persist status="expired" so the session stops being resurrectable.
+ *
+ * Returns a {status, body} violation to send back, or null when the session is
+ * live and may advance.
+ */
+function assertLive(
+  db: ReturnType<typeof getStore>["db"],
+  row: typeof negotiationSessions.$inferSelect,
+): { status: number; body: { error: string } } | null {
+  if (row.status === "committed") {
+    return { status: 409, body: { error: "Session already committed" } };
+  }
+  if (row.status === "cancelled" || row.status === "expired") {
+    return { status: 410, body: { error: `Session ${row.status}` } };
+  }
+  if (new Date(row.expiresAt) < new Date()) {
+    // Self-heal: persist expiry so the session can't be advanced later.
+    db.update(negotiationSessions)
+      .set({ status: "expired" })
+      .where(eq(negotiationSessions.id, row.id))
+      .run();
+    return { status: 410, body: { error: "Session expired" } };
+  }
+  return null;
+}
+
 export async function negotiationRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════
   // Session CRUD
@@ -377,7 +410,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
-        if (row.status === "committed") return reply.status(409).send({ error: "Session already committed" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
 
         // Load operator policy for pricing rules
         const policyRow = db.select().from(operatorPolicies)
@@ -480,6 +514,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
         if (!row.quote) return reply.status(400).send({ error: "Must compute quote first (POST /quote)" });
 
         const quote = row.quote as any;
@@ -535,8 +571,15 @@ export async function negotiationRoutes(app: FastifyInstance) {
           .get();
 
         if (!row) return reply.status(404).send({ error: "Session not found" });
-        if (row.status === "committed") return reply.status(409).send({ error: "Session already committed" });
+        const violation = assertLive(db, row);
+        if (violation) return reply.status(violation.status).send(violation.body);
         if (!row.contractTerms) return reply.status(400).send({ error: "Must review contract terms first" });
+        // Honor the quote's own validity window: don't lock escrow against a
+        // stale quote. The committed price must still be within validUntil (N1).
+        const commitQuote = row.quote as { validUntil?: string } | null;
+        if (commitQuote?.validUntil && new Date(commitQuote.validUntil) < new Date()) {
+          return reply.status(410).send({ error: "Quote expired — re-quote before commit" });
+        }
 
         const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;
