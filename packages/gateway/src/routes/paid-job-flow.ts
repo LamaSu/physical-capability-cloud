@@ -749,6 +749,22 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       }
       claimedOriginalStatus = job.status;
 
+      // #3 — the REAL assurance tier this job was negotiated at. N3 now writes
+      // this tier on-chain as the milestone's requiredTier, so the evidence
+      // bundle, the oracle verification, and the EAS attestation must all attest
+      // at the SAME tier — otherwise a tier>=1 milestone can't be released via
+      // this route (funds stranded), the N3 failure mode resurfacing through a
+      // different door. Source of truth is the session's contractTerms (what
+      // createJobFromSession bound on-chain); the jobs table has no tier column.
+      const tierSessionRow = db
+        .select()
+        .from(negotiationSessions)
+        .where(eq(negotiationSessions.jobId, jobId))
+        .get();
+      const jobAssuranceTier = Number(
+        (tierSessionRow?.contractTerms as Record<string, unknown> | null)?.assuranceTier ?? 0,
+      );
+
       // ── 1. Gather evidence ─────────────────────────────────────────
       // Collect tool call results from the scope's audit trail
       const scopes = db.select().from(executionScopes)
@@ -829,7 +845,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         jobId,
         stepId: job.stepId,
         kernelId: job.kernelId,
-        assuranceTier: 0,
+        assuranceTier: jobAssuranceTier,
         bundleHash,
         kernelSignature: {
           signer: "0x0000000000000000000000000000000000000000",
@@ -868,7 +884,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           jobId,
           stepId: job.stepId,
           kernelId: job.kernelId,
-          assuranceTier: 0,
+          assuranceTier: jobAssuranceTier,
           bundleHash,
           events,
           kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
@@ -887,7 +903,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           await mockStorage.init();
           const mockResult = await mockStorage.archiveBundle({
             id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
-            assuranceTier: 0, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
+            assuranceTier: jobAssuranceTier, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
             kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
             createdAt: now,
           });
@@ -905,7 +921,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         const commitment = await commitmentService.createCommitment(bundleHash as any);
         // Generate tier compliance proof
         const proof = await zkProofService.generateProof("tier_compliance", commitment as any, {
-          requiredTier: 0,
+          requiredTier: jobAssuranceTier,
           bundleHash,
         });
         // Anchor on Starknet
@@ -979,7 +995,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         jobId,
         kernelId: job.kernelId,
         evidenceHash: bundleHash,
-        assuranceTier: 0,
+        assuranceTier: jobAssuranceTier,
         chainId: resolveChainId(),
         ...(useEasV2()
           ? {
@@ -1020,7 +1036,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             stepId: job.stepId,
             evidenceBundleHash: bundleHash,
             ipfsCid: ipfsCid ?? "",
-            assuranceTier: 0,
+            assuranceTier: jobAssuranceTier,
             oracleVerified: oracleResponse.result.verified,
             recipient: escrowAddress && escrowAddress.startsWith("0x") ? escrowAddress : undefined,
           });
