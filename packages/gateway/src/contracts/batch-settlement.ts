@@ -4,8 +4,10 @@
  * Queues escrow operations (release, evidence, attestation, etc.) and
  * flushes them as batched UserOperations through a smart account.
  *
- * Env vars:
- *   PCC_BUNDLER_URL       — Bundler RPC (e.g., Pimlico API URL)
+ * Env vars (bundler/paymaster resolved via config/bundler-config.ts — ZeroDev,
+ * Coinbase CDP, Pimlico, or a custom URL all supported):
+ *   ZERODEV_BUNDLER_URL / ZERODEV_PAYMASTER_URL (or ZERODEV_PROJECT_ID)
+ *   PCC_BUNDLER_URL       — Bundler RPC (legacy generic name; e.g. Pimlico URL)
  *   PCC_PAYMASTER_URL     — Paymaster RPC (optional — for gas sponsorship)
  *   PCC_GATEWAY_PRIVATE_KEY — Same key used by escrow-client (required)
  *   PCC_BATCH_MAX_SIZE    — Max ops per batch (default: 50)
@@ -15,7 +17,7 @@
  */
 
 import type { Address, Hex } from "viem";
-import { baseSepolia } from "viem/chains";
+import { base, baseSepolia } from "viem/chains";
 import { MilestoneEscrowABI } from "@pcc/contracts";
 
 import type {
@@ -29,12 +31,19 @@ import type {
   QueueStatus,
 } from "@pcc/bundler";
 
+import { resolveBundlerConfig } from "../config/bundler-config.js";
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BUNDLER_URL = process.env.PCC_BUNDLER_URL;
-const PAYMASTER_URL = process.env.PCC_PAYMASTER_URL;
+// Bundler + paymaster resolved across every supported provider (ZeroDev,
+// Coinbase CDP, Pimlico, custom) — single source of truth in
+// config/bundler-config.ts. Preserves the legacy PCC_BUNDLER_URL/PCC_PAYMASTER_URL.
+const RESOLVED = resolveBundlerConfig();
+const BUNDLER_URL = RESOLVED.bundlerUrl;
+const PAYMASTER_URL = RESOLVED.paymasterUrl;
+const SETTLEMENT_CHAIN = RESOLVED.chain === "base" ? base : baseSepolia;
 const GATEWAY_PRIVATE_KEY = process.env.PCC_GATEWAY_PRIVATE_KEY as Hex | undefined;
 
 const BATCH_MAX_SIZE = parseInt(process.env.PCC_BATCH_MAX_SIZE ?? "50", 10);
@@ -61,7 +70,7 @@ export async function initBatchSettlement(): Promise<boolean> {
 
   if (!BUNDLER_URL || !GATEWAY_PRIVATE_KEY) {
     console.log(
-      "[batch-settlement] Disabled — set PCC_BUNDLER_URL and PCC_GATEWAY_PRIVATE_KEY to enable.",
+      "[batch-settlement] Disabled — set a bundler (ZERODEV_BUNDLER_URL / ZERODEV_PROJECT_ID / PCC_BUNDLER_URL) and PCC_GATEWAY_PRIVATE_KEY to enable.",
     );
     return false;
   }
@@ -79,7 +88,7 @@ export async function initBatchSettlement(): Promise<boolean> {
       bundler: {
         bundlerUrl: BUNDLER_URL,
         paymasterUrl: PAYMASTER_URL,
-        chain: baseSepolia,
+        chain: SETTLEMENT_CHAIN,
       },
     });
 
