@@ -35,6 +35,7 @@ import {
   type Chain,
   formatUnits,
   parseUnits,
+  WaitForTransactionReceiptTimeoutError,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
@@ -587,6 +588,44 @@ export async function submitAttestation(
 /** Check if write operations are available (private key is configured) */
 export function isWriteEnabled(): boolean {
   return !!GATEWAY_PRIVATE_KEY;
+}
+
+/**
+ * Wait for a transaction to be mined and return its terminal receipt status.
+ *
+ * The V2 write helpers above return as soon as the tx is BROADCAST (viem's
+ * writeContract resolves on the tx hash, not on mining). A crank that submits a
+ * dependent sequence (submitEvidence → submitAttestation → release) must wait for
+ * each step to MINE before the next one's estimation runs against the new state,
+ * otherwise the next estimation can `eth_call` against the pre-write state and
+ * revert spuriously. This is the same "trust the receipt, not a re-read" pattern
+ * the create-leg uses (paid-job-flow createJobFromSession) — we confirm the write
+ * landed via its receipt, we do NOT re-read getMilestone (the load-balanced RPC
+ * replica lags the just-mined write).
+ */
+export async function waitForReceipt(
+  txHash: Hex,
+): Promise<{ status: "success" | "reverted" | "timeout"; blockNumber: number }> {
+  const client = getPublicClient();
+  try {
+    // Bound the wait (F3). Without a timeout a dropped/underpriced tx polls forever, and
+    // because settlement runs this inside the in-process signer lock (settlement-crank
+    // withSignerLock) it would wedge ALL settlement + escrow-creation writes behind it.
+    // 90s mirrors the create-leg's addMilestone wait (paid-job-flow.ts).
+    const receipt = await client.waitForTransactionReceipt({ hash: txHash, timeout: 90_000 });
+    return { status: receipt.status, blockNumber: Number(receipt.blockNumber) };
+  } catch (err) {
+    // Timed out waiting for the receipt: the tx has NOT confirmed within the bound.
+    // Report a distinct "timeout" the caller classifies as blocked (never as success) —
+    // the tx may still mine later, and the next drive's fresh read + revert-map heals it.
+    if (
+      err instanceof WaitForTransactionReceiptTimeoutError ||
+      (err instanceof Error && err.name === "WaitForTransactionReceiptTimeoutError")
+    ) {
+      return { status: "timeout", blockNumber: 0 };
+    }
+    throw err;
+  }
 }
 
 /** Get the gateway signer address (if configured) */
@@ -1423,21 +1462,11 @@ export async function submitEvidenceV3(
   return { transactionHash: hash, status: "submitted" };
 }
 
-/**
- * Wait for a submitted tx to be mined (1 confirmation). Used to sequence
- * dependent on-chain writes — e.g. submitEvidence must be mined before
- * submitAttestation can read it (a V3 escrow reverts "Evidence not submitted"
- * against un-mined evidence).
- */
-export async function waitForReceipt(
-  hash: Hex,
-): Promise<{ status: "success" | "reverted" }> {
-  const receipt = await getPublicClient().waitForTransactionReceipt({
-    hash,
-    confirmations: 1,
-  });
-  return { status: receipt.status };
-}
+// NOTE: waitForReceipt is defined once, above (the F3 version with a 90s timeout
+// bound + a distinct "timeout" status). The settlement crank branches on that
+// "timeout" status; the V3 evidence-submit sequencer here awaits it and ignores the
+// return, so the single superset definition serves both. (A second, simpler V3-only
+// copy from the Mode-B branch was removed during the settlement-crank rebase.)
 
 /** Re-export V3 status utilities for convenience. */
 export { MilestoneStatusV3, milestoneStatusV3Name };
