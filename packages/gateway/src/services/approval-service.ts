@@ -33,7 +33,7 @@ import {
 } from "@pcc/spec";
 import { getStore, getRepos } from "../db.js";
 
-const { verificationPolicies, approvalEvidence, approvalChallenges } = schema;
+const { verificationPolicies, approvalEvidence, approvalChallenges, negotiationSessions } = schema;
 
 /** How long an issued challenge nonce stays usable before it must be re-issued. */
 export const APPROVAL_CHALLENGE_TTL_MS = 15 * 60_000;
@@ -167,6 +167,48 @@ function preCheckIntake(body: unknown): Result<ApprovalEvidenceV1> {
   }
   if (policyRow.jobId !== approval.jobId) {
     return Errors.badRequest("policyId is not bound to this jobId");
+  }
+
+  // ── escrow binding ──────────────────────────────────────────────────
+  // The committed negotiation session is the canonical place /complete
+  // itself reads escrowAddress from (paid-job-flow.ts reads
+  // tierSessionRow?.escrowAddress the same way). Case-insensitive: address
+  // checksum casing (ERC-55) is a typo-detection convention, not semantic.
+  const sessionRow = db
+    .select()
+    .from(negotiationSessions)
+    .where(eq(negotiationSessions.jobId, approval.jobId))
+    .get();
+  if (
+    sessionRow?.escrowAddress &&
+    sessionRow.escrowAddress.toLowerCase() !== approval.escrowAddress.toLowerCase()
+  ) {
+    return Errors.badRequest("escrowAddress does not match the job's committed escrow");
+  }
+
+  // ── evidence binding (commit-then-reveal: approve what was committed,
+  // never evidence-shop) ───────────────────────────────────────────────
+  let bundles: ReturnType<ReturnType<typeof getRepos>["evidence"]["findByJob"]>;
+  try {
+    bundles = getRepos().evidence.findByJob(approval.jobId);
+  } catch {
+    bundles = [];
+  }
+  if (bundles.length === 0) {
+    return Errors.notFoundWithHint(
+      "evidence",
+      approval.jobId,
+      "No evidence bundle is on file for this job yet — an approval must reference already-committed evidence.",
+    );
+  }
+  const latestBundle = bundles[bundles.length - 1]!;
+  if (latestBundle.bundleHash !== approval.evidenceHash) {
+    return err(
+      "EVIDENCE_HASH_MISMATCH",
+      "evidenceHash does not match the job's on-file evidence bundle — approve what was committed, not a different hash",
+      409,
+      { retryable: false, details: { onFile: latestBundle.bundleHash, submitted: approval.evidenceHash } },
+    );
   }
 
   return ok(approval);

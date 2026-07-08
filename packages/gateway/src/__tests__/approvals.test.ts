@@ -16,7 +16,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
 import { approvalRoutes } from "../routes/approvals.js";
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { policyHashV1, approvalDigestV1, type ApprovalEvidenceV1 } from "@pcc/spec";
 
@@ -237,6 +237,26 @@ describe("approval-as-evidence — benign lane", () => {
     return res.json() as { nonce: string; digestPreview: string | null; policyClaims: unknown[]; expiresAt: string };
   }
 
+  /**
+   * Drives the job to /complete so a REAL evidence bundle lands on file
+   * (mirrors negotiation-settlement-correctness.test.ts's P1 helper) —
+   * needed because approval-service.ts's evidence-binding check (commit-
+   * then-reveal: approve what was committed, not a different hash) 404s
+   * any approval submitted before evidence exists.
+   */
+  async function completeJob(app: FastifyInstance, jobId: string) {
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(res.statusCode).toBe(200);
+    return res;
+  }
+
+  /** Reads the job's latest on-file evidence bundle hash (post-/complete). */
+  function latestEvidenceHash(jobId: string): string {
+    const bundles = getRepos().evidence.findByJob(jobId);
+    expect(bundles.length).toBeGreaterThan(0);
+    return bundles[bundles.length - 1]!.bundleHash;
+  }
+
   it("issues a challenge carrying the committed policy's claims", async () => {
     const { sessionId, res: commitRes } = await fullCommit(app, "buyer-challenge", {
       verificationPolicy: proposedPolicyClaims(),
@@ -257,10 +277,19 @@ describe("approval-as-evidence — benign lane", () => {
 
   it("accepts a well-formed approval bound to a fresh nonce (202) and lists it", async () => {
     const { res: commitRes } = await fullCommit(app, "buyer-submit");
-    const { jobId, policyId } = commitRes.json();
+    const { jobId, policyId, escrowAddress } = commitRes.json();
+    await completeJob(app, jobId);
+    const evidenceHash = latestEvidenceHash(jobId);
     const challenge = await issueChallengeFor(app, jobId);
 
-    const approval = buildApproval({ jobId, policyId, nonce: challenge.nonce, claimIds: ["machine-tier"] });
+    const approval = buildApproval({
+      jobId,
+      policyId,
+      escrowAddress,
+      evidenceHash,
+      nonce: challenge.nonce,
+      claimIds: ["machine-tier"],
+    });
     const submitRes = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/approvals`, payload: approval });
     expect(submitRes.statusCode).toBe(202);
     expect(submitRes.json().status).toBe("received");
@@ -273,6 +302,51 @@ describe("approval-as-evidence — benign lane", () => {
     expect(listed.approvals[0].verdict).toBe("approve");
   });
 
+  it("rejects an approval when no evidence bundle is on file yet (404)", async () => {
+    const { res: commitRes } = await fullCommit(app, "buyer-no-evidence");
+    const { jobId, policyId, escrowAddress } = commitRes.json();
+    // Deliberately skip completeJob() — no evidence exists for this job yet.
+    const challenge = await issueChallengeFor(app, jobId);
+    const approval = buildApproval({ jobId, policyId, escrowAddress, nonce: challenge.nonce });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/approvals`, payload: approval });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("rejects an approval whose evidenceHash does not match the job's on-file evidence (409, no evidence-shopping)", async () => {
+    const { res: commitRes } = await fullCommit(app, "buyer-evidence-mismatch");
+    const { jobId, policyId, escrowAddress } = commitRes.json();
+    await completeJob(app, jobId);
+    const challenge = await issueChallengeFor(app, jobId);
+    // A DIFFERENT (well-formed) hash than what's actually on file.
+    const approval = buildApproval({
+      jobId,
+      policyId,
+      escrowAddress,
+      evidenceHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      nonce: challenge.nonce,
+    });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/approvals`, payload: approval });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("EVIDENCE_HASH_MISMATCH");
+  });
+
+  it("rejects an approval whose escrowAddress does not match the committed escrow (400)", async () => {
+    const { res: commitRes } = await fullCommit(app, "buyer-escrow-mismatch");
+    const { jobId, policyId } = commitRes.json();
+    await completeJob(app, jobId);
+    const evidenceHash = latestEvidenceHash(jobId);
+    const challenge = await issueChallengeFor(app, jobId);
+    const approval = buildApproval({
+      jobId,
+      policyId,
+      evidenceHash,
+      escrowAddress: "0x0000000000000000000000000000000000dEaD",
+      nonce: challenge.nonce,
+    });
+    const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/approvals`, payload: approval });
+    expect(res.statusCode).toBe(400);
+  });
+
   it("rejects an approval carrying an unknown/unissued nonce (400)", async () => {
     const { res: commitRes } = await fullCommit(app, "buyer-unknown-nonce");
     const { jobId, policyId } = commitRes.json();
@@ -283,9 +357,11 @@ describe("approval-as-evidence — benign lane", () => {
 
   it("rejects a second submission reusing an already-consumed nonce (409)", async () => {
     const { res: commitRes } = await fullCommit(app, "buyer-replay");
-    const { jobId, policyId } = commitRes.json();
+    const { jobId, policyId, escrowAddress } = commitRes.json();
+    await completeJob(app, jobId);
+    const evidenceHash = latestEvidenceHash(jobId);
     const challenge = await issueChallengeFor(app, jobId);
-    const approval = buildApproval({ jobId, policyId, nonce: challenge.nonce });
+    const approval = buildApproval({ jobId, policyId, escrowAddress, evidenceHash, nonce: challenge.nonce });
 
     const first = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/approvals`, payload: approval });
     expect(first.statusCode).toBe(202);
@@ -320,11 +396,15 @@ describe("approval-as-evidence — benign lane", () => {
 
   it("accepts a reject-verdict approval WITH a reasonCode", async () => {
     const { res: commitRes } = await fullCommit(app, "buyer-reject-with-reason");
-    const { jobId, policyId } = commitRes.json();
+    const { jobId, policyId, escrowAddress } = commitRes.json();
+    await completeJob(app, jobId);
+    const evidenceHash = latestEvidenceHash(jobId);
     const challenge = await issueChallengeFor(app, jobId);
     const approval = buildApproval({
       jobId,
       policyId,
+      escrowAddress,
+      evidenceHash,
       nonce: challenge.nonce,
       verdict: "reject",
       reasonCode: "surface-defect",
