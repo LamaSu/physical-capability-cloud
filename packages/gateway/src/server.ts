@@ -825,6 +825,29 @@ export async function createGateway(port = 3200) {
         console.warn("[gateway] kernel-ttl-sweeper start failed:", err);
       }
 
+      // Start the settlement keeper (settlement pivot Step 2). OPT-IN via
+      // SETTLEMENT_KEEPER_ENABLED=true; no-op otherwise (and in test / when write
+      // is disabled). It periodically drives Attested-past-window milestones
+      // through the settlement crank so the permissionless challenge-window
+      // release finishes itself instead of hanging on an absent completer.
+      // Interval timer is unref'd so it never keeps the process alive alone.
+      try {
+        const { startSettlementKeeper } = await import(
+          "./services/settlement-keeper.js"
+        );
+        const handle = startSettlementKeeper(() => getRepos(), {
+          info: (m) => app.log.info(`[settlement-keeper] ${m}`),
+          warn: (m) => app.log.warn(`[settlement-keeper] ${m}`),
+        });
+        if (process.env.SETTLEMENT_KEEPER_ENABLED === "true") {
+          console.log(
+            `[gateway] settlement-keeper started (interval=${handle.intervalSec}s)`,
+          );
+        }
+      } catch (err) {
+        console.warn("[gateway] settlement-keeper start failed:", err);
+      }
+
       const address = await app.listen({ port, host: "0.0.0.0" });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
