@@ -32,6 +32,8 @@ export * from "./fiat-ramp.js";
 export * from "./licensing.js";
 export * from "./operator-policy.js";
 export * from "./negotiation.js";
+// Approval-as-evidence — pcc.approval.v1 / pcc.verification-policy.v1 (D8)
+export * from "./verification-policy.js";
 export * from "./p2p.js";
 export * from "./device-tools.js";
 export * from "./requests.js";

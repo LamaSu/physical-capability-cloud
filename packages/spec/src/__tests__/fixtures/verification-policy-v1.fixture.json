@@ -1,0 +1,30 @@
+{
+  "schema": "pcc.verification-policy.v1",
+  "policyId": "policy-fixture-0001",
+  "jobId": "job-fixture-0001",
+  "baseTier": 1,
+  "claims": [
+    {
+      "claimId": "work-done",
+      "statement": "Evidence meets the machine-checked baseline for assurance tier 1.",
+      "band": "B1",
+      "clearing": { "kind": "machine-tier" }
+    },
+    {
+      "claimId": "payer-accepts",
+      "statement": "The payer has reviewed the delivered work and approves settlement.",
+      "band": "B4",
+      "clearing": {
+        "kind": "human-approval",
+        "approverRole": "payer",
+        "approverKeys": [
+          { "scheme": "eip191", "keyId": "0x9f8bC1a2D3e4F5061728394a5b6c7d8e9f0a1b2c" }
+        ],
+        "windowSecs": 259200,
+        "onLapse": "hold"
+      }
+    }
+  ],
+  "composition": "all",
+  "createdAt": "2026-07-08T00:00:00.000Z"
+}

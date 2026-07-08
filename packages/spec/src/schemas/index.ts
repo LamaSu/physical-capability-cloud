@@ -264,3 +264,106 @@ export const ShopKernelSchema = z.object({
   lastHeartbeat: TimestampSchema,
   version: z.string(),
 });
+
+// ============================================================
+// Approval-as-Evidence Schemas (pcc.approval.v1 / pcc.verification-policy.v1)
+//
+// D8 (settlement-decisions.md): human approval is a signed, evidence-hash-
+// bound, oracle-authenticated INPUT — never a release rail. These schemas
+// are the runtime-validation boundary for that input; they are
+// deliberately STRICTER than the plain-`string` TS field types in
+// types/verification-policy.ts (e.g. evidenceHash/policyHash validated as
+// SHA256Schema here) because a boundary validator should never be looser
+// than the shape it documents.
+// ============================================================
+
+export const ApprovalVerdictSchema = z.enum(["approve", "reject"]);
+export const ApproverRoleSchema = z.enum(["payer", "expert"]);
+
+export const ApprovalSignatureEip191Schema = z.object({
+  scheme: z.literal("eip191"),
+  address: AddressSchema,
+  signature: z.string().min(1),
+});
+
+export const ApprovalSignatureWebauthnP256Schema = z.object({
+  scheme: z.literal("webauthn-p256"),
+  credentialId: z.string().min(1),
+  publicKey: z.string().min(1),
+  signature: z.string().min(1),
+  authenticatorData: z.string().min(1),
+  clientDataJSON: z.string().min(1),
+});
+
+export const ApprovalSignatureSchema = z.discriminatedUnion("scheme", [
+  ApprovalSignatureEip191Schema,
+  ApprovalSignatureWebauthnP256Schema,
+]);
+
+export const ApprovalEvidenceV1Schema = z
+  .object({
+    schema: z.literal("pcc.approval.v1"),
+    jobId: z.string().min(1),
+    escrowAddress: z.string().min(1),
+    milestoneIndex: z.number().int().min(0),
+    evidenceHash: SHA256Schema,
+    policyId: z.string().min(1),
+    claimIds: z.array(z.string().min(1)).min(1),
+    verdict: ApprovalVerdictSchema,
+    reasonCode: z.string().min(1).optional(),
+    approverRole: ApproverRoleSchema,
+    approverId: z.string().min(1),
+    issuedAt: TimestampSchema,
+    expiresAt: TimestampSchema,
+    nonce: z.string().min(1),
+    sig: ApprovalSignatureSchema,
+  })
+  .refine((a) => a.verdict !== "reject" || !!a.reasonCode, {
+    message: "reasonCode is required when verdict is 'reject' (reasoned-rejection rule)",
+    path: ["reasonCode"],
+  });
+
+export const ApproverKeySchema = z.object({
+  scheme: z.enum(["eip191", "webauthn-p256"]),
+  keyId: z.string().min(1),
+  publicKey: z.string().optional(),
+});
+
+export const PolicyClaimClearingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("machine-tier") }),
+  z.object({
+    kind: z.literal("human-approval"),
+    approverRole: ApproverRoleSchema,
+    approverKeys: z.array(ApproverKeySchema).min(1),
+    windowSecs: z.number().int().positive(),
+    onLapse: z.enum(["approve", "hold"]),
+  }),
+  z.object({ kind: z.literal("window-lapse"), windowSecs: z.number().int().positive() }),
+  z.object({ kind: z.literal("committee") }), // RESERVED — not built this slice
+  z.object({ kind: z.literal("zk-proof") }), // RESERVED — not built this slice
+]);
+
+export const PolicyClaimSchema = z.object({
+  claimId: z.string().min(1),
+  statement: z.string().min(1),
+  band: z.enum(["B1", "B2", "B3", "B4", "B5"]).optional(),
+  clearing: PolicyClaimClearingSchema,
+});
+
+export const VerificationPolicyV1Schema = z.object({
+  schema: z.literal("pcc.verification-policy.v1"),
+  policyId: z.string().min(1),
+  jobId: z.string().min(1),
+  policyHash: SHA256Schema,
+  baseTier: AssuranceTierSchema,
+  claims: z.array(PolicyClaimSchema).min(1),
+  composition: z.literal("all"),
+  createdAt: TimestampSchema,
+});
+
+/** Buyer-supplied proposal at negotiate time — server stamps the rest (see VerificationPolicyInputV1). */
+export const VerificationPolicyInputV1Schema = z.object({
+  baseTier: AssuranceTierSchema.optional(),
+  claims: z.array(PolicyClaimSchema).min(1),
+  composition: z.literal("all"),
+});
