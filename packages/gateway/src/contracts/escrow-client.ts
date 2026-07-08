@@ -1462,21 +1462,11 @@ export async function submitEvidenceV3(
   return { transactionHash: hash, status: "submitted" };
 }
 
-/**
- * Wait for a submitted tx to be mined (1 confirmation). Used to sequence
- * dependent on-chain writes — e.g. submitEvidence must be mined before
- * submitAttestation can read it (a V3 escrow reverts "Evidence not submitted"
- * against un-mined evidence).
- */
-export async function waitForReceipt(
-  hash: Hex,
-): Promise<{ status: "success" | "reverted" }> {
-  const receipt = await getPublicClient().waitForTransactionReceipt({
-    hash,
-    confirmations: 1,
-  });
-  return { status: receipt.status };
-}
+// NOTE: waitForReceipt is defined once, above (the F3 version with a 90s timeout
+// bound + a distinct "timeout" status). The settlement crank branches on that
+// "timeout" status; the V3 evidence-submit sequencer here awaits it and ignores the
+// return, so the single superset definition serves both. (A second, simpler V3-only
+// copy from the Mode-B branch was removed during the settlement-crank rebase.)
 
 /** Re-export V3 status utilities for convenience. */
 export { MilestoneStatusV3, milestoneStatusV3Name };
