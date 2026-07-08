@@ -1914,6 +1914,57 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
   `);
+
+  // ══════════════════════════════════════════════════════════════════
+  // Approval-as-evidence (D8, settlement-decisions.md) — benign lane only.
+  // Human approval is a signed, evidence-hash-bound INPUT the oracle
+  // authenticates; never a release rail. These three tables carry the
+  // pre-agreed policy + the submitted approvals + the anti-replay
+  // challenge nonces. See packages/db/src/schema/approval-evidence.ts
+  // and ai/research/approval-as-evidence-build-spec.md.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS verification_policies (
+      policy_id   TEXT PRIMARY KEY,
+      job_id      TEXT NOT NULL,
+      policy_hash TEXT NOT NULL,
+      body        TEXT NOT NULL,  -- JSON pcc.verification-policy.v1
+      created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS verification_policies_job_id ON verification_policies(job_id);
+
+    CREATE TABLE IF NOT EXISTS approval_evidence (
+      id             TEXT PRIMARY KEY,
+      job_id         TEXT NOT NULL,
+      policy_id      TEXT NOT NULL,
+      evidence_hash  TEXT NOT NULL,
+      verdict        TEXT NOT NULL,             -- "approve" | "reject"
+      sig_scheme     TEXT NOT NULL,             -- "eip191" | "webauthn-p256"
+      body           TEXT NOT NULL,             -- JSON pcc.approval.v1
+      nonce          TEXT NOT NULL UNIQUE,
+      status         TEXT NOT NULL DEFAULT 'received',  -- "received" | "consumed"
+      created_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS approval_evidence_job_id ON approval_evidence(job_id);
+    CREATE INDEX IF NOT EXISTS approval_evidence_policy_id ON approval_evidence(policy_id);
+
+    CREATE TABLE IF NOT EXISTS approval_challenges (
+      nonce           TEXT PRIMARY KEY,
+      job_id          TEXT NOT NULL,
+      policy_id       TEXT,
+      digest_preview  TEXT,
+      issued_at       TEXT NOT NULL,
+      expires_at      TEXT NOT NULL,
+      consumed_at     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS approval_challenges_job_id ON approval_challenges(job_id);
+  `);
+  // negotiation_sessions predates D8 — add the policy snapshot pointer
+  // columns idempotently (same pattern as every other additive column
+  // above). Nullable: rows committed before this migration, or without an
+  // explicit policy, simply carry NULL here.
+  safeAddColumn("negotiation_sessions", "policy_id", "TEXT");
+  safeAddColumn("negotiation_sessions", "policy_hash", "TEXT");
 }
 
 /**

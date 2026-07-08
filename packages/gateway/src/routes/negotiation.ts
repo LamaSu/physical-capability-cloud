@@ -31,8 +31,20 @@ import type {
   CreateSessionRequest,
   WorkflowChallenge,
   DemandEnvelope,
+  VerificationPolicyV1,
+  VerificationPolicyInputV1,
+  AssuranceTier,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
+// Approval-as-evidence (D8, settlement-decisions.md) — policy snapshot at
+// commit. See services/approval-service.ts + routes/approvals.ts for the
+// (separate, benign) approval-intake surface that reads what this writes.
+import {
+  VERIFICATION_POLICY_SCHEMA_V1,
+  VerificationPolicyInputV1Schema,
+  defaultTrivialPolicy,
+  policyHashV1,
+} from "@pcc/spec";
 import { createJobFromSession } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
@@ -67,7 +79,7 @@ function serializeChallenge(
 
 const challengeService = new ChallengeService();
 
-const { negotiationSessions, operatorPolicies } = schema;
+const { negotiationSessions, operatorPolicies, verificationPolicies } = schema;
 
 const resolver = new TemplateResolver();
 
@@ -547,7 +559,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
   );
 
   /** POST /api/negotiate/session/:id/commit — Lock in, create job */
-  app.post<{ Params: { id: string } }>(
+  app.post<{
+    Params: { id: string };
+    Body?: { verificationPolicy?: VerificationPolicyInputV1 };
+  }>(
     "/api/negotiate/session/:id/commit",
     async (req, reply) => {
       try {
@@ -567,9 +582,69 @@ export async function negotiationRoutes(app: FastifyInstance) {
           return reply.status(410).send({ error: "Quote expired — re-quote before commit" });
         }
 
+        // ── Approval-as-evidence (D8): optional buyer-proposed verification
+        // policy, validated up front so a malformed proposal 400s BEFORE any
+        // commit side effect runs (job id mint, escrow creation).
+        const proposedPolicy = req.body?.verificationPolicy;
+        if (proposedPolicy) {
+          const policyCheck = VerificationPolicyInputV1Schema.safeParse(proposedPolicy);
+          if (!policyCheck.success) {
+            return reply.status(400).send({
+              error: "invalid_verification_policy",
+              message: policyCheck.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+            });
+          }
+        }
+
         const jobId = `job-${crypto.randomUUID().slice(0, 12)}`;
         const cwmId = `cwm-${crypto.randomUUID().slice(0, 12)}`;
         const now = new Date().toISOString();
+
+        // ── Approval-as-evidence (D8): snapshot + hash the verification
+        // policy at the exact moment the session locks in — same
+        // immutability convention as the OperatorPolicy constraints
+        // snapshot taken at session creation, above. No policy proposed ->
+        // synthesize the trivial machine-tier-only policy so exactly ONE
+        // code path exists downstream (the oracle lane never special-cases
+        // "no policy"). Success parameters are agreed BEFORE the job runs.
+        const agreedBaseTier = (
+          typeof (row.contractTerms as { assuranceTier?: number } | null)?.assuranceTier === "number"
+            ? (row.contractTerms as { assuranceTier: number }).assuranceTier
+            : 0
+        ) as AssuranceTier;
+        const policyBody: Omit<VerificationPolicyV1, "policyHash"> = proposedPolicy
+          ? {
+              schema: VERIFICATION_POLICY_SCHEMA_V1,
+              policyId: `policy-${crypto.randomUUID().slice(0, 12)}`,
+              jobId,
+              baseTier: proposedPolicy.baseTier ?? agreedBaseTier,
+              claims: proposedPolicy.claims,
+              composition: "all",
+              createdAt: now,
+            }
+          : defaultTrivialPolicy(jobId, agreedBaseTier);
+        const policyHash = await policyHashV1(policyBody);
+
+        try {
+          db.insert(verificationPolicies)
+            .values({
+              policyId: policyBody.policyId,
+              jobId: policyBody.jobId,
+              policyHash,
+              body: { ...policyBody, policyHash } as any,
+              createdAt: now,
+            })
+            .run();
+        } catch (policyErr) {
+          // Best-effort, matching the paid-job-flow wiring below: a failed
+          // policy snapshot must not block commit. The oracle lane falls
+          // back to defaultTrivialPolicy() when no policy row is found for
+          // a jobId, so this degrades safely rather than silently.
+          console.warn(
+            "[negotiation] verification policy snapshot failed (best-effort):",
+            policyErr instanceof Error ? policyErr.message : policyErr,
+          );
+        }
 
         const transitions = [...(row.transitions as unknown as SessionTransition[]), {
           from: row.status,
@@ -586,6 +661,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
             cwmId,
             committedAt: now,
             transitions: transitions as any,
+            policyId: policyBody.policyId,
+            policyHash,
           })
           .where(eq(negotiationSessions.id, req.params.id))
           .run();
@@ -612,13 +689,15 @@ export async function negotiationRoutes(app: FastifyInstance) {
         }
 
         return {
-          session: { ...row, status: "committed", jobId: paidJobResult?.jobId ?? jobId, cwmId, committedAt: now, transitions },
+          session: { ...row, status: "committed", jobId: paidJobResult?.jobId ?? jobId, cwmId, committedAt: now, transitions, policyId: policyBody.policyId, policyHash },
           jobId: paidJobResult?.jobId ?? jobId,
           cwmId,
           scopeId: paidJobResult?.scopeId ?? null,
           escrowId: paidJobResult?.escrowId ?? null,
           escrowAddress: paidJobResult?.escrowAddress ?? null,
           escrowStatus: paidJobResult?.escrowStatus ?? null,
+          policyId: policyBody.policyId,
+          policyHash,
           message: paidJobResult
             ? "Session committed. Job, escrow, and execution scope created."
             : "Session committed. Job created and ready for operator processing.",

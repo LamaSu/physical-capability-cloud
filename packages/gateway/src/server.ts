@@ -42,6 +42,7 @@ import { capture3dRoutes } from "./routes/capture-3d.js";
 import { captureSimRoutes } from "./routes/capture-sim.js";
 import { pizzaDemoRoutes } from "./routes/pizza-demo.js";
 import { negotiationRoutes } from "./routes/negotiation.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { a2aTasksRoutes } from "./routes/a2a-tasks.js";
 import { kernelAgentPackageRoutes } from "./routes/kernel-agent-package.js";
 import { sdkRoutes } from "./routes/sdk.js";
@@ -559,6 +560,10 @@ export async function createGateway(port = 3200) {
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
+  // Approval-as-evidence intake (D8) — benign lane: carries + structurally
+  // pre-checks signed approvals; never authoritative, never touches the
+  // settlement path. See routes/approvals.ts.
+  await app.register(approvalRoutes);
   // A2A v1.0 JSON-RPC adapter — POST /a2a/tasks/send
   await app.register(a2aTasksRoutes);
   await app.register(kernelAgentPackageRoutes);

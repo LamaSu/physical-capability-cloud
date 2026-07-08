@@ -45,6 +45,14 @@ export const negotiationSessions = sqliteTable("negotiation_sessions", {
   createdAt: text("created_at").notNull(),
   expiresAt: text("expires_at").notNull(),
   committedAt: text("committed_at"),
+  // Approval-as-evidence (D8) — pre-agreed verification policy snapshotted
+  // at commit. Nullable: legacy/pre-D8 sessions and sessions committed
+  // without an explicit policy carry null here (the oracle lane treats a
+  // missing policy the same as defaultTrivialPolicy()). Source of truth
+  // for the full policy body is the verificationPolicies table, keyed by
+  // policyId; these two columns are a fast pointer + integrity anchor.
+  policyId: text("policy_id"),
+  policyHash: text("policy_hash"),
 });
 
 /** Rate counters for policy enforcement */
