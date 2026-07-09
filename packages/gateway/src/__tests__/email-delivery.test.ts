@@ -15,7 +15,10 @@
  *     honest NOT-configured → delivered:false, error "email_not_configured",
  *     never a fake success.
  *   - The same two paths through the real HTTP /channels/test route.
- *   - Unwired transports (sms/…) are now honest (delivered:false), not fake.
+ *   - Unwired transports (voice/push/mqtt/file) are now honest
+ *     (delivered:false), not fake. (sms is now wired too -- see
+ *     sms-delivery.test.ts for its equivalent coverage; it is deliberately
+ *     no longer in the "unwired" loop below.)
  *
  * Deliberately isolated from the rest of the gateway suite: imports only
  * operator-channels.js (node:crypto + a type-only fastify import + the new
@@ -259,7 +262,7 @@ describe("dispatchToChannels — email path (B5)", () => {
 // ── unwired transports must be honest too (no fake stub success) ─────────────
 
 describe("dispatchToChannels — unwired transports are honest (B5)", () => {
-  for (const transport of ["sms", "voice", "push", "mqtt", "file"] as const) {
+  for (const transport of ["voice", "push", "mqtt", "file"] as const) {
     it(`${transport} returns delivered:false with no stub ref`, async () => {
       attachChannel(`shop-${transport}`, {
         label: `${transport} channel`,

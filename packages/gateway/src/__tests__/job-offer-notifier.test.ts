@@ -48,6 +48,7 @@ import {
   type EmailTransport,
   type EmailMessage,
 } from "../services/email-transport.js";
+import { __setSmsTransportForTests, TwilioTransport } from "../services/sms-transport.js";
 import { initStore, closeStore, getStore } from "../db.js";
 import { schema } from "@pcc/store";
 
@@ -515,5 +516,113 @@ describe("end-to-end: JobOffersStore.create() triggers a real email send", () =>
     await store.create(baseInput("offer-e2e-2", { capabilityType: "courier.dispatch" }));
 
     expect(fake.sent).toHaveLength(0);
+  });
+});
+
+// ── End-to-end: create() -> notifier -> dispatchToChannels -> SMS transport ──
+//
+// Proves the trigger reaches the SMS transport for an operator with an sms
+// channel (this change's acceptance criterion). Uses a REAL TwilioTransport
+// with only `fetch` mocked -- not a stand-in SmsTransport -- so this exercises
+// the actual Twilio request construction (Basic auth, form-urlencoded body,
+// SID parsing), not just the dispatch plumbing around it.
+
+describe("end-to-end: JobOffersStore.create() triggers a real SMS send (Twilio, mocked fetch)", () => {
+  beforeEach(() => {
+    _clearOperatorChannelsForTests();
+    __setSmsTransportForTests(undefined);
+  });
+
+  afterEach(() => {
+    _clearOperatorChannelsForTests();
+    __setSmsTransportForTests(undefined);
+  });
+
+  it("posting a new offer for a capability the operator offers reaches the SMS transport", async () => {
+    attachChannel("op-sms-e2e", {
+      label: "Driver phone",
+      transport: "sms",
+      endpoint: { phoneE164: "+14155551234" },
+      describe: "Text the driver the second a courier job is posted",
+    });
+
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+    const fakeFetch = (async (url: unknown, init: RequestInit) => {
+      fetchCalls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ sid: "SM-e2e-999" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const twilio = new TwilioTransport("ACe2e", "tokene2e", "+14155550100", fakeFetch);
+    __setSmsTransportForTests(twilio);
+
+    const notifier = createOperatorNotifier(async (capabilityType) =>
+      capabilityType === "courier.dispatch" ? ["op-sms-e2e"] : [],
+    );
+    const store = new JobOffersStore({ notifyOperators: notifier });
+
+    const res = await store.create(
+      baseInput("offer-sms-e2e-1", {
+        capabilityType: "courier.dispatch",
+        pricing: { amount: 9.5, currency: "USD", model: "fixed" },
+      }),
+    );
+
+    expect(res.ok).toBe(true);
+    // The trigger really reached Twilio's wire format via the mocked fetch.
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.url).toBe(
+      "https://api.twilio.com/2010-04-01/Accounts/ACe2e/Messages.json",
+    );
+    const headers = fetchCalls[0]!.init.headers as Record<string, string>;
+    expect(headers.authorization).toBe(
+      `Basic ${Buffer.from("ACe2e:tokene2e").toString("base64")}`,
+    );
+    const body = new URLSearchParams(String(fetchCalls[0]!.init.body));
+    expect(body.get("To")).toBe("+14155551234");
+    expect(body.get("From")).toBe("+14155550100");
+    expect(body.get("Body")).toContain("offer-sms-e2e-1");
+    expect(body.get("Body")).toContain("$9.5 USD");
+  });
+
+  it("an unmatched capability type never calls the SMS transport", async () => {
+    attachChannel("op-sms-e2e-2", {
+      label: "Driver phone",
+      transport: "sms",
+      endpoint: { phoneE164: "+14155551234" },
+      describe: "Only notify for pizza.order",
+    });
+    const fetchCalls: unknown[] = [];
+    const fakeFetch = (async () => {
+      fetchCalls.push(1);
+      return new Response(JSON.stringify({ sid: "SM-unused" }), { status: 201 });
+    }) as unknown as typeof fetch;
+    __setSmsTransportForTests(new TwilioTransport("ACx", "tok", "+14155550100", fakeFetch));
+
+    const notifier = createOperatorNotifier(async (capabilityType) =>
+      capabilityType === "pizza.order" ? ["op-sms-e2e-2"] : [],
+    );
+    const store = new JobOffersStore({ notifyOperators: notifier });
+
+    await store.create(baseInput("offer-sms-e2e-2", { capabilityType: "courier.dispatch" }));
+
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("an operator with no SMS provider configured gets an honest not-delivered outcome, not a throw", async () => {
+    attachChannel("op-sms-e2e-3", {
+      label: "Driver phone",
+      transport: "sms",
+      endpoint: { phoneE164: "+14155551234" },
+      describe: "Text me when a job lands",
+    });
+    __setSmsTransportForTests(null); // simulate "no provider configured"
+    const notifier = createOperatorNotifier(async () => ["op-sms-e2e-3"]);
+    const offer = makeOffer({ id: "offer-sms-noprovider" });
+    const outcomes = await notifier(offer);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.channelResults[0]!.delivered).toBe(false);
+    expect(outcomes[0]!.channelResults[0]!.error).toBe("sms_not_configured");
   });
 });
