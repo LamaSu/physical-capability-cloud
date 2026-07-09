@@ -36,8 +36,61 @@ Gap #1 below ("auto-notify on order arrival is NOT wired") is closed. New:
   skipped (pre-existing), 0 failures.** This also finally executes gap #4
   below (`operator-channels.test.ts`, 23 tests) and `email-delivery.test.ts`
   (19 tests) — both green, closing that deferred verification too.
-- Not done (still open, unchanged from below): SMTP (gap #2), sms/voice/push/
-  mqtt/file transports (gap #3).
+- Not done (still open, unchanged from below): SMTP (gap #2), voice/push/
+  mqtt/file transports (gap #3 — **sms is now wired**, see the SMS UPDATE below).
+
+## UPDATE (branch `feat/notifications-transport`) — the SMS (Twilio) transport is now wired
+
+Gap #3's `sms` leg is closed (voice/push/mqtt/file still honestly unimplemented):
+
+- `packages/gateway/src/services/sms-transport.ts` (new) — provider-neutral
+  `SmsTransport` interface + `TwilioTransport`, mirroring `email-transport.ts`'s
+  `ResendTransport` exactly. A real send is a single Basic-authenticated POST
+  (`Authorization: Basic base64(AccountSID:AuthToken)`) to Twilio's Messages
+  REST API with a form-urlencoded `To`/`From`/`Body` body, via the built-in
+  `fetch` — **zero new npm deps** (no Gate-A vetting of a new package). On
+  success the dispatch `ref` is the **real Twilio message SID**.
+- **Config gating.** `resolveSmsTransport(env)` returns a transport only when
+  **all three** of `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+  `TWILIO_FROM_NUMBER` are set, else `null`. The sms dispatch path
+  (`operator-channels.ts` → `sendSms`) now:
+  - configured → actually sends, `delivered:true`, `ref = <Twilio message SID>`;
+  - **not configured → `delivered:false`, `error:"sms_not_configured"`** — an
+    explicit, honest result, **not** a fake success (this is the build-env case);
+  - bad endpoint → `error:"invalid_endpoint"`; provider rejects → `send_failed`.
+- **Attach validation.** `attachChannel` now requires `endpoint.phoneE164` in
+  E.164 form for `transport:"sms"` (rejects missing/malformed with code
+  `invalid_endpoint`). New exported `SmsEndpoint` type documents the shape.
+- **Mockable seam.** `getSmsTransport()` honors `__setSmsTransportForTests()`,
+  same shape as the email seam. Provider-swappable: a Vonage/Plivo/SNS
+  `SmsTransport` can drop in behind the same seam with no dispatch-path change.
+- **Tests.** `packages/gateway/src/__tests__/sms-delivery.test.ts` — 23 tests
+  (env gating, Twilio request shape via injected fetch, E.164 validation, the
+  dispatch sms path), isolated (no `@pcc` workspace build needed) like
+  `email-delivery.test.ts`. Plus `job-offer-notifier.test.ts` gains an
+  end-to-end block: `JobOffersStore.create()` → notifier → `dispatchToChannels`
+  → a **real `TwilioTransport` with only `fetch` mocked** reaches Twilio's wire
+  format for an operator whose capability matches the offer and who has an sms
+  channel.
+- **Verified on Spark:** `sms-delivery.test.ts` **23/23 green**;
+  `pnpm --filter @pcc/gateway typecheck` clean for all changed files (the one
+  remaining tsc error is pre-existing in `settlement-crank.ts` — Step-1 crank,
+  out of scope, untouched here).
+
+### To enable real SMS sends in a deploy env (NOT done here — no creds in build env)
+
+Set all three in the gateway service env (e.g. Railway). **Do not commit them.**
+
+1. `TWILIO_ACCOUNT_SID` — your Twilio Account SID (starts `AC…`).
+2. `TWILIO_AUTH_TOKEN` — that account's Auth Token (or an API-key secret paired
+   with an SID; the transport uses HTTP Basic `SID:token`).
+3. `TWILIO_FROM_NUMBER` — an SMS-capable number **you own in that account**, in
+   E.164 (e.g. `+14155550100`). Twilio rejects sends from a From number the
+   account doesn't own.
+
+Then `POST /api/operators/:slug/channels/test` for an operator with an `sms`
+channel (`endpoint.phoneE164`) performs a real send and returns the Twilio
+message SID as `ref`. All three unset → `sms_not_configured` (fail closed).
 
 ## What was fixed (done, tested)
 
@@ -87,9 +140,10 @@ Gap #1 below ("auto-notify on order arrival is NOT wired") is closed. New:
    needs the `nodemailer` dependency, which must go through Gate A vetting
    (`/vet`) and a `pnpm install` first — out of scope for this change. Add it as
    another `EmailTransport` implementation; no dispatch-path change required.
-3. **Other transports unimplemented.** `sms/voice/push/mqtt/file` report
-   `transport_not_implemented`. Each needs its own provider (Twilio, FCM, an
-   MQTT client, etc.), added behind the same seam.
+3. ~~**Other transports unimplemented.**~~ **sms CLOSED** (Twilio — see the SMS
+   UPDATE section above). `voice/push/mqtt/file` still report
+   `transport_not_implemented`; each needs its own provider (a voice API, FCM,
+   an MQTT client, etc.), added behind the same seam.
 4. ~~**Existing suite not run here.**~~ **CLOSED** — see the UPDATE section
    above. Ran on DGX Spark (106GB RAM, no 16GB local-box limit): full monorepo
    build + full `@pcc/gateway` suite, 107 files / 1911 tests green.
