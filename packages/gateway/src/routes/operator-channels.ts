@@ -36,6 +36,7 @@ import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
 import { getSmsTransport } from "../services/sms-transport.js";
+import { getA2aTransport } from "../services/a2a-transport.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -51,7 +52,8 @@ export type ChannelTransport =
   | "push"      // a push token (mobile / desktop) supplied by the operator
   | "mqtt"      // a topic on a broker the operator runs
   | "file"      // write to a path / object-store key the operator polls
-  | "manual";   // no machine endpoint — the SSE dashboard is the only sink
+  | "manual"    // no machine endpoint — the SSE dashboard is the only sink
+  | "a2a";      // signed A2A task pushed to the operator's own registered agent (see services/a2a-transport.ts)
 
 /**
  * Direction = does PCC just push, or does the operator's system push back too?
@@ -267,12 +269,42 @@ export interface SmsEndpoint {
 }
 
 /**
+ * `endpoint` shape for `transport: "a2a"` — see `ChannelRecord.endpoint`'s
+ * doc comment. `agentId` is the operator's agent's PCC-network identity
+ * (its "subnet address" — the same id it heartbeats/registers with);
+ * `endpoint` is the absolute http(s) URL where that agent exposes its own
+ * A2A `tasks/send`-compatible handler (see services/a2a-transport.ts).
+ */
+export interface A2aEndpoint {
+  agentId: string;
+  endpoint: string;
+}
+
+/**
  * E.164 format check: "+" followed by 1-15 digits, first digit 1-9 (no
  * leading zero, no separators). This is the wire format Twilio's Messages
  * API (and the SMS transport generally) requires for `To`/`From`.
  */
 function isE164(phone: string): boolean {
   return /^\+[1-9]\d{1,14}$/.test(phone);
+}
+
+/**
+ * a2a endpoint validity check: non-empty `agentId` + an `endpoint` that
+ * parses as an absolute http(s) URL (the only schemes `fetch` can POST a
+ * signed task to).
+ */
+function isValidA2aEndpoint(ep: unknown): ep is A2aEndpoint {
+  if (!ep || typeof ep !== "object") return false;
+  const e = ep as Partial<A2aEndpoint>;
+  if (typeof e.agentId !== "string" || e.agentId.trim().length === 0) return false;
+  if (typeof e.endpoint !== "string" || e.endpoint.trim().length === 0) return false;
+  try {
+    const u = new URL(e.endpoint);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -307,6 +339,14 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
       );
     }
   }
+  if (input.transport === "a2a" && !isValidA2aEndpoint(input.endpoint)) {
+    throw Object.assign(
+      new Error(
+        "a2a channel requires endpoint.agentId and endpoint.endpoint (an absolute http(s) URL where the operator's agent exposes its own A2A tasks/send handler)",
+      ),
+      { code: "invalid_endpoint" },
+    );
+  }
   const ch: ChannelRecord = {
     id: newId(),
     operatorSlug,
@@ -333,6 +373,72 @@ export function getChannelsByOperator(operatorSlug: string): ChannelRecord[] {
   const ids = byOperator.get(operatorSlug);
   if (!ids) return [];
   return Array.from(ids).map((i) => channels.get(i)).filter((c): c is ChannelRecord => !!c);
+}
+
+/**
+ * Idempotently ensure an operator has an "a2a" notification channel pointed
+ * at their own registered agent. This is the onboarding hook: called when
+ * an operator's agent registers on the subnet (routes/a2a-tasks.ts's
+ * `pcc-author-integration`) or heartbeats (routes/agent-heartbeat.ts's
+ * `POST /api/agents/heartbeat`) with an `agentEndpoint`, so a courier/shop
+ * running the agent package never has to make a separate
+ * `pcc-attach-channel` call just to receive job pings over A2A.
+ *
+ * Dedup key is (operatorSlug, agentId) — the operator's agent identity, not
+ * the endpoint:
+ *   - exact repeat (same agentId, same endpoint, already enabled) -> true
+ *     no-op, returns the existing record unchanged.
+ *   - same agentId, different endpoint (or was previously disabled) ->
+ *     refreshed in place (self-heals an agent whose endpoint rotated —
+ *     e.g. a new tunnel URL — instead of piling up stale duplicate
+ *     channels for the same agent).
+ *   - different agentId for the same operator -> a NEW channel (one
+ *     operator can legitimately run multiple kernels/agents, each getting
+ *     its own a2a channel — mirrors how defaultOperatorLookup already
+ *     handles one operator across several kernels).
+ *
+ * Never throws — a malformed endpoint or attach failure returns `null`
+ * rather than blocking the onboarding/heartbeat call it was triggered from.
+ */
+export function autoRegisterA2aChannel(
+  operatorSlug: string,
+  agentId: string,
+  endpoint: string,
+): ChannelRecord | null {
+  if (!operatorSlug || !agentId || !endpoint) return null;
+  if (!isValidA2aEndpoint({ agentId, endpoint })) return null;
+
+  const existing = getChannelsByOperator(operatorSlug).find(
+    (c) => c.transport === "a2a" && (c.endpoint as Partial<A2aEndpoint>).agentId === agentId,
+  );
+  if (existing) {
+    const ep = existing.endpoint as Partial<A2aEndpoint>;
+    if (ep.endpoint === endpoint && existing.enabled) {
+      return existing; // exact repeat — true no-op
+    }
+    const refreshed: ChannelRecord = {
+      ...existing,
+      endpoint: { agentId, endpoint },
+      enabled: true,
+      updatedAt: nowIso(),
+    };
+    channels.set(existing.id, refreshed);
+    return refreshed;
+  }
+
+  try {
+    return attachChannel(operatorSlug, {
+      label: "Agent (A2A)",
+      transport: "a2a",
+      direction: "out",
+      endpoint: { agentId, endpoint },
+      describe:
+        "Signed A2A task pushed to this operator's own registered agent via tasks/send when a matching job-offer lands. Auto-registered when the operator's agent registers/heartbeats on the subnet — no manual pcc-attach-channel call needed.",
+      enabled: true,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -376,6 +482,8 @@ async function dispatchOne(
         return await sendEmail(ch, p);
       case "sms":
         return await sendSms(ch, p);
+      case "a2a":
+        return await sendA2a(ch, p);
       case "voice":
       case "push":
       case "mqtt":
@@ -527,6 +635,82 @@ function smsBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
   if (typeof p.deadlineSec === "number") parts.push(`respond within ${p.deadlineSec}s`);
   parts.push(`Job ${p.jobId} (${ch.label})`);
   return parts.join(" — ");
+}
+
+/**
+ * A2A dispatch — signed task push to the operator's own registered agent
+ * (services/a2a-transport.ts). Mirrors sendEmail/sendSms exactly:
+ *
+ *   - No endpoint.agentId/endpoint.endpoint -> delivered:false, invalid_endpoint.
+ *     (attachChannel already rejects this at attach time — this is
+ *     defense-in-depth, mirroring sendEmail/sendSms's own belt-and-suspenders
+ *     checks.)
+ *   - No signing key configured             -> delivered:false, error
+ *                                              a2a_not_configured (honest:
+ *                                              PCC_AGENT_CARD_SIGNING_KEY
+ *                                              unset in this build env).
+ *   - Configured + the operator's agent accepts the task
+ *                                             -> delivered:true, ref = the
+ *                                              REAL task id the operator's
+ *                                              agent assigned.
+ *   - The operator's agent is unreachable, rejects, or replies malformed
+ *                                             -> throws; caught by
+ *                                              dispatchOne as send_failed —
+ *                                              fail closed, never a fake
+ *                                              success.
+ */
+async function sendA2a(
+  ch: ChannelRecord,
+  p: ChannelDispatchPayload,
+): Promise<ChannelDispatchResult> {
+  const ep = ch.endpoint as Partial<A2aEndpoint>;
+  if (!ep.agentId || !ep.endpoint) {
+    return {
+      channelId: ch.id,
+      transport: "a2a",
+      delivered: false,
+      error: "invalid_endpoint",
+      warning: "a2a channel has no endpoint.agentId/endpoint.endpoint",
+    };
+  }
+  const transport = getA2aTransport();
+  if (!transport) {
+    return {
+      channelId: ch.id,
+      transport: "a2a",
+      delivered: false,
+      error: "a2a_not_configured",
+      warning:
+        "no A2A signing key configured — set PCC_AGENT_CARD_SIGNING_KEY to enable signed A2A dispatch; nothing was sent",
+    };
+  }
+  const result = await transport.send({
+    to: ep.endpoint,
+    agentId: ep.agentId,
+    params: a2aNotificationParams(ch, p),
+  });
+  return { channelId: ch.id, transport: "a2a", delivered: true, ref: result.id };
+}
+
+/**
+ * Skill params for the pcc-job-notification A2A task — the same fields the
+ * email/sms bodies compose from, kept structured (not prose) since the
+ * receiving side is another agent, not a human inbox.
+ */
+function a2aNotificationParams(
+  ch: ChannelRecord,
+  p: ChannelDispatchPayload,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    jobId: p.jobId,
+    contextRef: p.contextRef,
+    summary: p.summary,
+    operatorSlug: ch.operatorSlug,
+    channelLabel: ch.label,
+  };
+  if (typeof p.priceUSD === "number") params.priceUSD = p.priceUSD;
+  if (typeof p.deadlineSec === "number") params.deadlineSec = p.deadlineSec;
+  return params;
 }
 
 async function sendWebhook(

@@ -59,6 +59,7 @@ import {
   attachChannel,
   getChannelsByOperator,
   serializeAvailability,
+  autoRegisterA2aChannel,
   type ChannelInput,
   type ChannelRecord,
   type AvailabilityRecord,
@@ -625,6 +626,19 @@ interface PccAuthorIntegrationParams {
    */
   channels?: ChannelInput[];
   /**
+   * Optional — the absolute http(s) URL where THIS operator's own agent
+   * (the one calling pcc-author-integration, running the PCC agent package)
+   * exposes its own A2A `tasks/send`-compatible handler. When present, an
+   * "a2a" notification channel is auto-registered (additive alongside any
+   * explicit `channels[]`, idempotent on repeat calls — see
+   * `autoRegisterA2aChannel` in operator-channels.ts) so this operator
+   * starts receiving signed job-offer pings over A2A with no separate
+   * pcc-attach-channel call. The agent's PCC-network id is `operatorAddress`
+   * (or "a2a-operator" if omitted) — the same identity already used for the
+   * kernel registration above.
+   */
+  agentEndpoint?: string;
+  /**
    * Optional availability — when this capability is reachable. Mirrors the
    * envelope pattern from sla: small enum + describe slot for the long tail.
    * Omitted = treated as "always" (24/7) by downstream agents.
@@ -713,6 +727,18 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
     }
   }
 
+  // Auto-register the A2A notification channel for this operator's OWN
+  // agent (the one making this very call) — the "operator sets up their
+  // hook" point in onboarding. Additive alongside any explicit channels[]
+  // above and idempotent on repeat registrations (autoRegisterA2aChannel);
+  // never blocks onboarding if agentEndpoint is malformed (returns null).
+  const a2aChannel = p.agentEndpoint
+    ? autoRegisterA2aChannel(operatorSlug, p.operatorAddress ?? "a2a-operator", p.agentEndpoint)
+    : null;
+  if (a2aChannel && !attached.some((c) => c.id === a2aChannel.id)) {
+    attached.push(a2aChannel);
+  }
+
   const agentCardUrl = `${PCC_AAI_GATEWAY_URL}/api/kernels/${kernelId}/agent-card.json`;
   return [{
     type: "pcc.author_integration",
@@ -726,6 +752,7 @@ async function handlePccAuthorIntegration(p: PccAuthorIntegrationParams): Promis
       channelsAttached: attached.length,
       channels: attached,
       ...(channelErrors.length ? { channelErrors } : {}),
+      a2aChannelRegistered: !!a2aChannel,
       availability: p.availability ?? null,
       agentCardUrl,
       proveNext: lane === "machine"
