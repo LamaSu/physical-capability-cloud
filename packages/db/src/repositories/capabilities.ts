@@ -46,6 +46,21 @@ export class CapabilityRepository implements ICapabilityRepository {
     return this.db.select().from(capabilities).where(eq(capabilities.type, type)).all();
   }
 
+  distinctTypes(opts?: CapabilityTenantOpts): string[] {
+    const rows = opts?.tenantId
+      ? this.db
+          .selectDistinct({ type: capabilities.type })
+          .from(capabilities)
+          .where(eq(capabilities.tenantId, opts.tenantId))
+          .all()
+      : this.db.selectDistinct({ type: capabilities.type }).from(capabilities).all();
+    // `type` is NOT NULL in the schema, but guard defensively against a
+    // corrupted / empty value rather than advertise a blank type string.
+    return rows
+      .map((r) => r.type)
+      .filter((t): t is string => typeof t === "string" && t.length > 0);
+  }
+
   search(query: string, opts?: CapabilityTenantOpts) {
     if (opts?.tenantId) {
       return this.db

@@ -139,6 +139,21 @@ export class CapabilityFacade extends BaseFacade {
   }
 
   /**
+   * Distinct capability `type` values currently registered in the catalog,
+   * INCLUDING ad-hoc types the network priced/composed but has no compile-time
+   * template for. Backs the public GET /api/capabilities/types union.
+   *
+   * Pushed to SQL as SELECT DISTINCT (see CapabilityRepository.distinctTypes) —
+   * never materializes the full capability set. No enrichment, no TTL filter:
+   * a type on offer at any row is a type the network advertises.
+   */
+  async distinctTypes(): Promise<Result<string[]>> {
+    return this.execute("distinctTypes", async () => {
+      return this.repos.capabilities.distinctTypes();
+    });
+  }
+
+  /**
    * Get a single capability by ID with full enrichment.
    * Replaces: GET /api/capabilities/:id
    */
