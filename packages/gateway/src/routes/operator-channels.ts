@@ -35,6 +35,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
+import { getSmsTransport } from "../services/sms-transport.js";
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -259,6 +260,21 @@ export interface ChannelInput {
   enabled?: boolean;
 }
 
+/** `endpoint` shape for `transport: "sms"` — see `ChannelRecord.endpoint`'s doc comment. */
+export interface SmsEndpoint {
+  /** E.164 phone number, e.g. "+14155551234". */
+  phoneE164: string;
+}
+
+/**
+ * E.164 format check: "+" followed by 1-15 digits, first digit 1-9 (no
+ * leading zero, no separators). This is the wire format Twilio's Messages
+ * API (and the SMS transport generally) requires for `To`/`From`.
+ */
+function isE164(phone: string): boolean {
+  return /^\+[1-9]\d{1,14}$/.test(phone);
+}
+
 /**
  * Programmatic attach — used by HTTP route AND by the A2A `pcc-attach-channel`
  * skill (so an agent doesn't have to make a second HTTP call).
@@ -279,6 +295,17 @@ export function attachChannel(operatorSlug: string, input: ChannelInput): Channe
       ),
       { code: "invalid_body" },
     );
+  }
+  if (input.transport === "sms") {
+    const phone = (input.endpoint as Partial<SmsEndpoint> | undefined)?.phoneE164;
+    if (typeof phone !== "string" || !isE164(phone)) {
+      throw Object.assign(
+        new Error(
+          "sms channel requires endpoint.phoneE164 in E.164 format, e.g. +14155551234",
+        ),
+        { code: "invalid_endpoint" },
+      );
+    }
   }
   const ch: ChannelRecord = {
     id: newId(),
@@ -348,6 +375,7 @@ async function dispatchOne(
       case "email":
         return await sendEmail(ch, p);
       case "sms":
+        return await sendSms(ch, p);
       case "voice":
       case "push":
       case "mqtt":
@@ -357,7 +385,7 @@ async function dispatchOne(
         // code returned delivered:true + ref "stub:transport-not-wired" here,
         // which told operators a message sent when none did — bug B5.) Each
         // provider is a per-transport follow-on with the same shape as the
-        // email path below.
+        // email/sms paths above.
         console.log(
           `[op-channel] ${ch.transport} transport not implemented; would dispatch to ` +
             `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` +
@@ -439,6 +467,66 @@ function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
   if (typeof p.deadlineSec === "number") lines.push(`Respond within: ${p.deadlineSec}s`);
   lines.push("", `— PCC (channel: ${ch.label})`);
   return lines.join("\n");
+}
+
+/**
+ * SMS dispatch — Twilio-backed (this change, closing NOTIFICATION-NOTES.md
+ * gap #3 for the sms transport).
+ *
+ *   - No `endpoint.phoneE164`        → delivered:false, error invalid_endpoint.
+ *     (attachChannel already rejects this at attach time — see isE164 above
+ *     — this is defense-in-depth for channels reaching this state some other
+ *     way, e.g. a PATCH that doesn't re-validate, mirroring sendEmail's own
+ *     belt-and-suspenders invalid_endpoint check.)
+ *   - No provider configured         → delivered:false, error sms_not_configured
+ *                                      (honest: TWILIO_* env unset in this build env).
+ *   - Provider configured + send OK  → delivered:true, ref = Twilio message SID.
+ *   - Provider rejects the send      → throws; caught by dispatchOne as send_failed.
+ *
+ * The transport is resolved through `getSmsTransport()`, the mockable seam:
+ * tests inject a fake transport, production reads TWILIO_ACCOUNT_SID /
+ * TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER from env.
+ */
+async function sendSms(
+  ch: ChannelRecord,
+  p: ChannelDispatchPayload,
+): Promise<ChannelDispatchResult> {
+  const phoneE164 = (ch.endpoint as Partial<SmsEndpoint>).phoneE164;
+  if (!phoneE164) {
+    return {
+      channelId: ch.id,
+      transport: "sms",
+      delivered: false,
+      error: "invalid_endpoint",
+      warning: "sms channel has no endpoint.phoneE164",
+    };
+  }
+  const transport = getSmsTransport();
+  if (!transport) {
+    return {
+      channelId: ch.id,
+      transport: "sms",
+      delivered: false,
+      error: "sms_not_configured",
+      warning:
+        "no SMS provider configured — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER to enable SMS delivery; nothing was sent",
+    };
+  }
+  const result = await transport.send({ to: phoneE164, body: smsBody(ch, p) });
+  return { channelId: ch.id, transport: "sms", delivered: true, ref: result.id };
+}
+
+/**
+ * Short plain-text body — SMS has no subject line and real per-segment cost,
+ * so this stays terser than emailBody's multi-line composer (no contextRef:
+ * it's an internal API path, not something a phone recipient can act on).
+ */
+function smsBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
+  const parts = [p.summary];
+  if (typeof p.priceUSD === "number") parts.push(`$${p.priceUSD} USD`);
+  if (typeof p.deadlineSec === "number") parts.push(`respond within ${p.deadlineSec}s`);
+  parts.push(`Job ${p.jobId} (${ch.label})`);
+  return parts.join(" — ");
 }
 
 async function sendWebhook(
