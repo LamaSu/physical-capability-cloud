@@ -139,6 +139,22 @@ const HumanAttestationSchema = z.object({
   onTimeout: z.enum(["fail", "escalate"]),
 });
 
+// Evidence-vocabulary primitive (evidence-vocabulary v1, §5.3). ONE new rule
+// kind; the vocabulary grows in DATA (registry entries in @pcc/spec/evidence),
+// never in rule shapes — so RFC-001's union stays small. The four legacy
+// authentication-bearing kinds are documented registry aliases of primitive ids
+// (photo-authentic ≡ capture.photo_nonced, geofence ≡ telemetry.geofence_event,
+// registry-membership ≡ ident.registered_key/attest.credential, human-attestation
+// ≡ approval.*/attest.committee).
+const PrimitiveRuleSchema = z.object({
+  kind: z.literal("primitive"),
+  /** Short-form primitive id, e.g. "capture.photo_nonced". */
+  id: z.string().min(1),
+  params: z.record(z.unknown()).optional(),
+  /** Bundle/WorkSchema field carrying the instance. */
+  bind: z.string().optional(),
+});
+
 // Logical composition — recursive via z.lazy
 // Manual type declaration breaks the circular reference between the type and
 // the schema (TS2456: VerificationRuleOutput circularly references itself).
@@ -152,7 +168,8 @@ type LeafRule =
   | z.infer<typeof RegistryMembershipSchema>
   | z.infer<typeof PhotoAuthenticSchema>
   | z.infer<typeof WorkProductRequiredSchema>
-  | z.infer<typeof HumanAttestationSchema>;
+  | z.infer<typeof HumanAttestationSchema>
+  | z.infer<typeof PrimitiveRuleSchema>;
 
 export type VerificationRule =
   | LeafRule
@@ -172,6 +189,7 @@ export const VerificationRuleSchema: z.ZodType<VerificationRule> = z.lazy(() =>
     PhotoAuthenticSchema,
     WorkProductRequiredSchema,
     HumanAttestationSchema,
+    PrimitiveRuleSchema,
     z.object({
       kind: z.literal("and"),
       children: z.array(VerificationRuleSchema).min(1),

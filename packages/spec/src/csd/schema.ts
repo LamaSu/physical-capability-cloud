@@ -132,9 +132,34 @@ export type CsdInvariant = z.infer<typeof CsdInvariantSchema>;
 
 // ── Evidence Tier Schema ────────────────────────────────────────────
 
+/**
+ * Structured reference to an evidence primitive (evidence-vocabulary v1, §5.2).
+ *
+ * Additive sibling of the legacy free-text `required[]`. `bind` names the
+ * bundle/WorkSchema field carrying the instance (e.g. bind:"dropoffPhotoCid"),
+ * healing the outputPhotoCid-vs-dropoffPhotoCid divergence WITHOUT renaming
+ * anyone's fields.
+ */
+export const CsdEvidencePrimitiveRefSchema = z.object({
+  /** Short-form primitive id, e.g. "capture.photo_nonced". */
+  id: z.string().min(1),
+  /** Per-primitive params (minClass, integrityGrade, channel, …). */
+  params: z.record(z.unknown()).optional(),
+  /** Bundle/WorkSchema field that carries this primitive's instance. */
+  bind: z.string().optional(),
+});
+
+export type CsdEvidencePrimitiveRef = z.infer<typeof CsdEvidencePrimitiveRefSchema>;
+
 export const CsdEvidenceTierSchema = z.object({
   description: z.string(),
   required: z.array(z.string()),
+  /**
+   * Additive, optional. Absent ⇒ legacy free-text tier (lints as tier-0-only
+   * per the eligibility rule). Present ⇒ the tier references bounded primitives
+   * by id, which is what makes it tier-N eligible.
+   */
+  primitives: z.array(CsdEvidencePrimitiveRefSchema).optional(),
 });
 
 export type CsdEvidenceTier = z.infer<typeof CsdEvidenceTierSchema>;
