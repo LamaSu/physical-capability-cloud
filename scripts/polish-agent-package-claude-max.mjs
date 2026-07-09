@@ -63,10 +63,25 @@ Every PCC transaction is the same shape:
 identify capability → post job-offer → operator claims → evidence → settle
 \`\`\`
 
-- **Identify** = \`GET /api/capabilities?type=<capability_type>\` returns operators registered for that type. There is no fixed taxonomy — \`type\` is a free-form string. Common types: \`pizza.order\`, \`courier.dispatch\`, \`manufacturing.fdm\`, \`manufacturing.cnc\`, \`lab.hplc\`, \`research.report\`, \`photo.shoot\`, \`tutor.session\`, \`rideshare.request\`, \`creative.commission\`. See §Categories below for the canonical list.
+- **Identify** = \`GET /api/capabilities?type=<capability_type>\` returns operators registered for that type. There is no fixed taxonomy — \`type\` is a free-form string and the network serves ANY good or service, not a closed menu. Common types: \`pizza.order\`, \`courier.dispatch\`, \`manufacturing.fdm\`, \`manufacturing.cnc\`, \`lab.hplc\`, \`research.report\`, \`photo.shoot\`, \`tutor.session\`, \`rideshare.request\`, \`creative.commission\`. Do NOT rely on any enumerated list (including §Categories below) to decide what exists — DISCOVER it live: \`GET /api/capabilities/types\` returns the complete set of registered types, and \`GET /api/capabilities/search?q=<plain-English need>\` finds operators by natural-language match. Search first, assume nothing (see §Discovering what's available).
 - **Post job-offer** = \`POST /api/job-offers\` with \`capabilityType\` + \`requirements\` (category-specific opaque JSON) + \`pricing\` (\`fixed\` | \`quote-required\` | \`per-unit\`). The gateway is category-agnostic. The shape of \`requirements\` is whatever that category's adapter expects.
 - **Operator claims** = an operator polling \`GET /api/job-offers/open?capabilityType=<type>\` accepts via \`POST /api/job-offers/:id/claim\`.
 - **Evidence + settle** = the operator posts evidence; you verify it via the gateway's evidence routes; settlement releases on-chain (Base) — for Max users this is gas-paid by the gateway.
+
+## Discovering what's available (search first)
+
+The catalog is open and grows constantly — treat it as something to QUERY, not a list you already know. Before assuming a capability does or doesn't exist:
+
+1. \`GET /api/capabilities/types\` — the complete, live list of every registered capability type. This is authoritative; the §Categories section lower down is just common examples, not the real inventory.
+2. \`GET /api/capabilities/search?q=<plain-English need>\` — natural-language search across names, types, and materials. Start loose ("someone to laser-cut acrylic", "overnight PCB assembly"); you don't need the exact type string.
+
+Starting from a fuzzy, natural-language ask is safe. The negotiate→commit dialogue (\`POST /api/negotiate/session\` → refine selections → commit) sharpens a loose request into exact, priced acceptance criteria BEFORE any settlement — nothing is charged until you commit a fully-specified contract, so looseness at discovery time costs nothing.
+
+If nothing turns up, that's a demand signal, not a dead end — see §When nothing matches below.
+
+## When nothing matches — post a demand signal
+
+If \`GET /api/capabilities/types\` and \`/api/capabilities/search\` surface no operator for what the user needs, that does NOT mean it's impossible. PCC is supply that grows in response to demand. Post a demand signal via \`POST /api/bounty/*\` describing what's wanted — operators watch the demand board, and new verticals appear when one registers against it. Tell the user "no operator serves this yet, so I've posted it as demand" rather than "can't be done". (Still don't post a *paid* job-offer into a type with zero operators — that just expires unclaimed. A demand signal is the right instrument for an unmet need.)
 
 ## Composition (multi-capability orders)
 
@@ -106,14 +121,14 @@ Never report "ordered", "delivered", "complete", "done" unless you have read the
 - Present the quote back to the user with provider name, price, ETA, and any reputation signal you have, before posting an offer.
 - Use \`idempotencyKey\` (a stable string the user could regenerate — e.g. \`{user-email}-{date}-{request-shortname}\`) on every job-offer POST. Reposting with the same key returns the original offer instead of double-posting.
 - Use \`requirements.deadline\` for any time-bound request — operators see that and decline if they can't meet it.
-- Tell the user when a capability isn't covered by any registered operator. Don't fake a result.
+- Tell the user when a capability isn't covered by any registered operator — and post a demand signal (\`POST /api/bounty/*\`, see §When nothing matches) so the gap can attract an operator. Don't fake a result.
 
 ## Don't
 
 - Don't post a job-offer without confirming pricing first (use \`pricing.model = "quote-required"\` if you need an operator-quote before committing money).
 - Don't claim a job is "placed" or "delivered" based on the POST returning 200. Verify status.
 - Don't auto-add items the user didn't ask for. If they said "1 pizza", don't post 2.
-- Don't make up capability types that aren't registered. Either find an existing operator or report "nobody offers this".
+- Don't invent a capabilityType and post a *paid* job-offer against it when zero operators serve it (it just expires unclaimed). Inventing a type string for search or a demand signal is fine — but if no operator matches, post a demand signal (§When nothing matches), don't force an offer into the void.
 - Don't try to bypass the catalog and post offers for types with zero operators — the offer will just sit there until it expires.
 
 ## Trust model
@@ -122,9 +137,9 @@ Operators are ERC-8004 identities with reputation scores tied to evidence-verifi
 
 For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject. PCC also ships \`@pcc/evidence-judge\` for headless cases.
 
-## Categories
+## Categories (common patterns, NOT a menu)
 
-PCC's catalog spans 15 categories. \`capabilityType\` is free-form text, but stay close to these conventions when posting offers:
+These 15 categories are the conventions the earliest operators clustered around — a helpful starting vocabulary for naming \`capabilityType\`, NOT the boundary of what PCC serves and NOT a canonical catalog. The network sells ANY good or service; \`capabilityType\` is free-form text. The real, complete inventory is whatever \`GET /api/capabilities/types\` returns live (see §Discovering what's available) — always prefer that over this list. Use these as examples, and invent a new type string when the user's need doesn't fit one:
 
 1. **C.1 Software / API services** — \`text.translate\`, \`image.ocr\`, \`code.review\`
 2. **C.2 Info / knowledge work** — \`research.report\`, \`legal.search\`, \`market.analysis\`
@@ -489,9 +504,11 @@ function main() {
   const pkg = JSON.parse(raw);
 
   // Bump minor version (additive change). Idempotent re-runs keep
-  // version stable once it matches the script-target (2.16.0 for the
-  // dtos-and-requirements pass).
-  const TARGET_VERSION = "2.17.0";
+  // version stable once it matches the script-target (2.18.0 for the
+  // open-catalog reframe: categories demoted from canonical list to
+  // examples/facets, search-first discovery, demand-signal fallback,
+  // negotiate-refines-fuzzy).
+  const TARGET_VERSION = "2.18.0";
   const oldVersion = pkg.version || "2.14.0";
   pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
