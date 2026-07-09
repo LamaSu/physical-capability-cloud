@@ -49,6 +49,11 @@ import {
   type EmailMessage,
 } from "../services/email-transport.js";
 import { __setSmsTransportForTests, TwilioTransport } from "../services/sms-transport.js";
+import {
+  __setA2aTransportForTests,
+  type A2aTransport,
+  type A2aTaskMessage,
+} from "../services/a2a-transport.js";
 import { initStore, closeStore, getStore } from "../db.js";
 import { schema } from "@pcc/store";
 
@@ -63,6 +68,19 @@ function fakeTransport(id = "fake-msg-id-123"): EmailTransport & { sent: EmailMe
     provider: "fake",
     sent,
     async send(msg: EmailMessage) {
+      sent.push(msg);
+      return { id, provider: "fake" };
+    },
+  };
+}
+
+/** A fake A2A transport that records what it was asked to send and returns a canned task id. */
+function fakeA2aTransport(id = "fake-a2a-task-123"): A2aTransport & { sent: A2aTaskMessage[] } {
+  const sent: A2aTaskMessage[] = [];
+  return {
+    provider: "fake",
+    sent,
+    async send(msg: A2aTaskMessage) {
       sent.push(msg);
       return { id, provider: "fake" };
     },
@@ -624,5 +642,116 @@ describe("end-to-end: JobOffersStore.create() triggers a real SMS send (Twilio, 
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]!.channelResults[0]!.delivered).toBe(false);
     expect(outcomes[0]!.channelResults[0]!.error).toBe("sms_not_configured");
+  });
+});
+
+// ── End-to-end: create() -> notifier -> dispatchToChannels -> A2A transport ──
+//
+// Proves the trigger reaches the A2A transport for an operator whose agent
+// is registered on the subnet (an "a2a" channel attached — see
+// autoRegisterA2aChannel in operator-channels.ts for how that channel gets
+// there at onboarding/heartbeat time). Uses a fake A2aTransport (the A2A
+// send mocked) rather than real signing — the signing mechanism itself is
+// covered end-to-end in a2a-delivery.test.ts; this block's job is proving
+// the FULL wiring path: job-offer POST -> notifier -> dispatchToChannels ->
+// the operator's registered agent gets a signed task. Also proves the
+// "agent not registered" fail-closed case: an operator matched by the
+// lookup but with no a2a channel attached never reaches the transport.
+
+describe("end-to-end: JobOffersStore.create() triggers a real A2A task dispatch (signed, mocked send)", () => {
+  beforeEach(() => {
+    _clearOperatorChannelsForTests();
+    __setA2aTransportForTests(undefined);
+  });
+
+  afterEach(() => {
+    _clearOperatorChannelsForTests();
+    __setA2aTransportForTests(undefined);
+  });
+
+  it("posting a new offer for a capability the operator offers reaches the A2A transport with the real task id as ref", async () => {
+    attachChannel("op-a2a-e2e", {
+      label: "Agent (A2A)",
+      transport: "a2a",
+      endpoint: { agentId: "agent-courier-e2e", endpoint: "https://courier-agent.example.com/a2a/tasks/send" },
+      describe: "Push a signed A2A task to the courier's own registered agent the second a job is posted",
+    });
+    const fake = fakeA2aTransport("a2a-task-e2e-999");
+    __setA2aTransportForTests(fake);
+
+    const notifier = createOperatorNotifier(async (capabilityType) =>
+      capabilityType === "courier.dispatch" ? ["op-a2a-e2e"] : [],
+    );
+    const store = new JobOffersStore({ notifyOperators: notifier });
+
+    const res = await store.create(
+      baseInput("offer-a2a-e2e-1", {
+        capabilityType: "courier.dispatch",
+        pricing: { amount: 9.5, currency: "USD", model: "fixed" },
+      }),
+    );
+
+    expect(res.ok).toBe(true);
+    // The trigger really reached the A2A transport via the mocked send.
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]!.to).toBe("https://courier-agent.example.com/a2a/tasks/send");
+    expect(fake.sent[0]!.agentId).toBe("agent-courier-e2e");
+    expect(fake.sent[0]!.params.jobId).toBe("offer-a2a-e2e-1");
+    expect(fake.sent[0]!.params.priceUSD).toBe(9.5);
+  });
+
+  it("an operator whose agent is NOT registered (no a2a channel attached) gets no A2A dispatch attempt — fail closed", async () => {
+    // op-a2a-e2e-2 matches the lookup but never had autoRegisterA2aChannel /
+    // attachChannel called for it — this is the "agent not registered" case
+    // the acceptance criteria calls out explicitly.
+    const fake = fakeA2aTransport();
+    __setA2aTransportForTests(fake);
+
+    const notifier = createOperatorNotifier(async (capabilityType) =>
+      capabilityType === "courier.dispatch" ? ["op-a2a-e2e-2"] : [],
+    );
+    const store = new JobOffersStore({ notifyOperators: notifier });
+
+    const res = await store.create(
+      baseInput("offer-a2a-e2e-2", { capabilityType: "courier.dispatch" }),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("an unmatched capability type never calls the A2A transport", async () => {
+    attachChannel("op-a2a-e2e-3", {
+      label: "Agent (A2A)",
+      transport: "a2a",
+      endpoint: { agentId: "agent-3", endpoint: "https://x.example.com/a2a/tasks/send" },
+      describe: "Only notify for pizza.order",
+    });
+    const fake = fakeA2aTransport();
+    __setA2aTransportForTests(fake);
+
+    const notifier = createOperatorNotifier(async (capabilityType) =>
+      capabilityType === "pizza.order" ? ["op-a2a-e2e-3"] : [],
+    );
+    const store = new JobOffersStore({ notifyOperators: notifier });
+
+    await store.create(baseInput("offer-a2a-e2e-3", { capabilityType: "courier.dispatch" }));
+
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("an operator whose agent is registered but no signing key is configured gets an honest not-delivered outcome, not a throw", async () => {
+    attachChannel("op-a2a-e2e-4", {
+      label: "Agent (A2A)",
+      transport: "a2a",
+      endpoint: { agentId: "agent-4", endpoint: "https://x.example.com/a2a/tasks/send" },
+      describe: "notify me",
+    });
+    __setA2aTransportForTests(null); // simulate "no signing key configured"
+    const notifier = createOperatorNotifier(async () => ["op-a2a-e2e-4"]);
+    const outcomes = await notifier(makeOffer({ id: "offer-a2a-noprovider" }));
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.channelResults[0]!.delivered).toBe(false);
+    expect(outcomes[0]!.channelResults[0]!.error).toBe("a2a_not_configured");
   });
 });

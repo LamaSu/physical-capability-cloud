@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
+import { getChannelsByOperator } from "../routes/operator-channels.js";
 import { initStore, closeStore, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 
@@ -600,6 +601,69 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
         { start: "11:00", end: "21:00", daysOfWeek: [1, 3, 4, 5, 6, 0] },
       ],
     });
+  });
+
+  // ── pcc-author-integration: agentEndpoint auto-registers an A2A channel ─
+
+  it("tasks/send pcc-author-integration with agentEndpoint auto-registers an a2a notification channel", async () => {
+    // The onboarding-hook acceptance criterion: an operator's agent that
+    // registers via pcc-author-integration and supplies agentEndpoint gets
+    // an "a2a" channel auto-attached (autoRegisterA2aChannel,
+    // operator-channels.ts) with no separate pcc-attach-channel call.
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: rpcRequest("rpc-agent-onboard", "tasks/send", {
+        skill: "pcc-author-integration",
+        params: {
+          lane: "human",
+          name: "A2A Onboarding Courier",
+          type: "courier.dispatch",
+          description: "courier onboarding via its own agent",
+          operatorAddress: "0xa2aonboard",
+          operatorSlug: "op-a2a-onboard-1",
+          agentEndpoint: "https://courier-agent.example.com/a2a/tasks/send",
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.result.state).toBe("COMPLETED");
+    const artifact = body.result.artifacts?.[0];
+    expect(artifact?.data?.a2aChannelRegistered).toBe(true);
+    expect(artifact?.data?.channelsAttached).toBe(1);
+
+    const channels = getChannelsByOperator("op-a2a-onboard-1");
+    expect(channels).toHaveLength(1);
+    expect(channels[0]!.transport).toBe("a2a");
+    expect((channels[0]!.endpoint as { agentId: string }).agentId).toBe("0xa2aonboard");
+    expect((channels[0]!.endpoint as { endpoint: string }).endpoint).toBe(
+      "https://courier-agent.example.com/a2a/tasks/send",
+    );
+  });
+
+  it("tasks/send pcc-author-integration without agentEndpoint registers no a2a channel (pre-existing behaviour unchanged)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: rpcRequest("rpc-agent-onboard-2", "tasks/send", {
+        skill: "pcc-author-integration",
+        params: {
+          lane: "machine",
+          name: "No Agent Endpoint Shop",
+          type: "fdm",
+          operatorAddress: "0xnoagent",
+          operatorSlug: "op-a2a-onboard-2",
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const artifact = body.result.artifacts?.[0];
+    expect(artifact?.data?.a2aChannelRegistered).toBe(false);
+    expect(getChannelsByOperator("op-a2a-onboard-2")).toHaveLength(0);
   });
 
   // ── Auth (re-enable) ───────────────────────────────────────────────────

@@ -6,6 +6,79 @@ operator notification delivery path, replacing the stubbed
 `delivered:true / ref:"stub:transport-not-wired"` that reported success while no
 email ever sent.
 
+## UPDATE (branch `feat/notifications-transport`) — agent-native channel: signed A2A task dispatch + onboarding/heartbeat auto-registration
+
+A new transport, not a gap-closure: operators who run the PCC agent package
+(Claude Code) and register on the PCC subnet get pinged **agent-natively** —
+a signed A2A task, no SMS/email/credential — and the channel is
+**auto-registered when they onboard**, so it's automatic for agent operators.
+
+- `packages/gateway/src/services/a2a-transport.ts` (new) — `A2aTransport`
+  interface + `PccAgentTaskTransport`, mirroring `email-transport.ts`'s
+  `ResendTransport` / `sms-transport.ts`'s `TwilioTransport` in shape, but
+  gated on a DIFFERENT kind of "configured": not a third-party credential,
+  but the gateway's OWN agent-card signing key
+  (`PCC_AGENT_CARD_SIGNING_KEY`, loaded once at boot by `signing-key.ts` and
+  already used to sign `/.well-known/agent-card.json`). A send builds a
+  JSON-RPC 2.0 `tasks/send` envelope — the identical wire shape
+  `routes/a2a-tasks.ts`'s own inbound handler parses — signs the WHOLE
+  envelope with `@pcc/a2a-signing`'s `signAgentCard` (its `AgentCard` type is
+  generic, `Record<string, unknown>` — reused as-is, not hand-rolled), and
+  POSTs it to the operator's own registered agent endpoint. The dispatch
+  `ref` is the **real task id the receiving agent assigns** (per A2A v1.0
+  semantics — the receiver mints the task id, exactly like PCC's own
+  `dispatchTasksSend` does for inbound calls) — never self-minted.
+- **Config gating.** `resolveA2aTransport()` returns a transport only when a
+  signing key is loaded, else `null`. The a2a dispatch path
+  (`operator-channels.ts` → `sendA2a`) now:
+  - configured + operator's agent reachable and accepts → `delivered:true`,
+    `ref = <the operator agent's own task id>`;
+  - **no signing key configured → `delivered:false`,
+    `error:"a2a_not_configured"`** — honest, not a fake success (this is the
+    build-env case, same shape as `sms_not_configured`/`email_not_configured`);
+  - bad/missing endpoint → `error:"invalid_endpoint"`; the operator's agent
+    unreachable, rejects, or replies malformed → `send_failed` — **fail
+    closed**, per the acceptance criterion ("agent not registered → fail
+    closed").
+- **New channel transport `"a2a"`.** `endpoint` shape `{agentId, endpoint}`
+  — `agentId` is the operator's agent's PCC-network identity, `endpoint` is
+  the absolute http(s) URL where that agent exposes its own A2A
+  `tasks/send`-compatible handler. `attachChannel` validates both fields
+  (missing/malformed → `invalid_endpoint`, same as sms's E.164 check). New
+  exported `A2aEndpoint` type documents the shape.
+- **The onboarding hook — `autoRegisterA2aChannel`** (`operator-channels.ts`,
+  exported). Idempotent per `(operatorSlug, agentId)`: an exact repeat is a
+  true no-op; the same agent re-registering with a new endpoint refreshes
+  the existing channel in place (self-heals endpoint rotation); a different
+  agentId for the same operator gets its own channel (one operator can run
+  several agents/kernels). Never throws — a malformed endpoint returns
+  `null` rather than blocking whatever triggered it. Wired at **two**
+  registration points:
+  1. `pcc-author-integration` (`routes/a2a-tasks.ts`) — the primary
+     onboarding point. New optional `agentEndpoint` param; when present, the
+     operator's own a2a channel is auto-attached additively alongside any
+     explicit `channels[]`. Response gains `a2aChannelRegistered: boolean`.
+  2. `POST /api/agents/heartbeat` (`routes/agent-heartbeat.ts`) — the
+     "...or heartbeats" trigger. New optional `operatorSlug` +
+     `agentEndpoint` body fields; when both present, the channel is
+     auto-registered/refreshed on every heartbeat, independent of whether
+     the ASI10 liveness monitor happens to already track that `agentId`
+     (best-effort — never fails the heartbeat itself).
+- **Mockable seam.** `getA2aTransport()` honors `__setA2aTransportForTests()`,
+  same shape as the sms/email seams.
+- **Tests.** `packages/gateway/src/__tests__/a2a-delivery.test.ts` (new) —
+  signing-key gating, real-signing request-shape + round-trip verification
+  via `verifyAgentCard`, endpoint validation, the dispatch a2a path,
+  `autoRegisterA2aChannel` idempotency, and the heartbeat route's
+  auto-registration. `job-offer-notifier.test.ts` gains an end-to-end block:
+  `JobOffersStore.create()` → notifier → `dispatchToChannels` → the a2a
+  transport (mocked send), including the explicit "agent not registered →
+  no dispatch attempt" case. `a2a-tasks.test.ts` gains two
+  `pcc-author-integration` tests covering `agentEndpoint` present/absent.
+- **Boundary respected.** Notification + agent-subnet lane only — oracle,
+  settlement/`/complete`, contracts, the Step-1 crank, and
+  `verification-mode.ts` are untouched.
+
 ## UPDATE (branch `feat/notifications-transport`) — the trigger is now wired
 
 Gap #1 below ("auto-notify on order arrival is NOT wired") is closed. New:
@@ -147,8 +220,20 @@ message SID as `ref`. All three unset → `sms_not_configured` (fail closed).
 4. ~~**Existing suite not run here.**~~ **CLOSED** — see the UPDATE section
    above. Ran on DGX Spark (106GB RAM, no 16GB local-box limit): full monorepo
    build + full `@pcc/gateway` suite, 107 files / 1911 tests green.
+5. ~~**No agent-native channel — operators running the agent package have no
+   way to be pinged agent-to-agent.**~~ **CLOSED** — see the A2A UPDATE
+   section above (`services/a2a-transport.ts`, `autoRegisterA2aChannel`,
+   branch `feat/notifications-transport`). Follow-ons still open: endpoint
+   rotation across a DIFFERENT `agentId` for the same operator does not prune
+   the old channel (each `agentId` gets its own channel by design — see the
+   "different agentId" case in `autoRegisterA2aChannel`'s doc comment); a
+   PATCH/disable path for stale a2a channels is a future addition, same
+   pattern as gap #2/#3 above.
 
 ## Deploy safety
 
 No deploy, push, `:prod` retag, Railway, or GHCR changes were made. No secret is
-committed — the real `RESEND_API_KEY` is supplied in the deploy env only.
+committed — the real `RESEND_API_KEY` is supplied in the deploy env only. The
+A2A transport's tests generate a fresh, throwaway ES256 test key per test run
+(`jose.generateKeyPair`) — no real `PCC_AGENT_CARD_SIGNING_KEY` value is
+committed or required to exercise the signing path.
