@@ -163,6 +163,17 @@ export interface ClaimInput {
   contact?: string;
 }
 
+/**
+ * Fired once per NEWLY-created offer (never on an idempotent replay — see
+ * the `created` guard at the call site in `create()`). Best-effort: the
+ * store awaits it but swallows any error, so a broken notifier can never
+ * fail the underlying job-offer creation. The real (DB + dispatchToChannels
+ * backed) implementation lives in services/job-offer-notifier.ts and is
+ * wired in at boot by server.ts; omit this option (as existing tests do) for
+ * a pure no-op, matching pre-existing behaviour exactly.
+ */
+export type OperatorNotifier = (offer: JobOffer) => void | Promise<unknown>;
+
 // ── Capability schema lookup (graceful degrade) ────────────────────────────
 
 /**
@@ -343,6 +354,8 @@ export interface JobOffersStoreOptions {
   now?: () => Date;
   /** Override the capability-schema validator (defaults to graceful-degrade no-op). */
   validateSchema?: CapabilitySchemaValidator;
+  /** Called once per newly-created offer to notify eligible operators. Omit for a no-op. */
+  notifyOperators?: OperatorNotifier;
 }
 
 /**
@@ -359,12 +372,14 @@ export class JobOffersStore {
   private readonly validateSchema: CapabilitySchemaValidator;
   private readonly nowFn: () => Date;
   private readonly sqlite: SqliteDatabaseLike | undefined;
+  private readonly notifyOperators: OperatorNotifier | undefined;
 
   constructor(opts: JobOffersStoreOptions = {}) {
     this.sqlite = opts.sqlite;
     this.verify = opts.verify ?? defaultVerifyFn;
     this.validateSchema = opts.validateSchema ?? defaultSchemaValidator;
     this.nowFn = opts.now ?? (() => new Date());
+    this.notifyOperators = opts.notifyOperators;
     if (this.sqlite) this.hydrateFromSqlite();
   }
 
@@ -551,7 +566,24 @@ export class JobOffersStore {
     if (offer.idempotencyKey) this.idempotencyIndex.set(offer.idempotencyKey, offer.id);
     this.persistOffer(offer);
     this.appendEvent(offer.id, { at: postedAt, event: "posted", verified, capabilityType: offer.capabilityType });
+    await this.notifyOperatorsOfNewOffer(offer);
     return { ok: true, offer, created: true };
+  }
+
+  /**
+   * Best-effort operator notification for a freshly-posted offer. Never lets
+   * a notifier failure fail the job post — see the OperatorNotifier doc
+   * comment above for why. No-op when no notifier was configured (all
+   * pre-existing callers/tests that construct the store without
+   * `notifyOperators` see zero behaviour change).
+   */
+  private async notifyOperatorsOfNewOffer(offer: JobOffer): Promise<void> {
+    if (!this.notifyOperators) return;
+    try {
+      await this.notifyOperators(offer);
+    } catch {
+      // Swallowed — notification is best-effort, never the source of truth.
+    }
   }
 
   /**

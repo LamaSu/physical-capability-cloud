@@ -90,6 +90,7 @@ import { courierJobsRoutes } from "./routes/courier-jobs.js";
 import { jobOffersRoutes } from "./routes/job-offers.js";
 import { initJobOffersStore } from "./services/job-offers-store.js";
 import { startJobOffersSweeper } from "./services/job-offers-sweeper.js";
+import { createOperatorNotifier } from "./services/job-offer-notifier.js";
 // Note: courier-jobs-store is now a shim over job-offers-store; the legacy
 // courier-jobs-sweeper still ships but is a no-op since the generic sweeper
 // covers all capability types. Kept imports only for source-compat.
@@ -453,7 +454,17 @@ export async function createGateway(port = 3200) {
     const rawSqlite = (getStore().db as unknown as {
       $client?: import("./services/job-offers-store.js").SqliteDatabaseLike;
     }).$client;
-    initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
+    // notifyOperators: the operator-notification trigger (see
+    // services/job-offer-notifier.ts) — pings every operator whose
+    // registered capability matches a newly-posted offer's capabilityType,
+    // over whatever channels they've attached (email today via Resend).
+    // Wired here (not inside JobOffersStore itself) so the store stays
+    // DB-agnostic and unit-testable without a live database.
+    initJobOffersStore(
+      rawSqlite
+        ? { sqlite: rawSqlite, notifyOperators: createOperatorNotifier() }
+        : { notifyOperators: createOperatorNotifier() },
+    );
     startJobOffersSweeper({
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
@@ -465,7 +476,7 @@ export async function createGateway(port = 3200) {
     app.log.warn(
       `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
     );
-    initJobOffersStore({});
+    initJobOffersStore({ notifyOperators: createOperatorNotifier() });
     startJobOffersSweeper({
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
