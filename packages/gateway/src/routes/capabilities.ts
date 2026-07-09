@@ -3,6 +3,7 @@ import { getAllTemplates, getRegisteredTypes, getTemplate } from "@pcc/contract-
 import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
+import { getCsdRegistry } from "./csd.js";
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -80,6 +81,41 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 
+// ── CSD → capability-type helper ─────────────────────────────────────────────
+//
+// Maps every registered CSD to the capability-type slug it describes, for the
+// GET /api/capabilities/types union. A CSD's canonical URL is
+// `pcc://capabilities/<slug>/<version>` — the slug is the type. An explicit
+// `type` field wins when a CSD carries one (registry.findUrlByType honours the
+// same field). Best-effort by construction: the in-memory registry may hold
+// only the built-in CSDs or be empty, and any malformed entry is skipped rather
+// than thrown — the caller's fail-safe still returns the templates.
+//
+function csdRegisteredTypes(): string[] {
+  const out: string[] = [];
+  let list: ReturnType<ReturnType<typeof getCsdRegistry>["list"]>;
+  try {
+    list = getCsdRegistry().list();
+  } catch {
+    return out; // registry unavailable / empty — that's fine
+  }
+  for (const csd of list) {
+    const record = csd as Record<string, unknown>;
+    // Explicit `type` field wins when present (CSDs may opt in later).
+    const explicit = record.type;
+    if (typeof explicit === "string" && explicit.trim()) {
+      out.push(explicit.trim());
+      continue;
+    }
+    const url = record.url;
+    if (typeof url === "string") {
+      const m = url.match(/^pcc:\/\/capabilities\/([^/]+)\//i);
+      if (m && m[1]) out.push(m[1]);
+    }
+  }
+  return out;
+}
+
 export async function capabilityRoutes(app: FastifyInstance) {
   // Acquire singleton once per plugin registration — safe because the DB is
   // initialised before route plugins are registered in server.ts.
@@ -89,16 +125,35 @@ export async function capabilityRoutes(app: FastifyInstance) {
   // These are pure in-memory lookups against the registered template registry.
   // They do not use the facade and do not need sendResult().
 
-  /** List all registered capability type strings (e.g. "3d-printing", "cnc") */
+  /**
+   * List every capability type the network ACTUALLY offers — the UNION of:
+   *   1. built-in compile-time templates (getRegisteredTypes), plus
+   *   2. distinct `type` values registered in the capabilities table
+   *      (incl. ad-hoc types the network prices/composes with no template), plus
+   *   3. types described by registered CSDs.
+   * Deduped + sorted. Detail per template still lives at /templates.
+   *
+   * Historically this returned only the 18 templates, so the "shop window"
+   * under-advertised a system that already accepts/prices/composes arbitrary
+   * types. This union tells buyers the truth.
+   *
+   * PUBLIC, no auth. FAIL-SAFE: any DB/CSD error logs and falls back to the
+   * built-in templates — this endpoint never 500s and never changes its
+   * `{ types: string[] }` shape.
+   */
   app.get(
     "/api/capabilities/types",
     {
       schema: {
         tags: ["discovery"],
-        summary: "List all registered capability types",
+        summary: "List all capability types the network offers (templates + registered + CSD)",
         description:
-          "Returns the canonical set of capability type identifiers " +
-          "(e.g. 3d-printing, cnc, hplc, laser-cutting). PUBLIC — no auth required.",
+          "Returns the union of built-in template types, distinct types " +
+          "registered in the catalog (including ad-hoc types with no " +
+          "compile-time template), and CSD-described types — deduped and " +
+          "sorted (e.g. 3d-printing, cnc, hplc, laser-cutting, wood-fired-pizza). " +
+          "PUBLIC — no auth required. Per-template detail lives at " +
+          "/api/capabilities/templates.",
         response: {
           200: {
             type: "object",
@@ -112,7 +167,39 @@ export async function capabilityRoutes(app: FastifyInstance) {
       },
     },
     async () => {
-      return { types: getRegisteredTypes() };
+      // Built-in templates are the always-present safe baseline / fallback.
+      const merged = new Set<string>(getRegisteredTypes());
+
+      try {
+        // 1. Distinct catalog types (SELECT DISTINCT — never a full scan).
+        //    Includes ad-hoc types with no compile-time template.
+        const dbTypes = await facade.distinctTypes();
+        if (dbTypes.success) {
+          for (const t of dbTypes.data) {
+            const trimmed = typeof t === "string" ? t.trim() : "";
+            if (trimmed) merged.add(trimmed);
+          }
+        } else {
+          app.log.warn(
+            { err: dbTypes.error },
+            "[capabilities/types] distinct-type query failed; catalog types omitted from union",
+          );
+        }
+
+        // 2. CSD-registered types (in-memory registry; may be built-ins-only
+        //    or empty — the helper is best-effort and never throws).
+        for (const t of csdRegisteredTypes()) merged.add(t);
+      } catch (err) {
+        // Defense-in-depth: anything unexpected → advertise the templates,
+        // never a 500. Shape is unchanged.
+        app.log.error(
+          { err },
+          "[capabilities/types] union build failed; falling back to templates",
+        );
+        return { types: [...new Set(getRegisteredTypes())].sort() };
+      }
+
+      return { types: [...merged].sort() };
     },
   );
 

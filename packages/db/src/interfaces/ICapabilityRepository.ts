@@ -15,6 +15,13 @@ export interface ICapabilityRepository {
   findByIds(ids: string[]): CapabilityRow[];
   findByKernel(kernelId: string, opts?: CapabilityTenantOpts): CapabilityRow[];
   findByType(type: string, opts?: CapabilityTenantOpts): CapabilityRow[];
+  /**
+   * Distinct `type` values across the catalog (optionally tenant-scoped).
+   * Pushed to SQL as SELECT DISTINCT so the public /api/capabilities/types
+   * union never materializes every row just to list the types on offer.
+   * Order is not guaranteed — callers sort.
+   */
+  distinctTypes(opts?: CapabilityTenantOpts): string[];
   search(query: string, opts?: CapabilityTenantOpts): CapabilityRow[];
   insert(capability: CapabilityInsert): CapabilityRow | undefined;
   update(id: string, data: Partial<CapabilityInsert>): CapabilityRow | undefined;
