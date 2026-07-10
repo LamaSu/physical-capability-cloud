@@ -8,10 +8,30 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import nacl from "tweetnacl";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+
+/** A real device-signed (#236) evidence bundle over `bundleHash`, in the wire
+ *  form the node produces (hex Ed25519 sig, truncated EVM-looking signer). */
+function realDeviceBundle(jobId: string, bundleHash = `sha256:${"ab".repeat(32)}`) {
+  const kp = nacl.sign.keyPair();
+  const sig = nacl.sign.detached(new TextEncoder().encode(bundleHash), kp.secretKey);
+  const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+  return {
+    jobId,
+    assuranceTier: 2, // node's DECLARED tier — path 1 must NOT trust it (stays 0)
+    bundleHash,
+    kernelSignature: {
+      signer: `0x${hex(kp.publicKey).slice(0, 40)}`,
+      algorithm: "ed25519",
+      value: hex(sig),
+    },
+    events: [{ type: "execution_completed", timestamp: new Date().toISOString() }],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -189,6 +209,57 @@ describe("Operator Relay Routes", () => {
       expect(body.stored).toBe(true);
       expect(body.jobId).toBe(jobId);
       expect(body.bundleId).toBeTruthy();
+    });
+
+    // ── SEAM-2 path 1: capture the node's REAL device signature ──────────
+    it("captures the node's real device-signed (#236) Ed25519 signature", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = await getQueuedJobId(app, kernelId);
+      if (!jobId) return;
+
+      const bundle = realDeviceBundle(jobId);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/evidence",
+        payload: { jobId, kernelId, evidence: bundle, timestamp: Date.now() / 1000 },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.stored).toBe(true);
+      expect(body.deviceSigned).toBe(true);
+
+      // The STORED bundle carries the DEVICE's real signature — not the placeholder.
+      const stored = getRepos().evidence.findById(body.bundleId);
+      expect(stored).toBeTruthy();
+      expect(stored!.kernelSignature.algorithm).toBe("ed25519");
+      expect(stored!.kernelSignature.value).toBe(bundle.kernelSignature.value);
+      expect(stored!.kernelSignature.value).not.toBe("operator-relay-auto");
+      expect(stored!.bundleHash).toBe(bundle.bundleHash);
+      // Tier stays 0 (fails closed): the node's declared tier:2 is NOT trusted until
+      // the gated #52 verifier confirms the evidence.
+      expect(stored!.assuranceTier).toBe(0);
+    });
+
+    it("falls back to the placeholder for non-bundle evidence (backward compatible)", async () => {
+      const kernelId = await getSeededKernelId(app);
+      if (!kernelId) return;
+      const jobId = await getQueuedJobId(app, kernelId);
+      if (!jobId) return;
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/evidence",
+        payload: { jobId, kernelId, evidence: { printed: true, returncode: 0 } },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.stored).toBe(true);
+      expect(body.deviceSigned).toBe(false);
+
+      const stored = getRepos().evidence.findById(body.bundleId);
+      expect(stored!.kernelSignature.value).toBe("operator-relay-auto");
+      expect(stored!.assuranceTier).toBe(0);
     });
   });
 
