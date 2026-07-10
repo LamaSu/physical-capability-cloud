@@ -1467,6 +1467,15 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("capabilities", "valid_until", "TEXT");
   safeAddColumn("shop_kernels", "valid_until", "TEXT");
 
+  // signing_address on shop_kernels — the kernel's REAL secp256k1 signing
+  // address (checksummed 0x…), proven at registration via EIP-191
+  // proof-of-possession over a kernelId-bound message. Same address that
+  // signs every machine-log entry, so the oracle can authenticate
+  // kernel-signed logs for settlement (evidence primitive #52). Nullable:
+  // fail closed — only set when a valid proof is supplied. Additive for old
+  // DBs (same pattern as valid_until above).
+  safeAddColumn("shop_kernels", "signing_address", "TEXT");
+
   // public_key on api_keys — the Ed25519 public key the agent uses to sign
   // evidence + heartbeats + handshakes. Set at provision time (server-
   // generated OR bring-your-own from the request body). Stored as raw

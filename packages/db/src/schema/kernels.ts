@@ -9,6 +9,19 @@ export const shopKernels = sqliteTable("shop_kernels", {
   physicalAddress: text("physical_address").notNull(),
   maxAssuranceTier: integer("max_assurance_tier").notNull(),
   publicKey: text("public_key").notNull(),
+  /**
+   * The kernel's REAL secp256k1 signing address (checksummed 0x…), proven at
+   * registration via an EIP-191 proof-of-possession over a kernelId-bound
+   * message. This is the same address that appears as `kernelSignature.signer`
+   * on every signed machine-log entry, so the oracle can authenticate
+   * kernel-signed logs for settlement (evidence primitive #52).
+   *
+   * Nullable by design — fail closed: only set when a valid proof is supplied.
+   * An unproven/mismatched/absent proof leaves this null (never persist an
+   * unproven address; a wrong "registered" signer could clear settlement).
+   * Distinct from `publicKey`, which is a legacy random value not used for auth.
+   */
+  signingAddress: text("signing_address"),
   reputation: integer("reputation").notNull().default(0),
   totalJobsCompleted: integer("total_jobs_completed").notNull().default(0),
   /** ISO timestamp of the last reputation write (job completion/failure). Used for decay computation. */
