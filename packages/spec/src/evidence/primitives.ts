@@ -702,7 +702,10 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       { tier: 3, conditions: "+ tamper log or TEE" },
     ],
     objectivityBand: "B2",
-    verifierStatus: "stub",
+    // BOUND: the oracle PrimitiveVerifier shipped (pcc-oracle feat/oracle-primitive-verifiers,
+    // src/verifiers/envelope-conformance.ts — detectDrifts over the hash-verified bundle,
+    // envelope from policyHash-pinned params). Flip merges only AFTER the oracle deploys.
+    verifierStatus: "live",
     // No dependsOn: its input is Layer-1 sensor summary/stream events (+ #10 when
     // that v2 primitive lands), not a v1 vocabulary primitive.
     upgrades: ["machine.execution_log", "process.batch_record"],
@@ -738,7 +741,10 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       { tier: 3 },
     ],
     objectivityBand: "B1",
-    verifierStatus: "stub",
+    // BOUND: the oracle PrimitiveVerifier shipped (pcc-oracle feat/oracle-primitive-verifiers,
+    // src/verifiers/coverage-gate.ts — checkSensorGaps negative gate over the hash-verified
+    // bundle). Flip merges only AFTER the oracle deploys.
+    verifierStatus: "live",
     gates: true,
   },
 
