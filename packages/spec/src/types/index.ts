@@ -72,3 +72,5 @@ export * from "./skill-capability.js";
 export * from "./reputation.js";
 // Capability graph search
 export * from "./graph-search.js";
+// UI artifacts — the On-Ramp's saved/shared/forkable dashboard entity
+export * from "./ui-artifact.js";
