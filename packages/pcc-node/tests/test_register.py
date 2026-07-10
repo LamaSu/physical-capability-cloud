@@ -110,9 +110,12 @@ class TestRegisterSigningKey:
             mock_pcc.return_value = (200, {"ok": True})
             status, _ = register_signing_key("http://pcc", "key", "kernel_1", pub, sec)
         assert status == 200
-        # Dedicated signing-key route.
-        assert mock_pcc.call_args[0][1] == "/api/kernels/kernel_1/signing-key"
+        # Upsert route -- the key-proof is verified on the kernel
+        # registration path, keeping ONE proof route (no dedicated
+        # /signing-key subroute).
+        assert mock_pcc.call_args[0][1] == "/api/kernels"
         body = mock_pcc.call_args[1]["body"]
+        assert body["id"] == "kernel_1"
         assert body["signingKeyAlgorithm"] == "ed25519"
         assert body["signingPublicKey"] == "0x" + pub.lower()
         assert len(body["signingProof"]) == 128  # 64-byte ed25519 sig, hex

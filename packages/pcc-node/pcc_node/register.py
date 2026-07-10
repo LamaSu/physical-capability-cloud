@@ -37,11 +37,14 @@ def register_signing_key(pcc_base, api_key, kernel_id, public_key_hex, secret_ke
     SHAPE 1) -- the registry value the oracle's #52 verifier resolves to check
     machine-log signatures.
 
-    Endpoint: ``POST /api/kernels/{kernelId}/signing-key`` (the dedicated Option
-    C proof route; the gateway side is track M1). Body (field names are the
-    binding contract):
+    Endpoint: ``POST /api/kernels`` (the registration/upsert route -- the
+    gateway verifies the proof and persists the signing key on the existing
+    kernel row, keeping ONE proof route; the gateway side is track M1). The
+    kernel already exists (``register_kernel`` runs first), so this is the
+    upsert path. Body (field names are the binding contract):
 
-        {"signingKeyAlgorithm": "ed25519",
+        {"id":                  <kernelId>,
+         "signingKeyAlgorithm": "ed25519",
          "signingPublicKey":    "0x" + <64-hex raw ed25519 pubkey, lowercase>,
          "signingProof":        <128-hex detached ed25519 sig over the challenge>}
 
@@ -60,12 +63,13 @@ def register_signing_key(pcc_base, api_key, kernel_id, public_key_hex, secret_ke
 
     pub = public_key_hex if public_key_hex.lower().startswith("0x") else "0x" + public_key_hex
     body = {
+        "id": kernel_id,
         "signingKeyAlgorithm": "ed25519",
         "signingPublicKey": pub.lower(),
         "signingProof": proof_hex,
     }
     status, data = pcc_request(
-        "POST", f"/api/kernels/{kernel_id}/signing-key",
+        "POST", "/api/kernels",
         body=body,
         base_url=pcc_base,
         api_key=api_key,
