@@ -157,6 +157,14 @@ export interface KernelDTO {
   status: "online" | "offline" | "maintenance" | "suspended";
   lastHeartbeat: Timestamp;
   version: string;
+  /**
+   * The kernel's REAL secp256k1 signing address (checksummed 0x…), proven at
+   * registration via EIP-191 proof-of-possession. This is the address that
+   * signs the kernel's machine-log entries, so the oracle authenticates
+   * kernel-signed logs against it for settlement (evidence primitive #52).
+   * `null` when the kernel registered without a valid proof (fail closed).
+   */
+  signingAddress: string | null;
   // ── Enrichment ──
   /** Number of capabilities this kernel offers */
   capabilityCount: number;

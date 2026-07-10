@@ -7,6 +7,8 @@
  */
 
 import crypto from "node:crypto";
+import { recoverMessageAddress } from "viem";
+import { kernelSigningProofMessage } from "@pcc/kernel";
 import { type Result, ok, err, Errors } from "@pcc/spec";
 import { BaseFacade } from "./base.facade.js";
 import type {
@@ -52,6 +54,22 @@ export interface CreateKernelInput {
    * when omitted (most operators support tier 0/1/2 evidence by default).
    */
   maxAssuranceTier?: 0 | 1 | 2 | 3;
+  /**
+   * The kernel's claimed secp256k1 signing address (checksummed 0x…). This is
+   * the address that signs the kernel's machine-log entries. It is persisted
+   * ONLY when accompanied by a valid `signingProof` that recovers to it —
+   * otherwise it is ignored and `signingAddress` stays null (fail closed).
+   */
+  signingAddress?: string;
+  /**
+   * EIP-191 proof-of-possession: a signature by the kernel signing key over
+   * `pcc-kernel-signing-key:${id}` (see `kernelSigningProofMessage`). The
+   * gateway recovers the signer from this and persists `signingAddress` only
+   * if it matches the claimed address. The message is bound to the kernelId so
+   * a proof captured for one kernel cannot register another kernel's address.
+   * Produce it kernel-side with `KernelKeychain.buildRegistrationProof(id)`.
+   */
+  signingProof?: string;
 }
 
 export interface HeartbeatInput {
@@ -280,6 +298,19 @@ export class KernelFacade extends BaseFacade {
         if (typeof body.maxAssuranceTier === "number") {
           updates.maxAssuranceTier = body.maxAssuranceTier;
         }
+        // Signing-key proof: SET-ONCE on the money path. Bind a proven address
+        // only if this kernel has none yet. A generic upsert must never
+        // silently OVERWRITE an already-registered settlement signer — key
+        // rotation is a dedicated, owner-authenticated operation (follow-up).
+        // Fail closed: absent/mismatched proof leaves the existing value intact.
+        if (!(existing as { signingAddress?: string | null }).signingAddress) {
+          const provenAddress = await this.verifySigningProof(
+            id,
+            body.signingAddress,
+            body.signingProof,
+          );
+          if (provenAddress) updates.signingAddress = provenAddress;
+        }
         const updated = repos.kernels.update(id, updates);
         const kernel = updated ?? existing;
         const capabilities = repos.capabilities.findByKernel(id);
@@ -305,12 +336,26 @@ export class KernelFacade extends BaseFacade {
         addressString = addressString || body.location;
       }
 
+      // Proof-of-possession: recover + verify the kernel's signing-key proof.
+      // Only a claimed address that is cryptographically proven by a matching
+      // signature over the kernelId-bound message is persisted; absent /
+      // mismatched / malformed proof → null (never persist an unproven signer,
+      // which could otherwise clear settlement for forged machine logs).
+      const signingAddress = await this.verifySigningProof(
+        id,
+        body.signingAddress,
+        body.signingProof,
+      );
+
       const now = new Date();
       const kernelData = {
         id,
         name: body.name || "New Kernel",
         operatorAddress: body.operatorAddress || "0x0000000000000000000000000000000000000000",
+        // Legacy random field (not used for auth); kept for the NOT NULL column.
+        // The authenticated identity is `signingAddress` below.
         publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
+        signingAddress,
         location: geoLocation,
         physicalAddress: addressString,
         status: "online",
@@ -534,6 +579,52 @@ export class KernelFacade extends BaseFacade {
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Recover + verify a kernel signing-key proof-of-possession.
+   *
+   * Returns the checksummed proven address, or `null` if the proof is absent,
+   * malformed, invalid, or does not recover to the claimed address. Fail
+   * closed: the money path must never persist a signing address that was not
+   * cryptographically proven by a signature from that exact key — a wrong
+   * "registered" signer could let a forged kernel signature clear settlement
+   * and release escrowed funds.
+   *
+   * The signed message is bound to the kernelId
+   * (`kernelSigningProofMessage(kernelId)`), so a proof captured for one kernel
+   * cannot be replayed to register a different kernel's signing address.
+   *
+   * @param kernelId       - The kernel being registered (message binding).
+   * @param claimedAddress - The address the caller claims to control.
+   * @param signingProof   - EIP-191 signature over the bound message.
+   */
+  private async verifySigningProof(
+    kernelId: string,
+    claimedAddress?: string,
+    signingProof?: string,
+  ): Promise<string | null> {
+    // Both fields required. No proof → no persisted address (the default).
+    if (!claimedAddress || !signingProof) return null;
+    // Shape checks — reject anything that isn't a plausible address / hex
+    // signature before touching the recovery routine. Fail closed on garbage.
+    if (!/^0x[0-9a-fA-F]{40}$/.test(claimedAddress)) return null;
+    if (!/^0x[0-9a-fA-F]+$/.test(signingProof)) return null;
+    try {
+      const recovered = await recoverMessageAddress({
+        message: kernelSigningProofMessage(kernelId),
+        signature: signingProof as `0x${string}`,
+      });
+      // Constant-format compare (both are hex addresses). Persist the recovered
+      // (checksummed) address only when it matches the claim.
+      if (recovered.toLowerCase() === claimedAddress.toLowerCase()) {
+        return recovered;
+      }
+      return null;
+    } catch {
+      // Malformed signature / recovery failure → treat as unproven.
+      return null;
+    }
+  }
 
   /**
    * Build a map of kernelId → capabilities[] for batch population.

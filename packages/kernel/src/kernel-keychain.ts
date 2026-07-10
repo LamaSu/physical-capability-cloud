@@ -36,6 +36,32 @@ const AGENT_EVM_PATH = "m/44'/60'/0'/0/0";
 const KERNEL_SIGNING_PATH = "m/44'/60'/0'/1/0";
 
 // ---------------------------------------------------------------------------
+// Registration proof-of-possession
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical message a kernel signs to PROVE possession of its signing key at
+ * registration. Bound to the kernelId so a signature captured for one kernel
+ * cannot be replayed to register a different kernel's signing address.
+ *
+ * This is the single source of truth for the message format — the gateway's
+ * registration verifier imports THIS function so the signer and verifier can
+ * never drift. Changing this string is a protocol change: it invalidates every
+ * previously-issued proof, so version it rather than editing in place.
+ */
+export function kernelSigningProofMessage(kernelId: string): string {
+  return `pcc-kernel-signing-key:${kernelId}`;
+}
+
+/** The `{ signingAddress, signingProof }` pair a kernel sends at registration. */
+export interface KernelRegistrationProof {
+  /** The kernel's secp256k1 signing address (checksummed 0x…). */
+  signingAddress: Address;
+  /** EIP-191 personal_sign signature over `kernelSigningProofMessage(kernelId)`. */
+  signingProof: `0x${string}`;
+}
+
+// ---------------------------------------------------------------------------
 // KernelKeychain
 // ---------------------------------------------------------------------------
 
@@ -140,6 +166,30 @@ export class KernelKeychain {
       signer: account.address,
       algorithm: "secp256k1",
       value: signatureHex,
+    };
+  }
+
+  /**
+   * Build the registration proof-of-possession for this kernel's signing key.
+   *
+   * Signs the kernelId-bound message (`kernelSigningProofMessage(kernelId)`)
+   * with the kernel signing key and returns the claimed address plus the
+   * signature. The gateway recovers the signer from the proof and persists
+   * `signingAddress` only if it matches — so it can later authenticate this
+   * kernel's signed machine logs for settlement.
+   *
+   * Send both fields in the `POST /api/kernels` body:
+   *   { ...manifest, signingAddress, signingProof }
+   *
+   * @param kernelId - The kernelId being registered (must match the id in the
+   *   same registration body, or the gateway cannot verify the binding).
+   */
+  async buildRegistrationProof(kernelId: string): Promise<KernelRegistrationProof> {
+    const message = kernelSigningProofMessage(kernelId);
+    const signature = await this.signEvidence(message);
+    return {
+      signingAddress: this.getKernelAddress(),
+      signingProof: signature.value as `0x${string}`,
     };
   }
 
