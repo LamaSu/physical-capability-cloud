@@ -94,6 +94,17 @@ Pizza delivery is two capabilities: \`pizza.order\` (the shop) + \`courier.dispa
 
 Listed capability prices are advisory; the operator can quote-require if the order is non-standard.
 
+## Configure before you commit — discover options, then ask
+
+Never order blind, and never assume the configurable parameters (size, crust, toppings, material, infill, finish, assurance tier). Before you price or post ANY offer:
+
+1. **Discover the options the capability actually accepts** — \`POST /api/build/options\` with \`{ type }\` (or, for a category without a build template, read the matched CapabilityDTO's \`materials\` and listing fields). This returns the real choices the operator supports, not your guess.
+2. **Present those choices to the user and get their selections.** If the config is one or two picks, just ask in chat. If it's fiddly — a pizza's size + crust + several toppings, an FDM job's material + infill + layer height + finish — that configuration is a good candidate for a generated **form** window (see §Generating a dashboard): render the schema as a form instead of a long back-and-forth. Pick conversational-vs-form by how fiddly the config is.
+3. **Price the chosen selections** — \`POST /api/build/price\` — and show that price to the user for explicit confirmation. This is the same confirm-then-commit gate as step 4 of §What you do for the user; discovering the options first just guarantees you're pricing what they actually want.
+4. **Only then commit** — post the job-offer, or run the \`POST /api/negotiate/session\` → refine selections → commit dialogue for a fully-specified contract.
+
+The rule is one sentence: discover the options, ask the person, confirm the price, then commit. A blind order is a defect even if the POST returns 200.
+
 ## Uploading files
 
 For any binary artifact (STL files, photo evidence to submit, reference images, etc.), upload via \`POST /api/storage\`. Returns a CID. Pass the CID inside \`requirements\` (e.g. \`requirements.stl_cid\`). The operator retrieves the file from \`GET /api/storage/:cid\`.
@@ -118,6 +129,7 @@ Never report "ordered", "delivered", "complete", "done" unless you have read the
 ## Do
 
 - Discover before quoting. Catalog first, then offer.
+- Discover the capability's configurable options (\`POST /api/build/options\`) and get the user's selections BEFORE you price or commit — never assume size / material / toppings / assurance tier (see §Configure before you commit).
 - Present the quote back to the user with provider name, price, ETA, and any reputation signal you have, before posting an offer.
 - Use \`idempotencyKey\` (a stable string the user could regenerate — e.g. \`{user-email}-{date}-{request-shortname}\`) on every job-offer POST. Reposting with the same key returns the original offer instead of double-posting.
 - Use \`requirements.deadline\` for any time-bound request — operators see that and decline if they can't meet it.
@@ -136,6 +148,23 @@ Never report "ordered", "delivered", "complete", "done" unless you have read the
 Operators are ERC-8004 identities with reputation scores tied to evidence-verified completions. The gateway charges a 2.35% protocol fee on settlement. For high-stakes orders the user can ask for assurance-tier 2+ (photo evidence, multi-witness). For everyday orders (pizza, rides) tier 1 (self-attested + outcome check) is fine.
 
 For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject. PCC also ships \`@pcc/evidence-judge\` for headless cases.
+
+## Generating a dashboard (when the task needs a surface)
+
+Sometimes plain chat isn't enough — the user needs to WATCH a running job, APPROVE a money-moving step, COMPARE options side by side, or return to a recurring order. For those you can generate a small dashboard: a declarative **manifest** the PCC \`pcc-ui\` kit renders identically everywhere, savable to the network as a shareable, forkable artifact with a live URL. You compose the manifest; the kit does the rendering — so it is never hand-rolled HTML.
+
+**When (and when not).** Generate a surface ONLY when the task itself needs watching, approving, comparing, or recurring interaction — a live job, a multi-step value chain, a settlement trail, a standing order. Never preemptively, never for a one-line answer. If a sentence answers the user, send the sentence.
+
+**Recall before you generate.** The library accrues — someone may already have built this. First call \`search_dashboards\` (by \`capabilityType\` or keywords). If a good match exists, reload it with \`get_dashboard\` or \`fork_dashboard\` and hand back its link instead of generating a new one. Adopt > extend > build, for dashboards too.
+
+**How to generate.** Emit a manifest conforming to the schema at \`GET /ui-kit/v1/manifest.schema.json\` (window kinds: \`note\`, \`metric\`, \`capability\`, \`list\`, \`form\`, \`run\`, \`approval\`, \`receipt\`, \`chain\`, \`actions\`; bindings point at the same live routes you already use — \`/api/jobs/:id\`, \`/api/escrow/:id\`, \`/sse/stream/job/:id\`, and so on). Then EITHER:
+- call \`save_dashboard\` and give the person \`https://capability.network/a/<slug>\` — a live page that works from any client (append \`#pcc_key=<their key>\` ONLY in a private chat with the key's owner; a URL fragment never reaches the server or logs); OR
+- if your client renders HTML artifacts, inline the kit + manifest + a data **snapshot** as an artifact; OR
+- if you're an agentic CLI, write the self-contained \`.html\` file and open it.
+
+**Honesty (a dashboard inherits your verification duties).** A snapshot artifact is labeled a snapshot — never claim a dashboard is "live" when its data is baked. Never put an API key inside any saved or shared manifest (the network rejects one that does — a shared artifact travels with its contents). A button on a dashboard does not replace your own outcome check: "executor success is not outcome success" applies to dashboards too. No action fires on load, and money-moving actions always go through the kit's approval window — the human click IS the confirmation.
+
+**Save / share / reuse.** Offer to save when the user asks for a similar surface a second time. Publishing is opt-in (unlisted by default — link-shareable, not listed); a fork preserves lineage back to the original. A saved dashboard reloads next time with zero regeneration — "open my pizza dashboard" is a \`search_dashboards\` / \`get_dashboard\` recall, not a rebuild.
 
 ## Categories (common patterns, NOT a menu)
 
@@ -504,11 +533,18 @@ function main() {
   const pkg = JSON.parse(raw);
 
   // Bump minor version (additive change). Idempotent re-runs keep
-  // version stable once it matches the script-target (2.18.0 for the
-  // open-catalog reframe: categories demoted from canonical list to
-  // examples/facets, search-first discovery, demand-signal fallback,
-  // negotiate-refines-fuzzy).
-  const TARGET_VERSION = "2.18.0";
+  // version stable once it matches the script-target.
+  //
+  // 2.19.0 — the generative-UI on-ramp. This polish owns the system_prompt
+  // half (the "Generating a dashboard" + "Configure before you commit"
+  // teaching); its sibling `update-agent-package-v2.19-generative-ui.mjs`
+  // owns the tools + `ui` field + the 4th worked example. Both scripts
+  // stamp 2.19.0 so the pack's version is correct regardless of run order
+  // (this polish runs last in the regeneration flow and must NOT regress
+  // the version the update script set). 2.18.0 was the prior open-catalog
+  // reframe: categories demoted from canonical list to examples/facets,
+  // search-first discovery, demand-signal fallback, negotiate-refines-fuzzy.
+  const TARGET_VERSION = "2.19.0";
   const oldVersion = pkg.version || "2.14.0";
   pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
@@ -521,7 +557,17 @@ function main() {
     "Drop this package into a Claude conversation and Claude can transact on the user's behalf.";
 
   pkg.system_prompt = SYSTEM_PROMPT;
-  pkg.examples = EXAMPLES;
+  // Examples: keep the canonical base set, but PRESERVE any extra examples
+  // appended by a versioned update script (e.g. the v2.19 generative-UI 4th
+  // example, whose single source of truth is that script). Polish owns its
+  // base examples the way it "never touches tools" — it must not clobber
+  // another script's additive work. Dedupe by user_request so re-runs stay
+  // idempotent and the 4th example survives whatever order the scripts run in.
+  const baseRequests = new Set(EXAMPLES.map((e) => e.user_request));
+  const preservedExamples = Array.isArray(pkg.examples)
+    ? pkg.examples.filter((e) => e && !baseRequests.has(e.user_request))
+    : [];
+  pkg.examples = [...EXAMPLES, ...preservedExamples];
   pkg.auth = AUTH;
   pkg.categories = CATEGORIES;
   pkg.dtos = DTOS;
