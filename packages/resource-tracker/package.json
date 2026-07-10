@@ -1,0 +1,29 @@
+{
+  "name": "@pcc/resource-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline, in-memory transactional resource/capacity tracker: calibrated capacity model that refuses out-of-bounds requests + a 2-phase reserve/commit/rollback ledger + typed refuse-to-start errors. Clean-room port of the PyLabRobot poka-yoke pattern (https://github.com/PyLabRobot/pylabrobot) — pattern reference only, no dependency on pylabrobot.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

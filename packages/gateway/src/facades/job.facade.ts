@@ -290,7 +290,12 @@ export class JobFacade extends BaseFacade {
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier });
+        // Thread optional resource requirements to the adapter preflight gate.
+        // Absent on every existing job path, so preflight stays additive.
+        const requirements = parameters?.requirements as
+          | Record<string, number>
+          | undefined;
+        const result = await svc.submitJob({ jobId, stepId, deviceId, gcodeHash, assuranceTier, requirements });
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });

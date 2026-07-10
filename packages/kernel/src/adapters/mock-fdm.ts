@@ -9,7 +9,31 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
-import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { ResourceTracker, type ResourceBounds, ResourceTrackerError } from "@pcc/resource-tracker";
+import type {
+  MachineAdapter,
+  MachineCommand,
+  MachineCommandResult,
+  MachineStatus,
+  PreflightRequest,
+  PreflightResult,
+} from "./types.js";
+
+/**
+ * Reference calibration for the mock printer's resource pool. Round,
+ * documented placeholder numbers (this is a simulator, not a real
+ * printer spec) — a spool's worth of filament and a desktop-FDM-sized
+ * build volume.
+ */
+export interface MockFDMResourceConfig {
+  filamentGrams?: { available: number; bounds?: ResourceBounds };
+  buildVolumeMm3?: { available: number; bounds?: ResourceBounds };
+}
+
+const DEFAULT_RESOURCE_CONFIG: Required<MockFDMResourceConfig> = {
+  filamentGrams: { available: 1000, bounds: { min: 1, max: 1000, unit: "g" } },
+  buildVolumeMm3: { available: 12_100_000, bounds: { min: 1, max: 12_100_000, unit: "mm3" } },
+};
 
 export class MockFDMAdapter implements MachineAdapter {
   readonly id: string;
@@ -25,7 +49,10 @@ export class MockFDMAdapter implements MachineAdapter {
   /** Simulated job duration in ms */
   private jobDurationMs: number;
 
-  constructor(id: string, kernelId: string, jobDurationMs = 10_000) {
+  /** Calibrated capacity + 2-phase reservation ledger backing preflight(). */
+  private readonly resources: ResourceTracker;
+
+  constructor(id: string, kernelId: string, jobDurationMs = 10_000, resourceConfig: MockFDMResourceConfig = {}) {
     this.id = id;
     this.jobDurationMs = jobDurationMs;
     this.source = {
@@ -34,10 +61,47 @@ export class MockFDMAdapter implements MachineAdapter {
       kernelId,
       firmwareVersion: "MockFDM-1.0.0",
     };
+
+    const filament = { ...DEFAULT_RESOURCE_CONFIG.filamentGrams, ...resourceConfig.filamentGrams };
+    const buildVolume = { ...DEFAULT_RESOURCE_CONFIG.buildVolumeMm3, ...resourceConfig.buildVolumeMm3 };
+    this.resources = new ResourceTracker(
+      { filamentGrams: filament.bounds!, buildVolumeMm3: buildVolume.bounds! },
+      { filamentGrams: filament.available, buildVolumeMm3: buildVolume.available },
+    );
   }
 
   async getStatus(): Promise<MachineStatus> {
     return this.status;
+  }
+
+  /**
+   * Reference preflight() implementation: refuse-to-start before
+   * execute()/escrow if the declared requirements are out of the
+   * calibrated range OR exceed what's currently on hand (accounting for
+   * other pending reservations). On success, capacity is held (not yet
+   * consumed) — the caller commits after a successful run, or rolls back
+   * if the job never executes.
+   */
+  async preflight(input: PreflightRequest): Promise<PreflightResult> {
+    try {
+      const reservation = this.resources.reserve(input.requirements);
+      return { ok: true, reservationId: reservation.id };
+    } catch (err) {
+      if (err instanceof ResourceTrackerError) {
+        return { ok: false, refusal: { code: err.code, message: err.message, details: err.details } };
+      }
+      throw err;
+    }
+  }
+
+  /** Phase 2a: a preflight-approved job actually ran — permanently consume the held capacity. */
+  commitReservation(reservationId: string): void {
+    this.resources.commit(reservationId);
+  }
+
+  /** Phase 2b: a preflight-approved job never ran / aborted — release the hold, consume nothing. */
+  rollbackReservation(reservationId: string): void {
+    this.resources.rollback(reservationId);
   }
 
   async getProgress(): Promise<number> {

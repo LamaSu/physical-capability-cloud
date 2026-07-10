@@ -39,6 +39,7 @@ import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { settleStepReputationForJob } from "./reputation.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
 import { StarknetProofAnchoringService } from "@pcc/verifier";
@@ -1193,11 +1194,33 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       });
 
       if (!oracleResponse.result.verified) {
+        // External completion FAILED oracle verification → settle the
+        // composition step's reputation as failed (inert for non-composition
+        // jobs). Best-effort — never blocks the 422 response.
+        try {
+          settleStepReputationForJob(jobId, "failed");
+        } catch (repErr) {
+          console.warn(
+            "[complete] Reputation settle (failed) error:",
+            repErr instanceof Error ? repErr.message : repErr,
+          );
+        }
         return reply.status(422).send({
           error: "oracle_verification_failed",
           reason: oracleResponse.result.reason,
           checks: oracleResponse.result.checks,
         });
+      }
+
+      // Oracle VERIFIED → credit the composition step's reputation at completion
+      // (inert for non-composition jobs). Best-effort — never breaks settlement.
+      try {
+        settleStepReputationForJob(jobId, "success", { evidenceBundleId: bundleId });
+      } catch (repErr) {
+        console.warn(
+          "[complete] Reputation settle (success) error:",
+          repErr instanceof Error ? repErr.message : repErr,
+        );
       }
 
       // Store the attestation for potential on-chain submission

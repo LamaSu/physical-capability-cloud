@@ -472,8 +472,18 @@ export function planComposition(req: ComposeRequest): ComposeResponse {
 export interface ExecutorBinding {
   /** Which agent is credited/debited for a step. Default: the step's operator. */
   resolveExecutor?: (step: CompositionStep) => string;
-  /** Runs one step; throw to mark it failed. Default: no-op (stub success). */
-  runStep?: (step: CompositionStep) => Promise<void> | void;
+  /**
+   * Runs one step; throw to mark it failed. Default: no-op (stub success).
+   *
+   * The optional `ctx` carries the composition coordinates so a production
+   * runner can thread `{compositionId, stepIndex}` onto the submitted job
+   * (via `parameters.__pccStep`), letting the async completion path settle the
+   * step's reputation. NOOP/stub runners ignore it (backward compatible).
+   */
+  runStep?: (
+    step: CompositionStep,
+    ctx?: { compositionId: string },
+  ) => Promise<void> | void;
 }
 
 /** Structured result of {@link executeComposition}. */
@@ -561,7 +571,10 @@ export function createProductionBinding(
   facadeGetter?: () => JobSubmitter,
 ): ExecutorBinding {
   return {
-    runStep: async (step: CompositionStep): Promise<void> => {
+    runStep: async (
+      step: CompositionStep,
+      ctx?: { compositionId: string },
+    ): Promise<void> => {
       const facade = facadeGetter ? facadeGetter() : getJobFacade();
       const result = await facade.submit({
         stepId: step.capabilityId,
@@ -569,6 +582,17 @@ export function createProductionBinding(
         capabilityId: step.capabilityId,
         assuranceTier: step.assuranceTier,
         description: `Composition step: ${step.capabilityType}`,
+        // Thread the step→outcome bridge onto the job's parameters so the async
+        // completion path can find (compositionId, stepIndex) and settle the
+        // step's reputation. `JobFacade.submit` persists `parameters` verbatim
+        // on both the external-queued and local job rows.
+        ...(ctx
+          ? {
+              parameters: {
+                __pccStep: { compositionId: ctx.compositionId, stepIndex: step.index },
+              },
+            }
+          : {}),
       });
       if (!result.success) {
         throw new Error(
@@ -606,11 +630,22 @@ export async function executeComposition(
   const resolveExecutor =
     binding.resolveExecutor ?? ((s: CompositionStep) => s.operatorAddress);
 
+  // ack != completion — ONLY in real-execution mode. The NOOP/test runner is
+  // both ack and completion (it resolves synchronously with a definitive
+  // success/throw), so finalizing at ack there is correct. In real mode
+  // `runStep` only submits a job and physical completion is a separate async
+  // event, so we defer the +10/-15 to the completion path
+  // (`settleStepReputationForJob`).
+  const DEFER_TO_COMPLETION = process.env.PCC_COMPOSE_EXECUTE_REAL === "true";
+
   // Determine the effective step runner:
   // - Explicit binding.runStep always wins.
   // - Otherwise, use the production binding when PCC_COMPOSE_EXECUTE_REAL=true.
   // - Otherwise, fall back to the module-level stepRunner (NOOP in tests).
-  const effectiveRunStep: (step: CompositionStep) => Promise<void> | void =
+  const effectiveRunStep: (
+    step: CompositionStep,
+    ctx?: { compositionId: string },
+  ) => Promise<void> | void =
     binding.runStep ??
     (process.env.PCC_COMPOSE_EXECUTE_REAL === "true"
       ? createProductionBinding().runStep!
@@ -621,13 +656,54 @@ export async function executeComposition(
 
   for (const step of composition.steps) {
     const executorAgentId = resolveExecutor(step);
-    let status: StepOutcomeStatus = "success";
+    let ackFailed = false;
     try {
-      await effectiveRunStep(step);
+      // Thread the composition coordinates so a production runner can tag the
+      // submitted job with (compositionId, stepIndex) for completion-time settle.
+      await effectiveRunStep(step, { compositionId });
     } catch {
-      status = "failed";
+      ackFailed = true;
+    }
+    stepsExecuted += 1;
+
+    if (DEFER_TO_COMPLETION) {
+      if (ackFailed) {
+        // Submission itself failed — no job exists, so no completion will ever
+        // arrive. Record the failure and settle just this step now (-15), then
+        // short-circuit (preserve the existing downstream-skip semantics).
+        recordStepOutcome({
+          compositionId,
+          stepIndex: step.index,
+          capabilityId: step.capabilityId,
+          agentId: executorAgentId,
+          status: "failed",
+          startedAt,
+          completedAt: nowISO(),
+        });
+        finalizeReputation(compositionId, "compose-engine");
+        failedStepIndex = step.index;
+        break;
+      }
+
+      // Ack succeeded — record PENDING and DEFER. Do NOT finalize and do NOT
+      // short-circuit: every sibling job still fans out and records its own
+      // pending outcome, so compOutcomes.length === N up front and the one-time
+      // +5 composition bonus can settle on whichever completion lands last.
+      recordStepOutcome({
+        compositionId,
+        stepIndex: step.index,
+        capabilityId: step.capabilityId,
+        agentId: executorAgentId,
+        status: "pending",
+        startedAt,
+        completedAt: nowISO(),
+      });
+      continue;
     }
 
+    // NOOP/test mode: ack IS completion — record the definitive outcome and let
+    // the post-loop finalize settle it, exactly as before.
+    const status: StepOutcomeStatus = ackFailed ? "failed" : "success";
     recordStepOutcome({
       compositionId,
       stepIndex: step.index,
@@ -637,7 +713,6 @@ export async function executeComposition(
       startedAt,
       completedAt: nowISO(),
     });
-    stepsExecuted += 1;
 
     if (status === "failed") {
       failedStepIndex = step.index;
@@ -645,8 +720,11 @@ export async function executeComposition(
     }
   }
 
-  // Settle reputation: +10 per success, -15 on the failed step, +5 bonus to all
-  // participants when every step succeeded. Idempotent if already finalized.
+  // Settle reputation: in NOOP/test mode this applies +10 per success, -15 on
+  // the failed step, and the +5 all-success bonus. In real mode every recorded
+  // outcome is still `pending` (or the one ack-failed step is already settled
+  // above), so this is a no-op and the real deltas land at completion via
+  // `settleStepReputationForJob`. Idempotent if already finalized.
   const deltasApplied = finalizeReputation(compositionId, "compose-engine");
 
   // Register a durable workflow run to get a real workflow ID.

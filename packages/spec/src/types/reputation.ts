@@ -101,7 +101,20 @@ export interface ReputationDelta {
 // Step outcomes
 // ---------------------------------------------------------------------------
 
-export type StepOutcomeStatus = "success" | "failed" | "disputed" | "abandoned";
+export type StepOutcomeStatus =
+  | "success"
+  | "failed"
+  | "disputed"
+  | "abandoned"
+  /**
+   * The step's job has been submitted (acked) but physical completion has not
+   * yet arrived, so no reputation delta may be applied. Real-execution mode
+   * records this at ack and defers the +10/-15 to the completion path (see
+   * gateway `settleStepReputationForJob`). `finalizeReputation` skips it (it
+   * only settles `success`/`failed`) and the composition bonus is naturally
+   * withheld while any step is still `pending`.
+   */
+  | "pending";
 
 /**
  * The recorded result of executing one step of a composition.
@@ -226,6 +239,7 @@ export const StepOutcomeStatusSchema = z.enum([
   "failed",
   "disputed",
   "abandoned",
+  "pending",
 ]);
 
 export const DisputeStatusSchema = z.enum([
