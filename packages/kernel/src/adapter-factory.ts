@@ -93,6 +93,27 @@ const machineRegistry = new Map<string, MachineAdapterFactory>();
 const sensorRegistry = new Map<string, SensorAdapterFactory>();
 const cameraRegistry = new Map<string, CameraAdapterFactory>();
 
+/**
+ * Error for an adapterType that has no registered factory.
+ *
+ * Historically this case silently fell back to the mock adapter, which lets a
+ * typo'd device config mint fabricated-but-signed evidence bundles. Registration
+ * of an unknown type is a configuration error and is reported as one.
+ */
+function unknownAdapterTypeError(
+  category: "machine" | "sensor" | "camera",
+  adapterType: string,
+  deviceId: string,
+  registered: string[],
+): Error {
+  return new Error(
+    `[adapter-factory] Unknown ${category} adapterType "${adapterType}" for device "${deviceId}" — ` +
+      `refusing to fall back to a mock adapter (a silent mock emits fabricated evidence for a device ` +
+      `the operator believes is real). Registered ${category} adapter types: ${registered.join(", ")}. ` +
+      `Use adapterType: "mock" (or KernelConfig.mockMode: true) for explicit, tagged simulation.`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Public registration API
 // ---------------------------------------------------------------------------
@@ -191,9 +212,12 @@ export function createMachineAdapter(
     return factory(device, cfg, kernelId);
   }
 
-  // Backward-compat fallback: unknown adapterType -> mock FDM adapter.
-  // Preserves the prior behavior of the default switch arm.
-  return buildMockMachine(device, cfg, kernelId);
+  // FAIL LOUD: an unknown (typo'd / unregistered) adapterType must never
+  // silently become a mock adapter. The mock emits fabricated evidence that
+  // enters SIGNED evidence bundles while the operator believes a real device
+  // is wired. Explicit simulation stays available via adapterType: "mock" or
+  // KernelConfig.mockMode: true.
+  throw unknownAdapterTypeError("machine", effectiveType, device.id, listRegisteredMachineAdapters());
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +243,8 @@ export function createSensorAdapter(
     return factory(device, cfg, kernelId);
   }
 
-  return buildMockSensor(device, cfg, kernelId);
+  // FAIL LOUD — see createMachineAdapter for rationale.
+  throw unknownAdapterTypeError("sensor", effectiveType, device.id, listRegisteredSensorAdapters());
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +270,8 @@ export function createCameraAdapter(
     return factory(device, cfg, kernelId);
   }
 
-  return buildMockCamera(device, cfg, kernelId);
+  // FAIL LOUD — see createMachineAdapter for rationale.
+  throw unknownAdapterTypeError("camera", effectiveType, device.id, listRegisteredCameraAdapters());
 }
 
 // ---------------------------------------------------------------------------
@@ -439,9 +465,29 @@ function buildSiLA(
 // Built-in registrations (auto-register at module load for backward-compat)
 // ---------------------------------------------------------------------------
 
+/**
+ * `generic-http` was historically a silent alias for the mock adapters —
+ * a device honestly registered under this documented adapterType received a
+ * simulator whose fabricated events entered signed evidence bundles. No real
+ * generic-http transport exists in this build, so creating one now fails
+ * loudly at registration/boot time. The type stays registered (discoverable
+ * via listRegistered*Adapters, replaceable by a real implementation through
+ * the unregister/register API), but it can no longer mint mock evidence unnoticed.
+ */
+function buildGenericHttpRefusal<T>(category: "machine" | "sensor" | "camera") {
+  return (device: DeviceConfig): T => {
+    throw new Error(
+      `[adapter-factory] adapterType "generic-http" (device "${device.id}") is not implemented — ` +
+        `it previously aliased silently to the mock ${category} adapter, which emits fabricated evidence. ` +
+        `Use adapterType: "mock" (or KernelConfig.mockMode: true) for explicit simulation, or register a ` +
+        `real implementation via unregister/register for "generic-http".`,
+    );
+  };
+}
+
 // Machine adapters
 registerMachineAdapter("mock", buildMockMachine);
-registerMachineAdapter("generic-http", buildMockMachine);
+registerMachineAdapter("generic-http", buildGenericHttpRefusal<MachineAdapter>("machine"));
 registerMachineAdapter("octoprint", buildOctoPrint);
 registerMachineAdapter("opcua", buildOPCUA);
 registerMachineAdapter("ipp", buildIpp);
@@ -450,13 +496,13 @@ registerMachineAdapter("hamilton", buildHamilton);
 
 // Sensor adapters
 registerSensorAdapter("mock", buildMockSensor);
-registerSensorAdapter("generic-http", buildMockSensor);
+registerSensorAdapter("generic-http", buildGenericHttpRefusal<SensorAdapter>("sensor"));
 registerSensorAdapter("modbus", buildModbus);
 registerSensorAdapter("sila", buildSiLA);
 
 // Camera adapters
 registerCameraAdapter("mock", buildMockCamera);
-registerCameraAdapter("generic-http", buildMockCamera);
+registerCameraAdapter("generic-http", buildGenericHttpRefusal<CameraAdapter>("camera"));
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -473,15 +519,33 @@ function createSiLASensorAdapter(
   cfg: Record<string, unknown>,
   kernelId: string,
 ): SensorAdapter {
+  // Honor BOTH `mock` and `mockMode` keys. Every other adapter uses
+  // `mockMode`; sila historically only read `mock`, so an operator setting
+  // `mockMode: false` (believing it engages real transport) silently stayed
+  // in mock. Either key set to false now selects real mode — which fails
+  // loudly, because no real SiLA 2 transport exists in this build.
+  const mockFlag =
+    (cfg.mock as boolean | undefined) ?? (cfg.mockMode as boolean | undefined) ?? true;
+
   const sila = new SiLAAdapter({
     deviceId: id,
     kernelId,
     silaServerUrl: cfg.url as string | undefined,
-    mock: (cfg.mock as boolean | undefined) ?? true,
+    mock: mockFlag,
     deviceName: cfg.deviceName as string | undefined,
   });
 
   let currentJobId: string | null = null;
+
+  const assertMockOnly = (operation: string): void => {
+    if (!mockFlag) {
+      throw new Error(
+        `[sila-adapter] ${operation} not implemented for real SiLA 2 servers — no SiLA 2 transport ` +
+          `exists in this build; refusing to fabricate sensor lifecycle/evidence for device "${id}". ` +
+          `Set mock: true for explicit, tagged simulation.`,
+      );
+    }
+  };
 
   return {
     id: sila.id,
@@ -489,15 +553,19 @@ function createSiLASensorAdapter(
     source: sila.source,
 
     async startRecording(jobId: string): Promise<void> {
+      // Real mode must not pretend a recording started (a Tier-1+ job would
+      // believe evidence collection is running when nothing is connected).
+      assertMockOnly("startRecording");
       currentJobId = jobId;
     },
 
     async stopRecording(): Promise<Omit<import("@pcc/spec").EvidenceEvent, "id" | "hash">> {
+      assertMockOnly("stopRecording");
       return {
         type: "sensor_data_summary",
         timestamp: new Date().toISOString(),
         source: sila.source,
-        payload: { jobId: currentJobId, adapter: "sila" },
+        payload: { jobId: currentJobId, adapter: "sila", mock: true },
       };
     },
 
