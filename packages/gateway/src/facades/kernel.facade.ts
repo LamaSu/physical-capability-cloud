@@ -9,7 +9,8 @@
 import crypto from "node:crypto";
 import { recoverMessageAddress } from "viem";
 import { kernelSigningProofMessage } from "@pcc/kernel";
-import { type Result, ok, err, Errors } from "@pcc/spec";
+import { type Result, type RegisteredSigner, ok, err, Errors } from "@pcc/spec";
+import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
 import { BaseFacade } from "./base.facade.js";
 import type {
   KernelDTO,
@@ -59,17 +60,39 @@ export interface CreateKernelInput {
    * the address that signs the kernel's machine-log entries. It is persisted
    * ONLY when accompanied by a valid `signingProof` that recovers to it —
    * otherwise it is ignored and `signingAddress` stays null (fail closed).
+   *
+   * secp256k1 is the DEFAULT lane: a body with `signingAddress`+`signingProof`
+   * and NO `signingKeyAlgorithm` is verified as secp256k1 (unchanged from #230).
    */
   signingAddress?: string;
   /**
-   * EIP-191 proof-of-possession: a signature by the kernel signing key over
-   * `pcc-kernel-signing-key:${id}` (see `kernelSigningProofMessage`). The
-   * gateway recovers the signer from this and persists `signingAddress` only
-   * if it matches the claimed address. The message is bound to the kernelId so
-   * a proof captured for one kernel cannot register another kernel's address.
-   * Produce it kernel-side with `KernelKeychain.buildRegistrationProof(id)`.
+   * Proof-of-possession signature over the kernelId-bound challenge
+   * `kernelSigningProofMessage(id)` = `pcc-kernel-signing-key:${id}`. Same
+   * challenge for both algorithms — only the verification differs:
+   *   - secp256k1 (default): EIP-191 signature; the gateway recovers the signer
+   *     and persists `signingAddress` only if it matches the claimed address.
+   *   - ed25519 (`signingKeyAlgorithm:"ed25519"`): a 128-hex raw detached
+   *     signature verified against `signingPublicKey` with node:crypto.
+   * The binding to the kernelId means a proof captured for one kernel cannot
+   * register another kernel's key.
    */
   signingProof?: string;
+  /**
+   * Option C — the signing-key algorithm the proof is for. Omit (or "secp256k1")
+   * for the default EVM-address lane. Set to "ed25519" to prove a raw Ed25519
+   * signing key (the native key of pcc-node / kernel-sdk devices) via
+   * `signingPublicKey` + a 128-hex `signingProof`.
+   */
+  signingKeyAlgorithm?: "secp256k1" | "ed25519";
+  /**
+   * The kernel's claimed Ed25519 signing public key ("0x"+64hex, raw 32-byte
+   * pubkey). Required when `signingKeyAlgorithm === "ed25519"`. Persisted to
+   * `signingKey` (and `signingKeyPublicKey`) ONLY when `signingProof` verifies
+   * against it over the kernelId-bound challenge — otherwise ignored (fail
+   * closed). For secp256k1 kernels this is null and the identity is
+   * `signingAddress`.
+   */
+  signingPublicKey?: string;
 }
 
 export interface HeartbeatInput {
@@ -298,18 +321,28 @@ export class KernelFacade extends BaseFacade {
         if (typeof body.maxAssuranceTier === "number") {
           updates.maxAssuranceTier = body.maxAssuranceTier;
         }
-        // Signing-key proof: SET-ONCE on the money path. Bind a proven address
-        // only if this kernel has none yet. A generic upsert must never
-        // silently OVERWRITE an already-registered settlement signer — key
-        // rotation is a dedicated, owner-authenticated operation (follow-up).
-        // Fail closed: absent/mismatched proof leaves the existing value intact.
-        if (!(existing as { signingAddress?: string | null }).signingAddress) {
-          const provenAddress = await this.verifySigningProof(
-            id,
-            body.signingAddress,
-            body.signingProof,
-          );
-          if (provenAddress) updates.signingAddress = provenAddress;
+        // Signing-key proof: SET-ONCE on the money path. Bind a proven signer
+        // only if this kernel has none yet — in EITHER family. A generic upsert
+        // must never silently OVERWRITE an already-registered settlement signer
+        // — key rotation is a dedicated, owner-authenticated operation
+        // (follow-up). Fail closed: absent/mismatched proof leaves the existing
+        // value intact. "Already proven" = a tag is set (secp256k1 or ed25519)
+        // OR a legacy #230 row already carries signingAddress.
+        const existingSigner = existing as {
+          signingAddress?: string | null;
+          signingKeyAlgorithm?: string | null;
+        };
+        const alreadyProven =
+          Boolean(existingSigner.signingKeyAlgorithm) ||
+          Boolean(existingSigner.signingAddress);
+        if (!alreadyProven) {
+          const provenSigner = await this.verifySigningProof(id, body);
+          if (provenSigner) {
+            const cols = this.signerToColumns(provenSigner);
+            updates.signingAddress = cols.signingAddress;
+            updates.signingKeyAlgorithm = cols.signingKeyAlgorithm;
+            updates.signingKeyPublicKey = cols.signingKeyPublicKey;
+          }
         }
         const updated = repos.kernels.update(id, updates);
         const kernel = updated ?? existing;
@@ -336,16 +369,15 @@ export class KernelFacade extends BaseFacade {
         addressString = addressString || body.location;
       }
 
-      // Proof-of-possession: recover + verify the kernel's signing-key proof.
-      // Only a claimed address that is cryptographically proven by a matching
-      // signature over the kernelId-bound message is persisted; absent /
-      // mismatched / malformed proof → null (never persist an unproven signer,
-      // which could otherwise clear settlement for forged machine logs).
-      const signingAddress = await this.verifySigningProof(
-        id,
-        body.signingAddress,
-        body.signingProof,
-      );
+      // Proof-of-possession: verify the kernel's signing-key proof and resolve
+      // the tagged RegisteredSigner. Only a key cryptographically proven by a
+      // matching signature over the kernelId-bound challenge is persisted;
+      // absent / mismatched / malformed proof → null in every signing column
+      // (never persist an unproven signer, which could otherwise clear
+      // settlement for forged machine logs). Supports both secp256k1 (EVM
+      // address) and ed25519 (raw pubkey) via the algorithm tag.
+      const provenSigner = await this.verifySigningProof(id, body);
+      const signerColumns = this.signerToColumns(provenSigner);
 
       const now = new Date();
       const kernelData = {
@@ -353,9 +385,11 @@ export class KernelFacade extends BaseFacade {
         name: body.name || "New Kernel",
         operatorAddress: body.operatorAddress || "0x0000000000000000000000000000000000000000",
         // Legacy random field (not used for auth); kept for the NOT NULL column.
-        // The authenticated identity is `signingAddress` below.
+        // The authenticated identity is the tagged signing key below.
         publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
-        signingAddress,
+        signingAddress: signerColumns.signingAddress,
+        signingKeyAlgorithm: signerColumns.signingKeyAlgorithm,
+        signingKeyPublicKey: signerColumns.signingKeyPublicKey,
         location: geoLocation,
         physicalAddress: addressString,
         status: "online",
@@ -581,30 +615,56 @@ export class KernelFacade extends BaseFacade {
   // ── Private Helpers ────────────────────────────────────────────────────────
 
   /**
-   * Recover + verify a kernel signing-key proof-of-possession.
+   * Verify a kernel signing-key proof-of-possession and return the tagged
+   * `RegisteredSigner` it proves, or `null` (fail closed).
    *
-   * Returns the checksummed proven address, or `null` if the proof is absent,
-   * malformed, invalid, or does not recover to the claimed address. Fail
-   * closed: the money path must never persist a signing address that was not
-   * cryptographically proven by a signature from that exact key — a wrong
-   * "registered" signer could let a forged kernel signature clear settlement
-   * and release escrowed funds.
+   * TWO LANES, ONE challenge — the signed message is `kernelSigningProofMessage(
+   * kernelId)` for BOTH algorithms, so a proof captured for one kernel cannot be
+   * replayed to register a different kernel's key:
+   *   - secp256k1 (DEFAULT — #230 behavior, UNCHANGED): an EIP-191 signature;
+   *     recover the signer and accept iff it matches the claimed
+   *     `signingAddress`. Returns `{algorithm:"secp256k1", address:<checksummed>}`.
+   *   - ed25519 (Option C — when `signingKeyAlgorithm === "ed25519"`): verify the
+   *     128-hex detached signature against the claimed raw public key with
+   *     node:crypto (`auth/ed25519.ts`). Returns
+   *     `{algorithm:"ed25519", publicKey:"0x"+<64hex>}`.
    *
-   * The signed message is bound to the kernelId
-   * (`kernelSigningProofMessage(kernelId)`), so a proof captured for one kernel
-   * cannot be replayed to register a different kernel's signing address.
+   * Fail closed on absent / malformed / mismatched input in EITHER lane: the
+   * money path must never persist a signer that was not cryptographically
+   * proven, or a forged machine log could clear settlement and release escrow.
    *
-   * @param kernelId       - The kernel being registered (message binding).
-   * @param claimedAddress - The address the caller claims to control.
-   * @param signingProof   - EIP-191 signature over the bound message.
+   * @param kernelId - The kernel being registered (challenge binding).
+   * @param input    - The signing fields from the registration body.
    */
   private async verifySigningProof(
     kernelId: string,
-    claimedAddress?: string,
-    signingProof?: string,
-  ): Promise<string | null> {
-    // Both fields required. No proof → no persisted address (the default).
-    if (!claimedAddress || !signingProof) return null;
+    input: {
+      signingAddress?: string;
+      signingProof?: string;
+      signingKeyAlgorithm?: string;
+      signingPublicKey?: string;
+    },
+  ): Promise<RegisteredSigner | null> {
+    const { signingProof } = input;
+    // A proof is required in both lanes. No proof → no persisted signer.
+    if (!signingProof) return null;
+
+    // ── ed25519 lane (Option C) ────────────────────────────────────────────
+    if (input.signingKeyAlgorithm === "ed25519") {
+      // Normalize/validate the claimed raw pubkey (0x + 64 hex). Absent or
+      // malformed → fail closed.
+      const pubHex = normalizePublicKeyHex(input.signingPublicKey ?? "");
+      if (pubHex === null) return null;
+      const message = Buffer.from(kernelSigningProofMessage(kernelId), "utf8");
+      // verifyEd25519Signature normalizes the 128-hex signature itself and never
+      // throws — it returns false on any malformed / non-matching signature.
+      if (!verifyEd25519Signature(pubHex, message, signingProof)) return null;
+      return { algorithm: "ed25519", publicKey: `0x${pubHex}` };
+    }
+
+    // ── secp256k1 lane (default) ───────────────────────────────────────────
+    const claimedAddress = input.signingAddress;
+    if (!claimedAddress) return null;
     // Shape checks — reject anything that isn't a plausible address / hex
     // signature before touching the recovery routine. Fail closed on garbage.
     if (!/^0x[0-9a-fA-F]{40}$/.test(claimedAddress)) return null;
@@ -617,13 +677,42 @@ export class KernelFacade extends BaseFacade {
       // Constant-format compare (both are hex addresses). Persist the recovered
       // (checksummed) address only when it matches the claim.
       if (recovered.toLowerCase() === claimedAddress.toLowerCase()) {
-        return recovered;
+        return { algorithm: "secp256k1", address: recovered };
       }
       return null;
     } catch {
       // Malformed signature / recovery failure → treat as unproven.
       return null;
     }
+  }
+
+  /**
+   * Map a proven `RegisteredSigner` (or null) to the three persisted kernel
+   * columns. secp256k1 → the EVM address in `signingAddress` (the #230 compat
+   * column the oracle's existing reader consumes); ed25519 → the raw pubkey in
+   * `signingKeyPublicKey`. `signingKeyAlgorithm` carries the tag in both cases.
+   * `null` → all three columns null (fail closed — no proven signer).
+   */
+  private signerToColumns(signer: RegisteredSigner | null): {
+    signingAddress: string | null;
+    signingKeyAlgorithm: string | null;
+    signingKeyPublicKey: string | null;
+  } {
+    if (!signer) {
+      return { signingAddress: null, signingKeyAlgorithm: null, signingKeyPublicKey: null };
+    }
+    if (signer.algorithm === "ed25519") {
+      return {
+        signingAddress: null,
+        signingKeyAlgorithm: "ed25519",
+        signingKeyPublicKey: signer.publicKey,
+      };
+    }
+    return {
+      signingAddress: signer.address,
+      signingKeyAlgorithm: "secp256k1",
+      signingKeyPublicKey: null,
+    };
   }
 
   /**
