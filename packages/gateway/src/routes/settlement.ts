@@ -15,7 +15,12 @@ import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 import { pipelineTelemetry } from "../telemetry.js";
+import { getRepos } from "../db.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import {
+  buildCanonicalEvidenceEnvelope,
+  isEvidenceHashForm,
+} from "../services/evidence-envelope.js";
 import { getSettlementFacade } from "../facades/index.js";
 import { swfAccrue } from "./swf.js";
 import { releaseMilestoneByJobActivity } from "../activities/escrow.js";
@@ -220,10 +225,58 @@ export async function settlementRoutes(app: FastifyInstance) {
     return sendResult(reply, result);
   });
 
-  // ── Evidence bundle details for a job ─────────────────────────────
+  // ── Evidence bundle details for a job (or bundle bytes by hash) ───
+  //
+  // Two lookups share this route:
+  //   1. HASH-form param (`sha256:<64hex>` / `0x<64hex>` / bare 64-hex) —
+  //      the verification-oracle path. The oracle fetches
+  //      `GET /api/evidence/:evidenceHash`, re-hashes the RAW response bytes
+  //      to the committed hash, and fails closed on mismatch (pcc-oracle
+  //      evidence-checker.ts). So this branch serves the CANONICAL ENVELOPE
+  //      verbatim (raw string body, not a re-serialized DTO): deterministic
+  //      bytes containing the events — source.simulated / payload.mock ride
+  //      inside, which is what the oracle's authenticity-of-origin floor
+  //      (pcc-oracle PR #15) reads. Before this branch existed the param was
+  //      treated as a jobId, so every oracle evidence fetch 404'd.
+  //   2. Anything else — the original jobId lookup (unchanged), also the
+  //      fallback when no bundle matches the hash.
 
   app.get<{ Params: { jobId: string } }>("/api/evidence/:jobId", async (req, reply) => {
-    const result = await settlementFacade.getJobEvidence(req.params.jobId);
+    const param = req.params.jobId;
+
+    if (isEvidenceHashForm(param)) {
+      const repos = getRepos();
+      const bundle = repos.evidence.findByHash(param);
+      if (bundle) {
+        const events = repos.evidence.findEventsByBundle(bundle.id);
+        const canonical = buildCanonicalEvidenceEnvelope(
+          {
+            id: bundle.id,
+            jobId: bundle.jobId,
+            stepId: bundle.stepId,
+            kernelId: bundle.kernelId,
+            assuranceTier: bundle.assuranceTier,
+            createdAt: bundle.createdAt,
+            kernelSignature: bundle.kernelSignature,
+          },
+          events.map((e) => ({
+            id: e.id,
+            type: e.type,
+            timestamp: e.timestamp,
+            source: e.source,
+            payload: e.payload,
+            hash: e.hash,
+          })),
+        );
+        // Raw string body — Fastify must NOT re-serialize (key order and
+        // whitespace are load-bearing for the oracle's byte re-hash).
+        return reply.type("application/json; charset=utf-8").send(canonical);
+      }
+      // No bundle with that hash — fall through to the jobId lookup so a
+      // hypothetical hash-shaped jobId keeps its pre-existing behavior.
+    }
+
+    const result = await settlementFacade.getJobEvidence(param);
     return sendResult(reply, result);
   });
 

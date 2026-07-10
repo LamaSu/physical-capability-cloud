@@ -38,6 +38,7 @@ import { PricingCalculator } from "@pcc/contract-builder";
 import { applyPricingRules, sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getSettlementService } from "../services/settlement-service.js";
+import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
 import { verifyWithOracle, buildEasAttestationMetadata } from "../services/oracle-client.js";
 import { getEvidenceStorage, commitmentService, zkProofService } from "../services.js";
@@ -983,28 +984,100 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
       }
 
-      // Build evidence hash
-      const evidencePayload = JSON.stringify({
-        jobId,
-        auditTrail,
-        completedAt: new Date().toISOString(),
-        customHash: body.evidenceHash,
-      });
-
-      // Use crypto for hashing
-      const hashBuffer = crypto.createHash("sha256").update(evidencePayload).digest("hex");
-      const gatewayBundleHash = `sha256:${hashBuffer}`;
-
       const now = new Date().toISOString();
       const bundleId = `bundle-${crypto.randomUUID().slice(0, 12)}`;
+
+      // Digest of the tool-call audit trail. The old code hashed an ad-hoc
+      // {jobId, auditTrail, ...} JSON into bundleHash and then DISCARDED those
+      // bytes — the committed hash had no retrievable preimage, so the
+      // verification oracle (which fetches GET /api/evidence/:hash and
+      // re-hashes the raw bytes, failing closed) could never verify a Path-B
+      // bundle. The audit-trail binding now rides INSIDE the served envelope
+      // (execution_completed payload below) instead of being the whole
+      // preimage.
+      const auditTrailSha256 = crypto
+        .createHash("sha256")
+        .update(JSON.stringify(auditTrail))
+        .digest("hex");
+
+      // Build evidence events
+      const customEvents = (body.evidenceEvents ?? []) as Array<{
+        type: string;
+        payload?: Record<string, unknown>;
+      }>;
+
+      const events = [
+        {
+          id: `ev-${crypto.randomUUID().slice(0, 8)}`,
+          type: "execution_completed",
+          timestamp: now,
+          source: {
+            deviceId: "gateway",
+            deviceType: "controller",
+            kernelId: job.kernelId,
+          },
+          payload: {
+            toolCallCount: auditTrail.length,
+            completedAt: now,
+            // Binds the audit trail (and the caller's own evidence hash, when
+            // supplied) inside the hashed envelope — see bundleHash below.
+            auditTrailSha256,
+            ...(body.evidenceHash ? { customEvidenceHash: body.evidenceHash } : {}),
+          } as Record<string, unknown>,
+          hash: `sha256:${crypto.createHash("sha256").update(JSON.stringify({ type: "execution_completed", timestamp: now })).digest("hex")}`,
+        },
+        ...customEvents.map((ev) => ({
+          id: `ev-${crypto.randomUUID().slice(0, 8)}`,
+          type: ev.type,
+          timestamp: now,
+          source: {
+            deviceId: "gateway",
+            deviceType: "controller",
+            kernelId: job.kernelId,
+          },
+          payload: ev.payload ?? {},
+          hash: `sha256:${crypto.createHash("sha256").update(JSON.stringify(ev)).digest("hex")}`,
+        })),
+      ];
+
+      const kernelSignature = {
+        signer: "0x0000000000000000000000000000000000000000" as const,
+        algorithm: "ed25519" as const,
+        value: "gateway-auto-sign",
+      };
+
+      // Commit bundleHash over the CANONICAL ENVELOPE — the exact bytes
+      // GET /api/evidence/:hash serves back. The oracle's fetch-and-verify
+      // (re-hash raw bytes, fail closed) and its authenticity-of-origin floor
+      // (reads events[] off the hash-verified doc, pcc-oracle PR #15) both
+      // work against these bytes; a re-serialization that dropped
+      // source.simulated / payload.mock would break the hash. NOTE: these
+      // gateway-synth events are DERIVED from the real tool-call audit trail
+      // (digital execution records), not simulations — so they are not tagged
+      // source.simulated; their honest tell is the zero-address signer, which
+      // ALCOA "Original" and the oracle's identity check both catch.
+      const envelopeCanonical = buildCanonicalEvidenceEnvelope(
+        {
+          id: bundleId,
+          jobId,
+          stepId: job.stepId,
+          kernelId: job.kernelId,
+          assuranceTier: jobAssuranceTier,
+          createdAt: now,
+          kernelSignature,
+        },
+        events,
+      );
+      const gatewayBundleHash = `sha256:${crypto.createHash("sha256").update(envelopeCanonical).digest("hex")}`;
 
       // ── SEAM-2 (path 2): choose the settlement anchor. READY BUT GATED. ──
       // By DEFAULT the gate is CLOSED — the #52 machine.execution_log verifier is
       // stubbed/fail-closed AND the SEAM2_DEVICE_EVIDENCE_SETTLEMENT flag is unset —
-      // so `resolveSettlementEvidence` returns the gateway fallback and `bundleHash`/
-      // `settlementSignature` below are byte-identical to the prior gateway-auto-sign
-      // behavior. When a real device has cleared #52 on deployed infra and the gate
-      // is opened (NOT done here), a device-signed (#236) bundle captured by
+      // so `resolveSettlementEvidence` returns the gateway fallback: `settlementSignature`
+      // is the gateway placeholder and `bundleHash` is the canonical-envelope hash above
+      // (serve-the-flag) — the default money path is unchanged apart from the now
+      // oracle-verifiable hash. When a real device has cleared #52 on deployed infra and
+      // the gate is opened (NOT done here), a device-signed (#236) bundle captured by
       // operator-relay (path 1) whose Ed25519 signature verifies against the kernel's
       // REGISTERED signer anchors settlement on the DEVICE's own hash + signature
       // instead of this placeholder. Fails closed to the gateway anchor on any verify
@@ -1046,46 +1119,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         gateOpen: seam2GateOpen,
       });
       // The settlement anchor: drives the stored bundle, IPFS archive, oracle verify,
-      // driveSettlement and the EAS bridge below. Equal to the gateway values when the
-      // gate is closed (the default), so downstream behavior is unchanged.
+      // driveSettlement and the EAS bridge below. The gateway placeholder + envelope
+      // hash when the gate is closed (the default).
       const bundleHash = settlementEvidence.bundleHash;
       const settlementSignature = settlementEvidence.kernelSignature;
-
-      // Build evidence events
-      const customEvents = (body.evidenceEvents ?? []) as Array<{
-        type: string;
-        payload?: Record<string, unknown>;
-      }>;
-
-      const events = [
-        {
-          id: `ev-${crypto.randomUUID().slice(0, 8)}`,
-          type: "execution_completed",
-          timestamp: now,
-          source: {
-            deviceId: "gateway",
-            deviceType: "controller",
-            kernelId: job.kernelId,
-          },
-          payload: {
-            toolCallCount: auditTrail.length,
-            completedAt: now,
-          } as Record<string, unknown>,
-          hash: `sha256:${crypto.createHash("sha256").update(JSON.stringify({ type: "execution_completed", timestamp: now })).digest("hex")}`,
-        },
-        ...customEvents.map((ev) => ({
-          id: `ev-${crypto.randomUUID().slice(0, 8)}`,
-          type: ev.type,
-          timestamp: now,
-          source: {
-            deviceId: "gateway",
-            deviceType: "controller",
-            kernelId: job.kernelId,
-          },
-          payload: ev.payload ?? {},
-          hash: `sha256:${crypto.createHash("sha256").update(JSON.stringify(ev)).digest("hex")}`,
-        })),
-      ];
 
       // ── 2. Store evidence bundle ───────────────────────────────────
       repos.evidence.insert({

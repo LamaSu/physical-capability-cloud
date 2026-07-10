@@ -32,6 +32,11 @@ export const evidenceEvents = sqliteTable("evidence_events", {
     deviceType: string;
     kernelId: string;
     firmwareVersion?: string;
+    /** Fabricated-by-design marker (mock/simulated adapter paths) — see
+     *  @pcc/spec EvidenceSource.simulated. JSON mode round-trips the whole
+     *  object so the flag already persists; this annotation keeps the
+     *  column TYPE honest about it. */
+    simulated?: boolean;
   }>(),
   payload: text("payload", { mode: "json" }).notNull().$type<Record<string, unknown>>(),
   hash: text("hash").notNull(),
