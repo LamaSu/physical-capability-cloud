@@ -17,6 +17,8 @@ import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
+import { z } from "zod";
+import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Valid adapter types and device roles
@@ -104,6 +106,11 @@ interface RegisterDeviceBody {
   adapterType: string;
   adapterConfig?: Record<string, unknown>;
   capabilities?: string[];
+  /** Supply-side evidence emitter manifest — which primitives this device can
+   *  emit (bounded vocabulary; same grammar as CSD refs). Validated against
+   *  EmitterDeclSchema and persisted on the device row. A MATCHING artifact —
+   *  it never mints tier; the oracle verifies instances at settlement. */
+  emits?: EmitterDecl[];
 }
 
 interface TestJobBody {
@@ -535,7 +542,7 @@ export async function setupRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceBody }>(
     "/api/setup/register-device",
     async (req, reply) => {
-      const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities } =
+      const { kernelId, deviceId, type, model, adapterType, adapterConfig, capabilities, emits } =
         req.body;
 
       if (!kernelId || !deviceId || !type || !adapterType) {
@@ -547,6 +554,22 @@ export async function setupRoutes(app: FastifyInstance) {
           error: "invalid_adapter_type",
           message: `Invalid adapterType. Valid: ${VALID_ADAPTER_TYPES.join(", ")}`,
         });
+      }
+
+      // Validate the optional supply-side emitter manifest. A malformed manifest
+      // is rejected here (a matching artifact must be well-formed); absent = none.
+      let validatedEmits: EmitterDecl[] | undefined;
+      if (emits !== undefined) {
+        const parsed = z.array(EmitterDeclSchema).safeParse(emits);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: "invalid_emits",
+            message: parsed.error.errors
+              .map((e) => `${e.path.join(".")}: ${e.message}`)
+              .join("; "),
+          });
+        }
+        validatedEmits = parsed.data;
       }
 
       try {
@@ -578,6 +601,8 @@ export async function setupRoutes(app: FastifyInstance) {
               : existing.adapterConfig,
             capabilities: capabilities ?? existing.capabilities ?? [],
             healthStatus: existing.healthStatus ?? "healthy",
+            // Supply-side emitter manifest — update when provided, else preserve.
+            emits: validatedEmits ?? existing.emits ?? undefined,
           });
           action = "updated";
         } else {
@@ -594,6 +619,8 @@ export async function setupRoutes(app: FastifyInstance) {
             adapterConfig: adapterConfig ? JSON.stringify(adapterConfig) : undefined,
             capabilities: capabilities ?? [],
             healthStatus: "healthy",
+            // Supply-side emitter manifest (bounded vocabulary), if declared.
+            emits: validatedEmits,
           });
           action = "created";
         }

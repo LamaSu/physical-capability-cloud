@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { csdRoutes, resetCsdRegistry } from "../routes/csd.js";
 import { discoverRoutes } from "../routes/discover.js";
+import { computeCsdEligibility } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -280,5 +281,83 @@ describe("Auto-Discovery API", () => {
       const body = res.json();
       expect(body.device.uri).toBe("ipp://192.168.1.50/ipp/print");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Supply-side evidence — auto-discovered devices now declare structured
+// primitives[] and lint as tier-N eligible (previously free-text → tier-0 cap).
+// ---------------------------------------------------------------------------
+
+describe("Auto-Discovery — evidence primitives + eligibility", () => {
+  let app: FastifyInstance;
+
+  beforeEach(() => {
+    resetCsdRegistry();
+  });
+
+  beforeAll(async () => {
+    app = await buildApp();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    resetCsdRegistry();
+  });
+
+  async function generateIppCsd() {
+    const device = {
+      protocol: "ipp",
+      name: "Eligibility Test Printer",
+      uri: "ipp://192.168.1.77/ipp/print",
+      makeModel: "Eligibility Test Printer",
+      capabilities: {
+        color: true,
+        duplex: true,
+        mediaSizes: ["iso_a4_210x297mm"],
+        resolutions: [600],
+        mediaTypes: ["stationery"],
+      },
+    };
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/discover/generate-csd",
+      payload: { device },
+    });
+    return res.json().csd;
+  }
+
+  it("generated CSD carries structured evidence.tierN.primitives[]", async () => {
+    const csd = await generateIppCsd();
+    expect(csd.evidence.tier0.primitives).toBeDefined();
+    expect(csd.evidence.tier1.primitives).toBeDefined();
+    const tier1Ids = csd.evidence.tier1.primitives.map((p: { id: string }) => p.id);
+    expect(tier1Ids).toContain("receipt.kernel_signed");
+    expect(tier1Ids).toContain("confirm.execution_mode");
+  });
+
+  it("lints as tier-1 eligible (NOT tier-0 capped, as the old free-text CSD was)", async () => {
+    const csd = await generateIppCsd();
+    const report = computeCsdEligibility(csd);
+    expect(report.verdict).toBe("ELIGIBLE");
+    expect(report.eligibleTier).toBe(1);
+
+    // BEFORE — the free-text shape auto-discovery used to write. The eligibility
+    // lint caps free-text-only evidence at tier 0 (the on-ramp for undeclared
+    // devices is preserved: no structured primitives[] ⇒ tier 0).
+    const legacyFreeText = {
+      url: csd.url,
+      evidence: {
+        tier0: { description: "Print completion receipt", required: ["jobId", "timestamp", "copies"] },
+        tier1: { description: "Per-page progress", required: ["jobId", "pagesCompleted"] },
+      },
+    };
+    expect(computeCsdEligibility(legacyFreeText).eligibleTier).toBe(0);
+  });
+
+  it("onboarded CSD (full pipeline) is tier-1 eligible", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/discover/onboard", payload: {} });
+    const { csd } = res.json();
+    expect(computeCsdEligibility(csd).eligibleTier).toBe(1);
   });
 });
