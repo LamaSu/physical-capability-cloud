@@ -9,7 +9,7 @@ import {
   CapabilitySchema,
   ShopKernelSchema,
 } from "../schemas/index.js";
-import { EVIDENCE_DEVICE_TYPES } from "../types/evidence.js";
+import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES } from "../types/evidence.js";
 import { isFabricated } from "../evidence/is-fabricated.js";
 import type { EvidenceSource } from "../types/evidence.js";
 
@@ -158,6 +158,16 @@ describe("EvidenceEventSchema", () => {
       const event = { ...validEvent, source: { ...validEvent.source, deviceType } };
       const parsed = EvidenceEventSchema.safeParse(event);
       expect(parsed.success, `deviceType "${deviceType}" must parse`).toBe(true);
+    }
+  });
+
+  it("accepts every event type in the TS union (instrument/sensor-pipeline/machine-log events included)", () => {
+    // The event-type enum had the same drift bug as deviceType (27 of 56
+    // values) — this loop pins both to their single source of truth.
+    for (const type of EVIDENCE_EVENT_TYPES) {
+      const event = { ...validEvent, type };
+      const parsed = EvidenceEventSchema.safeParse(event);
+      expect(parsed.success, `event type "${type}" must parse`).toBe(true);
     }
   });
 

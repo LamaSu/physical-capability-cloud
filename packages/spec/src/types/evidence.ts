@@ -8,80 +8,95 @@
 
 import type { Id, SHA256, Timestamp, Signature, AssuranceTier } from "./common.js";
 
-/** Types of evidence events */
-export type EvidenceEventType =
+/**
+ * The single source of truth for evidence event types.
+ *
+ * The zod mirror (`schemas/index.ts` EvidenceEventTypeSchema) derives its enum
+ * from THIS array, so the TS union and the runtime validator cannot drift.
+ * (They had: the zod enum listed only 27 of these values, so sila
+ * `instrument_result`, modbus `sensor_data_summary`, machine-log
+ * `printer_log_captured` / `log_hash_chain_entry`, batch and digital-workflow
+ * events all failed EvidenceEventSchema.parse wherever it was enforced —
+ * the same drift bug as the deviceType enum, caught by the reconciliation
+ * tests.)
+ */
+export const EVIDENCE_EVENT_TYPES = [
   // G-code lifecycle
-  | "gcode_received"
-  | "gcode_hash_verified"
-  | "gcode_loaded"
+  "gcode_received",
+  "gcode_hash_verified",
+  "gcode_loaded",
   // Execution lifecycle
-  | "execution_started"
-  | "execution_progress"
-  | "execution_completed"
-  | "execution_failed"
+  "execution_started",
+  "execution_progress",
+  "execution_completed",
+  "execution_failed",
   // Sensor signals
-  | "power_profile_sample"
-  | "power_profile_summary"
-  | "vibration_signature"
-  | "acoustic_signature"
-  | "temperature_log"
+  "power_profile_sample",
+  "power_profile_summary",
+  "vibration_signature",
+  "acoustic_signature",
+  "temperature_log",
   // Camera / vision
-  | "camera_snapshot"
-  | "cv_inspection_result"
+  "camera_snapshot",
+  "cv_inspection_result",
   // TEE
-  | "tee_attestation"
+  "tee_attestation",
   // Custody
-  | "custody_sealed"
-  | "custody_handoff_initiated"
-  | "custody_handoff_confirmed"
-  | "courier_pickup_confirmed"
-  | "courier_delivery_confirmed"
+  "custody_sealed",
+  "custody_handoff_initiated",
+  "custody_handoff_confirmed",
+  "courier_pickup_confirmed",
+  "courier_delivery_confirmed",
   // Sensor pipeline events
-  | "sensor_data_summary"
-  | "sensor_anomaly_detected"
-  | "process_log_summary"
+  "sensor_data_summary",
+  "sensor_anomaly_detected",
+  "process_log_summary",
   // Batch tracking events
-  | "batch_session_started"
-  | "batch_session_completed"
-  | "batch_sample_result"
-  | "instrument_result"
+  "batch_session_started",
+  "batch_session_completed",
+  "batch_sample_result",
+  "instrument_result",
   // Encryption / ZK events
-  | "evidence_committed"
-  | "evidence_encrypted"
-  | "zk_proof_generated"
-  | "zk_proof_verified"
+  "evidence_committed",
+  "evidence_encrypted",
+  "zk_proof_generated",
+  "zk_proof_verified",
   // Universal device events
-  | "device_birth"
-  | "device_death"
-  | "device_heartbeat"
-  | "calibration_record"
-  | "method_loaded"
-  | "sequence_started"
+  "device_birth",
+  "device_death",
+  "device_heartbeat",
+  "calibration_record",
+  "method_loaded",
+  "sequence_started",
   // Photo verification events (WS2)
-  | "photo_captured"
-  | "photo_reference_set"
-  | "photo_comparison_result"
-  | "photo_anti_spoof_check"
+  "photo_captured",
+  "photo_reference_set",
+  "photo_comparison_result",
+  "photo_anti_spoof_check",
   // Machine log events (WS3)
-  | "printer_log_captured"
-  | "printer_job_verified"
-  | "log_hash_chain_entry"
+  "printer_log_captured",
+  "printer_job_verified",
+  "log_hash_chain_entry",
   // Digital workflow events
-  | "workflow_step_completed"
-  | "digital_task_started"
-  | "digital_task_completed"
-  | "touchstone_dispatched"
-  | "touchstone_verified"
+  "workflow_step_completed",
+  "digital_task_started",
+  "digital_task_completed",
+  "touchstone_dispatched",
+  "touchstone_verified",
   // Capture Verification Protocol (CVP) events — one per meaningful
   // transition in the capture-verification lifecycle. Emitted by the
   // gateway and verifier as a capture flows from declaration to anchor.
-  | "capture_class_declared"
-  | "capture_nonce_issued"
-  | "capture_submitted"
-  | "capture_signature_verified"
-  | "capture_liveness_result"
-  | "capture_multi_sensor_fusion"
-  | "capture_anchor_committed";
+  "capture_class_declared",
+  "capture_nonce_issued",
+  "capture_submitted",
+  "capture_signature_verified",
+  "capture_liveness_result",
+  "capture_multi_sensor_fusion",
+  "capture_anchor_committed",
+] as const;
+
+/** Types of evidence events */
+export type EvidenceEventType = (typeof EVIDENCE_EVENT_TYPES)[number];
 
 /**
  * The single source of truth for evidence-source device types.
