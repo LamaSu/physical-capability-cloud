@@ -37,12 +37,14 @@ describe("CSD Registry API", () => {
   // ── GET /api/csd ────────────────────────────────────────────────
 
   describe("GET /api/csd", () => {
-    it("lists all 8 built-in CSDs", async () => {
+    it("lists all built-in CSDs (8 loadBuiltinCsds + the compiled-in dashboard-v1)", async () => {
       const res = await app.inject({ method: "GET", url: "/api/csd" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(Array.isArray(body.csds)).toBe(true);
-      expect(body.csds.length).toBe(8);
+      // 8 base capability CSDs from loadBuiltinCsds + the On-Ramp dashboard
+      // manifest CSD (pcc://artifacts/dashboard/v1) registered in getCsdRegistry.
+      expect(body.csds.length).toBe(9);
     });
 
     it("each CSD has url, name, version, status, kind", async () => {
