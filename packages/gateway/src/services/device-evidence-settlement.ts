@@ -146,6 +146,32 @@ export function extractNodeSignedBundle(evidence: unknown): CapturedDeviceBundle
   return { bundleHash, kernelSignature: sig, assuranceTier, ...(signerPublicKey ? { signerPublicKey } : {}) };
 }
 
+/** The signer-identity columns persisted on a kernel row (see db schema
+ *  `kernels.ts`): the proven registered signer, tagged by algorithm. */
+export interface KernelSignerColumns {
+  signingKeyAlgorithm?: string | null;
+  signingKeyPublicKey?: string | null;
+  signingAddress?: string | null;
+}
+
+/**
+ * Build a `normalizeRegisteredSigner`-acceptable tagged input from a kernel's
+ * persisted signer columns, or null when the kernel has no proven signer
+ * (fail closed). ed25519 → the raw pubkey; secp256k1 → the EVM address.
+ */
+export function registeredSignerInputFromColumns(
+  cols: KernelSignerColumns | null | undefined,
+): { algorithm: "ed25519"; publicKey: string } | { algorithm: "secp256k1"; address: string } | null {
+  if (!cols) return null;
+  if (cols.signingKeyAlgorithm === "ed25519" && typeof cols.signingKeyPublicKey === "string") {
+    return { algorithm: "ed25519", publicKey: cols.signingKeyPublicKey };
+  }
+  if (cols.signingKeyAlgorithm === "secp256k1" && typeof cols.signingAddress === "string") {
+    return { algorithm: "secp256k1", address: cols.signingAddress };
+  }
+  return null;
+}
+
 // ── The verifier: registered-signer → (Ed25519 verify) ───────────────────────
 
 /**
