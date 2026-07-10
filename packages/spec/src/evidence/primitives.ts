@@ -374,7 +374,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       { tier: 3, conditions: "enabler" },
     ],
     objectivityBand: "B1",
-    verifierStatus: "stub",
+    verifierStatus: "live",
   },
 
   // #22 — Family F (receipt). Digital connectors' tier 1-2 EARNED. LIVE emit-side ×7.
@@ -647,7 +647,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
       { tier: 3, conditions: "inside chains with TEE co-sign / committee re-run" },
     ],
     objectivityBand: "B1",
-    verifierStatus: "stub",
+    verifierStatus: "live",
     dependsOn: ["artifact.hash", "ident.registered_key"],
     upgrades: ["process.batch_record"],
   },
