@@ -96,15 +96,19 @@ describe("buildEvidenceTiersFromEmits — the digital-receipt core is tier-1 eli
   it("drops unknown / not-yet-shipped primitive ids gracefully (rising tide)", () => {
     // A forward-referenced primitive that is not in the live vocabulary must NOT
     // cap the derived CSD — it is dropped until its entry lands, then lifts the tier.
-    expect(getPrimitive("telemetry.envelope_conformance")).toBeUndefined();
+    // NOTE: "telemetry.envelope_conformance" was the original placeholder here, but
+    // it shipped in #224 (v1.5-industrial, primitives #52-#55) — rebasing onto
+    // master means it now resolves, so the forward-ref example was swapped to a
+    // still-unshipped id to keep testing the actual "unknown id" behavior.
+    expect(getPrimitive("telemetry.envelope_conformance_v2")).toBeUndefined();
     const evidence = buildEvidenceTiersFromEmits([
       ...receiptCore,
-      { id: "telemetry.envelope_conformance" },
+      { id: "telemetry.envelope_conformance_v2" },
     ]);
     const report = computeCsdEligibility({ url: "pcc://t", evidence });
     expect(report.eligibleTier).toBe(1);
     const ids = Object.values(evidence).flatMap((t) => t.primitives?.map((p) => p.id) ?? []);
-    expect(ids).not.toContain("telemetry.envelope_conformance");
+    expect(ids).not.toContain("telemetry.envelope_conformance_v2");
   });
 
   it("a self-attest-only emit set stays at the tier-0 floor", () => {
