@@ -593,21 +593,32 @@ export async function createJobFromSession(
   // Job stepId mirrors the first normalized milestone (== on-chain milestone 0).
   const stepId = normalizedMilestones[0].stepId;
 
-  // Check if this kernel is externally-managed (daemon-polled).
-  // isExternal is a best-effort routing hint (queued vs active), never a
-  // correctness gate — so a missing/uninitialised kernel-service must NOT
+  // Decide dispatch routing: is this job for the gateway's OWN in-process
+  // kernel, or for a remote operator node that polls
+  // GET /api/operator/jobs?status=queued and executes it out-of-process?
+  //
+  // isExternal is a best-effort routing hint (queued vs active/pending), never
+  // a correctness gate — so a missing/uninitialised kernel-service must NOT
   // abort escrow+job creation. Both callers wrap createJobFromSession (the
   // negotiate commit handler swallows throws as "best-effort"; the fast-track
-  // route turns them into a 500), so an unguarded getKernelService() throw
-  // here silently strands the buyer with a committed session but no job or
-  // escrow. Default to "local" when the service isn't available.
+  // route turns them into a 500), so an unguarded getKernelService() throw here
+  // would silently strand the buyer with a committed session but no job/escrow.
+  //
+  // A job is gateway-LOCAL only when we have an initialised local kernel AND the
+  // job targets that exact kernel. EVERYTHING ELSE is external -> "queued":
+  //   - no local kernel  (a pure control-plane gateway with only remote nodes)
+  //   - a different kernelId  (the job belongs to some other operator's node)
+  // A production gateway has NO local kernel, so defaulting to "local" here (the
+  // pre-SEAM-1 behaviour) marked every remote job "pending" — a status the
+  // operator daemon (which polls status=queued) never sees, stranding a
+  // stranger's paid job forever. Treat "not our own kernel" as external.
   let localKernelId: string | undefined;
   try {
     localKernelId = (getKernelService() as any).config?.kernelId;
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !!localKernelId && session.kernelId !== localKernelId;
+  const isExternal = !(localKernelId && session.kernelId === localKernelId);
 
   repos.jobs.insert({
     id: jobId,
