@@ -32,17 +32,19 @@ const LIVE_FIRST_CLASS = [
   "decl.self_attested",
 ];
 
-// The locked golden manifest hash of the shipped v1 vocabulary.
-// Any contract change (adding/removing a primitive, changing tierSupport, auth,
-// params, deps, gates, status) moves this — the golden test then fails on purpose.
+// The locked golden manifest hash of the shipped vocabulary (v1 16 + the
+// v1.5-industrial #52-#55 = 20 active defs). Any contract change (adding/removing
+// a primitive, changing tierSupport, auth, params, deps, gates, status) moves
+// this — the golden test then fails on purpose. Recomputed for the additive
+// v1.5-industrial cut (was 0x499f3a5d… for the v1-only 16-primitive contract).
 const GOLDEN_VOCAB_MANIFEST_HASH =
-  "0x499f3a5de3f8dabd860ea90d232403db0f6a6b75d493723ce055a25c0a3c18ab";
+  "0x9e034dd9df85748de1bac4d199bd3928f6c4477b81eb20a83264bcd7fdd441ed";
 
 // ── 1. The registry validates ───────────────────────────────────────
 
 describe("evidence vocabulary — registry validates", () => {
-  it("ships exactly the 16 v1 primitives, all status:active", () => {
-    expect(EVIDENCE_PRIMITIVES).toHaveLength(16);
+  it("ships the 16 v1 + 4 v1.5-industrial primitives (20), all status:active", () => {
+    expect(EVIDENCE_PRIMITIVES).toHaveLength(20);
     for (const d of EVIDENCE_PRIMITIVES) expect(d.status).toBe("active");
   });
 
@@ -106,8 +108,8 @@ describe("evidence vocabulary — registry validates", () => {
 // ── 2. Manifest hash (golden + deterministic + order-independent) ────
 
 describe("evidence vocabulary — VOCAB_MANIFEST_HASH", () => {
-  it("VOCAB_VERSION is 1", () => {
-    expect(VOCAB_VERSION).toBe(1);
+  it("VOCAB_VERSION is 2 (additive v1.5-industrial bump)", () => {
+    expect(VOCAB_VERSION).toBe(2);
   });
 
   it("is a 0x-prefixed sha256 hex", () => {
@@ -394,5 +396,129 @@ describe("verifier-interface — the fail-closed stub", () => {
     const result = await stub.verify({}, {}, { vocabVersion: VOCAB_VERSION });
     expect(result.met).toBe(false);
     expect(result.detail.join(" ")).toMatch(/not implemented/);
+  });
+});
+
+// ── 8. v1.5-industrial primitives (#52-#55) ─────────────────────────
+
+const INDUSTRIAL_IDS = [
+  "machine.execution_log",
+  "telemetry.envelope_conformance",
+  "telemetry.coverage_gate",
+  "process.batch_record",
+];
+
+describe("v1.5-industrial — the four sensor/machine-log primitives", () => {
+  it("all four are registered, active, and stub-verifier (fail-closed until the oracle binds them)", () => {
+    for (const id of INDUSTRIAL_IDS) {
+      const def = getPrimitive(id);
+      expect(def, id).toBeDefined();
+      expect(def!.status).toBe("active");
+      // Machinery is live/extracted, but the ORACLE binding is the settlement
+      // lane's work — so verifierStatus stays "stub" (fail-closed, spec §8).
+      expect(def!.verifierStatus).toBe("stub");
+    }
+  });
+
+  it("every industrial def conforms to the schema (Family L 'record' is a valid enum member)", () => {
+    for (const id of INDUSTRIAL_IDS) {
+      const result = EvidencePrimitiveDefSchema.safeParse(getPrimitive(id));
+      if (!result.success) console.error(`${id} invalid:`, result.error.errors);
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("#52 machine.execution_log is Family L (record) and binds the program hash + registered key", () => {
+    const m = getPrimitive("machine.execution_log")!;
+    expect(m.family).toBe("record");
+    expect(m.dependsOn).toEqual(
+      expect.arrayContaining(["artifact.hash", "ident.registered_key"]),
+    );
+    expect(m.tierSupport.map((t) => t.tier)).toEqual([1, 2, 3]);
+  });
+
+  it("#54 telemetry.coverage_gate is a negative gate spanning tiers 0-3", () => {
+    const g = getPrimitive("telemetry.coverage_gate")!;
+    expect(g.gates).toBe(true);
+    expect(g.tierSupport.map((t) => t.tier)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("MODELING FIX (task step 3): machine logs bind to #52 (record), not a doc.* audit-trail primitive", () => {
+    // #38 doc.audit_trail is a future v1.5 doc primitive whose ALCOA predicate
+    // (old/new-value change records) does not fit a controller trace. The
+    // machine-log home is #52 machine.execution_log; no doc.* primitive in this
+    // cut exists to mis-bind machine logs to.
+    expect(getPrimitive("machine.execution_log")!.family).toBe("record");
+    expect(EVIDENCE_PRIMITIVES.filter((d) => d.id.startsWith("doc."))).toHaveLength(0);
+  });
+
+  it("dependsOn of the new primitives resolves within the registry (closure holds)", () => {
+    const ids = new Set(EVIDENCE_PRIMITIVES.map((d) => d.id));
+    for (const id of INDUSTRIAL_IDS) {
+      for (const dep of getPrimitive(id)!.dependsOn ?? []) {
+        expect(ids.has(dep), `${id} depends on ${dep}`).toBe(true);
+      }
+    }
+  });
+});
+
+describe("v1.5-industrial — a sensor/machine-log CSD is tier-eligible via the new primitives", () => {
+  // A CNC/mill CSD leaning on power_profile (#53 envelope) + #52 machine log.
+  const sensorCsd: Pick<CSD, "url" | "evidence"> = {
+    url: "pcc://capabilities/cnc-milling-industrial/v1",
+    evidence: {
+      tier0: {
+        description: "self-attested floor",
+        required: ["jobId", "gcodeHash"],
+        primitives: [{ id: "decl.self_attested" }],
+      },
+      tier1: {
+        description: "signed machine log + power envelope + coverage gate",
+        required: ["jobId", "machineLogChainCid", "sensorSummaryCid"],
+        primitives: [
+          { id: "artifact.hash", params: { mode: "redacted-commit" } },
+          { id: "ident.registered_key" },
+          { id: "receipt.kernel_signed" },
+          { id: "machine.execution_log", params: { logKind: "command_trace" }, bind: "machineLogChainCid" },
+          { id: "telemetry.envelope_conformance", params: { envelope: "builtin-defaults" }, bind: "sensorSummaryCid" },
+          { id: "telemetry.coverage_gate" },
+        ],
+      },
+      tier2: {
+        description: "payer sign-off + cross-corroborated machine log/envelope",
+        required: ["jobId", "approvalSig"],
+        primitives: [
+          { id: "receipt.kernel_signed" },
+          { id: "approval.payer" },
+          { id: "machine.execution_log", params: { logKind: "command_trace" } },
+          { id: "telemetry.envelope_conformance" },
+        ],
+      },
+    },
+  };
+
+  it("is tier-2 eligible in report-only mode, carried by #52 + #53", () => {
+    const report = computeCsdEligibility(sensorCsd);
+    expect(report.verdict).toBe("ELIGIBLE");
+    expect(report.eligibleTier).toBe(2);
+    for (const t of report.perTier) expect(t.eligible).toBe(true);
+    // The new primitives are what carry it: present + stub-advisory at tier 1.
+    const tier1 = report.perTier.find((t) => t.tier === 1)!;
+    expect(tier1.stubVerifierPrimitives).toContain("machine.execution_log");
+    expect(tier1.stubVerifierPrimitives).toContain("telemetry.envelope_conformance");
+  });
+
+  it("fails CLOSED under oracle enforcement (industrial verifiers are stubs) — caps below 2", () => {
+    const enforcing = computeCsdEligibility(sensorCsd, {
+      requireImplementedVerifier: true,
+    });
+    expect(enforcing.eligibleTier).toBeLessThan(2);
+    expect(enforcing.verdict).toBe("CAPPED");
+    const reasons = enforcing.perTier.flatMap((t) => t.reasons).join(" ");
+    expect(reasons).toMatch(/verifier not implemented/);
+  });
+
+  it("stays listable at tier 0+ (permissionless floor holds with industrial primitives present)", () => {
+    expect(computeCsdEligibility(sensorCsd).eligibleTier).toBeGreaterThanOrEqual(0);
   });
 });

@@ -14,7 +14,7 @@
  *   Entry N: previousHash = entryHash of entry N-1
  */
 
-import { sha256, canonicalize } from "@pcc/spec";
+import { verifyLogChain, computeLogEntryHash } from "@pcc/spec";
 import type { SHA256, Signature, Timestamp, EvidenceEvent, EvidenceEventType } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 import type { KernelKeychain } from "./kernel-keychain.js";
@@ -71,14 +71,15 @@ export class LogCaptureService {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  /** Compute the hash for a log entry's content fields */
+  /** Compute the hash for a log entry's content fields.
+   *  Delegates to the shared, extracted formula (single source of truth shared
+   *  with the oracle's #52 machine.execution_log verifier). */
   private async computeEntryHash(
     rawContent: string,
     source: string,
     capturedAt: Timestamp,
   ): Promise<SHA256> {
-    const hashInput = { capturedAt, rawContent, source };
-    return sha256(canonicalize(hashInput));
+    return computeLogEntryHash(rawContent, source, capturedAt);
   }
 
   /** Get the hash of the last entry, or GENESIS_HASH if chain is empty */
@@ -141,56 +142,14 @@ export class LogCaptureService {
    *   4. Each entry's kernel signature is valid
    */
   async verifyChain(): Promise<LogChainVerification> {
-    const errors: string[] = [];
-    let brokenAt: number | undefined;
-
-    for (let i = 0; i < this.entries.length; i++) {
-      const entry = this.entries[i]!;
-
-      // 1. Recompute the hash and compare
-      const expectedHash = await this.computeEntryHash(
-        entry.rawContent,
-        entry.source,
-        entry.capturedAt,
-      );
-      if (expectedHash !== entry.entryHash) {
-        if (brokenAt === undefined) brokenAt = i;
-        errors.push(
-          `Entry ${i} (${entry.entryId}): entryHash mismatch — expected ${expectedHash}, got ${entry.entryHash}`,
-        );
-      }
-
-      // 2. Check hash chain link
-      const expectedPrevious: SHA256 = i === 0
-        ? GENESIS_HASH
-        : this.entries[i - 1]!.entryHash;
-
-      if (entry.previousHash !== expectedPrevious) {
-        if (brokenAt === undefined) brokenAt = i;
-        errors.push(
-          `Entry ${i} (${entry.entryId}): chain link broken — previousHash ${entry.previousHash} does not match expected ${expectedPrevious}`,
-        );
-      }
-
-      // 3. Verify kernel signature
-      const sigValid = await this.kernelKeychain.verifySignature(
-        entry.entryHash,
-        entry.kernelSignature,
-      );
-      if (!sigValid) {
-        if (brokenAt === undefined) brokenAt = i;
-        errors.push(
-          `Entry ${i} (${entry.entryId}): kernel signature invalid`,
-        );
-      }
-    }
-
-    return {
-      valid: errors.length === 0,
-      entries: this.entries.length,
-      brokenAt,
-      errors,
-    };
+    // Delegates to the shared, extracted verifier (evidence-vocab #52
+    // machine.execution_log). The kernel injects its own keychain as the
+    // signature check; the oracle injects a registered-key (#47) check instead.
+    // Behavior — hash recompute, chain-link continuity, genesis check, error
+    // strings and brokenAt — is byte-identical to the prior inline version.
+    return verifyLogChain(this.entries, (entryHash, signature) =>
+      this.kernelKeychain.verifySignature(entryHash, signature),
+    );
   }
 
   /**
