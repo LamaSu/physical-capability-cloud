@@ -94,6 +94,11 @@ Operators are ERC-8004 identities with reputation scores tied to evidence-verifi
 
 For evidence judging in-line, you ARE the judge — read the photo, check the description matches, ack or reject. PCC also ships `@pcc/evidence-judge` for headless cases.
 
+## Dashboards (generate a surface when the task needs one)
+
+- **Discover options, then ask.** Before pricing or posting any offer, discover the capability's configurable options (`POST /api/build/options`), present the choices to the user, and confirm the price — then commit. Never order blind or assume parameters (size, material, toppings, tier). A fiddly config is a good candidate for a generated form (below) rather than a long back-and-forth.
+- **Emit a surface only when the task needs one** — watching a live job, approving a step, comparing options, a recurring order. Recall first with `search_dashboards`; if nothing fits, emit a manifest conforming to `https://capability.network/ui-kit/v1/manifest.schema.json`, call `save_dashboard`, and share `https://capability.network/a/<slug>` — the pcc-ui kit renders it identically everywhere. Never bake an API key into a manifest; snapshots are labeled snapshots. Full teaching: the agent-package `system_prompt` (§Generating a dashboard).
+
 ## Categories
 
 PCC's catalog spans 15 categories. `capabilityType` is free-form text, but stay close to these conventions when posting offers:

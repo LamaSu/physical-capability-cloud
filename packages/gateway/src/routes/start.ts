@@ -207,6 +207,12 @@ Then: order me a pizza for delivery to ...</div>
         <a href="https://capability.network">capability.network</a>
       </p>
       <p>
+        New: your agent can generate a live dashboard mid-task - it emits a
+        <a href="/ui-kit/v1/manifest.schema.json">manifest</a>, saves it, and shares a
+        live <code>/a/&lt;slug&gt;</code> page rendered by the
+        <a href="/ui-kit/v1/pcc-ui.js">pcc-ui kit</a>. Ask it to "keep me posted" on any order.
+      </p>
+      <p>
         Building programmatically? See
         <a href="https://www.npmjs.com/package/@pcc/decompose-skill">@pcc/decompose-skill</a>,
         <a href="https://www.npmjs.com/package/@pcc/operator-agent-runtime">@pcc/operator-agent-runtime</a>,
