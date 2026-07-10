@@ -1476,6 +1476,15 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // DBs (same pattern as valid_until above).
   safeAddColumn("shop_kernels", "signing_address", "TEXT");
 
+  // Option C — algorithm-tagged signing key on shop_kernels. Additive columns
+  // ALONGSIDE signing_address so the registry can prove + serve BOTH families:
+  // secp256k1 (EVM address stays in signing_address) and ed25519 (raw 32-byte
+  // pubkey "0x"+64hex in signing_key_public_key). signing_key_algorithm is the
+  // tag the oracle #52 verifier branches on. Same fail-closed, set-once
+  // semantics as signing_address. Additive for old DBs (same pattern as above).
+  safeAddColumn("shop_kernels", "signing_key_algorithm", "TEXT");
+  safeAddColumn("shop_kernels", "signing_key_public_key", "TEXT");
+
   // public_key on api_keys — the Ed25519 public key the agent uses to sign
   // evidence + heartbeats + handshakes. Set at provision time (server-
   // generated OR bring-your-own from the request body). Stored as raw

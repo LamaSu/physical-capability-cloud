@@ -22,6 +22,21 @@ export const shopKernels = sqliteTable("shop_kernels", {
    * Distinct from `publicKey`, which is a legacy random value not used for auth.
    */
   signingAddress: text("signing_address"),
+  /**
+   * Option C — algorithm tag for the proven signing key: "secp256k1" | "ed25519".
+   * secp256k1 → the proven identity is the EVM address in `signingAddress`;
+   * ed25519 → the raw 32-byte public key ("0x"+64hex) is in `signingKeyPublicKey`.
+   * Null when the kernel has no proven signer (fail closed). This is the tag the
+   * oracle #52 verifier branches on; distinct from the legacy random `publicKey`
+   * column (not used for auth). Set-once alongside the two key columns.
+   */
+  signingKeyAlgorithm: text("signing_key_algorithm"),
+  /**
+   * The proven Ed25519 signing public key ("0x" + 64 lowercase hex, raw 32-byte
+   * pubkey) when `signingKeyAlgorithm === "ed25519"`. Null for secp256k1 kernels
+   * (whose proven identity is `signingAddress`) and for unproven kernels.
+   */
+  signingKeyPublicKey: text("signing_key_public_key"),
   reputation: integer("reputation").notNull().default(0),
   totalJobsCompleted: integer("total_jobs_completed").notNull().default(0),
   /** ISO timestamp of the last reputation write (job completion/failure). Used for decay computation. */
