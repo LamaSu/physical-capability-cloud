@@ -586,6 +586,50 @@ describe("Setup API", () => {
       expect(second.json().action).toBe("updated");
       expect(second.json().registered).toBe(true);
     });
+
+    it("accepts and persists a supply-side emits[] manifest", async () => {
+      const deviceId = `dev-emits-${Date.now()}`;
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId,
+          type: "camera",
+          model: "Nonce Cam",
+          adapterType: "mock",
+          emits: [
+            { id: "decl.self_attested" },
+            {
+              id: "capture.photo_nonced",
+              params: { media: "photo", minClass: "CC1" },
+              bind: "capturePhotoCid",
+              via: "captureSnapshot",
+            },
+          ],
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      const emits = res.json().device.emits;
+      expect(Array.isArray(emits)).toBe(true);
+      expect(emits.map((e: { id: string }) => e.id)).toContain("capture.photo_nonced");
+    });
+
+    it("returns 400 for a malformed emits[] (a decl with no primitive id)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: {
+          kernelId: "kernel-nyc",
+          deviceId: `dev-bad-emits-${Date.now()}`,
+          type: "machine",
+          adapterType: "mock",
+          emits: [{ via: "nope" }],
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("invalid_emits");
+    });
   });
 
   // ── POST /api/setup/test-job ─────────────────────────────────────────────

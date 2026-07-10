@@ -1449,6 +1449,10 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // capabilities — additive JSON-as-TEXT column; null for machine capabilities.
   safeAddColumn("capabilities", "sla", "TEXT");
   safeAddColumn("sensor_aggregates", "tenant_id", "TEXT");
+  // Evidence Emitter Manifest (supply-side declaration): JSON EmitterDecl[] of
+  // the evidence primitives this device can emit. Nullable — legacy/undeclared
+  // rows have none. See @pcc/spec emitter-manifest.
+  safeAddColumn("kernel_devices", "emits", "TEXT");
 
   // ── feat/ed25519-keys-and-kernel-ttl (Skylar's audit) ──────────────────
   //

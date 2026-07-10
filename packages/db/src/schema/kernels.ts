@@ -50,4 +50,22 @@ export const kernelDevices = sqliteTable("kernel_devices", {
   healthStatus: text("health_status").notNull().default("unknown"), // "healthy" | "degraded" | "offline" | "unknown"
   /** Unix timestamp of last health check */
   lastHealthCheck: integer("last_health_check"),
+  // ── Evidence Emitter Manifest (supply-side declaration) ─────────────
+  /**
+   * Which evidence primitives this device can EMIT, in the bounded vocabulary
+   * (same grammar as CSD refs + via/demonstrated). A MATCHING artifact — it
+   * never mints tier; the oracle verifies instances at settlement (constraint
+   * D1). Nullable: legacy rows + undeclared devices have none. The structural
+   * type mirrors @pcc/spec's EmitterDecl (kept inline to avoid coupling the
+   * store package's schema typecheck to the spec build).
+   */
+  emits: text("emits", { mode: "json" }).$type<
+    Array<{
+      id: string;
+      params?: Record<string, unknown>;
+      bind?: string;
+      via?: string;
+      demonstrated?: boolean;
+    }>
+  >(),
 });

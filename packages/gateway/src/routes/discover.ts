@@ -14,6 +14,7 @@
 
 import type { FastifyInstance } from "fastify";
 import type { CSD } from "@pcc/spec";
+import { buildAdapterEvidence } from "@pcc/spec";
 import { getCsdRegistry } from "./csd.js";
 
 // ── Discovery types ──────────────────────────────────────────────────────────
@@ -223,16 +224,12 @@ function deviceToCsd(device: DiscoveredDevice): CSD {
       },
     ],
     constraints: [],
-    evidence: {
-      tier0: {
-        description: "Print completion receipt",
-        required: ["jobId", "timestamp", "copies"],
-      },
-      tier1: {
-        description: "Per-page progress tracking",
-        required: ["jobId", "timestamp", "copies", "pagesCompleted"],
-      },
-    },
+    // Supply-side evidence: derive structured `evidence.tierN.primitives[]` from
+    // the "ipp" adapter's default emitter manifest (the digital-receipt core), so
+    // an auto-onboarded printer is tier-N eligible by default instead of being
+    // tier-0-capped by the free-text lint. Unknown adapters fall back to the
+    // free-text tier-0 on-ramp inside buildAdapterEvidence.
+    evidence: buildAdapterEvidence("ipp").evidence,
     pricing: {
       basePrice: "0.05",
       currency: "USDC",
