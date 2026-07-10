@@ -65,6 +65,13 @@ export interface OracleAttestation {
   signature: string;
 }
 
+/**
+ * Verdict provenance. `"live"` = a real oracle produced this verdict; `"mock"` =
+ * no real oracle ran (dev/degraded fallback — see {@link OracleResponse.degraded}).
+ * The real oracle server omits this field, so absence is treated as `"live"`.
+ */
+export type OracleMode = "mock" | "live";
+
 export interface OracleResponse {
   result: {
     verified: boolean;
@@ -85,6 +92,20 @@ export interface OracleResponse {
   easAttestation?: { easUid: string; schemaUid: string } | null;
   oracle: string;
   chainId: number;
+  /**
+   * Verdict provenance. Set to `"mock"` ONLY on the degraded dev/test fallback
+   * (no oracle key). The real oracle server omits this, so `undefined` === live.
+   * S4 fix: callers must be able to tell a real verdict from a fabricated one.
+   */
+  mode?: OracleMode;
+  /**
+   * STRUCTURAL degraded-mode flag — `true` ONLY when this verdict came from
+   * {@link mockVerification}, never from a real oracle. Callers and the settlement
+   * crank branch on this boolean rather than parsing the free-text `result.reason`
+   * (a reason string is trivially ignorable; this is not). Absent/`false` = a real
+   * oracle verdict. S4: a mock verdict must never masquerade as a real one.
+   */
+  degraded?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,14 +120,25 @@ export interface OracleResponse {
  */
 export async function verifyWithOracle(request: OracleVerifyRequest): Promise<OracleResponse> {
   if (!ORACLE_KEY) {
-    console.warn("[oracle] No PCC_ORACLE_KEY set — using mock verification");
+    // No real oracle configured — degraded dev/test fallback. mockVerification
+    // fails CLOSED for paid tiers (>=1) and marks the response mode:"mock"/degraded,
+    // so a fabricated verdict can never drive a paid job to "verified"/"settled".
+    console.warn(
+      "[oracle] No PCC_ORACLE_KEY set — using degraded mock verification (fails closed for paid tiers)",
+    );
     return mockVerification(request);
   }
 
-  // Mock escrow addresses (non-hex) can't be verified on-chain — use mock
+  // A real oracle key IS configured. A non-hex / "mock"-prefixed escrowAddress can
+  // never be a real on-chain escrow, so it MUST NOT be silently downgraded to a
+  // fabricated mock verdict — that is the S4 two-truths hazard (a data value
+  // bypassing a configured real oracle). Treat it as bad input and fail closed.
   if (!request.escrowAddress.startsWith("0x") || request.escrowAddress.startsWith("mock")) {
-    console.warn("[oracle] Non-hex escrow address — using mock verification");
-    return mockVerification(request);
+    throw new Error(
+      `[oracle] Real oracle configured (PCC_ORACLE_KEY set) but escrowAddress ` +
+        `"${request.escrowAddress}" is not a hex on-chain address — refusing to fabricate a ` +
+        `mock verdict for a configured oracle. Pass a real 0x escrow, or unset PCC_ORACLE_KEY for dev.`,
+    );
   }
 
   const res = await fetch(`${ORACLE_URL}/verify`, {
@@ -141,44 +173,102 @@ export function isOracleConfigured(): boolean {
 // Mock (dev/test fallback)
 // ---------------------------------------------------------------------------
 
+/**
+ * The assurance-tier floor at/above which the mock refuses to fabricate a pass.
+ * Tier 0 is the self-attested dev/prototype floor; tier >= 1 is a PAID assurance
+ * tier (Verified / Certified / Sovereign) that must never settle on a self-invented
+ * verdict.
+ */
+const MOCK_PAID_TIER_FLOOR = 1;
+
+/**
+ * Mock verification — the degraded dev/test fallback, used ONLY when no real oracle
+ * is configured (no PCC_ORACLE_KEY). It is HONEST by construction (S4 fix):
+ *
+ *   - Tier 0 (self-attested dev/prototype floor): may pass on a mock verdict, but
+ *     the response is marked `mode:"mock"` / `degraded:true` so nothing downstream
+ *     can mistake it for a real one.
+ *   - Tier >= 1 (any PAID path): FAILS CLOSED. The mock cannot actually verify
+ *     evidence, so it returns `verified:false` with NO fabricated attestation — a
+ *     self-invented pass must never drive a paid job to "verified"/"settled". (The
+ *     settlement crank already gates on `result.verified`, so this alone closes the
+ *     hazard; the structural flags let callers distinguish this from a genuine
+ *     oracle rejection.)
+ *
+ * A real oracle response never carries `mode`/`degraded`, so `degraded === true`
+ * is an unambiguous "this was not a real verification" signal.
+ */
 function mockVerification(request: OracleVerifyRequest): OracleResponse {
+  const isPaidTier = request.assuranceTier >= MOCK_PAID_TIER_FLOOR;
+  const verified = !isPaidTier;
+
+  if (isPaidTier) {
+    console.warn(
+      `[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` +
+        `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`,
+    );
+  }
+
   return {
     result: {
-      verified: true,
+      verified,
       tier: request.assuranceTier,
-      reason: "mock_verification",
-      checks: {
-        evidenceExists: true,
-        hashMatches: true,
-        tierMet: true,
-        notReplay: true,
-        identityValid: true,
-      },
+      reason: verified ? "mock_verification" : "mock_verification_refused_paid_tier",
+      // Honest checks: the mock performs NO real verification. On the refused paid
+      // path nothing is asserted true; on the tier-0 dev path the checks stand in,
+      // but the response is still flagged degraded/mock below.
+      checks: verified
+        ? {
+            evidenceExists: true,
+            hashMatches: true,
+            tierMet: true,
+            notReplay: true,
+            identityValid: true,
+          }
+        : {
+            evidenceExists: false,
+            hashMatches: false,
+            tierMet: false,
+            notReplay: false,
+            identityValid: false,
+          },
     },
-    attestation: {
-      version: 1,
-      escrowAddress: request.escrowAddress,
-      jobId: request.jobId,
-      evidenceHash: request.evidenceHash,
-      tier: request.assuranceTier,
-      verified: true,
-      timestamp: Math.floor(Date.now() / 1000),
-      nonce: "0x" + "0".repeat(64),
-      extraData: "0x",
-      signature: "0x" + "0".repeat(130),
-    },
-    // V2: mirror the live oracle's behaviour — when minting is requested, return
-    // a deterministic mock EAS UID so the orchestration path is exercisable in
-    // dev/test without a real EAS write. A live oracle replaces this with the
-    // real on-chain UID. Absent (null) on the V1 path.
-    easAttestation: request.mintEasAttestation
+    // No fabricated attestation on the refused paid path — a mock must not emit a
+    // real-shaped attestation a downstream bridge could try to bind. Tier 0 keeps a
+    // clearly-unsigned (all-zero signature) mock attestation for the dev path.
+    attestation: verified
       ? {
-          easUid: "0x" + "ea".repeat(32),
-          schemaUid: request.schemaUid ?? process.env.PCC_EVIDENCE_SCHEMA_UID ?? "0x" + "00".repeat(32),
+          version: 1,
+          escrowAddress: request.escrowAddress,
+          jobId: request.jobId,
+          evidenceHash: request.evidenceHash,
+          tier: request.assuranceTier,
+          verified: true,
+          timestamp: Math.floor(Date.now() / 1000),
+          nonce: "0x" + "0".repeat(64),
+          extraData: "0x",
+          signature: "0x" + "0".repeat(130),
         }
       : null,
+    // V2: mirror the live oracle's behaviour — when minting is requested, return a
+    // deterministic mock EAS UID so the orchestration path is exercisable in dev/test
+    // without a real EAS write. A live oracle replaces this with the real on-chain
+    // UID. Absent (null) on the V1 path AND on the refused paid path (a mock must not
+    // fabricate a bindable attestation UID for a paid tier).
+    easAttestation:
+      verified && request.mintEasAttestation
+        ? {
+            easUid: "0x" + "ea".repeat(32),
+            schemaUid: request.schemaUid ?? process.env.PCC_EVIDENCE_SCHEMA_UID ?? "0x" + "00".repeat(32),
+          }
+        : null,
     oracle: "0x0000000000000000000000000000000000000000",
     chainId: request.chainId,
+    // STRUCTURAL degradation signal — ALWAYS present on the mock path (both the
+    // tier-0 pass and the paid-tier refusal). This is the field callers/the crank
+    // branch on to tell a mock verdict from a real one, not the free-text reason.
+    mode: "mock",
+    degraded: true,
   };
 }
 

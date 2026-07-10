@@ -319,7 +319,7 @@ describe("Mode B — oracle-attested (legacy default)", () => {
     else process.env.PCC_ORACLE_KEY = ORIG_ORACLE_KEY;
   });
 
-  it("runVerification(Mode B) calls verifyWithOracle (mock) and returns the OracleResponse", async () => {
+  it("runVerification(Mode B) calls verifyWithOracle (mock) — paid tier fails closed (S4)", async () => {
     const res = await runVerification({
       mode: "B",
       oracleRequest: {
@@ -334,9 +334,14 @@ describe("Mode B — oracle-attested (legacy default)", () => {
 
     expect(res.mode).toBe("B");
     if (res.mode !== "B") throw new Error("type narrow");
-    expect(res.oracle.result.verified).toBe(true);
-    expect(res.oracle.attestation).not.toBeNull();
-    expect(res.oracle.result.reason).toBe("mock_verification");
+    // S4: a mock (no PCC_ORACLE_KEY) verdict for a PAID tier (>=1) must fail closed —
+    // no fabricated pass, no fabricated attestation, and structurally flagged degraded
+    // so the settlement crank (which gates on result.verified) can never settle on it.
+    expect(res.oracle.result.verified).toBe(false);
+    expect(res.oracle.attestation).toBeNull();
+    expect(res.oracle.result.reason).toBe("mock_verification_refused_paid_tier");
+    expect(res.oracle.degraded).toBe(true);
+    expect(res.oracle.mode).toBe("mock");
   });
 
   it("Mode B works regardless of PCC_EVIDENCE_V2_ENABLED (back-compat)", async () => {
@@ -485,7 +490,7 @@ describe("verifyWithMode (select + run)", () => {
     expect(out.result.milestoneIndex).toBe(1);
   });
 
-  it("tier 3 + settle picks Mode B and calls the oracle (mock)", async () => {
+  it("tier 3 + settle picks Mode B and calls the oracle (mock) — fails closed (S4)", async () => {
     const out = await verifyWithMode({
       assuranceTier: 3,
       intent: "settle",
@@ -503,7 +508,9 @@ describe("verifyWithMode (select + run)", () => {
     expect(out.selection.mode).toBe("B");
     expect(out.result.mode).toBe("B");
     if (out.result.mode !== "B") throw new Error("type narrow");
-    expect(out.result.oracle.result.verified).toBe(true);
+    // S4: tier 3 mock (no oracle key) verdict fails closed + degraded, never fabricated.
+    expect(out.result.oracle.result.verified).toBe(false);
+    expect(out.result.oracle.degraded).toBe(true);
   });
 
   it("intent=dispute picks Mode C", async () => {
