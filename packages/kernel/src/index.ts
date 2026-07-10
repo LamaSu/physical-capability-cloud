@@ -118,7 +118,8 @@ export {
 } from "./local-comparison-service.js";
 export type { ImageData, LocalComparisonResult } from "./local-comparison-service.js";
 export * from "./adapters/index.js";
-export { KernelKeychain } from "./kernel-keychain.js";
+export { KernelKeychain, kernelSigningProofMessage } from "./kernel-keychain.js";
+export type { KernelRegistrationProof } from "./kernel-keychain.js";
 export { LogCaptureService } from "./log-capture-service.js";
 export type { LogEntry, LogChainVerification } from "./log-capture-service.js";
 // Policy engine
