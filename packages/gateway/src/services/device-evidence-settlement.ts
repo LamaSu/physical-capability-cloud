@@ -1,0 +1,332 @@
+/**
+ * SEAM-2 — device-signed (#236) evidence → settlement wiring. READY BUT GATED.
+ *
+ * The operator node already produces real Ed25519-signed evidence bundles
+ * (packages/kernel-sdk/src/job-handler.ts finalises + signs the bundleHash with
+ * a device key). Two gateway paths currently discard that signature and anchor
+ * settlement on a fabricated gateway placeholder instead:
+ *   - operator-relay `POST /api/operator/evidence` stored the bundle with
+ *     `kernelSignature.value:"operator-relay-auto"` (real Ed25519 sig dropped);
+ *   - paid-job-flow `/complete` rebuilt the bundle and signed it with the ZERO
+ *     address / `"gateway-auto-sign"`.
+ *
+ * This module builds the path by which a captured device bundle is verified
+ * against the device's REGISTERED signer (#47 ident.registered_key, via
+ * `normalizeRegisteredSigner`) and, ONLY when the gate is open, anchors
+ * settlement on the DEVICE's own bundleHash + signature.
+ *
+ * THE GATE IS CLOSED BY CONSTRUCTION (money path — fails closed):
+ *   1. `machine.execution_log` (#52) ships `verifierStatus:"stub"` and its
+ *      oracle verifier fails closed (spec §8, verifiers/oracle-binding.ts). This
+ *      module reads that live vocabulary status — it does NOT flip it. #233 stays
+ *      stubbed until a real device clears #52 on deployed infra.
+ *   2. An explicit opt-in flag (`SEAM2_DEVICE_EVIDENCE_SETTLEMENT`) defaults off.
+ * Both must be true to route device evidence into settlement, so today the
+ * mechanism is INERT: `resolveSettlementEvidence` always returns the gateway
+ * fallback and `/complete` behaves exactly as before. The verify+route code
+ * exists and is unit-tested so that when a real device clears #52 on deployed
+ * infra, opening the gate (NOT done here) turns it on with no new code. The
+ * post-deploy live proof is the harness rehearse-loop.mjs A6 rehearsal.
+ *
+ * SCOPE of the verification built here: a DIRECT registered-signer check — the
+ * device Ed25519 signature over the bundleHash verifies against the registered
+ * key. The node's per-job ephemeral session-key indirection (session sig +
+ * parent-sig authorisation chain) and the log-chain / program-binding legs are
+ * the ORACLE #52 verifier's responsibility (the separate settlement lane). A
+ * session-signed bundle therefore fails this direct check and falls back to the
+ * gateway anchor — fail-closed, never a silent pass.
+ */
+
+import nacl from "tweetnacl";
+import {
+  normalizeRegisteredSigner,
+  getPrimitive,
+  type RegisteredSigner,
+} from "@pcc/spec";
+
+// ── The signature shape stored on / carried by an evidence bundle ────────────
+
+/** The `kernelSignature` shape (matches the DB `evidence_bundles` JSON column
+ *  and the spec `Signature` type). */
+export interface StoredSignature {
+  signer: string;
+  algorithm: string;
+  value: string;
+}
+
+/** The zero address the gateway used as a placeholder signer. */
+export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/** Signature `value`s the gateway writes when it has NO real device signature.
+ *  A bundle carrying one of these is a gateway placeholder, never device-signed
+ *  and never eligible to anchor settlement. */
+export const PLACEHOLDER_SIGNATURE_VALUES: ReadonlySet<string> = new Set([
+  "operator-relay-auto", // legacy path-1 placeholder
+  "gateway-auto-sign", // legacy path-2 placeholder
+]);
+
+/**
+ * True iff `sig` is a REAL device (#236) Ed25519 signature, not a gateway/test
+ * placeholder: ed25519 algorithm, a non-zero signer, and a `value` that is
+ * neither a known gateway placeholder nor the emitter's `test_sig_` marker.
+ * Fails closed on anything missing.
+ */
+export function isDeviceSignedSignature(sig: StoredSignature | null | undefined): boolean {
+  if (!sig || typeof sig !== "object") return false;
+  if (sig.algorithm !== "ed25519") return false;
+  if (typeof sig.value !== "string" || sig.value.length === 0) return false;
+  if (PLACEHOLDER_SIGNATURE_VALUES.has(sig.value)) return false;
+  if (sig.value.startsWith("test_sig_")) return false;
+  if (typeof sig.signer !== "string" || sig.signer.length === 0) return false;
+  if (sig.signer.toLowerCase() === ZERO_ADDRESS) return false;
+  return true;
+}
+
+// ── Path-1 parser: the node's signed bundle out of the relay body ────────────
+
+/** The subset of a captured device bundle the settlement seam needs. */
+export interface CapturedDeviceBundle {
+  bundleHash: string;
+  kernelSignature: StoredSignature;
+  /** The node's DECLARED assurance tier (unverified at capture; the oracle #52
+   *  verifier — gated — is what actually gates settlement on it). */
+  assuranceTier: number;
+  /** Full signer public key when the envelope carries it (the truncated
+   *  `kernelSignature.signer` is not enough to verify an Ed25519 sig). Provenance
+   *  only; verification uses the REGISTERED key, not this. */
+  signerPublicKey?: string;
+}
+
+/** Coerce an unknown into a `StoredSignature` or null (fail closed). */
+function asStoredSignature(input: unknown): StoredSignature | null {
+  if (!input || typeof input !== "object") return null;
+  const o = input as Record<string, unknown>;
+  if (
+    typeof o.signer === "string" &&
+    typeof o.algorithm === "string" &&
+    typeof o.value === "string"
+  ) {
+    return { signer: o.signer, algorithm: o.algorithm, value: o.value };
+  }
+  return null;
+}
+
+/**
+ * Extract a real device-signed bundle from an operator-relay evidence body, or
+ * null when none is present (old nodes / non-bundle evidence → caller keeps the
+ * placeholder). Accepts the canonical EvidenceBundle shape (`kernelSignature` +
+ * `bundleHash`), and tolerates a `bundle` wrapper and a `signature` alias. Only
+ * returns non-null when the signature is a genuine device Ed25519 signature.
+ */
+export function extractNodeSignedBundle(evidence: unknown): CapturedDeviceBundle | null {
+  if (!evidence || typeof evidence !== "object") return null;
+  // Unwrap a `{ bundle: {...} }` envelope if present.
+  const root = evidence as Record<string, unknown>;
+  const b = (root.bundle && typeof root.bundle === "object" ? root.bundle : root) as Record<
+    string,
+    unknown
+  >;
+
+  const sig = asStoredSignature(b.kernelSignature) ?? asStoredSignature(b.signature);
+  if (!sig || !isDeviceSignedSignature(sig)) return null;
+
+  const bundleHash = typeof b.bundleHash === "string" ? b.bundleHash : undefined;
+  if (!bundleHash) return null;
+
+  const tierRaw = b.assuranceTier;
+  const assuranceTier = typeof tierRaw === "number" && Number.isInteger(tierRaw) ? tierRaw : 0;
+
+  const signerPublicKey =
+    typeof b.kernelSessionPublicKey === "string"
+      ? b.kernelSessionPublicKey
+      : typeof b.signerPublicKey === "string"
+        ? b.signerPublicKey
+        : undefined;
+
+  return { bundleHash, kernelSignature: sig, assuranceTier, ...(signerPublicKey ? { signerPublicKey } : {}) };
+}
+
+// ── The verifier: registered-signer → (Ed25519 verify) ───────────────────────
+
+/**
+ * An injected Ed25519 verify: `(message, signatureHex, publicKeyHex) => bool`.
+ * Injected (not hard-imported) so the mechanism is a pure function and the exact
+ * crypto is swappable at the seam. `naclEd25519Verify` is the reference impl.
+ */
+export type VerifyEd25519 = (
+  message: string,
+  signatureValue: string,
+  publicKeyHex: string,
+) => boolean | Promise<boolean>;
+
+function stripHexPrefix(hex: string): string {
+  return hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+}
+
+/**
+ * Reference Ed25519 verify using tweetnacl (the same primitive the node signs
+ * with — kernel-sdk `verifyBundleSignature`). Message is UTF-8 bytes of the
+ * bundleHash string; signature + public key are hex (optional 0x). Returns false
+ * on any malformed input — never throws.
+ */
+export function naclEd25519Verify(
+  message: string,
+  signatureValue: string,
+  publicKeyHex: string,
+): boolean {
+  try {
+    const msg = new TextEncoder().encode(message);
+    const sig = Buffer.from(stripHexPrefix(signatureValue), "hex");
+    const pk = Buffer.from(stripHexPrefix(publicKeyHex), "hex");
+    if (sig.length !== 64 || pk.length !== 32) return false;
+    return nacl.sign.detached.verify(msg, sig, pk);
+  } catch {
+    return false;
+  }
+}
+
+export interface DeviceEvidenceVerifyInput {
+  /** The captured device bundle's signature. */
+  signature: StoredSignature;
+  /** The bundleHash the device signed over (the verify message). */
+  bundleHash: string;
+  /** The device's REGISTERED signer, as served on `KernelDTO.signingKey` (any
+   *  `normalizeRegisteredSigner`-acceptable input). Verification is against THIS,
+   *  not the self-declared `signature.signer`. */
+  registeredSigner: unknown;
+  /** Injected Ed25519 verify (default `naclEd25519Verify`). */
+  verifyEd25519?: VerifyEd25519;
+}
+
+export interface DeviceEvidenceVerifyResult {
+  ok: boolean;
+  reason?: string;
+  /** The normalized registered signer the sig was checked against, on success. */
+  signer?: RegisteredSigner;
+}
+
+/**
+ * Verify a device-signed bundle against its REGISTERED Ed25519 signer (#47).
+ * Fails CLOSED: any missing/malformed input, an unregistered or non-ed25519
+ * signer, or an invalid signature → `ok:false`. This is the registered-signer →
+ * verify leg that gates whether device evidence may anchor settlement.
+ */
+export async function verifyDeviceSignedEvidence(
+  input: DeviceEvidenceVerifyInput,
+): Promise<DeviceEvidenceVerifyResult> {
+  const verifyEd25519 = input.verifyEd25519 ?? naclEd25519Verify;
+
+  if (!isDeviceSignedSignature(input.signature)) {
+    return { ok: false, reason: "not-device-signed" };
+  }
+  if (typeof input.bundleHash !== "string" || input.bundleHash.length === 0) {
+    return { ok: false, reason: "missing-bundle-hash" };
+  }
+  const signer = normalizeRegisteredSigner(input.registeredSigner);
+  if (!signer) return { ok: false, reason: "unregistered-signer" };
+  if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
+
+  let valid: boolean;
+  try {
+    valid = await verifyEd25519(input.bundleHash, input.signature.value, signer.publicKey);
+  } catch {
+    return { ok: false, reason: "verify-threw" };
+  }
+  if (!valid) return { ok: false, reason: "signature-invalid" };
+  return { ok: true, signer };
+}
+
+// ── The gate — CLOSED by construction ────────────────────────────────────────
+
+/**
+ * The #52 `machine.execution_log` verifier is the settlement gate (#233). It
+ * ships `verifierStatus:"stub"` and fails closed (spec §8). This reads the REAL
+ * vocabulary status; flipping #52 to `"live"` (NOT done here) is what would open
+ * this leg of the gate.
+ */
+export function machineLogVerifierLive(): boolean {
+  return getPrimitive("machine.execution_log")?.verifierStatus === "live";
+}
+
+/**
+ * Explicit opt-in flag, defaulted OFF. Belt-and-suspenders on top of the stubbed
+ * verifier: even once #52 goes live, settlement-on-device-evidence needs this
+ * deliberate flag set to `"1"`.
+ */
+export function deviceEvidenceSettlementFlagEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.SEAM2_DEVICE_EVIDENCE_SETTLEMENT === "1";
+}
+
+/**
+ * Composite gate: device evidence anchors settlement ONLY when BOTH the #52
+ * verifier is live AND the explicit flag is set. Both default false, so this is
+ * CLOSED today — the wiring is ready but inert (SEAM-2 ready-but-gated).
+ */
+export function deviceEvidenceSettlementEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return machineLogVerifierLive() && deviceEvidenceSettlementFlagEnabled(env);
+}
+
+// ── The settlement-evidence decision (what /complete calls) ───────────────────
+
+export interface SettlementEvidenceSlot {
+  bundleHash: string;
+  kernelSignature: StoredSignature;
+  assuranceTier: number;
+}
+
+export interface SettlementEvidenceInput {
+  /** A device-signed bundle already captured for this job (path 1), if any. */
+  deviceBundle: SettlementEvidenceSlot | null;
+  /** The device's registered signer (from the kernel registry). */
+  registeredSigner: unknown;
+  /** The gateway's own rebuilt anchor (today's behavior). */
+  fallback: SettlementEvidenceSlot;
+  /** Injected Ed25519 verify (default `naclEd25519Verify`). */
+  verifyEd25519?: VerifyEd25519;
+  /** Gate override (default `deviceEvidenceSettlementEnabled(env)`). */
+  gateOpen?: boolean;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
+  source: "device" | "gateway-fallback";
+  reason?: string;
+}
+
+/**
+ * Decide which evidence anchors settlement. When the gate is CLOSED (default)
+ * this ALWAYS returns the gateway fallback — identical to today's behavior, so
+ * the money path is unchanged. When the gate is OPEN and a device bundle verifies
+ * against its registered signer, it anchors on the DEVICE's real hash +
+ * signature. Fails closed to the fallback on any verify failure.
+ */
+export async function resolveSettlementEvidence(
+  input: SettlementEvidenceInput,
+): Promise<SettlementEvidenceDecision> {
+  const gateOpen = input.gateOpen ?? deviceEvidenceSettlementEnabled(input.env);
+  if (!gateOpen) {
+    return { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
+  }
+  if (!input.deviceBundle) {
+    return { ...input.fallback, source: "gateway-fallback", reason: "no-device-bundle" };
+  }
+  const verified = await verifyDeviceSignedEvidence({
+    signature: input.deviceBundle.kernelSignature,
+    bundleHash: input.deviceBundle.bundleHash,
+    registeredSigner: input.registeredSigner,
+    ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+  });
+  if (!verified.ok) {
+    return { ...input.fallback, source: "gateway-fallback", reason: verified.reason ?? "verify-failed" };
+  }
+  return {
+    source: "device",
+    bundleHash: input.deviceBundle.bundleHash,
+    kernelSignature: input.deviceBundle.kernelSignature,
+    assuranceTier: input.deviceBundle.assuranceTier,
+  };
+}
