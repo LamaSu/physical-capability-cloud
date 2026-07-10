@@ -47,6 +47,11 @@ import type { WorkflowContext } from "@pcc/workflow";
 import { getJobFacade } from "../facades/index.js";
 import type { SubmitJobInput, JobSubmitResult } from "../facades/index.js";
 import type { Result } from "@pcc/spec";
+import {
+  isComposeSettlementEnabled,
+  createCompositionEscrow,
+  type CompositionSettlementPlan,
+} from "../services/compose-settlement.js";
 
 // ---------------------------------------------------------------------------
 // Store access — getStore() is booted by server.ts in production; tests lazily
@@ -489,6 +494,18 @@ export interface CompositionExecutionResult {
   failedStepIndex: number | null;
   /** Reputation deltas applied by the post-run finalize. */
   deltasApplied: ReputationDelta[];
+  /**
+   * Per-leg escrow settlement (Lane 2 DRAFT) — present only when
+   * PCC_COMPOSE_SETTLEMENT=true. `plan` carries the escrow address + the
+   * leg→milestone mapping; `error` is non-null when escrow creation failed,
+   * in which case the execution failed CLOSED (no steps ran). Deliberately
+   * NOT part of the HTTP ExecuteCompositionResponse (spec untouched) —
+   * in-process callers and the persisted execution consume it.
+   */
+  settlement?: {
+    plan: CompositionSettlementPlan | null;
+    error: string | null;
+  };
 }
 
 /** Default step runner — the scaffold assumes every step succeeds. */
@@ -616,6 +633,37 @@ export async function executeComposition(
       ? createProductionBinding().runStep!
       : stepRunner);
 
+  // ── Lane 2 (DRAFT): per-leg escrow settlement ────────────────────────────
+  // When PCC_COMPOSE_SETTLEMENT=true, create + fund ONE MilestoneEscrowV3 with
+  // one milestone per settleable leg BEFORE any step runs. Fail CLOSED: if the
+  // composition's pay cannot be escrowed, no step executes — running legs
+  // nobody can be paid for is worse than failing fast. Shape per
+  // ai/research/industry-pain-points/lane2-escrow-shape-ADR.md (Option A,
+  // owner sign-off pending). Release is per-leg, on each leg's OWN completion
+  // evidence — see services/compose-settlement.ts for the flagged
+  // completion-signal dependency (feat/composition-preflight-gate).
+  let settlement: CompositionExecutionResult["settlement"];
+  if (isComposeSettlementEnabled()) {
+    try {
+      settlement = { plan: await createCompositionEscrow(composition), error: null };
+    } catch (err) {
+      return {
+        compositionId,
+        workflowId: `wf_${randomUUID()}`,
+        status: "failed",
+        startedAt,
+        completedAt: nowISO(),
+        stepsExecuted: 0,
+        failedStepIndex: null,
+        deltasApplied: [],
+        settlement: {
+          plan: null,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
+  }
+
   let failedStepIndex: number | null = null;
   let stepsExecuted = 0;
 
@@ -678,6 +726,7 @@ export async function executeComposition(
     stepsExecuted,
     failedStepIndex,
     deltasApplied,
+    settlement,
   };
 }
 
