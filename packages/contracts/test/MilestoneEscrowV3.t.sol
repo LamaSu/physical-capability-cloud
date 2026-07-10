@@ -16,14 +16,14 @@ import {Clones} from "../src/libraries/Clones.sol";
  *     release() distributes 5% to X, rest to operator.
  *   - fee cap: feeBps > MAX_FEE_BPS (1000) at submitAttestation reverts.
  *   - fee recipient guard: attestedFeeBps > 0 with zero recipient reverts.
- *   - payer-approval Mode A: payer calls approveAndRelease, no oracle, releases.
- *   - non-payer cannot call approveAndRelease.
- *   - approveAndRelease before evidence reverts (must be at least Evidenced).
- *   - approveAndRelease after Released reverts (idempotent).
  *   - C1: same UID twice reverts.
  *   - C2a: recipient != escrow reverts.
  *   - C2b: stepId mismatch reverts.
  *   - zero-fee path: attested feeBps=0, no fee transferred.
+ *
+ *   NOTE: the Mode-A (payer-approval `approveAndRelease`) tests were REMOVED
+ *   2026-07-09 together with the function itself — everything settles through
+ *   the oracle (Mode-B). See settlement-decisions.md D1–D3.
  *
  * Style mirrors MilestoneEscrowV2.t.sol.
  *
@@ -39,7 +39,6 @@ contract MilestoneEscrowV3Test is Test {
         address attestedFeeRecipient
     );
     event MilestoneReleased(uint256 indexed milestoneIndex, address operator, uint256 amount);
-    event PayerApprovedRelease(uint256 indexed milestoneIndex, address indexed approvedBy, uint256 amount);
 
     // ── Actors ───────────────────────────────────────────────────────────────
     address internal payer        = address(0x1);
@@ -275,119 +274,6 @@ contract MilestoneEscrowV3Test is Test {
             usdc.balanceOf(operator) - operatorBefore,
             AMOUNT + OPERATOR_BOND,
             "Operator gets full amount with no fee"
-        );
-    }
-
-    // ── Test 5: Mode A — payer approveAndRelease, no oracle ─────────────────
-
-    function test_payerApprovalRelease_byBuyer() public {
-        // Milestone is Evidenced after setUp.
-        uint256 operatorBefore = usdc.balanceOf(operator);
-
-        vm.expectEmit(true, true, false, true, address(escrow));
-        emit PayerApprovedRelease(0, payer, AMOUNT);
-
-        vm.prank(payer);
-        escrow.approveAndRelease(0);
-
-        MilestoneEscrowV3.Milestone memory m = escrow.getMilestone(0);
-        assertEq(uint8(m.status), 5, "Status should be Released");
-
-        // No fee in Mode A. Operator gets AMOUNT + OPERATOR_BOND.
-        assertEq(
-            usdc.balanceOf(operator) - operatorBefore,
-            AMOUNT + OPERATOR_BOND,
-            "Operator paid full amount (no fee in Mode A)"
-        );
-    }
-
-    // ── Test 6: Mode A — non-payer cannot call approveAndRelease ────────────
-
-    function test_revert_payerApprovalByNonBuyer() public {
-        vm.expectRevert("Only payer");
-        vm.prank(operator);
-        escrow.approveAndRelease(0);
-
-        vm.expectRevert("Only payer");
-        vm.prank(arbiter);
-        escrow.approveAndRelease(0);
-
-        vm.expectRevert("Only payer");
-        vm.prank(address(0xDEAD));
-        escrow.approveAndRelease(0);
-    }
-
-    // ── Test 7: Mode A — payer cannot approve before Evidenced ──────────────
-
-    function test_revert_payerApprovalBeforeEvidence() public {
-        // Fresh escrow, milestone funded + locked but NOT evidenced.
-        MockUSDC usdc2    = new MockUSDC(1_000_000e6);
-        MockEAS  mockEAS2 = new MockEAS();
-        MilestoneEscrowV3 escrow2 = _deployEscrow(
-            payer, arbiter, address(usdc2), CWM_ID, address(0),
-            address(mockEAS2), SCHEMA_V2_UID, oracle
-        );
-        usdc2.mint(payer,    500_000e6);
-        usdc2.mint(operator,  50_000e6);
-
-        vm.prank(payer);
-        escrow2.addMilestone(STEP_ID, operator, AMOUNT, OPERATOR_BOND, CHALLENGE_WINDOW, REQUIRED_TIER, JOB_ID);
-
-        vm.startPrank(payer);
-        usdc2.approve(address(escrow2), AMOUNT);
-        escrow2.fund();
-        vm.stopPrank();
-
-        // Bond deposited, status = Locked. NO submitEvidence yet.
-        vm.startPrank(operator);
-        usdc2.approve(address(escrow2), OPERATOR_BOND);
-        escrow2.depositBond(0);
-        vm.stopPrank();
-
-        vm.expectRevert("Not approvable");
-        vm.prank(payer);
-        escrow2.approveAndRelease(0);
-    }
-
-    // ── Test 8: Mode A — idempotent (cannot approve twice) ──────────────────
-
-    function test_revert_payerApprovalTwice() public {
-        vm.prank(payer);
-        escrow.approveAndRelease(0);
-
-        vm.expectRevert("Not approvable");
-        vm.prank(payer);
-        escrow.approveAndRelease(0);
-    }
-
-    // ── Test 9: Mode A — payer can short-circuit during challenge window ────
-
-    function test_payerApprovalDuringChallengeWindow() public {
-        // Run Mode B up to Attested, then payer signs off during the window.
-        _buildValidAttestation(VALID_UID, ATTESTED_FEE_BPS, feeRecipient);
-        escrow.submitAttestation(0, VALID_UID);
-
-        MilestoneEscrowV3.Milestone memory mAttested = escrow.getMilestone(0);
-        assertEq(uint8(mAttested.status), 4, "Status should be Attested");
-
-        // Buyer can early-release during challenge window.
-        // Mode A has no fee — even though attestation set one, Mode A path skips it.
-        uint256 operatorBefore = usdc.balanceOf(operator);
-        uint256 feeBefore      = usdc.balanceOf(feeRecipient);
-
-        vm.prank(payer);
-        escrow.approveAndRelease(0);
-
-        // Operator gets full amount + bond. No fee taken (Mode A).
-        assertEq(
-            usdc.balanceOf(operator) - operatorBefore,
-            AMOUNT + OPERATOR_BOND,
-            "Operator paid full (Mode A skips fee even when attested)"
-        );
-        assertEq(
-            usdc.balanceOf(feeRecipient) - feeBefore,
-            0,
-            "Fee recipient receives nothing in Mode A"
         );
     }
 
@@ -654,8 +540,12 @@ contract MilestoneEscrowV3Test is Test {
 
     // D6: a Released milestone is not reclaimable.
     function test_revert_reclaimReleased() public {
-        vm.prank(payer);
-        escrow.approveAndRelease(0); // Mode A → Released
+        // Drive the milestone to Released via Mode B (attest → warp → release).
+        _buildValidAttestation(VALID_UID, ATTESTED_FEE_BPS, feeRecipient);
+        escrow.submitAttestation(0, VALID_UID);
+        vm.warp(block.timestamp + CHALLENGE_WINDOW + 1);
+        escrow.release(0);
+        assertEq(uint8(escrow.getMilestone(0).status), 5, "Released via Mode B");
 
         _warpPastDeadline(escrow);
         vm.prank(payer);

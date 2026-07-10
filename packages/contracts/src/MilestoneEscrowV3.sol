@@ -9,9 +9,28 @@ import {SafeERC20} from "./libraries/SafeERC20.sol";
 
 /**
  * @title MilestoneEscrowV3
- * @notice DRAFT additive escrow. NOT DEPLOYED. Live V2 (`0xbC15763F...`) untouched.
+ * @notice Additive escrow. The V3 factory IS deployed (see the divergence note
+ *         below). Live V2 (`0xbC15763F...`) untouched.
  *
- * V3 is a duplicate of `MilestoneEscrowV2` with three behavioral changes:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SOURCE-VS-DEPLOYED DIVERGENCE — READ BEFORE ANY V3 REDEPLOY
+ *
+ *   `approveAndRelease` (V3 "Mode-A": the oracle-free, fee-free payer-approval
+ *   release) and its `PayerApprovedRelease` event were REMOVED FROM THIS SOURCE
+ *   on 2026-07-09, per the standing settlement directive — everything settles
+ *   through the oracle; income is oracle-attested Mode-B only. (See
+ *   `ai/research/pcc-wiki/settlement-decisions.md` D1–D3.)
+ *
+ *   The DEPLOYED prod V3 factory `0x786E85B17B288115E2F9230868e0BC94cBff5534`
+ *   and every clone it has already minted STILL CARRY `approveAndRelease` —
+ *   deployed bytecode is immutable. Mode-A is therefore NOT on-chain-impossible
+ *   until the O5 redeploy ships a factory built from this trimmed source. Until
+ *   then the Mode-A rejection is enforced off-chain only (the gateway call path
+ *   was removed in #194), NOT by the bytecode. Do not assume the live factory
+ *   lacks Mode-A just because this source does. See `docs/DEPLOY.md`.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * V3 is a duplicate of `MilestoneEscrowV2` with two behavioral changes:
  *
  *   (1) FEE-FROM-ATTESTATION. `submitAttestation` now reads `feeBps` and
  *       `feeRecipient` FROM the EAS attestation's data payload (the new
@@ -24,16 +43,14 @@ import {SafeERC20} from "./libraries/SafeERC20.sol";
  *       at attestation submission. A malicious or compromised oracle that
  *       attests `feeBps > MAX_FEE_BPS` cannot release the milestone.
  *
- *   (2) MODE-A PAYER-APPROVAL RELEASE. New `approveAndRelease(uint256 idx)`
- *       function callable ONLY by the payer (the buyer of the capability).
- *       This is the "user-verifiable evidence" path: the buyer inspects the
- *       deliverable off-chain and signs off on-chain. No oracle attestation
- *       required, no challenge window, no fee deducted (Mode A is a direct
- *       trust path between the payer and the operator).
- *
- *   (3) ADDITIVE — no removal of V2 behavior. The oracle-attested path
+ *   (2) ADDITIVE — no removal of V2 behavior. The oracle-attested path
  *       (Mode B) remains as in V2: `submitAttestation` → challenge window
  *       → `release`. Dispute mechanism (Mode C) is inherited verbatim.
+ *       Timeout reclaim (Mode D, `reclaimAfterDeadline`) is a V3 addition
+ *       that only ever refunds the payer (oracle-compatible).
+ *
+ *   NOTE: an earlier V3 draft carried a third change — Mode-A payer-approval
+ *   release — since removed from source (see the divergence note above).
  *
  * Schema delta (pcc.evidence.v2 vs pcc.evidence.v1):
  *
@@ -111,9 +128,9 @@ contract MilestoneEscrowV3 {
      * @notice Per-milestone state.
      * @dev V3 appends two fields to the V2 layout (existing fields unchanged):
      *      - `attestedFeeBps`        : fee bps decoded from the EAS attestation
-     *                                  (or 0 for Mode-A payer-approval releases).
+     *                                  (0 until the milestone is attested).
      *      - `attestedFeeRecipient`  : fee recipient decoded from the attestation
-     *                                  (or address(0) for Mode-A).
+     *                                  (address(0) until the milestone is attested).
      */
     struct Milestone {
         bytes32 stepId;
@@ -280,15 +297,6 @@ contract MilestoneEscrowV3 {
 
     event MilestoneReleased(uint256 indexed milestoneIndex, address operator, uint256 amount);
 
-    /// @notice Emitted when a payer signs off on a milestone via `approveAndRelease` (Mode A).
-    /// @dev Distinct from `MilestoneReleased` so off-chain tooling can separate
-    ///      user-attested from oracle-attested settlements. No fee is taken in Mode A.
-    event PayerApprovedRelease(
-        uint256 indexed milestoneIndex,
-        address indexed approvedBy,
-        uint256 amount
-    );
-
     event DisputeFiled(uint256 indexed milestoneIndex, address challenger, uint256 bond);
     event DisputeResolved(uint256 indexed milestoneIndex, bool challengerWon);
     event MilestoneRefunded(uint256 indexed milestoneIndex, uint256 amount);
@@ -337,8 +345,8 @@ contract MilestoneEscrowV3 {
 
     /// @dev `onlyPayerEffective` honors PGTR trusted forwarders — the effective
     ///      sender (the original meta-tx signer relayed by the forwarder) is
-    ///      checked, not just `msg.sender`. This matters for `approveAndRelease`
-    ///      where the buyer signs from a smart-account / forwarder relay.
+    ///      checked, not just `msg.sender`. This matters for `reclaimAfterDeadline`
+    ///      where the payer may sign from a smart-account / forwarder relay.
     modifier onlyPayerEffective() {
         require(_effectiveSender() == payer, "Only payer");
         _;
@@ -829,64 +837,6 @@ contract MilestoneEscrowV3 {
         } else {
             _distributeLegacy(args);
         }
-    }
-
-    /**
-     * @notice Mode A — payer signs off on a milestone without oracle attestation.
-     *
-     * @dev Callable ONLY by the payer (buyer of the capability). Used when the
-     *      buyer has user-verifiable evidence (e.g. the deliverable was inspected
-     *      in person, in-band, or via a trust channel outside the oracle's scope).
-     *
-     *      Mode-A semantics:
-     *        - milestone must be at least Evidenced (the operator must have
-     *          submitted on-chain evidence — this preserves the audit trail);
-     *          NOT Released/Refunded/Slashed/Disputed.
-     *        - no challenge window — the payer's signoff is immediate.
-     *        - no protocol fee deducted — Mode A is a direct user-to-operator
-     *          settlement, not a protocol-mediated one.
-     *        - bond returned in full, milestone marked Released.
-     *        - PGTR forwarder-aware (`_effectiveSender`) so the buyer can sign
-     *          via a smart-account meta-tx.
-     *
-     *      Reentrancy-guarded. Idempotent — once Released, a second call reverts.
-     *
-     *      Mode-A intentionally does NOT use any payout map. The buyer-direct
-     *      settlement is a single transfer to the operator. A split-payout in
-     *      Mode A would require the buyer to attest to the split, which is
-     *      outside the user-verifiable-evidence threat model (the buyer can
-     *      only attest to the deliverable, not to downstream splits).
-     *
-     * @param milestoneIndex Index of the milestone in milestones[].
-     */
-    function approveAndRelease(uint256 milestoneIndex)
-        external
-        nonReentrant
-        onlyPayerEffective
-        milestoneExists(milestoneIndex)
-    {
-        Milestone storage m = milestones[milestoneIndex];
-        // Must be at minimum Evidenced. Reject pre-Evidenced (Funded/Locked) so the
-        // operator must produce SOME on-chain evidence even in the buyer-direct path,
-        // and reject post-settlement states (Released/Refunded/Slashed/Disputed) so
-        // this function is idempotent and cannot race with Mode B / Mode C.
-        require(
-            m.status == MilestoneStatus.Evidenced || m.status == MilestoneStatus.Attested,
-            "Not approvable"
-        );
-
-        m.status = MilestoneStatus.Released;
-
-        address operator = m.operator;
-        uint256 amount = m.amount;
-        uint256 operatorBond = m.operatorBond;
-        IERC20 tok = IERC20(tokenForMilestone(milestoneIndex));
-
-        emit PayerApprovedRelease(milestoneIndex, _effectiveSender(), amount);
-
-        // No fee in Mode A — buyer-direct payment.
-        uint256 payout = amount + operatorBond;
-        tok.safeTransfer(operator, payout);
     }
 
     // ── Internal Distribution Helpers (V3 — fee args, no root.protocolFeeBps) ────

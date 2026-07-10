@@ -2,6 +2,17 @@
 
 PCC uses an artifact-promotion model: every merge to `master` produces **one** Docker image that is then retagged through `staging` → `prod` without rebuilding. Deploy time drops from ~10 min (rebuild-per-env) to seconds (manifest retag).
 
+## Contract source-vs-deployed divergence — V3 Mode-A (2026-07-09)
+
+`approveAndRelease` (V3 Mode-A: the oracle-free, fee-free payer-approval release) and its `PayerApprovedRelease` event were **removed from the contract source** (`packages/contracts/src/MilestoneEscrowV3.sol`, plus its V3 test coverage) on 2026-07-09, per the standing settlement directive — everything settles through the oracle; income is oracle-attested Mode-B only (see `ai/research/pcc-wiki/settlement-decisions.md` D1–D3).
+
+**The deployed bytecode is unchanged.** The live prod V3 factory `0x786E85B17B288115E2F9230868e0BC94cBff5534` and every clone it has already minted **STILL carry `approveAndRelease`** — deployed bytecode is immutable. Mode-A is therefore **not on-chain-impossible** until the **O5 redeploy** ships a new `PCCProtocolV3` factory built from the trimmed source and new escrows are cut over to it. Until then the Mode-A rejection is enforced off-chain only (the gateway call path was removed in #194), not by the bytecode.
+
+Implications:
+- Do **not** assume the live factory lacks Mode-A because the source does. Verify the live surface with `cast` before asserting.
+- `packages/contracts/ts/abi/MilestoneEscrowV3.ts` deliberately RETAINS the `approveAndRelease` / `PayerApprovedRelease` ABI members so the gateway can still encode/decode against the live contract. Regenerate it without them only after the O5 redeploy.
+- O5 redeploy = deploy a fresh `PCCProtocolV3` factory from current source, then cut new escrows over to it. The old factory and its clones stay on-chain (no upgrade/destroy mechanism, same as the V2 rollback note in `docs/V2_DEPLOY.md`) but should no longer be used.
+
 ## Rollout Progress (as of 2026-04-15)
 
 The pipeline is **wired but not yet running end-to-end**. Remaining steps, in order:
