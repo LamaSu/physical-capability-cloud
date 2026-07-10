@@ -6,6 +6,7 @@
  * Applies reputation decay (exponential half-life) and cold-start tier gating at read time.
  */
 
+import type { RegisteredSigner } from "@pcc/spec";
 import type {
   KernelDTO,
   KernelHealthSnapshot,
@@ -31,6 +32,12 @@ export interface RawKernel {
   physicalAddress: string;
   maxAssuranceTier: number;
   publicKey: string;
+  /** Proven secp256k1 signing address (checksummed 0x…); null when unproven. */
+  signingAddress?: string | null;
+  /** Option C — proven signing-key algorithm tag ("secp256k1" | "ed25519"); null when unproven. */
+  signingKeyAlgorithm?: string | null;
+  /** Option C — proven Ed25519 signing public key ("0x"+64hex); null for secp256k1/unproven. */
+  signingKeyPublicKey?: string | null;
   reputation: number;
   totalJobsCompleted: number;
   /** ISO timestamp of last reputation write; used for decay computation. Null for legacy rows. */
@@ -128,6 +135,18 @@ export function populateKernelDTO(
       ) as KernelDTO["maxAssuranceTier"])
     : ((model.maxAssuranceTier ?? 2) as KernelDTO["maxAssuranceTier"]);
 
+  // Option C — the algorithm-tagged registered signing key. ed25519 kernels
+  // carry the raw pubkey; secp256k1 kernels (incl. legacy #230 rows that have
+  // only signingAddress) carry the EVM address; unproven kernels serve null.
+  // This is the field the oracle #52 verifier reads to authenticate each
+  // machine-log entry's signature before releasing escrow.
+  let signingKey: RegisteredSigner | null = null;
+  if (model.signingKeyAlgorithm === "ed25519" && model.signingKeyPublicKey) {
+    signingKey = { algorithm: "ed25519", publicKey: model.signingKeyPublicKey };
+  } else if (model.signingAddress) {
+    signingKey = { algorithm: "secp256k1", address: model.signingAddress };
+  }
+
   return {
     id: model.id,
     name: model.name,
@@ -138,6 +157,14 @@ export function populateKernelDTO(
     status: model.status as KernelDTO["status"],
     lastHeartbeat: model.lastHeartbeat ?? new Date().toISOString(),
     version: model.version ?? "0.1.0",
+    // Proven signing identity (null when the kernel registered without a valid
+    // proof-of-possession). secp256k1 compat alias for the oracle's #230 reader;
+    // null for ed25519 kernels. Flows to GET /api/kernels/:id and GET /api/kernels.
+    signingAddress: (model.signingAddress as string | null | undefined) ?? null,
+    // Option C — the algorithm-tagged signing key (ed25519 pubkey OR secp256k1
+    // address OR null). What the oracle #52 verifier reads to authenticate
+    // machine-log signatures for settlement.
+    signingKey,
     // Enrichment
     capabilityCount,
     capabilityTypes,

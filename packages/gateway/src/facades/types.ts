@@ -20,6 +20,7 @@ import type {
   WorkEnvelope,
   StepStatus,
   EscrowStatus,
+  RegisteredSigner,
 } from "@pcc/spec";
 
 // ── Population Context ─────────────────────────────────────────────────────
@@ -157,6 +158,29 @@ export interface KernelDTO {
   status: "online" | "offline" | "maintenance" | "suspended";
   lastHeartbeat: Timestamp;
   version: string;
+  /**
+   * The kernel's REAL secp256k1 signing address (checksummed 0x…), proven at
+   * registration via EIP-191 proof-of-possession. This is the address that
+   * signs the kernel's machine-log entries, so the oracle authenticates
+   * kernel-signed logs against it for settlement (evidence primitive #52).
+   * `null` when the kernel registered without a valid proof (fail closed).
+   *
+   * COMPAT ALIAS for the secp256k1 case only — the merged oracle #13 reads this
+   * field. For an ed25519 kernel this is `null` and the key is on `signingKey`.
+   */
+  signingAddress: string | null;
+  /**
+   * Option C — the kernel's algorithm-tagged proven signing key, or `null` when
+   * it registered without a valid proof-of-possession:
+   *   - `{ algorithm: "ed25519",   publicKey }` — "0x"+64hex raw pubkey (the
+   *     native key of pcc-node / kernel-sdk devices)
+   *   - `{ algorithm: "secp256k1", address }`   — EIP-55 checksummed EVM address
+   *     (same value as `signingAddress`)
+   * The oracle's #52 `machine.execution_log` verifier reads THIS to match each
+   * log entry's `kernelSignature` (by algorithm + signer) before releasing
+   * escrow. Fail closed: `null` ⇒ #52 blocked.
+   */
+  signingKey: RegisteredSigner | null;
   // ── Enrichment ──
   /** Number of capabilities this kernel offers */
   capabilityCount: number;

@@ -15,7 +15,12 @@
  *                           Powers #52 machine.execution_log.
  *   - oracle-binding.ts   — the fail-closed STUB seam for #52–#55; the real
  *                           PrimitiveVerifier binding is the settlement lane.
+ *   - registered-signer.ts — the algorithm-tagged RegisteredSigner (Option C):
+ *                           the signing key the gateway registry proves + serves
+ *                           on KernelDTO.signingKey and the #52 verifier matches
+ *                           each log entry's kernelSignature against.
  */
 export * from "./drift-predicates.js";
 export * from "./log-chain.js";
 export * from "./oracle-binding.js";
+export * from "./registered-signer.js";
