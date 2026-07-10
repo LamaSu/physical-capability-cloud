@@ -319,6 +319,80 @@ describe("SettlementService", () => {
       // No CID since storage failed
       expect(result.cid).toBeUndefined();
     });
+
+    // ── Fabrication gate (detector side, coord #312/#316) ──────────────
+    // Fabricated bundle: one structurally-valid event tagged both ways.
+    const makeFabricatedBundle = (tier: 0 | 1 | 2) =>
+      makeBundle({
+        assuranceTier: tier,
+        events: [
+          {
+            id: "ev-fab-001",
+            type: "execution_completed",
+            timestamp: new Date().toISOString(),
+            source: {
+              deviceId: "dev-mock-001",
+              deviceType: "controller",
+              kernelId: "kernel-nyc",
+              simulated: true,
+            },
+            payload: { mock: true },
+            hash: "sha256:fabhash" as `sha256:${string}`,
+          },
+        ],
+      });
+
+    it("refuses to settle a fabricated bundle at a paid tier (>=1): no on-chain submit or release", async () => {
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+
+      const service = getSettlementService();
+      const result = await service.processEvidence(makeFabricatedBundle(1), "job-004", {
+        contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
+        autoRelease: true,
+      });
+
+      // Refused: fail-closed — no on-chain evidence submission, no release.
+      expect(result.error).toBe("fabricated_evidence");
+      expect(result.settled).toBe(false);
+      expect(result.evidenceTxHash).toBeUndefined();
+      expect(escrowMod.submitEvidence).not.toHaveBeenCalled();
+      expect(escrowMod.releaseMilestone).not.toHaveBeenCalled();
+    });
+
+    it("still submits on-chain for an HONEST paid-tier bundle (real passes)", async () => {
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+
+      const service = getSettlementService();
+      const result = await service.processEvidence(
+        makeBundle({
+          assuranceTier: 1,
+          bundleHash:
+            "sha256:deadbeef00000000000000000000000000000000000000000000000000000001" as `sha256:${string}`,
+        }),
+        "job-004",
+        { contractAddress: "0xDeAdBeEf00000000000000000000000000000001" },
+      );
+
+      expect(result.error).not.toBe("fabricated_evidence");
+      expect(escrowMod.submitEvidence).toHaveBeenCalledOnce();
+      expect(result.evidenceTxHash).toBe("0xtest_evidence_tx123");
+    });
+
+    it("does NOT block tier 0 (self-attested dev floor) even if fabricated", async () => {
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+
+      const service = getSettlementService();
+      const result = await service.processEvidence(makeFabricatedBundle(0), "job-004", {
+        contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
+      });
+
+      // The gate fires only at tier >= 1; tier 0 is unaffected.
+      expect(result.error).not.toBe("fabricated_evidence");
+      expect(escrowMod.submitEvidence).toHaveBeenCalledOnce();
+    });
   });
 
   describe("releaseMilestone", () => {

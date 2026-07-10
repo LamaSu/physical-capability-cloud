@@ -280,6 +280,103 @@ describe("ComplianceFacade", () => {
     });
   });
 
+  // ── ALCOA authenticity (fabrication detector, coord #312/#316) ─────────
+
+  describe("generateComplianceReport() — ALCOA 'Original' authenticity", () => {
+    // Seed one tier-2-complete bundle under its own kernel with a REAL
+    // (non-zero) signer. `fabricated` tags every event source.simulated.
+    const seedAlcoaBundle = (
+      repos: any,
+      kernelId: string,
+      fabricated: boolean,
+      suffix: string,
+    ): void => {
+      const now = new Date().toISOString();
+      const bundleId = `bun-alcoa-${suffix}`;
+      repos.evidence.insert({
+        id: bundleId,
+        jobId: `job-alcoa-${suffix}`,
+        stepId: "step-1",
+        kernelId,
+        assuranceTier: 2,
+        bundleHash: "b".repeat(64),
+        // Real, non-zero signer — the historical "Original" check passes on this.
+        kernelSignature: {
+          signer: "0x1111111111111111111111111111111111111111",
+          algorithm: "secp256k1",
+          value: "sig_alcoa",
+        },
+        createdAt: now,
+      });
+      const source = {
+        deviceId: "dev-alcoa",
+        deviceType: "controller",
+        kernelId,
+        ...(fabricated ? { simulated: true } : {}),
+      };
+      const types = [
+        "gcode_hash_verified",
+        "execution_completed",
+        "power_profile_summary",
+        "cv_inspection_result",
+      ];
+      repos.evidence.insertEvents(
+        types.map((type, i) => ({
+          id: `${bundleId}-ev-${i}`,
+          bundleId,
+          type,
+          timestamp: now,
+          source,
+          payload: {},
+          hash: "c".repeat(64),
+        })),
+      );
+    };
+
+    const insertCap = (repos: any, id: string, kernelId: string): void => {
+      repos.capabilities.insert({
+        id,
+        kernelId,
+        type: "test_type",
+        name: "ALCOA Cap",
+        description: "",
+        location: { lat: 0, lng: 0 },
+        pricing: { currency: "USDC", baseCost: "0", minimum: "0" },
+        materials: [],
+        assuranceTiers: [2],
+        availability: {},
+      });
+    };
+
+    it("is FALSE for a fabricated bundle even with a real signer (the gap)", async () => {
+      const { getRepos } = await import("../db.js");
+      const repos = getRepos();
+      insertCap(repos, "cap-alcoa-fab", "kernel-alcoa-fab");
+      seedAlcoaBundle(repos, "kernel-alcoa-fab", true, "fab");
+
+      const result = await facade.generateComplianceReport("cap-alcoa-fab");
+      expect(result.success).toBe(true);
+      if (result.success) {
+        // Previously TRUE (signer-only) — the fabricated bundle was undetected.
+        expect(result.data.alcoaStatus.original).toBe(false);
+      }
+    });
+
+    it("is TRUE for an honest bundle with a real signer (real passes)", async () => {
+      const { getRepos } = await import("../db.js");
+      const repos = getRepos();
+      insertCap(repos, "cap-alcoa-honest", "kernel-alcoa-honest");
+      seedAlcoaBundle(repos, "kernel-alcoa-honest", false, "honest");
+
+      const result = await facade.generateComplianceReport("cap-alcoa-honest");
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.alcoaStatus.original).toBe(true);
+        expect(result.data.alcoaStatus.attributable).toBe(true);
+      }
+    });
+  });
+
   // ── aggregateAttestations() ────────────────────────────────────────────
 
   describe("aggregateAttestations()", () => {
