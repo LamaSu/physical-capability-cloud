@@ -12,6 +12,7 @@
  */
 
 import type { EvidenceBundle } from "@pcc/spec";
+import { isFabricated } from "@pcc/spec";
 import type { Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
@@ -82,6 +83,35 @@ export class SettlementService {
       evidenceBundleId: bundle.id,
       settled: false,
     };
+
+    // ── Fabrication gate (detector side, coord #312/#316) ───────────────────
+    // A bundle carrying any mock/simulated event must NOT settle as real. This
+    // is the settlement-side twin of the oracle floor: fail CLOSED for paid
+    // tiers (>=1). The evidence is still archived + persisted for the record,
+    // but on-chain evidence submission AND auto-release are skipped. Tier 0
+    // (self-attested dev floor) is unaffected. Additive precondition only — the
+    // release mechanism (releaseMilestone) is unchanged.
+    const fabricatedBlocksSettlement =
+      bundle.events.some(isFabricated) && bundle.assuranceTier >= 1;
+    if (fabricatedBlocksSettlement) {
+      result.error = "fabricated_evidence";
+      console.warn(
+        `[settlement] Refusing to settle job ${jobId}: bundle ${bundle.id} contains ` +
+          `fabricated (simulated/mock) events at paid tier ${bundle.assuranceTier}. ` +
+          `Evidence archived + persisted but NOT settled as real.`,
+      );
+      auditService.log({
+        eventType: "settlement.fabricated_refused",
+        resourceType: "job",
+        resourceId: jobId,
+        action: "refuse_settlement",
+        metadata: {
+          bundleId: bundle.id,
+          assuranceTier: bundle.assuranceTier,
+          bundleHash: bundle.bundleHash,
+        },
+      });
+    }
 
     // ── Local trace (alongside Sentry) ──────────────────────────────────────
     const localTraceId = TraceCollector.newTraceId();
@@ -221,7 +251,7 @@ export class SettlementService {
               },
             },
             async () => {
-              if (isWriteEnabled() && contractAddress) {
+              if (isWriteEnabled() && contractAddress && !fabricatedBlocksSettlement) {
                 try {
                   const addr = contractAddress as Address;
                   const bundleHashHex = bundle.bundleHash.startsWith("0x")
@@ -333,7 +363,7 @@ export class SettlementService {
               },
             },
             async () => {
-              if (autoRelease && isWriteEnabled() && contractAddress && attestation) {
+              if (autoRelease && isWriteEnabled() && contractAddress && attestation && !fabricatedBlocksSettlement) {
                 try {
                   const releaseResult = await this.releaseMilestone(
                     jobId,

@@ -16,7 +16,7 @@ import type {
   TierEvidenceRequirements,
   Address,
 } from "@pcc/spec";
-import { DEFAULT_TIER_REQUIREMENTS } from "@pcc/spec";
+import { DEFAULT_TIER_REQUIREMENTS, isFabricated } from "@pcc/spec";
 import { hashEvent, hashBundle } from "@pcc/spec";
 import { ids } from "@pcc/spec";
 import type { EvidenceStorageService, ArchiveResult } from "./evidence-storage.js";
@@ -192,7 +192,12 @@ export class EvidenceEmitter {
       return { met: false, missing: [`No requirements defined for tier ${tier}`] };
     }
 
-    const eventTypes = new Set(events.map((e) => e.type));
+    // Fabricated (mock/simulated) events do NOT count toward tier requirements:
+    // a simulated event must not satisfy a real tier's required event-types, nor
+    // count toward the minimum-event floor. A bundle of all-fabricated events
+    // therefore meets no tier (its authentic-event set is empty). (coord #312/#316)
+    const authenticEvents = events.filter((e) => !isFabricated(e));
+    const eventTypes = new Set(authenticEvents.map((e) => e.type));
     const missing: string[] = [];
 
     for (const group of tierReq.requiredEventTypes) {
@@ -203,8 +208,8 @@ export class EvidenceEmitter {
       }
     }
 
-    if (events.length < tierReq.minimumEvents) {
-      missing.push(`Need at least ${tierReq.minimumEvents} events, have ${events.length}`);
+    if (authenticEvents.length < tierReq.minimumEvents) {
+      missing.push(`Need at least ${tierReq.minimumEvents} events, have ${authenticEvents.length}`);
     }
 
     return { met: missing.length === 0, missing };
