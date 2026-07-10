@@ -31,6 +31,10 @@
  *
  * FLAGS
  *   --live            Run the paid/commit/on-chain steps. Default OFF.
+ *   --o1              O-1 acceptance ONLY: provision + register a probe kernel with an
+ *                     Ed25519 proof + assert GET serves a non-zero signer. NO paid/commit/
+ *                     on-chain steps. This is the one-line post-deploy acceptance test —
+ *                     run it the moment master->prod lands. Creates one throwaway kernel row.
  *   --target=<url>    Gateway base URL. Default https://capability.network.
  *   --tier=<0-3>      Assurance tier to negotiate. Default 1 (a PAID tier — the
  *                     tier that MUST fail closed on a mock verdict; see A8/A9).
@@ -230,6 +234,42 @@ const PLAN = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// O-1 acceptance run — the one-line post-deploy check. Provision + register a
+// probe kernel with an Ed25519 proof + assert GET serves a non-zero proven
+// signer. NO commit / escrow / on-chain. Creates one throwaway kernel row.
+// Exit 0 = Option C identity is LIVE in prod (O-1 done). Exit 1 = still pre-#235.
+// ─────────────────────────────────────────────────────────────────────────────
+async function o1Run() {
+  console.log(`\n── O-1 acceptance (identity only; no paid steps) → ${TARGET} ──`);
+  const sc = selfVerifyCrypto();
+  if (!sc.ok) return fail("O1.crypto-selftest", sc.why);
+
+  const prov = await call("POST", "/api/auth/provision", { email: EMAIL, name: "PCC O-1 Probe" });
+  apiKey = prov.json?.api_key ?? prov.json?.apiKey;
+  if (!apiKey) return fail("O1.provision", `no api_key (status ${prov.status})`);
+
+  const kernelId = `kernel_o1probe_${Date.now().toString(36)}`;
+  const dev = newDeviceKey();
+  const signingProof = signingProofFor(kernelId, dev.privateKey);
+  const reg = await call("POST", "/api/kernels", {
+    id: kernelId, name: "O-1 Probe", operatorAddress: EMAIL,
+    location: { lat: 0, lng: 0 }, physicalAddress: "o1-probe", maxAssuranceTier: 2,
+    signingKeyAlgorithm: "ed25519", signingPublicKey: `0x${dev.publicKeyHex}`, signingProof,
+  });
+  if (reg.status !== 201 && reg.status !== 200) return fail("O1.register", `POST /api/kernels -> ${reg.status}`, "O-1");
+  created.kernelId = kernelId;
+  const got = await call("GET", `/api/kernels/${kernelId}`);
+  const signer = signerFrom(got.json);
+  if (!signer) {
+    fail("O1.identity", `registered a valid Ed25519 proof but GET /api/kernels/${kernelId} serves NO signer — pre-#235 path is LIVE. O-1 (master->prod) NOT done.`, "O-1");
+  } else if (signer.toLowerCase() !== `0x${dev.publicKeyHex}`.toLowerCase()) {
+    fail("O1.identity", `served signer ${signer} != registered 0x${dev.publicKeyHex}`, "O-1");
+  } else {
+    pass("O1.identity", `non-zero proven signer served (${signer}) — Option C identity is LIVE. O-1 DONE.`, "O-1");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LIVE run — the full span. Gated. Not executed without --live.
 // ─────────────────────────────────────────────────────────────────────────────
 async function liveRun() {
@@ -404,10 +444,12 @@ async function liveRun() {
 // ─────────────────────────────────────────────────────────────────────────────
 (async () => {
   const started = Date.now();
+  const O1 = args.o1 === "true" || args.o1 === "1";
   console.log(`\npcc rehearse-loop — span de-risk harness`);
-  console.log(`  target=${TARGET}  live=${LIVE}  tier=${TIER}`);
+  console.log(`  target=${TARGET}  live=${LIVE}  o1=${O1}  tier=${TIER}`);
   try {
-    if (LIVE) await liveRun();
+    if (O1) await o1Run();
+    else if (LIVE) await liveRun();
     else await dryRun();
   } catch (e) {
     console.error(`[rehearse] harness exception: ${e?.stack ?? e}`);
@@ -436,7 +478,7 @@ async function liveRun() {
   };
   console.log(`\nREHEARSE_RESULT=${JSON.stringify(summary)}`);
 
-  if (LIVE && !args.keep && (created.kernelId || created.capabilityId)) {
+  if (!args.keep && (created.kernelId || created.capabilityId)) {
     console.log(`\n  cleanup (testnet rows created): kernel=${created.kernelId} capability=${created.capabilityId}`);
     console.log(`  purge with the catalog-hygiene tooling (B-8) before a real demo.`);
   }
