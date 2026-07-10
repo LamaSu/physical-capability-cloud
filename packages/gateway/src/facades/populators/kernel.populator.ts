@@ -31,6 +31,8 @@ export interface RawKernel {
   physicalAddress: string;
   maxAssuranceTier: number;
   publicKey: string;
+  /** Proven secp256k1 signing address (checksummed 0x…); null when unproven. */
+  signingAddress?: string | null;
   reputation: number;
   totalJobsCompleted: number;
   /** ISO timestamp of last reputation write; used for decay computation. Null for legacy rows. */
@@ -138,6 +140,9 @@ export function populateKernelDTO(
     status: model.status as KernelDTO["status"],
     lastHeartbeat: model.lastHeartbeat ?? new Date().toISOString(),
     version: model.version ?? "0.1.0",
+    // Proven signing identity (null when the kernel registered without a valid
+    // proof-of-possession). Flows to GET /api/kernels/:id and GET /api/kernels.
+    signingAddress: (model.signingAddress as string | null | undefined) ?? null,
     // Enrichment
     capabilityCount,
     capabilityTypes,
