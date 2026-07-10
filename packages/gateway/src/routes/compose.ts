@@ -405,17 +405,76 @@ function planViaGraphSearch(req: ComposeRequest, outcomeType: string): PlanResul
   };
 }
 
+// ---------------------------------------------------------------------------
+// Known outcome → capability-type chains
+// ---------------------------------------------------------------------------
+
+/** One leg of a known outcome chain: a human-readable step + the capability
+ *  type a provider must offer to fulfil it. */
+interface OutcomeChainStep {
+  /** Documents intent (e.g. "make-pizza"); not used for provider matching. */
+  step: string;
+  /** The capability type a registered provider must offer for this leg. */
+  capabilityType: string;
+}
+
 /**
- * Resolve a {@link ComposeRequest} to a step list + status, choosing between
- * the direct in-memory provider and graph-search:
- *   1. An explicit `outcomeChain` always routes to graph-search (targets the
- *      chain's final element).
- *   2. Otherwise the direct provider runs first (single-step / explicit
- *      `steps`); a `proposed` or `over_budget` result is honoured as-is.
+ * Some delivered OUTCOMES are realized by a fixed sequence of capability TYPES,
+ * not a single provider. "delivered-pizza" is never one capability — it is a
+ * make leg (a `wood-fired-pizza` shop produces the pizza) followed by a deliver
+ * leg (a `local-courier-delivery` driver carries it to the door). Operators
+ * register those concrete types via POST /api/capabilities; nothing registers a
+ * single "delivered-pizza" provider, so a direct or graph search for that
+ * outcome alone finds nothing and the order 404s with `no_path_found`.
+ *
+ * This registry closes that gap, mirroring request-decomposer.ts's composite
+ * TEMPLATES (e.g. `print_deliver`): it maps an outcome to the ordered capability
+ * types that produce it. When a compose request targets a mapped outcome — and
+ * the caller did not pin explicit `steps` — the planner resolves one provider
+ * per capability type through the same in-memory provider `steps` mode uses, so
+ * an available wood-fired-pizza + local-courier-delivery yields a 2-step plan.
+ *
+ * Entries are data-only; the resolution logic lives in {@link planSteps}.
+ */
+const OUTCOME_CHAINS: Record<string, OutcomeChainStep[]> = {
+  "delivered-pizza": [
+    { step: "make-pizza", capabilityType: "wood-fired-pizza" },
+    { step: "deliver", capabilityType: "local-courier-delivery" },
+  ],
+};
+
+/**
+ * Resolve a {@link ComposeRequest} to a step list + status, choosing between a
+ * known outcome chain, the direct in-memory provider, and graph-search:
+ *   0. A mapped outcome ({@link OUTCOME_CHAINS}) with no caller-pinned `steps`
+ *      resolves one provider per capability type via the direct provider; a
+ *      `proposed` / `over_budget` result is honoured, otherwise we fall through.
+ *   1. An explicit `outcomeChain` routes to graph-search (targets the chain's
+ *      final element).
+ *   2. Otherwise the direct provider runs (single-step / explicit `steps`); a
+ *      `proposed` or `over_budget` result is honoured as-is.
  *   3. Only when the direct provider finds NO candidate does graph-search take
  *      over, searching for a multi-step path to `outcomeType`.
  */
 function planSteps(req: ComposeRequest): PlanResult {
+  // (0) Known delivered outcome → fixed capability-type chain. Resolve one
+  //     provider per leg through the direct provider (the same path `steps`
+  //     mode uses), bridging abstract outcomes like "delivered-pizza" to the
+  //     concrete types operators register (wood-fired-pizza +
+  //     local-courier-delivery). A clean fulfilment is returned as-is; if the
+  //     chain can't be satisfied from the candidate pool we fall through to the
+  //     graph search below, so explicit-graph demos keep working unchanged.
+  if (!req.steps) {
+    const chain = OUTCOME_CHAINS[req.outcomeType];
+    if (chain) {
+      const chained = plan(
+        { ...req, steps: chain.map((c) => c.capabilityType) },
+        inMemoryProvider,
+      );
+      if (chained.status !== "no_path_found") return chained;
+    }
+  }
+
   // (1) Explicit chain → graph-search on the final outcome type.
   if (req.outcomeChain && req.outcomeChain.length > 0) {
     const finalType = req.outcomeChain[req.outcomeChain.length - 1]!;
