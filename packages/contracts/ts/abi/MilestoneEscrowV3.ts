@@ -30,10 +30,22 @@
  *   - schema-UID getter is named PCC_EVIDENCE_V2_SCHEMA_UID() (V2 gates on
  *     pcc.evidence.v1 via PCC_EVIDENCE_SCHEMA_UID(); V3 gates on pcc.evidence.v2).
  *
- * DRAFT status (mirrors the .sol): NOT DEPLOYED. No V3 factory/address ships
- * yet; this ABI is published so the gateway can encode V3 calldata (Mode A
- * payer-approval, Mode B attestation/release) against the real interface instead
- * of a hand-rolled stub. Everything is additive — V1/V2 ABIs are untouched.
+ * SOURCE-VS-DEPLOYED DIVERGENCE (2026-07-09): the Solidity source
+ * `MilestoneEscrowV3.sol` NO LONGER declares `approveAndRelease` /
+ * `PayerApprovedRelease` — Mode-A (the oracle-free payer release) was removed per
+ * the settlement directive "everything through the oracle" (see
+ * `ai/research/pcc-wiki/settlement-decisions.md` D1–D3). This ABI DELIBERATELY
+ * RETAINS both members because the DEPLOYED prod V3 factory
+ * `0x786E85B17B288115E2F9230868e0BC94cBff5534` and its live clones STILL carry
+ * `approveAndRelease` (bytecode is immutable) — the gateway needs the entry to
+ * encode/decode against the live contract. Items (2) and (28) above therefore
+ * describe members that exist in the LIVE ABI but not in current source.
+ * Regenerate this ABI without them only AFTER the O5 redeploy ships a factory
+ * built from the trimmed source. The Mode-A *product* call path was already
+ * removed from the gateway in #194; the on-chain function persists until O5.
+ * See `docs/DEPLOY.md`.
+ *
+ * Everything else here is additive — V1/V2 ABIs are untouched.
  */
 export const MilestoneEscrowV3ABI = [
   // Constructor (implementation only — clones use initialize)
