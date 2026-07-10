@@ -1,0 +1,56 @@
+{
+  "publicKey": "0xff57575dc7af8bfc4d0837cc1ce2017b686a88145dc5579a958e3462fe9a908e",
+  "events": [
+    {
+      "type": "log_hash_chain_entry",
+      "timestamp": "2026-07-09T00:00:00.000Z",
+      "payload": {
+        "entryId": "e0",
+        "entryHash": "sha256:c31408369756b766d5ee02b1403cbee4ab64ed39f9c3de0b7bee4605fdf3d9cd",
+        "previousHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "cups://job-1",
+        "capturedAt": "2026-07-09T00:00:00.000Z",
+        "kernelSignature": {
+          "signer": "0xff57575dc7af8bfc4d0837cc1ce2017b686a88145dc5579a958e3462fe9a908e",
+          "algorithm": "ed25519",
+          "value": "9e2edbb66f124009f95e396df597d153d6c352c688e4f9d069ffa246e178f4fc50019452ba19cdb3cd819d07cd8de50ee1a1304f73b31c7b1ccab75adc1c7108"
+        },
+        "rawContent": "hello"
+      }
+    },
+    {
+      "type": "log_hash_chain_entry",
+      "timestamp": "2026-07-09T00:01:00.000Z",
+      "payload": {
+        "entryId": "e1",
+        "entryHash": "sha256:67aa45cab5fa93d2313e4db4e1a5febbeda766d8dbc71d81ee2bdde2cf6b638f",
+        "previousHash": "sha256:c31408369756b766d5ee02b1403cbee4ab64ed39f9c3de0b7bee4605fdf3d9cd",
+        "source": "cups://job-1",
+        "capturedAt": "2026-07-09T00:01:00.000Z",
+        "kernelSignature": {
+          "signer": "0xff57575dc7af8bfc4d0837cc1ce2017b686a88145dc5579a958e3462fe9a908e",
+          "algorithm": "ed25519",
+          "value": "5b6f6bdfd33969ba133eba699f90d48a2346efeacfd9fe8fdda35c54c2004be0bd58513cd34b564a2d16489a28e00e361ba335a3fd880ed8a28f6ece11259f05"
+        },
+        "rawContent": "world"
+      }
+    },
+    {
+      "type": "log_hash_chain_entry",
+      "timestamp": "2026-07-09T00:02:00.000Z",
+      "payload": {
+        "entryId": "e2",
+        "entryHash": "sha256:6d7dc5cdc1a95baea31605e5f58545e7294a5e4a6eeabbac11c5ba2b7d57ecb3",
+        "previousHash": "sha256:67aa45cab5fa93d2313e4db4e1a5febbeda766d8dbc71d81ee2bdde2cf6b638f",
+        "source": "cups://job-1",
+        "capturedAt": "2026-07-09T00:02:00.000Z",
+        "kernelSignature": {
+          "signer": "0xff57575dc7af8bfc4d0837cc1ce2017b686a88145dc5579a958e3462fe9a908e",
+          "algorithm": "ed25519",
+          "value": "a09d13d2fc9c946f1bef03fd191b0cf820e8fd2a28c96a8da7f0e683bfe7a84f03e2ee4f5b01270b3289aa30953bb30a2fb4ff5458e90af121f388e3e50a4906"
+        },
+        "rawContent": "café ☕ 日本語 — naïve"
+      }
+    }
+  ]
+}
