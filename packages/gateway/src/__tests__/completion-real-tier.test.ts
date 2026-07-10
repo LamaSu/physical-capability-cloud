@@ -11,8 +11,12 @@
  * Observable proof: the stored evidence bundle's assuranceTier (the same variable
  * that feeds the oracle + EAS calls) equals the negotiated tier, not 0.
  *
- * Mock settlement is on; IPFS + chain are mocked; the oracle uses its offline
- * mock fallback (verified:true) as in negotiation-settlement-correctness.test.ts.
+ * Mock settlement is on; IPFS + chain are mocked. The verification oracle is
+ * mocked to a working (verified:true, non-degraded) verdict: S4 made the
+ * *degraded* mock fallback (no PCC_ORACLE_KEY) fail CLOSED for paid tiers (>=1),
+ * so a paid-tier completion 422s at the settlement chokepoint without a real
+ * oracle. These tests assert the attested TIER, not oracle honesty (that lives
+ * in oracle-client-mock-honesty.test.ts).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -61,6 +65,49 @@ vi.mock("../contracts/batch-settlement.js", () => ({
   initBatchSettlement: vi.fn().mockResolvedValue(undefined),
   stopBatchSettlement: vi.fn(),
 }));
+
+// A working (non-degraded) verification oracle. S4 made the *degraded* mock
+// fallback (no PCC_ORACLE_KEY) fail CLOSED for paid tiers (>=1), so a paid-tier
+// completion now 422s at the settlement chokepoint (paid-job-flow.ts:1195)
+// without a real oracle. These tests assert WHICH tier completion attests at
+// (the negotiated tier, not a hardcoded 0) — not oracle honesty, which is pinned
+// in oracle-client-mock-honesty.test.ts. So a real oracle is simulated here:
+// verifyWithOracle returns verified:true with NO mode/degraded flags (absence
+// === live, per the S4 provenance contract). importOriginal preserves the real
+// EAS helpers; only verifyWithOracle is overridden. Pattern mirrors
+// settlement-crank-wiring.test.ts.
+vi.mock("../services/oracle-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/oracle-client.js")>();
+  return {
+    ...actual,
+    verifyWithOracle: vi.fn(async (req: Parameters<typeof actual.verifyWithOracle>[0]) => ({
+      result: {
+        verified: true,
+        tier: req.assuranceTier,
+        reason: "verified",
+        checks: { evidenceExists: true, hashMatches: true, tierMet: true, notReplay: true, identityValid: true },
+      },
+      attestation: {
+        version: 1,
+        escrowAddress: req.escrowAddress,
+        jobId: req.jobId,
+        evidenceHash: req.evidenceHash,
+        tier: req.assuranceTier,
+        verified: true,
+        timestamp: Math.floor(Date.now() / 1000),
+        nonce: "0x" + "0".repeat(64),
+        extraData: "0x",
+        signature: "0x" + "1".repeat(130),
+      },
+      easAttestation: req.mintEasAttestation
+        ? { easUid: "0x" + "ea".repeat(32), schemaUid: req.schemaUid ?? "0x" + "00".repeat(32) }
+        : null,
+      oracle: "0x" + "ab".repeat(20),
+      chainId: req.chainId,
+      // No mode/degraded — a real (non-degraded) oracle verdict, per S4 provenance.
+    })),
+  };
+});
 
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
