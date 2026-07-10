@@ -100,6 +100,16 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
   // ── SensorAdapter ──────────────────────────────────────────────────
 
   async startRecording(jobId: string): Promise<void> {
+    if (!this.config.mockMode) {
+      // FAIL LOUD: no real Modbus client is wired (modbus-serial pending).
+      // Recording in real mode would fabricate sensor readings (random values
+      // stamped quality 1.0) straight into evidence bundles. Refuse instead.
+      throw new Error(
+        `[modbus-adapter] real-mode read not implemented — refusing to record fabricated sensor data ` +
+          `for ${this.config.host}:${this.config.port ?? 502}. Set mockMode: true for simulated readings.`,
+      );
+    }
+
     this.recording = true;
     this.recordedValues.clear();
 
@@ -107,9 +117,14 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
       this.recordedValues.set(reg.channel, []);
     }
 
-    // Start polling registers
+    // Start polling registers. The catch is defensive: a rejected poll must
+    // never surface as an unhandled promise rejection inside the timer.
     const interval = this.config.pollIntervalMs ?? 1000;
-    this.pollTimer = setInterval(() => this.pollRegisters(jobId), interval);
+    this.pollTimer = setInterval(() => {
+      void this.pollRegisters(jobId).catch((err) => {
+        console.error("[modbus-adapter] register poll failed:", err);
+      });
+    }, interval);
   }
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
@@ -197,8 +212,12 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
     // const result = await client.readHoldingRegisters(reg.address, registerCount);
     // return decodeValue(result.data, reg.dataType) * (reg.scale ?? 1) + (reg.offset ?? 0);
 
-    // Placeholder — falls through to mock
-    return this.generateMockValue(reg);
+    // FAIL LOUD: no real client is wired. The previous behavior returned
+    // generateMockValue() here — fabricated readings presented as real ones.
+    throw new Error(
+      `[modbus-adapter] real-mode read not implemented for register ${reg.address} (${reg.channel}) ` +
+        `at ${this.config.host}:${this.config.port ?? 502}. Set mockMode: true for simulated readings.`,
+    );
   }
 
   private generateMockValue(reg: ModbusRegisterDef): number {

@@ -164,8 +164,23 @@ export class SafetyGateway {
     try {
       const result = await execute();
 
-      // Step 4a — Record success
-      this.breaker.recordSuccess(cmd.deviceId);
+      // Step 4a — Record outcome. A callback can signal device failure two
+      // ways: throwing (caught below), or resolving to a result object that
+      // self-reports failure ({ success: false }, e.g. MachineCommandResult).
+      // Recording the latter as a success would reset the breaker's
+      // consecutive-failure count and mask real device failures — a
+      // fail-loud adapter would be silenced right here.
+      const selfReportedFailure =
+        typeof result === "object" &&
+        result !== null &&
+        "success" in result &&
+        (result as { success: unknown }).success === false;
+
+      if (selfReportedFailure) {
+        this.breaker.recordFailure(cmd.deviceId);
+      } else {
+        this.breaker.recordSuccess(cmd.deviceId);
+      }
 
       return { allowed: true, executed: true, verdict, result };
     } catch (err) {
