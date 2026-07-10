@@ -15,7 +15,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
-import type { Result } from "@pcc/spec";
+import type { Result, Signature } from "@pcc/spec";
 import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
@@ -1133,7 +1133,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           assuranceTier: jobAssuranceTier,
           bundleHash,
           events,
-          kernelSignature: settlementSignature,
+          // StoredSignature → the strict spec Signature (device sig or the gateway
+          // placeholder; both ed25519, signer is a 0x-string).
+          kernelSignature: settlementSignature as Signature,
           createdAt: now,
         });
         ipfsCid = archiveResult.cid;
@@ -1150,7 +1152,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           const mockResult = await mockStorage.archiveBundle({
             id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
             assuranceTier: jobAssuranceTier, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
-            kernelSignature: settlementSignature,
+            kernelSignature: settlementSignature as Signature,
             createdAt: now,
           });
           ipfsCid = mockResult.cid;
