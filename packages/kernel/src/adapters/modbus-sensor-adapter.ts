@@ -74,6 +74,8 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
       deviceType: "plc",
       kernelId: config.kernelId,
       firmwareVersion: `Modbus-Adapter-1.0.0`,
+      // Honesty marker: events from a mock-mode adapter are simulation.
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 
@@ -93,8 +95,10 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
 
   async getStatus(): Promise<MachineStatus> {
     if (this.config.mockMode) return "idle";
-    // In production: try connecting to Modbus host
-    return "idle";
+    // No real Modbus client is wired — this adapter has never opened a socket
+    // to the host. Reporting "idle" claimed a never-contacted device was
+    // reachable and healthy. "offline" is the honest value.
+    return "offline";
   }
 
   // ── SensorAdapter ──────────────────────────────────────────────────
@@ -134,6 +138,17 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
       this.pollTimer = null;
     }
 
+    if (!this.config.mockMode) {
+      // FAIL LOUD (symmetry with startRecording): in real mode nothing was
+      // ever recorded, so returning a sensor_data_summary event — even an
+      // empty one — fabricates the shape of evidence that does not exist.
+      throw new Error(
+        `[modbus-adapter] real-mode read not implemented — no recording ever started for ` +
+          `${this.config.host}:${this.config.port ?? 502}, refusing to emit a fabricated ` +
+          `sensor_data_summary. Set mockMode: true for simulated readings.`,
+      );
+    }
+
     // Compute summary statistics
     const summary: Record<string, { min: number; max: number; mean: number; samples: number }> = {};
     for (const [channel, values] of this.recordedValues) {
@@ -149,7 +164,9 @@ export class ModbusSensorAdapter implements SensorAdapter, UniversalSensorAdapte
       type: "sensor_data_summary",
       timestamp: new Date().toISOString(),
       source: this.source,
-      payload: { summary },
+      // mock: true — this summary is simulation data (mock mode is the only
+      // path that reaches here).
+      payload: { summary, mock: true },
     };
   }
 
