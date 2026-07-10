@@ -33,6 +33,10 @@ export class MockFDMAdapter implements MachineAdapter {
       deviceType: "controller",
       kernelId,
       firmwareVersion: "MockFDM-1.0.0",
+      // Honesty marker: this adapter is a simulator by construction. Every
+      // event it emits is fabricated-by-design and must be machine-detectable
+      // as such (see also payload.mock in emit()).
+      simulated: true,
     };
   }
 
@@ -144,8 +148,10 @@ export class MockFDMAdapter implements MachineAdapter {
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
+    // Single tag point: every event from this simulator carries payload.mock.
+    const tagged = { ...event, payload: { ...event.payload, mock: true } };
     for (const listener of this.listeners) {
-      listener(event);
+      listener(tagged);
     }
   }
 

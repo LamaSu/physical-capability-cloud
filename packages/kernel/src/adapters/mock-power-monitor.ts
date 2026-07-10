@@ -33,6 +33,8 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
       deviceType: "power_monitor",
       kernelId,
       firmwareVersion: "MockCT-1.0.0",
+      // Honesty marker: simulator by construction (see also payload.mock).
+      simulated: true,
     };
   }
 
@@ -83,6 +85,7 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
         peakWatts: Math.round(peakWatts * 100) / 100,
         totalWh: Math.round(totalWh * 100) / 100,
         profile: this.samples.map((s) => s.watts),
+        mock: true,
       },
     };
 
@@ -111,8 +114,10 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
+    // Single tag point: every event from this simulator carries payload.mock.
+    const tagged = { ...event, payload: { ...event.payload, mock: true } };
     for (const listener of this.listeners) {
-      listener(event);
+      listener(tagged);
     }
   }
 }
