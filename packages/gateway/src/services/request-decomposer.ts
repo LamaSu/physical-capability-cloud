@@ -784,6 +784,15 @@ function calculateParallelTracks(nodes: CapabilityNode[]): string[][] {
 /**
  * Decompose a capability request into a dependency DAG.
  * Scales costs and hours to fit the request budget and urgency.
+ *
+ * NOTE (coord 954b8361 — compose facade wiring): this is a pure template-to-DAG
+ * planner. It emits the work breakdown with `assignedOperator: undefined`;
+ * operators bind later at bounty-claim time, so there is no candidate-SELECTION
+ * step here to route through CapabilityFacade (unlike compose.ts, whose
+ * `facadeProvider` picks a concrete capability instance per step). Pre-binding
+ * operators per node would change this planner's semantics, so facade wiring is
+ * intentionally deferred — mirror compose.ts's `facadeProvider` if per-node
+ * operator pre-binding is ever required.
  */
 export interface DecomposeOptions {
   /**
