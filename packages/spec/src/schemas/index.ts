@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EVIDENCE_DEVICE_TYPES } from "../types/evidence.js";
 
 // ============================================================
 // Common Schemas
@@ -106,10 +107,11 @@ export const EvidenceEventTypeSchema = z.enum([
 
 export const EvidenceSourceSchema = z.object({
   deviceId: z.string(),
-  deviceType: z.enum([
-    "controller", "camera", "power_monitor", "vibration_sensor",
-    "acoustic_sensor", "temperature_sensor", "tee", "courier_api", "human",
-  ]),
+  // Derived from the TS union's single source of truth (types/evidence.ts
+  // EVIDENCE_DEVICE_TYPES) — this enum had drifted to 9 hand-listed values
+  // while the TS type grew to 26, so sila / modbus / opentrons / instrument
+  // events failed EvidenceEventSchema.parse wherever it was enforced.
+  deviceType: z.enum(EVIDENCE_DEVICE_TYPES),
   kernelId: z.string(),
   firmwareVersion: z.string().optional(),
   // Fabricated-by-design marker (mock/simulated adapters). Kept in the schema

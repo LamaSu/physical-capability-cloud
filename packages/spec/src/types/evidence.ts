@@ -83,16 +83,33 @@ export type EvidenceEventType =
   | "capture_multi_sensor_fusion"
   | "capture_anchor_committed";
 
+/**
+ * The single source of truth for evidence-source device types.
+ *
+ * The zod mirror (`schemas/index.ts` EvidenceSourceSchema.deviceType) derives
+ * its enum from THIS array, so the TS union and the runtime validator can
+ * never drift again. (They had drifted: the zod enum listed only the first 9
+ * values, so sila / modbus / opentrons / instrument events failed
+ * EvidenceEventSchema.parse wherever it was enforced — see
+ * ai/research/evidence-oracle-fabrication-detection-handoff.md §6.)
+ */
+export const EVIDENCE_DEVICE_TYPES = [
+  "controller", "camera", "photo-camera", "power_monitor", "vibration_sensor",
+  "acoustic_sensor", "temperature_sensor", "tee", "courier_api", "human",
+  "instrument", "chromatograph", "bioreactor", "autosampler",
+  "spectrometer", "thermal_camera", "force_sensor", "flow_sensor",
+  "ph_sensor", "gas_analyzer", "plc", "robot_arm",
+  "pcb_placer", "gateway_bridge",
+  "digital_agent", "workflow_engine",
+] as const;
+
+/** A device type that can appear on an EvidenceSource. */
+export type EvidenceDeviceType = (typeof EVIDENCE_DEVICE_TYPES)[number];
+
 /** Source device that produced an evidence event */
 export interface EvidenceSource {
   deviceId: Id;
-  deviceType: "controller" | "camera" | "photo-camera" | "power_monitor" | "vibration_sensor" |
-              "acoustic_sensor" | "temperature_sensor" | "tee" | "courier_api" | "human" |
-              "instrument" | "chromatograph" | "bioreactor" | "autosampler" |
-              "spectrometer" | "thermal_camera" | "force_sensor" | "flow_sensor" |
-              "ph_sensor" | "gas_analyzer" | "plc" | "robot_arm" |
-              "pcb_placer" | "gateway_bridge" |
-              "digital_agent" | "workflow_engine";
+  deviceType: EvidenceDeviceType;
   kernelId: Id;
   firmwareVersion?: string;
   /**
