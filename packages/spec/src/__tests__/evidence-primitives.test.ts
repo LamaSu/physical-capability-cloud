@@ -24,12 +24,16 @@ import fdmRaw from "../csds/fdm.csd.json" with { type: "json" };
 import courierRouteRaw from "../csds/courier-route.csd.json" with { type: "json" };
 import hotFoodPrepRaw from "../csds/hot-food-prep.csd.json" with { type: "json" };
 
-// The four primitives with machinery already built/wired (verifier "live").
+// The primitives with machinery already built/wired (verifier "live").
+// v1 first-class (4) + two settlement-verified additions (gateway #230
+// signing-key registration + pcc-oracle #13 machine-log chain auth).
 const LIVE_FIRST_CLASS = [
   "approval.payer",
   "receipt.kernel_signed",
   "confirm.execution_mode",
   "decl.self_attested",
+  "ident.registered_key",
+  "machine.execution_log",
 ];
 
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
@@ -77,7 +81,7 @@ describe("evidence vocabulary — registry validates", () => {
     expect(decl.tierSupport.map((t) => t.tier)).toEqual([0]);
   });
 
-  it("the four first-class primitives are verifier 'live'; the rest are 'stub'", () => {
+  it("the LIVE_FIRST_CLASS primitives are verifier 'live'; the rest are 'stub'", () => {
     for (const id of LIVE_FIRST_CLASS) {
       expect(getPrimitive(id)?.verifierStatus).toBe("live");
     }
@@ -409,14 +413,20 @@ const INDUSTRIAL_IDS = [
 ];
 
 describe("v1.5-industrial — the four sensor/machine-log primitives", () => {
-  it("all four are registered, active, and stub-verifier (fail-closed until the oracle binds them)", () => {
+  it("all four are registered and active; #52 is now verifier 'live', the rest stay 'stub'", () => {
     for (const id of INDUSTRIAL_IDS) {
       const def = getPrimitive(id);
       expect(def, id).toBeDefined();
       expect(def!.status).toBe("active");
-      // Machinery is live/extracted, but the ORACLE binding is the settlement
-      // lane's work — so verifierStatus stays "stub" (fail-closed, spec §8).
-      expect(def!.verifierStatus).toBe("stub");
+      if (id === "machine.execution_log") {
+        // #52 — oracle binding shipped (gateway #230 signingAddress persistence +
+        // pcc-oracle #13 #47/#52 resolver+wiring); verifierStatus flipped live.
+        expect(def!.verifierStatus).toBe("live");
+      } else {
+        // Machinery is live/extracted, but the ORACLE binding is the settlement
+        // lane's work — so verifierStatus stays "stub" (fail-closed, spec §8).
+        expect(def!.verifierStatus).toBe("stub");
+      }
     }
   });
 
@@ -497,14 +507,14 @@ describe("v1.5-industrial — a sensor/machine-log CSD is tier-eligible via the 
     },
   };
 
-  it("is tier-2 eligible in report-only mode, carried by #52 + #53", () => {
+  it("is tier-2 eligible in report-only mode, carried by #53 (#52 is now verifier 'live')", () => {
     const report = computeCsdEligibility(sensorCsd);
     expect(report.verdict).toBe("ELIGIBLE");
     expect(report.eligibleTier).toBe(2);
     for (const t of report.perTier) expect(t.eligible).toBe(true);
-    // The new primitives are what carry it: present + stub-advisory at tier 1.
+    // #52 machine.execution_log flipped to verifier "live" (gateway #230 +
+    // pcc-oracle #13); #53 telemetry.envelope_conformance remains stub-advisory.
     const tier1 = report.perTier.find((t) => t.tier === 1)!;
-    expect(tier1.stubVerifierPrimitives).toContain("machine.execution_log");
     expect(tier1.stubVerifierPrimitives).toContain("telemetry.envelope_conformance");
   });
 
