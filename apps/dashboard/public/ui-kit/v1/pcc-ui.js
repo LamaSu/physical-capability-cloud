@@ -576,7 +576,13 @@
     if (ctx.mode === 'snapshot') {
       var snap = ctx.snapshot[w.binding.path];
       apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom));
-      pill.textContent = String(dot(snap, w.statusFrom) != null ? dot(snap, w.statusFrom) : 'snapshot');
+      var stat = dot(snap, w.statusFrom);
+      pill.textContent = String(stat != null ? stat : 'snapshot');
+      var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
+      if (Array.isArray(tl) && tl.length) {
+        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' · ' : '') + (tl[ti].type || ''));
+        latest.textContent = String(tl[tl.length - 1].type || latest.textContent); // last event = latest truth
+      }
       wrap._setFoot(null, true);
       clearInterval(tick); elapsed.textContent = '';
       return wrap;
