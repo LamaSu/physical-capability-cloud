@@ -110,12 +110,36 @@ export class IppAdapter implements MachineAdapter {
       deviceType: "controller",
       kernelId: config.kernelId,
       firmwareVersion: "IPP-Adapter-1.0.0",
+      // Honesty marker: declared mock mode is simulation. (The real->mock
+      // auto-downgrade also sets this at the moment it is detected — see
+      // tryLoadIpp / noteMockRouting.)
+      ...(config.mockMode ? { simulated: true } : {}),
     };
 
     // Attempt to load real IPP library unless mockMode is forced
     if (!config.mockMode) {
       this.tryLoadIpp();
     }
+  }
+
+  /**
+   * Surface the real->mock downgrade. An operator who set mockMode:false
+   * expects real IPP traffic; when the optional `ipp` package is missing (or
+   * still loading) every method silently routes to the mock branch. The
+   * events are payload-tagged mock:true, but the downgrade itself must be
+   * visible in logs and on the source marker — not discovered from bundles.
+   */
+  private warnedMockRouting = false;
+  private noteMockRouting(context: string): void {
+    this.source.simulated = true;
+    if (this.warnedMockRouting) return;
+    this.warnedMockRouting = true;
+    console.warn(
+      `[ipp-adapter] device "${this.id}" was configured mockMode:false but is serving MOCK ` +
+        `responses (${context}) — the optional 'ipp' npm package is not loaded/installed. ` +
+        `All emitted evidence is simulation (payload.mock:true, source.simulated:true). ` +
+        `Install the 'ipp' package for real printing to ${this.config.uri}.`,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -377,8 +401,10 @@ export class IppAdapter implements MachineAdapter {
       this.ippClient = mod;
       this.ippAvailable = true;
     }).catch(() => {
-      // ipp not available — fall back to mock
+      // ipp not available — fall back to mock, LOUDLY: the operator asked for
+      // real mode and is getting a simulator instead.
       this.ippAvailable = false;
+      this.noteMockRouting("optional 'ipp' package failed to import");
     });
   }
 

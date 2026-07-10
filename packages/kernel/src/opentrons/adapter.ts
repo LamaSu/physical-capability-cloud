@@ -49,6 +49,8 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       deviceId: id,
       deviceType: "instrument" as const,
       kernelId: id.split("-")[0] ?? id,
+      // Honesty marker: events from a mock-mode adapter are simulation.
+      ...(this.config.mockMode ? { simulated: true } : {}),
     };
   }
 
@@ -441,17 +443,18 @@ export class OpentronsMachineAdapter implements MachineAdapter {
           this.emitEvidence("run_progress", {
             runId: this.currentRunId,
             progress: this.mockProgress,
+            mock: true,
           });
 
           if (this.mockProgress >= 100) {
             if (this.mockInterval) clearInterval(this.mockInterval);
             this.mockInterval = null;
             this.mockStatus = "idle";
-            this.emitEvidence("run_completed", { runId: this.currentRunId });
+            this.emitEvidence("run_completed", { runId: this.currentRunId, mock: true });
           }
         }, 1000);
 
-        this.emitEvidence("run_started", { runId: this.currentRunId });
+        this.emitEvidence("run_started", { runId: this.currentRunId, mock: true });
         return { success: true, data: { runId: this.currentRunId } };
       }
 

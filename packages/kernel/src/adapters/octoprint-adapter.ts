@@ -61,6 +61,8 @@ export class OctoPrintAdapter implements MachineAdapter {
       deviceType: "controller",
       kernelId: config.kernelId,
       firmwareVersion: "OctoPrint-Adapter-1.0.0",
+      // Honesty marker: events from a mock-mode adapter are simulation.
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 

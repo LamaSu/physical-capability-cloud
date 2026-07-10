@@ -90,6 +90,9 @@ export class PrinterLogAdapter implements SensorAdapter {
   private chainLength = 0;
   private latestEntryHash: string | null = null;
 
+  /** True when no logProvider was supplied and the simulated script is used. */
+  private readonly usingSimulatedProvider: boolean;
+
   constructor(
     id: string,
     kernelId: string,
@@ -100,13 +103,28 @@ export class PrinterLogAdapter implements SensorAdapter {
     this.logCaptureService = logCaptureService;
     this.logSource = config?.logSource ?? `cups://${id}`;
     this.pollIntervalMs = config?.pollIntervalMs ?? 1000;
+    this.usingSimulatedProvider = !config?.logProvider;
     this.logProvider = config?.logProvider ?? makeSimulatedLogProvider();
+
+    if (this.usingSimulatedProvider) {
+      // Surface the default loudly: without an explicit logProvider this
+      // adapter emits a hash-chained "printer job" evidence stream from a
+      // 4-line SIMULATED script. Tagged below so it can never pass as real.
+      console.warn(
+        `[printer-log-adapter] device "${id}" constructed WITHOUT a logProvider — using the ` +
+          `simulated log script. All log_hash_chain_entry / printer_job_verified evidence will ` +
+          `be simulation (payload.mock:true, source.simulated:true). Pass config.logProvider ` +
+          `to capture real printer logs.`,
+      );
+    }
 
     this.source = {
       deviceId: id,
       deviceType: "controller",
       kernelId,
       firmwareVersion: "PrinterLogAdapter-1.0.0",
+      // Honesty marker: simulated default provider => simulation evidence.
+      ...(this.usingSimulatedProvider ? { simulated: true } : {}),
     };
   }
 
@@ -172,6 +190,9 @@ export class PrinterLogAdapter implements SensorAdapter {
         tailHash,
         logSource: this.logSource,
         summary: `Printer job ${this.jobId ?? "unknown"} completed with ${chainLength} hash-chained log entries`,
+        // Honesty marker: a "verified" printer job from the simulated script
+        // must be machine-detectable as simulation.
+        ...(this.usingSimulatedProvider ? { mock: true } : {}),
       },
     };
 
@@ -235,6 +256,8 @@ export class PrinterLogAdapter implements SensorAdapter {
         deviceId: this.logSource,
         deviceType: "gateway_bridge",
         kernelId: this.source.kernelId,
+        // Honesty marker: entries from the simulated script are simulation.
+        ...(this.usingSimulatedProvider ? { simulated: true } : {}),
       },
       payload: {
         jobId: this.jobId,
@@ -244,6 +267,7 @@ export class PrinterLogAdapter implements SensorAdapter {
         rawContent: entry.rawContent,
         capturedAt: entry.capturedAt,
         kernelSignature: entry.kernelSignature,
+        ...(this.usingSimulatedProvider ? { mock: true } : {}),
       },
     };
 

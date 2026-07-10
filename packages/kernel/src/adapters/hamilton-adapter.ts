@@ -91,6 +91,8 @@ export class HamiltonAdapter implements MachineAdapter {
       deviceType: "instrument",
       kernelId: config.kernelId,
       firmwareVersion: "Hamilton-MLPrep-Adapter-1.0.0",
+      // Honesty marker: events from a mock-mode adapter are simulation.
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 
