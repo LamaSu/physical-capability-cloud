@@ -105,10 +105,17 @@ describe("createMachineAdapter", () => {
     expect(adapter.type).toBe("liquid-handler");
   });
 
-  it("falls back to mock for unknown adapterType", () => {
-    const adapter = createMachineAdapter(machineDevice("generic-http"));
+  it("throws for 'generic-http' instead of silently aliasing to mock", () => {
+    // generic-http used to hand back a MockFDMAdapter whose fabricated events
+    // entered signed evidence bundles. It must now fail loud at creation.
+    expect(() => createMachineAdapter(machineDevice("generic-http"))).toThrow(
+      /generic-http.*not implemented/i,
+    );
+  });
+
+  it("still allows generic-http under globalMockMode (explicit simulation)", () => {
+    const adapter = createMachineAdapter(machineDevice("generic-http"), true);
     expect(adapter).toBeDefined();
-    // Mock FDM adapter type
     expect(adapter.type).toBe("fdm");
   });
 
@@ -204,9 +211,10 @@ describe("createCameraAdapter", () => {
     expect(typeof adapter.dispose).toBe("function");
   });
 
-  it("falls back to mock for all adapterTypes (no real camera adapters yet)", () => {
-    const adapter = createCameraAdapter(cameraDevice("generic-http"));
-    expect(adapter).toBeDefined();
+  it("throws for 'generic-http' instead of silently aliasing to mock", () => {
+    expect(() => createCameraAdapter(cameraDevice("generic-http"))).toThrow(
+      /generic-http.*not implemented/i,
+    );
   });
 
   it("forces mock when globalMockMode=true", () => {
@@ -469,17 +477,17 @@ describe("registerMachineAdapter / unregisterMachineAdapter", () => {
     expect(() => unregisterMachineAdapter("never_registered_xyz")).not.toThrow();
   });
 
-  it("after unregistering, createMachineAdapter falls back to mock", () => {
-    // Note: this type was NEVER registered, so it should hit the fallback path
-    const adapter = createMachineAdapter({
-      id: "fallback_id",
-      type: "machine",
-      adapterType: "never_registered_xyz",
-      config: { kernelId: "kernel_test" },
-    });
-    expect(adapter).toBeDefined();
-    // Mock FDM adapter
-    expect(adapter.type).toBe("fdm");
+  it("unregistered adapterType fails loud (no silent mock fallback)", () => {
+    // Note: this type was NEVER registered. A typo'd type must produce a
+    // config error naming the type — not a mock adapter minting evidence.
+    expect(() =>
+      createMachineAdapter({
+        id: "fallback_id",
+        type: "machine",
+        adapterType: "never_registered_xyz",
+        config: { kernelId: "kernel_test" },
+      }),
+    ).toThrow(/never_registered_xyz/);
   });
 
   it("listRegisteredMachineAdapters includes built-ins", () => {
@@ -607,15 +615,15 @@ describe("registerSensorAdapter / unregisterSensorAdapter", () => {
     expect(list).toEqual(sorted);
   });
 
-  it("unknown sensor adapterType falls back to mock", () => {
-    const adapter = createSensorAdapter({
-      id: "fallback_sensor",
-      type: "sensor",
-      adapterType: "unknown_sensor_type",
-      config: { kernelId: "kernel_test" },
-    });
-    expect(adapter).toBeDefined();
-    expect(adapter.type).toBe("power_monitor");
+  it("unknown sensor adapterType fails loud (no silent mock fallback)", () => {
+    expect(() =>
+      createSensorAdapter({
+        id: "fallback_sensor",
+        type: "sensor",
+        adapterType: "unknown_sensor_type",
+        config: { kernelId: "kernel_test" },
+      }),
+    ).toThrow(/unknown_sensor_type/);
   });
 });
 

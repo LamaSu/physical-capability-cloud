@@ -68,7 +68,26 @@ export class SiLAAdapter {
       deviceType: "instrument",
       kernelId: config.kernelId,
       firmwareVersion: "SiLA2-Adapter-1.0.0",
+      // Honesty marker: every event from a mock-mode instrument is simulation.
+      ...(this.config.mock ? { simulated: true } : {}),
     };
+  }
+
+  /**
+   * FAIL LOUD in real mode. No SiLA 2 client transport (HTTP/2 + protobuf)
+   * exists in this build — every code path below the mock flag fabricates
+   * assay, QC, calibration, and regulatory-compliance data. A real-mode
+   * caller must get a refusal, never fabricated wet-lab evidence: these
+   * events flow through onEvidence straight into signed evidence bundles.
+   */
+  private assertMockOnly(operation: string): void {
+    if (!this.config.mock) {
+      throw new Error(
+        `[sila-adapter] ${operation} not implemented for real SiLA 2 servers — no SiLA 2 transport ` +
+          `exists in this build; refusing to fabricate assay/QC/compliance evidence for ` +
+          `${this.config.silaServerUrl}. Set mock: true for explicit, tagged simulation.`,
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -82,10 +101,9 @@ export class SiLAAdapter {
 
   /** Get current device status */
   async getStatus(): Promise<SiLADevice> {
-    if (!this.config.mock) {
-      // Production: query SiLA 2 server status via ServerType feature
-      // For now, fall through to mock response
-    }
+    // Real mode: refuse — a canned device descriptor would claim features and
+    // liveness for an instrument this process has never contacted.
+    this.assertMockOnly("getStatus");
 
     return {
       id: this.id,
@@ -108,9 +126,11 @@ export class SiLAAdapter {
    * Query SiLA device features and map them to PCCP capability types.
    */
   async getCapabilities(): Promise<LabCapability[]> {
-    if (!this.config.mock) {
-      // Production: enumerate SiLA 2 features, map to LabCapability
-    }
+    // Real mode: refuse. Asserting regulatory compliance ("GLP",
+    // "21_CFR_Part_11", "GMP", "ISO_17025") for an instrument that was never
+    // queried is a fabricated compliance claim. In mock mode every entry is
+    // tagged simulated:true so no bare compliance claim leaves a simulator.
+    this.assertMockOnly("getCapabilities");
 
     return [
       {
@@ -120,6 +140,7 @@ export class SiLAAdapter {
         precision_cv: 2.5,
         plateFormats: [96, 384],
         compliance: ["GLP", "21_CFR_Part_11"],
+        simulated: true,
       },
       {
         capabilityType: "serial_dilution",
@@ -128,6 +149,7 @@ export class SiLAAdapter {
         precision_cv: 1.8,
         plateFormats: [96, 384],
         compliance: ["GLP", "GMP"],
+        simulated: true,
       },
       {
         capabilityType: "cherry_picking",
@@ -136,6 +158,7 @@ export class SiLAAdapter {
         precision_cv: 3.0,
         plateFormats: [96, 384, 1536],
         compliance: ["GLP"],
+        simulated: true,
       },
       {
         capabilityType: "sample_normalization",
@@ -144,6 +167,7 @@ export class SiLAAdapter {
         precision_cv: 2.0,
         plateFormats: [96, 384],
         compliance: ["GLP", "ISO_17025"],
+        simulated: true,
       },
       {
         capabilityType: "pcr_stamping",
@@ -152,6 +176,7 @@ export class SiLAAdapter {
         precision_cv: 1.5,
         plateFormats: [96, 384],
         compliance: ["GLP"],
+        simulated: true,
       },
     ];
   }
@@ -162,6 +187,9 @@ export class SiLAAdapter {
    */
   async executeAssay(config: AssayRunConfig): Promise<AssayResult> {
     this.assertNotDisposed();
+    // Real mode: refuse — everything below fabricates per-well instrument
+    // results and QC verdicts and emits them into the evidence pipeline.
+    this.assertMockOnly("executeAssay");
     this.status = "busy";
 
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -260,6 +288,8 @@ export class SiLAAdapter {
    */
   async executeFailingAssay(config: AssayRunConfig): Promise<AssayResult> {
     this.assertNotDisposed();
+    // Real mode: refuse — simulated failure narratives are still fabrication.
+    this.assertMockOnly("executeFailingAssay");
     this.status = "busy";
 
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -317,6 +347,9 @@ export class SiLAAdapter {
    */
   async collectCalibrationEvidence(): Promise<Array<Omit<EvidenceEvent, "id" | "hash">>> {
     this.assertNotDisposed();
+    // Real mode: refuse — gravimetric calibration_record events with passed:
+    // verdicts below are generated from Math.random(), not a balance.
+    this.assertMockOnly("collectCalibrationEvidence");
 
     const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
     const channels = 8;
@@ -350,6 +383,7 @@ export class SiLAAdapter {
           temperature_C: 25.0,
           replicates: 10,
           passed: error_percent < 1.0,
+          mock: true,
         },
       };
       events.push(event);
@@ -380,13 +414,18 @@ export class SiLAAdapter {
     }
   }
 
-  /** Emit an evidence event to all listeners */
+  /**
+   * Emit an evidence event to all listeners.
+   * Mock-mode events are tagged payload.mock:true (real mode never reaches an
+   * emit today — assertMockOnly refuses first — but the tag is conditional so
+   * a future real transport emits untagged real data).
+   */
   private emit(type: string, payload: Record<string, unknown>): void {
     const event: Omit<EvidenceEvent, "id" | "hash"> = {
       type: type as EvidenceEvent["type"],
       timestamp: new Date().toISOString(),
       source: this.source,
-      payload,
+      payload: this.config.mock ? { ...payload, mock: true } : payload,
     };
     for (const cb of this.listeners) {
       try { cb(event); } catch { /* ignore callback errors */ }

@@ -14,6 +14,13 @@
  *
  * In production: use node-opcua npm package.
  * In development: built-in mock mode.
+ *
+ * NOTE: real OPC-UA writes are NOT wired yet. In real mode (mockMode falsy)
+ * the actuation commands (load_gcode / start / stop) FAIL LOUDLY with
+ * success:false instead of pretending the machine acted — see execute().
+ * The READ path is equally honest: getStatus() reports "offline" (never a
+ * fabricated "idle"), and getProgress() / execute(status) fail loudly
+ * instead of returning fabricated zeros.
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
@@ -89,6 +96,8 @@ export class OPCUAAdapter implements MachineAdapter {
       deviceType: "controller",
       kernelId: config.kernelId,
       firmwareVersion: "OPCUA-Adapter-1.0.0",
+      // Honesty marker: events from a mock-mode adapter are simulation.
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 
@@ -98,61 +107,78 @@ export class OPCUAAdapter implements MachineAdapter {
         : this.mockState.alarmActive ? "error"
         : "idle";
     }
-    // In production: read CNC status node
-    return "idle";
+    // No OPC-UA client is wired (node-opcua pending), so this adapter has
+    // NEVER contacted the machine. Reporting "idle" here made a phantom CNC
+    // show healthStatus:"healthy" in the devices/health APIs. "offline" is
+    // the honest value for a device we cannot observe.
+    return "offline";
   }
 
   async getProgress(): Promise<number> {
     if (this.config.mockMode) return this.mockState.programProgress;
-    // In production: read program progress node
-    return 0;
+    // FAIL LOUD: no live progress node is readable. The previous hardcoded 0
+    // was a plausible-looking fabricated read.
+    throw new Error(
+      `[opcua-adapter] real-mode read not implemented — no progress value is available from ` +
+        `${this.config.endpoint}. Set mockMode: true for simulated progress.`,
+    );
   }
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.config.mockMode) return this.executeMock(command);
 
-    // In production: write to OPC-UA command nodes
+    // Real OPC-UA writes are NOT implemented (node-opcua wiring pending).
+    // FAIL LOUD: a real-mode actuation command that sent nothing to the machine
+    // must never report success, and must not emit evidence events for actions
+    // that did not happen. ("Executor success ≠ outcome success" must not be
+    // inverted inside the adapter.) Set mockMode: true for simulated execution.
     switch (command.type) {
       case "load_gcode": {
-        // Write program name to CNC controller
+        // Pending real wiring:
         // await this.writeNode("CNC.ProgramName", command.payload?.filename);
-        this.emit({
-          type: "gcode_received",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: { filename: command.payload?.filename },
-        });
-        return { success: true, message: "Program loaded" };
+        return {
+          success: false,
+          message:
+            `OPC-UA write not implemented — the program was NOT sent to ${this.config.endpoint}. ` +
+            `Real node-opcua wiring is pending; set mockMode: true for simulated execution.`,
+        };
       }
 
       case "start": {
-        // Write CycleStart to command node
+        // Pending real wiring:
         // await this.writeNode("CNC.CycleStart", true);
-        this.startPolling();
-        this.emit({
-          type: "execution_started",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: {},
-        });
-        return { success: true, message: "Cycle started" };
+        return {
+          success: false,
+          message:
+            `OPC-UA write not implemented — CycleStart was NOT sent to ${this.config.endpoint}. ` +
+            `Real node-opcua wiring is pending; set mockMode: true for simulated execution.`,
+        };
       }
 
       case "stop": {
-        // Write FeedHold or CycleStop
+        // Pending real wiring:
         // await this.writeNode("CNC.CycleStop", true);
+        // Local poll cleanup is real; the machine command is not.
         this.stopPolling();
-        return { success: true, message: "Cycle stopped" };
+        return {
+          success: false,
+          message:
+            `OPC-UA write not implemented — CycleStop was NOT sent to ${this.config.endpoint}; ` +
+            `if the machine is running it has NOT been stopped (use the physical e-stop). ` +
+            `Real node-opcua wiring is pending; set mockMode: true for simulated execution.`,
+        };
       }
 
       case "status": {
+        // FAIL LOUD: previously returned success:true with fabricated zeros
+        // (spindleSpeed/feedRate/position all 0) — confident zeroed telemetry
+        // indistinguishable from a real idle machine. No node reads exist yet.
         return {
-          success: true,
-          data: {
-            spindleSpeed: 0,
-            feedRate: 0,
-            position: { x: 0, y: 0, z: 0 },
-          },
+          success: false,
+          message:
+            `OPC-UA read not implemented — no live node values are available from ` +
+            `${this.config.endpoint}. Real node-opcua wiring is pending; set mockMode: true ` +
+            `for simulated status.`,
         };
       }
 

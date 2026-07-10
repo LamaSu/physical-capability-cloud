@@ -95,6 +95,15 @@ export interface EvidenceSource {
               "digital_agent" | "workflow_engine";
   kernelId: Id;
   firmwareVersion?: string;
+  /**
+   * True when the emitting adapter is a mock/simulated device or is running
+   * in mock mode — i.e. every event from this source is fabricated-by-design
+   * simulation data, NOT a reading from physical hardware. Detector layers
+   * (ALCOA authenticity, oracle attestation) must treat evidence carrying
+   * `source.simulated: true` (or `payload.mock: true`) as non-authentic.
+   * Absent/undefined means the adapter claims to be real hardware.
+   */
+  simulated?: boolean;
 }
 
 /** A single evidence event — one signal from one source */

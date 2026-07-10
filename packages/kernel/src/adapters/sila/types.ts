@@ -147,4 +147,10 @@ export interface LabCapability {
   precision_cv: number;
   plateFormats: PlateFormat[];
   compliance: ComplianceStandard[];
+  /**
+   * True when this capability descriptor comes from a mock/simulated adapter
+   * rather than a live instrument query. Compliance claims on a simulated
+   * entry describe what the SIMULATION advertises, not a verified instrument.
+   */
+  simulated?: boolean;
 }

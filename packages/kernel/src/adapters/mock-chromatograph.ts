@@ -29,6 +29,8 @@ export class MockChromatograph implements UniversalSensorAdapter {
       deviceType: "chromatograph",
       kernelId,
       firmwareVersion: "mock-hplc-1.0",
+      // Honesty marker: simulator by construction (see also payload.mock).
+      simulated: true,
     };
   }
 
@@ -178,7 +180,8 @@ export class MockChromatograph implements UniversalSensorAdapter {
       type: type as EvidenceEvent["type"],
       timestamp: new Date().toISOString(),
       source: this.source,
-      payload,
+      // Single tag point: every event from this simulator carries payload.mock.
+      payload: { ...payload, mock: true },
     };
     for (const cb of this.evidenceCallbacks) {
       try { cb(event); } catch { /* ignore */ }

@@ -24,6 +24,10 @@ export class MockCameraAdapter implements CameraAdapter {
       deviceType: "camera",
       kernelId,
       firmwareVersion: "MockCam-1.0.0",
+      // Honesty marker: simulator by construction (see also payload.mock).
+      // Its imageHash is 64 random hex chars addressing NO stored content and
+      // its cv_inspection_result verdicts are Math.random() rolls.
+      simulated: true,
     };
   }
 
@@ -100,8 +104,10 @@ export class MockCameraAdapter implements CameraAdapter {
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
+    // Single tag point: every event from this simulator carries payload.mock.
+    const tagged = { ...event, payload: { ...event.payload, mock: true } };
     for (const listener of this.listeners) {
-      listener(event);
+      listener(tagged);
     }
   }
 }

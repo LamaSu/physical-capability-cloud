@@ -112,6 +112,9 @@ export const EvidenceSourceSchema = z.object({
   ]),
   kernelId: z.string(),
   firmwareVersion: z.string().optional(),
+  // Fabricated-by-design marker (mock/simulated adapters). Kept in the schema
+  // so schema-validated round-trips do not strip the honesty tag.
+  simulated: z.boolean().optional(),
 });
 
 export const EvidenceEventSchema = z.object({
