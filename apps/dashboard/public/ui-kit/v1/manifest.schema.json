@@ -1,0 +1,187 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://capability.network/ui-kit/v1/manifest.schema.json",
+  "title": "PCC Dashboard Manifest",
+  "description": "JSON-Schema mirror of @pcc/spec DashboardManifestSchema (packages/spec/src/types/ui-artifact.ts). The small declarative dashboard a person's LLM emits; the pcc-ui kit renders it. Windows are a closed set rendered textContent-only. Actions never carry confirm:\"none\" (a human click is the confirm step). A manifest must NOT contain an API key (pcc_live_/pcc_test_) anywhere — a shared artifact travels with its contents.",
+  "type": "object",
+  "required": ["csd", "title", "sections"],
+  "additionalProperties": false,
+  "properties": {
+    "csd": {
+      "const": "pcc://artifacts/dashboard/v1",
+      "description": "The builtin CSD URI this manifest conforms to."
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "api_base": {
+      "type": "string",
+      "description": "Gateway base URL. Default https://capability.network."
+    },
+    "theme": { "enum": ["auto", "dark", "light"] },
+    "sections": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Section" }
+    }
+  },
+  "definitions": {
+    "Binding": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "description": "A live-data binding: which route a window reads, how often, what to pluck.",
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "description": "'/api/…' route the window reads." },
+        "query": { "type": "object", "description": "Query params merged onto the request." },
+        "pollMs": { "type": "integer", "exclusiveMinimum": 0, "description": "Poll cadence in ms (default ~30000)." },
+        "sse": { "type": "string", "minLength": 1, "description": "SSE stream '/sse/stream/…' (fetch-SSE with Bearer)." },
+        "select": { "type": "string", "description": "Dot-path into the response (e.g. 'data.jobs.0.status'). NOT JSONPath." }
+      }
+    },
+    "Action": {
+      "type": "object",
+      "required": ["id", "label", "kind", "path", "confirm", "intentText"],
+      "additionalProperties": false,
+      "description": "A write the surface can perform. Fires ONLY on a human click; nothing on load. confirm has NO 'none'. Money verbs use confirm:'approval'.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["post", "patch"] },
+        "path": { "type": "string", "minLength": 1 },
+        "bodyFrom": { "type": "string", "description": "Form id whose collected values become the request body." },
+        "body": { "type": "object", "description": "Static body merged into the request." },
+        "confirm": { "enum": ["inline", "approval"], "description": "'inline' = button confirm; 'approval' = the kit's Approval window. NO 'none'." },
+        "idempotencyFrom": { "type": "string", "description": "Field id supplying an idempotencyKey (required on offer-posting actions)." },
+        "intentText": { "type": "string", "minLength": 1, "description": "Snapshot-mode chip text handed to the LLM (e.g. 'pcc: approve offer …')." }
+      }
+    },
+    "ListItem": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "description": "Dot-path field for each row's title." },
+        "meta": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Dot-path fields for the row's meta line." },
+        "statusFrom": { "type": "string", "description": "Dot-path field for the row's status pill." }
+      }
+    },
+    "ComposeRequest": {
+      "type": "object",
+      "required": ["outcomeType", "budgetUSD", "minAssuranceTier"],
+      "additionalProperties": false,
+      "description": "A re-plannable value-chain request (mirrors @pcc/spec ComposeRequestSchema). Pinned in a chain window, never a compositionId (30-min TTL).",
+      "properties": {
+        "outcomeType": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "steps": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 120 }, "minItems": 1, "maxItems": 20 },
+        "outcomeChain": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 120 }, "minItems": 1, "maxItems": 20 },
+        "budgetUSD": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000 },
+        "minAssuranceTier": { "enum": [0, 1, 2, 3] },
+        "location": {
+          "type": "object",
+          "required": ["lat", "lng"],
+          "additionalProperties": false,
+          "properties": {
+            "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+            "lng": { "type": "number", "minimum": -180, "maximum": 180 },
+            "radiusKm": { "type": "number", "exclusiveMinimum": 0, "maximum": 20000 }
+          }
+        },
+        "optimizeFor": { "enum": ["price", "speed", "quality"] },
+        "requester": {
+          "type": "object",
+          "required": ["agentId"],
+          "additionalProperties": false,
+          "properties": {
+            "agentId": { "type": "string", "minLength": 1 },
+            "did": { "type": "string", "minLength": 1 }
+          }
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      }
+    },
+    "Section": {
+      "type": "object",
+      "required": ["windows"],
+      "additionalProperties": false,
+      "properties": {
+        "heading": { "type": "string" },
+        "windows": { "type": "array", "items": { "$ref": "#/definitions/Window" } }
+      }
+    },
+    "Window": {
+      "oneOf": [
+        {
+          "type": "object", "required": ["kind", "text"], "additionalProperties": false,
+          "properties": { "kind": { "const": "note" }, "text": { "type": "string" } }
+        },
+        {
+          "type": "object", "required": ["kind", "label", "binding"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "metric" },
+            "label": { "type": "string", "minLength": 1 },
+            "binding": { "$ref": "#/definitions/Binding" },
+            "select": { "type": "string" },
+            "format": { "enum": ["usd", "int", "pct", "ts"] }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "binding"], "additionalProperties": false,
+          "properties": { "kind": { "const": "capability" }, "binding": { "$ref": "#/definitions/Binding" } }
+        },
+        {
+          "type": "object", "required": ["kind", "binding", "item"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "list" },
+            "binding": { "$ref": "#/definitions/Binding" },
+            "item": { "$ref": "#/definitions/ListItem" },
+            "limit": { "type": "integer", "exclusiveMinimum": 0 }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "schema", "submit"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "form" },
+            "schema": { "type": "object", "description": "A JSON Schema whose properties become form fields." },
+            "submit": { "$ref": "#/definitions/Action" }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "binding", "statusFrom", "latestFrom"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "run" },
+            "binding": { "$ref": "#/definitions/Binding" },
+            "statusFrom": { "type": "string" },
+            "latestFrom": { "type": "string" }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "binding", "approve"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "approval" },
+            "binding": { "$ref": "#/definitions/Binding" },
+            "approve": { "$ref": "#/definitions/Action" },
+            "deny": { "$ref": "#/definitions/Action" }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "binding"], "additionalProperties": false,
+          "properties": { "kind": { "const": "receipt" }, "binding": { "$ref": "#/definitions/Binding" } }
+        },
+        {
+          "type": "object", "required": ["kind", "composeRef"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "chain" },
+            "composeRef": { "$ref": "#/definitions/ComposeRequest" },
+            "execute": { "$ref": "#/definitions/Action" }
+          }
+        },
+        {
+          "type": "object", "required": ["kind", "actions"], "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "actions" },
+            "actions": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/Action" } }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,104 @@
+<!doctype html>
+<!--
+  PCC On-Ramp — standalone render shell (ui-kit v1).
+
+  The exportable / file:// twin of the gateway's `/a/:slug` shell: it boots the
+  same `pcc-ui.js` kit against an inlined manifest, adding a header "Connect"
+  field so a person can paste their PCC key once per browser session (held in
+  sessionStorage, never in the DOM or the manifest). Served by the gateway this
+  runs live same-origin; opened from file:// it runs live-cors (needs the key +
+  the wave-4 CORS lane) or falls back to snapshot mode.
+
+  To turn this into a self-contained dashboard: replace the JSON inside
+  <script id="pcc-manifest"> with your manifest (and, for an offline snapshot,
+  add a <script id="pcc-snapshot"> block — see demo-snapshot.html). The single
+  inline script below only wires the Connect field to sessionStorage; it renders
+  no manifest content and uses no innerHTML.
+-->
+<html lang="en" data-pcc-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PCC Dashboard</title>
+  <style>
+    /* Only the header chrome — the kit injects the full visual system. */
+    :root { color-scheme: dark light; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .pcc-shell-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 16px; border-bottom: 1px solid rgba(127,127,127,.18);
+      max-width: 720px; margin: 0 auto; box-sizing: border-box;
+    }
+    .pcc-shell-bar .brand { font-weight: 650; font-size: 14px; opacity: .9; }
+    .pcc-shell-bar .spacer { flex: 1 1 auto; }
+    .pcc-shell-bar input {
+      font: 400 13px/18px system-ui, sans-serif; padding: 6px 10px; border-radius: 8px;
+      border: 1px solid rgba(127,127,127,.3); background: transparent; color: inherit;
+      max-width: 220px;
+    }
+    .pcc-shell-bar button {
+      font: 500 13px/18px system-ui, sans-serif; padding: 6px 12px; border-radius: 8px;
+      border: 1px solid rgba(127,127,127,.4); background: transparent; color: inherit; cursor: pointer;
+    }
+    .pcc-shell-bar .state { font-size: 12px; opacity: .7; }
+  </style>
+</head>
+<body>
+  <div class="pcc-shell-bar">
+    <span class="brand">PCC</span>
+    <span class="spacer"></span>
+    <input id="shell-key" type="password" placeholder="pcc_live_… (paste once)" autocomplete="off" spellcheck="false" aria-label="PCC key">
+    <button id="shell-connect" type="button">Connect</button>
+    <span id="shell-state" class="state"></span>
+  </div>
+
+  <main id="pcc-root" data-slug="">
+    <header>
+      <h1>PCC Dashboard</h1>
+    </header>
+    <p id="pcc-kit-status">Loading the PCC dashboard kit&hellip;</p>
+  </main>
+
+  <!-- Replace this manifest with your own (must conform to manifest.schema.json). -->
+  <script type="application/json" id="pcc-manifest">
+{
+  "csd": "pcc://artifacts/dashboard/v1",
+  "title": "PCC Dashboard",
+  "description": "Replace this manifest with your own.",
+  "theme": "auto",
+  "sections": [
+    { "windows": [ { "kind": "note", "text": "This is the standalone shell. Paste your PCC key above to go live, or inline a snapshot for offline review." } ] }
+  ]
+}
+  </script>
+
+  <!-- Connect field wiring ONLY — no manifest rendering, no innerHTML. -->
+  <script>
+    (function () {
+      'use strict';
+      var STORE = 'pcc.key';
+      var input = document.getElementById('shell-key');
+      var btn = document.getElementById('shell-connect');
+      var state = document.getElementById('shell-state');
+      function refresh() {
+        var has = false;
+        try { has = !!sessionStorage.getItem(STORE); } catch (e) {}
+        state.textContent = has ? 'connected ✓' : 'not connected';
+      }
+      function connect() {
+        var v = (input.value || '').trim();
+        if (!v) return;
+        try { sessionStorage.setItem(STORE, v); } catch (e) {}
+        input.value = ''; // never keep the key in the DOM
+        refresh();
+        location.reload(); // re-boot the kit in a live mode
+      }
+      btn.addEventListener('click', connect);
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') connect(); });
+      refresh();
+    })();
+  </script>
+
+  <script src="./pcc-ui.js" defer></script>
+</body>
+</html>

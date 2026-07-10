@@ -1,0 +1,42 @@
+{
+  "csd": "pcc://artifacts/dashboard/v1",
+  "title": "Operator console",
+  "description": "A kernel operator's at-a-glance: balance, active jobs, and the recent job list.",
+  "theme": "auto",
+  "sections": [
+    {
+      "heading": "At a glance",
+      "windows": [
+        {
+          "kind": "metric",
+          "label": "Wallet balance",
+          "binding": { "path": "/api/fiat-ramp/wallet/balance" },
+          "select": "balance",
+          "format": "usd"
+        },
+        {
+          "kind": "metric",
+          "label": "Active jobs",
+          "binding": { "path": "/api/jobs", "query": { "status": "in_progress" } },
+          "select": "jobs.length",
+          "format": "int"
+        }
+      ]
+    },
+    {
+      "heading": "Recent jobs",
+      "windows": [
+        {
+          "kind": "list",
+          "binding": { "path": "/api/jobs", "select": "jobs" },
+          "item": {
+            "title": "capabilityType",
+            "meta": ["kernelName", "createdAt"],
+            "statusFrom": "status"
+          },
+          "limit": 10
+        }
+      ]
+    }
+  ]
+}
