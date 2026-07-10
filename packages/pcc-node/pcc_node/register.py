@@ -11,8 +11,70 @@ import time
 
 from .http_util import pcc_request
 from .crypto import sign_announcement
+from .log_capture import sign_ed25519_utf8, LogSigningRefused
 
 log = logging.getLogger("pcc-node.register")
+
+
+def kernel_signing_proof_message(kernel_id):
+    """The kernelId-bound registration challenge string.
+
+    Byte-identical to the gateway's ``kernelSigningProofMessage``
+    (``packages/kernel/src/kernel-keychain.ts:52-53``). Do NOT add an env tag or
+    nonce here: the binding wire contract pins this exact string for v1;
+    domain-separation is a versioned fast-follow (out of scope), and diverging
+    would make every proof fail the gateway's verification.
+    """
+    return f"pcc-kernel-signing-key:{kernel_id}"
+
+
+def register_signing_key(pcc_base, api_key, kernel_id, public_key_hex, secret_key_hex):
+    """Prove possession of the node's Ed25519 signing key to the gateway.
+
+    Signs the kernelId-bound challenge with the node's Ed25519 key and POSTs the
+    algorithm-tagged proof, so the gateway persists
+    ``signingKey:{algorithm:"ed25519", publicKey}`` on the kernel row (WIRE
+    SHAPE 1) -- the registry value the oracle's #52 verifier resolves to check
+    machine-log signatures.
+
+    Endpoint: ``POST /api/kernels/{kernelId}/signing-key`` (the dedicated Option
+    C proof route; the gateway side is track M1). Body (field names are the
+    binding contract):
+
+        {"signingKeyAlgorithm": "ed25519",
+         "signingPublicKey":    "0x" + <64-hex raw ed25519 pubkey, lowercase>,
+         "signingProof":        <128-hex detached ed25519 sig over the challenge>}
+
+    Fail CLOSED: raises :class:`LogSigningRefused` if only the HMAC dev-fallback
+    key is available (pynacl missing, or ``public != ed25519(secret)``). A
+    money-path signer must never be registered with an HMAC value the gateway or
+    oracle would treat as ed25519. Callers that want fail-soft behavior (keep the
+    daemon running for the announcement path) catch :class:`LogSigningRefused`.
+
+    Returns ``(status, data)`` from the gateway.
+    """
+    challenge = kernel_signing_proof_message(kernel_id)
+    # Raises LogSigningRefused on the HMAC fallback -- do NOT swallow it here; a
+    # node that cannot prove a genuine ed25519 key must not register a signer.
+    proof_hex = sign_ed25519_utf8(challenge, public_key_hex, secret_key_hex)
+
+    pub = public_key_hex if public_key_hex.lower().startswith("0x") else "0x" + public_key_hex
+    body = {
+        "signingKeyAlgorithm": "ed25519",
+        "signingPublicKey": pub.lower(),
+        "signingProof": proof_hex,
+    }
+    status, data = pcc_request(
+        "POST", f"/api/kernels/{kernel_id}/signing-key",
+        body=body,
+        base_url=pcc_base,
+        api_key=api_key,
+    )
+    if status in (200, 201):
+        log.info(f"Registered ed25519 signing key for kernel {kernel_id}")
+    else:
+        log.warning(f"Signing-key registration failed (HTTP {status}): {data}")
+    return status, data
 
 
 def provision_api_key(pcc_base, email=""):
