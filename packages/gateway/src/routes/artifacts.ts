@@ -40,6 +40,7 @@ import {
   UpdateUiArtifactSchema,
   ForkUiArtifactSchema,
   DASHBOARD_CSD_URL,
+  containsApiKey,
   type UiArtifact,
 } from "@pcc/spec";
 import { schema, eq } from "@pcc/store";
@@ -287,6 +288,24 @@ function forbidden(reply: FastifyReply, message: string): FastifyReply {
   return reply.status(403).send({ error: "forbidden", message });
 }
 
+/**
+ * §2(a) key-refusal, extended beyond the manifest. The manifest's own no-key
+ * `.refine` runs inside safeParse; this covers the top-level create/update
+ * fields (name / description / capabilityTypes / composeRefs / renderedCid)
+ * that are ALSO stored and publicly returned — `name` even renders into the
+ * `/a/:slug` HTML — so a key baked into any of them would travel with a shared
+ * artifact. Scans the whole validated body; returns a 400 reply when a key is
+ * present, else null.
+ */
+function rejectIfBodyHasKey(reply: FastifyReply, body: unknown): FastifyReply | null {
+  if (!containsApiKey(body)) return null;
+  return reply.status(400).send({
+    error: "invalid_body",
+    message:
+      "Invalid artifact body — no field may contain an API key (pcc_live_/pcc_test_ substring); a shared artifact travels with its contents.",
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
@@ -310,6 +329,8 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
+    const keyReject = rejectIfBodyHasKey(reply, parsed.data);
+    if (keyReject) return keyReject;
 
     const now = new Date().toISOString();
     const artifact: UiArtifact = {
@@ -423,6 +444,9 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
         details: parsed.error.flatten(),
       });
     }
+    const keyReject = rejectIfBodyHasKey(reply, parsed.data);
+    if (keyReject) return keyReject;
+
     const u = parsed.data;
     if (u.name !== undefined) a.name = u.name;
     if (u.description !== undefined) a.description = u.description;

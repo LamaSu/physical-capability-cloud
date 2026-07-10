@@ -79,6 +79,16 @@ const PUBLIC_JOB_OFFERS_DETAIL_RE = /^\/api\/job-offers\/[^/]+$/;
 // behavior).
 const PUBLIC_COURIER_JOBS_DETAIL_RE = /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/;
 
+// On-Ramp §5.3 / acceptance #8 — UI-artifact discovery + recall are public
+// reads: GET /api/artifacts (public listing) and GET /api/artifacts/:idOrSlug
+// (recall by id or slug). A shared /a/:slug link and cross-agent discovery
+// must work for an anonymous caller. Only GET is public: the single-segment
+// regex excludes /api/artifacts/:id/fork, and the method guard below keeps
+// POST/PUT/DELETE (save/modify/retire/fork) Bearer-gated. The route handler
+// still runs its own visibility check, so a `private` artifact 403s an
+// anonymous caller — the public path never leaks private content.
+const PUBLIC_ARTIFACTS_READ_RE = /^\/api\/artifacts(?:\/[^/]+)?$/;
+
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
@@ -89,6 +99,8 @@ function isPublicRoute(url: string, method?: string): boolean {
   // Only GET on the offer/job detail routes is public.
   if (method === "GET" && PUBLIC_JOB_OFFERS_DETAIL_RE.test(path)) return true;
   if (method === "GET" && PUBLIC_COURIER_JOBS_DETAIL_RE.test(path)) return true;
+  // Only GET on artifact discovery/recall is public; mutations stay gated.
+  if (method === "GET" && PUBLIC_ARTIFACTS_READ_RE.test(path)) return true;
   return false;
 }
 
