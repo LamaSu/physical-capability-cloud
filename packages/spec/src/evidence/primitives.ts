@@ -7,8 +7,11 @@
  * eligibility flows ONLY through this layer: generic schema-relative rules
  * authenticate nothing; a primitive is exactly what adds authentication.
  *
- * This ships the v1 cut: 16 primitives (§7.1), all `status:"active"`. The full
- * space is 51 primitives in 11 families; v1.5 / v2 primitives are appended to
+ * This ships the v1 cut (16 primitives, §7.1) PLUS the additive v1.5-industrial
+ * cut (#52-#55, Family L `record` + Family C telemetry — the sensor/machine-log
+ * primitives that bind already-built verifiers; see
+ * ai/research/pcc-evidence-vocab-sensor-machinelog.md). All `status:"active"`.
+ * The full space is 51+ primitives; further v1.5 / v2 primitives are appended to
  * EVIDENCE_PRIMITIVES as their verifiers land (§7.2 / §7.3), each an independent
  * commitment. The vocabulary grows in DATA (registry entries), never in code
  * shape — this is deliberately data, not per-vertical code.
@@ -31,7 +34,12 @@ import { canonicalize } from "../util/canonical.js";
 
 // ── Field enums (spec §5.1 axes) ────────────────────────────────────
 
-/** The 11 families — each a unit of shared oracle machinery (spec §3). */
+/** The families — each a unit of shared oracle machinery (spec §3).
+ *  `record` is Family L (PROCESS & MACHINE RECORDS: machine.* + process.*), added
+ *  in the v1.5-industrial cut — records the executing system keeps about its own
+ *  execution, verified by chain/sequence machinery (see
+ *  ai/research/pcc-evidence-vocab-sensor-machinelog.md §4). Like `meta`, the family
+ *  value names the category, not any single id-prefix. */
 export const EVIDENCE_FAMILIES = [
   "artifact",
   "capture",
@@ -44,6 +52,7 @@ export const EVIDENCE_FAMILIES = [
   "measure",
   "pay",
   "meta",
+  "record",
 ] as const;
 export type EvidenceFamily = (typeof EVIDENCE_FAMILIES)[number];
 
@@ -580,12 +589,200 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     objectivityBand: "B1",
     verifierStatus: "stub",
   },
+
+  // ── v1.5-industrial cut — #52-#55 (Family L + Family C) ─────────────
+  // Design: ai/research/pcc-evidence-vocab-sensor-machinelog.md §4/§6. These bind
+  // ALREADY-BUILT machinery (drift-detector + LogCaptureService.verifyChain,
+  // extracted to evidence/verifiers/). verifierStatus is "stub" for ALL FOUR: the
+  // predicate machinery is live/extracted, but the ORACLE-side PrimitiveVerifier
+  // binding is the settlement lane's work (§8), so each fails CLOSED under
+  // requireImplementedVerifier until that binding ships (see oracle-binding.ts).
+  // "stub" is what keeps the fail-closed invariant honest — marking them "live"
+  // would let a CSD settle a machine log the oracle cannot yet authenticate.
+
+  // #52 — Family L (record). THE core C.4/C.5 machine-log proof object; emit-side
+  // + predicate LIVE (LogCaptureService.verifyChain). Core claim is B1 (chain
+  // mechanics); coverage/cadence adds a B2 aspect.
+  //
+  // MODELING NOTE (deep-dive fix, task step 3): machine execution logs bind HERE
+  // (#52), NOT to #38 doc.audit_trail. #38's ALCOA predicate is who-changed-what
+  // with {actor, action, old/new value, reason}; a controller's execution trace
+  // has no old/new values or reasons — routing machine logs through #38
+  // mis-specifies the predicate and silently drops the chain/signature/
+  // program-binding checks verifyLogChain already implements. #38 is a v1.5 doc
+  // primitive (not in this cut); its EMITTERS must NOT claim C.4 machine logs.
+  {
+    id: "machine.execution_log",
+    wire: "pcc.ev.machine.execution_log.v1",
+    family: "record",
+    status: "active",
+    proves:
+      "The machine's own execution record for this job — the command/event/alarm sequence the controller reported, captured contemporaneously by the kernel, hash-chained, kernel-signed, with program identity bound to the committed program/method hash.",
+    paramsSchema: {
+      type: "object",
+      properties: {
+        logKind: {
+          type: "string",
+          enum: ["job_log", "command_trace", "alarm_log", "program_transcript"],
+        },
+        disclosure: {
+          type: "string",
+          enum: ["full", "redacted-commit"],
+          default: "redacted-commit",
+        },
+        minCadenceMs: { type: "number" },
+        alarmPolicy: { type: "string", enum: ["none-critical", "declared"] },
+      },
+      required: ["logKind"],
+      additionalProperties: true,
+    },
+    authRequirement: "actor-signed",
+    tierSupport: [
+      { tier: 1, conditions: "kernel-signed chain = attributable + integrity, no independence" },
+      {
+        tier: 2,
+        conditions:
+          "ONE OF: authenticated-session capture provenance; #53 cross-consistency; independent witness",
+      },
+      { tier: 3, conditions: "inside chains with TEE co-sign / committee re-run" },
+    ],
+    objectivityBand: "B1",
+    verifierStatus: "stub",
+    dependsOn: ["artifact.hash", "ident.registered_key"],
+    upgrades: ["process.batch_record"],
+  },
+
+  // #53 — Family C (telemetry). The drift-detector's expected-profile checks as a
+  // primitive (power envelope / temp band / duration ratio). Predicate LIVE
+  // (detectDrifts, extracted). Distinct from #10 metric_window (SLA threshold);
+  // this is match-to-expected-profile. D8-native (envelope is a pre-agreed param).
+  {
+    id: "telemetry.envelope_conformance",
+    wire: "pcc.ev.telemetry.envelope_conformance.v1",
+    family: "telemetry",
+    status: "active",
+    proves:
+      "The job's physical signals stayed within the pre-agreed operating envelope — power within the capability's band, temperature within the material's band, duration within the expected ratio — i.e. a machine doing this class of work ran for this long on this material.",
+    paramsSchema: {
+      type: "object",
+      properties: {
+        envelope: {
+          oneOf: [
+            { type: "string", enum: ["builtin-defaults"] },
+            {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  metric: { type: "string" },
+                  min: { type: "number" },
+                  max: { type: "number" },
+                  ratioBands: { type: "array", items: { type: "number" } },
+                },
+                required: ["metric"],
+              },
+            },
+          ],
+        },
+        source: { type: "string", enum: ["summary", "stream"], default: "summary" },
+        severityFloor: { type: "string", enum: ["high", "critical"], default: "high" },
+        materialParam: { type: "string" },
+        includePipelineAnomalies: { type: "boolean" },
+      },
+      additionalProperties: true,
+    },
+    authRequirement: "inherited",
+    tierSupport: [
+      { tier: 1, conditions: "kernel-signed summaries" },
+      {
+        tier: 2,
+        conditions:
+          "device-signed readings, independent-collector cross-check, or mutual corroboration with #52",
+      },
+      { tier: 3, conditions: "+ tamper log or TEE" },
+    ],
+    objectivityBand: "B2",
+    verifierStatus: "stub",
+    // No dependsOn: its input is Layer-1 sensor summary/stream events (+ #10 when
+    // that v2 primitive lands), not a v1 vocabulary primitive.
+    upgrades: ["machine.execution_log", "process.batch_record"],
+  },
+
+  // #54 — Family C (telemetry). checkSensorGaps promoted to a first-class NEGATIVE
+  // gate (the anti-cherry-picking device; ALCOA +Complete already consumes it).
+  // Gate, not grant — mirrors confirm.execution_mode's shape. Predicate LIVE.
+  {
+    id: "telemetry.coverage_gate",
+    wire: "pcc.ev.telemetry.coverage_gate.v1",
+    family: "telemetry",
+    status: "active",
+    proves:
+      "The evidence stream is complete for the claimed tier — no missing required signal groups, no dead air on evidence-grade channels, no flatlined sensors. The anti-cherry-picking gate.",
+    paramsSchema: {
+      type: "object",
+      properties: {
+        requiredGroups: {
+          type: "array",
+          items: { type: "array", items: { type: "string" } },
+        },
+        maxGapSeconds: { type: "number" },
+        evidenceGradeChannels: { type: "boolean" },
+      },
+      additionalProperties: true,
+    },
+    authRequirement: "none",
+    tierSupport: [
+      { tier: 0, conditions: "missing/gapped coverage caps here (negative gate)" },
+      { tier: 1 },
+      { tier: 2 },
+      { tier: 3 },
+    ],
+    objectivityBand: "B1",
+    verifierStatus: "stub",
+    gates: true,
+  },
+
+  // #55 — Family L (record). ISA-88 electronic-batch-record shape. Verifier is
+  // mostly composition glue over existing rules (#52/#53/#54 + event-sequence).
+  // Core is B1 (phase sequence + method-hash match); per-phase envelope adds B2.
+  {
+    id: "process.batch_record",
+    wire: "pcc.ev.process.batch_record.v1",
+    family: "record",
+    status: "active",
+    proves:
+      "A batch/process run followed its pre-agreed recipe — phases executed in declared order, per-phase parameters in-range, all manifest samples processed with results attached. The ISA-88 electronic-batch-record shape.",
+    paramsSchema: {
+      type: "object",
+      properties: {
+        recipeRef: { type: "string" },
+        phaseGraph: { type: "object", additionalProperties: true },
+        sampleManifestRef: { type: "string" },
+      },
+      required: ["recipeRef"],
+      additionalProperties: true,
+    },
+    authRequirement: "actor-signed",
+    tierSupport: [
+      { tier: 1 },
+      {
+        tier: 2,
+        conditions: "with #52 instrument log + #35 calibration, or #38 hash-chained",
+      },
+      { tier: 3, conditions: "+ committee quorum re-run or signed acquisition" },
+    ],
+    objectivityBand: "B1",
+    verifierStatus: "stub",
+    dependsOn: ["artifact.hash"],
+  },
 ];
 
 // ── Version + manifest hash ─────────────────────────────────────────
 
-/** Vocabulary version. Bumps when the contract (§5.1 fields) changes. */
-export const VOCAB_VERSION = 1 as const;
+/** Vocabulary version. Bumps when the contract (§5.1 fields) changes.
+ *  v2 = the additive v1.5-industrial cut (#52-#55 + Family L `record`); no v1
+ *  primitive changed, so the bump is purely additive. */
+export const VOCAB_VERSION = 2 as const;
 
 /**
  * Contract projection of a primitive def — the fields that constitute the
