@@ -7,7 +7,7 @@
  *   POST /api/devices/:deviceId/health
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { kernelRoutes } from "../routes/kernels.js";
@@ -21,26 +21,26 @@ import type { KernelConfig } from "@pcc/kernel";
 // ---------------------------------------------------------------------------
 
 const mockConfig: KernelConfig = {
-  kernelId: "kernel-test-001",
+  kernelId: "kernel-nyc",
   mockMode: true,
   devices: [
     {
       id: "dev-test-machine",
       type: "machine",
       adapterType: "mock",
-      config: { kernelId: "kernel-test-001", jobDurationMs: 100 },
+      config: { kernelId: "kernel-nyc", jobDurationMs: 100 },
     },
     {
       id: "dev-test-sensor",
       type: "sensor",
       adapterType: "mock",
-      config: { kernelId: "kernel-test-001" },
+      config: { kernelId: "kernel-nyc" },
     },
     {
       id: "dev-test-camera",
       type: "camera",
       adapterType: "mock",
-      config: { kernelId: "kernel-test-001" },
+      config: { kernelId: "kernel-nyc" },
     },
   ],
 };
@@ -72,11 +72,14 @@ async function buildApp(): Promise<FastifyInstance> {
 describe("Job Submission API", () => {
   let app: FastifyInstance;
 
-  beforeAll(async () => {
+  // Per-test isolation: submitting to the local kernel (kernel-nyc) now runs the
+  // KernelService fire-and-forget execution path, so a fresh service per test
+  // keeps accumulated device/breaker state from leaking between cases.
+  beforeEach(async () => {
     app = await buildApp();
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     await app.close();
     closeStore();
     resetKernelService();
@@ -157,7 +160,11 @@ describe("Job Submission API", () => {
       });
       expect(res.statusCode).toBe(400);
       const body = res.json();
-      expect(body.error).toBe("missing_kernel_id");
+      // kernelId is now enforced by the route's fastify body schema
+      // (required: ["kernelId"]), so the rejection is the schema's generic
+      // 400 "Bad Request" rather than the facade's "missing_kernel_id" code
+      // (the facade check remains as unreachable defense-in-depth).
+      expect(body.error).toBe("Bad Request");
     });
 
     it("persists submitted job to DB", async () => {

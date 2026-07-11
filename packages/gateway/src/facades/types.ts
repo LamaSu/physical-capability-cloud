@@ -186,6 +186,8 @@ export interface KernelDTO {
   capabilityCount: number;
   /** Capability types offered */
   capabilityTypes: CapabilityType[];
+  /** Backward-compat alias for capabilityTypes (dashboard + tests read kernel.capabilities) */
+  capabilities?: CapabilityType[];
   /** Reputation score */
   reputation?: number;
   /** Total completed jobs */

@@ -14,7 +14,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { settlementRoutes } from "../routes/settlement.js";
 import { initStore, closeStore } from "../db.js";
 import { resetSettlementService, getSettlementService } from "../services/settlement-service.js";
+import { closeWorkflowStore } from "../workflow-store.js";
 import type { EvidenceBundle } from "@pcc/spec";
+import type { OracleAttestation } from "@pcc/contracts";
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any imports that use them
@@ -116,12 +118,53 @@ function makeBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
   };
 }
 
+/**
+ * Deterministic oracle-signed attestation bound to the shared test escrow.
+ * The release path now REQUIRES this (SettlementService.releaseMilestone +
+ * POST /api/settlement/release both re-verify the struct on-chain via
+ * PCCProtocol.collectFeeWithAttestation). Here the on-chain call is mocked,
+ * so only the shape + a truthy escrowAddress (the route/service guard) matter.
+ * Mirrors the fixture in settlement-telemetry.test.ts.
+ */
+function mkAttestation(
+  escrowAddress: `0x${string}` = "0xDeAdBeEf00000000000000000000000000000001",
+): OracleAttestation {
+  return {
+    version: 1,
+    escrowAddress,
+    jobId: "job-001",
+    evidenceHash:
+      "0xaabbcc00000000000000000000000000000000000000000000000000000000ee" as `0x${string}`,
+    tier: 0,
+    verified: true,
+    timestamp: 1700000000n,
+    nonce: ("0x" + "c".repeat(64)) as `0x${string}`,
+    extraData: "0x" as `0x${string}`,
+    signature: "0x" as `0x${string}`,
+  };
+}
+
+/**
+ * JSON-safe attestation for HTTP payloads. Over the wire `timestamp` is a
+ * number (JSON has no BigInt); the route reads the struct opaquely (only
+ * escrowAddress is validated) and hands it to the mocked on-chain release.
+ */
+function mkAttestationBody(): Record<string, unknown> {
+  return { ...mkAttestation(), timestamp: 1700000000 };
+}
+
 // ---------------------------------------------------------------------------
 // Test app builder
 // ---------------------------------------------------------------------------
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
+  // POST /api/settlement/release routes through releaseMilestoneByJobActivity,
+  // which uses the durable workflow store for on-chain-op idempotency. Give each
+  // test a fresh in-memory store so release attempts across tests can't collide
+  // on the same (jobId, milestone, action) idempotency key.
+  process.env.WORKFLOW_DB_PATH = ":memory:";
+  closeWorkflowStore();
   initStore({ seed: true });
 
   resetSettlementService();
@@ -237,6 +280,7 @@ describe("SettlementService", () => {
       const result = await service.processEvidence(bundle, bundle.jobId, {
         contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
         autoRelease: true,
+        attestation: mkAttestation(),
       });
 
       expect(result.releaseTxHash).toBe("0xtest_release_tx456");
@@ -310,6 +354,7 @@ describe("SettlementService", () => {
       const result = await service.releaseMilestone(
         "job-001",
         0,
+        mkAttestation(),
         "0xDeAdBeEf00000000000000000000000000000001",
       );
 
@@ -326,6 +371,7 @@ describe("SettlementService", () => {
       await service.releaseMilestone(
         "job-001",
         0,
+        mkAttestation(),
         "0xDeAdBeEf00000000000000000000000000000001",
       );
 
@@ -352,6 +398,7 @@ describe("Settlement Routes", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    closeWorkflowStore();
     resetSettlementService();
   });
 
@@ -366,7 +413,7 @@ describe("Settlement Routes", () => {
       });
       expect(res.statusCode).toBe(404);
       const body = res.json();
-      expect(body.error).toBe("not_found");
+      expect(body.error).toBe("SETTLEMENT_NOT_FOUND");
     });
 
     it("returns evidence bundle details after evidence is processed", async () => {
@@ -425,7 +472,7 @@ describe("Settlement Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/settlement/release",
-        payload: { jobId: "job-001", milestoneIndex: 0 },
+        payload: { jobId: "job-001", milestoneIndex: 0, attestation: mkAttestationBody() },
       });
       expect(res.statusCode).toBe(502);
       const body = res.json();
@@ -443,6 +490,7 @@ describe("Settlement Routes", () => {
           jobId: "job-001",
           milestoneIndex: 0,
           contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
+          attestation: mkAttestationBody(),
         },
       });
       expect(res.statusCode).toBe(200);
@@ -464,7 +512,7 @@ describe("Settlement Routes", () => {
       });
       expect(res.statusCode).toBe(404);
       const body = res.json();
-      expect(body.error).toBe("not_found");
+      expect(body.error).toBe("SETTLEMENT_NOT_FOUND");
     });
 
     it("returns settlement status for a known job (seeded)", async () => {
@@ -547,6 +595,7 @@ describe("Full evidence-to-settlement flow", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    closeWorkflowStore();
     resetSettlementService();
   });
 
@@ -562,6 +611,7 @@ describe("Full evidence-to-settlement flow", () => {
       contractAddress: "0xDeAdBeEf00000000000000000000000000000001",
       milestoneIndex: 0,
       autoRelease: true,
+      attestation: mkAttestation(),
     });
 
     expect(result.cid).toBe("bafytest123");
