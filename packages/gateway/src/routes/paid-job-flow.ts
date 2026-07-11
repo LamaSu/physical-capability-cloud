@@ -71,8 +71,11 @@ const resolver = new TemplateResolver();
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Whether mock settlement is active (default: true for testnet) */
-function isMockSettlement(): boolean {
+/** Whether mock settlement is active (default: true for testnet).
+ *  Exported so the negotiation /commit handler makes its "did real settlement
+ *  actually wire an escrow?" decision from the SAME source of truth this module
+ *  uses to pick the mock-vs-real escrow branch — the two must never disagree. */
+export function isMockSettlement(): boolean {
   return process.env.MOCK_SETTLEMENT !== "false";
 }
 

@@ -33,7 +33,7 @@ import type {
   DemandEnvelope,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, budgetToBand } from "@pcc/spec";
-import { createJobFromSession } from "./paid-job-flow.js";
+import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
   getCapabilityDescriptor,
@@ -598,6 +598,7 @@ export async function negotiationRoutes(app: FastifyInstance) {
           escrowAddress: string;
           escrowStatus: string;
         } | null = null;
+        let settlementError: string | null = null;
 
         try {
           const committedRow = db.select().from(negotiationSessions)
@@ -607,8 +608,35 @@ export async function negotiationRoutes(app: FastifyInstance) {
             paidJobResult = await createJobFromSession(committedRow);
           }
         } catch (err) {
-          // Paid job flow creation is best-effort — the session is already committed
-          console.warn("[negotiation] Paid job flow wiring failed (best-effort):", err instanceof Error ? err.message : err);
+          settlementError = err instanceof Error ? err.message : String(err);
+          console.warn("[negotiation] Paid job flow wiring failed:", settlementError);
+        }
+
+        // ── Money-path guard: never return a false 200 in REAL settlement ──
+        // Mock/dev mode: escrow is synthetic, so a wiring miss is genuinely
+        // best-effort — keep the existing 200 (behavior unchanged).
+        // REAL settlement mode: a throw (e.g. "PCC_GATEWAY_PRIVATE_KEY required
+        // for real settlement") or a result with no on-chain escrowAddress means
+        // NO escrow exists. Returning 200 here would tell the buyer the deal is
+        // funded when it is not — the exact false-success this fix removes. Fail
+        // loud with 502 so the caller knows the commit did not produce escrow.
+        //
+        // The session row is deliberately LEFT status="committed" (not rolled
+        // back to "reviewing"): assertSessionLive() returns 409 "Session already
+        // committed" for a committed row, so a retry of /commit is blocked by
+        // that shared liveness gate. That block is what prevents a second
+        // createJobFromSession from deploying a DUPLICATE on-chain escrow when a
+        // first attempt had already created one before throwing. On the money
+        // path, blocking a double escrow outranks un-sticking the session.
+        if (!isMockSettlement() && (settlementError || !paidJobResult?.escrowAddress)) {
+          return reply.status(502).send({
+            error: "settlement_failed",
+            message:
+              settlementError ??
+              "Real settlement completed without an on-chain escrow address",
+            sessionId: req.params.id,
+            jobId,
+          });
         }
 
         return {
