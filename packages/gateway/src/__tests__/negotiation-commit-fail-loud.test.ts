@@ -163,24 +163,25 @@ describe("negotiation /commit — fail loud on real-settlement failure", () => {
     expect(body.escrowAddress).toBeUndefined();
   });
 
-  it("REAL-mode failure leaves the session committed so a retry is 409-blocked (no double escrow)", async () => {
+  it("REAL-mode failure moves the session to settlement_failed; a naive /commit retry is still 409-blocked (no double escrow)", async () => {
     const id = await toReview(app, "real-retry");
     process.env.MOCK_SETTLEMENT = "false";
     delete process.env.PCC_GATEWAY_PRIVATE_KEY;
 
     expect((await commit(app, id)).statusCode).toBe(502);
 
-    // Rollback decision: the row stays "committed", so assertSessionLive() 409s a
-    // retry of /commit. That guard is what stops a second createJobFromSession
-    // from deploying a duplicate escrow if a first attempt had already created one.
+    // The row now moves to the recoverable "settlement_failed" state (not silently
+    // left "committed"). assertSessionLive() 409s that state too, so a naive /commit
+    // retry is STILL blocked — the double-escrow guard #242 introduced is preserved,
+    // just under a status that also carries a recovery path (see the recovery suite).
     const row = getStore().db
       .select().from(negotiationSessions)
       .where(eq(negotiationSessions.id, id)).get();
-    expect(row!.status).toBe("committed");
+    expect(row!.status).toBe("settlement_failed");
 
     const retry = await commit(app, id);
     expect(retry.statusCode).toBe(409);
-    expect(retry.json().error).toContain("committed");
+    expect(retry.json().error).toContain("settlement failed");
   });
 
   it("MOCK mode commit is unchanged: 200 with a (synthetic) escrow", async () => {

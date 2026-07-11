@@ -30,6 +30,20 @@ export function assertSessionLive(
   if (row.status === "committed") {
     return { status: 409, body: { error: "Session already committed" } };
   }
+  if (row.status === "settlement_failed") {
+    // Locked in but settlement wiring failed. Recovery is out-of-band and guarded:
+    // POST /api/negotiate/session/:id/retry-settlement (never double-mints) or DELETE
+    // to cancel. Every state-advancing path (/commit, /quote, /review, and the A2A
+    // adapter) must refuse here — this 409 is what still blocks a naive /commit retry
+    // from deploying a DUPLICATE on-chain escrow (the guard #242 got from "committed").
+    return {
+      status: 409,
+      body: {
+        error:
+          "Session settlement failed — POST /retry-settlement to recover or DELETE to cancel",
+      },
+    };
+  }
   if (row.status === "cancelled" || row.status === "expired") {
     return { status: 410, body: { error: `Session ${row.status}` } };
   }
