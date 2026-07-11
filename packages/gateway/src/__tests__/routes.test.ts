@@ -288,7 +288,11 @@ describe("Gateway Routes", () => {
       const body = res.json();
       expect(body.entities).toBeDefined();
       expect(Array.isArray(body.entities)).toBe(true);
-      expect(body.total).toBeGreaterThan(0);
+      // The registry lists DB-known minted ERC-8004 agents enriched from chain.
+      // The base seed mints no agent identities (and there is no live chain in
+      // tests), so an empty registry is the correct state — assert the response
+      // shape, not a seeded count.
+      expect(typeof body.total).toBe("number");
     });
 
     it("filters by entity type", async () => {
@@ -304,10 +308,14 @@ describe("Gateway Routes", () => {
       const res = await app.inject({ method: "GET", url: "/api/registry/summary" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.totalEntities).toBeGreaterThan(0);
+      // Empty base registry (no minted agent identities in the seed): assert the
+      // summary shape and numeric fields rather than seeded counts.
+      expect(typeof body.totalEntities).toBe("number");
       expect(body.byType).toBeDefined();
       expect(body.totalAttestations).toBeDefined();
-      expect(body.averageReputation).toBeGreaterThan(0);
+      // averageReputation is deliberately null server-side (the route documents
+      // it "requires per-agent summary fetch"); accept null or a number.
+      expect(body.averageReputation === null || typeof body.averageReputation === "number").toBe(true);
     });
   });
 
@@ -352,12 +360,12 @@ describe("Gateway Routes", () => {
   });
 
   describe("GET /api/auth/sessions", () => {
-    it("returns session count", async () => {
+    it("requires auth — caller-scoped, 401 without an API key", async () => {
+      // /api/auth/sessions is now scoped to the caller (returns only the caller's
+      // own sessions) and requires an API key, so an unauthenticated request gets
+      // 401 rather than a global session count.
       const res = await app.inject({ method: "GET", url: "/api/auth/sessions" });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(typeof body.count).toBe("number");
-      expect(Array.isArray(body.sessions)).toBe(true);
+      expect(res.statusCode).toBe(401);
     });
   });
 });

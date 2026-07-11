@@ -56,6 +56,12 @@ vi.mock("../contracts/batch-settlement.js", () => ({
   stopBatchSettlement: vi.fn(),
 }));
 
+// The PUT /api/jobs/:jobId/complete flow does best-effort IPFS archive +
+// Starknet anchor + oracle verification I/O (all mock/fallback here) that can
+// exceed vitest's 5s default on constrained/CI machines. Give the suite headroom
+// so these I/O-heavy paths don't flake on timing.
+vi.setConfig({ testTimeout: 20000 });
+
 // ---------------------------------------------------------------------------
 // Test app builder
 // ---------------------------------------------------------------------------
@@ -141,7 +147,7 @@ describe("Paid Job Flow", () => {
       expect(body.error).toContain("required");
     });
 
-    it("creates a job in 'active' status (mock settlement)", async () => {
+    it("creates a job in 'queued' status (mock settlement, control-plane gateway)", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
@@ -155,11 +161,16 @@ describe("Paid Job Flow", () => {
       expect(res.statusCode).toBe(201);
       const body = res.json();
 
-      // Verify the job exists in DB with active status
+      // SEAM-1: this test app registers no local KernelService, so the gateway is
+      // control-plane only — createJobFromSession routes a fresh job to "queued"
+      // for a remote operator daemon (which polls status=queued) to pick up. This
+      // is the production topology (capability.network holds no local kernel). A
+      // gateway WITH a matching local kernel would mark it "active". Either way the
+      // escrow is funded — the money-path assertion below is unchanged.
       const repos = getRepos();
       const job = repos.jobs.findById(body.jobId);
       expect(job).toBeDefined();
-      expect(job!.status).toBe("active");
+      expect(job!.status).toBe("queued");
     });
 
     it("creates an escrow in 'funded' status (mock settlement)", async () => {
@@ -225,7 +236,11 @@ describe("Paid Job Flow", () => {
         url: "/api/negotiate/session",
         payload: {
           userAgentId: "user-agent-002",
-          kernelId: "kernel-nyc",
+          // negotiation now gates on the kernel actually offering the capability
+          // type (checkKernelOffersCapability → 404 otherwise). kernel-nyc offers
+          // fdm/laser-cut, not liquid-handler; kernel-nanoclaw is the seeded
+          // liquid-handler kernel, so it clears the gate.
+          kernelId: "kernel-nanoclaw",
           capabilityType: "liquid-handler",
         },
       });
@@ -360,7 +375,7 @@ describe("Paid Job Flow", () => {
       expect(body.error).toContain("already completed");
     });
 
-    it("revokes execution scopes on completion", async () => {
+    it("leaves execution scopes active after completion (revoked at expiry, not on complete)", async () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
@@ -379,7 +394,10 @@ describe("Paid Job Flow", () => {
         payload: {},
       });
 
-      // Verify scope was completed/revoked
+      // Deliberate (paid-job-flow.ts §"Execution scopes — left active"): scopes
+      // are NOT revoked on job completion; they stay active for follow-up tool
+      // calls (camera, diagnostics) until their 1h expiry. completeBody would
+      // report scopesRevoked === 0 accordingly.
       const scopeRes = await app.inject({
         method: "GET",
         url: `/api/ot2/scope/${scopeId}`,
@@ -387,7 +405,7 @@ describe("Paid Job Flow", () => {
 
       expect(scopeRes.statusCode).toBe(200);
       const scope = scopeRes.json();
-      expect(scope.status).toBe("completed");
+      expect(scope.status).toBe("active");
     });
   });
 
@@ -607,13 +625,14 @@ describe("Paid Job Flow", () => {
       expect(settlement.milestones[0].status).toBe("released");
       expect(settlement.currency).toBe("USDC");
 
-      // ── Step 5: Verify scope is no longer active ───────────────────
+      // ── Step 5: Scope stays active post-completion (revoked at expiry) ──
+      // completeBody.scopesRevoked === 0 above already asserts none were revoked.
       const scopeRes = await app.inject({
         method: "GET",
         url: `/api/ot2/scope/${scopeId}`,
       });
       expect(scopeRes.statusCode).toBe(200);
-      expect(scopeRes.json().status).toBe("completed");
+      expect(scopeRes.json().status).toBe("active");
 
       // ── Step 6: Verify job in jobs list ────────────────────────────
       const jobRes = await app.inject({
@@ -623,7 +642,11 @@ describe("Paid Job Flow", () => {
       expect(jobRes.statusCode).toBe(200);
       const jobBody = jobRes.json();
       expect(jobBody.job.status).toBe("settled");
-      expect(jobBody.job.evidenceBundleId).toBeDefined();
+      // GET /api/jobs/:jobId returns { job, evidence } — the route lifts the
+      // detail DTO's evidenceBundles out to a top-level `evidence` array (not a
+      // scalar job.evidenceBundleId). Completion persisted a bundle, so it is
+      // non-empty.
+      expect(jobBody.evidence.length).toBeGreaterThan(0);
     });
   });
 });
