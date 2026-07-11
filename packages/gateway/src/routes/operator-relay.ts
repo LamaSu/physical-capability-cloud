@@ -16,6 +16,7 @@ import type { Result } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
+import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
 import { v4 as uuidv4 } from "uuid";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
@@ -121,6 +122,30 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       const bundleId = `ev-${uuidv4()}`;
       const now = new Date().toISOString();
 
+      // SEAM-2 (path 1): capture the node's REAL device (#236) Ed25519 signature and
+      // real bundleHash when the pushed evidence carries a signed bundle — instead of
+      // discarding the signature and writing a gateway placeholder. This only
+      // PERSISTS the truth of what the device signed; it does NOT verify it or gate
+      // settlement. The oracle #52 verifier (stubbed, fail-closed) still owns whether
+      // this evidence may settle. Old nodes / non-bundle evidence fall back to the
+      // placeholder, unchanged.
+      //
+      // assuranceTier stays 0 ON PURPOSE (fails closed): an UNVERIFIED bundle
+      // "actually supports" only the tier-0 permissionless floor (eligibility.ts).
+      // The node's self-declared tier is a claim, not proof — trusting it here would
+      // let resume-settlement's `?? latestBundle.assuranceTier` fallback escalate the
+      // release tier from unverified evidence. The tier is lifted only once the gated
+      // #52 verifier confirms the evidence on deployed infra (SEAM-2 ready-but-gated).
+      const captured = extractNodeSignedBundle(evidence);
+      const bundleHash = captured?.bundleHash ?? `sha256-${bundleId}`;
+      const kernelSignature = captured
+        ? captured.kernelSignature
+        : {
+            signer: kernelId ?? job.kernelId ?? "unknown",
+            algorithm: "sha256",
+            value: "operator-relay-auto",
+          };
+
       try {
         repos.evidence.insert({
           id: bundleId,
@@ -128,12 +153,8 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           stepId: job.stepId ?? "operator-relay",
           kernelId: kernelId ?? job.kernelId,
           assuranceTier: 0,
-          bundleHash: `sha256-${bundleId}`,
-          kernelSignature: {
-            signer: kernelId ?? job.kernelId ?? "unknown",
-            algorithm: "sha256",
-            value: "operator-relay-auto",
-          },
+          bundleHash,
+          kernelSignature,
           createdAt: now,
         });
       } catch (insertErr) {
@@ -152,6 +173,9 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         stored: true,
         jobId,
         bundleId,
+        // True when the node's real device-signed (#236) bundle was captured
+        // (real Ed25519 signature persisted); false when the placeholder was used.
+        deviceSigned: !!captured,
         timestamp: now,
       };
     } catch (err) {

@@ -15,7 +15,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
-import type { Result } from "@pcc/spec";
+import type { Result, Signature } from "@pcc/spec";
 import { createWalletClient, createPublicClient, http, keccak256, toBytes, decodeEventLog, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { PCCProtocolABI, PCCProtocolV2ABI, getDeployment, getContractAddress } from "@pcc/contracts";
@@ -53,6 +53,14 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
+import {
+  deviceEvidenceSettlementEnabled,
+  resolveSettlementEvidence,
+  isDeviceSignedSignature,
+  registeredSignerInputFromColumns,
+  naclEd25519Verify,
+  type StoredSignature,
+} from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
   OperatorPolicy,
@@ -985,10 +993,63 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
       // Use crypto for hashing
       const hashBuffer = crypto.createHash("sha256").update(evidencePayload).digest("hex");
-      const bundleHash = `sha256:${hashBuffer}`;
+      const gatewayBundleHash = `sha256:${hashBuffer}`;
 
       const now = new Date().toISOString();
       const bundleId = `bundle-${crypto.randomUUID().slice(0, 12)}`;
+
+      // ── SEAM-2 (path 2): choose the settlement anchor. READY BUT GATED. ──
+      // By DEFAULT the gate is CLOSED — the #52 machine.execution_log verifier is
+      // stubbed/fail-closed AND the SEAM2_DEVICE_EVIDENCE_SETTLEMENT flag is unset —
+      // so `resolveSettlementEvidence` returns the gateway fallback and `bundleHash`/
+      // `settlementSignature` below are byte-identical to the prior gateway-auto-sign
+      // behavior. When a real device has cleared #52 on deployed infra and the gate
+      // is opened (NOT done here), a device-signed (#236) bundle captured by
+      // operator-relay (path 1) whose Ed25519 signature verifies against the kernel's
+      // REGISTERED signer anchors settlement on the DEVICE's own hash + signature
+      // instead of this placeholder. Fails closed to the gateway anchor on any verify
+      // failure — the money path never weakens.
+      const gatewaySignature: StoredSignature = {
+        signer: "0x0000000000000000000000000000000000000000",
+        algorithm: "ed25519",
+        value: "gateway-auto-sign",
+      };
+      const seam2GateOpen = deviceEvidenceSettlementEnabled();
+      let seam2DeviceBundle: { bundleHash: string; kernelSignature: StoredSignature; assuranceTier: number } | null =
+        null;
+      let seam2RegisteredSigner: unknown = null;
+      if (seam2GateOpen) {
+        // Extra lookups only when the gate is open — the closed path is unchanged.
+        const priorBundles = repos.evidence.findByJob(jobId);
+        const deviceRow = priorBundles.find((r) =>
+          isDeviceSignedSignature(r.kernelSignature as StoredSignature),
+        );
+        if (deviceRow) {
+          seam2DeviceBundle = {
+            bundleHash: deviceRow.bundleHash,
+            kernelSignature: deviceRow.kernelSignature as StoredSignature,
+            assuranceTier: deviceRow.assuranceTier,
+          };
+        }
+        const kernelRow = repos.kernels.findById(job.kernelId);
+        seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
+      }
+      const settlementEvidence = await resolveSettlementEvidence({
+        deviceBundle: seam2DeviceBundle,
+        registeredSigner: seam2RegisteredSigner,
+        fallback: {
+          bundleHash: gatewayBundleHash,
+          kernelSignature: gatewaySignature,
+          assuranceTier: jobAssuranceTier,
+        },
+        verifyEd25519: naclEd25519Verify,
+        gateOpen: seam2GateOpen,
+      });
+      // The settlement anchor: drives the stored bundle, IPFS archive, oracle verify,
+      // driveSettlement and the EAS bridge below. Equal to the gateway values when the
+      // gate is closed (the default), so downstream behavior is unchanged.
+      const bundleHash = settlementEvidence.bundleHash;
+      const settlementSignature = settlementEvidence.kernelSignature;
 
       // Build evidence events
       const customEvents = (body.evidenceEvents ?? []) as Array<{
@@ -1034,11 +1095,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         kernelId: job.kernelId,
         assuranceTier: jobAssuranceTier,
         bundleHash,
-        kernelSignature: {
-          signer: "0x0000000000000000000000000000000000000000",
-          algorithm: "ed25519" as const,
-          value: "gateway-auto-sign",
-        },
+        // SEAM-2: the settlement anchor's signature — the gateway placeholder when
+        // the gate is closed (default), the DEVICE's real Ed25519 signature when open.
+        kernelSignature: settlementSignature,
         createdAt: now,
       });
 
@@ -1074,7 +1133,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           assuranceTier: jobAssuranceTier,
           bundleHash,
           events,
-          kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
+          // StoredSignature → the strict spec Signature (device sig or the gateway
+          // placeholder; both ed25519, signer is a 0x-string).
+          kernelSignature: settlementSignature as Signature,
           createdAt: now,
         });
         ipfsCid = archiveResult.cid;
@@ -1091,7 +1152,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           const mockResult = await mockStorage.archiveBundle({
             id: bundleId, jobId, stepId: job.stepId, kernelId: job.kernelId,
             assuranceTier: jobAssuranceTier, bundleHash: bundleHash as `sha256:${string}`, events: events as any,
-            kernelSignature: { signer: "0x0000000000000000000000000000000000000000", algorithm: "ed25519" as const, value: "gateway-auto-sign" },
+            kernelSignature: settlementSignature as Signature,
             createdAt: now,
           });
           ipfsCid = mockResult.cid;
