@@ -8,6 +8,8 @@
  *
  * State machine:
  *   CREATED → CONFIGURING → QUOTED → REVIEWING → COMMITTED
+ *                                               → SETTLEMENT_FAILED → COMMITTED (recovered)
+ *                                               → SETTLEMENT_FAILED → CANCELLED
  *                                               → EXPIRED / CANCELLED
  *
  * Security:
@@ -38,6 +40,10 @@ export type SessionStatus =
   | "quoted"        // Params locked, price computed
   | "reviewing"     // Both sides reviewing contract terms
   | "committed"     // Escrow funded, job locked in
+  | "settlement_failed" // Locked in, but REAL-settlement wiring failed to mint a usable
+                        // on-chain escrow. Non-terminal + recoverable: retry (safe — never
+                        // double-mints) or cancel. Distinct from "committed" so a failed
+                        // commit is never mistaken for a funded deal.
   | "expired"       // TTL elapsed
   | "cancelled";    // Cancelled by either party
 
