@@ -1,0 +1,36 @@
+{
+  "csd": "pcc://artifacts/dashboard/v1",
+  "title": "Pizza + courier chain",
+  "description": "A value chain — make a pizza, then dispatch a courier — pinned as a re-plannable ComposeRequest.",
+  "theme": "auto",
+  "sections": [
+    {
+      "heading": "Value chain",
+      "windows": [
+        {
+          "kind": "note",
+          "text": "This dashboard pins a value chain. Press Plan to re-cost it against the live network; the plan is re-planned fresh each time (the ComposeRequest is pinned, never a 30-minute compositionId)."
+        },
+        {
+          "kind": "chain",
+          "composeRef": {
+            "outcomeType": "courier.dispatch",
+            "outcomeChain": ["pizza.order", "courier.dispatch"],
+            "budgetUSD": 40,
+            "minAssuranceTier": 1,
+            "optimizeFor": "price",
+            "description": "Hot pizza prepared, then delivered by courier."
+          },
+          "execute": {
+            "id": "exec-pizza-courier",
+            "label": "Execute chain",
+            "kind": "post",
+            "path": "/api/compose/execute",
+            "confirm": "approval",
+            "intentText": "pcc: execute the pizza + courier value chain"
+          }
+        }
+      ]
+    }
+  ]
+}

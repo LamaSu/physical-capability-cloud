@@ -1,0 +1,36 @@
+{
+  "csd": "pcc://artifacts/dashboard/v1",
+  "title": "Watch my pizza",
+  "description": "Live status and the settlement receipt for a single pizza order.",
+  "theme": "auto",
+  "sections": [
+    {
+      "heading": "Order",
+      "windows": [
+        {
+          "kind": "metric",
+          "label": "Order total",
+          "binding": { "path": "/api/escrow/esc-pizza-8k3f" },
+          "select": "totalAmount",
+          "format": "usd"
+        },
+        {
+          "kind": "run",
+          "binding": {
+            "path": "/api/jobs/job-pizza-8k3f",
+            "sse": "/sse/stream/job/job-pizza-8k3f",
+            "pollMs": 15000
+          },
+          "statusFrom": "job.status",
+          "latestFrom": "job.status"
+        }
+      ]
+    },
+    {
+      "heading": "Settlement",
+      "windows": [
+        { "kind": "receipt", "binding": { "path": "/api/escrow/esc-pizza-8k3f" } }
+      ]
+    }
+  ]
+}
