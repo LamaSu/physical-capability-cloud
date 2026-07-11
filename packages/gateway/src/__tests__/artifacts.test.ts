@@ -168,6 +168,47 @@ describe("no-key refuse", () => {
     const res = await save({ name: "clean" });
     expect(res.statusCode).toBe(201);
   });
+
+  // §2(a) scoping: the refine only guards the manifest, but name/description/
+  // capabilityTypes are stored AND publicly returned (name renders into the
+  // /a/:slug HTML), so the route scans the WHOLE body too.
+  it("rejects a pcc_live_ key hidden in the artifact name (400)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/artifacts",
+      headers: ALICE,
+      payload: { name: "my dash pcc_live_abc123", manifest: validManifest() },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_body");
+  });
+
+  it("rejects a pcc_test_ key hidden in a capabilityType (400)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/artifacts",
+      headers: ALICE,
+      payload: {
+        name: "typed",
+        capabilityTypes: ["pizza.order", "pcc_test_deadbeef"],
+        manifest: validManifest(),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_body");
+  });
+
+  it("rejects a key slipped into a name on PUT update (400)", async () => {
+    const a = (await save({ name: "renamable" }, ALICE)).json();
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/artifacts/${a.id}`,
+      headers: ALICE,
+      payload: { name: "leak pcc_live_zzz" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_body");
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────

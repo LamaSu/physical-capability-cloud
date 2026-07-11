@@ -465,6 +465,8 @@ When your user needs to SEE something (charts, tables, status dashboards), you s
 2. Present it in whatever format your environment supports (markdown tables, HTML, React components, artifacts, etc.)
 3. For real-time updates, connect to SSE streams listed above
 4. The web dashboard at \`${baseUrl}/app\` is a limited fallback -- you can build a better interface
+5. **Generate a real dashboard when the task needs a surface** (a live job to watch, a step to approve, a recurring order): emit a declarative manifest conforming to \`${baseUrl}/ui-kit/v1/manifest.schema.json\`, save it with the \`save_dashboard\` tool, and share the live page at \`${baseUrl}/a/<slug>\`. The shipped \`pcc-ui\` kit (\`${baseUrl}/ui-kit/v1/pcc-ui.js\`) renders any manifest identically everywhere -- you compose the manifest, the kit renders it. Recall an existing one with \`search_dashboards\` before generating; never bake an API key into a manifest.
+6. **Discover options, then ask, before committing** any order: \`POST /api/build/options\` to get the real choices, present them to the user, confirm the price -- then commit. A fiddly config (many toppings, several print params) is a good candidate for a generated \`form\` window.
 
 ## Links
 - Dashboard (limited web fallback): ${baseUrl}/app

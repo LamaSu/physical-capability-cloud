@@ -27,7 +27,7 @@ export const PCC_API_KEY = process.env.PCC_API_KEY?.trim() || undefined;
 // ---------------------------------------------------------------------------
 
 export interface FetchOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   query?: Record<string, string | undefined>;
 }

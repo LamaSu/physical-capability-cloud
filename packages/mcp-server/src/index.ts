@@ -1557,6 +1557,196 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Generative UI — dashboard artifact tools (On-Ramp Wave 3).
+// Thin wrappers over the ui-artifact registry (packages/gateway/src/routes/
+// artifacts.ts). A person's LLM emits a DashboardManifest, saves it here, and
+// shares the live page at https://capability.network/a/<slug>. Recall-first:
+// search before generating; a saved dashboard reloads with zero regeneration.
+// ---------------------------------------------------------------------------
+
+// 57. pcc_ui_save_dashboard
+
+server.tool(
+  "pcc_ui_save_dashboard",
+  "Save a generated dashboard to the network and get a live, shareable URL (https://capability.network/a/<slug>). Pass a `manifest` — a declarative DashboardManifest (schema at https://capability.network/ui-kit/v1/manifest.schema.json) that the pcc-ui kit renders identically everywhere. Only for tasks that need a surface to watch/approve/compare/reuse; call pcc_ui_search_dashboards first to reuse an existing one. The manifest must not contain an API key. Defaults visibility to 'unlisted'.",
+  {
+    name: z.string().describe("Short name for the dashboard; used to mint the slug."),
+    manifest: z
+      .record(z.unknown())
+      .describe(
+        "The DashboardManifest JSON. Required keys: csd='pcc://artifacts/dashboard/v1', title, sections[]. No API key anywhere.",
+      ),
+    description: z.string().optional().describe("One-line description."),
+    capabilityTypes: z
+      .array(z.string())
+      .optional()
+      .describe("Capability types the dashboard is about, e.g. ['pizza.order']. The discovery join."),
+    composeRefs: z
+      .array(z.record(z.unknown()))
+      .optional()
+      .describe("Optional pinned, re-plannable ComposeRequest objects (value chains)."),
+    visibility: z
+      .enum(["private", "unlisted", "public"])
+      .optional()
+      .describe("private | unlisted (default) | public."),
+    renderedCid: z.string().optional().describe("Optional rendered-HTML export CID."),
+  },
+  async ({
+    name,
+    manifest,
+    description,
+    capabilityTypes,
+    composeRefs,
+    visibility,
+    renderedCid,
+  }: {
+    name: string;
+    manifest: Record<string, unknown>;
+    description?: string;
+    capabilityTypes?: string[];
+    composeRefs?: Record<string, unknown>[];
+    visibility?: "private" | "unlisted" | "public";
+    renderedCid?: string;
+  }) => {
+    const data = await pccFetch("/api/artifacts", {
+      method: "POST",
+      body: { name, manifest, description, capabilityTypes, composeRefs, visibility, renderedCid },
+    });
+    return toolResult(data);
+  },
+);
+
+// 58. pcc_ui_get_dashboard
+
+server.tool(
+  "pcc_ui_get_dashboard",
+  "Recall a saved dashboard by id or slug (the tail of the /a/<slug> URL). Returns the manifest + metadata. Use this to reload a dashboard the user asks for again instead of regenerating it. Public for public/unlisted; owner-only for private.",
+  {
+    idOrSlug: z.string().describe("Artifact id (ua_...) or slug."),
+  },
+  async ({ idOrSlug }: { idOrSlug: string }) => {
+    const data = await pccFetch(`/api/artifacts/${encodeURIComponent(idOrSlug)}`);
+    return toolResult(data);
+  },
+);
+
+// 59. pcc_ui_search_dashboards
+
+server.tool(
+  "pcc_ui_search_dashboards",
+  "Discover existing public dashboards before generating a new one (recall-first; adopt > extend > build for UIs too). Filter by capabilityType, free-text q, and sort by popular|recent. Returns { entries, total, offset, limit }. Unlisted/private artifacts are not listed.",
+  {
+    capabilityType: z.string().optional().describe("Filter by capability type, e.g. 'pizza.order'."),
+    q: z.string().optional().describe("Free-text over name/description/types."),
+    sort: z.enum(["popular", "recent"]).optional().describe("Ranking (default 'recent')."),
+    offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)."),
+    limit: z.number().int().positive().max(100).optional().describe("Max results (1..100, default 20)."),
+  },
+  async ({
+    capabilityType,
+    q,
+    sort,
+    offset,
+    limit,
+  }: {
+    capabilityType?: string;
+    q?: string;
+    sort?: "popular" | "recent";
+    offset?: number;
+    limit?: number;
+  }) => {
+    const data = await pccFetch("/api/artifacts", {
+      query: {
+        capabilityType,
+        q,
+        sort,
+        offset: offset !== undefined ? String(offset) : undefined,
+        limit: limit !== undefined ? String(limit) : undefined,
+      },
+    });
+    return toolResult(data);
+  },
+);
+
+// 60. pcc_ui_fork_dashboard
+
+server.tool(
+  "pcc_ui_fork_dashboard",
+  "Fork an existing dashboard into a new artifact you own, preserving lineage back to the original. Adapt a popular dashboard instead of building from scratch. Forks any public/unlisted artifact, or a private one you own.",
+  {
+    id: z.string().describe("Artifact id (ua_...) to fork."),
+    name: z.string().optional().describe("Optional name for the fork (defaults to '<original> (fork)')."),
+    visibility: z
+      .enum(["private", "unlisted", "public"])
+      .optional()
+      .describe("Fork visibility (default 'unlisted')."),
+  },
+  async ({
+    id,
+    name,
+    visibility,
+  }: {
+    id: string;
+    name?: string;
+    visibility?: "private" | "unlisted" | "public";
+  }) => {
+    const data = await pccFetch(`/api/artifacts/${encodeURIComponent(id)}/fork`, {
+      method: "POST",
+      body: { name, visibility },
+    });
+    return toolResult(data);
+  },
+);
+
+// 61. pcc_ui_update_dashboard
+
+server.tool(
+  "pcc_ui_update_dashboard",
+  "Modify a dashboard you own (owner-only); the version increments. Replace the manifest or any metadata field — e.g. raise a budget, add a receipt window, flip visibility to public. A replaced manifest must conform to the schema and contain no API key. Send only the fields you want to change.",
+  {
+    id: z.string().describe("Artifact id (ua_...) to update."),
+    name: z.string().optional().describe("New name."),
+    description: z.string().optional().describe("New description."),
+    manifest: z
+      .record(z.unknown())
+      .optional()
+      .describe("Replacement DashboardManifest (schema-conformant, no API key)."),
+    capabilityTypes: z.array(z.string()).optional().describe("Replacement capability-type tags."),
+    composeRefs: z
+      .array(z.record(z.unknown()))
+      .optional()
+      .describe("Replacement pinned ComposeRequest objects."),
+    visibility: z.enum(["private", "unlisted", "public"]).optional().describe("New visibility."),
+    renderedCid: z.string().optional().describe("New rendered-HTML export CID."),
+  },
+  async ({
+    id,
+    name,
+    description,
+    manifest,
+    capabilityTypes,
+    composeRefs,
+    visibility,
+    renderedCid,
+  }: {
+    id: string;
+    name?: string;
+    description?: string;
+    manifest?: Record<string, unknown>;
+    capabilityTypes?: string[];
+    composeRefs?: Record<string, unknown>[];
+    visibility?: "private" | "unlisted" | "public";
+    renderedCid?: string;
+  }) => {
+    const data = await pccFetch(`/api/artifacts/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: { name, description, manifest, capabilityTypes, composeRefs, visibility, renderedCid },
+    });
+    return toolResult(data);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Capture Verification Protocol (CVP) tools — Wave 6 Scope B
 // Registered out-of-line to keep index.ts slim. The module owns its own Zod
 // shapes + endpoint metadata for test introspection.

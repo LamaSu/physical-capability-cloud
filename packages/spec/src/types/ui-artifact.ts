@@ -159,8 +159,16 @@ export type Section = z.infer<typeof SectionSchema>;
 // The manifest itself + the no-key refine.
 // ---------------------------------------------------------------------------
 
-/** True if the JSON value contains a live/test API-key substring ANYWHERE. */
-function containsApiKey(value: unknown): boolean {
+/**
+ * True if the JSON value contains a live/test API-key substring ANYWHERE.
+ *
+ * Exported so the gateway can apply the SAME predicate to the whole
+ * create/update body (name/description/capabilityTypes/composeRefs), not just
+ * the manifest the `.refine` below guards — those top-level fields are stored
+ * AND publicly returned (and `name` renders into the `/a/:slug` HTML), so a
+ * baked key would still travel with a shared artifact (§3, §5.2, acceptance #2).
+ */
+export function containsApiKey(value: unknown): boolean {
   const s = JSON.stringify(value ?? null);
   return s.includes("pcc_live_") || s.includes("pcc_test_");
 }
