@@ -38,6 +38,7 @@ import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
 import { skillsRoutes } from "./routes/skills.js";
+import { artifactsRoutes } from "./routes/artifacts.js";
 import { capture3dRoutes } from "./routes/capture-3d.js";
 import { captureSimRoutes } from "./routes/capture-sim.js";
 import { pizzaDemoRoutes } from "./routes/pizza-demo.js";
@@ -552,6 +553,11 @@ export async function createGateway(port = 3200) {
   await app.register(operatorStatusRoutes);
   await app.register(captureRoutes);
   await app.register(skillsRoutes);
+  // On-Ramp UI artifact registry — POST/GET/PUT/DELETE /api/artifacts + the
+  // render shell GET /a/:slug. Mutations require Bearer (self-checked +
+  // apiGate); GET /a/:slug is non-/api so it is ungated (public per the
+  // artifact's visibility), like the context pack.
+  await app.register(artifactsRoutes);
   await app.register(capture3dRoutes);
   await app.register(captureSimRoutes);
   await app.register(pizzaDemoRoutes);

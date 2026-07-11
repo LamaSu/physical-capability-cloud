@@ -10,7 +10,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { loadBuiltinCsds, CsdRegistry, CsdSchema, type CsdUsageRepository } from "@pcc/spec";
+import { loadBuiltinCsds, CsdRegistry, CsdSchema, dashboardV1Csd, type CsdUsageRepository } from "@pcc/spec";
 import { getRepos } from "../db.js";
 
 // Module-level registry instance — initialized once at startup
@@ -42,6 +42,19 @@ export function getCsdRegistry(): CsdRegistry {
       }
     }
     _registry = loadBuiltinCsds(usageRepo);
+    // On-Ramp: register the compiled-in dashboard-manifest CSD
+    // (pcc://artifacts/dashboard/v1) so the type is discoverable via /api/csd.
+    // Durable (compiled-in constant), unlike a runtime registration (G5). Kept
+    // out of the shared loadBuiltinCsds() so its builtin-count unit tests stay
+    // green. Best-effort — a validation failure must never break the registry.
+    try {
+      _registry.register(dashboardV1Csd);
+    } catch (err) {
+      console.warn(
+        "[csd] dashboard-v1 builtin registration failed (best-effort):",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
   return _registry;
 }

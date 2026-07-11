@@ -1820,6 +1820,35 @@ export function migrateDatabase(sqlite: Database.Database): void {
   `);
 
   // ══════════════════════════════════════════════════════════════════
+  // On-Ramp UI artifacts — saved/shared/forkable dashboards (artifacts.ts).
+  // JSON blob per row (`data`) + indexed scalar columns for the discovery
+  // filters (visibility, owner) and slug lookup. Durable SQLite persistence
+  // is the whole point — artifacts survive redeploy, unlike runtime-registered
+  // CSDs (RAM-only, G5). Mirrors packages/db/src/schema/substrate.ts.
+  // ══════════════════════════════════════════════════════════════════
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ui_artifacts (
+      id                TEXT PRIMARY KEY,
+      slug              TEXT NOT NULL UNIQUE,
+      owner             TEXT NOT NULL,
+      visibility        TEXT NOT NULL DEFAULT 'unlisted',
+      status            TEXT NOT NULL DEFAULT 'active',
+      capability_types  TEXT,                       -- JSON string[] | NULL
+      use_count         INTEGER NOT NULL DEFAULT 0,
+      load_count        INTEGER NOT NULL DEFAULT 0,
+      fork_count        INTEGER NOT NULL DEFAULT 0,
+      fork_of           TEXT,
+      version           INTEGER NOT NULL DEFAULT 1,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL,
+      data              TEXT NOT NULL               -- JSON UiArtifact
+    );
+    CREATE INDEX IF NOT EXISTS ui_artifacts_owner_idx ON ui_artifacts(owner);
+    CREATE INDEX IF NOT EXISTS ui_artifacts_visibility_idx ON ui_artifacts(visibility);
+    CREATE INDEX IF NOT EXISTS ui_artifacts_status_idx ON ui_artifacts(status);
+  `);
+
+  // ══════════════════════════════════════════════════════════════════
   // CSD usage attribution — backs the SQLite CsdUsageRepository.
   // Replaces the in-memory Map introduced in PR #118 so per-CSD adoption
   // counters survive gateway restart. Opt-in via PCC_CSD_PERSIST=true; the

@@ -36,6 +36,7 @@ import type {
   CapabilityGraphEdge,
   GraphSearchRequest,
   GraphPathOption,
+  UiArtifact,
 } from "@pcc/spec";
 
 // ── compose.ts ───────────────────────────────────────────────────────────
@@ -232,4 +233,30 @@ export const graphSearchProposals = sqliteTable("graph_search_proposals", {
     .$type<Record<string, unknown>>(),
   expiresAt: text("expires_at").notNull(),
   createdAt: text("created_at").notNull(),
+});
+
+// ── artifacts.ts (On-Ramp UI artifacts) ───────────────────────────────────
+
+/**
+ * UI dashboard artifacts (UiArtifact) — saved/shared/forkable dashboards.
+ * The full record lives in the `data` JSON column for lossless round-trips;
+ * scalar columns back the discovery filters (visibility, capability_types,
+ * popularity counts) and the slug/owner lookups. Durable SQLite persistence is
+ * the whole point (survives redeploy — the CSD-registry gap, G5).
+ */
+export const uiArtifacts = sqliteTable("ui_artifacts", {
+  id: text("id").primaryKey(),
+  slug: text("slug").notNull().unique(),
+  owner: text("owner").notNull(),
+  visibility: text("visibility").notNull().default("unlisted"),
+  status: text("status").notNull().default("active"),
+  capabilityTypes: text("capability_types", { mode: "json" }).$type<string[]>(),
+  useCount: integer("use_count").notNull().default(0),
+  loadCount: integer("load_count").notNull().default(0),
+  forkCount: integer("fork_count").notNull().default(0),
+  forkOf: text("fork_of"),
+  version: integer("version").notNull().default(1),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  data: text("data", { mode: "json" }).notNull().$type<UiArtifact>(),
 });
