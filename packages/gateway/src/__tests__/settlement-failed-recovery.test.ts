@@ -152,6 +152,7 @@ describe("settlement_failed session — status transition + safe recovery", () =
   // ── 1. failure transition ────────────────────────────────────────────────
   it("real-settlement commit failure moves the session to settlement_failed (502 body unchanged)", async () => {
     const id = await toReview(app, "fail-transition");
+    const base = escrowCount(); // seed pre-populates escrows — assert on the DELTA.
     process.env.MOCK_SETTLEMENT = "false";
     delete process.env.PCC_GATEWAY_PRIVATE_KEY;
 
@@ -161,18 +162,19 @@ describe("settlement_failed session — status transition + safe recovery", () =
     expect(res.json().sessionId).toBe(id);
 
     expect(sessionRow(id)!.status).toBe("settlement_failed");
-    // No escrow was minted (pre-flight throw before any on-chain call).
-    expect(escrowCount()).toBe(0);
+    // No NEW escrow was minted (pre-flight throw before any on-chain call).
+    expect(escrowCount()).toBe(base);
   });
 
   it("a naive /commit retry on a settlement_failed session is 409-blocked", async () => {
     const id = await toSettlementFailed(app, "naive-commit");
+    const base = escrowCount();
     const res = await commit(app, id);
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toContain("settlement failed");
-    // Still settlement_failed, still zero escrows — no double-mint.
+    // Still settlement_failed, no new escrow — no double-mint.
     expect(sessionRow(id)!.status).toBe("settlement_failed");
-    expect(escrowCount()).toBe(0);
+    expect(escrowCount()).toBe(base);
   });
 
   // ── 2. retry: escrow-already-exists → RESUME, never re-mint ───────────────
@@ -180,6 +182,7 @@ describe("settlement_failed session — status transition + safe recovery", () =
     const id = await toSettlementFailed(app, "resume-by-cwm");
     const before = sessionRow(id)!;
     expect(before.cwmId).toBeTruthy();
+    const base = escrowCount();
 
     // Simulate the partial-failure window: the on-chain escrow WAS minted and its DB
     // row written (createJobFromSession line ~560), but job/scope wiring then threw —
@@ -198,7 +201,7 @@ describe("settlement_failed session — status transition + safe recovery", () =
       deadline: new Date(Date.now() + 86_400_000).toISOString(),
       version: "v2",
     } as any);
-    expect(escrowCount()).toBe(1);
+    expect(escrowCount()).toBe(base + 1);
 
     const res = await retry(app, id);
     expect(res.statusCode).toBe(200);
@@ -207,13 +210,14 @@ describe("settlement_failed session — status transition + safe recovery", () =
     expect(body.escrowAddress).toBe(ESCROW);
 
     // No NEW escrow minted; session recovered to committed against the existing one.
-    expect(escrowCount()).toBe(1);
+    expect(escrowCount()).toBe(base + 1);
     expect(sessionRow(id)!.status).toBe("committed");
     expect(sessionRow(id)!.escrowAddress).toBe(ESCROW);
   });
 
   it("retry RESUMES from an escrow already recorded on the session row — no re-mint", async () => {
     const id = await toSettlementFailed(app, "resume-by-session");
+    const base = escrowCount();
     const ESCROW = "0xdef0000000000000000000000000000000000002";
     // Defensive belt: even without an escrows-table row, a real escrowAddress already
     // on the session is proof an escrow exists → resume, never mint.
@@ -225,13 +229,14 @@ describe("settlement_failed session — status transition + safe recovery", () =
     expect(res.statusCode).toBe(200);
     expect(res.json().resumed).toBe(true);
     expect(res.json().escrowAddress).toBe(ESCROW);
-    expect(escrowCount()).toBe(0); // nothing minted
+    expect(escrowCount()).toBe(base); // nothing minted
     expect(sessionRow(id)!.status).toBe("committed");
   });
 
   // ── 3. retry: no escrow + ambiguous failure → FAIL CLOSED ─────────────────
   it("retry FAILS CLOSED when the failure was ambiguous (an escrow may exist but is unrecorded)", async () => {
     const id = await toSettlementFailed(app, "ambiguous");
+    const base = escrowCount();
     // Rewrite the latest settlement_failed marker to the ambiguous class — i.e. a
     // failure where the gateway key WAS present, so an on-chain escrow may have been
     // minted before the throw. With no recorded escrow, a re-mint could duplicate it.
@@ -250,7 +255,7 @@ describe("settlement_failed session — status transition + safe recovery", () =
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("settlement_unrecoverable_ambiguous");
     // Refused — no mint, session stays settlement_failed for manual resolution / cancel.
-    expect(escrowCount()).toBe(0);
+    expect(escrowCount()).toBe(base);
     expect(sessionRow(id)!.status).toBe("settlement_failed");
   });
 
@@ -259,20 +264,21 @@ describe("settlement_failed session — status transition + safe recovery", () =
     const id = await toSettlementFailed(app, "safe-remint");
     // Marker is PREFLIGHT (no key at failure). Operator "fixes config": here we flip
     // to mock mode so the re-mint completes deterministically in-process.
-    expect(escrowCount()).toBe(0);
+    const base = escrowCount();
     process.env.MOCK_SETTLEMENT = "true";
 
     const res = await retry(app, id);
     expect(res.statusCode).toBe(200);
     expect(res.json().retried).toBe(true);
     expect(res.json().escrowAddress).toBeTruthy();
-    // Exactly ONE escrow — the re-mint, no duplicate.
-    expect(escrowCount()).toBe(1);
+    // Exactly ONE NEW escrow — the re-mint, no duplicate.
+    expect(escrowCount()).toBe(base + 1);
     expect(sessionRow(id)!.status).toBe("committed");
   });
 
   it("retry in REAL mode with the config still broken re-fails safely — never mints", async () => {
     const id = await toSettlementFailed(app, "safe-still-broken");
+    const base = escrowCount();
     // Still no key → retry re-attempts (marker is safe) but throws pre-flight again.
     process.env.MOCK_SETTLEMENT = "false";
     delete process.env.PCC_GATEWAY_PRIVATE_KEY;
@@ -280,9 +286,9 @@ describe("settlement_failed session — status transition + safe recovery", () =
     const res = await retry(app, id);
     expect(res.statusCode).toBe(502);
     expect(res.json().error).toBe("settlement_failed");
-    // Back to settlement_failed, still zero escrows — a failing retry never double-mints.
+    // Back to settlement_failed, no new escrow — a failing retry never double-mints.
     expect(sessionRow(id)!.status).toBe("settlement_failed");
-    expect(escrowCount()).toBe(0);
+    expect(escrowCount()).toBe(base);
   });
 
   it("retry on a non-settlement_failed session is rejected", async () => {
