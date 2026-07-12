@@ -107,6 +107,7 @@ class TestStartCommand:
              mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)), \
              mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
              mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
+             mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
              mock.patch("pcc_node.cli.announce_capabilities"), \
              mock.patch("pcc_node.cli.run_daemon") as mock_daemon:
             result = runner.invoke(main, ["start", "-c", config_path, "--api-key", "k"])

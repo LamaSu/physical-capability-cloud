@@ -28,7 +28,13 @@ from .discovery import (
     format_discovery_report,
     DiscoveredDevice,
 )
-from .register import provision_api_key, register_kernel, announce_capabilities
+from .register import (
+    provision_api_key,
+    register_kernel,
+    announce_capabilities,
+    register_signing_key,
+)
+from .log_capture import LogSigningRefused
 
 
 def _setup_logging(verbose):
@@ -277,6 +283,22 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
     # Register kernel
     click.echo("Registering on PCC network...")
     register_kernel(config.pcc_base, config.pcc_api_key, config)
+
+    # Prove possession of the node's Ed25519 machine-log signing key (#235).
+    # Fail-soft: a genuine ed25519 node registers its signer so the oracle can
+    # verify its machine logs; an HMAC dev-fallback node cannot prove one, so we
+    # skip WITH a clear message rather than crash the daemon (its settlement /
+    # signing path simply stays unavailable). No HMAC value is ever sent as ed25519.
+    try:
+        register_signing_key(
+            config.pcc_base,
+            config.pcc_api_key,
+            config.kernel_id,
+            public_key,
+            secret_key,
+        )
+    except LogSigningRefused as exc:
+        click.echo(f"  Skipping signing-key registration (dev key): {exc}")
 
     # Announce capabilities
     if devices:
