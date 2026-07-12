@@ -224,10 +224,13 @@ describe("isFabricated (canonical fabrication predicate)", () => {
     ).toBe(false);
   });
 
-  it("treats absent / null / undefined as honest", () => {
+  it("treats an event with no tag fields as honest (canonical takes a non-null EvidenceEvent)", () => {
+    // The canonical isFabricated (#240 @pcc/spec) is typed for a non-null
+    // EvidenceEvent and every detector call site iterates a real events[]; it
+    // reads missing source.simulated / payload.mock via optional chaining, so an
+    // untagged event is honest. (null/undefined events are out of contract — not
+    // a settlement path; bundleHasFabricatedEvents owns the empty-array case.)
     expect(isFabricated({ source: source(), payload: {} })).toBe(false);
-    expect(isFabricated(null)).toBe(false);
-    expect(isFabricated(undefined)).toBe(false);
-    expect(isFabricated({})).toBe(false);
+    expect(isFabricated({ source: source(), payload: { other: 1 } })).toBe(false);
   });
 });
