@@ -41,7 +41,6 @@ const PUBLIC_PREFIXES = [
 const PUBLIC_EXACT = [
   "/api/capabilities/types",   // Discovery is public (see what's available)
   "/api/capabilities",         // Capability listing is public
-  "/api/kernels",              // Kernel listing is public (find operators)
   "/api/agents/status",        // Network status is public
   "/api/onboard/registrations", // EXACT match only — GET listing is public, but
                                 // sub-paths like /approve, /reject, /activate require auth
@@ -93,6 +92,8 @@ function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
+  // Kernel discovery is public; identity-bearing creation/upsert is not.
+  if (method === "GET" && path === "/api/kernels") return true;
   if (PUBLIC_CAPABILITY_DETAIL_RE.test(path)) return true;
   if (PUBLIC_OPERATOR_RATINGS_RE.test(path)) return true;
   if (PUBLIC_KERNEL_AGENT_CARD_RE.test(path)) return true;

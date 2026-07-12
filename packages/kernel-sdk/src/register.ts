@@ -4,10 +4,9 @@
  * `registerKernel(gatewayUrl, manifest, opts?)` POSTs the manifest to
  * `/api/kernels/register` and returns the gateway's response.
  *
- * When `opts.signingKey` is provided, registerKernel FIRST proves possession of
- * the kernel's settlement signing key via `POST /api/kernels` (the Ed25519 lane,
- * #235), THEN posts the marketplace manifest exactly as before. Without it, the
- * behavior is byte-for-byte unchanged (backward compatible).
+ * When a confirmed `opts.signingKey` is provided, registerKernel posts the
+ * marketplace manifest first and performs the irreversible SET-ONCE signer bind
+ * only after marketplace registration succeeds.
  *
  * The function is a thin fetch wrapper — no retries, no fancy auth. Third-
  * party builders that need auth should pass the `apiKey` option; the SDK
@@ -25,17 +24,13 @@ export type RegisteredSigner =
 /** Outcome of the `POST /api/kernels` signing-key proof (only when requested). */
 export interface SigningRegistrationResult {
   /**
-   * True iff the gateway bound OUR proven Ed25519 key as the kernel's
-   * settlement signer. False means the gateway did NOT adopt our key — most
-   * commonly because the kernel's signer is already set (set-once) to a
-   * different key. Callers should treat `false` as "my evidence bundles will
-   * NOT settle under this kernel" and reconcile before running jobs.
+   * Always true on a successful return. A missing or mismatched gateway bind
+   * throws `KernelRegistrationError` instead of returning a success shape.
    */
-  signerBound: boolean;
+  signerBound: true;
   /**
    * The signer the gateway now has on record for this kernel, or `null` if none
-   * was bound. When `signerBound` is false but this is non-null, it reveals the
-   * mismatching signer already in place.
+   * was bound.
    */
   registeredSigner: RegisteredSigner | null;
   /** The public key we proved (raw 32-byte Ed25519, hex, no 0x prefix). */
@@ -51,16 +46,18 @@ export interface RegisterKernelOptions {
   timeoutMs?: number;
   /**
    * When provided, registerKernel proves possession of the kernel's settlement
-   * signing key via `POST /api/kernels` (Ed25519 lane, #235) BEFORE posting the
-   * marketplace manifest.
+   * signing key via `POST /api/kernels` (Ed25519 lane, #235).
    *
    * `principalPrivateKey` MUST be the SAME key the adapter wires into
    * `createKernelHandler` to sign evidence bundles — the gateway matches
    * evidence signatures against this registered signer at settlement. Accepts a
-   * 64-byte tweetnacl `secretKey` or a 32-byte seed.
+   * `expectedPublicKey` is mandatory confirmation that the supplied bytes are
+   * the intended signing key rather than an unrelated 32-byte dev/HMAC secret.
    */
   signingKey?: {
+    algorithm: "ed25519";
     principalPrivateKey: Uint8Array;
+    expectedPublicKey: string;
   };
 }
 
@@ -156,17 +153,43 @@ export async function registerKernel(
     headers["Authorization"] = `Bearer ${opts.apiKey}`;
   }
 
-  // ── #235: prove the settlement signing key FIRST (only when requested) ─────
-  // The proof is verified + persisted by POST /api/kernels — NOT by the
-  // marketplace endpoint below, which ignores signing fields. We check the
-  // response for the bound signer so callers can detect a set-once mismatch,
-  // but a merely-unbound signer does NOT abort the marketplace registration.
-  let signing: SigningRegistrationResult | undefined;
+  // Build a proof only for explicitly identified, public-key-confirmed material.
+  // Ambiguous or mismatched secrets fail closed by taking the proofless
+  // marketplace path; they never reach the SET-ONCE endpoint.
+  let proof: ReturnType<typeof buildEd25519RegistrationProof> | undefined;
   if (opts.signingKey) {
-    const proof = buildEd25519RegistrationProof(
-      manifest.kernelId,
-      opts.signingKey.principalPrivateKey,
-    );
+    try {
+      proof = buildEd25519RegistrationProof(manifest.kernelId, {
+        algorithm: opts.signingKey.algorithm,
+        privateKey: opts.signingKey.principalPrivateKey,
+        expectedPublicKey: opts.signingKey.expectedPublicKey,
+      });
+    } catch {
+      proof = undefined;
+    }
+  }
+
+  // ── Marketplace registration ──────────────────────────────────────────────
+  const { res, body } = await postJson(
+    f,
+    `${base}/api/kernels/register`,
+    headers,
+    { manifest },
+    timeoutMs,
+  );
+
+  if (!res.ok) {
+    throw new KernelRegistrationError(res.status, body);
+  }
+
+  const b = body as Partial<RegisterKernelResponse> | undefined;
+  if (!b?.kernelId || !b?.status) {
+    throw new KernelRegistrationError(res.status, body, "Malformed gateway response");
+  }
+
+  // ── Irreversible SET-ONCE signing bind: always the final network step ──────
+  let signing: SigningRegistrationResult | undefined;
+  if (proof) {
     const { res: signRes, body: signBody } = await postJson(
       f,
       `${base}/api/kernels`,
@@ -193,29 +216,22 @@ export async function registerKernel(
       registeredSigner?.algorithm === "ed25519" &&
       typeof registeredSigner.publicKey === "string" &&
       normalizeHex(registeredSigner.publicKey) === normalizeHex(proof.signingPublicKey);
+    if (!signerBound) {
+      throw new KernelRegistrationError(
+        409,
+        {
+          error: "signer_binding_mismatch",
+          registeredSigner,
+          provenPublicKey: proof.signingPublicKey,
+        },
+        "Gateway did not bind the proven signing key",
+      );
+    }
     signing = {
-      signerBound,
+      signerBound: true,
       registeredSigner,
       provenPublicKey: proof.signingPublicKey,
     };
-  }
-
-  // ── Marketplace registration (wire unchanged from pre-#235) ────────────────
-  const { res, body } = await postJson(
-    f,
-    `${base}/api/kernels/register`,
-    headers,
-    { manifest },
-    timeoutMs,
-  );
-
-  if (!res.ok) {
-    throw new KernelRegistrationError(res.status, body);
-  }
-
-  const b = body as Partial<RegisterKernelResponse> | undefined;
-  if (!b?.kernelId || !b?.status) {
-    throw new KernelRegistrationError(res.status, body, "Malformed gateway response");
   }
 
   return {

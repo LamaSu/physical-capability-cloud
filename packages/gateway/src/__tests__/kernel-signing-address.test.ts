@@ -227,8 +227,7 @@ describe("POST /api/kernels — signing-address proof-of-possession (primitive #
         signingProof: proofB,
       },
     });
-    // Upsert of an existing kernel returns 200 (created: false).
-    expect(second.statusCode).toBe(200);
+    expect(second.statusCode).toBe(409);
 
     // The original proven signer must be untouched.
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });

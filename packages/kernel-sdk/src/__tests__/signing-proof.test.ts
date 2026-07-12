@@ -57,6 +57,8 @@ interface RecordedCall {
   headers: Record<string, string>;
 }
 
+const toHex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+
 /** A fetch stub that records each call and replays queued responses in order. */
 function mockFetch(responders: Array<(url: string, body: any) => { status: number; json: unknown }>) {
   const calls: RecordedCall[] = [];
@@ -89,7 +91,9 @@ describe("buildEd25519RegistrationProof", () => {
 
   it("emits a detached proof node:crypto verifies against the kernelId-bound challenge", () => {
     const kernelId = "k-roundtrip-235";
-    const proof = buildEd25519RegistrationProof(kernelId, kp.secretKey);
+    const proof = buildEd25519RegistrationProof(kernelId, {
+      algorithm: "ed25519", privateKey: kp.secretKey, expectedPublicKey: toHex(kp.publicKey),
+    });
 
     expect(proof.signingKeyAlgorithm).toBe("ed25519");
     expect(proof.signingPublicKey).toMatch(/^[0-9a-f]{64}$/);
@@ -101,23 +105,40 @@ describe("buildEd25519RegistrationProof", () => {
     expect(verifyWithNodeCrypto(proof.signingPublicKey, challenge, proof.signingProof)).toBe(true);
   });
 
-  it("accepts a 32-byte seed and a 64-byte secretKey interchangeably (identical output)", () => {
+  it("accepts a confirmed 32-byte seed and 64-byte secretKey interchangeably", () => {
     const kernelId = "k-seed-vs-secret";
-    const fromSecret = buildEd25519RegistrationProof(kernelId, kp.secretKey);
-    const fromSeed = buildEd25519RegistrationProof(kernelId, SEED);
+    const expectedPublicKey = toHex(kp.publicKey);
+    const fromSecret = buildEd25519RegistrationProof(kernelId, {
+      algorithm: "ed25519", privateKey: kp.secretKey, expectedPublicKey,
+    });
+    const fromSeed = buildEd25519RegistrationProof(kernelId, {
+      algorithm: "ed25519", privateKey: SEED, expectedPublicKey,
+    });
     expect(fromSeed).toEqual(fromSecret);
   });
 
   it("binds the proof to the kernelId (a proof does not verify for a different kernelId)", () => {
-    const proof = buildEd25519RegistrationProof("kernel-A", kp.secretKey);
+    const proof = buildEd25519RegistrationProof("kernel-A", {
+      algorithm: "ed25519", privateKey: kp.secretKey, expectedPublicKey: toHex(kp.publicKey),
+    });
     const otherChallenge = new TextEncoder().encode(signingProofMessage("kernel-B"));
     expect(verifyWithNodeCrypto(proof.signingPublicKey, otherChallenge, proof.signingProof)).toBe(false);
   });
 
   it("throws on a key that is neither 32 nor 64 bytes", () => {
-    expect(() => buildEd25519RegistrationProof("k", new Uint8Array(16))).toThrow(
+    expect(() => buildEd25519RegistrationProof("k", {
+      algorithm: "ed25519", privateKey: new Uint8Array(16), expectedPublicKey: toHex(kp.publicKey),
+    })).toThrow(
       /must be 32.*64.*bytes/,
     );
+  });
+
+  it("rejects ambiguous or mismatched 32-byte material instead of binding it", () => {
+    expect(() => buildEd25519RegistrationProof("k", {
+      algorithm: "ed25519",
+      privateKey: new Uint8Array(32).fill(99),
+      expectedPublicKey: toHex(kp.publicKey),
+    })).toThrow(/does not match expectedPublicKey/);
   });
 
   it("uses the canonical, kernelId-bound challenge string", () => {
@@ -131,10 +152,12 @@ describe("registerKernel — signing-key registration (#235)", () => {
   const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(9));
   const pubHex = Buffer.from(kp.publicKey).toString("hex");
 
-  it("POSTs /api/kernels THEN /api/kernels/register, in order, with correct bodies; reports signerBound", async () => {
+  it("registers marketplace first and performs the SET-ONCE bind last", async () => {
     const manifest = testManifest("k-flow-235");
     const { fetchImpl, calls } = mockFetch([
-      // 1st POST — signing proof to /api/kernels → gateway binds our key
+      // 1st POST — reversible marketplace registration
+      (_url, _body) => ({ status: 200, json: { kernelId: "k-flow-235", status: "pending" } }),
+      // 2nd POST — irreversible signing proof bind
       (_url, _body) => ({
         status: 201,
         json: {
@@ -142,37 +165,35 @@ describe("registerKernel — signing-key registration (#235)", () => {
           created: true,
         },
       }),
-      // 2nd POST — marketplace manifest
-      (_url, _body) => ({ status: 200, json: { kernelId: "k-flow-235", status: "pending" } }),
     ]);
 
     const res = await registerKernel("https://gw.example.com/", manifest, {
       apiKey: "pcc_live_test",
       fetchImpl,
-      signingKey: { principalPrivateKey: kp.secretKey },
+      signingKey: { algorithm: "ed25519", principalPrivateKey: kp.secretKey, expectedPublicKey: pubHex },
     });
 
     // Two calls, in the mandated order.
     expect(calls).toHaveLength(2);
-    expect(calls[0].url).toBe("https://gw.example.com/api/kernels");
-    expect(calls[1].url).toBe("https://gw.example.com/api/kernels/register");
+    expect(calls[0].url).toBe("https://gw.example.com/api/kernels/register");
+    expect(calls[1].url).toBe("https://gw.example.com/api/kernels");
     expect(calls[0].method).toBe("POST");
     expect(calls[1].method).toBe("POST");
 
     // 1st body: the signing fields + manifest identity fields.
-    expect(calls[0].body).toMatchObject({
+    expect(calls[1].body).toMatchObject({
       id: "k-flow-235",
       name: "Test Kernel 235",
       maxAssuranceTier: 1,
       signingKeyAlgorithm: "ed25519",
       signingPublicKey: pubHex,
     });
-    expect(calls[0].body.signingProof).toMatch(/^[0-9a-f]{128}$/);
+    expect(calls[1].body.signingProof).toMatch(/^[0-9a-f]{128}$/);
     // Auth header propagated to the signing POST.
-    expect(calls[0].headers["Authorization"]).toBe("Bearer pcc_live_test");
+    expect(calls[1].headers["Authorization"]).toBe("Bearer pcc_live_test");
 
     // 2nd body: unchanged marketplace shape.
-    expect(calls[1].body).toEqual({ manifest });
+    expect(calls[0].body).toEqual({ manifest });
 
     // Result: marketplace fields + signing outcome.
     expect(res.kernelId).toBe("k-flow-235");
@@ -184,12 +205,13 @@ describe("registerKernel — signing-key registration (#235)", () => {
     });
   });
 
-  it("reports signerBound:false when the gateway already bound a DIFFERENT signer (set-once)", async () => {
+  it("fails loud when the gateway reports a different SET-ONCE signer", async () => {
     const manifest = testManifest("k-setonce-235");
     const otherPub = Buffer.from(
       nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(3)).publicKey,
     ).toString("hex");
     const { fetchImpl } = mockFetch([
+      (_url, _body) => ({ status: 200, json: { kernelId: "k-setonce-235", status: "pending" } }),
       (_url, _body) => ({
         status: 200, // upsert of an existing kernel
         json: {
@@ -197,51 +219,74 @@ describe("registerKernel — signing-key registration (#235)", () => {
           created: false,
         },
       }),
-      (_url, _body) => ({ status: 200, json: { kernelId: "k-setonce-235", status: "pending" } }),
     ]);
 
-    const res = await registerKernel("https://gw.example.com", manifest, {
+    await expect(registerKernel("https://gw.example.com", manifest, {
       fetchImpl,
-      signingKey: { principalPrivateKey: kp.secretKey },
-    });
-
-    expect(res.signing?.signerBound).toBe(false);
-    expect(res.signing?.registeredSigner).toEqual({ algorithm: "ed25519", publicKey: `0x${otherPub}` });
-    expect(res.signing?.provenPublicKey).toBe(pubHex);
+      signingKey: { algorithm: "ed25519", principalPrivateKey: kp.secretKey, expectedPublicKey: pubHex },
+    })).rejects.toMatchObject({ name: "KernelRegistrationError", statusCode: 409 });
   });
 
-  it("reports signerBound:false when the gateway persisted no signer (null)", async () => {
+  it("fails loud when the gateway reports no bound signer", async () => {
     const manifest = testManifest("k-nullsigner-235");
     const { fetchImpl } = mockFetch([
+      (_url, _body) => ({ status: 200, json: { kernelId: "k-nullsigner-235", status: "pending" } }),
       (_url, _body) => ({
         status: 201,
         json: { kernel: { signingKey: null, signingAddress: null }, created: true },
       }),
-      (_url, _body) => ({ status: 200, json: { kernelId: "k-nullsigner-235", status: "pending" } }),
     ]);
 
-    const res = await registerKernel("https://gw.example.com", manifest, {
+    await expect(registerKernel("https://gw.example.com", manifest, {
       fetchImpl,
-      signingKey: { principalPrivateKey: kp.secretKey },
-    });
-    expect(res.signing?.signerBound).toBe(false);
-    expect(res.signing?.registeredSigner).toBeNull();
+      signingKey: { algorithm: "ed25519", principalPrivateKey: kp.secretKey, expectedPublicKey: pubHex },
+    })).rejects.toMatchObject({ name: "KernelRegistrationError", statusCode: 409 });
   });
 
   it("throws KernelRegistrationError if the signing POST itself fails (non-2xx)", async () => {
     const manifest = testManifest("k-signfail-235");
     const { fetchImpl, calls } = mockFetch([
+      (_url, _body) => ({ status: 200, json: { kernelId: "k-signfail-235", status: "pending" } }),
       (_url, _body) => ({ status: 500, json: { error: "boom" } }),
     ]);
 
     await expect(
       registerKernel("https://gw.example.com", manifest, {
         fetchImpl,
-        signingKey: { principalPrivateKey: kp.secretKey },
+        signingKey: { algorithm: "ed25519", principalPrivateKey: kp.secretKey, expectedPublicKey: pubHex },
       }),
     ).rejects.toMatchObject({ name: "KernelRegistrationError", statusCode: 500 });
-    // Marketplace POST must NOT have run after the signing POST failed.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toContain("/api/kernels");
+  });
+
+  it("does not attempt the irreversible bind when marketplace registration fails", async () => {
+    const { fetchImpl, calls } = mockFetch([
+      () => ({ status: 503, json: { error: "marketplace unavailable" } }),
+    ]);
+    await expect(registerKernel("https://gw.example.com", testManifest("k-no-orphan"), {
+      fetchImpl,
+      signingKey: { algorithm: "ed25519", principalPrivateKey: kp.secretKey, expectedPublicKey: pubHex },
+    })).rejects.toMatchObject({ statusCode: 503 });
     expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain("/api/kernels/register");
+  });
+
+  it("leaves registration proofless when key bytes do not match the expected public key", async () => {
+    const { fetchImpl, calls } = mockFetch([
+      () => ({ status: 200, json: { kernelId: "k-proofless", status: "pending" } }),
+    ]);
+    const res = await registerKernel("https://gw.example.com", testManifest("k-proofless"), {
+      fetchImpl,
+      signingKey: {
+        algorithm: "ed25519",
+        principalPrivateKey: new Uint8Array(32).fill(77),
+        expectedPublicKey: pubHex,
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain("/api/kernels/register");
+    expect(res.signing).toBeUndefined();
   });
 });
 

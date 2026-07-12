@@ -168,8 +168,32 @@ export interface EvidenceBundle {
   bundleHash: SHA256;
   /** Kernel's signature over bundleHash */
   kernelSignature: Signature;
+  /**
+   * Delegation proving that the ephemeral Ed25519 key in `kernelSignature`
+   * was authorised by the kernel's registered principal signing key.
+   * Binary values use lowercase hex on the JSON wire.
+   */
+  sessionKeyAuthorization?: SessionKeyAuthorization;
   /** When this bundle was finalized */
   createdAt: Timestamp;
+}
+
+/** JSON-wire form of a principal-authorised ephemeral session key. */
+export interface SessionKeyAuthorization {
+  sessionId: string;
+  parentAgentId: string;
+  /** Raw 32-byte Ed25519 session public key (64 hex chars, optional 0x). */
+  publicKey: string;
+  issuedAt: number;
+  expiresAt: number;
+  scope: {
+    allowedActions: string[];
+    contractIds: string[];
+    maxSignatures: number;
+  };
+  /** Principal signature over the canonical SessionKey body (64-byte hex). */
+  parentSignature: string;
+  derivationPath?: string;
 }
 
 /** Requirements for each assurance tier */

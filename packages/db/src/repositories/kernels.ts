@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, isNull } from "drizzle-orm";
 import { shopKernels, kernelDevices } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IKernelRepository } from "../interfaces/IKernelRepository.js";
@@ -31,6 +31,20 @@ export class KernelRepository implements IKernelRepository {
 
   update(id: string, data: Partial<typeof shopKernels.$inferInsert>) {
     return this.db.update(shopKernels).set(data).where(eq(shopKernels.id, id)).returning().get();
+  }
+
+  bindSignerIfUnregistered(id: string, data: Partial<typeof shopKernels.$inferInsert>) {
+    return this.db
+      .update(shopKernels)
+      .set(data)
+      .where(and(
+        eq(shopKernels.id, id),
+        isNull(shopKernels.signingKeyAlgorithm),
+        isNull(shopKernels.signingAddress),
+        isNull(shopKernels.signingKeyPublicKey),
+      ))
+      .returning()
+      .get();
   }
 
   // ── Devices ─────────────────────────────────────────────────────

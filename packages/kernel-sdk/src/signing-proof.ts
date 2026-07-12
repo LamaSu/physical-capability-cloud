@@ -53,6 +53,20 @@ export interface Ed25519RegistrationProof {
   signingProof: string;
 }
 
+export interface Ed25519RegistrationKey {
+  /** Explicit discriminator: ambiguous byte strings are never auto-detected. */
+  algorithm: "ed25519";
+  /** 32-byte seed or 64-byte tweetnacl secret key. */
+  privateKey: Uint8Array;
+  /** Expected raw public key; the derived key must match before proof creation. */
+  expectedPublicKey: string;
+}
+
+function normalizePublicKey(input: string): string | null {
+  const clean = input.startsWith("0x") || input.startsWith("0X") ? input.slice(2) : input;
+  return /^[0-9a-fA-F]{64}$/.test(clean) ? clean.toLowerCase() : null;
+}
+
 /**
  * Build the Ed25519 registration proof for a kernel's principal signing key.
  *
@@ -69,17 +83,30 @@ export interface Ed25519RegistrationProof {
  */
 export function buildEd25519RegistrationProof(
   kernelId: string,
-  principalPrivateKey: Uint8Array,
+  signingKey: Ed25519RegistrationKey,
 ): Ed25519RegistrationProof {
+  if (signingKey?.algorithm !== "ed25519") {
+    throw new Error("buildEd25519RegistrationProof: signing key algorithm must be explicitly 'ed25519'");
+  }
+  const principalPrivateKey = signingKey.privateKey;
   let keyPair: nacl.SignKeyPair;
   if (principalPrivateKey.length === 64) {
-    keyPair = nacl.sign.keyPair.fromSecretKey(principalPrivateKey);
+    // Re-derive from the seed half rather than trusting the public half embedded
+    // in an arbitrary 64-byte value.
+    keyPair = nacl.sign.keyPair.fromSeed(principalPrivateKey.slice(0, 32));
   } else if (principalPrivateKey.length === 32) {
     keyPair = nacl.sign.keyPair.fromSeed(principalPrivateKey);
   } else {
     throw new Error(
       `buildEd25519RegistrationProof: principalPrivateKey must be 32 (seed) or ` +
         `64 (tweetnacl secretKey) bytes, got ${principalPrivateKey.length}`,
+    );
+  }
+
+  const expectedPublicKey = normalizePublicKey(signingKey.expectedPublicKey);
+  if (!expectedPublicKey || expectedPublicKey !== toHex(keyPair.publicKey)) {
+    throw new Error(
+      "buildEd25519RegistrationProof: derived public key does not match expectedPublicKey",
     );
   }
 

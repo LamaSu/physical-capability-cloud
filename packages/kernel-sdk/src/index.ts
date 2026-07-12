@@ -34,4 +34,4 @@ export type {
 } from "./register.js";
 
 export { buildEd25519RegistrationProof, signingProofMessage } from "./signing-proof.js";
-export type { Ed25519RegistrationProof } from "./signing-proof.js";
+export type { Ed25519RegistrationProof, Ed25519RegistrationKey } from "./signing-proof.js";

@@ -53,7 +53,11 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
     const seed = Buffer.from(kp.privateKeyHex, "hex"); // 32 bytes
 
     // The SDK builds the proof from that seed (tweetnacl fromSeed).
-    const proof = buildEd25519RegistrationProof(id, new Uint8Array(seed));
+    const proof = buildEd25519RegistrationProof(id, {
+      algorithm: "ed25519",
+      privateKey: new Uint8Array(seed),
+      expectedPublicKey: kp.publicKeyHex,
+    });
 
     // Cross-library: tweetnacl-derived pubkey == node:crypto-derived pubkey.
     expect(proof.signingPublicKey).toBe(kp.publicKeyHex);
@@ -91,7 +95,11 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
     const seed = new Uint8Array(Buffer.from(kp.privateKeyHex, "hex"));
 
     // Proof bound to some OTHER kernelId — the challenge won't match `id`.
-    const proof = buildEd25519RegistrationProof("some_other_kernel", seed);
+    const proof = buildEd25519RegistrationProof("some_other_kernel", {
+      algorithm: "ed25519",
+      privateKey: seed,
+      expectedPublicKey: kp.publicKeyHex,
+    });
 
     const create = await app.inject({
       method: "POST",
