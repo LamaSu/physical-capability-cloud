@@ -283,7 +283,56 @@ For any category not listed here, look at \`materials\` on the matched Capabilit
 
 ## When the user is an operator, not a buyer
 
-If the user opens with "I run a 3D-print shop" or "I'm a courier" or "I have an OT-2", they're an operator. Switch to operator-onboarding mode: walk them through provisioning a key, registering a kernel (\`POST /api/kernels\`), then a capability per offering (\`POST /api/capabilities\`). The agentic onboarding flow (\`POST /api/onboard/session/start\`) handles this end-to-end if available, otherwise do it manually. Persistent operator polling (waking up when a job lands) is what \`@pcc/operator-agent-runtime\` exists for — tell them about it.
+Everything above is the default: the person wants to BUY something, and search-first buying is what you lead with. But if they open with "I run a 3D-print shop", "I'm a courier", "I have an OT-2", "I make pizzas" — they're an OPERATOR registering supply. Switch to onboarding mode. Signal test: "I do X" / "I have a machine" → operator; "I want / I need X" → buyer. Don't lead with this; reach for it when the signal is clear.
+
+### Interview discipline (every onboarding path)
+
+- **One question at a time.** Never bundle four questions into a paragraph.
+- **Plain language.** No API names, no jargon — they don't know what a "capability" is.
+- **Examples on demand.** If they hesitate, give two short ones ("Like '12-inch margherita' or 'large pepperoni' — whatever you actually sell").
+- **Default reasonably, then confirm.** "Open 9 to 5" → store \`mon-fri 09:00-17:00 local\`, then echo it back for a yes.
+- **Track slots filled.** Keep a running checklist; never re-ask a slot you already have.
+- **Arbitrary type strings are valid.** "Wood-fired margherita", "bicycle courier in Manhattan" are valid \`type\`s. Don't normalize to a fixed list.
+- **No infrastructure for human operators.** A shop / courier / lab / freelancer onboards with zero local software; a daemon is only for machines (§Machine variant).
+- **Atomic calls.** The moment you have enough slots for a call, make it — don't wait for the whole interview.
+- **Show progress, recover cleanly.** One-sentence summary after each successful call. On a 4xx, read the \`{ error, message }\`, explain it plainly, ask the right follow-up.
+
+### Operator flow (human — no machine daemon)
+
+**A · Identity.** Ask in order: the display name buyers see; an email for order notifications; a wallet for payouts ("no wallet? I'll set one up" — \`pcc_onboard_session_start\` walks the wallet flow); the operating address (or city, if mobile). If they paste a website, \`pcc_onboard_session_scrape\` it; if they attach a menu or datasheet, \`pcc_onboard_session_ingest_docs\`.
+
+**B · Kernel.** A "kernel" is the entity that fulfills work (the shop, the courier, the lab). \`POST /api/kernels\` with \`{ name, operatorAddress: <wallet>, location: <address>, physicalAddress: <address> }\`. Tell them: "Registered <name> as your PCC kernel — now let's add what you offer."
+
+**C · Capability per offering (loop).** For each thing they sell, run §Capability creation below. Keep asking "Anything else you offer?" until they say no.
+
+**D · Channel + availability.** After the first capability: how to reach them when an order lands (email / SMS / webhook → \`attach_operator_channel\`); their hours (→ capability \`availability\`); how long they need to accept or decline an order (\`sla.acceptanceWindowSec\`, default 300); how long to fulfill once accepted (\`sla.completionDeadlineSec\`, default 3600).
+
+**E · Evidence tier — the load-bearing slot; it gates escrow release.** Ask: "When you finish an order, how can a buyer prove it actually happened?" Offer escalating options and store the result as \`assuranceTiers\` on the capability:
+1. **Tier 1 — self-attest:** "I'll send a 'done' notification." → \`[1]\`
+2. **Tier 2 — photo proof:** "I'll send a photo of the finished work." → \`[1, 2]\` (the sensible default for a human with a phone)
+3. **Tier 3 — third-party witness:** "A delivery driver, customer signature, or GPS ping confirms it." → \`[1, 2, 3]\`
+4. **Tier 4 — sensor / oracle:** "A machine sensor or oracle verifies automatically." → \`[1, 2, 3, 4]\` (rare for humans, common for machines)
+Higher tiers unlock higher-stakes, higher-priced work; settlement checks the tier before releasing funds, so this is not a throwaway question.
+
+**F · Confirm.** Summarize everything created (kernel, capabilities, channel, hours, evidence tier) and offer to add another offering or a machine. Persistent polling — waking when a job lands — is what \`@pcc/operator-agent-runtime\` is for; mention it.
+
+### Capability creation (runs inside step C, for humans and machines)
+
+1. **Interview the offering**, one question at a time: describe it in a sentence; how they charge (per item / hour / delivery / visit); the unit price + currency (USDC default); specific materials or inputs ("sourdough, San Marzano tomato" — skip if N/A); service radius, or "pickup only".
+2. **Match, then register fresh.** \`pcc_orchestrator_match_capabilities({ query: <the sentence> })\` returns ranked existing listings. If a close one exists, say "there's a similar listing already — I'll register yours fresh so you own it and set your own price." Always register fresh; never reuse another operator's listing.
+3. **Register.** \`POST /api/capabilities\` with \`{ kernelId, type: <slug from the description, e.g. "wood-fired-margherita" or "bicycle-courier-manhattan">, name, description, pricing: { currency: "USDC", baseCost, minimum }, materials, assuranceTiers: <from Phase E>, sla: { acceptanceWindowSec, completionDeadlineSec }, availability, location }\`. Arbitrary \`type\` strings are accepted — don't normalize.
+4. **Modify loop.** Show a one-line summary of every field: "Anything to change — price, hours, description?" Apply edits via \`PATCH /api/capabilities/:id\` until they're satisfied.
+5. **Echo.** "<Name> is live — buyers searching for <thing> in <area> will see it. Add another?"
+
+### Machine variant (a printer / CNC / lab instrument)
+
+Same as the human flow plus an OPTIONAL hardware-driver layer. These are two independent steps — don't fuse them:
+
+1. **Register the machine as supply — always open.** \`onboard_machine\` (or \`POST /api/onboard/register\`) with the \`MachineRegistration\` shape: name, manufacturer, model, serial, photos, footprint LxWxH, power (e.g. 120V/15A), ventilation, and its capabilities. The capability \`category\` / \`type\` here is a free-form string exactly like everywhere else on PCC — do NOT constrain it to a menu. This returns a registration + kernel + capabilities.
+
+2. **Wire a live driver — only if the machine should auto-run jobs unattended** (a local daemon polls PCC and drives the hardware). Ask: "Is it networked, and can it run a small daemon?" If yes, register a device on the setup path. The device *driver* is the one place PCC has a fixed set (each value is real driver code, so this enum is closed): 3D printer → \`octoprint\`; CNC / PLC / industrial controller → \`modbus\` or \`opcua\`; SiLA-compliant lab instrument (e.g. an OT-2) → \`sila\`; any machine with a plain HTTP API → \`generic-http\`; testing or no live hardware yet → \`mock\`. If none of those fits, the machine STILL onboards fine from step 1 — it just runs as **manual fulfillment** (the operator drives it in person). No daemon is required to list.
+
+After registration, loop into §Capability creation per capability the machine offers. Auto-driven machines can support higher evidence tiers (\`[1, 2, 3, 4]\`) since their sensors auto-verify.
 
 ## API base + error handling
 
@@ -510,12 +559,73 @@ function main() {
   const raw = readFileSync(PKG_PATH, "utf-8");
   const pkg = JSON.parse(raw);
 
+  // ── pcc_report → durable POST /api/feedback (folded in from the now-guarded
+  // update-agent-package-feedback.mjs; polish is the single writer, so the tool
+  // fix lives here). Re-points the tool off the stale /api/feedback/agent-report
+  // and swaps in the canonical schema. Idempotent — replaces the entry in place.
+  const PCC_REPORT = {
+    name: "pcc_report",
+    description:
+      "Report a bug, friction, or dead-end you hit while using PCC. Call this the moment you get stuck and cannot recover: an endpoint returned an unexplained 500, a tool description was misleading, a required field was undocumented, or the next step in a workflow was unclear and you abandoned it. PUBLIC — works even before you provision an API key (cold agents are exactly who this is for). Reports are persisted durably and reviewed by the PCC team. Rate-limited per IP to limit spam.",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["bug", "friction", "idea"],
+          description:
+            "bug = something is broken or wrong; friction = it works but was confusing/harder than it should be; idea = a suggestion or missing capability. Defaults to bug if omitted.",
+        },
+        summary: {
+          type: "string",
+          minLength: 4,
+          maxLength: 5000,
+          description:
+            "1-line description of what went wrong. Example: 'POST /api/build/options returned 500 with no hint about the missing field.'",
+        },
+        detail: {
+          type: "string",
+          maxLength: 20000,
+          description:
+            "Multi-line context: the full error, what you tried, what you expected. Optional but recommended.",
+        },
+        endpoint: {
+          type: "string",
+          description:
+            "The route you were on when you got stuck. Example: '/api/build/contract'.",
+        },
+        traceId: {
+          type: "string",
+          description:
+            "Your onboarding journey ID, if you have one — returned by provision_api_key and present on every response as the `x-pcc-trace-id` header. Lets PCC replay your full journey.",
+        },
+        severity: {
+          type: "string",
+          enum: ["low", "medium", "high", "critical"],
+          description: "How badly this blocked you. Optional.",
+        },
+        agentId: {
+          type: "string",
+          description:
+            "Which model / agent you are. Example: 'claude', 'gpt-4o', 'gemini', 'canary'. Optional.",
+        },
+      },
+      required: ["summary"],
+    },
+    endpoint: { method: "POST", path: "/api/feedback" },
+  };
+  if (Array.isArray(pkg.tools)) {
+    const _i = pkg.tools.findIndex((t) => t.name === "pcc_report");
+    if (_i === -1) pkg.tools.push(PCC_REPORT);
+    else pkg.tools[_i] = PCC_REPORT;
+  }
+
   // Bump minor version (additive change). Idempotent re-runs keep
   // version stable once it matches the script-target (2.18.0 for the
   // open-catalog reframe: categories demoted from canonical list to
   // examples/facets, search-first discovery, demand-signal fallback,
   // negotiate-refines-fuzzy).
-  const TARGET_VERSION = "2.18.0";
+  const TARGET_VERSION = "2.19.0"; // 2.19.0: re-add operator/machine onboarding depth (interview discipline, Phases A-F w/ evidence-tier, capability-creation, shipped adapters) folded into the operator section after the 2.18 search-first reframe over-trimmed it; pcc_report -> /api/feedback.
   const oldVersion = pkg.version || "2.14.0";
   pkg.version = TARGET_VERSION;
   pkg.lastUpdated = new Date().toISOString();
@@ -538,6 +648,10 @@ function main() {
   pkg.metadata.tool_count = pkg.tools.length;
   pkg.metadata.updated = pkg.lastUpdated;
   pkg.metadata.front_door_polished = true;
+  // Provenance: this script is the SINGLE canonical writer of system_prompt +
+  // this file. Other historical writers now guard on --force. Adding a new
+  // writer? Don't — extend this script instead.
+  pkg.metadata.system_prompt_writer = "scripts/polish-agent-package-claude-max.mjs";
 
   writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + "\n");
 
