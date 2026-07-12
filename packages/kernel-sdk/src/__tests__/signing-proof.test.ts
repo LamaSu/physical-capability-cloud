@@ -115,7 +115,9 @@ describe("buildEd25519RegistrationProof", () => {
   });
 
   it("throws on a key that is neither 32 nor 64 bytes", () => {
-    expect(() => buildEd25519RegistrationProof("k", new Uint8Array(16))).toThrow(/32 .* or .* 64/);
+    expect(() => buildEd25519RegistrationProof("k", new Uint8Array(16))).toThrow(
+      /must be 32.*64.*bytes/,
+    );
   });
 
   it("uses the canonical, kernelId-bound challenge string", () => {
