@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES } from "../types/evidence.js";
 
 // ============================================================
 // Common Schemas
@@ -85,31 +86,21 @@ export const CapabilitySchema = z.object({
 // Evidence Schemas
 // ============================================================
 
-export const EvidenceEventTypeSchema = z.enum([
-  "gcode_received", "gcode_hash_verified", "gcode_loaded",
-  "execution_started", "execution_progress", "execution_completed", "execution_failed",
-  "power_profile_sample", "power_profile_summary", "vibration_signature",
-  "acoustic_signature", "temperature_log",
-  "camera_snapshot", "cv_inspection_result",
-  "tee_attestation",
-  "custody_sealed", "custody_handoff_initiated", "custody_handoff_confirmed",
-  "courier_pickup_confirmed", "courier_delivery_confirmed",
-  // CVP events (paired with packages/spec/src/types/evidence.ts).
-  "capture_class_declared",
-  "capture_nonce_issued",
-  "capture_submitted",
-  "capture_signature_verified",
-  "capture_liveness_result",
-  "capture_multi_sensor_fusion",
-  "capture_anchor_committed",
-]);
+// Derived from the TS union's single source of truth (types/evidence.ts
+// EVIDENCE_EVENT_TYPES) — this enum had drifted to 27 hand-listed values
+// while the TS union grew to 56, so sila instrument_result, modbus
+// sensor_data_summary, machine-log printer_log_captured, batch and
+// digital-workflow events failed EvidenceEventSchema.parse wherever it was
+// enforced (same drift bug as deviceType below).
+export const EvidenceEventTypeSchema = z.enum(EVIDENCE_EVENT_TYPES);
 
 export const EvidenceSourceSchema = z.object({
   deviceId: z.string(),
-  deviceType: z.enum([
-    "controller", "camera", "power_monitor", "vibration_sensor",
-    "acoustic_sensor", "temperature_sensor", "tee", "courier_api", "human",
-  ]),
+  // Derived from the TS union's single source of truth (types/evidence.ts
+  // EVIDENCE_DEVICE_TYPES) — this enum had drifted to 9 hand-listed values
+  // while the TS type grew to 26, so sila / modbus / opentrons / instrument
+  // events failed EvidenceEventSchema.parse wherever it was enforced.
+  deviceType: z.enum(EVIDENCE_DEVICE_TYPES),
   kernelId: z.string(),
   firmwareVersion: z.string().optional(),
   // Fabricated-by-design marker (mock/simulated adapters). Kept in the schema

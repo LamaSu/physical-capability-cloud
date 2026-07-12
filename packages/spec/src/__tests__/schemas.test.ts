@@ -9,6 +9,9 @@ import {
   CapabilitySchema,
   ShopKernelSchema,
 } from "../schemas/index.js";
+import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES } from "../types/evidence.js";
+import { isFabricated } from "../evidence/is-fabricated.js";
+import type { EvidenceSource } from "../types/evidence.js";
 
 describe("SHA256Schema", () => {
   it("accepts valid sha256 hashes", () => {
@@ -142,5 +145,92 @@ describe("EvidenceEventSchema", () => {
   it("validates device types", () => {
     const invalid = { ...validEvent, source: { ...validEvent.source, deviceType: "quantum" } };
     expect(EvidenceEventSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  // ── deviceType enum ↔ TS union reconciliation (coord #312) ────────────────
+  // The zod enum had drifted to 9 hand-listed values while the TS union grew
+  // to 26 — sila / modbus / opentrons / instrument events failed parse
+  // wherever the schema was enforced. The enum now derives from
+  // EVIDENCE_DEVICE_TYPES (single source of truth).
+
+  it("accepts every device type in the TS union (sila/modbus/opentrons devices included)", () => {
+    for (const deviceType of EVIDENCE_DEVICE_TYPES) {
+      const event = { ...validEvent, source: { ...validEvent.source, deviceType } };
+      const parsed = EvidenceEventSchema.safeParse(event);
+      expect(parsed.success, `deviceType "${deviceType}" must parse`).toBe(true);
+    }
+  });
+
+  it("accepts every event type in the TS union (instrument/sensor-pipeline/machine-log events included)", () => {
+    // The event-type enum had the same drift bug as deviceType (27 of 56
+    // values) — this loop pins both to their single source of truth.
+    for (const type of EVIDENCE_EVENT_TYPES) {
+      const event = { ...validEvent, type };
+      const parsed = EvidenceEventSchema.safeParse(event);
+      expect(parsed.success, `event type "${type}" must parse`).toBe(true);
+    }
+  });
+
+  it("accepts a sila-style instrument event (the previously-failing case)", () => {
+    const silaEvent = {
+      ...validEvent,
+      type: "instrument_result",
+      source: {
+        deviceId: "dev_sila_plate_reader",
+        deviceType: "instrument",
+        kernelId: "kernel_lab1",
+        simulated: true,
+      },
+      payload: { mock: true, well: "A1" },
+    };
+    const parsed = EvidenceEventSchema.safeParse(silaEvent);
+    expect(parsed.success).toBe(true);
+  });
+
+  it("round-trips source.simulated through parse (the honesty tag is not stripped)", () => {
+    const tagged = {
+      ...validEvent,
+      source: { ...validEvent.source, simulated: true },
+    };
+    const parsed = EvidenceEventSchema.parse(tagged);
+    expect(parsed.source.simulated).toBe(true);
+  });
+});
+
+describe("isFabricated (canonical fabrication predicate)", () => {
+  const source = (over: Partial<EvidenceSource> = {}): EvidenceSource => ({
+    deviceId: "dev-1",
+    deviceType: "controller",
+    kernelId: "k-1",
+    ...over,
+  });
+
+  it("detects the source.simulated leg", () => {
+    expect(isFabricated({ source: source({ simulated: true }), payload: {} })).toBe(true);
+  });
+
+  it("detects the payload.mock leg", () => {
+    expect(isFabricated({ source: source(), payload: { mock: true } })).toBe(true);
+  });
+
+  it("is strict === true on both legs (money-path: truthy is not enough)", () => {
+    expect(isFabricated({ source: source(), payload: { mock: "true" } })).toBe(false);
+    expect(isFabricated({ source: source(), payload: { mock: 1 } })).toBe(false);
+    expect(
+      isFabricated({
+        source: source({ simulated: "yes" as unknown as boolean }),
+        payload: {},
+      }),
+    ).toBe(false);
+  });
+
+  it("treats an event with no tag fields as honest (canonical takes a non-null EvidenceEvent)", () => {
+    // The canonical isFabricated (#240 @pcc/spec) is typed for a non-null
+    // EvidenceEvent and every detector call site iterates a real events[]; it
+    // reads missing source.simulated / payload.mock via optional chaining, so an
+    // untagged event is honest. (null/undefined events are out of contract — not
+    // a settlement path; bundleHasFabricatedEvents owns the empty-array case.)
+    expect(isFabricated({ source: source(), payload: {} })).toBe(false);
+    expect(isFabricated({ source: source(), payload: { other: 1 } })).toBe(false);
   });
 });

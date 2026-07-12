@@ -16,6 +16,13 @@ export interface IEvidenceBundleRepository {
   findById(id: string): EvidenceRow | undefined;
   findByJob(jobId: string, opts?: EvidenceTenantOpts): EvidenceRow[];
   findByKernel(kernelId: string, opts?: EvidenceTenantOpts): EvidenceRow[];
+  /**
+   * Find a bundle by its committed bundleHash. Accepts any of the three hash
+   * forms in circulation (`sha256:<64hex>`, `0x<64hex>`, bare 64-hex) and
+   * matches rows stored in any of them. Returns undefined for non-hash input.
+   * Serves the oracle's evidence fetch (`GET /api/evidence/:hash`).
+   */
+  findByHash(bundleHash: string): EvidenceRow | undefined;
   insert(bundle: EvidenceInsert): EvidenceRow | undefined;
   // Events sub-domain
   findEventsByBundle(bundleId: string): EvidenceEventRow[];

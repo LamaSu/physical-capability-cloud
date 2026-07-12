@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { evidenceBundles, evidenceEvents, captureVerdicts } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IEvidenceBundleRepository, EvidenceTenantOpts } from "../interfaces/IEvidenceBundleRepository.js";
@@ -45,6 +45,23 @@ export class EvidenceBundleRepository implements IEvidenceBundleRepository {
 
   insert(bundle: typeof evidenceBundles.$inferInsert) {
     return this.db.insert(evidenceBundles).values(bundle).returning().get();
+  }
+
+  findByHash(bundleHash: string) {
+    // Normalize to bare lowercase 64-hex, then match every stored form.
+    // Producers commit hashes as `sha256:<hex>` (gateway synth, spec sha256())
+    // while on-chain/oracle callers pass `0x<hex>` — the digest is the key.
+    let hex = bundleHash.trim();
+    if (hex.startsWith("sha256:")) hex = hex.slice("sha256:".length);
+    else if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.slice(2);
+    hex = hex.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) return undefined;
+    const candidates = [`sha256:${hex}`, `0x${hex}`, hex];
+    return this.db
+      .select()
+      .from(evidenceBundles)
+      .where(inArray(evidenceBundles.bundleHash, candidates))
+      .get();
   }
 
   // ── Events ──────────────────────────────────────────────────────
