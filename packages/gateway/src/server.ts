@@ -740,6 +740,10 @@ export async function createGateway(port = 3200) {
       prefix: "/",
       decorateReply: true,
       wildcard: false,
+      // index:false so the bare "/" is NOT auto-served the SPA index here — the
+      // explicit GET "/" route below owns the root (serves the AEO landing page).
+      // Directory index behaviour is preserved by the setNotFoundHandler fallback.
+      index: false,
     });
 
     // SPA fallback — serve index.html for all non-API/SSE routes
@@ -747,6 +751,22 @@ export async function createGateway(port = 3200) {
     const { readFileSync, existsSync, createReadStream, statSync } = await import("node:fs");
     const { join, extname } = await import("node:path");
     const indexHtml = readFileSync(join(dashboardPath, "index.html"), "utf-8");
+
+    // AEO marketing landing at the root path "/". The React dashboard app stays
+    // reachable at all its own routes (/dashboard, /jobs, /kernels, …) via the SPA
+    // fallback below — only the bare "/" serves the static, crawlable landing page
+    // (rich server-rendered content + OpenGraph + JSON-LD for AI answer engines).
+    // Falls back to the SPA index if landing.html is absent from the build, so a
+    // missing file degrades gracefully instead of breaking the root route.
+    let landingHtml: string | null = null;
+    try {
+      landingHtml = readFileSync(join(dashboardPath, "landing.html"), "utf-8");
+    } catch {
+      landingHtml = null;
+    }
+    app.get("/", async (_req, reply) => {
+      return reply.type("text/html").send(landingHtml ?? indexHtml);
+    });
 
     // Minimal extension → MIME type map for static file serving
     const MIME_TYPES: Record<string, string> = {
