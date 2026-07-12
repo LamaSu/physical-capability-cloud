@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 /** Origins allowed to make credentialed requests */
 const ALLOWED_ORIGINS = new Set([
   "https://capability.network",
+  "https://lamasu.github.io",   // GitHub Pages landing site — feedback form POSTs to /api/feedback
   "http://localhost:5173",      // Vite dev server
   "http://localhost:3200",      // Local gateway
   "http://127.0.0.1:5173",
