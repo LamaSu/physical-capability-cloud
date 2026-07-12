@@ -168,18 +168,26 @@ jobs:
             echo "::warning::RAILWAY_API_TOKEN not set — skipping staging redeploy (staging may stay stale until the secret is added)."
             exit 0
           fi
-          api() { curl -s https://backboard.railway.com/graphql/v2 \
+          # --fail-with-body: nonzero exit on HTTP >=400 (so set -e catches API failures); body still printed.
+          api() { curl -sS --fail-with-body https://backboard.railway.com/graphql/v2 \
             -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H "Content-Type: application/json" -d "$1"; }
+          # A GraphQL error arrives as HTTP 200 with an { errors: [...] } body — curl can't see it.
+          gqlerr() { echo "$1" | jq -e '.errors' >/dev/null 2>&1; }
           Q_LATEST="{\"query\":\"query { serviceInstance(serviceId: \\\"$STG_SERVICE_ID\\\", environmentId: \\\"$STG_ENV_ID\\\") { latestDeployment { id status } } }\"}"
           Q_REDEPLOY="{\"query\":\"mutation { serviceInstanceRedeploy(serviceId: \\\"$STG_SERVICE_ID\\\", environmentId: \\\"$STG_ENV_ID\\\") }\"}"
-          old=$(api "$Q_LATEST" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
-          echo "old deployment: ${old:-none}"
-          resp=$(api "$Q_REDEPLOY")
-          echo "redeploy: $resp"
-          echo "$resp" | jq -e '.data.serviceInstanceRedeploy == true' >/dev/null || { echo "::error::redeploy call failed"; exit 1; }
+          # Baseline MUST succeed: a failed query here would leave old="" and let the first poll accept
+          # the OLD still-running deployment's stale SUCCESS. Fail hard so old="" can ONLY mean no-prior-deploy.
+          base=$(api "$Q_LATEST") || { echo "::error::baseline latestDeployment query failed"; exit 1; }
+          if gqlerr "$base"; then echo "::error::baseline GraphQL error: $(echo "$base" | jq -c '.errors')"; exit 1; fi
+          old=$(echo "$base" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
+          echo "old deployment: ${old:-none (no prior deployment)}"
+          resp=$(api "$Q_REDEPLOY") || { echo "::error::redeploy request failed (HTTP)"; exit 1; }
+          if gqlerr "$resp"; then echo "::error::redeploy GraphQL error: $(echo "$resp" | jq -c '.errors')"; exit 1; fi
+          echo "$resp" | jq -e '.data.serviceInstanceRedeploy == true' >/dev/null || { echo "::error::redeploy returned non-true: $resp"; exit 1; }
           for i in $(seq 1 40); do
             sleep 10
-            dep=$(api "$Q_LATEST")
+            dep=$(api "$Q_LATEST") || { echo "attempt $i: query failed (transient), retrying"; continue; }
+            if gqlerr "$dep"; then echo "attempt $i: GraphQL error (transient), retrying"; continue; fi
             id=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
             st=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.status // ""')
             echo "attempt $i: id=${id:0:8} status=${st:-pending}"
