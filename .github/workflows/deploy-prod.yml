@@ -46,6 +46,45 @@ jobs:
             --tag "${IMG}:prod" \
             "${IMG}:${{ inputs.sha }}"
 
+      # Railway's image auto-watch does not reliably redeploy on a :prod manifest
+      # change, so the retag above alone leaves prod on the OLD container while the
+      # health smoke below would false-green against it. Force a redeploy and gate on
+      # a NEW deployment reaching SUCCESS (deploy-truth), not on an HTTP 200.
+      - name: Redeploy prod on Railway + wait for the NEW deployment to succeed
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROD_SERVICE_ID: 995c4eed-ee96-47a0-9bab-9a5cb93e4064
+          PROD_ENV_ID: d0b84123-01b2-40da-a96d-252f492ca471
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "::error::RAILWAY_API_TOKEN secret not set — cannot redeploy prod."; exit 1
+          fi
+          api() { curl -s https://backboard.railway.com/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H "Content-Type: application/json" -d "$1"; }
+          Q_LATEST="{\"query\":\"query { serviceInstance(serviceId: \\\"$PROD_SERVICE_ID\\\", environmentId: \\\"$PROD_ENV_ID\\\") { latestDeployment { id status } } }\"}"
+          Q_REDEPLOY="{\"query\":\"mutation { serviceInstanceRedeploy(serviceId: \\\"$PROD_SERVICE_ID\\\", environmentId: \\\"$PROD_ENV_ID\\\") }\"}"
+          old=$(api "$Q_LATEST" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
+          echo "old deployment: ${old:-none}"
+          resp=$(api "$Q_REDEPLOY")
+          echo "redeploy: $resp"
+          echo "$resp" | jq -e '.data.serviceInstanceRedeploy == true' >/dev/null || { echo "::error::redeploy call failed"; exit 1; }
+          # Gate on a *new* deployment id reaching SUCCESS — never the old one's stale SUCCESS.
+          for i in $(seq 1 40); do
+            sleep 10
+            dep=$(api "$Q_LATEST")
+            id=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
+            st=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.status // ""')
+            echo "attempt $i: id=${id:0:8} status=${st:-pending}"
+            if [ -n "$id" ] && [ "$id" != "$old" ]; then
+              case "$st" in
+                SUCCESS) echo "new prod deployment live"; exit 0;;
+                FAILED|CRASHED|REMOVED|SKIPPED) echo "::error::new prod deployment $st"; exit 1;;
+              esac
+            fi
+          done
+          echo "::error::prod deployment did not reach SUCCESS in time"; exit 1
+
       - name: Smoke test prod health endpoint
         run: |
           for i in $(seq 1 18); do
