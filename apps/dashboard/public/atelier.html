@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<!-- pattern: 04-agentic-ux-patterns.md §Generative UI failure modes — the recognized gaps (fix #3:
+     "loss of mental model / consistency… keep a STABLE shell/spatial layout so only content
+     regenerates") + §Emil Kowalski (loading choreography: skeleton/shimmer, never a bare spinner,
+     <300ms micro-motion) + §Generative UI failure modes gap #10 (ARIA live-region discipline for
+     streamed content).
+
+     WHAT THIS IS: the stable-shell pattern. Header and nav are fixed chrome, built once, and are
+     NEVER touched again. Exactly ONE region (#atl-content) is handed to the renderer as its `mount`;
+     every regeneration — a full render() or an RFC-6902 applyPatch() — replaces only that region.
+     Because the renderer's `render()` never reaches outside its `mount` element, this invariant is
+     structural, not a discipline the caller has to remember.
+
+     SINGLE-FILE: no build step, no CDN, no external fetch. The renderer + governed component catalog
+     are inlined verbatim below (source of truth: assets/renderer/component-tree-renderer.mjs and
+     assets/renderer/component-catalog.mjs — copy this file's <script> back in sync if those change).
+     Inlining (rather than a relative `<script src="../renderer/…">`) is deliberate: SPEC.md §7.4 calls
+     for the Artifact-tool publishing path to carry the renderer inline, and a relative ES-module import
+     does not reliably load when a template is opened directly via file:// (Chromium/Firefox block
+     cross-origin / file-scheme module fetches) — inlining is what makes "works when opened directly"
+     actually true. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCC — governed UI renderer</title>
+<style>
+  :root {
+    --atl-fg: #1a1a19;
+    --atl-fg-muted: #6b6b66;
+    --atl-surface: #f7f7f5;
+    --atl-surface-2: #ecece8;
+    --atl-border: #e3e3df;
+    --atl-accent: #5b5bd6;
+    --atl-accent-fg: #ffffff;
+    --atl-danger: #c53030;
+    --atl-warn: #b7791f;
+    --atl-ok: #2f855a;
+    --atl-radius: 10px;
+    --atl-radius-sm: 6px;
+    --atl-space-2: 8px;
+    --atl-space-3: 12px;
+    --atl-space-4: 16px;
+    --atl-font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    --atl-dur-1: 120ms;
+    --atl-dur-2: 200ms;
+    --atl-ease-out: ease-out;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; min-height: 100%;
+    background: var(--atl-surface-2);
+    color: var(--atl-fg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .atl-shell {
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    min-height: 100vh;
+  }
+  .atl-shell-header {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--atl-space-3);
+    padding: var(--atl-space-3) var(--atl-space-4);
+    background: var(--atl-surface);
+    border-bottom: 1px solid var(--atl-border);
+  }
+  .atl-shell-title { font-weight: 680; letter-spacing: -0.01em; }
+  .atl-shell-subtitle { margin-top: 2px; font-size: 0.85em; color: var(--atl-fg-muted); }
+  .atl-shell-actions { display: flex; gap: var(--atl-space-2); align-items: center; flex-wrap: wrap; }
+  .atl-shell-btn {
+    appearance: none; border-radius: var(--atl-radius-sm); padding: 7px 12px; font: inherit; cursor: pointer;
+    border: 1px solid var(--atl-border); background: var(--atl-surface-2); color: var(--atl-fg);
+    transition: transform var(--atl-dur-1) var(--atl-ease-out);
+  }
+  .atl-shell-btn:hover { transform: translateY(-1px); }
+  .atl-shell-btn.primary { background: var(--atl-accent); color: var(--atl-accent-fg); border-color: transparent; }
+  .atl-shell-activity {
+    font-size: 0.8em; color: var(--atl-fg-muted); font-family: var(--atl-font-mono);
+    min-height: 1.2em; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .atl-shell-nav {
+    display: flex; gap: var(--atl-space-2); padding: var(--atl-space-2) var(--atl-space-4);
+    background: var(--atl-surface); border-bottom: 1px solid var(--atl-border);
+  }
+  .atl-shell-nav a {
+    display: inline-block; padding: 6px 10px; border-radius: var(--atl-radius-sm);
+    color: var(--atl-fg-muted); text-decoration: none; font-size: 0.9em;
+    border-bottom: 2px solid transparent;
+  }
+  .atl-shell-nav a.active { color: var(--atl-fg); border-bottom-color: var(--atl-accent); font-weight: 620; }
+  .atl-shell-content { padding: var(--atl-space-4); max-width: 720px; margin: 0 auto; width: 100%; }
+
+  /* Loading choreography: skeleton shimmer, never a bare spinner (03-react-ui-craft.md §Emil Kowalski). */
+  @keyframes atl-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+  .atl-skeleton {
+    height: 220px; border-radius: var(--atl-radius);
+    background: linear-gradient(90deg, var(--atl-surface-2) 25%, var(--atl-border) 37%, var(--atl-surface-2) 63%);
+    background-size: 400% 100%;
+    animation: atl-shimmer 1.4s ease infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .atl-skeleton { animation: none; }
+    .atl-shell-btn { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="atl-shell">
+    <header class="atl-shell-header">
+      <div>
+        <div class="atl-shell-title">PCC — governed UI renderer</div>
+        <div class="atl-shell-subtitle">governed ui-tree renderer · capability.network</div>
+      </div>
+      <div class="atl-shell-actions">
+        <span id="atl-activity" class="atl-shell-activity" aria-live="polite"></span>
+      </div>
+    </header>
+    <!-- Decorative, static nav — never rebuilt by render(). Real integrations can wire these to routes;
+         the point demonstrated here is that they are outside the renderer's `mount` and therefore
+         immune to whatever the content region does. -->
+    <nav class="atl-shell-nav" aria-label="Sections (static — not regenerated)">
+      <a href="#" class="active" aria-current="page">Overview</a>
+      <a href="#">History</a>
+      <a href="#">Settings</a>
+    </nav>
+    <main id="atl-content" class="atl-shell-content" aria-live="polite" aria-busy="true">
+      <div class="atl-skeleton" role="status" aria-label="Loading content"></div>
+    </main>
+  </div>
+
+  <script type="module">
+    // ============================================================================================
+    // BEGIN inlined copy of assets/renderer/component-catalog.mjs (verbatim, source of truth there)
+    // ============================================================================================
+    // pattern: 01-agui-ecosystem.md §generative-UI component catalog (governed declarative primitives)
+    //
+    // The default governed catalog: ~24 primitives the Declarative tier composes from. Every factory is
+    // (node, ctx) => Element. Hard rules, enforced here so they cannot be prompted away:
+    //   • All model-provided text is written with textContent (via ctx.h's `text`) — never innerHTML.
+    //   • The single exception is `markdown`, whose text runs through ctx.sanitizeMarkdown (allowlist) first.
+    //   • `image` and any link accept only safe URL protocols; anything else is dropped to text.
+    //   • Components never call a capability directly. Interactive parts dispatch through ctx.dispatchAction,
+    //     the renderer's single gated seam. Nothing auto-fires.
+    //   • Styling comes exclusively from CSS custom properties (--atl-*) emitted by `tokenize`; the literal
+    //     fallbacks are the default token values, so a component is legible before tokens.css loads and
+    //     fully themed after.
+
+    const SAFE_URL = /^(https?:|data:image\/(png|jpe?g|gif|webp|svg\+xml);|mailto:|tel:)/i;
+
+    function isSafeUrl(u) {
+      if (typeof u !== 'string') return false;
+      const s = u.trim();
+      if (s.startsWith('/') || s.startsWith('./') || s.startsWith('../') || s.startsWith('#')) return true;
+      return SAFE_URL.test(s);
+    }
+
+    function str(v) {
+      if (v == null) return '';
+      if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
+      return String(v);
+    }
+
+    const componentCatalog = {
+      card(node, ctx) {
+        const p = node.props || {};
+        const el = ctx.h('section', { class: 'atl-card', style: cardStyle() });
+        if (p.title) el.appendChild(ctx.h('h3', { class: 'atl-card-title', text: str(p.title), style: titleStyle() }));
+        if (p.subtitle) el.appendChild(ctx.h('p', { class: 'atl-card-sub', text: str(p.subtitle), style: mutedStyle() }));
+        appendChildren(el, node, ctx);
+        return el;
+      },
+
+      grid(node, ctx) {
+        const cols = clampInt((node.props || {}).columns, 1, 6, 2);
+        const el = ctx.h('div', {
+          class: 'atl-grid',
+          style: `display:grid;gap:var(--atl-space-4,16px);grid-template-columns:repeat(${cols},minmax(0,1fr))`,
+        });
+        appendChildren(el, node, ctx);
+        return el;
+      },
+
+      bento(node, ctx) { return componentCatalog.grid(node, ctx); },
+
+      list(node, ctx) {
+        const p = node.props || {};
+        const ordered = !!p.ordered;
+        const el = ctx.h(ordered ? 'ol' : 'ul', { class: 'atl-list', style: 'margin:0;padding-left:1.25em;display:grid;gap:var(--atl-space-2,8px)' });
+        if (Array.isArray(p.items)) {
+          for (const item of p.items) el.appendChild(ctx.h('li', { text: str(item) }));
+        }
+        for (const child of node.children || []) {
+          const li = ctx.h('li');
+          li.appendChild(ctx.renderNode(child));
+          el.appendChild(li);
+        }
+        return el;
+      },
+
+      table(node, ctx) {
+        const p = node.props || {};
+        const columns = Array.isArray(p.columns) ? p.columns : [];
+        const rows = Array.isArray(p.rows) ? p.rows : [];
+        const el = ctx.h('table', { class: 'atl-table', style: 'border-collapse:collapse;width:100%;font:var(--atl-font,inherit)' });
+        if (columns.length) {
+          const thead = ctx.h('thead');
+          const tr = ctx.h('tr');
+          for (const c of columns) tr.appendChild(ctx.h('th', { text: str(c), style: thStyle() }));
+          thead.appendChild(tr);
+          el.appendChild(thead);
+        }
+        const tbody = ctx.h('tbody');
+        for (const row of rows) {
+          const tr = ctx.h('tr');
+          const cells = Array.isArray(row) ? row : columns.map((c) => (row && typeof row === 'object' ? row[c] : ''));
+          for (const cell of cells) tr.appendChild(ctx.h('td', { text: str(cell), style: tdStyle() }));
+          tbody.appendChild(tr);
+        }
+        el.appendChild(tbody);
+        return el;
+      },
+
+      tabs(node, ctx) {
+        const p = node.props || {};
+        const items = Array.isArray(p.tabs) ? p.tabs : [];
+        const el = ctx.h('div', { class: 'atl-tabs' });
+        const bar = ctx.h('div', { class: 'atl-tab-bar', role: 'tablist', style: 'display:flex;gap:var(--atl-space-2,8px);border-bottom:1px solid var(--atl-border,#e3e3df)' });
+        const panels = ctx.h('div', { class: 'atl-tab-panels', style: 'padding-top:var(--atl-space-3,12px)' });
+        const children = node.children || [];
+        items.forEach((label, i) => {
+          const selected = i === (p.active || 0);
+          const tab = ctx.h('button', {
+            class: 'atl-tab', role: 'tab', type: 'button', 'aria-selected': String(selected),
+            text: str(label), style: tabStyle(selected),
+          });
+          const panel = ctx.h('div', { class: 'atl-tab-panel', role: 'tabpanel', style: selected ? '' : 'display:none' });
+          if (children[i]) panel.appendChild(ctx.renderNode(children[i]));
+          tab.addEventListener('click', () => {
+            [...bar.children].forEach((t, ti) => { t.setAttribute('aria-selected', String(ti === i)); t.setAttribute('style', tabStyle(ti === i)); });
+            [...panels.children].forEach((pn, pi) => pn.setAttribute('style', pi === i ? '' : 'display:none'));
+          });
+          bar.appendChild(tab);
+          panels.appendChild(panel);
+        });
+        el.appendChild(bar);
+        el.appendChild(panels);
+        return el;
+      },
+
+      timeline(node, ctx) {
+        const p = node.props || {};
+        const events = Array.isArray(p.events) ? p.events : [];
+        const el = ctx.h('ol', { class: 'atl-timeline', style: 'list-style:none;margin:0;padding:0;display:grid;gap:var(--atl-space-3,12px)' });
+        for (const ev of events) {
+          const li = ctx.h('li', { class: 'atl-timeline-item', style: 'display:grid;grid-template-columns:auto 1fr;gap:var(--atl-space-3,12px)' });
+          li.appendChild(ctx.h('span', { class: 'atl-timeline-dot', 'aria-hidden': 'true', style: 'width:10px;height:10px;border-radius:50%;background:var(--atl-accent,#5b5bd6);margin-top:6px' }));
+          const body = ctx.h('div');
+          if (ev && ev.time) body.appendChild(ctx.h('div', { class: 'atl-timeline-time', text: str(ev.time), style: mutedStyle() }));
+          body.appendChild(ctx.h('div', { class: 'atl-timeline-label', text: str(ev && ev.label != null ? ev.label : ev) }));
+          li.appendChild(body);
+          el.appendChild(li);
+        }
+        return el;
+      },
+
+      heading(node, ctx) {
+        const p = node.props || {};
+        const level = clampInt(p.level, 1, 6, 2);
+        return ctx.h('h' + level, { class: 'atl-heading', text: str(p.text), style: 'margin:0;font-weight:650' });
+      },
+
+      text(node, ctx) {
+        const p = node.props || {};
+        return ctx.h('p', { class: 'atl-text', text: str(p.text), style: 'margin:0;line-height:1.55;color:var(--atl-fg,#1a1a19)' });
+      },
+
+      divider(node, ctx) {
+        return ctx.h('hr', { class: 'atl-divider', style: 'border:none;border-top:1px solid var(--atl-border,#e3e3df);margin:var(--atl-space-3,12px) 0' });
+      },
+
+      badge(node, ctx) {
+        const p = node.props || {};
+        const tone = ({ ok: 'var(--atl-ok,#2f855a)', warn: 'var(--atl-warn,#b7791f)', danger: 'var(--atl-danger,#c53030)' })[p.tone] || 'var(--atl-accent,#5b5bd6)';
+        return ctx.h('span', {
+          class: 'atl-badge', text: str(p.label),
+          style: `display:inline-block;padding:2px 8px;border-radius:999px;font-size:0.78em;color:#fff;background:${tone}`,
+        });
+      },
+
+      stat(node, ctx) {
+        const p = node.props || {};
+        const el = ctx.h('div', { class: 'atl-stat', style: 'display:grid;gap:2px' });
+        el.appendChild(ctx.h('div', { class: 'atl-stat-value', text: str(p.value), style: 'font-size:1.6em;font-weight:680;letter-spacing:-0.01em' }));
+        if (p.label != null) el.appendChild(ctx.h('div', { class: 'atl-stat-label', text: str(p.label), style: mutedStyle() }));
+        if (p.delta != null) el.appendChild(ctx.h('div', { class: 'atl-stat-delta', text: str(p.delta), style: 'font-size:0.85em;color:var(--atl-fg-muted,#6b6b66)' }));
+        return el;
+      },
+
+      progress(node, ctx) {
+        const p = node.props || {};
+        const value = clampInt(p.value, 0, 100, 0);
+        const el = ctx.h('div', { class: 'atl-progress' });
+        if (p.label != null) el.appendChild(ctx.h('div', { class: 'atl-progress-label', text: str(p.label), style: mutedStyle() }));
+        const track = ctx.h('div', { class: 'atl-progress-track', role: 'progressbar', 'aria-valuenow': String(value), 'aria-valuemin': '0', 'aria-valuemax': '100', style: 'height:8px;border-radius:999px;background:var(--atl-surface-2,#ecece8);overflow:hidden' });
+        track.appendChild(ctx.h('div', { class: 'atl-progress-fill', style: `height:100%;width:${value}%;background:var(--atl-accent,#5b5bd6);transition:width var(--atl-dur-2,200ms) var(--atl-ease-out,ease-out)` }));
+        el.appendChild(track);
+        return el;
+      },
+
+      markdown(node, ctx) {
+        const p = node.props || {};
+        const el = ctx.h('div', { class: 'atl-markdown', style: 'line-height:1.55' });
+        if (typeof ctx.sanitizeMarkdown === 'function') {
+          el.innerHTML = ctx.sanitizeMarkdown(str(p.text));
+        } else {
+          el.textContent = str(p.text);
+        }
+        return el;
+      },
+
+      image(node, ctx) {
+        const p = node.props || {};
+        if (!isSafeUrl(p.src)) {
+          return ctx.h('div', { class: 'atl-image-blocked', text: `[image blocked: unsafe src] ${str(p.alt || '')}`.trim(), style: mutedStyle() });
+        }
+        return ctx.h('img', { class: 'atl-image', src: String(p.src), alt: str(p.alt || ''), loading: 'lazy', style: 'max-width:100%;height:auto;border-radius:var(--atl-radius,10px)' });
+      },
+
+      chart(node, ctx) {
+        const p = node.props || {};
+        const fig = ctx.h('figure', { class: 'atl-chart', style: cardStyle() });
+        if (p.title) fig.appendChild(ctx.h('figcaption', { class: 'atl-chart-title', text: str(p.title), style: titleStyle() }));
+        const kind = str(p.spec && p.spec.mark ? p.spec.mark : p.kind || 'chart');
+        const n = Array.isArray(p.spec && p.spec.data ? p.spec.data : p.data) ? (p.spec && p.spec.data ? p.spec.data : p.data).length : 0;
+        fig.appendChild(ctx.h('div', { class: 'atl-chart-placeholder', text: `${kind} · ${n} point${n === 1 ? '' : 's'} — hand to dataviz to render`, style: `display:grid;place-items:center;min-height:120px;color:var(--atl-fg-muted,#6b6b66);background:var(--atl-surface-2,#ecece8);border-radius:var(--atl-radius,10px)` }));
+        try { fig.__atelierChartSpec = p.spec || { mark: p.kind, data: p.data }; } catch { /* frozen target */ }
+        return fig;
+      },
+
+      button(node, ctx) {
+        const p = node.props || {};
+        const action = (node.actions && node.actions[0]) || null;
+        const btn = ctx.h('button', { class: 'atl-button', type: 'button', text: str(p.label || (action && action.label) || 'Action'), style: buttonStyle(p.variant) });
+        if (action) {
+          btn.addEventListener('click', () => ctx.dispatchAction(action, node));
+        } else {
+          btn.disabled = true;
+        }
+        markActionsHandled(btn);
+        return btn;
+      },
+
+      field(node, ctx) {
+        const p = node.props || {};
+        const id = 'atl-f-' + (node.id || Math.abs(hash(str(p.name || p.label))));
+        const wrap = ctx.h('label', { class: 'atl-field', for: id, style: 'display:grid;gap:4px' });
+        if (p.label != null) wrap.appendChild(ctx.h('span', { class: 'atl-field-label', text: str(p.label), style: 'font-size:0.9em;color:var(--atl-fg-muted,#6b6b66)' }));
+        const input = buildInput(p, id, ctx);
+        input.classList.add('atl-input');
+        input.setAttribute('name', str(p.name || node.id || 'field'));
+        wrap.appendChild(input);
+        return wrap;
+      },
+
+      form(node, ctx) {
+        const p = node.props || {};
+        const form = ctx.h('form', { class: 'atl-form', style: 'display:grid;gap:var(--atl-space-3,12px)' });
+        form.addEventListener('submit', (e) => e.preventDefault());
+        for (const child of node.children || []) form.appendChild(ctx.renderNode(child));
+        if (Array.isArray(p.fields)) {
+          for (const f of p.fields) form.appendChild(componentCatalog.field({ type: 'field', props: f }, ctx));
+        }
+        const actions = node.actions || [];
+        if (actions.length) {
+          const bar = ctx.h('div', { class: 'atl-form-actions', style: 'display:flex;gap:var(--atl-space-2,8px);flex-wrap:wrap' });
+          for (const action of actions) {
+            const btn = ctx.h('button', { class: 'atl-button', type: 'submit', text: str(action.label), style: buttonStyle('primary') });
+            btn.addEventListener('click', (e) => {
+              e.preventDefault();
+              const values = collectFormValues(form);
+              ctx.dispatchAction(action, node, { values });
+            });
+            bar.appendChild(btn);
+          }
+          form.appendChild(bar);
+          markActionsHandled(form);
+        }
+        return form;
+      },
+
+      'approval-card'(node, ctx) {
+        const p = node.props || {};
+        const el = ctx.h('section', { class: 'atl-approval-card', role: 'group', 'aria-label': 'Approval required', style: `${cardStyle()};border-left:3px solid var(--atl-warn,#b7791f)` });
+        el.appendChild(ctx.h('div', { class: 'atl-approval-head', text: str(p.title || 'Approval required'), style: titleStyle() }));
+        if (p.summary) el.appendChild(ctx.h('p', { class: 'atl-approval-summary', text: str(p.summary), style: mutedStyle() }));
+        if (p.trust) el.appendChild(componentCatalog.badge({ props: { label: `trust: ${str(p.trust)}`, tone: p.trust === 'read' ? 'ok' : 'warn' } }, ctx));
+        const decisions = node.actions && node.actions.length ? node.actions : defaultDecisions(p);
+        const bar = ctx.h('div', { class: 'atl-approval-actions', style: 'display:flex;gap:var(--atl-space-2,8px);flex-wrap:wrap;margin-top:var(--atl-space-3,12px)' });
+        for (const d of decisions) {
+          const btn = ctx.h('button', { class: 'atl-button', type: 'button', text: str(d.label), style: buttonStyle(d.id === 'approve' ? 'primary' : d.id === 'reject' ? 'danger' : 'ghost') });
+          btn.addEventListener('click', () => ctx.dispatchAction(d, node));
+          bar.appendChild(btn);
+        }
+        el.appendChild(bar);
+        markActionsHandled(el);
+        return el;
+      },
+
+      'confidence-badge'(node, ctx) {
+        const p = node.props || {};
+        const level = ['low', 'med', 'high'].includes(p.level) ? p.level : 'med';
+        const tone = { low: 'var(--atl-danger,#c53030)', med: 'var(--atl-warn,#b7791f)', high: 'var(--atl-ok,#2f855a)' }[level];
+        const el = ctx.h('span', { class: 'atl-confidence', title: (p.drivers || []).map(str).join('; '), style: `display:inline-flex;align-items:center;gap:6px;font-size:0.8em;color:var(--atl-fg-muted,#6b6b66)` });
+        el.appendChild(ctx.h('span', { 'aria-hidden': 'true', style: `width:8px;height:8px;border-radius:50%;background:${tone}` }));
+        el.appendChild(ctx.h('span', { text: `confidence: ${level}` }));
+        return el;
+      },
+
+      footprints(node, ctx) {
+        const p = node.props || {};
+        const items = Array.isArray(p.items) ? p.items : [];
+        const el = ctx.h('div', { class: 'atl-footprints', role: 'group', 'aria-label': 'Side effects', style: 'display:grid;gap:6px' });
+        el.appendChild(ctx.h('div', { class: 'atl-footprints-head', text: 'This can change:', style: mutedStyle() }));
+        for (const f of items) {
+          const row = ctx.h('div', { class: 'atl-footprint', style: 'display:flex;gap:8px;align-items:baseline' });
+          row.appendChild(componentCatalog.badge({ props: { label: str(f.trust || 'read'), tone: (f.trust && f.trust !== 'read') ? 'warn' : 'ok' } }, ctx));
+          row.appendChild(ctx.h('span', { text: str(f.summary || f.capability) }));
+          el.appendChild(row);
+        }
+        return el;
+      },
+
+      plan(node, ctx) {
+        const p = node.props || {};
+        const steps = Array.isArray(p.steps) ? p.steps : [];
+        const el = ctx.h('div', { class: 'atl-plan', style: cardStyle() });
+        el.appendChild(ctx.h('div', { class: 'atl-plan-head', text: str(p.title || 'Planned actions'), style: titleStyle() }));
+        const ol = ctx.h('ol', { class: 'atl-plan-steps', style: 'margin:8px 0 0;padding-left:1.25em;display:grid;gap:6px' });
+        for (const s of steps) {
+          const li = ctx.h('li');
+          li.appendChild(ctx.h('span', { text: str(s && s.label != null ? s.label : s) }));
+          if (s && s.trust && s.trust !== 'read') { li.appendChild(ctx.h('span', { text: ' ' })); li.appendChild(componentCatalog.badge({ props: { label: str(s.trust), tone: 'warn' } }, ctx)); }
+          ol.appendChild(li);
+        }
+        el.appendChild(ol);
+        return el;
+      },
+    };
+
+    function unknownCard(node, ctx) {
+      const el = ctx.h('section', { class: 'atl-unknown-card', role: 'note', style: `${cardStyle()};border:1px dashed var(--atl-border,#e3e3df)` });
+      el.appendChild(ctx.h('div', { class: 'atl-unknown-head', text: `Unknown component: ${str(node && node.type)}`, style: `${titleStyle()};color:var(--atl-fg-muted,#6b6b66)` }));
+      const pre = ctx.h('pre', { class: 'atl-unknown-props', style: 'margin:8px 0 0;white-space:pre-wrap;font:var(--atl-font-mono,ui-monospace,monospace);font-size:0.8em;color:var(--atl-fg-muted,#6b6b66)' });
+      pre.textContent = safeJson(node && node.props);
+      el.appendChild(pre);
+      return el;
+    }
+
+    function appendChildren(el, node, ctx) {
+      for (const child of node.children || []) el.appendChild(ctx.renderNode(child));
+    }
+    function markActionsHandled(el) { try { el.dataset.atlActionsHandled = '1'; } catch { /* non-HTML target */ } }
+    function defaultDecisions(p) {
+      return [
+        { id: 'approve', label: 'Approve', capability: p.capability || 'unknown', trust: p.trust || 'write' },
+        { id: 'reject', label: 'Reject', capability: p.capability || 'unknown', trust: p.trust || 'write' },
+        { id: 'edit', label: 'Edit…', capability: p.capability || 'unknown', trust: p.trust || 'write' },
+      ];
+    }
+    function buildInput(p, id, ctx) {
+      const type = str(p.type || 'text');
+      if (type === 'textarea') {
+        const t = ctx.h('textarea', { id, rows: String(clampInt(p.rows, 1, 20, 3)), placeholder: str(p.placeholder || ''), style: inputStyle() });
+        if (p.value != null) t.value = str(p.value);
+        return t;
+      }
+      if (type === 'select') {
+        const s = ctx.h('select', { id, style: inputStyle() });
+        for (const opt of Array.isArray(p.options) ? p.options : []) {
+          const o = ctx.h('option', { value: str(opt && opt.value != null ? opt.value : opt), text: str(opt && opt.label != null ? opt.label : opt) });
+          if (p.value != null && str(p.value) === o.getAttribute('value')) o.selected = true;
+          s.appendChild(o);
+        }
+        return s;
+      }
+      if (type === 'checkbox') {
+        const c = ctx.h('input', { id, type: 'checkbox' });
+        if (p.value) c.checked = true;
+        return c;
+      }
+      const inputType = ['text', 'number', 'email', 'password', 'search', 'tel', 'url', 'date'].includes(type) ? type : 'text';
+      const i = ctx.h('input', { id, type: inputType, placeholder: str(p.placeholder || ''), style: inputStyle() });
+      if (p.value != null) i.value = str(p.value);
+      return i;
+    }
+    function collectFormValues(form) {
+      const out = {};
+      for (const el of form.querySelectorAll('input,select,textarea')) {
+        const name = el.getAttribute('name');
+        if (!name) continue;
+        out[name] = el.type === 'checkbox' ? !!el.checked : el.value;
+      }
+      return out;
+    }
+    function clampInt(v, min, max, dflt) {
+      const n = Number.parseInt(v, 10);
+      if (Number.isNaN(n)) return dflt;
+      return Math.min(max, Math.max(min, n));
+    }
+    function hash(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return h; }
+    function safeJson(v) { try { return JSON.stringify(v ?? {}, null, 2); } catch { return String(v); } }
+    function cardStyle() { return 'background:var(--atl-surface,#f7f7f5);color:var(--atl-fg,#1a1a19);border:1px solid var(--atl-border,#e3e3df);border-radius:var(--atl-radius,10px);padding:var(--atl-space-4,16px);display:grid;gap:var(--atl-space-2,8px)'; }
+    function titleStyle() { return 'margin:0;font-size:1.05em;font-weight:640;letter-spacing:-0.01em'; }
+    function mutedStyle() { return 'margin:0;color:var(--atl-fg-muted,#6b6b66);font-size:0.9em'; }
+    function thStyle() { return 'text-align:left;padding:6px 10px;border-bottom:2px solid var(--atl-border,#e3e3df);font-weight:620;font-size:0.9em'; }
+    function tdStyle() { return 'padding:6px 10px;border-bottom:1px solid var(--atl-border,#e3e3df)'; }
+    function inputStyle() { return 'width:100%;padding:8px 10px;border:1px solid var(--atl-border,#e3e3df);border-radius:var(--atl-radius-sm,6px);background:var(--atl-surface,#fff);color:var(--atl-fg,#1a1a19);font:inherit'; }
+    function tabStyle(sel) { return `appearance:none;background:none;border:none;border-bottom:2px solid ${sel ? 'var(--atl-accent,#5b5bd6)' : 'transparent'};padding:6px 10px;cursor:pointer;color:${sel ? 'var(--atl-fg,#1a1a19)' : 'var(--atl-fg-muted,#6b6b66)'};font:inherit`; }
+    function buttonStyle(variant) {
+      const base = 'appearance:none;border-radius:var(--atl-radius-sm,6px);padding:8px 14px;font:inherit;cursor:pointer;border:1px solid transparent;transition:transform var(--atl-dur-1,120ms) var(--atl-ease-out,ease-out)';
+      if (variant === 'danger') return `${base};background:var(--atl-danger,#c53030);color:#fff`;
+      if (variant === 'ghost') return `${base};background:transparent;color:var(--atl-fg,#1a1a19);border-color:var(--atl-border,#e3e3df)`;
+      if (variant === 'primary') return `${base};background:var(--atl-accent,#5b5bd6);color:var(--atl-accent-fg,#fff)`;
+      return `${base};background:var(--atl-surface-2,#ecece8);color:var(--atl-fg,#1a1a19);border-color:var(--atl-border,#e3e3df)`;
+    }
+    // ============================================================================================
+    // END inlined copy of component-catalog.mjs
+    // BEGIN inlined copy of assets/renderer/component-tree-renderer.mjs (verbatim; the `import` of
+    // component-catalog.mjs is dropped since both files now share this one module's top-level scope)
+    // ============================================================================================
+    // pattern: 01-agui-ecosystem.md §Declarative gen-UI (named-component ui-tree, STATE_DELTA live sync)
+    //
+    // THE KEYSTONE. Renders a declarative ui-tree (see atelier/reference/ui-tree-spec.md) to live DOM,
+    // progressively, morphing keyed nodes without flicker as RFC-6902 deltas arrive. Vanilla ES module,
+    // zero runtime deps, no build step.
+    //
+    // Security invariants (the reasons ARE the design — see reference/ui-tree-spec.md §boundaries):
+    //   1. Model text is only ever written with textContent. The one HTML insertion path is the `markdown`
+    //      component, and it runs an allowlist sanitizer first. There is no other innerHTML in this file.
+    //   2. An unknown component `type` renders as `unknown-card` (escaped type + props). The governed
+    //      catalog is therefore enforced mechanically, not by prompt.
+    //   3. `actions` NEVER auto-fire. Every dispatch is routed through the single `onAction` seam, whose
+    //      default hands the request to the server-side AG-UI interrupt / trust gate — it does not run the
+    //      capability client-side. Non-read actions cross that gate; the renderer never widens approval.
+    //   4. Deltas are RFC-6902 JSON Patch applied against the tree data, then re-rendered with keyed reuse.
+
+    const defaultCatalog = componentCatalog;
+
+    function createRenderer(opts) {
+      if (!opts || !opts.mount) throw new Error('createRenderer: { mount } is required');
+      const doc = opts.mount.ownerDocument || (typeof document !== 'undefined' ? document : null);
+      if (!doc) throw new Error('createRenderer: no document available');
+
+      const mount = opts.mount;
+      const catalog = Object.assign(Object.create(null), defaultCatalog, opts.catalog || {});
+      const tokens = opts.tokens || null;
+      const sanitize = typeof opts.sanitizeMarkdown === 'function' ? opts.sanitizeMarkdown : sanitizeMarkdown;
+      const onAction = typeof opts.onAction === 'function' ? opts.onAction : defaultOnAction(opts.runEndpoint || '/api/agui/run', mount);
+
+      let tree = null;
+      let destroyed = false;
+      let prevKeyed = new Map();
+
+      const h = makeH(doc);
+
+      function makeCtx(curKeyed) {
+        const ctx = {
+          doc, h, tokens,
+          sanitizeMarkdown: sanitize,
+          renderNode: (node) => buildNode(node, ctx, curKeyed),
+          dispatchAction: (action, extra) => dispatch(action, extra),
+        };
+        return ctx;
+      }
+
+      function dispatch(action, extra) {
+        if (destroyed) return;
+        try {
+          onAction(action, { node: extra && extra.node, values: extra && extra.values, tree });
+        } catch (err) {
+          console.error('[atelier] onAction threw:', err);
+        }
+      }
+
+      function buildNode(node, ctx, curKeyed) {
+        if (!node || typeof node !== 'object' || typeof node.type !== 'string') {
+          return unknownCard({ type: node && node.type, props: node }, ctx);
+        }
+        const key = typeof node.id === 'string' && node.id ? node.id : null;
+        const sig = key ? stableSig(node) : null;
+        if (key && sig != null) {
+          const prev = prevKeyed.get(key);
+          if (prev && prev.sig === sig && prev.el && prev.el.isConnected !== false) {
+            curKeyed.set(key, prev);
+            return prev.el;
+          }
+        }
+        const factory = Object.prototype.hasOwnProperty.call(catalog, node.type) ? catalog[node.type] : unknownCard;
+        let el;
+        try {
+          el = factory(node, ctx) || unknownCard(node, ctx);
+        } catch (err) {
+          console.error(`[atelier] component "${node.type}" threw:`, err);
+          el = errorCard(h, `component "${node.type}" failed to render`);
+        }
+        if (Array.isArray(node.actions) && node.actions.length && !(el.dataset && el.dataset.atlActionsHandled)) {
+          el.appendChild(buildActionBar(node, ctx));
+        }
+        if (key) curKeyed.set(key, { sig, el });
+        return el;
+      }
+
+      function buildActionBar(node, ctx) {
+        const bar = h('div', { class: 'atl-actions', style: 'display:flex;gap:var(--atl-space-2,8px);flex-wrap:wrap;margin-top:var(--atl-space-3,12px)' });
+        for (const action of node.actions) {
+          const nonRead = action && action.trust && action.trust !== 'read';
+          const btn = h('button', {
+            class: 'atl-button', type: 'button',
+            text: String(action && action.label != null ? action.label : 'Action'),
+            title: nonRead ? `Requires approval (${action.trust})` : '',
+            style: actionButtonStyle(nonRead),
+          });
+          btn.addEventListener('click', () => ctx.dispatchAction(action, { node }));
+          bar.appendChild(btn);
+        }
+        return bar;
+      }
+
+      function render(treeInput) {
+        if (destroyed) return;
+        const problem = validateEnvelope(treeInput);
+        if (problem) {
+          replaceContent(mount, errorCard(h, problem));
+          return;
+        }
+        tree = deepClone(treeInput);
+        const curKeyed = new Map();
+        const ctx = makeCtx(curKeyed);
+        const rootEl = buildNode(tree.root, ctx, curKeyed);
+        const frame = h('div', { class: 'atl-root', dataset: { atlVersion: String(tree.version) } });
+        if (tree.meta && tree.meta.title) {
+          frame.appendChild(h('div', { class: 'atl-tree-title', text: String(tree.meta.title), style: 'font-weight:640;margin-bottom:var(--atl-space-3,12px)' }));
+        }
+        if (tree.meta && tree.meta.confidence) {
+          frame.appendChild(catalog['confidence-badge']({ props: tree.meta.confidence }, ctx));
+        }
+        frame.appendChild(rootEl);
+        replaceContent(mount, frame);
+        prevKeyed = curKeyed;
+      }
+
+      function applyPatch(ops) {
+        if (destroyed) return;
+        if (!tree) { console.warn('[atelier] applyPatch before render — ignored'); return; }
+        let next;
+        try {
+          next = applyRfc6902(deepClone(tree), Array.isArray(ops) ? ops : (ops && ops.ops) || []);
+        } catch (err) {
+          console.error('[atelier] delta rejected (tree unchanged):', err.message);
+          return;
+        }
+        render(next);
+      }
+
+      function getState() { return tree ? deepClone(tree) : null; }
+
+      function registerComponentLocal(type, factoryFn) {
+        if (typeof type !== 'string' || typeof factoryFn !== 'function') throw new Error('registerComponent(type, factoryFn)');
+        catalog[type] = factoryFn;
+      }
+
+      function destroy() {
+        destroyed = true;
+        replaceContent(mount, null);
+        prevKeyed = new Map();
+        tree = null;
+      }
+
+      return { render, applyPatch, getState, registerComponent: registerComponentLocal, destroy };
+    }
+
+    async function renderStream(eventIterable, opts) {
+      const renderer = createRenderer(opts);
+      const getPayload = typeof opts.getPayload === 'function' ? opts.getPayload : defaultGetPayload;
+      const onReasoning = typeof opts.onReasoning === 'function' ? opts.onReasoning : null;
+      try {
+        for await (const event of eventIterable) {
+          const type = event && (event.type || event.event);
+          if (typeof type === 'string' && type.startsWith('REASONING')) {
+            if (onReasoning) onReasoning(event);
+            continue;
+          }
+          const payload = getPayload(event);
+          if (!payload || typeof payload !== 'object') continue;
+          if (payload.kind === 'ui-tree') renderer.render(payload);
+          else if (payload.kind === 'ui-tree-delta') renderer.applyPatch(payload.ops || []);
+        }
+      } catch (err) {
+        console.error('[atelier] renderStream ended on error:', err);
+      }
+      return renderer;
+    }
+
+    function registerComponent(type, factoryFn) {
+      if (typeof type !== 'string' || typeof factoryFn !== 'function') throw new Error('registerComponent(type, factoryFn)');
+      defaultCatalog[type] = factoryFn;
+    }
+
+    function validateEnvelope(t) {
+      if (!t || typeof t !== 'object') return 'ui-tree envelope missing';
+      if (t.kind !== 'ui-tree') return `unexpected kind "${t.kind}" (expected "ui-tree")`;
+      if (t.version !== 1) return `unsupported ui-tree version ${t.version} (renderer speaks version 1)`;
+      if (!t.root || typeof t.root !== 'object') return 'ui-tree.root missing';
+      return null;
+    }
+
+    function applyRfc6902(docObj, ops) {
+      for (const op of ops) {
+        if (!op || typeof op.op !== 'string') throw new Error('invalid patch op');
+        switch (op.op) {
+          case 'add': setAt(docObj, parsePointer(op.path), op.value, true); break;
+          case 'replace': ensureExists(docObj, op.path); setAt(docObj, parsePointer(op.path), op.value, false); break;
+          case 'remove': removeAt(docObj, parsePointer(op.path)); break;
+          case 'move': {
+            const from = parsePointer(op.from);
+            const val = getAt(docObj, from);
+            removeAt(docObj, from);
+            setAt(docObj, parsePointer(op.path), val, true);
+            break;
+          }
+          case 'copy': setAt(docObj, parsePointer(op.path), deepClone(getAt(docObj, parsePointer(op.from))), true); break;
+          case 'test': {
+            const actual = getAt(docObj, parsePointer(op.path));
+            if (!deepEqual(actual, op.value)) throw new Error(`test failed at ${op.path}`);
+            break;
+          }
+          default: throw new Error(`unsupported op "${op.op}"`);
+        }
+      }
+      return docObj;
+    }
+
+    function parsePointer(pointer) {
+      if (pointer === '' || pointer == null) return [];
+      if (pointer[0] !== '/') throw new Error(`invalid pointer "${pointer}"`);
+      return pointer.slice(1).split('/').map((t) => t.replace(/~1/g, '/').replace(/~0/g, '~'));
+    }
+    function getAt(obj, tokens) {
+      let cur = obj;
+      for (const t of tokens) {
+        if (cur == null) throw new Error('path not found');
+        cur = Array.isArray(cur) ? cur[t === '-' ? cur.length : Number(t)] : cur[t];
+      }
+      return cur;
+    }
+    function ensureExists(obj, pointer) { getAt(obj, parsePointer(pointer)); }
+    function setAt(obj, tokens, value, isAdd) {
+      if (!tokens.length) throw new Error('cannot set root');
+      const parent = getAt(obj, tokens.slice(0, -1));
+      const last = tokens[tokens.length - 1];
+      if (Array.isArray(parent)) {
+        const idx = last === '-' ? parent.length : Number(last);
+        if (Number.isNaN(idx)) throw new Error(`bad array index "${last}"`);
+        if (isAdd) parent.splice(idx, 0, value); else parent[idx] = value;
+      } else if (parent && typeof parent === 'object') {
+        parent[last] = value;
+      } else {
+        throw new Error('cannot set on non-object parent');
+      }
+    }
+    function removeAt(obj, tokens) {
+      if (!tokens.length) throw new Error('cannot remove root');
+      const parent = getAt(obj, tokens.slice(0, -1));
+      const last = tokens[tokens.length - 1];
+      if (Array.isArray(parent)) parent.splice(Number(last), 1);
+      else if (parent && typeof parent === 'object') delete parent[last];
+      else throw new Error('cannot remove from non-object parent');
+    }
+
+    function sanitizeMarkdown(src) {
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const decodeAmp = (u) => u.replace(/&amp;/g, '&');
+      const inline = (raw) => {
+        let t = esc(raw);
+        t = t.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+        t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        t = t.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>');
+        t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) =>
+          isSafeUrl(decodeAmp(url)) ? `<a href="${url}" rel="noopener noreferrer">${label}</a>` : label);
+        return t;
+      };
+      const lines = String(src == null ? '' : src).replace(/\r\n?/g, '\n').split('\n');
+      const out = [];
+      let list = null;
+      let inCode = false;
+      let code = [];
+      const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+      for (const line of lines) {
+        if (/^```/.test(line)) {
+          if (inCode) { out.push(`<pre><code>${code.map(esc).join('\n')}</code></pre>`); code = []; inCode = false; }
+          else { closeList(); inCode = true; }
+          continue;
+        }
+        if (inCode) { code.push(line); continue; }
+        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (heading) { closeList(); out.push(`<h${heading[1].length}>${inline(heading[2])}</h${heading[1].length}>`); continue; }
+        const ul = /^\s*[-*]\s+(.*)$/.exec(line);
+        const ol = /^\s*\d+\.\s+(.*)$/.exec(line);
+        if (ul) { if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(ul[1])}</li>`); continue; }
+        if (ol) { if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(ol[1])}</li>`); continue; }
+        if (line.trim() === '') { closeList(); continue; }
+        closeList();
+        out.push(`<p>${inline(line)}</p>`);
+      }
+      closeList();
+      if (inCode) out.push(`<pre><code>${code.map(esc).join('\n')}</code></pre>`);
+      return out.join('\n');
+    }
+
+    function defaultOnAction(runEndpoint, mount) {
+      return (action, ctx) => {
+        const payload = { kind: 'action-request', action, values: ctx && ctx.values, trust: action && action.trust };
+        if (typeof fetch === 'function' && runEndpoint) {
+          fetch(runEndpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+            .catch((err) => { console.warn('[atelier] action-request POST failed; surfacing via DOM event', err); emitDomEvent(mount, payload); });
+        } else {
+          emitDomEvent(mount, payload);
+        }
+      };
+    }
+    function emitDomEvent(mount, payload) {
+      try {
+        const CE = typeof CustomEvent === 'function' ? CustomEvent : null;
+        if (CE && mount && mount.dispatchEvent) mount.dispatchEvent(new CE('atelier:action-request', { bubbles: true, detail: payload }));
+        else console.warn('[atelier] action-request (no transport):', payload);
+      } catch (err) { console.warn('[atelier] could not emit action event', err); }
+    }
+
+    function makeH(doc) {
+      return function h(tag, attrs = {}, children = []) {
+        const el = doc.createElement(tag);
+        for (const k in attrs) {
+          const v = attrs[k];
+          if (v == null || v === '') continue;
+          if (k === 'text') el.textContent = String(v);
+          else if (k === 'class') el.setAttribute('class', String(v));
+          else if (k === 'style') el.setAttribute('style', String(v));
+          else if (k === 'dataset') { for (const dk in v) { try { el.dataset[dk] = String(v[dk]); } catch { /* noop */ } } }
+          else el.setAttribute(k, String(v));
+        }
+        const kids = Array.isArray(children) ? children : [children];
+        for (const c of kids) {
+          if (c == null) continue;
+          el.appendChild(typeof c === 'object' && c.nodeType ? c : doc.createTextNode(String(c)));
+        }
+        return el;
+      };
+    }
+    function errorCard(h, message) {
+      const el = h('section', { class: 'atl-envelope-error', role: 'alert', style: 'background:var(--atl-surface,#f7f7f5);border:1px solid var(--atl-danger,#c53030);border-radius:var(--atl-radius,10px);padding:var(--atl-space-4,16px);color:var(--atl-danger,#c53030)' });
+      el.appendChild(h('strong', { text: 'ui-tree not rendered' }));
+      el.appendChild(h('div', { text: String(message), style: 'margin-top:6px;color:var(--atl-fg-muted,#6b6b66)' }));
+      return el;
+    }
+    function actionButtonStyle(nonRead) {
+      const base = 'appearance:none;border-radius:var(--atl-radius-sm,6px);padding:8px 14px;font:inherit;cursor:pointer;border:1px solid transparent;transition:transform var(--atl-dur-1,120ms) var(--atl-ease-out,ease-out)';
+      return nonRead
+        ? `${base};background:var(--atl-surface-2,#ecece8);color:var(--atl-fg,#1a1a19);border-color:var(--atl-warn,#b7791f)`
+        : `${base};background:var(--atl-accent,#5b5bd6);color:var(--atl-accent-fg,#fff)`;
+    }
+    function replaceContent(mount, el) {
+      while (mount.firstChild) mount.removeChild(mount.firstChild);
+      if (el) mount.appendChild(el);
+    }
+    function stableSig(node) {
+      try { return JSON.stringify(node, replacerSorted()); } catch { return null; }
+    }
+    function replacerSorted() {
+      return function (_key, value) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          return Object.keys(value).sort().reduce((acc, k) => ((acc[k] = value[k]), acc), {});
+        }
+        return value;
+      };
+    }
+    function deepClone(v) {
+      if (typeof structuredClone === 'function') { try { return structuredClone(v); } catch { /* fall through */ } }
+      return JSON.parse(JSON.stringify(v));
+    }
+    function deepEqual(a, b) {
+      if (a === b) return true;
+      if (typeof a !== typeof b || a == null || b == null) return false;
+      if (typeof a !== 'object') return false;
+      const ka = Object.keys(a), kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      return ka.every((k) => deepEqual(a[k], b[k]));
+    }
+    function defaultGetPayload(event) {
+      if (!event) return null;
+      if (event.value && typeof event.value === 'object') return event.value;
+      if (event.data && typeof event.data === 'object') return event.data;
+      if (event.payload && typeof event.payload === 'object') return event.payload;
+      if (event.kind) return event;
+      return null;
+    }
+    // ============================================================================================
+    // END inlined copy of component-tree-renderer.mjs
+    // ============================================================================================
+
+    // ---- PCC serving bootstrap: render an EXTERNALLY-supplied ui-tree. The tree arrives via
+    //   (1) postMessage({ kind: 'ui-tree' | 'ui-tree-delta', ... }) from an embedder / host,
+    //   (2) a ?tree=<base64url or URL-encoded JSON> query param, or
+    //   (3) an inline <script id="atl-tree" type="application/json"> block.
+    // A button click NEVER runs a capability here — it is relayed to the embedder (postMessage) and
+    // emitted as a DOM event; the host / agent decides whether to act. Header + nav are never touched. ----
+
+    const mountEl = document.getElementById('atl-content');
+    const activityEl = document.getElementById('atl-activity');
+    function setActivity(msg) { if (activityEl) activityEl.textContent = String(msg); }
+
+    const renderer = createRenderer({
+      mount: mountEl,
+      onAction(action, ctx) {
+        const req = { kind: 'action-request', action, values: ctx && ctx.values, trust: action && action.trust };
+        try { if (window.parent && window.parent !== window) window.parent.postMessage(req, '*'); } catch (_) {}
+        try { mountEl.dispatchEvent(new CustomEvent('atelier:action-request', { bubbles: true, detail: req })); } catch (_) {}
+        setActivity('action: ' + (action && action.capability) + ' (' + (action && action.trust) + ') — relayed to host, not executed here');
+      },
+    });
+
+    function placeholder() {
+      renderer.render({ kind: 'ui-tree', version: 1, meta: { title: 'PCC governed UI renderer' }, root: {
+        type: 'card', id: 'wait', props: {
+          title: 'Waiting for a ui-tree',
+          subtitle: 'postMessage a { kind: "ui-tree" } envelope, or open with ?tree=<base64url JSON>.' } } });
+    }
+
+    function tryRender(payload) {
+      if (!payload || typeof payload !== 'object') return false;
+      if (payload.kind === 'ui-tree') { mountEl.setAttribute('aria-busy', 'false'); renderer.render(payload); setActivity('rendered ui-tree'); return true; }
+      if (payload.kind === 'ui-tree-delta') { renderer.applyPatch(payload.ops || []); setActivity('applied ui-tree-delta'); return true; }
+      return false;
+    }
+
+    // (1) postMessage from an embedder / host
+    window.addEventListener('message', (e) => { try { tryRender(e && e.data); } catch (err) { console.warn('[atelier] message render failed', err); } });
+
+    // (2) ?tree= query param — base64url OR URL-encoded JSON
+    function fromParam() {
+      try {
+        const raw = new URLSearchParams(location.search).get('tree');
+        if (!raw) return false;
+        let json;
+        try { json = decodeURIComponent(raw); JSON.parse(json); }
+        catch (_) { json = atob(raw.replace(/-/g, '+').replace(/_/g, '/')); }
+        return tryRender(JSON.parse(json));
+      } catch (err) { console.warn('[atelier] ?tree= parse failed', err); return false; }
+    }
+
+    // (3) inline <script id="atl-tree" type="application/json">
+    function fromInline() {
+      const el = document.getElementById('atl-tree');
+      if (!el) return false;
+      try { return tryRender(JSON.parse(el.textContent)); } catch (err) { console.warn('[atelier] inline tree parse failed', err); return false; }
+    }
+
+    mountEl.setAttribute('aria-busy', 'false');
+    if (!fromParam() && !fromInline()) { placeholder(); setActivity('ready — awaiting a ui-tree via postMessage or ?tree='); }
+    // Signal an embedder that we are ready to receive a tree.
+    try { if (window.parent && window.parent !== window) window.parent.postMessage({ kind: 'atelier-ready' }, '*'); } catch (_) {}
+  </script>
+</body>
+</html>

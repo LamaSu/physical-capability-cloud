@@ -340,7 +340,38 @@ All endpoints resolve against https://capability.network. Always include your AP
 
 ## Trace IDs
 
-Every response includes \`x-pcc-trace-id\`. Save it from \`provision_api_key\` (or \`redeem_invite\`) and echo it on subsequent requests as \`-H "x-pcc-trace-id: tr_<id>"\` so PCC can correlate your full session. When you get stuck, \`pcc_report { trace_id, summary }\` logs to the team's dashboard. This is how friction gets fixed.`;
+Every response includes \`x-pcc-trace-id\`. Save it from \`provision_api_key\` (or \`redeem_invite\`) and echo it on subsequent requests as \`-H "x-pcc-trace-id: tr_<id>"\` so PCC can correlate your full session. When you get stuck, \`pcc_report { type, summary }\` logs to the team's dashboard. This is how friction gets fixed.
+
+## Generating UI (optional — when a rich surface beats a wall of text)
+
+You can return a **governed UI** instead of plain text for the moments that benefit from one — a capability list to pick from, a quote to confirm, a live job status, an approval before a paid action, a receipt. Emit a **ui-tree** (a JSON component tree); the user's client renders it with PCC's governed renderer, served at \`https://capability.network/atelier.html\`. The renderer is safe by construction: every string is written as text (never HTML), an unknown component degrades to a plain card, and **no button ever fires an action on its own** — a click comes back to YOU as an action-request, and only then do you call the matching tool. That last property is what makes it safe to show an "approve & pay" button.
+
+### The ui-tree envelope
+
+\`{ "kind": "ui-tree", "version": 1, "meta": { "title": "..." }, "root": <node> }\`
+
+A **node** is \`{ "type": "<component>", "id": "<stable-key>", "props": { … }, "children": [<node> …], "actions": [<action> …] }\`. \`id\` is optional but keep it stable across regenerations so the renderer morphs in place instead of flickering.
+
+### Components (the governed catalog — anything else degrades to a safe card)
+
+- Structure / text: \`card\` (props: title, subtitle; + children), \`grid\` (props: columns), \`list\` (props: items[] or children), \`table\` (props: columns[], rows[]), \`tabs\`, \`divider\`, \`heading\` (props: level, text), \`text\` (props: text), \`markdown\` (props: text — the only rich-text path, allowlist-sanitized).
+- Signals: \`stat\` (props: value, label, delta), \`progress\` (props: value 0-100, label), \`badge\` (props: label, tone: ok|warn|danger), \`timeline\` (props: events[{time,label}]), \`confidence-badge\`.
+- Input / action: \`form\` (props: fields[] + actions[]), \`field\` (props: name, label, type, options), \`button\` (props: label; + actions[]).
+- Trust: \`approval-card\` — the approval window (below); \`footprints\` (props: items[{trust, summary}]) previews side-effects; \`plan\` (props: steps[]) previews a multi-step order.
+
+### Actions and the approval gate (load-bearing for paid work)
+
+An **action** is \`{ "id": "...", "label": "...", "capability": "<what it does>", "trust": "read" | "write" }\`. A \`read\` action fires freely; anything that spends money, posts a job-offer, books, or settles is \`trust: "write"\` — the renderer marks it and routes the click back to you instead of executing it. NEVER present a paid commit as a bare button: use an \`approval-card\` (props: title, summary, capability, trust: "write") whose Approve / Reject / Edit decisions ARE the confirmation. Put the price, provider, and ETA in the card's \`summary\`; only after the user picks Approve do you post the job-offer. This is the "show the price, get explicit confirmation, then commit" rule from the top of this prompt, rendered.
+
+### Example — a quote to confirm before ordering
+
+\`{ "kind":"ui-tree","version":1,"meta":{"title":"Confirm your order"}, "root":{ "type":"approval-card","id":"confirm","props":{ "title":"Domino's #7764 — 1 medium pepperoni", "summary":"$18.50 + $3 tip · ready ~25 min · reputation 873/1000", "capability":"pizza.order","trust":"write" }, "actions":[ {"id":"approve","label":"Approve & order","capability":"pizza.order","trust":"write"}, {"id":"edit","label":"Change it","capability":"pizza.order","trust":"write"}, {"id":"reject","label":"Cancel","capability":"pizza.order","trust":"write"} ] } }\`
+
+When the client sends back the \`approve\` action, THEN you \`POST /api/job-offers\`. Not before.
+
+### When to reach for it
+
+Default to plain text for a one-line answer. Emit a ui-tree when the user is choosing among options (a \`table\` / \`list\` of capabilities), confirming a spend (\`approval-card\`), watching progress (\`stat\` + \`progress\` + \`timeline\`), or reviewing a result (a \`card\` receipt). If the client can't render it, it shows the JSON — so keep a one-line text summary alongside.`;
 
 // ────────────────────────────────────────────────────────────────────────
 // Worked examples — the kind of multi-step flow Claude will actually run.
@@ -642,6 +673,23 @@ function main() {
   pkg.auth = AUTH;
   pkg.categories = CATEGORIES;
   pkg.dtos = DTOS;
+
+  // Generative UI: the ui-tree renderer + governed catalog (see system_prompt ## Generating UI).
+  pkg.ui = {
+    renderer_url: "https://capability.network/atelier.html",
+    format: "ui-tree",
+    envelope: { kind: "ui-tree", version: 1, meta: { title: "..." }, root: "<node>" },
+    node_shape: "{ type, id?, props?, children?, actions? }",
+    components: [
+      "card", "grid", "list", "table", "tabs", "heading", "text", "markdown",
+      "badge", "stat", "progress", "timeline", "confidence-badge", "image", "chart",
+      "form", "field", "button", "approval-card", "footprints", "plan", "divider",
+    ],
+    action_shape: { id: "", label: "", capability: "", trust: "read|write" },
+    approval_component: "approval-card",
+    notes:
+      "Return a ui-tree envelope to render a governed UI instead of plain text. Unknown component types degrade to a safe card; model text is never HTML; actions never auto-fire (a click returns to the caller, who then calls the tool). Gate any paid/write action behind an approval-card. Full guide in system_prompt ## Generating UI.",
+  };
 
   // Tool count + metadata refresh (additive — does NOT touch tools).
   pkg.metadata = pkg.metadata || {};
