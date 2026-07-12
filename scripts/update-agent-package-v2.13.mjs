@@ -22,6 +22,16 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENT_PACKAGE_PATH = join(ROOT, "apps", "dashboard", "public", "agent-package.json");
 
+// ── DE-CONFLICTION GUARD (2026-07-11 · ai/research/pcc-agent-package-deconflict.md) ──
+// `scripts/polish-agent-package-claude-max.mjs` is the SINGLE canonical writer of this
+// file (live v2.18.0). This one-shot sets version 2.13.0 — a re-run DOWNGRADES the live
+// version and clobbers. No lock — last-run-wins. Refuses unless --force.
+if (!process.argv.includes("--force")) {
+  console.error("[guard] SUPERSEDED — running this would DOWNGRADE + clobber the canonical agent-package.json (live v2.18.0).");
+  console.error("[guard] Canonical: scripts/polish-agent-package-claude-max.mjs. Re-run with --force to override intentionally.");
+  process.exit(1);
+}
+
 const TARGET_VERSION = "2.13.0";
 const TARGET_LAST_UPDATED = "2026-06-14T00:00:00Z";
 

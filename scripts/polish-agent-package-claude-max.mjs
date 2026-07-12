@@ -35,6 +35,13 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_PATH = join(ROOT, "apps", "dashboard", "public", "agent-package.json");
 
+// ── CANONICAL WRITER (de-conflicted 2026-07-11 · ai/research/pcc-agent-package-deconflict.md) ──
+// This is the SINGLE canonical generator of agent-package.json's system_prompt (live
+// v2.18.0+). Every sibling script that writes this file is now guarded to refuse without
+// --force (they were silently clobbering — last-run-wins, no lock). POLICY: one-off
+// prompt/tool changes edit THIS file's SYSTEM_PROMPT source and re-run; never hand-edit
+// agent-package.json, and never revive a sibling generator without merging its content here.
+
 // ────────────────────────────────────────────────────────────────────────
 // The new system prompt (Claude-as-user-agent framing).
 // Replaces the old operator-interview prompt. Onboarding flow still works

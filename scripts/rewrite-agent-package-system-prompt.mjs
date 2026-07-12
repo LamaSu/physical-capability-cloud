@@ -29,6 +29,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_PATH = join(ROOT, "apps", "dashboard", "public", "agent-package.json");
 
+// ── DE-CONFLICTION GUARD (2026-07-11 · ai/research/pcc-agent-package-deconflict.md) ──
+// `scripts/polish-agent-package-claude-max.mjs` is the SINGLE canonical writer of this
+// file's system_prompt (live v2.18.0). This script writes an OLDER "v3 onboarding
+// dispatcher" prompt whose substance should be MERGED into polish, not re-run here.
+// There is no lock — last-run-wins — so an accidental run silently overwrites the live
+// prompt. Refuses unless --force; intended prompt changes go into polish's SYSTEM_PROMPT.
+if (!process.argv.includes("--force")) {
+  console.error("[guard] SUPERSEDED — running this would clobber the canonical agent-package.json system_prompt (live v2.18.0).");
+  console.error("[guard] Canonical: scripts/polish-agent-package-claude-max.mjs. Re-run with --force to override intentionally.");
+  process.exit(1);
+}
+
 const COVERAGE_WORDS = [
   "interview", "question", "clone", "modify", "match",
   "kernel", "capability", "evidence", "availability", "sla",

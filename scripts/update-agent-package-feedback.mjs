@@ -22,6 +22,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENT_PACKAGE_PATH = join(ROOT, "apps", "dashboard", "public", "agent-package.json");
 
+// ── DE-CONFLICTION GUARD (2026-07-11 · ai/research/pcc-agent-package-deconflict.md) ──
+// `scripts/polish-agent-package-claude-max.mjs` is the SINGLE canonical writer of this
+// file's system_prompt (live v2.18.0). This script re-points pcc_report, but its target
+// prompt line no longer matches the live prompt (already a silent no-op) — apply this
+// intent inside polish's SYSTEM_PROMPT + wherever `tools` are generated, not here.
+// No lock — last-run-wins. Refuses unless --force.
+if (!process.argv.includes("--force")) {
+  console.error("[guard] SUPERSEDED — running this would clobber the canonical agent-package.json (live v2.18.0).");
+  console.error("[guard] Canonical: scripts/polish-agent-package-claude-max.mjs. Re-run with --force to override intentionally.");
+  process.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // Canonical pcc_report tool — points at the durable JSONL feedback sink.
 // ---------------------------------------------------------------------------
