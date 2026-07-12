@@ -18,7 +18,7 @@ import type {
   AssuranceTier,
   VerificationAttestation,
 } from "@pcc/spec";
-import { DEFAULT_TIER_REQUIREMENTS, DEFAULT_VERIFIER_CRITERIA } from "@pcc/spec";
+import { DEFAULT_TIER_REQUIREMENTS, DEFAULT_VERIFIER_CRITERIA, isFabricated } from "@pcc/spec";
 import type { CWMStep } from "@pcc/spec";
 import { computeAssuranceScore } from "@pcc/verifier";
 import type { CaptureVerdictRow } from "@pcc/store";
@@ -439,12 +439,19 @@ export class ComplianceFacade extends BaseFacade {
     // Contemporaneous: timestamps are valid ISO strings and span ≤ 48 hours
     const contemporaneous = checkTimestampsContemporaneous(allEvents);
 
-    // Original: kernelSignature is present and signer is not the zero-address test signer
+    // Original: kernelSignature present, signer not the zero-address test signer,
+    // AND no event is fabricated-by-design. The signer-only check passes on ANY
+    // real key, so a fabricated bundle signed by a registered kernel would slip
+    // through it. Folding the authenticity predicate (source.simulated /
+    // payload.mock) into "Original" makes the leg mean origin again: a
+    // simulated/mock-tagged bundle now fails ALCOA "Original". (coord #312/#316)
     const ZERO_SIGNER = "0x0000000000000000000000000000000000000000";
-    const original = allBundles.every((b) => {
+    const signerOriginal = allBundles.every((b) => {
       const sig = (b as any).kernelSignature as { signer?: string } | undefined;
       return sig !== undefined && sig.signer !== ZERO_SIGNER;
     });
+    const authentic = allEvents.every((e) => !isFabricated(e));
+    const original = signerOriginal && authentic;
 
     // Accurate: each bundle's events satisfy the bundle's declared tier requirements
     const accurate = bundles.every(({ raw, events }) => {

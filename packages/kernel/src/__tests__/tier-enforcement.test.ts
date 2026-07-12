@@ -261,6 +261,89 @@ describe("EvidenceEmitter — checkTierRequirements", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fabricated-evidence exclusion from tier requirements (coord #312/#316)
+// ---------------------------------------------------------------------------
+
+describe("EvidenceEmitter — checkTierRequirements rejects fabricated events", () => {
+  let emitter: EvidenceEmitter;
+
+  beforeEach(() => {
+    emitter = new EvidenceEmitter(KERNEL_ID);
+  });
+
+  const simulatedSource = (): EvidenceSource => ({
+    deviceId: "dev-mock-001",
+    deviceType: "controller",
+    kernelId: KERNEL_ID,
+    simulated: true,
+  });
+
+  it("does NOT meet tier 0 when BOTH required events are source.simulated", () => {
+    // Structurally a valid tier-0 set (gcode_hash_verified + execution_completed),
+    // but every event is fabricated → zero authentic events → fails.
+    const events = [
+      makeEvent("gcode_hash_verified", { source: simulatedSource() }),
+      makeEvent("execution_completed", { source: simulatedSource() }),
+    ] as unknown as EvidenceEvent[];
+    const result = emitter.checkTierRequirements(events, 0);
+    expect(result.met).toBe(false);
+    expect(result.missing.length).toBeGreaterThan(0);
+  });
+
+  it("does NOT meet tier 0 when both required events carry payload.mock", () => {
+    const events = [
+      makeEvent("gcode_hash_verified", { payload: { mock: true } }),
+      makeEvent("execution_completed", { payload: { mock: true } }),
+    ] as unknown as EvidenceEvent[];
+    expect(emitter.checkTierRequirements(events, 0).met).toBe(false);
+  });
+
+  it("still meets tier 0 with two HONEST events (real bundle passes)", () => {
+    const events = [
+      makeEvent("gcode_hash_verified"),
+      makeEvent("execution_completed"),
+    ] as unknown as EvidenceEvent[];
+    expect(emitter.checkTierRequirements(events, 0).met).toBe(true);
+  });
+
+  it("does NOT let a fabricated event satisfy a tier-2 required type", () => {
+    // Real tier-1 base + a SIMULATED cv_inspection_result. The fabricated CV
+    // event must not satisfy tier 2's camera/CV group.
+    const events = [
+      makeEvent("gcode_hash_verified"),
+      makeEvent("execution_completed"),
+      makeEvent("power_profile_summary"),
+      makeEvent("cv_inspection_result", { source: simulatedSource() }),
+    ] as unknown as EvidenceEvent[];
+    const result = emitter.checkTierRequirements(events, 2);
+    expect(result.met).toBe(false);
+    expect(
+      result.missing.some((m) => m.includes("cv_inspection_result") || m.includes("camera_snapshot")),
+    ).toBe(true);
+  });
+
+  it("meets tier 2 when the same CV event is HONEST", () => {
+    const events = [
+      makeEvent("gcode_hash_verified"),
+      makeEvent("execution_completed"),
+      makeEvent("power_profile_summary"),
+      makeEvent("cv_inspection_result"),
+    ] as unknown as EvidenceEvent[];
+    expect(emitter.checkTierRequirements(events, 2).met).toBe(true);
+  });
+
+  it("does NOT count a fabricated event toward the minimum-event floor", () => {
+    // Only one authentic event remains once the fabricated one is excluded →
+    // below the tier-0 minimum of 2 AND missing execution_completed.
+    const events = [
+      makeEvent("gcode_hash_verified"),
+      makeEvent("execution_completed", { source: simulatedSource() }),
+    ] as unknown as EvidenceEvent[];
+    expect(emitter.checkTierRequirements(events, 0).met).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JobRunner tier behavior tests (integration-style with mocks)
 // ---------------------------------------------------------------------------
 
