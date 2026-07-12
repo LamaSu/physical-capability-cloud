@@ -152,6 +152,54 @@ jobs:
             --tag "${IMG}:staging" \
             "${IMG}:${{ github.sha }}"
 
+      # Railway's image auto-watch does not reliably redeploy on a :staging manifest
+      # change (staging drifted stale for days under exactly this), so force a redeploy
+      # and gate on a NEW deployment reaching SUCCESS. Unlike the manually-dispatched
+      # prod job, this runs on every master push — so if the token secret is missing it
+      # SKIPS with a warning rather than reddening all of master CI.
+      - name: Redeploy staging on Railway + wait for the NEW deployment to succeed
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          STG_SERVICE_ID: 995c4eed-ee96-47a0-9bab-9a5cb93e4064
+          STG_ENV_ID: 990d7e9b-2079-4f50-b7a8-e2035444adc5
+        run: |
+          set -euo pipefail
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+            echo "::warning::RAILWAY_API_TOKEN not set — skipping staging redeploy (staging may stay stale until the secret is added)."
+            exit 0
+          fi
+          # --fail-with-body: nonzero exit on HTTP >=400 (so set -e catches API failures); body still printed.
+          api() { curl -sS --fail-with-body https://backboard.railway.com/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" -H "Content-Type: application/json" -d "$1"; }
+          # A GraphQL error arrives as HTTP 200 with an { errors: [...] } body — curl can't see it.
+          gqlerr() { echo "$1" | jq -e '.errors' >/dev/null 2>&1; }
+          Q_LATEST="{\"query\":\"query { serviceInstance(serviceId: \\\"$STG_SERVICE_ID\\\", environmentId: \\\"$STG_ENV_ID\\\") { latestDeployment { id status } } }\"}"
+          Q_REDEPLOY="{\"query\":\"mutation { serviceInstanceRedeploy(serviceId: \\\"$STG_SERVICE_ID\\\", environmentId: \\\"$STG_ENV_ID\\\") }\"}"
+          # Baseline MUST succeed: a failed query here would leave old="" and let the first poll accept
+          # the OLD still-running deployment's stale SUCCESS. Fail hard so old="" can ONLY mean no-prior-deploy.
+          base=$(api "$Q_LATEST") || { echo "::error::baseline latestDeployment query failed"; exit 1; }
+          if gqlerr "$base"; then echo "::error::baseline GraphQL error: $(echo "$base" | jq -c '.errors')"; exit 1; fi
+          old=$(echo "$base" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
+          echo "old deployment: ${old:-none (no prior deployment)}"
+          resp=$(api "$Q_REDEPLOY") || { echo "::error::redeploy request failed (HTTP)"; exit 1; }
+          if gqlerr "$resp"; then echo "::error::redeploy GraphQL error: $(echo "$resp" | jq -c '.errors')"; exit 1; fi
+          echo "$resp" | jq -e '.data.serviceInstanceRedeploy == true' >/dev/null || { echo "::error::redeploy returned non-true: $resp"; exit 1; }
+          for i in $(seq 1 40); do
+            sleep 10
+            dep=$(api "$Q_LATEST") || { echo "attempt $i: query failed (transient), retrying"; continue; }
+            if gqlerr "$dep"; then echo "attempt $i: GraphQL error (transient), retrying"; continue; fi
+            id=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.id // ""')
+            st=$(echo "$dep" | jq -r '.data.serviceInstance.latestDeployment.status // ""')
+            echo "attempt $i: id=${id:0:8} status=${st:-pending}"
+            if [ -n "$id" ] && [ "$id" != "$old" ]; then
+              case "$st" in
+                SUCCESS) echo "new staging deployment live"; exit 0;;
+                FAILED|CRASHED|REMOVED|SKIPPED) echo "::error::new staging deployment $st"; exit 1;;
+              esac
+            fi
+          done
+          echo "::error::staging deployment did not reach SUCCESS in time"; exit 1
+
       - name: Smoke test staging health endpoint
         if: vars.STAGING_URL != ''
         run: |
