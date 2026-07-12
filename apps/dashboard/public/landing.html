@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en" data-mood="oaxaca-immersive">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PCC — your agent can do real things now</title>
+  <meta name="description" content="AI agents discover, hire, and verify real-world capability. Cryptographic proof on every job. The capability network." />
+
+  <!-- ── Canonical + Open Graph + Twitter (social & AI answer-engine previews) ── -->
+  <link rel="canonical" href="https://capability.network/" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23130a1d'/%3E%3Ccircle cx='16' cy='16' r='6.5' fill='%23F2A90E'/%3E%3C/svg%3E" />
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+  <meta name="author" content="LamaSu" />
+  <meta name="keywords" content="AI agents, capability network, physical capability, agentic commerce, on-chain settlement, verifiable evidence, PCC, Physical Capability Cloud" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="PCC — Physical Capability Cloud" />
+  <meta property="og:url" content="https://capability.network/" />
+  <meta property="og:title" content="PCC — your agent can do real things now" />
+  <meta property="og:description" content="The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays. Cryptographic proof on every job." />
+  <meta property="og:image" content="https://capability.network/landing/og-image.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="PCC — your agent can do real things now. The capability network." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="PCC — your agent can do real things now" />
+  <meta name="twitter:description" content="The capability network: AI agents discover, hire, and verify real-world capability, with cryptographic proof on every job." />
+  <meta name="twitter:image" content="https://capability.network/landing/og-image.jpg" />
+
+  <!-- ── AEO/GEO: help AI answer engines (ChatGPT, Claude, Perplexity…) learn about PCC.
+       Structured summary lives in /llms.txt; machine-readable metadata in /agent-readability.json;
+       AI crawlers are explicitly welcomed in /robots.txt. ── -->
+  <link rel="alternate" type="text/plain" href="https://capability.network/llms.txt" title="llms.txt — structured summary for LLMs" />
+  <link rel="alternate" type="application/json" href="https://capability.network/agent-package.json" title="Agent package — 249 tools for any LLM" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://capability.network/#org",
+        "name": "PCC — Physical Capability Cloud",
+        "alternateName": "The capability network",
+        "url": "https://capability.network",
+        "logo": "https://capability.network/landing/og-image.jpg",
+        "sameAs": [
+          "https://github.com/LamaSu/physical-capability-cloud",
+          "https://discord.gg/CRFvvUgeV4"
+        ],
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "contactType": "customer support",
+          "url": "https://discord.gg/CRFvvUgeV4"
+        }
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://capability.network/#website",
+        "url": "https://capability.network/",
+        "name": "PCC — your agent can do real things now",
+        "description": "The capability network: AI agents discover, hire, and verify real-world capability with cryptographic proof on every job.",
+        "publisher": { "@id": "https://capability.network/#org" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": "PCC — Physical Capability Cloud",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Web, API",
+        "url": "https://capability.network",
+        "description": "The capability network: AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with cryptographic proof on every job. On-chain settlement (Base Sepolia) via x402 and USDC. Includes a 249-tool agent package.",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "featureList": [
+          "AI agents discover, hire, and verify real-world capability",
+          "Cryptographic proof on every job — signed evidence, IPFS, anchored on-chain",
+          "On-chain settlement on Base Sepolia via x402 and USDC",
+          "249-tool agent package",
+          "Operators publish capabilities in plain language — no code"
+        ]
+      },
+      {
+        "@type": "Service",
+        "name": "PCC — the capability network",
+        "serviceType": "Agentic real-world capability network",
+        "provider": { "@id": "https://capability.network/#org" },
+        "areaServed": "Global",
+        "audience": { "@type": "Audience", "audienceType": "AI agents and capability operators" },
+        "description": "AI agents discover, hire, and verify real-world capability — pizza to power tools to lab assays — with cryptographic proof and on-chain (Base Sepolia) settlement via x402/USDC.",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free to connect and browse; jobs settle per-outcome via USDC escrow." }
+      },
+      {
+        "@type": "WebPage",
+        "@id": "https://capability.network/#webpage",
+        "url": "https://capability.network/",
+        "name": "PCC — your agent can do real things now",
+        "isPartOf": { "@id": "https://capability.network/#website" },
+        "about": { "@id": "https://capability.network/#org" },
+        "speakable": {
+          "@type": "SpeakableSpecification",
+          "cssSelector": [".hero h1", ".hero .sub"]
+        }
+      }
+    ]
+  }
+  </script>
+
+  <!-- ── Analytics: PostHog ───────────────────────────────────────────────
+       __PCC_POSTHOG_KEY is a PUBLIC client-side project key (starts with
+       "phc_") — safe to commit: it is write-only ingest and cannot read data.
+       Get it from PostHog -> Settings -> Project -> "Project API Key" (project
+       350545, US cloud). Until a real phc_ key is filled in, analytics stays
+       OFF and the page still works (PCC.capture falls back to console.debug).
+       Events flow to the same PostHog project the capability.network report
+       reads, so landing-page traffic shows up in scripts/daily-report.mjs. ── -->
+  <script>
+    window.__PCC_POSTHOG_KEY  = 'phc_HyYMiiJIEpF8X7W4OFmxN8bvzMWli2ovupgmAQgmUFn';
+    window.__PCC_POSTHOG_HOST = 'https://us.i.posthog.com';
+  </script>
+  <script>
+    (function () {
+      var key = window.__PCC_POSTHOG_KEY || '';
+      if (!/^phc_/.test(key) || key.indexOf('REPLACE') !== -1) {
+        console.debug('[pcc] PostHog key not set — analytics disabled.');
+        return;
+      }
+      !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageViewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+      posthog.init(key, {
+        api_host: window.__PCC_POSTHOG_HOST,
+        person_profiles: 'identified_only',
+        capture_pageview: true,
+        capture_pageleave: true
+      });
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+  <!-- ── Hero shard-assemble enhancement: three.js + GSAP/ScrollTrigger ──────
+       Progressive enhancement only. If any of this fails to load, the hero's
+       existing fact.jpg duotone image shows exactly as before — see
+       .hero-canvas-mount (empty by default) and the module script before
+       </body>. Same CDN pinning + non-defer load order as the proven
+       compose-reality.html preview (GSAP must be classic + non-defer/async,
+       loaded BEFORE the module script, so window.gsap/ScrollTrigger are
+       guaranteed to exist when it runs). ── -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+
+  <style>
+    /* ============================================================
+       PCC · v5 — IMMERSIVE, image-backed
+       Full-bleed photographic backgrounds symbolizing physical
+       capability, forced into PURPLE→YELLOW duotone (the Oaxaca
+       post palette), text hovering + contrasted over them.
+       Immersive depth: grain, glass, glow, scrim. Space Grotesk.
+       ============================================================ */
+    *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+    svg,img { display: block; max-width: 100%; }
+
+    :root {
+      --purple:   #5B2A86;   /* jacaranda — duotone shadow */
+      --purple-lt:#9B6FD0;
+      --yellow:   #F2A90E;   /* marigold — duotone highlight + accent */
+      --yellow-lt:#F8CB5C;
+      --bg:       #130a1d;   /* deep jacaranda-black */
+      --bg-2:     #1b1029;
+      --cream:    #F6EEDF;
+      --muted:    #C3B2D4;
+      --faint:    #7c6a90;
+      --line:     rgba(246,238,223,.12);
+
+      --display: 'Space Grotesk', system-ui, sans-serif;
+      --sans: 'Inter', system-ui, sans-serif;
+      --mono: 'Space Mono', ui-monospace, monospace;
+      --t-massive: clamp(3rem, 8.5vw + .5rem, 9rem);
+      --t-display: clamp(2rem, 4.5vw + .5rem, 4.75rem);
+      --t-head: clamp(1.4rem, 2.4vw + .4rem, 2.5rem);
+      --t-sub: clamp(1.05rem, 1.2vw + .4rem, 1.4rem);
+      --t-body: clamp(.95rem, .4vw + .8rem, 1.08rem);
+      --t-label: .72rem;
+      --gutter: clamp(1.25rem, 4vw, 4.5rem);
+      --maxw: 1320px;
+      --sp-s: clamp(.75rem,.5vw + .5rem,1rem);
+      --sp-m: clamp(1rem,1vw + .5rem,1.6rem);
+      --sp-l: clamp(1.75rem,2.5vw + .5rem,3rem);
+      --sp-xl: clamp(3rem,5vw + .5rem,6rem);
+      --ease: cubic-bezier(0.16,1,0.3,1);
+      --r: 16px;
+    }
+
+    body {
+      font-family: var(--sans); color: var(--cream); line-height: 1.6; background: var(--bg); overflow-x: hidden;
+      -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+    }
+    body::after { /* grain */
+      content:''; position: fixed; inset: 0; pointer-events: none; z-index: 9999; opacity: .06; mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 220 220' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+    ::selection { background: var(--yellow); color: var(--bg); }
+    a { color: inherit; }
+    .label { font-family: var(--mono); font-size: var(--t-label); font-weight: 400; letter-spacing: .2em; text-transform: uppercase; color: var(--yellow); }
+
+    /* ---- full-bleed image shots ---- */
+    .shot { position: relative; overflow: hidden; isolation: isolate; }
+    .shot-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: -3;
+      filter: url(#duo) saturate(1.7) contrast(1.14) brightness(1.12); transform: scale(1.06); }
+    .shot-tint { position: absolute; inset: 0; z-index: -2; pointer-events: none; mix-blend-mode: overlay;
+      background: linear-gradient(120deg, rgba(124,58,196,.55), rgba(242,169,14,.30) 90%); }
+    .shot.kb .shot-bg { animation: kb 26s ease-in-out infinite alternate; }
+    @keyframes kb { from{ transform: scale(1.06) } to{ transform: scale(1.16) translateY(-1.5%) } }
+    .shot-veil { position: absolute; inset: 0; z-index: -1; pointer-events: none;
+      background:
+        linear-gradient(100deg, rgba(19,10,29,.80) 0%, rgba(19,10,29,.34) 44%, rgba(91,42,134,.06) 100%),
+        radial-gradient(120% 95% at 50% 100%, rgba(19,10,29,.6), transparent 64%),
+        linear-gradient(0deg, var(--bg), transparent 18%); }
+    .shot-veil.center { background:
+        radial-gradient(120% 95% at 50% 50%, transparent 30%, rgba(19,10,29,.82) 100%),
+        linear-gradient(0deg, var(--bg), transparent 22%), linear-gradient(180deg, rgba(19,10,29,.5), transparent 26%); }
+
+    /* ---- hero shard-assemble canvas (enhancement layer, empty until three.js renders into it) ---- */
+    .hero-canvas-mount { position: absolute; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+    .hero-canvas-mount canvas { width: 100% !important; height: 100% !important; display: block; }
+
+    /* ---- TOP BAR ---- */
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding: var(--sp-m) var(--gutter);
+      position: absolute; top: 0; left: 0; right: 0; z-index: 100; }
+    .brand { font-family: var(--mono); font-weight: 700; font-size: 1.05rem; color: var(--cream); letter-spacing: .04em; }
+    .brand i { color: var(--yellow); font-style: normal; }
+    .nav { display: flex; gap: var(--sp-l); align-items: center; }
+    .nav a { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .12em; text-transform: uppercase; text-decoration: none; color: var(--cream); opacity: .8; transition: opacity .3s; text-shadow: 0 1px 12px rgba(0,0,0,.6); }
+    .nav a:hover { opacity: 1; color: var(--yellow); }
+
+    /* ---- HERO ---- */
+    .hero { min-height: 100vh; min-height: 100svh; display: flex; flex-direction: column; justify-content: center; padding: 8rem var(--gutter) var(--sp-xl); }
+    .hero-in { max-width: var(--maxw); margin-inline: auto; width: 100%; }
+    .hero h1 { font-family: var(--display); font-weight: 700; font-size: var(--t-massive); line-height: .98; letter-spacing: -.03em; color: var(--cream); max-width: 15ch;
+      text-shadow: 0 6px 40px rgba(0,0,0,.55); }
+    .hero h1 .y { color: var(--yellow); }
+    .hero .sub { font-size: var(--t-sub); color: var(--cream); max-width: 44ch; margin-top: var(--sp-m); line-height: 1.55; text-shadow: 0 2px 24px rgba(0,0,0,.7); }
+    .hero .sub b { color: var(--yellow-lt); font-weight: 600; }
+    .doors { display: flex; gap: var(--sp-s); margin-top: var(--sp-l); flex-wrap: wrap; }
+    .btn { font-family: var(--mono); font-size: .9rem; font-weight: 700; letter-spacing: .02em; padding: 1em 1.7em; border-radius: 100px; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center; gap: .55em; transition: all .35s var(--ease); border: 1px solid transparent; }
+    .btn .arr { transition: transform .35s var(--ease); } .btn:hover .arr { transform: translateX(5px); }
+    .btn--do { background: var(--yellow); color: var(--bg); box-shadow: 0 12px 40px -10px rgba(242,169,14,.7); }
+    .btn--do:hover { transform: translateY(-3px); box-shadow: 0 18px 50px -10px rgba(242,169,14,.8); }
+    .btn--offer { background: rgba(246,238,223,.08); color: var(--cream); border-color: rgba(246,238,223,.35); backdrop-filter: blur(6px); }
+    .btn--offer:hover { transform: translateY(-3px); background: rgba(246,238,223,.14); border-color: var(--cream); }
+    .scrollcue { margin-top: var(--sp-xl); font-family: var(--mono); font-size: var(--t-label); letter-spacing: .2em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: .8rem; }
+    .scrollcue::before { content:''; width: 34px; height: 1px; background: linear-gradient(90deg, var(--yellow), transparent); }
+    .scrollcue.live::before { width: 72px; background: linear-gradient(90deg, var(--yellow) calc(var(--p,0)*100%), rgba(246,238,223,.14) calc(var(--p,0)*100%)); }
+    .scrollcue.live { transition: opacity .5s var(--ease); }
+    .scrollcue.live.done { opacity: 0; }
+
+    /* ---- dark sections ---- */
+    .wrap { max-width: var(--maxw); margin-inline: auto; padding: var(--sp-xl) var(--gutter); }
+    .head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-m); margin-bottom: var(--sp-l); flex-wrap: wrap; }
+    .head h2 { font-family: var(--display); font-weight: 700; font-size: var(--t-display); line-height: 1; letter-spacing: -.02em; color: var(--cream); max-width: 16ch; }
+
+    .glass { background: linear-gradient(180deg, rgba(246,238,223,.05), rgba(246,238,223,.02)); backdrop-filter: blur(16px);
+      border: 1px solid var(--line); border-radius: var(--r); padding: var(--sp-xl); position: relative; overflow: hidden; box-shadow: 0 40px 90px -50px #000; }
+    .glass::before { content:''; position: absolute; top:0; left:0; right:0; height:1px; background: linear-gradient(90deg, transparent, rgba(242,169,14,.5), transparent); }
+    .demo .label { color: var(--yellow); }
+    .intent { display: flex; align-items: center; gap: var(--sp-s); margin: var(--sp-s) 0 var(--sp-l); border-bottom: 1px solid rgba(242,169,14,.35); padding-bottom: var(--sp-s); }
+    .intent .q { font-family: var(--display); font-size: clamp(1.3rem,2.6vw,2.1rem); color: var(--cream); }
+    .intent .cur { display: inline-block; width: 10px; height: 1.05em; background: var(--yellow); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .chain { display: flex; align-items: center; gap: var(--sp-s); flex-wrap: wrap; font-family: var(--mono); font-size: var(--t-label); letter-spacing: .08em; text-transform: uppercase; }
+    .step { display: inline-flex; align-items: center; gap: .5em; padding: .55em .95em; border: 1px solid var(--line); border-radius: 100px; color: var(--muted); opacity: .42; transition: all .4s var(--ease); }
+    .step .d { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .step.on { opacity: 1; color: var(--yellow); border-color: rgba(242,169,14,.45); box-shadow: 0 0 18px rgba(242,169,14,.25); }
+    .step.done { color: var(--purple-lt); border-color: rgba(155,111,208,.5); box-shadow: 0 0 18px rgba(155,111,208,.3); }
+    .chain .s { color: var(--faint); }
+
+    .paths { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-m); }
+    .path { position: relative; overflow: hidden; border-radius: var(--r); padding: var(--sp-xl); border: 1px solid var(--line);
+      min-height: 340px; display: flex; flex-direction: column; justify-content: flex-end; transition: transform .4s var(--ease), border-color .4s; isolation: isolate; }
+    .path .pbg { position: absolute; inset: 0; z-index: -2; width: 100%; height: 100%; object-fit: cover; filter: url(#duo) saturate(1.6) brightness(1.0); transform: scale(1.05); transition: transform .6s var(--ease); }
+    .path .pveil { position: absolute; inset: 0; z-index: -1; }
+    .path--do .pveil   { background: linear-gradient(0deg, rgba(19,10,29,.96) 12%, rgba(91,42,134,.5) 70%, rgba(19,10,29,.5)); }
+    .path--offer .pveil{ background: linear-gradient(0deg, rgba(19,10,29,.96) 12%, rgba(242,169,14,.28) 78%, rgba(19,10,29,.55)); }
+    .path:hover { transform: translateY(-5px); border-color: rgba(246,238,223,.3); }
+    .path:hover .pbg { transform: scale(1.12); }
+    .tag { align-self: flex-start; font-family: var(--mono); font-size: var(--t-label); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: .35em .8em; border-radius: 100px; margin-bottom: var(--sp-s); }
+    .path--do .tag { background: var(--purple); color: var(--cream); } .path--offer .tag { background: var(--yellow); color: var(--bg); }
+    .path h3 { font-family: var(--display); font-weight: 700; font-size: var(--t-head); line-height: 1.08; color: var(--cream); margin-bottom: var(--sp-s); text-shadow: 0 2px 20px rgba(0,0,0,.6); }
+    .path p { color: var(--cream); opacity: .92; max-width: 40ch; margin-bottom: var(--sp-m); }
+    .steps { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+    .steps li { display: flex; gap: var(--sp-s); align-items: baseline; font-size: var(--t-body); }
+    .steps .n { font-family: var(--mono); font-weight: 700; }
+    .path--do .steps .n { color: var(--yellow); } .path--offer .steps .n { color: var(--yellow); }
+
+    /* verified — full-bleed Mars shot */
+    .verify { min-height: 78vh; display: flex; align-items: center; padding: var(--sp-xl) var(--gutter); }
+    .verify-in { max-width: var(--maxw); margin-inline: auto; width: 100%; display: grid; grid-template-columns: auto 1fr; gap: var(--sp-l); align-items: center; }
+    .verify .big { font-family: var(--display); font-weight: 700; font-size: var(--t-massive); line-height: .82; color: var(--yellow); text-shadow: 0 4px 50px rgba(0,0,0,.6); }
+    .verify .big .x { color: var(--purple-lt); }
+    .verify p { font-size: var(--t-sub); color: var(--cream); max-width: 42ch; line-height: 1.5; text-shadow: 0 2px 24px rgba(0,0,0,.7); }
+    .verify .label { margin-bottom: var(--sp-s); }
+    .proof { list-style: none; display: flex; flex-wrap: wrap; gap: .5rem; margin-top: var(--sp-m); }
+    .proof li { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .05em; text-transform: uppercase; color: var(--cream);
+      border: 1px solid var(--line); border-radius: 100px; padding: .42em .9em; background: rgba(19,10,29,.5); backdrop-filter: blur(6px); display: inline-flex; align-items: center; gap: .5em; }
+    .proof .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); box-shadow: 0 0 10px var(--yellow); animation: blink 2s steps(1) infinite; }
+    .prooflink, .demolink { display: inline-block; font-family: var(--mono); font-size: var(--t-label); letter-spacing: .08em; text-transform: uppercase; text-decoration: none; }
+    .prooflink { margin-top: var(--sp-m); color: var(--yellow); border-bottom: 1px solid rgba(242,169,14,.45); padding-bottom: 2px; }
+    .prooflink:hover { color: var(--yellow-lt); }
+    .demolink { margin-top: var(--sp-m); color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 2px; }
+    .demolink:hover { color: var(--cream); }
+    .verify .btn { margin-top: var(--sp-m); } /* the single primary CTA — see funnel note in plan */
+
+    .footer { max-width: var(--maxw); margin-inline: auto; padding: var(--sp-xl) var(--gutter) var(--sp-l); border-top: 1px solid var(--line);
+      display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: var(--sp-m); }
+    .footer .big { font-family: var(--display); font-weight: 700; font-size: var(--t-display); line-height: .95; color: var(--cream); }
+    .footer .big i { color: var(--yellow); font-style: normal; }
+    .footer .meta { text-align: right; font-family: var(--mono); font-size: var(--t-label); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+    .footer a { text-decoration: none; }
+
+    .reveal { opacity: 0; transform: translateY(30px); transition: opacity .8s var(--ease), transform .8s var(--ease); }
+    .reveal.vis { opacity: 1; transform: none; }
+    @media (max-width: 900px) {
+      .paths { grid-template-columns: 1fr; } .verify-in { grid-template-columns: 1fr; } .nav .nl { display: none; }
+      .shot-veil { background: linear-gradient(0deg, rgba(19,10,29,.95) 20%, rgba(19,10,29,.55)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *,*::before,*::after { animation:none!important; transition-duration:.01ms!important; }
+      .reveal { opacity:1; transform:none; } .shot.kb .shot-bg { animation: none; }
+      .hero-canvas-mount { display:none!important; } /* belt-and-suspenders: JS also skips init under reduced motion */
+    }
+  </style>
+</head>
+<body>
+  <!-- duotone filter: shadows -> jacaranda purple, highlights -> marigold yellow -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="duo" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0 0 0 1 0"/>
+    <feComponentTransfer>
+      <feFuncR tableValues="0.42 1.0"/><feFuncG tableValues="0.16 0.74"/><feFuncB tableValues="0.66 0.06"/>
+    </feComponentTransfer>
+  </filter></svg>
+
+  <main>
+  <!-- HERO -->
+  <section class="shot kb hero">
+    <img class="shot-bg" src="/landing/fact.jpg" alt="" />
+    <div class="shot-tint"></div>
+    <div class="shot-veil"></div>
+    <div class="hero-canvas-mount" id="hero-canvas-mount" aria-hidden="true"></div>
+    <header class="topbar">
+      <span class="brand">PCC<i>.</i></span>
+      <nav class="nav">
+        <a href="#do" class="nl">For agents</a>
+        <a href="#offer" class="nl">For operators</a>
+        <a href="/docs" class="nl">Docs</a>
+        <a href="/dashboard" class="nl">Console</a>
+        <a href="/start" class="nl" style="color:var(--yellow);">Get started &#8599;</a>
+      </nav>
+    </header>
+    <div class="hero-in">
+      <p class="label reveal">The capability network</p>
+      <h1 class="reveal" style="margin-top:var(--sp-s);">Your agent can do <span class="y">real</span> things now.</h1>
+      <p class="sub reveal">It discovers, hires, and verifies real-world capability — pizza to power tools to lab assays. <b>Cryptographic proof on every job.</b></p>
+      <div class="doors reveal">
+        <a class="btn btn--do" href="#do">Do something <span class="arr">&rarr;</span></a>
+        <a class="btn btn--offer" href="#offer">Offer something <span class="arr">&rarr;</span></a>
+      </div>
+      <div class="scrollcue reveal" aria-hidden="true"></div>
+    </div>
+  </section>
+
+  <!-- DEMO -->
+  <section class="wrap">
+    <div class="glass demo reveal">
+      <p class="label">How a request composes</p>
+      <div class="intent"><span class="q"><span id="it"></span><span class="cur"></span></span></div>
+      <div class="chain" id="chain">
+        <span class="step on"><span class="d"></span> your agent</span><span class="s">&rarr;</span>
+        <span class="step"><span class="d"></span> pizza kernel</span><span class="s">&rarr;</span>
+        <span class="step"><span class="d"></span> courier</span><span class="s">&rarr;</span>
+        <span class="step"><span class="d"></span> escrow</span><span class="s">&rarr;</span>
+        <span class="step"><span class="d"></span> verified &check;</span>
+      </div>
+      <a class="demolink" href="/docs">Illustrative — see the live API &amp; how jobs settle on-chain &rarr;</a>
+    </div>
+  </section>
+
+  <!-- TWO DOORS (image-backed) -->
+  <section class="wrap" style="padding-top:0;">
+    <div class="head reveal"><h2>Two doors. Both simple.</h2><p class="label">No terminal required</p></div>
+    <div class="paths reveal">
+      <article class="path path--do" id="do">
+        <img class="pbg" src="/landing/robot.jpg" alt="" />
+        <div class="pveil"></div>
+        <span class="tag">For agents</span>
+        <h3>Tell your agent. It gets it done.</h3>
+        <p>Discover what the network can do, bid, hire, and stream verified evidence — never a wall of commands.</p>
+        <ol class="steps">
+          <li><span class="n">01</span> Connect your agent (or use ours)</li>
+          <li><span class="n">02</span> Discover real machines, real operators</li>
+          <li><span class="n">03</span> Ask for an outcome. Watch it verify.</li>
+        </ol>
+      </article>
+      <article class="path path--offer" id="offer">
+        <img class="pbg" src="/landing/p3d.jpg" alt="" />
+        <div class="pveil"></div>
+        <span class="tag">For operators</span>
+        <h3>Put it online. Keep what you earn.</h3>
+        <p>Describe what you offer in plain words. An agent builds the integration — the hard parts happen out of sight.</p>
+        <ol class="steps">
+          <li><span class="n">01</span> Describe your capability in plain language</li>
+          <li><span class="n">02</span> An agent scaffolds the kernel — no code</li>
+          <li><span class="n">03</span> Publish. Jobs arrive. Escrow pays your wallet.</li>
+        </ol>
+      </article>
+    </div>
+  </section>
+
+  <!-- VERIFIED (full-bleed Mars) -->
+  <section class="shot kb verify">
+    <img class="shot-bg" src="/landing/chip.jpg" alt="" />
+    <div class="shot-tint"></div>
+    <div class="shot-veil center"></div>
+    <div class="verify-in reveal">
+      <div class="big">100<span class="x">%</span></div>
+      <div>
+        <p class="label">Proof, not promises</p>
+        <p>Every job returns signed, independently-verifiable evidence — encrypted, stored on IPFS, anchored on-chain. You don&rsquo;t trust the operator; you check the proof.</p>
+        <ul class="proof">
+          <li><span class="dot"></span> Live · capability.network</li>
+          <li>5 sponsor integrations</li>
+          <li>On-chain · Base Sepolia</li>
+          <li>249-tool agent package</li>
+          <li>x402 · USDC settlement</li>
+        </ul>
+        <a class="btn btn--do" href="/start">Get started <span class="arr">&rarr;</span></a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="footer">
+    <div class="big">do real things<i>.</i></div>
+    <div class="meta"><a href="/docs" class="nl">docs</a> · <a href="/agent-package.json" class="nl">agent package</a> · <a href="https://github.com/LamaSu/physical-capability-cloud" target="_blank" rel="noopener" class="nl">&lt;/&gt; developers</a><br/><span style="display:inline-block;margin-top:.5rem;">capability.network · 2026</span></div>
+  </footer>
+
+  <script>
+    const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('vis');io.unobserve(e.target);}})},{threshold:.12,rootMargin:'0px 0px -40px 0px'});
+    document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+    const intents=['get a pizza to my door tonight','run this assay on 96 samples','print and ship this part by friday','a ride to SFO at 6am'];
+    const out=document.getElementById('it'); let ii=0,ci=0,typ=true;
+    (function tick(){const w=intents[ii];
+      if(typ){out.textContent=w.slice(0,ci++); if(ci>w.length){typ=false;return setTimeout(tick,1900);} setTimeout(tick,45);}
+      else{out.textContent=w.slice(0,ci--); if(ci<0){typ=true;ii=(ii+1)%intents.length;ci=0;return setTimeout(tick,220);} setTimeout(tick,22);}})();
+    /* chain: retimed to click into place when the demo card scrolls into view (one
+       continuous compose gesture right after the hero shards settle), rather than an
+       unconditional loop that's already mid-cycle by the time you get here. Runs once
+       to "done" and holds — a demonstration, not an ambient loop. */
+    const steps=[...document.querySelectorAll('#chain .step')]; let si=0, chainStarted=false;
+    function chainTick(){
+      steps.forEach((s,i)=>{s.classList.toggle('on',i<=si);s.classList.toggle('done',i===steps.length-1&&si>=steps.length-1);});
+      if(si<steps.length-1){ si++; setTimeout(chainTick,700); }
+    }
+    const chainSection=document.querySelector('.demo');
+    if(chainSection){
+      const chainIo=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting&&!chainStarted){chainStarted=true;chainTick();chainIo.unobserve(e.target);}})},{threshold:.35});
+      chainIo.observe(chainSection);
+    }
+    const PCC={capture(ev,p){window.posthog?window.posthog.capture(ev,p):console.debug('[pcc:event]',ev,p||{});}};
+    /* scoped to .doors .btn (its only members) rather than the global .btn selector — the
+       verify-section CTA below now reuses .btn/.btn--do for its prominent styling, and it is
+       NOT a door click, so it gets its own event rather than being misattributed as door:'do'. */
+    document.querySelectorAll('.doors .btn').forEach(b=>b.addEventListener('click',()=>PCC.capture('door_click',{door:b.classList.contains('btn--do')?'do':'offer'})));
+    const proofCta=document.querySelector('.verify .btn');
+    if(proofCta) proofCta.addEventListener('click',()=>PCC.capture('cta_click',{cta:'see_it_live'}));
+  </script>
+
+  <script type="module">
+    /* ============================================================
+       Hero shard-assemble — adapted + re-tinted from compose-reality.html's
+       proven scatter->cluster instanced-shard mechanic (icosa+tetra InstancedMesh,
+       key/rim/bloom, ScrollTrigger scrub). Self-contained: no vendor/web-fx import,
+       only the hero mechanic is reused here, not the other compose-reality demos.
+       Progressive enhancement: a no-op unless WebGL is available and the user has
+       not requested reduced motion — the existing fact.jpg image hero is the
+       fallback in both cases, and needs no JS-driven hide/show: the canvas mount
+       (.hero-canvas-mount) is simply empty until this successfully renders into it.
+       ============================================================ */
+    function prefersReducedMotion() {
+      return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    }
+    function hasWebGL() {
+      try {
+        const c = document.createElement('canvas');
+        return !!(window.WebGLRenderingContext && (c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl')));
+      } catch (e) { return false; }
+    }
+
+    async function initHeroShards() {
+      if (prefersReducedMotion() || !hasWebGL()) return; // fallback: image hero shows, unchanged
+
+      const mount = document.getElementById('hero-canvas-mount');
+      const heroEl = document.querySelector('.hero');
+      const h1 = document.querySelector('.hero h1');
+      if (!mount || !heroEl) return;
+
+      let THREE;
+      try {
+        THREE = await import('three');
+      } catch (e) {
+        console.warn('[hero-shards] three.js failed to load — image fallback stays.', e);
+        return;
+      }
+
+      function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
+      function rand(min, max) { return min + Math.random() * (max - min); }
+      function randomDirection() {
+        const u = Math.random(), v = Math.random();
+        const theta = 2 * Math.PI * u, phi = Math.acos(2 * v - 1);
+        return new THREE.Vector3(Math.sin(phi) * Math.cos(theta), Math.sin(phi) * Math.sin(theta), Math.cos(phi));
+      }
+      function randomInShell(minR, maxR) { return randomDirection().multiplyScalar(rand(minR, maxR)); }
+      // JS stand-in for cubic-bezier(0.16,1,0.3,1) — the page's own --ease, same approximation
+      // compose-reality.html uses for the identical curve.
+      function easeOutExpo(t) { return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
+
+      function makeShardGroup(geometry, count, shardColors) {
+        const material = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.9, roughness: 0.18, flatShading: true });
+        const mesh = new THREE.InstancedMesh(geometry, material, count);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        const dummy = new THREE.Object3D();
+        const instances = [];
+        for (let i = 0; i < count; i++) {
+          const scatterPos = randomInShell(8, 12);
+          const clusterPos = randomInShell(1, 2);
+          const scatterQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(rand(0, Math.PI * 2), rand(0, Math.PI * 2), rand(0, Math.PI * 2)));
+          const clusterQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(rand(-0.08, 0.08), rand(-0.08, 0.08), rand(-0.08, 0.08)));
+          mesh.setColorAt(i, new THREE.Color(shardColors[Math.floor(Math.random() * shardColors.length)]));
+          instances.push({
+            scatterPos, clusterPos, scatterQuat, clusterQuat,
+            scale: rand(0.3, 1.4), delay: rand(0, 0.35),
+            driftAxis: new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize(),
+            driftSpeed: rand(0.02, 0.05), driftAngle: 0,
+          });
+        }
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        return { mesh, instances, dummy };
+      }
+
+      function updateShardGroup(group, p, dt) {
+        const { mesh, instances, dummy } = group;
+        for (let i = 0; i < instances.length; i++) {
+          const inst = instances[i];
+          const lp = clamp((p - inst.delay) / (1 - inst.delay), 0, 1);
+          const eased = easeOutExpo(lp);
+          const pos = inst.scatterPos.clone().lerp(inst.clusterPos, eased);
+          const quat = inst.scatterQuat.clone().slerp(inst.clusterQuat, eased);
+          inst.driftAngle += inst.driftSpeed * dt;
+          quat.multiply(new THREE.Quaternion().setFromAxisAngle(inst.driftAxis, inst.driftAngle));
+          dummy.position.copy(pos); dummy.quaternion.copy(quat); dummy.scale.setScalar(inst.scale); dummy.updateMatrix();
+          mesh.setMatrixAt(i, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+
+      async function setupBloom(renderer, scene, camera, w, h) {
+        try {
+          const [{ EffectComposer }, { RenderPass }, { UnrealBloomPass }, { OutputPass }] = await Promise.all([
+            import('three/addons/postprocessing/EffectComposer.js'),
+            import('three/addons/postprocessing/RenderPass.js'),
+            import('three/addons/postprocessing/UnrealBloomPass.js'),
+            import('three/addons/postprocessing/OutputPass.js'),
+          ]);
+          const composer = new EffectComposer(renderer);
+          composer.setSize(w, h);
+          composer.addPass(new RenderPass(scene, camera));
+          // threshold 0.6 / strength 0.4 / radius 0.3 per the tinted-shard hero spec
+          composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.4, 0.3, 0.6));
+          composer.addPass(new OutputPass());
+          return composer;
+        } catch (err) {
+          console.warn('[hero-shards] bloom unavailable, using plain renderer.', err);
+          return null;
+        }
+      }
+
+      let renderer;
+      try {
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      } catch (e) {
+        console.warn('[hero-shards] WebGLRenderer failed — image fallback stays.', e);
+        return;
+      }
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x130a1d); // --bg jacaranda-black ground
+
+      const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+      camera.position.set(0, 0, 15);
+
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      mount.appendChild(renderer.domElement);
+
+      // lighting.shard.key-rim-bloom, retinted: marigold key (~2.5) + purple rim (~1.5) + low ambient
+      const key = new THREE.DirectionalLight(0xF2A90E, 2.5); key.position.set(3, 4, 5);
+      const rim = new THREE.DirectionalLight(0x9B6FD0, 1.5); rim.position.set(-4, 2, -3);
+      const ambient = new THREE.AmbientLight(0xffffff, 0.1);
+      scene.add(key, rim, ambient);
+
+      // shard material pulled toward --purple (dark->light ramp, base weighted); marigold
+      // comes from the key light above, not the material, per the spec's split of the two.
+      const shardColors = [0x2E1543, 0x4A2270, 0x5B2A86, 0x5B2A86, 0x7A4CAE, 0x9B6FD0];
+      const icoGroup = makeShardGroup(new THREE.IcosahedronGeometry(0.55, 0), 46, shardColors);
+      const tetraGroup = makeShardGroup(new THREE.TetrahedronGeometry(0.65, 0), 44, shardColors);
+      scene.add(icoGroup.mesh, tetraGroup.mesh);
+
+      let composer = null;
+      function sizeToMount() {
+        const w = mount.clientWidth || 1, h = mount.clientHeight || 1;
+        camera.aspect = w / h; camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+        if (composer) composer.setSize(w, h);
+      }
+      sizeToMount();
+      setupBloom(renderer, scene, camera, mount.clientWidth || 1, mount.clientHeight || 1).then((c) => { composer = c; sizeToMount(); });
+
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sizeToMount).observe(mount);
+      else window.addEventListener('resize', sizeToMount);
+
+      let p = 0;
+      function updateResolve(progress) {
+        if (!h1) return;
+        // type.display: the headline "resolves crisply" as the shards lock — a marigold glow
+        // ramps in, additive to the existing shadow. At progress 0 this is a 0px/0-alpha no-op,
+        // i.e. visually identical to the unmodified CSS. Page's own type system is untouched.
+        const eased = easeOutExpo(clamp(progress, 0, 1));
+        h1.style.textShadow = '0 6px 40px rgba(0,0,0,.55), 0 0 ' + (eased * 26).toFixed(0) + 'px rgba(242,169,14,' + (eased * .5).toFixed(2) + ')';
+      }
+
+      if (window.gsap && window.ScrollTrigger) {
+        gsap.registerPlugin(ScrollTrigger);
+        ScrollTrigger.config({ ignoreMobileResize: true }); // no refresh/jump on mobile URL-bar collapse
+        const cue = document.querySelector('.scrollcue');
+        if (cue) cue.classList.add('live');
+        const setCue = () => { if (cue) { cue.style.setProperty('--p', p.toFixed(3)); cue.classList.toggle('done', p >= 0.9); } };
+        ScrollTrigger.create({
+          trigger: heroEl,
+          start: 'top top',
+          end: () => '+=' + (window.innerHeight * 2), // 200vh pinned runway — the assemble scrubs across THIS scroll, then releases
+          pin: true,
+          pinSpacing: true,      // the spacer IS the runway = real document height (honest anchors/scrollbar/momentum)
+          scrub: 1,              // smoothing layer; NOT true (shards are a pure function of p and would strobe)
+          anticipatePin: 1,      // kills the 1-frame unpinned flash on fast scroll
+          invalidateOnRefresh: true,
+          onUpdate(self) { p = self.progress; updateResolve(p); setCue(); },
+          onRefresh(self) { p = self.progress; updateResolve(p); setCue(); }, // deep-link / reload mid-runway: keep p honest
+          onLeave() { p = 1; updateResolve(1); setCue(); },                   // deterministic assembled end-state
+        });
+      } else {
+        p = 1; updateResolve(1); // GSAP unavailable for some reason -> settle at rest rather than stay scattered
+      }
+
+      let last = performance.now();
+      function animate(now) {
+        const dt = Math.min((now - last) / 1000, 0.05);
+        last = now;
+        updateShardGroup(icoGroup, p, dt);
+        updateShardGroup(tetraGroup, p, dt);
+        if (composer) composer.render(); else renderer.render(scene, camera);
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+    }
+
+    initHeroShards();
+  </script>
+</body>
+</html>
