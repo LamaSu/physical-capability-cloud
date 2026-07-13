@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply } from "fastify";
 import { getAllTemplates, getRegisteredTypes, getTemplate } from "@pcc/contract-builder";
 import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
@@ -116,6 +116,45 @@ function csdRegisteredTypes(): string[] {
   return out;
 }
 
+/**
+ * Build the canonical public capability-type union used by both
+ * GET /api/capabilities/types and request-time discovery manifests.
+ *
+ * Built-in templates are the always-available baseline. Live registry and CSD
+ * types are best-effort additions so discovery remains useful if a backing
+ * store is temporarily unavailable.
+ */
+export async function getApiCapabilityTypes(
+  log?: Pick<FastifyBaseLogger, "warn" | "error">,
+): Promise<string[]> {
+  const merged = new Set<string>(getRegisteredTypes());
+
+  try {
+    const dbTypes = await getCapabilityFacade().distinctTypes();
+    if (dbTypes.success) {
+      for (const type of dbTypes.data) {
+        const trimmed = typeof type === "string" ? type.trim() : "";
+        if (trimmed) merged.add(trimmed);
+      }
+    } else {
+      log?.warn(
+        { err: dbTypes.error },
+        "[capabilities/types] distinct-type query failed; catalog types omitted from union",
+      );
+    }
+
+    for (const type of csdRegisteredTypes()) merged.add(type);
+  } catch (err) {
+    log?.error(
+      { err },
+      "[capabilities/types] union build failed; falling back to templates",
+    );
+    return [...new Set(getRegisteredTypes())].sort();
+  }
+
+  return [...merged].sort();
+}
+
 export async function capabilityRoutes(app: FastifyInstance) {
   // Acquire singleton once per plugin registration — safe because the DB is
   // initialised before route plugins are registered in server.ts.
@@ -166,41 +205,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
         },
       },
     },
-    async () => {
-      // Built-in templates are the always-present safe baseline / fallback.
-      const merged = new Set<string>(getRegisteredTypes());
-
-      try {
-        // 1. Distinct catalog types (SELECT DISTINCT — never a full scan).
-        //    Includes ad-hoc types with no compile-time template.
-        const dbTypes = await facade.distinctTypes();
-        if (dbTypes.success) {
-          for (const t of dbTypes.data) {
-            const trimmed = typeof t === "string" ? t.trim() : "";
-            if (trimmed) merged.add(trimmed);
-          }
-        } else {
-          app.log.warn(
-            { err: dbTypes.error },
-            "[capabilities/types] distinct-type query failed; catalog types omitted from union",
-          );
-        }
-
-        // 2. CSD-registered types (in-memory registry; may be built-ins-only
-        //    or empty — the helper is best-effort and never throws).
-        for (const t of csdRegisteredTypes()) merged.add(t);
-      } catch (err) {
-        // Defense-in-depth: anything unexpected → advertise the templates,
-        // never a 500. Shape is unchanged.
-        app.log.error(
-          { err },
-          "[capabilities/types] union build failed; falling back to templates",
-        );
-        return { types: [...new Set(getRegisteredTypes())].sort() };
-      }
-
-      return { types: [...merged].sort() };
-    },
+    async () => ({ types: await getApiCapabilityTypes(app.log) }),
   );
 
   /** List all capability templates with pricing hints and parameter metadata */

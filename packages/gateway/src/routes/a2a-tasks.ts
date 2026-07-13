@@ -894,7 +894,14 @@ async function dispatchTasksSend(
   params: Record<string, unknown>,
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
-  const skill = (params.skill ?? params.skillId) as string | undefined;
+  const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
+  const skill = requestedSkill
+    ? ({
+        discover_capability: "pcc-discover",
+        hire_capability: "pcc-submit",
+        verify_evidence: "pcc-verify",
+      }[requestedSkill] ?? requestedSkill)
+    : undefined;
   const skillParams = (params.params ?? params.input ?? {}) as Record<string, unknown>;
   const userAgentId = (skillParams.userAgentId as string | undefined) ?? "a2a-anonymous";
 

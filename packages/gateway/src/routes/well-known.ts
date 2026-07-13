@@ -51,7 +51,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       services: [
         {
           name: "A2A",
-          endpoint: `${GATEWAY_URL}/a2a`,
+          endpoint: `${GATEWAY_URL}/a2a/tasks/send`,
           version: "1.0",
         },
         {
@@ -125,9 +125,16 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       protocolVersion: "1.0",
       name: KERNEL_NAME,
       description: KERNEL_DESC,
-      url: `${GATEWAY_URL}/a2a`,
+      url: `${GATEWAY_URL}/a2a/tasks/send`,
       version: "2.0.0",
-      preferredTransport: "http+sse",
+      preferredTransport: "JSONRPC",
+      supportedInterfaces: [
+        {
+          url: `${GATEWAY_URL}/a2a/tasks/send`,
+          protocolBinding: "JSONRPC",
+          protocolVersion: "1.0",
+        },
+      ],
 
       provider: {
         organization: "Physical Capability Cloud",
@@ -138,13 +145,14 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       iconUrl: `${GATEWAY_URL}/icon.png`,
 
       capabilities: {
-        streaming: true,
+        streaming: false,
         pushNotifications: false,
         stateTransitionHistory: false,
+        extendedAgentCard: false,
       },
 
       defaultInputModes: ["application/json", "text/plain"],
-      defaultOutputModes: ["application/json", "text/event-stream"],
+      defaultOutputModes: ["application/json"],
 
       securitySchemes: {
         apiKey: {
@@ -181,14 +189,48 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         { apiKey: [] },
         { siwe: ["operator"] },
       ],
+      securityRequirements: [
+        { apiKey: [] },
+        { siwe: ["operator"] },
+      ],
 
       supportsAuthenticatedExtendedCard: false,
 
       skills: [
         {
+          id: "discover_capability",
+          name: "Discover Physical Capabilities",
+          description: "Find real physical capabilities through POST /ask, GET /api/capabilities/search?q=, GET /api/capabilities/types, or POST /a2a/tasks/send with skill discover_capability.",
+          tags: ["discovery", "physical-capability", "search"],
+          examples: [
+            "Find a physical capability that can manufacture this part",
+            "What laboratory capability is available for this protocol?",
+          ],
+          inputModes: ["application/json", "text/plain"],
+          outputModes: ["application/json"],
+        },
+        {
+          id: "hire_capability",
+          name: "Hire a Physical Capability",
+          description: "Hire a discovered capability through POST /a2a/tasks/send with skill hire_capability or submit directly at POST /api/jobs/submit.",
+          tags: ["hiring", "physical-capability", "job-submission"],
+          examples: ["Hire the selected 3D-printing capability for this job"],
+          inputModes: ["application/json"],
+          outputModes: ["application/json"],
+        },
+        {
+          id: "verify_evidence",
+          name: "Verify Physical Evidence",
+          description: "Assess execution evidence through POST /a2a/tasks/send with skill verify_evidence and retrieve job evidence at GET /api/evidence/:jobId.",
+          tags: ["verification", "evidence", "physical-capability"],
+          examples: ["Verify the evidence for this completed physical job"],
+          inputModes: ["application/json"],
+          outputModes: ["application/json"],
+        },
+        {
           id: "pcc-discover",
           name: "Capability Discovery",
-          description: "Discover and search physical manufacturing capabilities across the PCC network. Returns available capability types (3D printing, CNC machining, laser cutting, HPLC, liquid handling), active Shop Kernels, pricing, assurance tiers, and real-time queue depth.",
+          description: "Discover and search physical capabilities across PCC's live registry. Invoke this skill at POST /a2a/tasks/send with skill pcc-discover, use POST /ask for natural-language discovery, or query GET /api/capabilities/search?q= and GET /api/capabilities/types.",
           tags: ["discovery", "manufacturing", "search", "capabilities", "kernels", "physical-world"],
           examples: [
             "Find FDM 3D printers near Austin TX that can print PLA under $50",
@@ -214,7 +256,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         {
           id: "pcc-submit",
           name: "Job Submission and Tracking",
-          description: "Submit and track physical manufacturing jobs through the full lifecycle: pending → scheduled → in_progress → awaiting_verification → verified → completed. Supports milestone-based escrow funding, SSE streaming for real-time status updates, and batch job manifests.",
+          description: "Hire a discovered capability by invoking POST /a2a/tasks/send with skill pcc-submit, or submit directly at POST /api/jobs/submit, then track the physical job through its execution lifecycle.",
           tags: ["job-submission", "workflow", "manufacturing", "tracking", "escrow", "milestones", "sse"],
           examples: [
             "Submit 3D print job with STL file, PLA material, 0.2mm resolution",
@@ -222,12 +264,12 @@ export async function wellKnownRoutes(app: FastifyInstance) {
             "Submit multi-step protocol: PCR amplification then gel electrophoresis",
           ],
           inputModes: ["application/json", "multipart/form-data"],
-          outputModes: ["application/json", "text/event-stream"],
+          outputModes: ["application/json"],
         },
         {
           id: "pcc-verify",
           name: "Evidence Verification",
-          description: "Verify physical execution evidence bundles. Evidence is SHA-256 content-addressed, stored on Storacha/IPFS, optionally anchored to Starknet ZK proofs, and attested by the Bittensor verifier subnet. Supports photo verification (pHash+SSIM), sensor data, and human consensus.",
+          description: "Verify physical execution evidence by invoking POST /a2a/tasks/send with skill pcc-verify. Retrieve the real job evidence surface at GET /api/evidence/:jobId and use the returned bundles for assurance assessment.",
           tags: ["verification", "evidence", "ipfs", "zk-proof", "bittensor", "storacha", "trust"],
           examples: [
             "Verify evidence bundle for job job_abc123",
@@ -306,6 +348,30 @@ export async function wellKnownRoutes(app: FastifyInstance) {
       "x-pcc-mcp-endpoint": `${GATEWAY_URL}/mcp`,
       "x-pcc-sse-endpoint": `${GATEWAY_URL}/sse`,
       "x-pcc-agent-package": `${GATEWAY_URL}/agent-package.json`,
+      "x-pcc-core-skills": {
+        discover_capability: {
+          a2aSkill: "pcc-discover",
+          endpoints: [
+            { method: "POST", url: `${GATEWAY_URL}/ask` },
+            { method: "GET", url: `${GATEWAY_URL}/api/capabilities/search` },
+            { method: "GET", url: `${GATEWAY_URL}/api/capabilities/types` },
+          ],
+        },
+        hire_capability: {
+          a2aSkill: "pcc-submit",
+          endpoints: [
+            { method: "POST", url: `${GATEWAY_URL}/a2a/tasks/send` },
+            { method: "POST", url: `${GATEWAY_URL}/api/jobs/submit` },
+          ],
+        },
+        verify_evidence: {
+          a2aSkill: "pcc-verify",
+          endpoints: [
+            { method: "POST", url: `${GATEWAY_URL}/a2a/tasks/send` },
+            { method: "GET", url: `${GATEWAY_URL}/api/evidence/:jobId` },
+          ],
+        },
+      },
     };
 
     // A2A v1.0 §8.4 — if a signing key is loaded, sign the card in flight.
@@ -421,15 +487,20 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         return reply.status(500).send({ error: "kernel_lookup_failed" });
       }
 
-      const cardUrl = `${GATEWAY_URL}/api/kernels/${kernelRow.id}/agent-card.json`;
-
       const kernelCard = {
         protocolVersion: "1.0",
         name: kernelRow.name,
         description: `Physical Capability Cloud kernel ${kernelRow.name}. ${capTypes.length} capability type(s).`,
-        url: cardUrl,
+        url: `${GATEWAY_URL}/a2a/tasks/send`,
         version: kernelRow.version,
-        preferredTransport: "http+sse",
+        preferredTransport: "JSONRPC",
+        supportedInterfaces: [
+          {
+            url: `${GATEWAY_URL}/a2a/tasks/send`,
+            protocolBinding: "JSONRPC",
+            protocolVersion: "1.0",
+          },
+        ],
 
         provider: {
           organization: "Physical Capability Cloud",
@@ -437,13 +508,14 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         },
 
         capabilities: {
-          streaming: true,
+          streaming: false,
           pushNotifications: false,
           stateTransitionHistory: false,
+          extendedAgentCard: false,
         },
 
         defaultInputModes: ["application/json"],
-        defaultOutputModes: ["application/json", "text/event-stream"],
+        defaultOutputModes: ["application/json"],
 
         securitySchemes: {
           apiKey: {
@@ -455,6 +527,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
         },
 
         security: [{ apiKey: [] }],
+        securityRequirements: [{ apiKey: [] }],
 
         skills: [
           {
@@ -471,7 +544,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
             description: `Submit a job to this kernel's capabilities. Maps to POST /api/jobs/submit with kernelId=${kernelRow.id}.`,
             tags: ["job-submission", "kernel"],
             inputModes: ["application/json"],
-            outputModes: ["application/json", "text/event-stream"],
+            outputModes: ["application/json"],
           },
         ],
 

@@ -161,6 +161,24 @@ describe("POST /a2a/tasks/send (A2A v1.0 JSON-RPC adapter)", () => {
     expect(body.result.artifacts[0].type).toBe("pcc.capability_list");
   });
 
+  it("accepts the discovery-layer discover_capability skill alias", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/a2a/tasks/send",
+      payload: rpcRequest("rpc-discovery-alias", "tasks/send", {
+        skill: "discover_capability",
+        params: { capabilityType: "fdm" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const body = res.json();
+
+    expect(res.statusCode).toBe(200);
+    expect(body.result.state).toBe("COMPLETED");
+    expect(body.result.skill).toBe("pcc-discover");
+    expect(body.result.artifacts[0].type).toBe("pcc.capability_list");
+  });
+
   // ── pcc-quote ──────────────────────────────────────────────────────────
 
   it("tasks/send pcc-quote → INPUT_REQUIRED with quote artifact + session id", async () => {
