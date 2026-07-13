@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About PCC — Physical Capability Cloud</title>
+  <meta name="description" content="How the Physical Capability Cloud connects agents with real machines, operators, evidence, and milestone settlement.">
+  <link rel="canonical" href="https://capability.network/about.html">
+  <style>body{max-width:760px;margin:3rem auto;padding:0 1.25rem;font:17px/1.65 system-ui,sans-serif;color:#171717}a{color:#075fd8}h1,h2{line-height:1.2}nav{margin-bottom:2rem}footer{margin-top:3rem;border-top:1px solid #ddd;padding-top:1rem}</style>
+</head>
+<body>
+  <nav><a href="/">PCC home</a> · <a href="/docs">Docs</a> · <a href="/pricing.md">Pricing</a></nav>
+  <main>
+    <h1>About the Physical Capability Cloud</h1>
+    <p>Physical Capability Cloud (PCC) is a decentralized control plane for real-world work. It gives software agents and people one API for discovering, configuring, hiring, and monitoring capabilities such as 3D printers, CNC routers, laser cutters, laboratory instruments, couriers, and human services. Operators keep their equipment behind a local Shop Kernel, publish what it can do, and decide which jobs to accept. The gateway coordinates discovery and workflow state without pretending that every machine is the same.</p>
+    <h2>Evidence is part of the job</h2>
+    <p>PCC treats proof of work as part of the contract. Jobs can require assurance tiers from basic operator health through signed events, photos, sensor records, content-addressed evidence, and independent verification. Evidence bundles are hashed, while on-chain state stores commitments rather than raw customer data. Milestone settlement is implemented with x402 and USDC escrow on Base Sepolia, with a 2.35% protocol settlement fee.</p>
+    <h2>Built for agents and operators</h2>
+    <p>Agents can use the REST API described by <a href="/openapi.json">OpenAPI</a>, load the <a href="/agent-package.json">254-tool agent package</a>, or run the repository's 77-tool MCP server over stdio. Operators can start with the <a href="/start">setup page</a>, while developers can inspect the <a href="https://github.com/LamaSu/physical-capability-cloud">Apache-2.0 source</a>.</p>
+  </main>
+  <footer>Physical Capability Cloud · <a href="/contact.html">Contact</a> · <a href="/privacy.html">Privacy</a></footer>
+</body>
+</html>

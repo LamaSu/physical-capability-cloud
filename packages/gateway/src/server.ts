@@ -63,6 +63,7 @@ import { settlementRoutes } from "./routes/settlement.js";
 import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
+import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { jwksRoutes } from "./routes/jwks.js";
 import { initSigningKey } from "./signing-key.js";
 import { feedbackRoutes } from "./routes/feedback.js";
@@ -269,7 +270,7 @@ export async function createGateway(port = 3200) {
         version: process.env.npm_package_version ?? "0.1.0",
         description:
           "Agent-native API for discovering and invoking physical capabilities. " +
-          "See https://capability.network/agent-package.json for the 218-tool agent package.",
+          "See https://capability.network/agent-package.json for the 254-tool agent package.",
       },
       servers: [{ url: gatewayUrlForOpenApi }],
       components: {
@@ -282,6 +283,26 @@ export async function createGateway(port = 3200) {
           },
         },
       },
+      ...({
+        "x-payment-info": {
+          description:
+            "Machine-payment metadata for deployment-configured paid routes. MPP is the current default; x402 v2 remains a real legacy opt-in transport.",
+          discovery: `${gatewayUrlForOpenApi}/api/x402/routes`,
+          x402: {
+            version: 2,
+            status: "legacy-opt-in",
+            network: "eip155:84532",
+            currency: "USDC",
+            requestHeader: "PAYMENT-SIGNATURE",
+            challengeHeader: "PAYMENT-REQUIRED",
+          },
+          mpp: {
+            status: "default-when-configured",
+            challengeHeader: "WWW-Authenticate",
+            credentialHeader: "Authorization",
+          },
+        },
+      } as Record<string, unknown>),
     },
   });
   await app.register(fastifySwaggerUi, {
@@ -365,6 +386,8 @@ export async function createGateway(port = 3200) {
 
   // ERC-8004 domain verification + A2A agent card (public, before auth)
   await app.register(wellKnownRoutes);
+  // AEO/API/MCP/NLWeb discovery (public, before the API auth gate)
+  await app.register(wellKnownAeoRoutes);
   // A2A v1.0 JWKS endpoint (public, before auth, serves the verification
   // key for the agent card's JWS signature)
   await app.register(jwksRoutes);
@@ -764,7 +787,58 @@ export async function createGateway(port = 3200) {
     } catch {
       landingHtml = null;
     }
-    app.get("/", async (_req, reply) => {
+    app.get<{ Querystring: { mode?: string } }>("/", async (req, reply) => {
+      if (req.query.mode === "agent") {
+        reply.header("Cache-Control", "public, max-age=300");
+        return reply.type("application/json").send({
+          schema: "pcc-agent-view/1.0",
+          name: "Physical Capability Cloud",
+          description:
+            "A decentralized control plane for discovering, contracting, running, and verifying physical manufacturing and laboratory capabilities.",
+          apiBase: "https://capability.network",
+          auth: {
+            method: "api-key",
+            provision: {
+              method: "POST",
+              url: "https://capability.network/api/auth/provision",
+              requiredIdentifier: "email or walletAddress",
+              optionalFields: ["name", "capability"],
+            },
+            use: "Authorization: Bearer pcc_live_...",
+            guide: "https://capability.network/auth.md",
+          },
+          keyCapabilities: [
+            "Discover physical manufacturing, laboratory, and logistics capabilities",
+            "Build and price capability contracts",
+            "Submit and monitor physical jobs",
+            "Verify cryptographic evidence against assurance tiers",
+            "Settle outcome-based jobs through milestone escrow",
+            "Onboard operators and publish machine capabilities",
+          ],
+          discovery: {
+            naturalLanguage: "https://capability.network/ask",
+            capabilities: "https://capability.network/api/capabilities",
+            openapi: "https://capability.network/openapi.json",
+            documentation: "https://capability.network/docs",
+            agentPackage: {
+              url: "https://capability.network/agent-package.json",
+              toolCount: 254,
+            },
+            a2aAgentCard:
+              "https://capability.network/.well-known/agent-card.json",
+            agentSkills:
+              "https://capability.network/.well-known/agent-skills/index.json",
+            mcp: {
+              transport: "stdio",
+              toolCount: 77,
+              discovery: "https://capability.network/.well-known/mcp",
+              serverCard:
+                "https://capability.network/.well-known/mcp/server-card.json",
+            },
+          },
+          pricing: "https://capability.network/pricing.md",
+        });
+      }
       return reply.type("text/html").send(landingHtml ?? indexHtml);
     });
 
@@ -775,7 +849,8 @@ export async function createGateway(port = 3200) {
       ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
       ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff": "font/woff",
       ".woff2": "font/woff2", ".ttf": "font/ttf", ".map": "application/json",
-      ".txt": "text/plain", ".webp": "image/webp", ".avif": "image/avif",
+      ".txt": "text/plain", ".md": "text/markdown", ".xml": "application/xml",
+      ".webp": "image/webp", ".avif": "image/avif",
     };
 
     const { resolve: resolvePath } = await import("node:path");

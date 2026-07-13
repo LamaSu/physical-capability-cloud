@@ -24,13 +24,23 @@ setInterval(() => {
   }
 }, 120_000);
 
-export async function rateLimiter(app: FastifyInstance) {
+async function rateLimiterImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    // Skip health checks and static assets
-    if (req.url === "/api/health" || !req.url.startsWith("/api/")) return;
+    // Static assets and non-API discovery routes are outside this policy.
+    if (!req.url.startsWith("/api/")) return;
+
+    const now = Date.now();
+    // Health checks stay exempt from accounting, but still advertise the API
+    // policy so automated clients see consistent headers on every /api/*
+    // response.
+    if (req.url.split("?")[0] === "/api/health") {
+      reply.header("RateLimit-Limit", String(MAX_REQUESTS));
+      reply.header("RateLimit-Remaining", String(MAX_REQUESTS));
+      reply.header("RateLimit-Reset", String(Math.ceil(WINDOW_MS / 1_000)));
+      return;
+    }
 
     const ip = req.ip;
-    const now = Date.now();
     let entry = ipCounts.get(ip);
 
     if (!entry || now - entry.windowStart > WINDOW_MS) {
@@ -40,12 +50,35 @@ export async function rateLimiter(app: FastifyInstance) {
 
     entry.count++;
 
+    const resetSeconds = Math.max(
+      1,
+      Math.ceil((entry.windowStart + WINDOW_MS - now) / 1_000),
+    );
+    const remaining = Math.max(0, MAX_REQUESTS - entry.count);
+
+    reply.header("RateLimit-Limit", String(MAX_REQUESTS));
+    reply.header("RateLimit-Remaining", String(remaining));
+    reply.header("RateLimit-Reset", String(resetSeconds));
+
     if (entry.count > MAX_REQUESTS) {
-      reply.header("Retry-After", "60");
+      reply.header("Retry-After", String(resetSeconds));
       return reply.status(429).send({
         error: "rate_limited",
         message: `Too many requests (${MAX_REQUESTS}/min). Try again later.`,
       });
     }
   });
+}
+
+// This hook is intentionally global. Fastify encapsulates ordinary registered
+// plugins, which would otherwise keep it from applying to sibling API routes.
+// Match the established non-encapsulated pattern used by apiGate.
+(rateLimiterImpl as any)[Symbol.for("skip-override")] = true;
+(rateLimiterImpl as any)[Symbol.for("fastify.display-name")] = "rateLimiter";
+
+export const rateLimiter = rateLimiterImpl;
+
+/** Test-only state reset. */
+export function __resetRateLimitState(): void {
+  ipCounts.clear();
 }

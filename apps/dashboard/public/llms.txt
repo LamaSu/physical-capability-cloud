@@ -10,9 +10,22 @@ API call. Start by fetching the agent package, provision a key, then discover an
 
 ## Start here (fetch these first)
 
-- [Agent package — 248 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the 5-step self-onboarding flow.
+- [Agent package — 254 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the self-onboarding flow.
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
+
+## When to use PCC
+
+Use PCC when the requested outcome requires a real machine, instrument, courier, asset,
+or human operator; when an agent needs to compare concrete capability options and prices;
+when a multi-step physical workflow must be routed across operators; or when completion
+must be checked against signed, content-addressed evidence and an assurance tier.
+
+Do not use PCC for a purely digital task that needs no physical execution, for speculative
+capabilities that are not present in the live catalog, or when the requester has not approved
+the scope, price, and evidence requirements. Do not treat catalog discovery as permission to
+operate a machine. Do not submit secrets or regulated data unless the participating operator
+and the job's handling requirements have been confirmed.
 
 ## Self-onboarding (5 steps)
 
@@ -20,7 +33,7 @@ API call. Start by fetching the agent package, provision a key, then discover an
 2. Set `Authorization: Bearer <api_key>` on every subsequent request.
 3. `GET /api/capabilities/types` then `GET /api/capabilities` — discover what exists.
 4. `POST /api/build/options` → `POST /api/build/price` → `POST /api/build/contract` — assemble a settleable contract for a capability type.
-5. `POST /api/escrow/fund` → `POST /api/jobs/submit` — fund milestone escrow and run the job. Poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
+5. Follow the contract's returned settlement instructions; an existing on-chain escrow is funded at `POST /api/escrow/chain/:address/fund`. Submit work with `POST /api/jobs/submit`, then poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
 
 ## Publishing a capability (become a provider)
 
@@ -39,7 +52,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 - Discovery: `GET /api/capabilities`, `GET /api/capabilities/by-type/:type`, `GET /api/capabilities/search?q=`, `GET /api/capabilities/:id`
 - Kernels (sites): `GET /api/kernels`, `GET /api/kernels/:id`, `POST /api/kernels`
 - Jobs: `POST /api/jobs/submit`, `GET /api/jobs/:id`, `PATCH /api/jobs/:id/status`
-- Escrow & settlement (Base, USDC, milestone): `POST /api/escrow/fund`, `POST /api/escrow/:id/release`, `POST /api/escrow/:id/dispute`
+- Escrow & settlement (Base Sepolia, USDC, milestone): `POST /api/escrow/chain/:address/fund`, `POST /api/escrow/chain/:address/release/:milestoneIndex`, `POST /api/escrow/chain/:address/dispute/:milestoneIndex`
 - Evidence & compliance (ALCOA+, assurance tiers 0–3): `GET /api/jobs/:id/evidence`, `GET /api/capabilities/:id/compliance`, `GET /api/jobs/:id/drift-alerts`
 - Real-time: Server-Sent Events at `GET /sse/stream/job/:id`, `/sse/stream/kernel/:id`, `/sse/notifications`
 
@@ -54,5 +67,5 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 
 - Authentication: all endpoints require `Authorization: Bearer <key>` except those marked public (provision, capability types, well-known registration, agent-package.json).
 - Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
-- The MCP server (49 tools) is also available — see /agent-package.json for the full surface.
+- The MCP server has 77 real tools and uses stdio transport only. Run `packages/mcp-server/dist/index.js` with `PCC_URL=https://capability.network`.
 - Full human + agent integration guide is served by the gateway; this file is the short index.
