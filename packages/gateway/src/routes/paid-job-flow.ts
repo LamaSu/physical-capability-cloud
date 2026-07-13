@@ -61,6 +61,7 @@ import {
   registeredSignerInputFromColumns,
   naclEd25519Verify,
   type StoredSignature,
+  type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
@@ -1088,7 +1089,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         value: "gateway-auto-sign",
       };
       const seam2GateOpen = deviceEvidenceSettlementEnabled();
-      let seam2DeviceBundle: { bundleHash: string; kernelSignature: StoredSignature; assuranceTier: number } | null =
+      let seam2DeviceBundle: SettlementEvidenceSlot | null =
         null;
       let seam2RegisteredSigner: unknown = null;
       if (seam2GateOpen) {
@@ -1102,6 +1103,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             bundleHash: deviceRow.bundleHash,
             kernelSignature: deviceRow.kernelSignature as StoredSignature,
             assuranceTier: deviceRow.assuranceTier,
+            ...(deviceRow.sessionKeyAuthorization
+              ? { sessionKeyAuthorization: deviceRow.sessionKeyAuthorization }
+              : {}),
+            contractId: jobId,
           };
         }
         const kernelRow = repos.kernels.findById(job.kernelId);

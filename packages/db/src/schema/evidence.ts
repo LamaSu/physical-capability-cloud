@@ -15,6 +15,17 @@ export const evidenceBundles = sqliteTable("evidence_bundles", {
     algorithm: string;
     value: string;
   }>(),
+  /** Principal-authorised session key used to sign this bundle, when present. */
+  sessionKeyAuthorization: text("session_key_authorization", { mode: "json" }).$type<{
+    sessionId: string;
+    parentAgentId: string;
+    publicKey: string;
+    issuedAt: number;
+    expiresAt: number;
+    scope: { allowedActions: string[]; contractIds: string[]; maxSignatures: number };
+    parentSignature: string;
+    derivationPath?: string;
+  }>(),
   /** Wave 4.1.x — tenant scoping. Nullable; backfilled at write time from
    *  the buyer/operator on the parent job. Routes pass `tenantOpts(req)`. */
   tenantId: text("tenant_id"),

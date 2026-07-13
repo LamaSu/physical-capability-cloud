@@ -31,6 +31,7 @@ from .discovery import (
 from .register import (
     provision_api_key,
     register_kernel,
+    register_devices,
     announce_capabilities,
     register_signing_key,
 )
@@ -275,14 +276,22 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet):
         click.echo("Provisioning API key...")
         config.pcc_api_key = provision_api_key(config.pcc_base)
         if not config.pcc_api_key:
-            click.echo(
-                "Warning: Could not provision API key. "
-                "Set PCC_API_KEY env var or use --api-key."
+            raise click.ClickException(
+                "Could not provision API key. Set PCC_API_KEY env var or use --api-key."
             )
 
     # Register kernel
     click.echo("Registering on PCC network...")
     register_kernel(config.pcc_base, config.pcc_api_key, config)
+
+    # Devices reference the kernel, so register them only after the authenticated
+    # kernel registration succeeds.
+    register_devices(
+        config.pcc_base,
+        config.pcc_api_key,
+        config.kernel_id,
+        devices,
+    )
 
     # Prove possession of the node's Ed25519 signing key (Option C, #52 producer
     # lane). Fail-soft: a genuine ed25519 node registers its signer so the oracle

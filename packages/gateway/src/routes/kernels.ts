@@ -128,7 +128,9 @@ export async function kernelRoutes(app: FastifyInstance) {
    * Returns 200 + { kernel, created: false } when already exists (heartbeat update).
    */
   app.post<{ Body: CreateKernelInput }>("/api/kernels", async (req, reply) => {
-    const actorId = (req as any).operatorId ?? (req as any).apiKeyId;
+    // apiGate authenticates this mutation. Ownership is the stable operator
+    // identity, never the replaceable API-key record id.
+    const actorId = (req as any).operatorId ?? (req as any).userId;
     const result = await facade.register(
       req.body,
       actorId,

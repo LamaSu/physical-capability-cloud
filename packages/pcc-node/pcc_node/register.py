@@ -97,12 +97,12 @@ def provision_api_key(pcc_base, email=""):
         The provisioned API key, or empty string on failure.
     """
     status, data = pcc_request(
-        "POST", "/api/keys/provision",
-        body={"email": email, "source": "pcc-node"},
+        "POST", "/api/auth/provision",
+        body={"email": email, "name": "pcc-node"},
         base_url=pcc_base,
     )
     if status in (200, 201) and isinstance(data, dict):
-        key = data.get("apiKey", data.get("api_key", data.get("key", "")))
+        key = data.get("api_key", "")
         if key:
             log.info("API key provisioned successfully")
             return key
@@ -129,7 +129,7 @@ def register_kernel(pcc_base, api_key, config):
         Registration response, or error dict.
     """
     payload = {
-        "kernelId": config.kernel_id,
+        "id": config.kernel_id,
         "name": config.kernel_name,
         "devices": config.devices,
         "approvalMode": config.approval_mode,
@@ -151,6 +151,39 @@ def register_kernel(pcc_base, api_key, config):
         log.warning(f"Kernel registration failed (HTTP {status}): {data}")
 
     return data if isinstance(data, dict) else {"raw": data, "status": status}
+
+
+def register_devices(pcc_base, api_key, kernel_id, devices):
+    """Register detected devices after their owning kernel exists."""
+    results = []
+    for index, device in enumerate(devices):
+        device_type = device.get("type", "unknown")
+        device_id = (
+            device.get("id")
+            or device.get("deviceId")
+            or f"{kernel_id}-{device_type}-{index}"
+        )
+        payload = {
+            "kernelId": kernel_id,
+            "id": device_id,
+            "type": device_type,
+            "model": device.get("model") or device.get("name") or device_type,
+            "adapterType": device.get("adapterType") or device.get("protocol") or device_type,
+            "adapterConfig": device.get("adapterConfig", device),
+            "capabilities": device.get("capabilities", []),
+        }
+        status, data = pcc_request(
+            "POST", "/api/devices/register",
+            body=payload,
+            base_url=pcc_base,
+            api_key=api_key,
+        )
+        if status in (200, 201):
+            log.info(f"Device {device_id} registered on PCC")
+        else:
+            log.warning(f"Device registration failed (HTTP {status}): {data}")
+        results.append(data if isinstance(data, dict) else {"raw": data, "status": status})
+    return results
 
 
 def announce_capabilities(pcc_base, api_key, kernel_id, devices, secret_key=""):

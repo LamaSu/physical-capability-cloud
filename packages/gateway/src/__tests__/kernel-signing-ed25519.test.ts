@@ -315,8 +315,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
         signingProof: proofB,
       },
     });
-    // Upsert of an existing kernel returns 200 (created: false).
-    expect(second.statusCode).toBe(200);
+    expect(second.statusCode).toBe(409);
 
     // The original proven signer (A) must be untouched.
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
@@ -357,13 +356,39 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
         signingProof: secpProof,
       },
     });
-    expect(second.statusCode).toBe(200);
+    expect(second.statusCode).toBe(409);
 
     // The original ed25519 signer must be untouched; no secp256k1 address leaks in.
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     const body = JSON.parse(get.body) as KernelBody;
     expect(body.kernel.signingKey).toEqual({ algorithm: "ed25519", publicKey: expectedKey });
     expect(body.kernel.signingAddress).toBeNull();
+  });
+
+  it("atomically allows only one of two concurrent SET-ONCE binds", async () => {
+    const id = `kernel_ed_cas_${Date.now()}`;
+    expect((await app.inject({
+      method: "POST", url: "/api/kernels", payload: { id, name: "CAS Kernel" },
+    })).statusCode).toBe(201);
+
+    const bind = (kp: typeof KP_A) => app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      payload: {
+        id,
+        signingKeyAlgorithm: "ed25519",
+        signingPublicKey: `0x${kp.publicKeyHex}`,
+        signingProof: ed25519Proof(kp.privateKeyHex, id),
+      },
+    });
+    const [a, b] = await Promise.all([bind(KP_A), bind(KP_B)]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+
+    const stored = (await app.inject({ method: "GET", url: `/api/kernels/${id}` })).json() as KernelBody;
+    expect([
+      `0x${KP_A.publicKeyHex}`,
+      `0x${KP_B.publicKeyHex}`,
+    ]).toContain((stored.kernel.signingKey as Extract<Signer, { algorithm: "ed25519" }>).publicKey);
   });
 
   it("serves the tagged secp256k1 signingKey for a secp256k1 kernel (union covers both families)", async () => {

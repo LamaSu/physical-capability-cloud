@@ -28,13 +28,9 @@
  * infra, opening the gate (NOT done here) turns it on with no new code. The
  * post-deploy live proof is the harness rehearse-loop.mjs A6 rehearsal.
  *
- * SCOPE of the verification built here: a DIRECT registered-signer check — the
- * device Ed25519 signature over the bundleHash verifies against the registered
- * key. The node's per-job ephemeral session-key indirection (session sig +
- * parent-sig authorisation chain) and the log-chain / program-binding legs are
- * the ORACLE #52 verifier's responsibility (the separate settlement lane). A
- * session-signed bundle therefore fails this direct check and falls back to the
- * gateway anchor — fail-closed, never a silent pass.
+ * SDK bundles use a per-job session key. This verifier authenticates the
+ * principal-signed delegation, enforces expiry/action/job scope, and only then
+ * verifies the bundle signature with the delegated session public key.
  */
 
 import nacl from "tweetnacl";
@@ -42,7 +38,11 @@ import {
   normalizeRegisteredSigner,
   getPrimitive,
   type RegisteredSigner,
+  type SessionKeyAuthorization,
+  type SessionKey,
+  type SessionSignedEvent,
 } from "@pcc/spec";
+import { SessionKeyService } from "@pcc/verifier";
 
 // ── The signature shape stored on / carried by an evidence bundle ────────────
 
@@ -95,6 +95,10 @@ export interface CapturedDeviceBundle {
    *  `kernelSignature.signer` is not enough to verify an Ed25519 sig). Provenance
    *  only; verification uses the REGISTERED key, not this. */
   signerPublicKey?: string;
+  /** Principal-authorised session key carried by SDK evidence bundles. */
+  sessionKeyAuthorization?: SessionKeyAuthorization;
+  /** Job/contract scope the delegation must match. */
+  contractId?: string;
 }
 
 /** Coerce an unknown into a `StoredSignature` or null (fail closed). */
@@ -143,7 +147,53 @@ export function extractNodeSignedBundle(evidence: unknown): CapturedDeviceBundle
         ? b.signerPublicKey
         : undefined;
 
-  return { bundleHash, kernelSignature: sig, assuranceTier, ...(signerPublicKey ? { signerPublicKey } : {}) };
+  const sessionKeyAuthorization = asSessionKeyAuthorization(b.sessionKeyAuthorization);
+  const contractId = typeof b.jobId === "string" ? b.jobId : undefined;
+
+  return {
+    bundleHash,
+    kernelSignature: sig,
+    assuranceTier,
+    ...(signerPublicKey ? { signerPublicKey } : {}),
+    ...(sessionKeyAuthorization ? { sessionKeyAuthorization } : {}),
+    ...(contractId ? { contractId } : {}),
+  };
+}
+
+function asSessionKeyAuthorization(input: unknown): SessionKeyAuthorization | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const a = input as Record<string, unknown>;
+  const scope = a.scope as Record<string, unknown> | undefined;
+  if (
+    typeof a.sessionId !== "string" ||
+    typeof a.parentAgentId !== "string" ||
+    typeof a.publicKey !== "string" ||
+    !/^(?:0x)?[0-9a-fA-F]{64}$/.test(a.publicKey) ||
+    typeof a.issuedAt !== "number" ||
+    typeof a.expiresAt !== "number" ||
+    !scope ||
+    !Array.isArray(scope.allowedActions) ||
+    !scope.allowedActions.every((v) => typeof v === "string") ||
+    !Array.isArray(scope.contractIds) ||
+    !scope.contractIds.every((v) => typeof v === "string") ||
+    typeof scope.maxSignatures !== "number" ||
+    typeof a.parentSignature !== "string" ||
+    !/^(?:0x)?[0-9a-fA-F]{128}$/.test(a.parentSignature)
+  ) return undefined;
+  return {
+    sessionId: a.sessionId,
+    parentAgentId: a.parentAgentId,
+    publicKey: a.publicKey,
+    issuedAt: a.issuedAt,
+    expiresAt: a.expiresAt,
+    scope: {
+      allowedActions: scope.allowedActions as string[],
+      contractIds: scope.contractIds as string[],
+      maxSignatures: scope.maxSignatures,
+    },
+    parentSignature: a.parentSignature,
+    ...(typeof a.derivationPath === "string" ? { derivationPath: a.derivationPath } : {}),
+  };
 }
 
 /** The signer-identity columns persisted on a kernel row (see db schema
@@ -220,6 +270,10 @@ export interface DeviceEvidenceVerifyInput {
    *  `normalizeRegisteredSigner`-acceptable input). Verification is against THIS,
    *  not the self-declared `signature.signer`. */
   registeredSigner: unknown;
+  /** Delegation required when the bundle was signed by an ephemeral session key. */
+  sessionKeyAuthorization?: SessionKeyAuthorization;
+  /** Job/contract id the session scope must explicitly contain. */
+  contractId?: string;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
 }
@@ -251,6 +305,50 @@ export async function verifyDeviceSignedEvidence(
   const signer = normalizeRegisteredSigner(input.registeredSigner);
   if (!signer) return { ok: false, reason: "unregistered-signer" };
   if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
+
+  if (input.sessionKeyAuthorization) {
+    if (!input.contractId) return { ok: false, reason: "missing-contract-id" };
+    const auth = input.sessionKeyAuthorization;
+    try {
+      const sessionKey: SessionKey = {
+        sessionId: auth.sessionId,
+        parentAgentId: auth.parentAgentId as SessionKey["parentAgentId"],
+        publicKey: Uint8Array.from(Buffer.from(stripHexPrefix(auth.publicKey), "hex")),
+        issuedAt: auth.issuedAt,
+        expiresAt: auth.expiresAt,
+        scope: {
+          allowedActions: auth.scope.allowedActions as SessionKey["scope"]["allowedActions"],
+          contractIds: auth.scope.contractIds,
+          maxSignatures: auth.scope.maxSignatures,
+        },
+        parentSignature: Uint8Array.from(Buffer.from(stripHexPrefix(auth.parentSignature), "hex")),
+        ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+      };
+      if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
+        return { ok: false, reason: "malformed-session-authorization" };
+      }
+      if (!sessionKey.scope.contractIds.includes(input.contractId)) {
+        return { ok: false, reason: "contract_not_allowed" };
+      }
+      const event: SessionSignedEvent = {
+        eventData: new TextEncoder().encode(input.bundleHash),
+        sessionSignature: Uint8Array.from(Buffer.from(stripHexPrefix(input.signature.value), "hex")),
+        proof: {
+          sessionKey,
+          parentPublicKey: Uint8Array.from(Buffer.from(stripHexPrefix(signer.publicKey), "hex")),
+          ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
+        },
+      };
+      const result = new SessionKeyService().verifySessionSignedEvent({
+        event,
+        action: "evidence_submit",
+      });
+      if (!result.valid) return { ok: false, reason: result.failures[0] ?? "delegation-invalid" };
+      return { ok: true, signer };
+    } catch {
+      return { ok: false, reason: "malformed-session-authorization" };
+    }
+  }
 
   let valid: boolean;
   try {
@@ -302,6 +400,8 @@ export interface SettlementEvidenceSlot {
   bundleHash: string;
   kernelSignature: StoredSignature;
   assuranceTier: number;
+  sessionKeyAuthorization?: SessionKeyAuthorization;
+  contractId?: string;
 }
 
 export interface SettlementEvidenceInput {
@@ -344,6 +444,10 @@ export async function resolveSettlementEvidence(
     signature: input.deviceBundle.kernelSignature,
     bundleHash: input.deviceBundle.bundleHash,
     registeredSigner: input.registeredSigner,
+    ...(input.deviceBundle.sessionKeyAuthorization
+      ? { sessionKeyAuthorization: input.deviceBundle.sessionKeyAuthorization }
+      : {}),
+    ...(input.deviceBundle.contractId ? { contractId: input.deviceBundle.contractId } : {}),
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
   if (!verified.ok) {

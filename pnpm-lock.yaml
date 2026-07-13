@@ -847,6 +847,9 @@ importers:
         specifier: ^3.23.0
         version: 3.25.76
     devDependencies:
+      '@pcc/kernel-sdk':
+        specifier: workspace:*
+        version: link:../kernel-sdk
       '@types/uuid':
         specifier: ^9.0.0
         version: 9.0.8

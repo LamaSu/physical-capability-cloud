@@ -299,11 +299,32 @@ export class KernelFacade extends BaseFacade {
 
       const existing = repos.kernels.findById(id);
       if (existing) {
+        const unownedOperatorAddresses = new Set([
+          "",
+          "0x0000000000000000000000000000000000000000",
+        ]);
+        const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
+        // Authorization only — authentication is apiGate's job (POST /api/kernels
+        // is Bearer-gated → 401 without a key), so a real request always carries
+        // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
+        // not mutate someone else's kernel. When actorId is absent (a facade-level
+        // unit test with no apiGate wired) there is no owner to check against; the
+        // SET-ONCE signer bind still fail-closes via the CAS below.
+        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
+          throw Object.assign(
+            new Error(`Authenticated actor does not own kernel '${id}'`),
+            { name: "ForbiddenError" },
+          );
+        }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
           lastHeartbeat: new Date().toISOString(),
           status: "online",
         };
+        // Legacy rows may carry the historical zero-address placeholder rather
+        // than an owner. Their first authenticated mutation claims ownership;
+        // subsequent heartbeats/profile updates are owner-only like new rows.
+        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.
@@ -321,31 +342,30 @@ export class KernelFacade extends BaseFacade {
         if (typeof body.maxAssuranceTier === "number") {
           updates.maxAssuranceTier = body.maxAssuranceTier;
         }
-        // Signing-key proof: SET-ONCE on the money path. Bind a proven signer
-        // only if this kernel has none yet — in EITHER family. A generic upsert
-        // must never silently OVERWRITE an already-registered settlement signer
-        // — key rotation is a dedicated, owner-authenticated operation
-        // (follow-up). Fail closed: absent/mismatched proof leaves the existing
-        // value intact. "Already proven" = a tag is set (secp256k1 or ed25519)
-        // OR a legacy #230 row already carries signingAddress.
-        const existingSigner = existing as {
-          signingAddress?: string | null;
-          signingKeyAlgorithm?: string | null;
-        };
-        const alreadyProven =
-          Boolean(existingSigner.signingKeyAlgorithm) ||
-          Boolean(existingSigner.signingAddress);
-        if (!alreadyProven) {
-          const provenSigner = await this.verifySigningProof(id, body);
-          if (provenSigner) {
-            const cols = this.signerToColumns(provenSigner);
-            updates.signingAddress = cols.signingAddress;
-            updates.signingKeyAlgorithm = cols.signingKeyAlgorithm;
-            updates.signingKeyPublicKey = cols.signingKeyPublicKey;
+        // Heartbeat/profile fields are a normal update. The signing identity is
+        // deliberately excluded and committed through the atomic CAS below.
+        let kernel = repos.kernels.update(id, updates) ?? existing;
+        const provenSigner = await this.verifySigningProof(id, body);
+        if (provenSigner) {
+          const cols = this.signerToColumns(provenSigner);
+          const bound = repos.kernels.bindSignerIfUnregistered(id, cols);
+          if (bound) {
+            kernel = bound;
+          } else {
+            // Another request won the SET-ONCE race (or the row was already
+            // bound). Re-read and accept only an idempotent proof of that same
+            // signer; a different signer is a loud conflict.
+            const current = repos.kernels.findById(id) ?? kernel;
+            const currentSigner = this.signerFromRow(current);
+            if (!currentSigner || !this.sameSigner(currentSigner, provenSigner)) {
+              throw Object.assign(
+                new Error(`Kernel '${id}' already has a different registered signer`),
+                { name: "ConflictError" },
+              );
+            }
+            kernel = current;
           }
         }
-        const updated = repos.kernels.update(id, updates);
-        const kernel = updated ?? existing;
         const capabilities = repos.capabilities.findByKernel(id);
         return {
           kernel: populateKernelDTO(kernel as any as RawKernel, capabilities, context),
@@ -383,7 +403,9 @@ export class KernelFacade extends BaseFacade {
       const kernelData = {
         id,
         name: body.name || "New Kernel",
-        operatorAddress: body.operatorAddress || "0x0000000000000000000000000000000000000000",
+        // Authenticated creates are owned by the stable actor identity. A body
+        // field cannot nominate a different owner for a SET-ONCE signing bind.
+        operatorAddress: actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000",
         // Legacy random field (not used for auth); kept for the NOT NULL column.
         // The authenticated identity is the tagged signing key below.
         publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
@@ -713,6 +735,27 @@ export class KernelFacade extends BaseFacade {
       signingKeyAlgorithm: "secp256k1",
       signingKeyPublicKey: null,
     };
+  }
+
+  private signerFromRow(row: {
+    signingKeyAlgorithm?: string | null;
+    signingKeyPublicKey?: string | null;
+    signingAddress?: string | null;
+  }): RegisteredSigner | null {
+    if (row.signingKeyAlgorithm === "ed25519" && row.signingKeyPublicKey) {
+      return { algorithm: "ed25519", publicKey: row.signingKeyPublicKey };
+    }
+    if ((row.signingKeyAlgorithm === "secp256k1" || !row.signingKeyAlgorithm) && row.signingAddress) {
+      return { algorithm: "secp256k1", address: row.signingAddress as `0x${string}` };
+    }
+    return null;
+  }
+
+  private sameSigner(a: RegisteredSigner, b: RegisteredSigner): boolean {
+    if (a.algorithm !== b.algorithm) return false;
+    return a.algorithm === "ed25519"
+      ? a.publicKey.toLowerCase() === (b as Extract<RegisteredSigner, { algorithm: "ed25519" }>).publicKey.toLowerCase()
+      : a.address.toLowerCase() === (b as Extract<RegisteredSigner, { algorithm: "secp256k1" }>).address.toLowerCase();
   }
 
   /**

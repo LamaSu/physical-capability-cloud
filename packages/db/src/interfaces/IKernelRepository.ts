@@ -13,6 +13,8 @@ export interface IKernelRepository {
   findByStatus(status: string): KernelRow[];
   insert(kernel: KernelInsert): KernelRow | undefined;
   update(id: string, data: Partial<KernelInsert>): KernelRow | undefined;
+  /** Atomically bind an unregistered SET-ONCE signing identity. */
+  bindSignerIfUnregistered(id: string, data: Partial<KernelInsert>): KernelRow | undefined;
   // Devices sub-domain
   findDevicesByKernel(kernelId: string): DeviceRow[];
   findDeviceById(id: string): DeviceRow | undefined;

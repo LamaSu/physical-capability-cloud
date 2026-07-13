@@ -78,6 +78,12 @@ export abstract class BaseFacade {
               span.setAttribute("facade.error_code", code);
               return err(code, message, 400) as Result<T>;
             }
+            if (error.name === "ForbiddenError") {
+              return err("FORBIDDEN", message, 403) as Result<T>;
+            }
+            if (error.name === "ConflictError") {
+              return err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
+            }
             if (error.name === "WriteDisabledError") {
               span.setAttribute("facade.error_code", "WRITE_DISABLED");
               return err("WRITE_DISABLED", message, 503) as Result<T>;

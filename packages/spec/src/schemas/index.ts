@@ -126,6 +126,20 @@ export const EvidenceBundleSchema = z.object({
   events: z.array(EvidenceEventSchema).min(1),
   bundleHash: SHA256Schema,
   kernelSignature: SignatureSchema,
+  sessionKeyAuthorization: z.object({
+    sessionId: z.string().min(1),
+    parentAgentId: z.string().min(1),
+    publicKey: z.string().regex(/^(?:0x)?[a-fA-F0-9]{64}$/),
+    issuedAt: z.number().int().nonnegative(),
+    expiresAt: z.number().int().positive(),
+    scope: z.object({
+      allowedActions: z.array(z.string()),
+      contractIds: z.array(z.string()),
+      maxSignatures: z.number().int().positive(),
+    }),
+    parentSignature: z.string().regex(/^(?:0x)?[a-fA-F0-9]{128}$/),
+    derivationPath: z.string().optional(),
+  }).optional(),
   createdAt: TimestampSchema,
 });
 

@@ -155,6 +155,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           assuranceTier: 0,
           bundleHash,
           kernelSignature,
+          sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
           createdAt: now,
         });
       } catch (insertErr) {

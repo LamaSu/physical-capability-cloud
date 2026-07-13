@@ -16,6 +16,7 @@
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
 import { getPrimitive } from "@pcc/spec";
+import { createKernelHandler } from "@pcc/kernel-sdk";
 import {
   isDeviceSignedSignature,
   extractNodeSignedBundle,
@@ -191,6 +192,45 @@ describe("extractNodeSignedBundle (path 1 capture)", () => {
 // ── verifyDeviceSignedEvidence (registered-signer → verify) with REAL crypto ──
 
 describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (real crypto)", () => {
+  it("accepts an SDK session-signed bundle through its principal delegation", async () => {
+    const principal = nacl.sign.keyPair();
+    const jobId = "job-delegated-247";
+    const handler = createKernelHandler({
+      manifest: {
+        manifestVersion: "1.0.0",
+        kernelId: "kernel-delegated-247",
+        name: "Delegated Kernel",
+        description: "test",
+        builder: { agentId: "agent:test" },
+        capabilityType: "test.transform",
+        workflowSteps: [],
+        pricing: { currency: "USDC", baseUSD: 0 },
+        maxAssuranceTier: 0,
+        endpointURL: "https://example.test/run",
+        sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+        status: "pending",
+      } as any,
+      principalKey: {
+        agentId: "eip155:1:0x0000000000000000000000000000000000000001",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+        publicKey: principal.publicKey,
+      },
+      principalPrivateKey: principal.secretKey,
+      execute: async () => ({ ok: true }),
+    });
+    const { evidenceBundle } = await handler({ jobId, input: { value: 1 } });
+    expect(evidenceBundle.sessionKeyAuthorization).toBeDefined();
+
+    const result = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
+      contractId: jobId,
+    });
+    expect(result).toMatchObject({ ok: true });
+  });
+
   it("naclEd25519Verify round-trips a genuine tweetnacl signature", () => {
     const dev = realDeviceEvidence();
     expect(naclEd25519Verify(dev.bundleHash, dev.signature.value, dev.publicKeyHex)).toBe(true);

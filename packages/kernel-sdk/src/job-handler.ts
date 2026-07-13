@@ -5,7 +5,7 @@
  *   - Ed25519 session signature verification on the inbound request
  *   - Scope + expiry check against the manifest's sessionKeyPolicy
  *   - Evidence bundle assembly (events for step traces + lifecycle)
- *   - Signature of the bundle with the kernel's principalKey
+ *   - Session-key signature plus principal-authorised delegation proof
  *
  * The handler is Fastify-compatible (accepts `{body}`, returns a JSON-
  * serialisable object) but has no hard Fastify dependency — it's a plain
@@ -200,13 +200,17 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     };
 
     const sessionCanonical = new TextEncoder().encode(
-      canonicalize({
+      JSON.stringify({
         sessionId: sessionKeyBody.sessionId,
         parentAgentId: sessionKeyBody.parentAgentId,
         publicKey: toHex(sessionKeyBody.publicKey),
         issuedAt: sessionKeyBody.issuedAt,
         expiresAt: sessionKeyBody.expiresAt,
-        scope: sessionKeyBody.scope,
+        scope: {
+          allowedActions: [...sessionKeyBody.scope.allowedActions].sort(),
+          contractIds: [...sessionKeyBody.scope.contractIds].sort(),
+          maxSignatures: sessionKeyBody.scope.maxSignatures,
+        },
       }),
     );
     const parentSig = nacl.sign.detached(sessionCanonical, principalPrivateKey);
@@ -346,6 +350,15 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         signer: `0x${toHex(sessionKey.publicKey).slice(0, 40)}` as `0x${string}`,
         algorithm: "ed25519",
         value: toHex(bundleSig),
+      },
+      sessionKeyAuthorization: {
+        sessionId: sessionKey.sessionId,
+        parentAgentId: sessionKey.parentAgentId,
+        publicKey: toHex(sessionKey.publicKey),
+        issuedAt: sessionKey.issuedAt,
+        expiresAt: sessionKey.expiresAt,
+        scope: sessionKey.scope,
+        parentSignature: toHex(sessionKey.parentSignature),
       },
       createdAt: new Date().toISOString(),
     };
