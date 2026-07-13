@@ -278,6 +278,48 @@
   };
 
   // ═══════════════════════════════════════════════════════════════════════
+  // Host transport (Tier D) — mode === 'host'. An embedding host (e.g. an
+  // MCP-Apps view) has announced itself via window.__PCC_HOST__ = true.
+  // Bindings prefer a host-mediated fetch/proxy channel when the host offers
+  // one (window.__PCC_HOST_BRIDGE__.fetch — an optional contract a host may
+  // set before the kit boots); otherwise this falls back to the SAME direct
+  // fetch-with-Bearer behaviour as every other live transport (the view's
+  // CSP explicitly allows connect-src to the PCC API origin, so a direct
+  // fetch is a legitimate "live" path here, not a security gap). If neither
+  // path is reachable, resolveBinding()'s existing fetch-failure handling
+  // already degrades to any baked snapshot, else an honest stale/empty
+  // state — never fabricated, exactly like every other mode.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function HostTransport(apiBase) {
+    Transport.call(this, apiBase);
+  }
+  HostTransport.prototype = Object.create(Transport.prototype);
+  HostTransport.prototype.constructor = HostTransport;
+  HostTransport.prototype._bridge = function () {
+    var b = window.__PCC_HOST_BRIDGE__;
+    return (b && typeof b.fetch === 'function') ? b : null;
+  };
+  HostTransport.prototype.getJSON = function (path, query) {
+    var bridge = this._bridge();
+    if (!bridge) return Transport.prototype.getJSON.call(this, path, query);
+    return bridge.fetch(path, { method: 'GET', query: query }).then(function (r) {
+      if (!r || r.ok === false) throw new Error('host bridge fetch failed on ' + path);
+      return r.json;
+    });
+  };
+  HostTransport.prototype.send = function (method, path, body) {
+    var bridge = this._bridge();
+    if (!bridge) return Transport.prototype.send.call(this, method, path, body);
+    return bridge.fetch(path, { method: method, body: body }).then(function (r) {
+      return { ok: !!(r && r.ok), status: (r && r.status) || 0, body: (r && r.json) || {} };
+    });
+  };
+  // No defined host-bridge equivalent for streaming yet; always use the
+  // direct fetch-SSE reader (same Bearer-header contract as every live mode).
+  HostTransport.prototype.streamSSE = Transport.prototype.streamSSE;
+
+  // ═══════════════════════════════════════════════════════════════════════
   // Kit context — mode, transport, snapshot, root; shared by every renderer
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -287,6 +329,13 @@
     if (window.__PCC_HOST__ === true) return 'host';
     if (isSameOrigin(ctx.apiBase)) return 'live-same-origin';
     return 'live-cors'; // file:// or cross-host — needs a key + the wave-4 CORS lane
+  }
+
+  // Mode-appropriate transport: 'host' gets the host-bridge-aware
+  // HostTransport (falls back to the same direct fetch as every other live
+  // mode); every other mode keeps the existing plain Transport.
+  function createTransport(ctx) {
+    return ctx.mode === 'host' ? new HostTransport(ctx.apiBase) : new Transport(ctx.apiBase);
   }
 
   // Resolve a binding to data. In snapshot mode, look the path up in the baked
@@ -1018,8 +1067,9 @@
 
     var snapshot = readSnapshot();
     var apiBase = resolveApiBase(manifest);
-    var ctx = { manifest: manifest, apiBase: apiBase, snapshot: snapshot, tx: new Transport(apiBase), degraded: false };
+    var ctx = { manifest: manifest, apiBase: apiBase, snapshot: snapshot, tx: null, degraded: false };
     ctx.mode = detectMode(ctx);
+    ctx.tx = createTransport(ctx);
 
     var wrap = el('div', 'pcc-wrap');
     wrap.setAttribute('data-mode', ctx.mode);

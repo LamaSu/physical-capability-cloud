@@ -8,10 +8,19 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   CallToolRequestSchema,
+  ErrorCode,
   isInitializeRequest,
   ListToolsRequestSchema,
+  McpError,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  buildRenderDashboardTool,
+  handleRenderDashboardTool,
+  registerMcpAppHttpRoute,
+  registerMcpAppResource,
+  RENDER_DASHBOARD_TOOL_NAME,
+} from "./mcp-app-view.js";
 
 const PCC_API_BASE_URL = "https://capability.network";
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -266,20 +275,46 @@ function createMcpServer(pack: AgentPackage): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
     { name: "Physical Capability Cloud", version: pack.version },
-    { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS },
+    {
+      capabilities: { tools: {}, resources: {} },
+      instructions: MCP_INSTRUCTIONS,
+    },
   );
 
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: pack.tools.map(toMcpTool),
+    tools: [...pack.tools.map(toMcpTool), buildRenderDashboardTool()],
   }));
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const tool = toolsByName.get(request.params.name);
-    if (!tool) return errorResult(`Unknown PCC tool: ${request.params.name}`);
+    const { name } = request.params;
+    const rawArguments = request.params.arguments;
 
-    const args = request.params.arguments ?? {};
+    if (typeof name !== "string" || name.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "Invalid params: tool name is required");
+    }
+    if (
+      rawArguments !== undefined &&
+      (typeof rawArguments !== "object" || rawArguments === null || Array.isArray(rawArguments))
+    ) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Invalid params: arguments for "${name}" must be an object`,
+      );
+    }
+    const args = rawArguments ?? {};
+
+    if (name === RENDER_DASHBOARD_TOOL_NAME) {
+      return handleRenderDashboardTool(args);
+    }
+
+    const tool = toolsByName.get(name);
+    if (!tool) {
+      throw new McpError(ErrorCode.MethodNotFound, `Method not found: unknown PCC tool "${name}"`);
+    }
     return proxyToolCall(tool, args, extra.authInfo?.token, extra.signal);
   });
+
+  registerMcpAppResource(server);
 
   return server;
 }
@@ -337,6 +372,8 @@ function sendJsonRpcError(
 /** Public Streamable HTTP MCP transport. Register before the gateway API auth gate. */
 export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
   const sessions = new Map<string, McpSession>();
+
+  registerMcpAppHttpRoute(app);
 
   const closeSessions = async (entries: McpSession[]): Promise<void> => {
     await Promise.allSettled(entries.map(({ server }) => server.close()));
