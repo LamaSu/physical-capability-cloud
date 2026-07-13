@@ -21,12 +21,14 @@
  *      module reads that live vocabulary status — it does NOT flip it. #233 stays
  *      stubbed until a real device clears #52 on deployed infra.
  *   2. An explicit opt-in flag (`SEAM2_DEVICE_EVIDENCE_SETTLEMENT`) defaults off.
- * Both must be true to route device evidence into settlement, so today the
- * mechanism is INERT: `resolveSettlementEvidence` always returns the gateway
- * fallback and `/complete` behaves exactly as before. The verify+route code
- * exists and is unit-tested so that when a real device clears #52 on deployed
- * infra, opening the gate (NOT done here) turns it on with no new code. The
- * post-deploy live proof is the harness rehearse-loop.mjs A6 rehearsal.
+ * Both must be true to route device evidence into settlement (`source:"device"`),
+ * so NO device evidence is auto-anchored today. Closed-gate behavior by tier:
+ * tier 0 keeps the gateway fallback (byte-identical to before); tier >= 1 HOLDS —
+ * fails closed, because the purchased verifier is unavailable, so settlement never
+ * silently downgrades a purchased tier onto the gateway placeholder. The verify+route
+ * code exists and is unit-tested so that when a real device clears #52 on deployed
+ * infra, opening the gate (NOT done here) turns device-anchoring on with no new code.
+ * The post-deploy live proof is the harness rehearse-loop.mjs A6 rehearsal.
  *
  * SDK bundles use a per-job session key. This verifier authenticates the
  * principal-signed delegation, enforces expiry/action/job scope, and only then
@@ -573,9 +575,13 @@ export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
 /**
  * Decide which evidence anchors settlement.
  *
- * When the gate is CLOSED (the default in every current env) this ALWAYS returns
- * the gateway fallback — identical to today's behavior, so the live money path is
- * byte-identical and tier-agnostic.
+ * When the gate is CLOSED (the default in every current env):
+ *   - tier 0 (self-attested) returns the gateway fallback — identical to today's
+ *     behavior, so the live money path for tier-0 jobs is byte-identical;
+ *   - tier >= 1 HOLDS (`source:"hold"`, reason `required-verifier-unavailable`): the
+ *     purchased verifier-backed assurance is unavailable while the gate is closed, so
+ *     settlement must NOT silently downgrade a purchased tier onto the gateway
+ *     placeholder (§8.5-1). This is the fail-closed stance — money holds in escrow.
  *
  * When the gate is OPEN (SEAM-2 live):
  *   - a device bundle that verifies against its registered signer anchors on the
@@ -595,9 +601,16 @@ export async function resolveSettlementEvidence(
 ): Promise<SettlementEvidenceDecision> {
   const gateOpen = input.gateOpen ?? deviceEvidenceSettlementEnabled(input.env);
   if (!gateOpen) {
-    // Gate CLOSED — the inert default. Unchanged, tier-agnostic: the live money
-    // path stays byte-identical to today regardless of the purchased tier.
-    return { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
+    // Gate CLOSED. Tier 0 (self-attested) keeps the buyer-approved gateway fallback,
+    // byte-identical to today. Tier >= 1 PURCHASED verifier-backed assurance; while the
+    // gate is closed that verifier is UNAVAILABLE, so settlement HOLDS rather than
+    // SILENTLY downgrading onto the gateway placeholder (§8.5-1 / §7.3-3). Anchoring a
+    // purchased tier >= 1 on the zero-address "gateway-auto-sign" placeholder is the
+    // exact fail-open this branch exists to remove — fail closed instead: the money
+    // stays in escrow (no wrong release, no auto-refund), the caller surfaces the hold.
+    return input.requestedTier >= 1
+      ? { ...input.fallback, source: "hold", reason: "required-verifier-unavailable" }
+      : { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
   }
   // Gate OPEN. Tier >= 1 required real device evidence, so a missing bundle or a
   // verify failure HOLDS (never a silent downgrade). Tier 0 keeps the fallback.

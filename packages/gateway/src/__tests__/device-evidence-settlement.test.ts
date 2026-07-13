@@ -104,16 +104,37 @@ describe("SEAM-2 gate — stays CLOSED, #233/verifierStatus untouched", () => {
 });
 
 // GATE HOLDS at the decision layer: with the REAL default gate, a valid device
-// bundle does NOT anchor settlement.
+// bundle does NOT anchor settlement. Fix #1 (audit round-2): a PURCHASED tier >= 1
+// job HOLDS under the closed gate rather than silently downgrading onto the gateway
+// placeholder; tier 0 keeps the buyer-approved fallback.
 describe("SEAM-2 gate holds — settlement does NOT auto-anchor device evidence", () => {
-  it("resolveSettlementEvidence returns the gateway fallback under the real (stubbed) gate", async () => {
+  it("HOLDS a tier >= 1 job under the real (stubbed) gate — no auto-anchor, no placeholder downgrade", async () => {
+    // Rewritten (fix #1): with the real gate closed (#52 stubbed) a purchased tier-2 job
+    // neither auto-anchors device evidence NOR silently downgrades onto the gateway
+    // placeholder — it HOLDS (the required verifier is unavailable). Was: gateway-fallback.
     const dev = realDeviceEvidence();
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
-      requestedTier: 2, // tier-2 job; the CLOSED gate is tier-agnostic → still fallback
+      requestedTier: 2, // purchased tier-2 → HOLD while the verifier is unavailable
       fallback: GATEWAY_FALLBACK,
-      // No gateOpen override → uses deviceEvidenceSettlementEnabled() (env below).
+      // No gateOpen override → uses deviceEvidenceSettlementEnabled() (env below): closed.
+      env: { SEAM2_DEVICE_EVIDENCE_SETTLEMENT: "1" } as unknown as NodeJS.ProcessEnv,
+    });
+    expect(decision.source).toBe("hold");
+    expect(decision.reason).toBe("required-verifier-unavailable");
+    // A hold is NOT a gateway anchor — the money must not settle on the placeholder.
+    expect(decision.source).not.toBe("gateway-fallback");
+  });
+
+  it("keeps the gateway fallback for a tier 0 job under the real (stubbed) gate", async () => {
+    // Tier 0 (self-attested) is the buyer-approved fallback path — unchanged by fix #1.
+    const dev = realDeviceEvidence();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 0,
+      fallback: GATEWAY_FALLBACK,
       env: { SEAM2_DEVICE_EVIDENCE_SETTLEMENT: "1" } as unknown as NodeJS.ProcessEnv,
     });
     expect(decision.source).toBe("gateway-fallback");
@@ -321,14 +342,23 @@ describe("registeredSignerInputFromColumns", () => {
 });
 
 // ── 2. Wiring correct — resolveSettlementEvidence with the gate OPEN ──────────
+// SCOPE — CRYPTO-ROUTING, NOT SETTLEMENT POLICY. These tests assert only that a
+// signature which VERIFIES against the registered signer routes settlement to the
+// DEVICE anchor (source:"device") instead of the gateway placeholder. They do NOT
+// assert that the achieved assurance tier satisfies the requestedTier: "signature
+// valid ≠ requested assurance satisfied". Deriving the ACHIEVED tier from verified
+// claims and gating settlement on achievedTier >= requestedTier is a later step
+// (§8.5-10, a future gate-opening blocker), NOT asserted here. Where requestedTier is
+// 2 below it is only to show the crypto routing is tier-agnostic, never a claim that
+// tier 2 was met.
 
-describe("SEAM-2 wiring — device signature flows to the settlement anchor when the gate is OPEN", () => {
+describe("SEAM-2 wiring (crypto-routing) — a verified device signature routes to the device anchor when the gate is OPEN", () => {
   it("gate open + valid device bundle (mocked passing verifier) → anchors on DEVICE hash+sig", async () => {
     const dev = realDeviceEvidence();
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
-      requestedTier: 2, // verify OK below → source "device" regardless of tier
+      requestedTier: 2, // crypto-routing is tier-agnostic: verify OK → source "device" (NOT a claim tier-2 was achieved — see §8.5-10 scope note above)
       fallback: GATEWAY_FALLBACK,
       verifyEd25519: () => true, // verifier mocked to pass
       gateOpen: true, // simulate #52 live + flag set (NOT changing the real gate)
@@ -344,7 +374,7 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
-      requestedTier: 2, // verify OK below → source "device" regardless of tier
+      requestedTier: 2, // crypto-routing is tier-agnostic: verify OK → source "device" (NOT a claim tier-2 was achieved — see §8.5-10 scope note above)
       fallback: GATEWAY_FALLBACK,
       // default verifier = naclEd25519Verify (real crypto)
       gateOpen: true,
@@ -382,10 +412,11 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
 });
 
 // ── §8.5-1 hard-gate HOLD: tier >= 1 never silently downgrades ────────────────
-// The core of step 1: with the gate OPEN, a purchased tier >= 1 whose required
-// device evidence is missing or fails to verify HOLDS settlement (§7.3-3, §8.4-C)
-// — it is NOT anchored on the gateway placeholder. Tier 0 keeps the fallback, and
-// the CLOSED-gate default path is provably unchanged (case d).
+// The core of step 1: a purchased tier >= 1 whose required device evidence is
+// missing or fails to verify HOLDS settlement (§7.3-3, §8.4-C) — it is NOT anchored
+// on the gateway placeholder. This holds whether the gate is OPEN (missing/failed
+// device evidence, cases a/c/e) or CLOSED (required verifier unavailable, case d, fix
+// #1). Tier 0 always keeps the buyer-approved fallback (cases b, f).
 describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgrade", () => {
   it("(a) gate open + verify FAILS + tier >= 1 → source 'hold' (never gateway-fallback)", async () => {
     const dev = realDeviceEvidence();
@@ -430,14 +461,36 @@ describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgra
     expect(decision.reason).toBe("no-device-bundle");
   });
 
-  it("(d) gate CLOSED + tier >= 1 → 'gateway-fallback'/'gate-closed' (default money path UNCHANGED)", async () => {
+  it("(d) gate CLOSED + tier >= 1 → source 'hold' reason 'required-verifier-unavailable' (fix #1: no silent placeholder downgrade)", async () => {
+    // Rewritten (audit round-2 fix #1). This previously asserted gate-closed + tier-2 →
+    // gateway-fallback/gate-closed, which LOCKED IN the fail-open: a PURCHASED tier-2 job
+    // settling on the zero-address gateway placeholder while the required verifier is
+    // unavailable. Correct: tier >= 1 HOLDS when the gate is closed (fails closed). The
+    // still-permitted tier-0 fallback moved to case (f).
     const dev = realDeviceEvidence();
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
       requestedTier: 2,
       fallback: GATEWAY_FALLBACK,
-      gateOpen: false, // the inert default — the closed gate is tier-agnostic
+      gateOpen: false, // the closed default
+    });
+    expect(decision.source).toBe("hold");
+    expect(decision.reason).toBe("required-verifier-unavailable");
+    expect(decision.source).not.toBe("gateway-fallback");
+  });
+
+  it("(f) gate CLOSED + tier 0 → 'gateway-fallback'/'gate-closed' (tier-0 fallback UNCHANGED)", async () => {
+    // The still-permitted closed-gate path: tier 0 (self-attested) keeps the buyer-approved
+    // gateway placeholder, byte-identical to before fix #1. (This is the tier-0 half of what
+    // the old tier-agnostic case (d) used to cover.)
+    const dev = realDeviceEvidence();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 0,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: false,
     });
     expect(decision.source).toBe("gateway-fallback");
     expect(decision.reason).toBe("gate-closed");
@@ -445,7 +498,11 @@ describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgra
     expect(decision.kernelSignature.value).toBe("gateway-auto-sign");
   });
 
-  it("(e) gate open + verify OK + tier >= 1 → source 'device' (anchors on device hash+sig)", async () => {
+  it("(e) gate open + verify OK → source 'device' (crypto-routing to the device anchor; achieved-tier vs requested is §8.5-10, not asserted)", async () => {
+    // Crypto-routing, not settlement policy: a verified signature routes to the device
+    // anchor. requestedTier:2 here only proves the routing fires at tier >= 1 — it is NOT
+    // an assertion that achievedTier >= 2 ("signature valid ≠ requested assurance
+    // satisfied"; achieved-tier derivation is §8.5-10, a later step).
     const dev = realDeviceEvidence();
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
@@ -665,7 +722,7 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
     expect(decision.bundleHash).toBe(GATEWAY_FALLBACK.bundleHash);
   });
 
-  it("gate CLOSED + revoked → 'gateway-fallback'/'gate-closed' (revocation inert on the default path)", async () => {
+  it("gate CLOSED + revoked + tier >= 1 → source 'hold'/'required-verifier-unavailable' (revocation inert on the default path)", async () => {
     const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
     const decision = await resolveSettlementEvidence({
       deviceBundle: {
@@ -682,8 +739,13 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
       effectiveEvidenceTime: 2000,
       gateOpen: false, // closed default → revocation never consulted
     });
-    expect(decision.source).toBe("gateway-fallback");
-    expect(decision.reason).toBe("gate-closed");
+    // Updated for fix #1: closed-gate tier >= 1 now HOLDS (was gateway-fallback). The
+    // point of THIS test survives and is in fact sharper — the hold reason is the
+    // closed-gate stance 'required-verifier-unavailable', NOT 'session_revoked', proving
+    // revocation state was never consulted on the closed path (it short-circuits first).
+    expect(decision.source).toBe("hold");
+    expect(decision.reason).toBe("required-verifier-unavailable");
+    expect(decision.reason).not.toBe("session_revoked");
   });
 });
 

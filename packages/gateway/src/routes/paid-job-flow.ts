@@ -1173,10 +1173,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       // on-chain write and no mock auto-settle happen and the escrow stays funded
       // for the buyer to supplement / accept / dispute. Mode-C/D dispute calls are
       // an owner-gated LATER step and are intentionally NOT wired here.
-      //   INERT TODAY: the gate is closed by default (seam2GateOpen === false), so
-      //   `source` is never "hold" on the live money path (it is
-      //   "gateway-fallback"/"gate-closed"); this branch only activates once SEAM-2
-      //   opens — it is kept type- and behavior-correct for that day.
+      //   LIVE FOR TIER >= 1 (audit round-2 fix #1): even with the gate closed by
+      //   default (seam2GateOpen === false), a PURCHASED tier >= 1 job now resolves to
+      //   source:"hold" (required-verifier-unavailable) instead of settling on the
+      //   gateway placeholder — fail closed. Tier 0 still settles via the gateway
+      //   fallback (unchanged). NOTE: the hold performed here is MINIMAL (job status +
+      //   response only). Full hold persistence/resolution — SettlementHold record,
+      //   real escrow ids, non-reclaimable/non-arbitrary bundle, buyer
+      //   supplement/accept/dispute — is DEFERRED (§8.5, "before hold path is
+      //   operational"); the buyer's funds simply stay in escrow until then.
       if (settlementEvidence.source === "hold") {
         // Move the job off the 'completing' claim into a distinct terminal
         // 'settlement_hold' so it is neither stuck (the claim guard excludes
