@@ -396,7 +396,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 249-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | 254-tool agent package for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
@@ -842,7 +842,7 @@ MPP is the default payment rail. Milestone escrow with automatic release when ev
 
 ---
 
-## 9. MCP Server (63 Tools)
+## 9. MCP Server (77 Tools)
 
 Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
@@ -861,7 +861,7 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 }
 ```
 
-**All 56 MCP tools**:
+**49 of the 77 MCP tools** (core set shown below; the capture + negotiate tool groups in `packages/mcp-server/src/tools/` complete the list):
 
 | # | Tool | Description |
 |---|------|-------------|
@@ -917,9 +917,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (249 Tools)
+## 10. Agent Package (254 Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 249 tools with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+The agent package is a single JSON file any LLM can consume, containing 254 tools with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
 
 > **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 
@@ -934,7 +934,7 @@ curl https://capability.network/agent-package.json
 |-------|---------|
 | `title`, `description` | Human-friendly product framing |
 | `system_prompt` | ~9000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
-| `tools` | 249 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
+| `tools` | 254 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
 | `examples` | 3 worked examples — pizza, STL print, operator browse. Each lists user_request + step-by-step what_claude_does + tools_used. |
 | `auth` | `modes`, `provision_endpoint`, `public_endpoints_no_auth`, `bearer_header`, `trace_header`. |
 | `categories` | 15 PCC categories (C.1..C.15) with canonical `capabilityType` examples. |
