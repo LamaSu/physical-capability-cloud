@@ -262,6 +262,18 @@ export function naclEd25519Verify(
   }
 }
 
+/**
+ * Default permitted skew (SECONDS) between the device's ADVISORY `createdAt` and
+ * the authoritative `effectiveEvidenceTime` (§8.4-A: `|deviceCreatedAt −
+ * effectiveEvidenceTime| ≤ permittedSkew` as a flag/policy input; §8.6 suggests a
+ * 5-minute default). This is an OWNER-POLICY value, tunable per
+ * `assurancePolicyVersion` — callers may override via `permittedSkewSeconds`. It
+ * is a NAMED default here, never a bare literal. In this cut the skew check is a
+ * FLAG ONLY (surfaced for policy on the verify result); hard-reject-on-skew is an
+ * owner policy toggle that is DEFAULT OFF and not wired here.
+ */
+export const DEFAULT_PERMITTED_SKEW_SECONDS = 300;
+
 export interface DeviceEvidenceVerifyInput {
   /** The captured device bundle's signature. */
   signature: StoredSignature;
@@ -285,12 +297,29 @@ export interface DeviceEvidenceVerifyInput {
    */
   revocations?: SessionRevocationRecord[];
   /**
-   * The evidence-time (Unix SECONDS) revocation is judged against (§7.3-4:
-   * "validity evaluated at effectiveEvidenceTime"). PROVISIONAL — the caller
-   * supplies submission time until §8.5 step 4 supplies the authoritative value.
-   * Defaults to now (Unix seconds) when omitted.
+   * The AUTHORITATIVE evidence-time (Unix SECONDS) that validity is judged at
+   * (§7.3-4 / §8.4-A / §8.5-4). This is the ONE value used for BOTH the session-key
+   * EXPIRY check (`notBefore(issuedAt) ≤ effectiveEvidenceTime ≤ expiresAt`, via
+   * `verifySessionSignedEvent.currentTimestamp`) AND the step-2 revocation filter
+   * (`revokedAt < effectiveEvidenceTime`) — never settlement wall-clock-now, never
+   * the device's raw `createdAt` (§3.1 CVE-2024-55655 fix: check the timestamp
+   * against cert validity using the LOG's/gateway's time, not the signer's claim).
+   * Sourced from the gateway `receivedAt` (§7.1). Defaults to now (Unix seconds)
+   * when omitted, which keeps legacy direct callers/tests unchanged.
    */
   effectiveEvidenceTime?: number;
+  /**
+   * The device's ADVISORY `createdAt` (Unix SECONDS), when available. Used ONLY to
+   * compute the skew flag `|deviceCreatedAt − effectiveEvidenceTime| ≤ permittedSkew`
+   * (§8.4-A). It is ADVISORY — never the validity time itself, never trusted for
+   * expiry/revocation. Omitted → no skew flag is computed.
+   */
+  deviceCreatedAt?: number;
+  /**
+   * Owner-policy override (Unix SECONDS) for the permitted device-clock skew;
+   * defaults to `DEFAULT_PERMITTED_SKEW_SECONDS`. Tunable per `assurancePolicyVersion`.
+   */
+  permittedSkewSeconds?: number;
 }
 
 export interface DeviceEvidenceVerifyResult {
@@ -298,6 +327,19 @@ export interface DeviceEvidenceVerifyResult {
   reason?: string;
   /** The normalized registered signer the sig was checked against, on success. */
   signer?: RegisteredSigner;
+  /**
+   * The absolute skew (SECONDS) between the ADVISORY device `createdAt` and the
+   * authoritative `effectiveEvidenceTime` (§8.4-A). Present only when a device
+   * `createdAt` was supplied. A standing anomaly signal, independent of `ok`.
+   */
+  skewSeconds?: number;
+  /**
+   * Whether `skewSeconds ≤ permittedSkew` (§8.6 owner policy, default
+   * `DEFAULT_PERMITTED_SKEW_SECONDS`). Present only when a device `createdAt` was
+   * supplied. FLAG ONLY — this does NOT gate `ok` in this cut (hard-reject-on-skew
+   * is an owner toggle, default off).
+   */
+  skewWithinPolicy?: boolean;
 }
 
 /**
@@ -321,8 +363,29 @@ export async function verifyDeviceSignedEvidence(
   if (!signer) return { ok: false, reason: "unregistered-signer" };
   if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
 
+  // §8.5-4 — resolve the ONE authoritative evidence time (Unix SECONDS) up front.
+  // It is used for BOTH the session-key EXPIRY check (passed as currentTimestamp to
+  // verifySessionSignedEvent below) AND the step-2 revocation filter — unified, so
+  // the two can never diverge. The optional `?? now` fallback keeps legacy direct
+  // callers/tests (which omit effectiveEvidenceTime) behaving exactly as before.
+  const evidenceTime = input.effectiveEvidenceTime ?? Math.floor(Date.now() / 1000);
+
+  // §8.4-A skew FLAG (advisory): |deviceCreatedAt − effectiveEvidenceTime| ≤ permittedSkew.
+  // deviceCreatedAt stays ADVISORY — never the validity time, never trusted for expiry.
+  // FLAG ONLY: it never gates `ok` in this cut (hard-reject-on-skew is an owner toggle,
+  // default off — §8.6). Computed only when a device createdAt was supplied, then spread
+  // onto every subsequent return so callers always see the standing anomaly signal.
+  const permittedSkew = input.permittedSkewSeconds ?? DEFAULT_PERMITTED_SKEW_SECONDS;
+  const skewFields: Pick<DeviceEvidenceVerifyResult, "skewSeconds" | "skewWithinPolicy"> =
+    typeof input.deviceCreatedAt === "number"
+      ? {
+          skewSeconds: Math.abs(input.deviceCreatedAt - evidenceTime),
+          skewWithinPolicy: Math.abs(input.deviceCreatedAt - evidenceTime) <= permittedSkew,
+        }
+      : {};
+
   if (input.sessionKeyAuthorization) {
-    if (!input.contractId) return { ok: false, reason: "missing-contract-id" };
+    if (!input.contractId) return { ok: false, reason: "missing-contract-id", ...skewFields };
     const auth = input.sessionKeyAuthorization;
     try {
       const sessionKey: SessionKey = {
@@ -340,10 +403,10 @@ export async function verifyDeviceSignedEvidence(
         ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
       };
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
-        return { ok: false, reason: "malformed-session-authorization" };
+        return { ok: false, reason: "malformed-session-authorization", ...skewFields };
       }
       if (!sessionKey.scope.contractIds.includes(input.contractId)) {
-        return { ok: false, reason: "contract_not_allowed" };
+        return { ok: false, reason: "contract_not_allowed", ...skewFields };
       }
       const event: SessionSignedEvent = {
         eventData: new TextEncoder().encode(input.bundleHash),
@@ -354,19 +417,16 @@ export async function verifyDeviceSignedEvidence(
           ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
         },
       };
-      // §7.3-4 / §8.5-2 — revocation keyed to effectiveEvidenceTime. A session-key
-      // revocation disqualifies this evidence iff the key was revoked BEFORE the
-      // effective evidence time (strict `<`): "revokedAt < effectiveEvidenceTime →
-      // invalid; else prior evidence stands" (§7.3-4); "not revoked ... before its
-      // effectiveEvidenceTime" (§8.4-A step 6). A revocation AT-or-AFTER the evidence
-      // time does not disqualify — prior evidence stands. Pre-filtering here (rather
-      // than relying on the verifier's clock) is what makes check-5 time-aware.
-      // effectiveEvidenceTime is PROVISIONAL (submission time) until §8.5 step 4;
-      // defaults to now (Unix seconds) when the caller omits it.
-      // SCOPE: only the revocation set is keyed to evidence time — re-keying the
-      // EXPIRY check to evidence time is §8.5 step 4's job (out of scope), so
-      // `currentTimestamp` is intentionally NOT passed to verifySessionSignedEvent.
-      const evidenceTime = input.effectiveEvidenceTime ?? Math.floor(Date.now() / 1000);
+      // §8.5-4 — BOTH the EXPIRY check and the revocation filter are now keyed to the
+      // single authoritative `evidenceTime` (hoisted above). This is the CVE-2024-55655
+      // fix (§3.1): validity is `notBefore(issuedAt) ≤ effectiveEvidenceTime ≤ expiresAt`,
+      // judged at EVIDENCE time using the gateway's clock (§7.1 receivedAt), never at
+      // settlement wall-clock-now, never on the signer's raw `createdAt` claim.
+      // Revocation (§7.3-4 / §8.4-A step 6): a session-key revocation disqualifies iff the
+      // key was revoked BEFORE the effective evidence time (strict `<`): "revokedAt <
+      // effectiveEvidenceTime → invalid; else prior evidence stands". Pre-filtering the
+      // revocation set here (rather than relying on the verifier's own clock) is what makes
+      // check-5 time-aware; passing currentTimestamp makes check-3 (expiry) time-aware.
       const revokedSessionIds =
         input.revocations && input.revocations.length > 0
           ? new Set(
@@ -378,12 +438,14 @@ export async function verifyDeviceSignedEvidence(
       const result = new SessionKeyService().verifySessionSignedEvent({
         event,
         action: "evidence_submit",
+        currentTimestamp: evidenceTime,
         ...(revokedSessionIds ? { revokedSessionIds } : {}),
       });
-      if (!result.valid) return { ok: false, reason: result.failures[0] ?? "delegation-invalid" };
-      return { ok: true, signer };
+      if (!result.valid)
+        return { ok: false, reason: result.failures[0] ?? "delegation-invalid", ...skewFields };
+      return { ok: true, signer, ...skewFields };
     } catch {
-      return { ok: false, reason: "malformed-session-authorization" };
+      return { ok: false, reason: "malformed-session-authorization", ...skewFields };
     }
   }
 
@@ -391,10 +453,10 @@ export async function verifyDeviceSignedEvidence(
   try {
     valid = await verifyEd25519(input.bundleHash, input.signature.value, signer.publicKey);
   } catch {
-    return { ok: false, reason: "verify-threw" };
+    return { ok: false, reason: "verify-threw", ...skewFields };
   }
-  if (!valid) return { ok: false, reason: "signature-invalid" };
-  return { ok: true, signer };
+  if (!valid) return { ok: false, reason: "signature-invalid", ...skewFields };
+  return { ok: true, signer, ...skewFields };
 }
 
 // ── The gate — CLOSED by construction ────────────────────────────────────────
@@ -439,6 +501,12 @@ export interface SettlementEvidenceSlot {
   assuranceTier: number;
   sessionKeyAuthorization?: SessionKeyAuthorization;
   contractId?: string;
+  /**
+   * The device's ADVISORY `createdAt` (Unix SECONDS), when the captured bundle
+   * carries one. Passed through to the skew flag (§8.4-A) — ADVISORY only, never
+   * the validity time. Distinct from the gateway `effectiveEvidenceTime`.
+   */
+  deviceCreatedAt?: number;
 }
 
 export interface SettlementEvidenceInput {
@@ -462,10 +530,14 @@ export interface SettlementEvidenceInput {
    */
   revocations?: SessionRevocationRecord[];
   /**
-   * Evidence-time (Unix SECONDS) revocation is judged against (§7.3-4). PROVISIONAL
-   * (submission time) until §8.5 step 4. Passed through to verifyDeviceSignedEvidence.
+   * The AUTHORITATIVE evidence-time (Unix SECONDS) validity is judged at — used for
+   * BOTH expiry and revocation (§7.3-4 / §8.4-A / §8.5-4). Sourced from the gateway
+   * `receivedAt` (§7.1). Passed through to verifyDeviceSignedEvidence.
    */
   effectiveEvidenceTime?: number;
+  /** Owner-policy override (Unix SECONDS) for the skew flag; defaults to
+   *  `DEFAULT_PERMITTED_SKEW_SECONDS`. Passed through to verifyDeviceSignedEvidence. */
+  permittedSkewSeconds?: number;
   /** Gate override (default `deviceEvidenceSettlementEnabled(env)`). */
   gateOpen?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -478,6 +550,10 @@ export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
    *  device evidence that did not verify; settlement HOLDS and does NOT anchor. */
   source: "device" | "gateway-fallback" | "hold";
   reason?: string;
+  /** Skew flag (§8.4-A), surfaced from the device verify when a device `createdAt`
+   *  was available. Advisory/policy signal only — never gates settlement here. */
+  skewSeconds?: number;
+  skewWithinPolicy?: boolean;
 }
 
 /**
@@ -526,21 +602,43 @@ export async function resolveSettlementEvidence(
       : {}),
     ...(input.deviceBundle.contractId ? { contractId: input.deviceBundle.contractId } : {}),
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
-    // §8.5-2: revocation state + evidence-time, consulted on the session-key branch.
+    // §8.5-2: revocation state + §8.5-4: authoritative evidence-time (both consulted on
+    // the session-key branch: revocation filter + expiry check share the one value).
     ...(input.revocations ? { revocations: input.revocations } : {}),
     ...(input.effectiveEvidenceTime !== undefined
       ? { effectiveEvidenceTime: input.effectiveEvidenceTime }
       : {}),
+    // §8.4-A skew flag inputs (advisory device createdAt + owner-policy skew bound).
+    ...(input.deviceBundle.deviceCreatedAt !== undefined
+      ? { deviceCreatedAt: input.deviceBundle.deviceCreatedAt }
+      : {}),
+    ...(input.permittedSkewSeconds !== undefined
+      ? { permittedSkewSeconds: input.permittedSkewSeconds }
+      : {}),
   });
+  // Skew flag is a standing signal independent of the verify verdict — surface it on
+  // every post-verify decision (device / hold / fallback-on-failure).
+  const skewOut: Pick<SettlementEvidenceDecision, "skewSeconds" | "skewWithinPolicy"> = {
+    ...(verified.skewSeconds !== undefined ? { skewSeconds: verified.skewSeconds } : {}),
+    ...(verified.skewWithinPolicy !== undefined
+      ? { skewWithinPolicy: verified.skewWithinPolicy }
+      : {}),
+  };
   if (!verified.ok) {
     return holdWhenEvidenceInsufficient
-      ? { ...input.fallback, source: "hold", reason: verified.reason ?? "verify-failed" }
-      : { ...input.fallback, source: "gateway-fallback", reason: verified.reason ?? "verify-failed" };
+      ? { ...input.fallback, source: "hold", reason: verified.reason ?? "verify-failed", ...skewOut }
+      : {
+          ...input.fallback,
+          source: "gateway-fallback",
+          reason: verified.reason ?? "verify-failed",
+          ...skewOut,
+        };
   }
   return {
     source: "device",
     bundleHash: input.deviceBundle.bundleHash,
     kernelSignature: input.deviceBundle.kernelSignature,
     assuranceTier: input.deviceBundle.assuranceTier,
+    ...skewOut,
   };
 }
