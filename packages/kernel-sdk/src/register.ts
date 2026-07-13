@@ -154,8 +154,8 @@ export async function registerKernel(
   }
 
   // Build a proof only for explicitly identified, public-key-confirmed material.
-  // Ambiguous or mismatched secrets fail closed by taking the proofless
-  // marketplace path; they never reach the SET-ONCE endpoint.
+  // Once signing was explicitly requested, invalid or mismatched key material
+  // is a registration error rather than a silent proofless fallback.
   let proof: ReturnType<typeof buildEd25519RegistrationProof> | undefined;
   if (opts.signingKey) {
     try {
@@ -164,8 +164,13 @@ export async function registerKernel(
         privateKey: opts.signingKey.principalPrivateKey,
         expectedPublicKey: opts.signingKey.expectedPublicKey,
       });
-    } catch {
-      proof = undefined;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new KernelRegistrationError(
+        0,
+        { error: "signing_proof_construction_failed", detail },
+        `Signing-key proof construction failed: ${detail}`,
+      );
     }
   }
 

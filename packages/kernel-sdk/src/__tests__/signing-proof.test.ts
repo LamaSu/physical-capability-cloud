@@ -272,21 +272,23 @@ describe("registerKernel — signing-key registration (#235)", () => {
     expect(calls[0].url).toContain("/api/kernels/register");
   });
 
-  it("leaves registration proofless when key bytes do not match the expected public key", async () => {
+  it("fails loud before network registration when explicit signing key construction fails", async () => {
     const { fetchImpl, calls } = mockFetch([
       () => ({ status: 200, json: { kernelId: "k-proofless", status: "pending" } }),
     ]);
-    const res = await registerKernel("https://gw.example.com", testManifest("k-proofless"), {
+    await expect(registerKernel("https://gw.example.com", testManifest("k-proofless"), {
       fetchImpl,
       signingKey: {
         algorithm: "ed25519",
         principalPrivateKey: new Uint8Array(32).fill(77),
         expectedPublicKey: pubHex,
       },
+    })).rejects.toMatchObject({
+      name: "KernelRegistrationError",
+      statusCode: 0,
+      body: { error: "signing_proof_construction_failed" },
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0].url).toContain("/api/kernels/register");
-    expect(res.signing).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 });
 

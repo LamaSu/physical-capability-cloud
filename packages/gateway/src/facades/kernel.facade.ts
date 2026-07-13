@@ -299,8 +299,12 @@ export class KernelFacade extends BaseFacade {
 
       const existing = repos.kernels.findById(id);
       if (existing) {
-        const hasSigningProof = typeof body.signingProof === "string";
-        if (hasSigningProof && actorId && existing.operatorAddress !== actorId) {
+        const unownedOperatorAddresses = new Set([
+          "",
+          "0x0000000000000000000000000000000000000000",
+        ]);
+        const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
+        if (!actorId || (hasRecordedOwner && existing.operatorAddress !== actorId)) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -311,6 +315,10 @@ export class KernelFacade extends BaseFacade {
           lastHeartbeat: new Date().toISOString(),
           status: "online",
         };
+        // Legacy rows may carry the historical zero-address placeholder rather
+        // than an owner. Their first authenticated mutation claims ownership;
+        // subsequent heartbeats/profile updates are owner-only like new rows.
+        if (!hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.

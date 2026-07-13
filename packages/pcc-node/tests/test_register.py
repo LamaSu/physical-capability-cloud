@@ -7,6 +7,7 @@ import pytest
 from pcc_node.register import (
     provision_api_key,
     register_kernel,
+    register_devices,
     announce_capabilities,
     send_heartbeat,
     register_signing_key,
@@ -17,17 +18,39 @@ from pcc_node.config import NodeConfig
 
 
 class TestProvisionApiKey:
-    def test_success(self):
+    def test_provisions_then_uses_key_for_kernel_and_device_registration(self):
+        cfg = NodeConfig(
+            kernel_id="k1",
+            kernel_name="test",
+            devices=[{"id": "d1", "type": "camera", "model": "cam", "adapterType": "camera"}],
+        )
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (201, {"apiKey": "test-key-123"})
+            mock_pcc.side_effect = [
+                (201, {"api_key": "test-key-123"}),
+                (201, {"id": "k1"}),
+                (201, {"id": "d1"}),
+            ]
             key = provision_api_key("http://pcc")
-        assert key == "test-key-123"
+            register_kernel("http://pcc", key, cfg)
+            register_devices("http://pcc", key, cfg.kernel_id, cfg.devices)
 
-    def test_alternate_key_field(self):
+        assert key == "test-key-123"
+        calls = mock_pcc.call_args_list
+        assert [call.args[1] for call in calls] == [
+            "/api/auth/provision",
+            "/api/kernels",
+            "/api/devices/register",
+        ]
+        assert calls[0].kwargs["body"] == {"email": "", "name": "pcc-node"}
+        assert calls[1].kwargs["api_key"] == "test-key-123"
+        assert calls[1].kwargs["body"]["id"] == "k1"
+        assert calls[2].kwargs["api_key"] == "test-key-123"
+
+    def test_missing_api_key_field(self):
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
-            mock_pcc.return_value = (200, {"api_key": "alt-key"})
+            mock_pcc.return_value = (200, {"apiKey": "obsolete-field"})
             key = provision_api_key("http://pcc")
-        assert key == "alt-key"
+        assert key == ""
 
     def test_failure(self):
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:

@@ -66,4 +66,28 @@ describe("POST /api/kernels authentication and ownership", () => {
     });
     expect(response.statusCode).toBe(403);
   });
+
+  it("rejects an authenticated non-owner mutation without a signing proof", async () => {
+    const owner = provisionApiKey({ operatorId: "operator-owner" }).rawKey;
+    const attacker = provisionApiKey({ operatorId: "operator-attacker" }).rawKey;
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: { authorization: `Bearer ${owner}` },
+      payload: { id: "owned-profile", name: "Owner profile" },
+    });
+    expect(first.statusCode).toBe(201);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/kernels",
+      headers: { authorization: `Bearer ${attacker}` },
+      payload: { id: "owned-profile", name: "Attacker profile", maxAssuranceTier: 3 },
+    });
+    expect(response.statusCode).toBe(403);
+
+    const stored = await app.inject({ method: "GET", url: "/api/kernels/owned-profile" });
+    expect(stored.json().kernel.name).toBe("Owner profile");
+    expect(stored.json().kernel.maxAssuranceTier).toBe(2);
+  });
 });
