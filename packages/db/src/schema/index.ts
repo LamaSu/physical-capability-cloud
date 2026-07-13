@@ -26,4 +26,5 @@ export * from "./ratings.js";
 export * from "./orchestrator-sessions.js";
 export * from "./requests.js";
 export * from "./invocation-receipts.js";
+export * from "./gateway-receipts.js";
 export * from "./substrate.js";

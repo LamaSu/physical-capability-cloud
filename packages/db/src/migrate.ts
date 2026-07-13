@@ -1627,6 +1627,32 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS invocation_receipts_created_idx ON invocation_receipts(created_at);
   `);
 
+  // v3 evidence-signing (§8.5 step 5) — per-checkpoint transactional gateway
+  // receipts. One row per durably-accepted checkpoint; the online freshness
+  // anchor of §8.3 (receipt ⟺ committed acceptance, serialized per session).
+  // NEW table → CREATE TABLE IF NOT EXISTS (idempotent). Additive: no route
+  // reads/writes it until step 6 wires the checkpoint-submission path.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      gateway_key_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      checkpoint_hash TEXT NOT NULL,
+      previous_accepted_hash TEXT,
+      session_state_version INTEGER NOT NULL,
+      accepted_at INTEGER NOT NULL,
+      signature TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS gateway_receipts_job_idx ON gateway_receipts(job_id);
+    CREATE INDEX IF NOT EXISTS gateway_receipts_session_idx ON gateway_receipts(session_id);
+    CREATE INDEX IF NOT EXISTS gateway_receipts_checkpoint_idx ON gateway_receipts(checkpoint_hash);
+    CREATE INDEX IF NOT EXISTS gateway_receipts_session_seq_idx ON gateway_receipts(session_id, seq);
+  `);
+
   // ══════════════════════════════════════════════════════════════════
   // Substrate persistence — the five agentic-substrate routes (compose,
   // asset-outbound, skills, reputation, graph-search) previously held all

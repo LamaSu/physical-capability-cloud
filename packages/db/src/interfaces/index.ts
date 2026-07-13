@@ -236,6 +236,7 @@ import type { IRatingRepository } from "./IRatingRepository.js";
 import type { IContributorRepository } from "./IContributorRepository.js";
 import type { IRequestRepository } from "./IRequestRepository.js";
 import type { IInvocationReceiptRepository } from "./IInvocationReceiptRepository.js";
+import type { IGatewayReceiptRepository } from "./IGatewayReceiptRepository.js";
 import type { ICsdUsageRepository } from "./ICsdUsageRepository.js";
 
 export type {
@@ -265,6 +266,13 @@ export type {
   InvocationReceiptInsert,
   InvocationReceiptFilter,
 } from "./IInvocationReceiptRepository.js";
+
+export type {
+  IGatewayReceiptRepository,
+  GatewayReceiptRow,
+  GatewayReceiptInsert,
+  GatewayReceiptSessionSnapshot,
+} from "./IGatewayReceiptRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -311,6 +319,10 @@ export interface IRepositories {
   // Universal Aggregator (Phase 1) — per-invocation provenance receipts for
   // indexed-tool calls proxied through /api/aggregator/invoke.
   invocationReceipts: IInvocationReceiptRepository;
+  // v3 evidence-signing (§8.5 step 5) — per-checkpoint transactional gateway
+  // receipts (§8.3: receipt ⟺ committed acceptance). Additive; not wired into
+  // the live settlement path until step 6.
+  gatewayReceipts: IGatewayReceiptRepository;
   // PR #118 follow-on — persistent CSD usage attribution (replaces in-memory
   // Map on CsdRegistry). Opt-in via PCC_CSD_PERSIST=true in gateway boot.
   csdUsage: ICsdUsageRepository;
