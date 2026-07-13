@@ -63,7 +63,10 @@ const HTTP_MIRROR_PATH = "/mcp-apps/ui/dashboard";
 // both of which live under apps/dashboard/public (outside this package).
 // ---------------------------------------------------------------------------
 
-function resolveGatewayAsset(relativeSegments: string[], envVarOverride?: string): string {
+/** Exported so other MCP surfaces (e.g. docs-mcp-server.ts) that also need to
+ * locate a repo-root-relative asset from either compiled dist/ or tsx-run
+ * src/ don't have to re-derive this candidate-path search a third time. */
+export function resolveGatewayAsset(relativeSegments: string[], envVarOverride?: string): string {
   const override = envVarOverride ? process.env[envVarOverride] : undefined;
   if (override && existsSync(override)) return resolvePath(override);
 
@@ -300,6 +303,13 @@ export function buildRenderDashboardTool(): Tool {
       idempotentHint: true,
       openWorldHint: false,
     },
+    // MCP Apps convention: a tool that RENDERS a ui:// resource declares the
+    // link on the tools/list definition itself, not only on the call result
+    // (handleRenderDashboardTool already returns the same _meta below) — a
+    // host/scanner reading tools/list should be able to tell up front that
+    // this tool has a UI without first calling it. The SDK's Tool._meta is
+    // typed Record<string, unknown>, so this needs no schema workaround.
+    _meta: { ui: { resourceUri: MCP_APP_DASHBOARD_URI } },
   };
 }
 

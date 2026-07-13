@@ -4,6 +4,17 @@
   "version": "0.1.0",
   "serverUrl": "https://capability.network/mcp",
   "logo": "https://capability.network/pcc-icon.svg",
+  "icon": "https://capability.network/pcc-icon.svg",
+  "icons": [
+    {
+      "src": "https://capability.network/pcc-icon.svg",
+      "mimeType": "image/svg+xml"
+    }
+  ],
+  "servers": [
+    { "name": "product", "url": "https://capability.network/mcp" },
+    { "name": "docs", "url": "https://capability.network/mcp/docs" }
+  ],
   "transport": {
     "type": "streamable-http",
     "url": "https://capability.network/mcp"

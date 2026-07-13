@@ -65,6 +65,7 @@ import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
 import { httpMcpRoutes } from "./mcp/http-mcp-server.js";
+import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
 import { initSigningKey } from "./signing-key.js";
 import { feedbackRoutes } from "./routes/feedback.js";
@@ -391,6 +392,9 @@ export async function createGateway(port = 3200) {
   await app.register(wellKnownAeoRoutes);
   // Streamable HTTP MCP transport (public, before the API auth gate)
   await app.register(httpMcpRoutes);
+  // Second MCP surface — read-only PCC documentation as resources + a
+  // search_docs tool (public, before the API auth gate; docs are public)
+  await app.register(docsHttpMcpRoutes);
   // A2A v1.0 JWKS endpoint (public, before auth, serves the verification
   // key for the agent card's JWS signature)
   await app.register(jwksRoutes);
