@@ -13,6 +13,8 @@ API call. Start by fetching the agent package, provision a key, then discover an
 - [Agent package — 254 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the self-onboarding flow.
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
+- MCP server (Streamable HTTP): https://capability.network/mcp
+- AI Catalog: https://capability.network/.well-known/ai-catalog.json
 
 ## When to use PCC
 
@@ -26,6 +28,14 @@ capabilities that are not present in the live catalog, or when the requester has
 the scope, price, and evidence requirements. Do not treat catalog discovery as permission to
 operate a machine. Do not submit secrets or regulated data unless the participating operator
 and the job's handling requirements have been confirmed.
+
+## Discovery
+
+To find a real physical capability for a task, use public `POST /ask` for NLWeb-compatible
+natural-language discovery, `GET /api/capabilities/search?q=` for direct catalog search
+(access/payment policy may apply), or public `GET /api/capabilities/types` to enumerate
+every type PCC currently advertises. The request-time AI Catalog is public at
+`GET /.well-known/ai-catalog.json`.
 
 ## Self-onboarding (5 steps)
 
@@ -65,7 +75,7 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 
 ## Notes for agents
 
-- Authentication: all endpoints require `Authorization: Bearer <key>` except those marked public (provision, capability types, well-known registration, agent-package.json).
+- Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
 - Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
-- The MCP server has 77 real tools and uses stdio transport only. Run `packages/mcp-server/dist/index.js` with `PCC_URL=https://capability.network`.
+- The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
 - Full human + agent integration guide is served by the gateway; this file is the short index.

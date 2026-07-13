@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { closeStore, initStore } from "../db.js";
+import { getCapabilityFacade } from "../facades/index.js";
 import { wellKnownAeoRoutes } from "../routes/well-known-aeo.js";
 
 describe("public AEO discovery routes", () => {
@@ -35,6 +36,99 @@ describe("public AEO discovery routes", () => {
       "https://capability.network/agent-package.json",
     );
     expect(response.body).not.toContain("graphql");
+  });
+
+  it("generates the AI Catalog from the live capability-type registry", async () => {
+    const capabilityType = "robot-polishing";
+    const before = await app.inject({
+      method: "GET",
+      url: "/.well-known/ai-catalog.json",
+    });
+    expect(before.statusCode).toBe(200);
+    expect(before.json().entries).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          identifier: `urn:ai:capability.network:capability:${capabilityType}`,
+        }),
+      ]),
+    );
+
+    const created = await getCapabilityFacade().create({
+      id: "cap-ai-catalog-robot-polishing",
+      kernelId: "kernel-nyc",
+      type: capabilityType,
+      name: "Robot polishing",
+    });
+    expect(created.success).toBe(true);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/ai-catalog.json",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(body.specVersion).toBe("1.0");
+    expect(body.host).toEqual({
+      displayName: "Physical Capability Cloud",
+      identifier: "urn:ai:capability.network",
+    });
+    expect(body.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          identifier: "urn:ai:capability.network:mcp",
+          type: "application/mcp-server+json",
+          url: "https://capability.network/mcp",
+        }),
+        expect.objectContaining({
+          identifier: `urn:ai:capability.network:capability:${capabilityType}`,
+          type: "application/pcc-capability+json",
+          url: `https://capability.network/api/capabilities/by-type/${capabilityType}`,
+        }),
+      ]),
+    );
+    expect(
+      body.entries.some(
+        (entry: { type?: string }) =>
+          entry.type === "application/pcc-capability+json",
+      ),
+    ).toBe(true);
+    expect(body.collections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          identifier: "urn:ai:capability.network:catalog",
+          url: "https://capability.network/api/capabilities",
+        }),
+      ]),
+    );
+  });
+
+  it("lists PCC's physical-capability discovery agent with real endpoints", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/agent-directory.json",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(body.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          displayName: "Physical Capability Cloud",
+          agentCard:
+            "https://capability.network/.well-known/agent-card.json",
+          discovery: expect.objectContaining({
+            naturalLanguage: expect.objectContaining({
+              url: "https://capability.network/ask",
+            }),
+            search: expect.objectContaining({
+              url: "https://capability.network/api/capabilities/search",
+            }),
+          }),
+        }),
+      ]),
+    );
   });
 
   it("advertises the Streamable HTTP MCP server and retains stdio", async () => {

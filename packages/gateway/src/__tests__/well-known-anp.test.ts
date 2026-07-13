@@ -105,6 +105,42 @@ describe("ANP discovery surface", () => {
       });
       expect(res.headers["access-control-allow-origin"]).toBe("*");
     });
+
+    it("maps discovery, hire, and verification to real A2A skills and endpoints", async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: "/.well-known/agent-card.json",
+      });
+      const body = res.json();
+
+      expect(body.url).toMatch(/^https:\/\/[^/]+\/a2a\/tasks\/send$/);
+      expect(body.supportedInterfaces).toEqual([
+        {
+          url: body.url,
+          protocolBinding: "JSONRPC",
+          protocolVersion: "1.0",
+        },
+      ]);
+      expect(body.capabilities).toMatchObject({
+        streaming: false,
+        extendedAgentCard: false,
+      });
+      expect(body.skills.map((skill: { id: string }) => skill.id)).toEqual(
+        expect.arrayContaining([
+          "discover_capability",
+          "hire_capability",
+          "verify_evidence",
+          "pcc-discover",
+          "pcc-submit",
+          "pcc-verify",
+        ]),
+      );
+      expect(body["x-pcc-core-skills"]).toMatchObject({
+        discover_capability: { a2aSkill: "pcc-discover" },
+        hire_capability: { a2aSkill: "pcc-submit" },
+        verify_evidence: { a2aSkill: "pcc-verify" },
+      });
+    });
   });
 
   // ── /.well-known/agent-descriptions (ANP CollectionPage) ─────────────────
