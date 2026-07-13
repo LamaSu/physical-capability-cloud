@@ -1,0 +1,9 @@
+# PCC Privacy Statement
+
+Physical Capability Cloud coordinates discovery and execution of real-world work. To provide that service, PCC may process information supplied through the website or API, including an email address or wallet address used to provision access, operator and capability records, job parameters and status, evidence references, authentication records, and technical request data such as IP address, user agent, timestamps, and trace identifiers. SIWE login may use a session cookie. API keys and wallet private keys are credentials and should never be placed in public capability descriptions or job fields.
+
+Evidence is designed to be content-addressed. On-chain records store hashes or commitments rather than raw evidence, but a hash, public capability listing, transaction, or other chain record can remain visible and may not be practically erasable. Operators and customers should submit only the data needed to scope, perform, verify, and settle a job, and should choose evidence appropriate to their assurance requirements. Do not submit regulated, confidential, or personal data unless you have authority and have confirmed the handling requirements with the operator involved.
+
+PCC uses service data to operate the gateway, authenticate callers, route work, prevent abuse, diagnose failures, verify outcomes, and support settlement. Operators are independent participants and may receive the job information necessary to perform accepted work; their own practices may also apply. This statement does not promise a retention period that the service has not published. For privacy questions or a request concerning data you supplied, contact the maintainers through [PCC Discord](https://discord.gg/CRFvvUgeV4) or the [GitHub repository](https://github.com/LamaSu/physical-capability-cloud) without posting secrets or sensitive evidence publicly.
+
+Last updated: 2026-07-12.

@@ -1,0 +1,327 @@
+{
+  "name": "Physical Capability Cloud MCP Server",
+  "description": "Discover and orchestrate PCC physical capabilities through the real PCC MCP tool catalog. This server connects over stdio only; serverUrl is the backing PCC gateway API base, not an HTTP MCP transport endpoint.",
+  "version": "0.1.0",
+  "serverUrl": "https://capability.network",
+  "logo": "https://capability.network/pcc-icon.svg",
+  "transport": {
+    "type": "stdio",
+    "command": "node",
+    "args": [
+      "packages/mcp-server/dist/index.js"
+    ],
+    "env": {
+      "PCC_URL": "https://capability.network"
+    }
+  },
+  "tools": [
+    {
+      "name": "pcc_list_capabilities",
+      "description": "List all registered PCC capability types (e.g. fdm-printer, cnc-3axis, hplc, centrifuge). Returns the canonical type identifiers recognized by the contract builder."
+    },
+    {
+      "name": "pcc_search_capabilities",
+      "description": "Search capability templates with full details: type, name, version, description, parameter count, parameter groups, and base pricing hints."
+    },
+    {
+      "name": "pcc_list_kernels",
+      "description": "List all Shop Kernels (physical manufacturing sites) with their status and capability types. Optionally filter by kernel status."
+    },
+    {
+      "name": "pcc_get_kernel",
+      "description": "Get detailed information about a specific Shop Kernel including its capabilities and devices."
+    },
+    {
+      "name": "pcc_list_jobs",
+      "description": "List manufacturing jobs across all kernels. Optionally filter by kernel ID and/or job status."
+    },
+    {
+      "name": "pcc_get_job",
+      "description": "Get detailed information about a specific job including its evidence bundles."
+    },
+    {
+      "name": "pcc_build_options",
+      "description": "Get the available configuration options for building a capability contract. Pass a capability type and optionally partial selections to get the next set of available parameters and their valid values."
+    },
+    {
+      "name": "pcc_calculate_price",
+      "description": "Calculate the price for a capability contract given a complete set of parameter selections."
+    },
+    {
+      "name": "pcc_build_contract",
+      "description": "Build a complete capability contract with all parameters, pricing, and assurance tier. Returns the full contract object ready for escrow."
+    },
+    {
+      "name": "pcc_list_escrows",
+      "description": "List all escrow contracts with their milestones. Optionally filter by escrow status."
+    },
+    {
+      "name": "pcc_get_escrow",
+      "description": "Get the settlement status of a single escrow by its escrow ID or on-chain contract address. Returns the escrow with milestones, released/disputed counts, challenge-window state, total/currency, and a `source` of 'db' or 'on-chain' (an 0x address triggers a live chain read). This is the primary settlement-status read for a committed job."
+    },
+    {
+      "name": "pcc_get_escrow_events",
+      "description": "Get the on-chain event log for an escrow contract by address (Funded, MilestoneReleased, Disputed, EvidenceSubmitted, etc.). Optionally start from a block number to page through history. Read-only chain query."
+    },
+    {
+      "name": "pcc_list_evidence",
+      "description": "List all evidence bundles across all jobs. Evidence bundles contain cryptographic proof of manufacturing work (measurements, sensor data, photos, etc.)."
+    },
+    {
+      "name": "pcc_list_protocols",
+      "description": "List protocol templates (multi-step manufacturing workflows). Optionally filter by tags, required capabilities, search term, or status."
+    },
+    {
+      "name": "pcc_depin_stats",
+      "description": "Get DePIN (Decentralized Physical Infrastructure Network) reward statistics: epochs, kernel scores, certificates, and treasury balance."
+    },
+    {
+      "name": "pcc_subnet_status",
+      "description": "Get the status of the PCC agent network: active agents, their types, and conversation activity."
+    },
+    {
+      "name": "pcc_get_agent_identity",
+      "description": "Get the ERC-8004 agent identity for a PCC kernel or agent, including registration file, reputation summary, and validation status."
+    },
+    {
+      "name": "pcc_get_reputation",
+      "description": "Get reputation scores for a PCC kernel or agent — assurance tier, quality rating, uptime, response time, and evidence completeness."
+    },
+    {
+      "name": "pcc_list_sensors",
+      "description": "List available sensor channels for a kernel — temperature, pressure, pH, flow rate, etc."
+    },
+    {
+      "name": "pcc_get_sensor_data",
+      "description": "Get recent sensor readings for a specific channel on a kernel."
+    },
+    {
+      "name": "pcc_get_evidence",
+      "description": "Get a specific evidence bundle by ID — includes encrypted data reference, IPFS CID, ZK proof status, Bittensor verification scores, and evaluator attestations."
+    },
+    {
+      "name": "pcc_compile_workflow",
+      "description": "Compile a multi-step manufacturing workflow into an execution DAG. Provide capability requirements and dependencies — returns topologically sorted execution waves."
+    },
+    {
+      "name": "pcc_agent_registration",
+      "description": "Get the ERC-8004 Agent Registration File for the PCC gateway. This is the machine-readable identity document that enables agent discovery."
+    },
+    {
+      "name": "pcc_setup_detect",
+      "description": "Auto-detect the current PCC configuration state. Returns which environment variables are set, database status (kernels/devices/jobs), chain connectivity, adapter health, and evidence storage status. Use this as the FIRST step when helping someone set up PCC."
+    },
+    {
+      "name": "pcc_setup_generate_config",
+      "description": "Generate a KERNEL_CONFIG JSON from device descriptions. Tell it what devices the operator has (type, adapter protocol, connection details) and it produces the config JSON, an env var line, and a JSON file."
+    },
+    {
+      "name": "pcc_setup_validate_config",
+      "description": "Validate a kernel configuration. Checks adapter connectivity, capability definitions, and configuration completeness. If no config is provided, validates the currently loaded config."
+    },
+    {
+      "name": "pcc_setup_register_device",
+      "description": "Register a physical device onto the PCC network. Creates a DB record and optionally runs a health check."
+    },
+    {
+      "name": "pcc_setup_health_check",
+      "description": "Run health checks on all configured devices or a specific device. Returns connectivity status, response time, and any errors."
+    },
+    {
+      "name": "pcc_setup_test_job",
+      "description": "Submit a test job to verify the full PCC pipeline works end-to-end: job submission → adapter execution → evidence collection → (optional) settlement. Returns job result with evidence bundle ID."
+    },
+    {
+      "name": "pcc_setup_generate_env",
+      "description": "Generate a .env file from configuration answers. Produces all required environment variables for a specific deployment profile (dev, testnet, mainnet). This tool runs locally without a gateway call."
+    },
+    {
+      "name": "pcc_setup_status",
+      "description": "Get comprehensive setup status. Shows what's configured, what's missing, and what needs attention across all categories: gateway, database, adapters, chain, storage, identity."
+    },
+    {
+      "name": "pcc_csd_list",
+      "description": "List all registered CSD (Capability StructureDefinition) documents. Optionally filter by structural kind or lifecycle status."
+    },
+    {
+      "name": "pcc_csd_get",
+      "description": "Get a specific CSD (Capability StructureDefinition) by its canonical URI."
+    },
+    {
+      "name": "pcc_csd_register",
+      "description": "Register a new CSD (Capability StructureDefinition) in the PCC registry. Validates the document against the CSD schema before storing."
+    },
+    {
+      "name": "pcc_discover_scan",
+      "description": "Scan the local network for physical devices that can be onboarded to PCC. Currently supports IPP printers via mDNS. Falls back to mock devices in dev mode."
+    },
+    {
+      "name": "pcc_discover_onboard",
+      "description": "One-command device onboarding pipeline: auto-discover a device on the network → generate a CSD → register the CSD in the PCC registry. Returns the discovered device, generated CSD, and registration confirmation."
+    },
+    {
+      "name": "pcc_ip_register_capability",
+      "description": "Register a PCC Capability StructureDefinition (CSD) as a Story Protocol IP Asset. Returns an ipId, nftTokenId, licenseTermsId, and transaction hash. The IP Asset enables programmable royalties for all future jobs using this capability."
+    },
+    {
+      "name": "pcc_ip_revenue_snapshot",
+      "description": "Get the current revenue snapshot for a Story Protocol IP Asset — total accumulated revenue, unclaimed balance, and per-holder claimable amounts. Use this to check how much an IP Royalty Vault has accumulated."
+    },
+    {
+      "name": "pcc_ip_claim",
+      "description": "Claim accumulated revenue from a Story Protocol IP Royalty Vault. Returns a transaction hash and the amount claimed. Optionally specify which Royalty Token IDs to claim; omit to claim all."
+    },
+    {
+      "name": "pcc_ip_lineage",
+      "description": "Get the full IP lineage chain for a Story Protocol IP Asset — ancestors (parent CSDs this was derived from) and descendants (job evidence bundles and derivative CSDs). Shows the provenance graph of physical manufacturing work."
+    },
+    {
+      "name": "pcc_ip_set_splits",
+      "description": "Configure revenue splits (Royalty Token distribution) for a Story Protocol IP Asset.\nSplits must sum to 100. Each collaborator's role determines their share of all future revenue from this IP.\n\nContributorRole taxonomy (ADR-12 §4 — see role responsibility table):\n  • operator             — runs the physical machine; residual share (typically 80-95% after others)\n  • verifier             — evaluates evidence, signs attestations; slashable (1-5%)\n  • insurer              — underwrites job failure coverage; opt-in (0-3%)\n  • integrator           — authored the machine-type adapter (OctoPrint, Bambu, ROS); 0-100 bps\n  • protocol-author      — authored the capability schema (CSD) + test vectors; 0-50 bps\n  • model-author         — trained the AI model invoked at execution time; 0-80 bps\n  • dataset-contributor  — pilot who collected training demonstrations; resolved via TrainingManifest\n  • curator              — organizes/audits a collection of contributions; 0-5%\n  • assembler            — composed multiple capabilities into a workflow; 0-50 bps\n  • network-treasury     — per-network protocol treasury (verification, grants, security); 0-3%\n\nLegacy aliases kept for backward decoding only — prefer the canonical names above:\n  • `designer` → use `protocol-author` / `assembler` / `integrator` depending on CSD kind\n  • `network`  → use `network-treasury`\n\nRecommended starting splits:\n  • Standard job (no AI):   operator 92, verifier 3, protocol-author 2, integrator 2, network-treasury 1\n  • Job with AI model:      operator 87, verifier 3, protocol-author 2, integrator 2, model-author 4, network-treasury 2\n\n"
+    },
+    {
+      "name": "pcc_swf_summary",
+      "description": "Get the Sovereign Wealth Fund summary: total balance, accrued/distributed amounts, current allocation strategy, participant count, and active proposals."
+    },
+    {
+      "name": "pcc_swf_participant_dashboard",
+      "description": "Get a participant's Sovereign Wealth Fund dashboard: total earned, pending dividends, epoch participation count, claim history, and voting history."
+    },
+    {
+      "name": "pcc_swf_list_proposals",
+      "description": "List governance proposals for the Sovereign Wealth Fund. Optionally filter by status (active, passed, rejected, executed)."
+    },
+    {
+      "name": "pcc_get_wallet_balance",
+      "description": "Check agent wallet USDC balance, pending deposits, and API credits"
+    },
+    {
+      "name": "pcc_get_funding_options",
+      "description": "Show available fiat-to-crypto funding options — Stripe for US/EU (card/ACH) and Yellowcard for 34 emerging market countries (bank transfer/mobile money)"
+    },
+    {
+      "name": "pcc_create_onramp_session",
+      "description": "Create a fiat-to-crypto funding session — user pays with card/ACH/bank transfer/mobile money and receives USDC"
+    },
+    {
+      "name": "pcc_get_provider_rates",
+      "description": "Get live exchange rates from Yellowcard for emerging market currencies"
+    },
+    {
+      "name": "pcc_submit_withdrawal",
+      "description": "Withdraw USDC earnings to local fiat via bank transfer or mobile money (Yellowcard) — supports 34 countries"
+    },
+    {
+      "name": "pcc_get_ramp_activity",
+      "description": "Show recent fiat on/off ramp activity — deposits, withdrawals, and statuses across all providers"
+    },
+    {
+      "name": "pcc_send_enterprise_payout",
+      "description": "Send fiat payout to institutional bank account via Wise — 40+ currencies, no crypto exposure for enterprise operators"
+    },
+    {
+      "name": "pcc_contributor_register",
+      "description": "Register a contributor profile (DB-only). Mints to the on-chain ContributorNFT happen separately via script/MintContributor.s.sol — this tool does not currently broadcast on-chain transactions. Body: address (0x40hex), role (10 ContributorRole values + legacy 'designer'), scheduleHash (0x64hex of a previously published schedule), optional ipId, metadataUri, contributorNftTokenId. Returns the persisted profile (composite id is address:role:tail)."
+    },
+    {
+      "name": "pcc_contributor_list",
+      "description": "List all contributor profiles for an address across roles. Returns an array of {id, address, role, scheduleHash, ipId, contributorNftTokenId, metadataUri, registeredAt}."
+    },
+    {
+      "name": "pcc_schedule_publish",
+      "description": "Publish a sealed off-chain RateSchedule. Computes scheduleHash server-side via the canonical sha256-over-canonical-JSON algorithm; idempotent on duplicate content. Returns {scheduleHash, alreadyPublished}."
+    },
+    {
+      "name": "pcc_schedule_get",
+      "description": "Fetch a published RateSchedule by its content hash. Returns {schedule, publishedBy} or 404 if not found."
+    },
+    {
+      "name": "pcc_schedule_evaluate",
+      "description": "Evaluate a published RateSchedule at a moment, returning the effective bps. Inputs: scheduleHash + now (unix seconds) + optional jobValueCents (piecewise-value) + optional jobsPerDay (adoption-indexed). Returns {scheduleHash, bps, segmentKind, segmentIndex}."
+    },
+    {
+      "name": "pcc_training_manifest_set",
+      "description": "Set (insert-or-replace) the TrainingManifest for a model IP — the dataset weight map the LicensingEngine walks when distributing payouts to a 'model-author' entry. Dataset weightBps must sum to ≤ 10000. Returns {modelIpId, manifestHash}."
+    },
+    {
+      "name": "pcc_training_manifest_get",
+      "description": "Fetch the TrainingManifest for a model IP. Returns the parsed datasets array + manifestHash + createdAt, or 404 if no manifest has been set."
+    },
+    {
+      "name": "pcc_ui_save_dashboard",
+      "description": "Save a generated dashboard to the network and get a live, shareable URL (https://capability.network/a/<slug>). Pass a `manifest` — a declarative DashboardManifest (schema at https://capability.network/ui-kit/v1/manifest.schema.json) that the pcc-ui kit renders identically everywhere. Only for tasks that need a surface to watch/approve/compare/reuse; call pcc_ui_search_dashboards first to reuse an existing one. The manifest must not contain an API key. Defaults visibility to 'unlisted'."
+    },
+    {
+      "name": "pcc_ui_get_dashboard",
+      "description": "Recall a saved dashboard by id or slug (the tail of the /a/<slug> URL). Returns the manifest + metadata. Use this to reload a dashboard the user asks for again instead of regenerating it. Public for public/unlisted; owner-only for private."
+    },
+    {
+      "name": "pcc_ui_search_dashboards",
+      "description": "Discover existing public dashboards before generating a new one (recall-first; adopt > extend > build for UIs too). Filter by capabilityType, free-text q, and sort by popular|recent. Returns { entries, total, offset, limit }. Unlisted/private artifacts are not listed."
+    },
+    {
+      "name": "pcc_ui_fork_dashboard",
+      "description": "Fork an existing dashboard into a new artifact you own, preserving lineage back to the original. Adapt a popular dashboard instead of building from scratch. Forks any public/unlisted artifact, or a private one you own."
+    },
+    {
+      "name": "pcc_ui_update_dashboard",
+      "description": "Modify a dashboard you own (owner-only); the version increments. Replace the manifest or any metadata field — e.g. raise a budget, add a receipt window, flip visibility to public. A replaced manifest must conform to the schema and contain no API key. Send only the fields you want to change."
+    },
+    {
+      "name": "pcc_capture_challenge",
+      "description": "Issue a fresh block-anchored CaptureNonceChallenge for a job. The operator's device must render this nonce into the captured media (QR code, audio tone, etc.) before calling pcc_capture_upload. The nonce is derived from (challengeId, latest blockHash, workOutputRoot) so captures cannot be pre-computed. Returns challengeId, 64-char hex nonce, blockNumber, maxAgeSeconds (clamped to 120)."
+    },
+    {
+      "name": "pcc_capture_upload",
+      "description": "Upload a capture (photo / video / audio / sensor clip) with its CaptureManifest for G1..G6 verification. Bytes are base64-encoded inline; optional base64 C2PA manifest bytes can be supplied for CC3+ claims. The server runs the 6-gate CaptureVerifier and persists a PASS/PARTIAL/FAIL verdict. Returns {verdictId, verdict, verifiedClass, gatesPassed, gatesFailed, warnings, anchorCandidate}."
+    },
+    {
+      "name": "pcc_capture_anchor",
+      "description": "Anchor a PASS + anchor-candidate capture verdict to CaptureClassRegistry on-chain (Base Sepolia by default). Rejects FAIL/PARTIAL verdicts. Idempotent — re-submitting the same verdictId returns the existing anchor row. Returns 202 {status:'deferred'} if CaptureClassRegistry is not yet deployed (CAPTURE_REGISTRY_ADDRESS unset)."
+    },
+    {
+      "name": "pcc_capture_status",
+      "description": "Fetch the combined verdict + on-chain anchor view for a single capture. Mirrors the underlying DB shape returned by the verifier plus the anchor tx metadata (txHash, blockNumber, gasUsed, explorerUrl). Anchor is null if the verdict was never anchored."
+    },
+    {
+      "name": "pcc_list_verdicts",
+      "description": "List recent capture verdicts, newest first. Optionally filter by jobId. Default limit is 50, capped at 200 server-side. Returns {verdicts, count, limit, jobId}."
+    },
+    {
+      "name": "pcc_capture_class_registry",
+      "description": "Look up a capture's on-chain anchor record in CaptureClassRegistry by its 32-byte captureHash. Returns the registry address, captureHash, and the decoded anchor tuple (declaredClass, verifiedClass, manifestHash, submittedBy, jobId, challengeId, blockAnchor, capturedAt, attestationsRoot, attesterCount). onchain is null if the capture was never anchored. Returns 202 deferred when CaptureClassRegistry is not yet deployed."
+    },
+    {
+      "name": "pcc_verifier_health",
+      "description": "Report CaptureVerifier health: which adapters are loaded (c2pa, webauthn, appattest, playintegrity), their staleness status, in-memory challenge cache size, whether CaptureClassRegistry is deployed, and the active PCC_NETWORK. Use this to diagnose why a capture class is being rejected or degraded."
+    },
+    {
+      "name": "pcc_negotiate_create",
+      "description": "Open a negotiation session between a user agent and an operator's Shop Kernel for one capability type. Snapshots the operator's constraints, issues a replay-resistant workflow challenge, and returns the session (status='created'), resolved parameter options, and a template summary. This is step 1 of the create → select → quote → review → commit lifecycle. Requires PCC_API_KEY for authenticated kernels."
+    },
+    {
+      "name": "pcc_negotiate_get",
+      "description": "Get the current state of a negotiation session: status, parameter selections, operator constraint snapshot, quote (if computed), contract terms (if reviewed), transition history, and freshly resolved options. Returns 404 if unknown, 410 if expired (sessions auto-expire after 30 minutes)."
+    },
+    {
+      "name": "pcc_negotiate_select",
+      "description": "Set or update parameter selections for a session (merged into existing selections, free-text sanitized server-side). Moves the session to 'configuring' and returns the merged selections plus newly resolved options. Rejected (409) once committed, (410) once expired/cancelled. Step 2 of the lifecycle."
+    },
+    {
+      "name": "pcc_negotiate_quote",
+      "description": "Compute a binding quote for the session's current selections: base price, operator pricing-rule adjustments, total price, currency, bond amount, challenge-window seconds, and validity window. Moves the session to 'quoted'. Step 3 of the lifecycle."
+    },
+    {
+      "name": "pcc_negotiate_review",
+      "description": "Generate the on-chain-ready contract terms from the computed quote: milestones (amount, bond, challenge window), deadline, assurance tier, payer/operator/token addresses. Moves the session to 'reviewing'. Requires a quote first (400 otherwise). Step 4 of the lifecycle — review these terms before committing."
+    },
+    {
+      "name": "pcc_negotiate_commit",
+      "description": "Commit the session: freeze it as immutable and create the downstream job, execution scope, and milestone escrow. Returns the committed session plus jobId, cwmId, scopeId, escrowId, escrowAddress, and escrowStatus. Requires reviewed contract terms first (400 otherwise); rejected (409) if already committed. Step 5 (final) of the lifecycle."
+    },
+    {
+      "name": "pcc_negotiate_cancel",
+      "description": "Cancel a negotiation session before commit. Records a 'cancelled' transition and returns {cancelled:true, sessionId}. Rejected (409) once the session is committed — committed sessions are immutable."
+    }
+  ]
+}
