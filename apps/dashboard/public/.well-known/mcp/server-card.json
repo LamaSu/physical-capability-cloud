@@ -1,19 +1,29 @@
 {
   "name": "Physical Capability Cloud MCP Server",
-  "description": "Discover and orchestrate PCC physical capabilities through the real PCC MCP tool catalog. This server connects over stdio only; serverUrl is the backing PCC gateway API base, not an HTTP MCP transport endpoint.",
+  "description": "Discover and orchestrate PCC physical capabilities through the real PCC MCP tool catalog over Streamable HTTP or stdio.",
   "version": "0.1.0",
-  "serverUrl": "https://capability.network",
+  "serverUrl": "https://capability.network/mcp",
   "logo": "https://capability.network/pcc-icon.svg",
   "transport": {
-    "type": "stdio",
-    "command": "node",
-    "args": [
-      "packages/mcp-server/dist/index.js"
-    ],
-    "env": {
-      "PCC_URL": "https://capability.network"
-    }
+    "type": "streamable-http",
+    "url": "https://capability.network/mcp"
   },
+  "transports": [
+    {
+      "type": "streamable-http",
+      "url": "https://capability.network/mcp"
+    },
+    {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "packages/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "PCC_URL": "https://capability.network"
+      }
+    }
+  ],
   "tools": [
     {
       "name": "pcc_list_capabilities",
