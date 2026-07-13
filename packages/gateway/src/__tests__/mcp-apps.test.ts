@@ -23,7 +23,9 @@ import { _clearArtifactsForTests, _seedArtifactForTests } from "../routes/artifa
 import {
   dashboardResourceUriForSlug,
   enrichOnRampToolResult,
+  extractVerifiedHandoff,
   MCP_APP_DASHBOARD_TEMPLATE_URI,
+  MCP_APP_TOOL_RESULT_METHOD,
   ON_RAMP_UI_TOOL_NAMES,
   renderSavedDashboardHtml,
 } from "../mcp/mcp-app-view.js";
@@ -133,6 +135,100 @@ describe("MCP Apps — renderSavedDashboardHtml", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Finding 2 — the transient render_pcc_dashboard view (ui://pcc/dashboard)
+// accepts a manifest ONLY from a VERIFIED MCP Apps (SEP-1865) host->view
+// tool-result notification. extractVerifiedHandoff is the exact logic inlined
+// into that view's boot script via .toString(), so unit-testing it here is the
+// coverage for the browser handoff path (source check + JSON-RPC envelope +
+// method + standardized params location).
+// ---------------------------------------------------------------------------
+
+describe("MCP Apps — extractVerifiedHandoff (host handoff verification)", () => {
+  // Stand-in for the embedding host frame reference (window.parent). Identity is
+  // what matters: the boot script calls (event.source, window.parent, data).
+  const HOST = { name: "host-parent-frame" };
+
+  const toolResultNotification = (manifest: unknown) => ({
+    jsonrpc: "2.0",
+    method: MCP_APP_TOOL_RESULT_METHOD,
+    params: {
+      content: [{ type: "text", text: "Rendered a PCC dashboard." }],
+      structuredContent: { manifest },
+    },
+  });
+
+  it("uses the exact SEP-1865 host->view notification method string", () => {
+    expect(MCP_APP_TOOL_RESULT_METHOD).toBe("ui/notifications/tool-result");
+  });
+
+  it("(c) accepts a valid tool-result notification from window.parent and returns the manifest", () => {
+    const manifest = { csd: DASHBOARD_CSD_URL, title: "Live dashboard", sections: [] };
+    const handoff = extractVerifiedHandoff(HOST, HOST, toolResultNotification(manifest));
+    expect(handoff).not.toBeNull();
+    expect(handoff?.manifest).toEqual(manifest);
+  });
+
+  it("(c) surfaces apiBase/snapshot/token ONLY from the standardized params.structuredContent", () => {
+    const handoff = extractVerifiedHandoff(HOST, HOST, {
+      jsonrpc: "2.0",
+      method: MCP_APP_TOOL_RESULT_METHOD,
+      params: {
+        structuredContent: {
+          manifest: { title: "X" },
+          apiBase: "https://capability.network",
+          snapshot: { "x.y": 1 },
+          token: "pcc_live_from_host",
+        },
+      },
+    });
+    expect(handoff?.apiBase).toBe("https://capability.network");
+    expect(handoff?.token).toBe("pcc_live_from_host");
+    expect(handoff?.snapshot).toEqual({ "x.y": 1 });
+  });
+
+  it("(a) rejects a message whose source is not window.parent (foreign frame)", () => {
+    const foreignSource = { name: "not-the-parent" };
+    expect(
+      extractVerifiedHandoff(foreignSource, HOST, toolResultNotification({ title: "X" })),
+    ).toBeNull();
+  });
+
+  it("(b) rejects a message lacking the JSON-RPC 2.0 envelope (the old permissive shapes)", () => {
+    // Bare { manifest }, or nested under toolOutput/structuredContent/payload
+    // with no jsonrpc/method — exactly what the old extractHandoff latched on.
+    expect(extractVerifiedHandoff(HOST, HOST, { manifest: { title: "X" } })).toBeNull();
+    expect(
+      extractVerifiedHandoff(HOST, HOST, { structuredContent: { manifest: { title: "X" } } }),
+    ).toBeNull();
+    expect(
+      extractVerifiedHandoff(HOST, HOST, { toolOutput: { manifest: { title: "X" } } }),
+    ).toBeNull();
+    expect(extractVerifiedHandoff(HOST, HOST, null)).toBeNull();
+    expect(extractVerifiedHandoff(HOST, HOST, "not-an-object")).toBeNull();
+  });
+
+  it("(b) rejects a JSON-RPC message with the wrong method", () => {
+    expect(
+      extractVerifiedHandoff(HOST, HOST, {
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { structuredContent: { manifest: { title: "X" } } },
+      }),
+    ).toBeNull();
+  });
+
+  it("(b) rejects a correct notification missing structuredContent.manifest", () => {
+    expect(
+      extractVerifiedHandoff(HOST, HOST, {
+        jsonrpc: "2.0",
+        method: MCP_APP_TOOL_RESULT_METHOD,
+        params: { content: [{ type: "text", text: "no manifest" }] },
+      }),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Transport-level coverage — the live /mcp JSON-RPC surface.
 // ---------------------------------------------------------------------------
 
@@ -232,6 +328,11 @@ describe("MCP Apps — /mcp transport", () => {
     expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
     expect(contents[0].text).toContain('id="pcc-manifest"');
     expect(contents[0].text).toContain(SEEDED_TITLE);
+    // Finding 3 (test d, resource 2): the per-slug view's content carries
+    // _meta.ui.csp so a compliant host permits its live calls to the PCC API.
+    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain(
+      "https://capability.network",
+    );
   });
 
   it("reads a missing slug as a graceful not-found view, not a protocol error", async () => {

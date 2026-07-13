@@ -166,6 +166,18 @@ describe("Streamable HTTP MCP server", () => {
     expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
     expect(contents[0].text).toContain("__PCC_HOST__");
     expect(contents[0].text).toContain('<meta name="color-scheme"');
+    // Finding 3 (test d, resource 1): the sandbox CSP a compliant host enforces
+    // comes from resource-content _meta.ui.csp (NOT the HTML <meta>), and must
+    // declare the live PCC API origin as a connect-src domain.
+    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain(
+      "https://capability.network",
+    );
+    // Finding 2: the boot script accepts a manifest ONLY from a verified MCP
+    // Apps tool-result notification — it names the SEP method + gates on
+    // window.parent, and the old permissive data.toolOutput path is gone.
+    expect(contents[0].text).toContain("ui/notifications/tool-result");
+    expect(contents[0].text).toContain("window.parent");
+    expect(contents[0].text).not.toContain("data.toolOutput");
   });
 
   it("render_pcc_dashboard renders a valid manifest and rejects one containing an API key", async () => {
