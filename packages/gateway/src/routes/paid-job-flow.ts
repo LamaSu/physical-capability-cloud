@@ -1115,6 +1115,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundle: seam2DeviceBundle,
         registeredSigner: seam2RegisteredSigner,
+        // §8.5-1: the purchased tier. At tier >= 1 a missing/failed device bundle
+        // HOLDS (below) instead of silently anchoring on the gateway placeholder.
+        requestedTier: jobAssuranceTier,
         fallback: {
           bundleHash: gatewayBundleHash,
           kernelSignature: gatewaySignature,
@@ -1123,6 +1126,57 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         verifyEd25519: naclEd25519Verify,
         gateOpen: seam2GateOpen,
       });
+
+      // ── SEAM-2 §8.5-1: HARD-GATE HOLD ──────────────────────────────────────
+      // When the purchased tier (>= 1) required real device evidence that did NOT
+      // verify (or was absent), resolveSettlementEvidence returns source:"hold"
+      // rather than silently anchoring settlement on the gateway placeholder
+      // (§7.3-3: never a silent downgrade, never an auto-refund; §8.4-C). Money
+      // HOLDS: skip the whole anchor → store → oracle → EAS → settle chain, so no
+      // on-chain write and no mock auto-settle happen and the escrow stays funded
+      // for the buyer to supplement / accept / dispute. Mode-C/D dispute calls are
+      // an owner-gated LATER step and are intentionally NOT wired here.
+      //   INERT TODAY: the gate is closed by default (seam2GateOpen === false), so
+      //   `source` is never "hold" on the live money path (it is
+      //   "gateway-fallback"/"gate-closed"); this branch only activates once SEAM-2
+      //   opens — it is kept type- and behavior-correct for that day.
+      if (settlementEvidence.source === "hold") {
+        // Move the job off the 'completing' claim into a distinct terminal
+        // 'settlement_hold' so it is neither stuck (the claim guard excludes
+        // 'completing') nor re-runnable as if unexecuted — mirroring how the settle
+        // paths below record job status via repos.jobs.
+        repos.jobs.updateStatus(jobId, "settlement_hold");
+        pipelineTelemetry.emit(jobId, "settlement_complete", "completed", {
+          metadata: {
+            bundleId,
+            settlementStatus: "hold",
+            holdReason: settlementEvidence.reason ?? "evidence-insufficient-for-tier",
+            requestedTier: jobAssuranceTier,
+          },
+        });
+        // Same response shape as the settled path below (no new contract), with a
+        // "hold" status and null anchor/settlement fields — nothing was anchored.
+        return {
+          jobId,
+          status: "hold",
+          evidenceBundleId: null,
+          evidenceHash: null,
+          escrowAddress: null,
+          escrowId: null,
+          settledAt: null,
+          ipfsCid: null,
+          starknetAnchorTxHash: null,
+          eas: null,
+          scopesRevoked: 0,
+          toolCallsRecorded: auditTrail.length,
+          oracleVerified: false,
+          oracleAttestation: null,
+          message:
+            "Job executed but the device evidence did not verify for the purchased tier. " +
+            "Settlement is on HOLD — funds remain in escrow (no release, no refund). " +
+            "Supplement evidence, accept the result, or open a dispute.",
+        };
+      }
       // The settlement anchor: drives the stored bundle, IPFS archive, oracle verify,
       // driveSettlement and the EAS bridge below. The gateway placeholder + envelope
       // hash when the gate is closed (the default).
