@@ -17,15 +17,18 @@
  * the EXISTING `DashboardManifestSchema`, and nothing here touches
  * settlement/escrow/auth.
  *
- * Host->view handoff assumption (documented — the exact MCP-Apps host<->view
- * postMessage envelope is not yet uniformly standardized across hosts as of
- * this SDK version): the view's boot script listens broadly on `window`
- * "message" events for a `manifest` field (optionally nested under
- * `toolOutput` / `structuredContent` / `payload`), matching the
- * `structuredContent: { manifest }` shape `handleRenderDashboardTool` below
- * returns, plus a couple of reasonably-named alternate envelopes for
- * interoperability with different host implementations. See
- * buildMcpAppDashboardHtml()'s inline boot script for the exact logic.
+ * Host->view handoff (MCP Apps SEP-1865 contract): the transient view's boot
+ * script accepts a DashboardManifest ONLY from a VERIFIED host->view
+ * notification — a `window` "message" whose `event.source` is `window.parent`,
+ * carrying a JSON-RPC 2.0 envelope with method
+ * `ui/notifications/tool-result` (params is a standard `CallToolResult`, so the
+ * manifest arrives at `params.structuredContent.manifest`, matching the
+ * `structuredContent: { manifest }` shape `handleRenderDashboardTool` returns).
+ * Any other message is ignored; the page holds a neutral "waiting for the host"
+ * state and never boots on an unverified message. See `extractVerifiedHandoff`
+ * (exported + unit-tested; inlined into the boot script via `.toString()` so the
+ * two can't drift). NOTE: the per-slug `ui://pcc/dashboard/{slug}` view has NO
+ * host handoff — it pre-inlines its manifest and boots immediately.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -99,6 +102,25 @@ export const MCP_APP_CSP =
   "img-src 'self' data:; connect-src 'self' https://capability.network; " +
   "form-action 'self' https://capability.network; frame-ancestors https://chatgpt.com https://claude.ai";
 
+/** MCP Apps (SEP-1865) host->view notification method that carries a tool's
+ * result into the embedded view. Its params IS a standard `CallToolResult`, so
+ * the `render_pcc_dashboard` result's `structuredContent: { manifest }` arrives
+ * at `params.structuredContent`. The view accepts a manifest handoff ONLY from a
+ * message whose method equals this string (see `extractVerifiedHandoff`). */
+export const MCP_APP_TOOL_RESULT_METHOD = "ui/notifications/tool-result";
+
+/** MCP Apps (SEP-1865) resource-content CSP metadata. A compliant host builds
+ * the view iframe's sandbox Content-Security-Policy from `_meta.ui.csp`
+ * (camelCase keys) — it does NOT read the HTML `<meta http-equiv>` CSP for the
+ * sandbox — so the live PCC API origin the kit fetches from MUST be declared
+ * here as a connect-src origin, or the host blocks those requests.
+ * `connectDomains` maps to the CSP `connect-src` directive. Attached to BOTH
+ * ui:// resources' content so each ships an identical policy; the HTML `<meta>`
+ * CSP stays as defense-in-depth. */
+export const MCP_APP_CSP_META = {
+  ui: { csp: { connectDomains: [MCP_APP_API_BASE_URL] } },
+};
+
 const HTTP_MIRROR_PATH = "/mcp-apps/ui/dashboard";
 
 // ---------------------------------------------------------------------------
@@ -158,9 +180,10 @@ function readDashboardManifestJsonSchema(): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 // The MCP App view — self-contained HTML: inlines pcc-ui.js, sets
 // window.__PCC_HOST__ BEFORE the kit ever runs, and defers actually booting
-// the kit until a DashboardManifest arrives from the host (see the module
-// doc comment's host->view handoff assumption). Shared verbatim by the MCP
-// `resources/read` handler and the plain HTTP mirror route.
+// the kit until a DashboardManifest arrives from a VERIFIED host->view
+// notification (see the module doc comment's host->view handoff contract and
+// extractVerifiedHandoff). Shared verbatim by the MCP `resources/read` handler
+// and the plain HTTP mirror route.
 // ---------------------------------------------------------------------------
 
 /** pcc-ui.js source as a safe JS string literal for inline embedding.
@@ -179,6 +202,57 @@ function pccUiKitSourceLiteral(): string {
  * inlineManifestJson). U+2028/U+2029 are harmless in a non-executable block. */
 function inlineJsonForScriptData(value: unknown): string {
   return JSON.stringify(value).split("<").join("\\u003c").split(">").join("\\u003e");
+}
+
+/**
+ * Verify + extract a host->view handoff from a `window` "message" event, per the
+ * MCP Apps (SEP-1865) host->view contract. Returns the DashboardManifest (plus
+ * any standardized extras) ONLY when the message is a genuine tool-result
+ * notification from the embedding host; returns `null` for everything else, so a
+ * caller never boots on an unverified message.
+ *
+ * Requires ALL of:
+ *  - `source === parent` — the message came from the embedding host frame
+ *    (`window.parent`), not an arbitrary / nested / opener window;
+ *  - a JSON-RPC 2.0 envelope (`jsonrpc === "2.0"`);
+ *  - `method === "ui/notifications/tool-result"` (the SEP host->view method);
+ * then reads `manifest` (and optional `apiBase` / `snapshot` / `token`) ONLY
+ * from the notification's standardized `params.structuredContent` — `params` IS
+ * a `CallToolResult`, so the tool's `structuredContent` (`{ manifest }` from
+ * `handleRenderDashboardTool`) sits there. Any deviation yields `null`.
+ *
+ * Deliberately self-contained (no module-scope references; the method string is
+ * a literal): `buildMcpAppDashboardHtml()` inlines this verbatim via
+ * `.toString()`, so the browser boot script and this unit-tested definition are
+ * ONE source of truth and cannot drift.
+ */
+export function extractVerifiedHandoff(
+  source: unknown,
+  parent: unknown,
+  data: unknown,
+): { manifest: unknown; snapshot?: unknown; apiBase?: unknown; token?: unknown } | null {
+  if (source !== parent) return null;
+  if (!data || typeof data !== "object") return null;
+  var envelope = data as { jsonrpc?: unknown; method?: unknown; params?: unknown };
+  if (envelope.jsonrpc !== "2.0") return null;
+  if (envelope.method !== "ui/notifications/tool-result") return null;
+  var params = envelope.params;
+  if (!params || typeof params !== "object") return null;
+  var structured = (params as { structuredContent?: unknown }).structuredContent;
+  if (!structured || typeof structured !== "object") return null;
+  var payload = structured as {
+    manifest?: unknown;
+    snapshot?: unknown;
+    apiBase?: unknown;
+    token?: unknown;
+  };
+  if (!payload.manifest || typeof payload.manifest !== "object") return null;
+  return {
+    manifest: payload.manifest,
+    snapshot: payload.snapshot,
+    apiBase: payload.apiBase,
+    token: payload.token,
+  };
 }
 
 function buildMcpAppDashboardHtml(): string {
@@ -235,32 +309,20 @@ function buildMcpAppDashboardHtml(): string {
     document.body.appendChild(kit);
   }
 
-  // Accept a DashboardManifest handed over by the embedding host. The exact
-  // MCP-Apps host->view postMessage envelope is not yet uniformly
-  // standardized across hosts as of this kit version, so this looks for a
-  // "manifest" field either at the top level or nested under a few
-  // reasonably-named wrappers (toolOutput / structuredContent / payload),
-  // matching the { structuredContent: { manifest } } shape the
-  // render_pcc_dashboard tool result carries.
-  function extractHandoff(data) {
-    if (!data || typeof data !== 'object') return null;
-    if (data.manifest) return data;
-    var nested = data.toolOutput || data.structuredContent ||
-      (data.payload && (data.payload.toolOutput || data.payload.structuredContent)) ||
-      data.payload;
-    if (nested && nested.manifest) {
-      return {
-        manifest: nested.manifest,
-        snapshot: nested.snapshot || data.snapshot,
-        apiBase: nested.apiBase || data.apiBase,
-        token: nested.token || data.token
-      };
-    }
-    return null;
-  }
+  // Accept a DashboardManifest ONLY from a VERIFIED MCP Apps (SEP-1865)
+  // host->view tool-result notification. extractVerifiedHandoff is inlined from
+  // the module's exported, unit-tested definition via .toString() (so the two
+  // cannot drift): it requires the message to originate from window.parent,
+  // carry a JSON-RPC 2.0 envelope, and use method "ui/notifications/tool-result",
+  // then reads manifest/apiBase/snapshot/token ONLY from the notification's
+  // standardized params.structuredContent. It returns null for anything else —
+  // wrong source, wrong shape, or an unsolicited message — so the kit never
+  // boots on an unverified handoff; the page just holds its neutral
+  // "waiting for the host" state until a real notification arrives.
+  var extractVerifiedHandoff = ${extractVerifiedHandoff.toString()};
 
   window.addEventListener('message', function (event) {
-    var handoff = extractHandoff(event && event.data);
+    var handoff = extractVerifiedHandoff(event && event.source, window.parent, event && event.data);
     if (!handoff) return;
     bootWithManifest(handoff.manifest, handoff.snapshot, handoff.apiBase, handoff.token);
   });
@@ -301,6 +363,10 @@ export function registerMcpAppResource(server: McpServer): void {
           uri: MCP_APP_DASHBOARD_URI,
           mimeType: MCP_APP_MIME_TYPE,
           text: buildMcpAppDashboardHtml(),
+          // Finding 3: the sandbox CSP a compliant host enforces comes from
+          // resource-content `_meta.ui.csp`, not the HTML <meta> — declare the
+          // live PCC API origin as a connect-src domain here.
+          _meta: MCP_APP_CSP_META,
         },
       ],
     }),
@@ -413,7 +479,12 @@ export function registerMcpAppDashboardSlugResource(server: McpServer): void {
           ? renderSavedDashboardHtml(slug)
           : buildDashboardNotFoundHtml(String(slug ?? ""));
       return {
-        contents: [{ uri: uri.toString(), mimeType: MCP_APP_MIME_TYPE, text: html }],
+        // Finding 3: same resource-content `_meta.ui.csp` as the transient view
+        // — the self-contained per-slug view also fetches live PCC data, so its
+        // connect-src origin must be declared for the host to permit it.
+        contents: [
+          { uri: uri.toString(), mimeType: MCP_APP_MIME_TYPE, text: html, _meta: MCP_APP_CSP_META },
+        ],
       };
     },
   );
