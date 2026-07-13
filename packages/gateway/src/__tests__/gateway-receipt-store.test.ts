@@ -185,12 +185,17 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
 
   // (e) --------------------------------------------------------------------
   it("on a persist failure: returns errored, persists nothing, and does NOT advance the in-memory chain", () => {
-    // A repo whose insert throws; the service only calls repo.insert (inside the
-    // txn), so the other methods are unused. Keep the REAL db for the txn.
+    // A repo whose insert throws; the failure under test is the persist. record()'s
+    // step-0 rehydrate probe (§1) reads lastAcceptedForSession + findBySession BEFORE
+    // the insert — for this never-committed session those faithfully return "no tip"
+    // / empty chain, so step 0 is a no-op and the throwing insert stays the thing
+    // being tested. Keep the REAL db for the txn.
     const throwingRepo = {
       insert: () => {
         throw new Error("simulated disk failure");
       },
+      lastAcceptedForSession: () => undefined,
+      findBySession: () => [],
     } as unknown as IGatewayReceiptRepository;
 
     const failingSvc = new GatewayReceiptStore({
@@ -216,5 +221,134 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
     expect(ok.status).toBe("accepted");
     expect(store.repos.gatewayReceipts.findBySession("sess-1")).toHaveLength(1);
     expect(sequenceStore.snapshot("sess-1")).toEqual({ lastSeq: 1, lastHash: "h1", acceptedCount: 1 });
+  });
+});
+
+/**
+ * Rehydrate-on-first-touch (§1): after a gateway restart the in-memory acceptance
+ * store is genesis, but the durable gateway_receipts rows hold the real accepted
+ * tip. `record()` recovers that tip (inside its synchronous span) so post-restart
+ * outcomes are correct. The restart is simulated faithfully: the durable rows are
+ * committed through one `SessionSequenceStore`, then a FRESH (empty) one is placed
+ * over the SAME @pcc/store db/repo — exactly what a process restart leaves behind.
+ */
+describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
+  let store: Store;
+  let signer: GatewayReceiptSigner;
+
+  beforeEach(() => {
+    store = createStore({ seed: false });
+    signer = makeSigner();
+  });
+  afterEach(() => store.close());
+
+  /** Commit a chained seq 1..N receipt run through a throwaway (pre-restart) store. */
+  function seedCommittedChain(sessionId: string, hashes: string[]): void {
+    const seedSeq = new SessionSequenceStore();
+    const seeding = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      sequenceStore: seedSeq,
+      signer,
+    });
+    let prev: string | null = null;
+    hashes.forEach((hash, i) => {
+      const res = seeding.record(
+        input({ sessionId, seq: i + 1, checkpointHash: hash, prevCheckpointHash: prev }),
+      );
+      expect(res.status).toBe("accepted");
+      prev = hash;
+    });
+  }
+
+  /** A "restarted gateway": a fresh (empty) sequenceStore over the SAME durable db/repo. */
+  function restartedStore(): { svc: GatewayReceiptStore; sequenceStore: SessionSequenceStore } {
+    const sequenceStore = new SessionSequenceStore();
+    const svc = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      sequenceStore,
+      signer,
+    });
+    return { svc, sequenceStore };
+  }
+
+  it("restart-sim: a fresh sequenceStore over durable rows accepts the next seq (tip recovered)", () => {
+    const sessionId = "sess-restart";
+    seedCommittedChain(sessionId, ["h1", "h2", "h3"]); // seq 1..3 committed
+    const { svc, sequenceStore } = restartedStore();
+
+    // Memory is genesis after "restart".
+    expect(sequenceStore.hasSession(sessionId)).toBe(false);
+
+    // seq 4, prevHash = the committed tip (h3) → accepted ONLY if the tip was recovered.
+    const r = svc.record(input({ sessionId, seq: 4, checkpointHash: "h4", prevCheckpointHash: "h3" }));
+    expect(r.status).toBe("accepted");
+
+    // Durable tip advanced to seq 4; in-memory recovered (seen={h1..h3}) then advanced.
+    expect(store.repos.gatewayReceipts.lastAcceptedForSession(sessionId)).toEqual({
+      lastSeq: 4,
+      lastHash: "h4",
+      lastReceiptId: `grcpt-${sessionId}-4`,
+    });
+    expect(sequenceStore.snapshot(sessionId)).toEqual({ lastSeq: 4, lastHash: "h4", acceptedCount: 4 });
+  });
+
+  it("a replayed seq-1 after restart rejects cleanly (seq_gap_or_replay, NOT errored — no PK collision)", () => {
+    const sessionId = "sess-replay";
+    seedCommittedChain(sessionId, ["h1", "h2", "h3"]);
+    const { svc } = restartedStore();
+
+    // Rehydrate sets lastSeq=3, so seq 1 fails the seq clause BEFORE any insert.
+    const replay = svc.record(input({ sessionId, seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(replay.status).toBe("rejected");
+    if (replay.status === "rejected") expect(replay.reason).toBe("seq_gap_or_replay");
+
+    // No insert attempted → durable rows unchanged (still the original 3).
+    expect(store.repos.gatewayReceipts.findBySession(sessionId).map((r) => r.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("rebuilds `seen` from the committed chain: a duplicate old hash at a fresh seq → duplicate_hash", () => {
+    const sessionId = "sess-seen";
+    seedCommittedChain(sessionId, ["h1", "h2", "h3"]);
+    const { svc } = restartedStore();
+
+    // seq 4 (valid), prevHash = tip h3 (valid chain), but hash = h1 (already accepted).
+    // seq/max/chain clauses all pass; only the REBUILT `seen` set catches the replay.
+    const dup = svc.record(input({ sessionId, seq: 4, checkpointHash: "h1", prevCheckpointHash: "h3" }));
+    expect(dup.status).toBe("rejected");
+    if (dup.status === "rejected") expect(dup.reason).toBe("duplicate_hash");
+
+    expect(store.repos.gatewayReceipts.findBySession(sessionId).map((r) => r.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("rehydrate refuses to overwrite live memory (first-touch-wins)", () => {
+    const sessionId = "sess-live";
+    const sequenceStore = new SessionSequenceStore();
+    // Live memory ahead of any rehydrate: accept seq 1 directly.
+    expect(
+      sequenceStore.accept(sessionId, { seq: 1, prevHash: null, hash: "live1", maxSignatures: 100 }).accepted,
+    ).toBe(true);
+    const before = sequenceStore.snapshot(sessionId);
+
+    // Attempt to install a different (durable-looking) state → refused, state unchanged.
+    const installed = sequenceStore.rehydrate(sessionId, {
+      lastSeq: 9,
+      lastHash: "durable9",
+      seen: new Set(["x", "y"]),
+    });
+    expect(installed).toBe(false);
+    expect(sequenceStore.snapshot(sessionId)).toEqual(before);
+  });
+
+  it("a genuinely-new session (no durable rows) stays genesis: first record at seq 1 accepts", () => {
+    const sessionId = "sess-new";
+    const { svc, sequenceStore } = restartedStore(); // nothing seeded → no durable rows
+
+    // No durable rows → rehydrate is a no-op (never stores a genesis; rule 1) → clean genesis.
+    const r = svc.record(input({ sessionId, seq: 1, checkpointHash: "n1", prevCheckpointHash: null }));
+    expect(r.status).toBe("accepted");
+    expect(sequenceStore.snapshot(sessionId)).toEqual({ lastSeq: 1, lastHash: "n1", acceptedCount: 1 });
+    expect(store.repos.gatewayReceipts.findBySession(sessionId).map((row) => row.seq)).toEqual([1]);
   });
 });

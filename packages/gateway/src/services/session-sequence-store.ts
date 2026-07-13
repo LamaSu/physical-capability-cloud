@@ -94,6 +94,42 @@ export class SessionSequenceStore {
     return { accepted: true };
   }
 
+  /**
+   * Install a recovered accepted-chain state for a session, FIRST-TOUCH-WINS (§1).
+   *
+   * After a gateway restart, in-memory state is genesis for every session while the
+   * durable `gateway_receipts` rows still hold the real accepted tip.
+   * `gateway-receipt-store.record()` calls this INSIDE its synchronous critical
+   * section (before the priorState read) to recover that tip from committed rows,
+   * so a legit mid-session checkpoint re-joins the chain and a replayed seq-1
+   * rejects cleanly instead of exploding on the deterministic PK.
+   *
+   * FIRST-TOUCH-WINS: if the session already has in-memory state this is a NO-OP and
+   * returns false — it refuses to overwrite live memory. Live memory is always ≥
+   * durable, because memory advances ONLY after the receipt row commits
+   * (gateway-receipt-store.ts step 5), so an in-memory tip is never staler than the
+   * durable rows; rehydrating over it could only regress the chain.
+   *
+   * The caller supplies a non-null `lastHash` (a durable tip always has a real
+   * checkpoint hash — a genesis is never persisted, §1 rule 1) and the full `seen`
+   * set rebuilt from the session's committed chain — `checkSequence`'s dup-hash
+   * clause needs it, and the durable snapshot deliberately omits it. The given Set
+   * BECOMES the session's `seen` (not copied). Returns true iff state was installed.
+   */
+  rehydrate(
+    sessionId: string,
+    state: { lastSeq: number; lastHash: string; seen: Set<string> },
+  ): boolean {
+    // First-touch-wins: never overwrite live memory (which is always ≥ durable).
+    if (this.stateBySession.has(sessionId)) return false;
+    this.stateBySession.set(sessionId, {
+      lastSeq: state.lastSeq,
+      lastHash: state.lastHash,
+      seen: state.seen,
+    });
+    return true;
+  }
+
   /** True iff at least one checkpoint has been accepted for this session. */
   hasSession(sessionId: string): boolean {
     return this.stateBySession.has(sessionId);

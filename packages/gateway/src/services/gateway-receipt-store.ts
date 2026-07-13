@@ -148,6 +148,35 @@ export class GatewayReceiptStore {
    * file header for why that is the single-writer guarantee.
    */
   record(input: CheckpointReceiptInput): RecordCheckpointResult {
+    // 0. REHYDRATE-ON-FIRST-TOUCH (§1): after a restart, in-memory state is genesis
+    //    for every session, but the durable gateway_receipts rows hold the real
+    //    accepted tip. Recover it INSIDE this same synchronous span (before the
+    //    priorState read) so no other record() can interleave between rehydrate and
+    //    the accept below. better-sqlite3 reads are synchronous, so the critical
+    //    section stays await-free (the single-writer property in the file header).
+    //    §1 rules: rehydrate ONLY when memory is empty AND durable rows exist — a
+    //    genuinely new session stays genesis (never store a genesis; rule 1). Once
+    //    the tip is recovered, a post-restart replayed seq-1 rejects cleanly as
+    //    `seq_gap_or_replay` (rule 3) instead of hitting the deterministic PK, and a
+    //    legit mid-session seq re-joins the chain. First-touch-wins: rehydrate()
+    //    refuses to overwrite live memory (rule 2). NOTE: the idempotent receipt
+    //    re-issue (rule 4) is the Wave-3 ROUTE's job, deliberately NOT here —
+    //    record() stays strict (a re-submitted accepted seq still rejects/errors).
+    //    Multi-instance durability is the Gate-5 boundary (rule 5), unchanged: one
+    //    better-sqlite3 connection per process; a second instance is out of scope,
+    //    and the deterministic PK makes a cross-instance violation detectable.
+    if (!this.sequenceStore.hasSession(input.sessionId)) {
+      const tip = this.repo.lastAcceptedForSession(input.sessionId); // sync
+      if (tip) {
+        const rows = this.repo.findBySession(input.sessionId); // seq-asc chain
+        this.sequenceStore.rehydrate(input.sessionId, {
+          lastSeq: tip.lastSeq,
+          lastHash: tip.lastHash,
+          seen: new Set(rows.map((r) => r.checkpointHash)), // rebuild the dup-hash set
+        });
+      }
+    }
+
     // 1. READ the prior accepted-chain state (incl. `seen`, for the dup-hash clause).
     const prior = this.sequenceStore.priorState(input.sessionId);
 
