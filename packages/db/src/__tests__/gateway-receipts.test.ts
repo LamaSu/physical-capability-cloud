@@ -68,7 +68,7 @@ describe("GatewayReceiptRepository", () => {
       makeRow({ receiptId: "r1", seq: 1, checkpointHash: "h1", createdAt: "2026-07-13T00:00:01.000Z" }),
     );
     store.repos.gatewayReceipts.insert(
-      makeRow({ receiptId: "r3", jobId: "job-other", seq: 1, checkpointHash: "h3", createdAt: "2026-07-13T00:00:03.000Z" }),
+      makeRow({ receiptId: "r3", jobId: "job-other", sessionId: "sess-other", seq: 1, checkpointHash: "h3", createdAt: "2026-07-13T00:00:03.000Z" }),
     );
     const out = store.repos.gatewayReceipts.findByJob("job-1");
     expect(out.map((r) => r.receiptId)).toEqual(["r1", "r2"]);
@@ -132,6 +132,43 @@ describe("GatewayReceiptRepository", () => {
     expect(names).toContain("gateway_receipts_job_idx");
     expect(names).toContain("gateway_receipts_session_idx");
     expect(names).toContain("gateway_receipts_checkpoint_idx");
-    expect(names).toContain("gateway_receipts_session_seq_idx");
+    // Renamed to UNIQUE in the step-5 hardening; the old non-unique name is gone.
+    expect(names).toContain("gateway_receipts_session_seq_unique");
+    expect(names).toContain("gateway_receipts_session_checkpoint_unique");
+    expect(names).not.toContain("gateway_receipts_session_seq_idx");
+  });
+
+  it("enforces UNIQUE(session_id, seq): a different receiptId at the same (session,seq) is rejected by the DB", () => {
+    store.repos.gatewayReceipts.insert(makeRow({ receiptId: "grcpt-sess-1-1", seq: 1, checkpointHash: "h1" }));
+    // Same (session_id, seq) under a DIFFERENT receipt_id must violate the unique
+    // index — the DB enforces one-accept-per-(session,seq) (§8.3) even if app
+    // logic somehow constructed a non-deterministic id.
+    expect(() =>
+      store.repos.gatewayReceipts.insert(
+        makeRow({ receiptId: "different-id", seq: 1, checkpointHash: "h1b" }),
+      ),
+    ).toThrow();
+    // A different seq in the same session inserts fine.
+    expect(
+      store.repos.gatewayReceipts.insert(
+        makeRow({ receiptId: "grcpt-sess-1-2", seq: 2, checkpointHash: "h2", previousAcceptedHash: "h1" }),
+      )?.seq,
+    ).toBe(2);
+  });
+
+  it("enforces UNIQUE(session_id, checkpoint_hash): same hash twice in a session is rejected, but recurs across sessions", () => {
+    store.repos.gatewayReceipts.insert(makeRow({ receiptId: "grcpt-sess-1-1", seq: 1, checkpointHash: "dup" }));
+    // Same (session_id, checkpoint_hash) at a new seq/id → unique violation.
+    expect(() =>
+      store.repos.gatewayReceipts.insert(
+        makeRow({ receiptId: "grcpt-sess-1-2", seq: 2, checkpointHash: "dup", previousAcceptedHash: "dup" }),
+      ),
+    ).toThrow();
+    // The SAME hash in a DIFFERENT session is allowed (constraint is per-session).
+    expect(
+      store.repos.gatewayReceipts.insert(
+        makeRow({ receiptId: "grcpt-sess-2-1", sessionId: "sess-2", seq: 1, checkpointHash: "dup" }),
+      )?.checkpointHash,
+    ).toBe("dup");
   });
 });

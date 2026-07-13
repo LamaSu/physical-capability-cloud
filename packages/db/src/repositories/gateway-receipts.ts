@@ -18,7 +18,8 @@ function capLimit(limit?: number): number {
 /**
  * Persistence for gateway receipts (§8.3). Pure data access — canonicalization,
  * signing, and the transactional-acceptance ordering live in the gateway's
- * gateway-receipt-store.ts. This class only reads and writes rows.
+ * step-5 module services/gateway-receipt-store.ts (unit-proven, NOT yet wired
+ * into a live route — step 6 wires it). This class only reads and writes rows.
  *
  * `insert` uses `.returning().get()` so the write path can construct the
  * returned receipt FROM the persisted row (the §8.3 "construct receipt FROM

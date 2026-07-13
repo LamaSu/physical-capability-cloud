@@ -1650,7 +1650,13 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS gateway_receipts_job_idx ON gateway_receipts(job_id);
     CREATE INDEX IF NOT EXISTS gateway_receipts_session_idx ON gateway_receipts(session_id);
     CREATE INDEX IF NOT EXISTS gateway_receipts_checkpoint_idx ON gateway_receipts(checkpoint_hash);
-    CREATE INDEX IF NOT EXISTS gateway_receipts_session_seq_idx ON gateway_receipts(session_id, seq);
+    -- UNIQUE: the DB enforces the §8.3 invariant of one accepted receipt per
+    -- (session, seq) and per (session, checkpoint_hash) directly — not left to
+    -- the deterministic receiptId PK alone (step-5 hardening). Drop the prior
+    -- non-unique (session, seq) index if a dev DB created it.
+    DROP INDEX IF EXISTS gateway_receipts_session_seq_idx;
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_session_seq_unique ON gateway_receipts(session_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_session_checkpoint_unique ON gateway_receipts(session_id, checkpoint_hash);
   `);
 
   // ══════════════════════════════════════════════════════════════════

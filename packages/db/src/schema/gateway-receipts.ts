@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /**
  * Gateway receipts — per-checkpoint transactional acceptance records
@@ -10,12 +10,13 @@ import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
  * §8.4's division of responsibilities.
  *
  * THE TRANSACTIONAL INVARIANT (frozen §8.3): a receipt row exists IFF the
- * checkpoint was durably accepted, serialized per session. The write path
- * (services/gateway-receipt-store.ts) persists this row and the in-memory
- * acceptance advance atomically-in-effect: the row commits first, the
- * in-memory `sessionSequenceStore` advances only after commit. So this table
- * is the durable source of truth a restart can recover accepted-chain tips
- * from (`lastAcceptedForSession`).
+ * checkpoint was durably accepted, serialized per session. The write path lives
+ * in the step-5 mechanism module services/gateway-receipt-store.ts (persist this
+ * row, then advance the in-memory `sessionSequenceStore` — the row commits
+ * first, so a receipt is exposed only after commit). That module is unit-proven
+ * but NOT yet wired into any live route; step 6 wires it into the
+ * checkpoint-submission path. This table is the durable source of truth a
+ * restart recovers accepted-chain tips from (`lastAcceptedForSession`).
  *
  * The full receipt (content + signature) is stored in `body` (JSON) for a
  * lossless round-trip; the individual columns duplicate receipt fields for
@@ -35,7 +36,7 @@ import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
 export const gatewayReceipts = sqliteTable(
   "gateway_receipts",
   {
-    /** Deterministic id `grcpt-<sessionId>-<seq>` — unique (strict chain ⇒ one accept per (session,seq)). */
+    /** Deterministic id `grcpt-<sessionId>-<seq>`. Per-(session,seq) uniqueness is ALSO DB-enforced by gateway_receipts_session_seq_unique — not left to this id scheme alone. */
     receiptId: text("receipt_id").primaryKey(),
     /**
      * Identifies the Ed25519 gateway key that signed this receipt. The key
@@ -80,9 +81,19 @@ export const gatewayReceipts = sqliteTable(
   (t) => ({
     byJob: index("gateway_receipts_job_idx").on(t.jobId),
     bySession: index("gateway_receipts_session_idx").on(t.sessionId),
+    // checkpoint_hash alone: findByCheckpointHash resolves a hash ACROSS sessions.
     byCheckpoint: index("gateway_receipts_checkpoint_idx").on(t.checkpointHash),
-    // Serves lastAcceptedForSession (WHERE session_id=? ORDER BY seq DESC LIMIT 1)
-    // and findBySession's seq-ordered chain replay.
-    bySessionSeq: index("gateway_receipts_session_seq_idx").on(t.sessionId, t.seq),
+    // UNIQUE(session_id, seq): the DB enforces one accepted receipt per session
+    // sequence (the §8.3 invariant — not reliant on the deterministic receiptId
+    // PK alone). Also serves lastAcceptedForSession (WHERE session_id=? ORDER BY
+    // seq DESC LIMIT 1) and findBySession's seq-ordered chain replay.
+    bySessionSeq: uniqueIndex("gateway_receipts_session_seq_unique").on(t.sessionId, t.seq),
+    // UNIQUE(session_id, checkpoint_hash): a checkpoint hash is accepted at most
+    // once within a session's chain (the mechanism never re-accepts a hash); the
+    // same hash MAY recur across sessions, so the constraint is per-session.
+    bySessionCheckpoint: uniqueIndex("gateway_receipts_session_checkpoint_unique").on(
+      t.sessionId,
+      t.checkpointHash,
+    ),
   }),
 );
