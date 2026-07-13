@@ -271,10 +271,27 @@ async function proxyToolCall(
   }
 }
 
+/** Served, verified-200 icon for the product surface AND the docs surface
+ * (see docs-mcp-server.ts) — same asset apps/dashboard/public/pcc-icon.svg
+ * that /.well-known/mcp/server-card.json's `logo`/`icon` fields already
+ * reference. Kept as one constant so a future icon swap only edits one line. */
+export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
+
 function createMcpServer(pack: AgentPackage): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
-    { name: "Physical Capability Cloud", version: pack.version },
+    {
+      name: "Physical Capability Cloud",
+      // Registry-branding fields carried directly on Implementation (NOT
+      // under _meta — ImplementationSchema has no _meta key; title/
+      // description/icons are first-class fields), so a scanner reading the
+      // live `initialize` handshake sees name+icon+description without
+      // needing a second request to server-card.json.
+      title: "Physical Capability Cloud",
+      version: pack.version,
+      description: pack.description,
+      icons: [{ src: PCC_MCP_ICON_URL, mimeType: "image/svg+xml" }],
+    },
     {
       capabilities: { tools: {}, resources: {} },
       instructions: MCP_INSTRUCTIONS,

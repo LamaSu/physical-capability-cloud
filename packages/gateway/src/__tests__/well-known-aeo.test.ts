@@ -68,7 +68,11 @@ describe("public AEO discovery routes", () => {
     const body = response.json();
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers["content-type"]).toContain("application/json");
+    // Bare "application/json" — no "; charset=utf-8". ora's ARD validator is
+    // charset-strict; Fastify's Reply.send() auto-appends charset to any
+    // json-ish Content-Type unless a route-level onSend hook overrides it
+    // after the fact (see forceBareJsonContentType in well-known-aeo.ts).
+    expect(response.headers["content-type"]).toBe("application/json");
     expect(body.specVersion).toBe("1.0");
     expect(body.host).toEqual({
       displayName: "Physical Capability Cloud",
@@ -112,6 +116,7 @@ describe("public AEO discovery routes", () => {
     const body = response.json();
 
     expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/json");
     expect(body.agents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -153,6 +158,14 @@ describe("public AEO discovery routes", () => {
     expect(body.serverCardUrl).toBe(
       "https://capability.network/.well-known/mcp/server-card.json",
     );
+    // Both real MCP surfaces advertised: the product server and the
+    // read-only docs server.
+    expect(body.servers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "product", url: "https://capability.network/mcp" }),
+        expect.objectContaining({ name: "docs", url: "https://capability.network/mcp/docs" }),
+      ]),
+    );
   });
 
   it("generates the MCP server card from the live agent package", async () => {
@@ -181,6 +194,24 @@ describe("public AEO discovery routes", () => {
         name: expect.any(String),
         description: expect.any(String),
       }),
+    );
+    // Registry branding: name+icon+description, not just name+description.
+    // ora's scanner reported 0/2 because only `logo` (not `icon`/`icons`)
+    // was present.
+    expect(body.name).toEqual(expect.any(String));
+    expect(body.description).toEqual(expect.any(String));
+    expect(body.icon).not.toBeNull();
+    expect(body.icon).toBe("https://capability.network/pcc-icon.svg");
+    expect(body.icons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ src: "https://capability.network/pcc-icon.svg" }),
+      ]),
+    );
+    expect(body.servers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "product", url: "https://capability.network/mcp" }),
+        expect.objectContaining({ name: "docs", url: "https://capability.network/mcp/docs" }),
+      ]),
     );
   });
 

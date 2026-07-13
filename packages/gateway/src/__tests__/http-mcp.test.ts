@@ -42,8 +42,17 @@ describe("Streamable HTTP MCP server", () => {
     expect(body.result.serverInfo).toEqual(
       expect.objectContaining({
         name: "Physical Capability Cloud",
+        title: "Physical Capability Cloud",
         version: expect.any(String),
+        description: expect.any(String),
       }),
+    );
+    // Registry branding on the live handshake — name+icon+description
+    // reachable without a second request to server-card.json.
+    expect(body.result.serverInfo.icons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ src: "https://capability.network/pcc-icon.svg" }),
+      ]),
     );
     expect(body.result.instructions).toContain("Discover PCC capabilities");
     sessionId = String(response.headers["mcp-session-id"]);
@@ -103,6 +112,13 @@ describe("Streamable HTTP MCP server", () => {
     expect(tools.some((tool: { name: string }) => tool.name === "render_pcc_dashboard")).toBe(
       true,
     );
+    // MCP Apps: the tools/list definition itself declares the ui:// link,
+    // not only the tool-call result — a host can tell this tool has a UI
+    // without first calling it.
+    const renderDashboardTool = tools.find(
+      (tool: { name: string }) => tool.name === "render_pcc_dashboard",
+    );
+    expect(renderDashboardTool._meta?.ui?.resourceUri).toBe("ui://pcc/dashboard");
   });
 
   it("exposes the ui://pcc/dashboard MCP App resource with the correct MIME + host markers", async () => {
