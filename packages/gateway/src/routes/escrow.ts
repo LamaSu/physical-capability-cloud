@@ -246,47 +246,38 @@ export async function escrowRoutes(app: FastifyInstance) {
   );
 
   /**
-   * Approve token spending for an escrow contract.
-   * Returns 503 if write is disabled.
+   * REMOVED from the public API (audit C-03 containment).
+   *
+   * This route previously made the gateway signer send ERC-20
+   * `approve(spender = :address, token, amount)` with the spender, token, and
+   * amount taken directly from untrusted request params — no provenance,
+   * ownership, or token-allowlist check. That let any caller make the gateway
+   * signer approve an arbitrary spender for an arbitrary token/amount (bounded
+   * only by MAX_ESCROW_AMOUNT), i.e. drain the signer's ERC-20 balances.
+   *
+   * Per the P0 remediation (ChatGPT: "remove the arbitrary approval endpoint
+   * from the public API"), the endpoint is removed: it now returns 410 Gone
+   * unconditionally and accepts NO spender/token/amount params. The legitimate
+   * funding allowance is issued internally by the escrow-create path
+   * (paid-job-flow.createJobFromSession), which approves ONLY a freshly
+   * factory-created escrow for the exact fund amount — never an arbitrary spender.
+   *
+   * BREAKING (expected + accepted per spec): clients can no longer call approve
+   * directly.
+   *
+   * TODO(audit P0 follow-up, Wave 2): typed funding operation + treasury/relayer
+   * signer separation + rotate signer.
    */
-  app.post<{
-    Params: { address: string };
-    Body: { amount: string; tokenAddress?: string };
-  }>(
+  app.post<{ Params: { address: string } }>(
     "/api/escrow/chain/:address/approve",
-    async (req, reply) => {
-      const { address } = req.params;
-      if (!isAddress(address)) {
-        return reply.status(400).send({ error: "Invalid escrow address" });
-      }
-      const body = req.body as { amount?: string; tokenAddress?: string } | undefined;
-      if (!body?.amount) {
-        return reply.status(400).send({ error: "amount is required" });
-      }
-
-      // Bound approval to MAX_ESCROW_AMOUNT (default 1M USDC, 6 decimals)
-      const maxEscrowAmount = BigInt(
-        Math.floor(parseFloat(process.env.MAX_ESCROW_AMOUNT ?? "1000000") * 1_000_000),
-      );
-      let amountUnits: bigint;
-      try {
-        amountUnits = BigInt(Math.floor(parseFloat(body.amount) * 1_000_000));
-      } catch {
-        return reply.status(400).send({ error: "invalid_amount", message: "amount must be numeric" });
-      }
-      if (amountUnits <= 0n || amountUnits > maxEscrowAmount) {
-        return reply.status(400).send({
-          error: "amount_out_of_bounds",
-          message: `Amount must be between 0 and ${process.env.MAX_ESCROW_AMOUNT ?? "1000000"} USDC`,
-        });
-      }
-
-      const tokenAddr =
-        body.tokenAddress && isAddress(body.tokenAddress)
-          ? (body.tokenAddress as Address)
-          : undefined;
-      const result = await facade.approveToken(address as Address, body.amount, tokenAddr);
-      return sendResult(reply, result);
+    async (_req, reply) => {
+      return reply.status(410).send({
+        error: "endpoint_removed",
+        message:
+          "Arbitrary token approval has been removed from the public API (audit C-03). " +
+          "The gateway no longer approves caller-supplied spenders/tokens. Funding " +
+          "allowances are issued internally to protocol-created escrows only.",
+      });
     },
   );
 

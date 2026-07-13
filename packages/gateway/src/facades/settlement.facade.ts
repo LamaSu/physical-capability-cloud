@@ -44,7 +44,8 @@ import {
   getDispute,
   getEvents,
   fundEscrow as chainFundEscrow,
-  approveToken as chainApproveToken,
+  // approveToken (chainApproveToken) intentionally NOT imported: the arbitrary
+  // token-approve path is disabled (audit C-03). See approveToken() below.
   releaseMilestone as chainReleaseMilestone,
   fileDispute as chainFileDispute,
   depositBond as chainDepositBond,
@@ -334,22 +335,38 @@ export class SettlementFacade extends BaseFacade {
   }
 
   /**
-   * Approve token spending for an escrow contract.
-   * Replaces: POST /api/escrow/chain/:address/approve
+   * DISABLED (audit C-03 containment). Backed the removed
+   * POST /api/escrow/chain/:address/approve route (now 410 Gone).
+   *
+   * Previously issued an ERC-20 approval from the gateway signer to a
+   * caller-supplied spender/token/amount with no provenance/ownership/allowlist
+   * — a drain primitive. It is now fail-closed: it performs NO approval and
+   * throws (mapped to 403 by BaseFacade.execute). The only legitimate funding
+   * allowance is issued inline by the escrow-create path
+   * (paid-job-flow.createJobFromSession) to a freshly factory-created escrow for
+   * the exact fund amount.
+   *
+   * Kept (throwing) rather than deleted so any residual caller fails safely
+   * instead of silently type-breaking.
+   *
+   * TODO(audit P0 follow-up, Wave 2): replace with a typed funding operation
+   * (factory-proven escrow spender + token allowlist + caller-ownership +
+   * zero-to-exact amount) + treasury/relayer signer separation + rotate signer.
    */
   async approveToken(
-    address: Address,
-    amount: string,
-    tokenAddress?: Address,
+    _address: Address,
+    _amount: string,
+    _tokenAddress?: Address,
   ): Promise<Result<unknown>> {
     return this.execute("approveToken", async () => {
-      this.validateAddress(address);
-      this.requireWriteEnabled();
-      if (!amount) {
-        throw Object.assign(new Error("amount is required"), { name: "BadRequestError" });
-      }
-      const result = await chainApproveToken(address, amount, tokenAddress);
-      return { ...result, action: "approve", spender: address, amount };
+      throw Object.assign(
+        new Error(
+          "Arbitrary token approval is disabled (audit C-03). The gateway signer " +
+            "does not approve caller-supplied spenders/tokens; funding allowances " +
+            "are issued internally to protocol-created escrows only.",
+        ),
+        { name: "ForbiddenError" },
+      );
     });
   }
 

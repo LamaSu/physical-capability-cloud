@@ -402,31 +402,35 @@ export async function fundEscrow(contractAddress?: Address): Promise<WriteResult
 }
 
 /**
- * Approve MockUSDC spending for escrow funding.
- * Must be called before fundEscrow so the escrow contract can pull tokens.
+ * DISABLED (audit C-03 containment).
+ *
+ * Previously sent ERC-20 `approve(spender, amount)` from the gateway signer with
+ * a caller-supplied spender/token/amount and no provenance/ownership/allowlist
+ * check — so any caller reaching it could make the signer approve an arbitrary
+ * spender and drain its balances. It is now fail-closed and throws.
+ *
+ * The legitimate funding allowance is issued inline by the escrow-create path
+ * (paid-job-flow.createJobFromSession), which approves ONLY a freshly
+ * factory-created escrow for the exact fund amount — never an arbitrary spender.
+ * This low-level helper is retained (throwing) rather than deleted so the
+ * package's export shape is unchanged (see the escrow-client backwards-compat
+ * export test) and any residual/external caller fails safely instead of
+ * performing a drain.
+ *
+ * TODO(audit P0 follow-up, Wave 2): replace with a typed funding operation
+ * (factory-proven escrow spender + token allowlist + caller-ownership +
+ * zero-to-exact amount) + treasury/relayer signer separation + rotate signer.
  */
 export async function approveToken(
-  spender: Address,
-  amount: string,
-  tokenAddress?: Address,
+  _spender: Address,
+  _amount: string,
+  _tokenAddress?: Address,
 ): Promise<WriteResult> {
-  const token = tokenAddress ?? resolveMockUSDCAddress();
-  if (!token) {
-    throw new Error("No token address provided and MOCK_USDC_ADDRESS env var is not set and no mockUSDC in chain-config.");
-  }
-  const wallet = getWalletClient();
-
-  const hash = await wallet.writeContract({
-    chain: resolveChainConfig().chain,
-    account: getAccount(),
-    address: token,
-    abi: MockUSDCABI,
-    functionName: "approve",
-    args: [spender, parseUnits(amount, 6)],
-    gas: GAS_LIMITS.approve,
-  });
-
-  return { transactionHash: hash, status: "submitted" };
+  throw new Error(
+    "approveToken is disabled (audit C-03): the gateway signer does not issue " +
+      "arbitrary ERC-20 approvals. Funding allowances are granted inline to " +
+      "protocol-created escrows only (see paid-job-flow.createJobFromSession).",
+  );
 }
 
 /**
