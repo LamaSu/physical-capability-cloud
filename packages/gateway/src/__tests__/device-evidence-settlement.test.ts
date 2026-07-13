@@ -110,6 +110,7 @@ describe("SEAM-2 gate holds — settlement does NOT auto-anchor device evidence"
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 2, // tier-2 job; the CLOSED gate is tier-agnostic → still fallback
       fallback: GATEWAY_FALLBACK,
       // No gateOpen override → uses deviceEvidenceSettlementEnabled() (env below).
       env: { SEAM2_DEVICE_EVIDENCE_SETTLEMENT: "1" } as unknown as NodeJS.ProcessEnv,
@@ -323,6 +324,7 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 2, // verify OK below → source "device" regardless of tier
       fallback: GATEWAY_FALLBACK,
       verifyEd25519: () => true, // verifier mocked to pass
       gateOpen: true, // simulate #52 live + flag set (NOT changing the real gate)
@@ -338,6 +340,7 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
       registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 2, // verify OK below → source "device" regardless of tier
       fallback: GATEWAY_FALLBACK,
       // default verifier = naclEd25519Verify (real crypto)
       gateOpen: true,
@@ -352,6 +355,7 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     const decision = await resolveSettlementEvidence({
       deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
       registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(other.publicKey)}` },
+      requestedTier: 0, // tier 0 (self-attested) keeps the buyer-approved fallback
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
     });
@@ -364,10 +368,89 @@ describe("SEAM-2 wiring — device signature flows to the settlement anchor when
     const decision = await resolveSettlementEvidence({
       deviceBundle: null,
       registeredSigner: null,
+      requestedTier: 0, // tier 0 keeps the buyer-approved fallback (no device required)
       fallback: GATEWAY_FALLBACK,
       gateOpen: true,
     });
     expect(decision.source).toBe("gateway-fallback");
     expect(decision.reason).toBe("no-device-bundle");
+  });
+});
+
+// ── §8.5-1 hard-gate HOLD: tier >= 1 never silently downgrades ────────────────
+// The core of step 1: with the gate OPEN, a purchased tier >= 1 whose required
+// device evidence is missing or fails to verify HOLDS settlement (§7.3-3, §8.4-C)
+// — it is NOT anchored on the gateway placeholder. Tier 0 keeps the fallback, and
+// the CLOSED-gate default path is provably unchanged (case d).
+describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgrade", () => {
+  it("(a) gate open + verify FAILS + tier >= 1 → source 'hold' (never gateway-fallback)", async () => {
+    const dev = realDeviceEvidence();
+    const other = nacl.sign.keyPair(); // wrong registered key → verify fails
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(other.publicKey)}` },
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("hold");
+    expect(decision.reason).toBe("signature-invalid");
+    // A hold is NOT a gateway anchor — the caller must not settle on it.
+    expect(decision.source).not.toBe("gateway-fallback");
+  });
+
+  it("(b) gate open + verify FAILS + tier 0 → 'gateway-fallback' (buyer-approved T0 keeps fallback)", async () => {
+    const dev = realDeviceEvidence();
+    const other = nacl.sign.keyPair();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 0 },
+      registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(other.publicKey)}` },
+      requestedTier: 0,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("gateway-fallback");
+    expect(decision.reason).toBe("signature-invalid");
+    expect(decision.bundleHash).toBe(GATEWAY_FALLBACK.bundleHash);
+  });
+
+  it("(c) gate open + NO device bundle + tier >= 1 → source 'hold' reason 'no-device-bundle'", async () => {
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: null,
+      registeredSigner: null,
+      requestedTier: 1,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("hold");
+    expect(decision.reason).toBe("no-device-bundle");
+  });
+
+  it("(d) gate CLOSED + tier >= 1 → 'gateway-fallback'/'gate-closed' (default money path UNCHANGED)", async () => {
+    const dev = realDeviceEvidence();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: false, // the inert default — the closed gate is tier-agnostic
+    });
+    expect(decision.source).toBe("gateway-fallback");
+    expect(decision.reason).toBe("gate-closed");
+    expect(decision.bundleHash).toBe(GATEWAY_FALLBACK.bundleHash);
+    expect(decision.kernelSignature.value).toBe("gateway-auto-sign");
+  });
+
+  it("(e) gate open + verify OK + tier >= 1 → source 'device' (anchors on device hash+sig)", async () => {
+    const dev = realDeviceEvidence();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: { bundleHash: dev.bundleHash, kernelSignature: dev.signature, assuranceTier: 2 },
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      gateOpen: true, // default verifier = naclEd25519Verify (real crypto)
+    });
+    expect(decision.source).toBe("device");
+    expect(decision.bundleHash).toBe(dev.bundleHash);
   });
 });
