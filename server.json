@@ -1,0 +1,15 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "network.capability/physical-capability-cloud",
+  "title": "Physical Capability Cloud",
+  "description": "Discover, hire, and verify real-world physical capability (3D printing, CNC, lab work, drone surveys, couriers, and more) through MCP.",
+  "websiteUrl": "https://capability.network",
+  "repository": {
+    "url": "https://github.com/LamaSu/physical-capability-cloud",
+    "source": "github"
+  },
+  "version": "2.19.0",
+  "remotes": [
+    { "type": "streamable-http", "url": "https://capability.network/mcp" }
+  ]
+}
