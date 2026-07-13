@@ -454,3 +454,219 @@ describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgra
     expect(decision.bundleHash).toBe(dev.bundleHash);
   });
 });
+
+// ── §8.5-2. Revocation into settlement, keyed to effectiveEvidenceTime ─────────
+// §7.3-4: "revokedAt < effectiveEvidenceTime → invalid; else prior evidence stands"
+// (§8.4-A step 6: "not revoked ... BEFORE its effectiveEvidenceTime"). Strict `<`,
+// so a revocation AT the exact evidence time → prior evidence STANDS (valid). The
+// evidenceTime/revokedAt integers below are only compared for revocation; expiry
+// still uses the real clock (currentTimestamp is intentionally not re-keyed here).
+
+/** A real SDK session-signed bundle (principal-delegated session key), plus the
+ *  registered signer + the delegated sessionId — the exact shape /complete captures. */
+async function realSessionSignedBundle(jobId = "job-revoke-247") {
+  const principal = nacl.sign.keyPair();
+  const handler = createKernelHandler({
+    manifest: {
+      manifestVersion: "1.0.0",
+      kernelId: "kernel-revoke-247",
+      name: "Revoke Kernel",
+      description: "test",
+      builder: { agentId: "agent:test" },
+      capabilityType: "test.transform",
+      workflowSteps: [],
+      pricing: { currency: "USDC", baseUSD: 0 },
+      maxAssuranceTier: 0,
+      endpointURL: "https://example.test/run",
+      sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+      status: "pending",
+    } as any,
+    principalKey: {
+      agentId: "eip155:1:0x0000000000000000000000000000000000000002",
+      walletAddress: "0x0000000000000000000000000000000000000002",
+      publicKey: principal.publicKey,
+    },
+    principalPrivateKey: principal.secretKey,
+    execute: async () => ({ ok: true }),
+  });
+  const { evidenceBundle } = await handler({ jobId, input: { value: 1 } });
+  const auth = evidenceBundle.sessionKeyAuthorization;
+  if (!auth) throw new Error("expected sessionKeyAuthorization on the SDK bundle");
+  return {
+    evidenceBundle,
+    registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+    sessionId: auth.sessionId,
+    jobId,
+  };
+}
+
+describe("verifyDeviceSignedEvidence — session-key revocation keyed to effectiveEvidenceTime (§8.5-2)", () => {
+  it("revoked BEFORE effectiveEvidenceTime → invalid (session_revoked)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      revocations: [{ sessionId, revokedAt: 1000 }],
+      effectiveEvidenceTime: 2000, // 1000 < 2000 → revoked before evidence → invalid
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("session_revoked");
+  });
+
+  it("revoked AFTER effectiveEvidenceTime → prior evidence stands (valid)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      revocations: [{ sessionId, revokedAt: 3000 }],
+      effectiveEvidenceTime: 2000, // 3000 < 2000 is false → not disqualified → valid
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("revoked AT effectiveEvidenceTime (boundary) → prior evidence stands (strict `<`, §7.3-4)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      revocations: [{ sessionId, revokedAt: 2000 }],
+      effectiveEvidenceTime: 2000, // 2000 < 2000 is false → valid ("prior evidence stands")
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("a DIFFERENT session's revocation does not disqualify", async () => {
+    const { evidenceBundle, registeredSigner, jobId } = await realSessionSignedBundle();
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      revocations: [{ sessionId: "some-other-session", revokedAt: 1 }],
+      effectiveEvidenceTime: 2000,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("no revocations supplied → unchanged (valid)", async () => {
+    const { evidenceBundle, registeredSigner, jobId } = await realSessionSignedBundle();
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("direct registered-signer path (no session key) is UNAFFECTED by revocation", async () => {
+    // No sessionKeyAuthorization → the Ed25519 branch → revocation is never consulted.
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      revocations: [{ sessionId: "anything", revokedAt: 1 }],
+      effectiveEvidenceTime: 2, // would disqualify a session key, but there is none
+    });
+    expect(res.ok).toBe(true);
+  });
+});
+
+describe("resolveSettlementEvidence — revocation flows into the tier/HOLD decision (§8.5-2)", () => {
+  it("gate open + tier >= 1 + revoked BEFORE evidence time → source 'hold' (session_revoked)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 2,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+        contractId: jobId,
+      },
+      registeredSigner,
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      revocations: [{ sessionId, revokedAt: 1000 }],
+      effectiveEvidenceTime: 2000,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("hold"); // tier >= 1 → HOLD, never silent downgrade
+    expect(decision.reason).toBe("session_revoked");
+  });
+
+  it("gate open + revoked AFTER evidence time → source 'device' (prior evidence stands)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 2,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+        contractId: jobId,
+      },
+      registeredSigner,
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      revocations: [{ sessionId, revokedAt: 3000 }],
+      effectiveEvidenceTime: 2000,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("device");
+    expect(decision.bundleHash).toBe(evidenceBundle.bundleHash);
+  });
+
+  it("gate open + tier 0 + revoked BEFORE evidence time → 'gateway-fallback' (T0 keeps buyer-approved fallback)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 0,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+        contractId: jobId,
+      },
+      registeredSigner,
+      requestedTier: 0,
+      fallback: GATEWAY_FALLBACK,
+      revocations: [{ sessionId, revokedAt: 1000 }],
+      effectiveEvidenceTime: 2000,
+      gateOpen: true,
+    });
+    expect(decision.source).toBe("gateway-fallback");
+    expect(decision.reason).toBe("session_revoked");
+    expect(decision.bundleHash).toBe(GATEWAY_FALLBACK.bundleHash);
+  });
+
+  it("gate CLOSED + revoked → 'gateway-fallback'/'gate-closed' (revocation inert on the default path)", async () => {
+    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const decision = await resolveSettlementEvidence({
+      deviceBundle: {
+        bundleHash: evidenceBundle.bundleHash,
+        kernelSignature: evidenceBundle.kernelSignature,
+        assuranceTier: 2,
+        sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+        contractId: jobId,
+      },
+      registeredSigner,
+      requestedTier: 2,
+      fallback: GATEWAY_FALLBACK,
+      revocations: [{ sessionId, revokedAt: 1000 }],
+      effectiveEvidenceTime: 2000,
+      gateOpen: false, // closed default → revocation never consulted
+    });
+    expect(decision.source).toBe("gateway-fallback");
+    expect(decision.reason).toBe("gate-closed");
+  });
+});
