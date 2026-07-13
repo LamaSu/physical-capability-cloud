@@ -1202,6 +1202,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       //   supplement/accept/dispute — is DEFERRED (§8.5, "before hold path is
       //   operational"); the buyer's funds simply stay in escrow until then.
       if (settlementEvidence.source === "hold") {
+        // TODO(§8.5: operationalize the hold path). Persist a SettlementHold record (real
+        // escrow id, non-reclaimable/non-arbitrary bundle), and wire buyer resolution
+        // (supplement evidence / accept / Mode-C-D dispute). Today this is the MINIMAL hold
+        // (job status + response); the money stays funded in escrow with no resolution path.
         // Move the job off the 'completing' claim into a distinct terminal
         // 'settlement_hold' so it is neither stuck (the claim guard excludes
         // 'completing') nor re-runnable as if unexecuted — mirroring how the settle

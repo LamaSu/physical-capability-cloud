@@ -661,6 +661,13 @@ export async function resolveSettlementEvidence(
           ...skewOut,
         };
   }
+  // The signature checks out against the registered signer, so settlement anchors on the
+  // device's own hash + signature (crypto-routing).
+  // TODO(§8.5-10: gate on ACHIEVED tier). A verified signature currently routes to the
+  // device anchor regardless of the achieved assurance tier — "signature valid != requested
+  // assurance satisfied". The mandatory-before-the-gate-opens step is to derive the ACHIEVED
+  // tier from the verified claims and settle iff achievedTier >= requestedTier; NOT built in
+  // this steps-1–4 slice. `assuranceTier` below is the bundle's DECLARED tier, not a proven one.
   return {
     source: "device",
     bundleHash: input.deviceBundle.bundleHash,
