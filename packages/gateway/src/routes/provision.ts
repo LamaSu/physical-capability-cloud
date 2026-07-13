@@ -7,6 +7,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
@@ -19,6 +20,52 @@ import {
   generateOperatorWallet,
   setAgentWalletOnChain,
 } from "../services/erc8004-identity-write.js";
+
+// ── H-12 containment: envelope-encrypt the custodial operator EOA key ─────────
+// The operator's operational wallet private key must NEVER be returned in an
+// HTTP response NOR persisted in plaintext. We envelope-encrypt it at rest with
+// AES-256-GCM under a Key-Encryption-Key (KEK) sourced from the environment.
+// The stored value is a self-describing string `enc:v1:<ivHex>:<tagHex>:<ctHex>`
+// (iv + auth tag + ciphertext), so the existing `operator_wallet_private_key`
+// text column needs no schema/type change — only a semantic one (see the schema
+// note in packages/db/src/schema/auth.ts).
+//
+// Fail CLOSED: if no KEK is configured we return null and the caller persists
+// null — we NEVER fall back to storing plaintext. The in-memory key is still
+// used transiently to sign the on-chain setAgentWallet tx at provision time.
+//
+// TODO(audit P0 follow-up, Wave 3): move custody to a non-exportable KMS/HSM
+// (envelope key wrapping via cloud KMS), rotate every previously-generated
+// operator key that was written before this containment landed, and add a
+// governed decrypt-on-use path if a signer ever needs the key after provision.
+const KEK_ENV_VAR = "PCC_KEY_ENCRYPTION_KEK";
+
+function resolveKeyEncryptionKey(): Buffer | null {
+  const raw = process.env[KEK_ENV_VAR];
+  if (!raw || raw.length === 0) return null;
+  // Accept a 32-byte key as 64 hex chars (optionally 0x-prefixed); otherwise
+  // derive a stable 32-byte key from the provided secret via SHA-256.
+  const hexCandidate = raw.replace(/^0x/, "");
+  if (/^[0-9a-fA-F]{64}$/.test(hexCandidate)) {
+    return Buffer.from(hexCandidate, "hex");
+  }
+  return createHash("sha256").update(raw, "utf8").digest();
+}
+
+/**
+ * Envelope-encrypt a secret for storage at rest. Returns
+ * `enc:v1:<ivHex>:<tagHex>:<ciphertextHex>` or `null` when no KEK is set
+ * (fail closed — the caller must persist null, never the plaintext).
+ */
+function encryptSecretAtRest(plaintext: string): string | null {
+  const kek = resolveKeyEncryptionKey();
+  if (!kek) return null;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", kek, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
+}
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -104,7 +151,16 @@ export async function provisionRoutes(app: FastifyInstance) {
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        scopes: ["*"],
+        // C-01 containment: this endpoint is PUBLIC + unauthenticated, so the
+        // caller is unverified. Never mint a wildcard/global key here. Issue an
+        // EMPTY (least-privilege / no-scope) grant — the key authenticates the
+        // caller but grants no privileged scope. scope-checker fails closed, so
+        // this key is denied on every scoped/unmatched route until the operator
+        // earns scopes through a verified path.
+        // TODO(audit P0 follow-up, Wave 1): grant real scopes only via verified/
+        // invite onboarding (identity-checked). Until then a self-provisioned
+        // key is intentionally unprivileged.
+        scopes: [],
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),
@@ -166,10 +222,12 @@ export async function provisionRoutes(app: FastifyInstance) {
         | { agentId: string; txHash: string; registryAddress: string; chainId: number }
         | undefined;
       // Option A operator wallet response (populated inside the mint branch).
+      // H-12 containment: the private key is NEVER included here. The wallet is
+      // gateway-custodied and the key is encrypted at rest; only the public
+      // address is surfaced.
       let operatorWalletResponse:
         | {
             address: string;
-            private_key: string;
             source: "server-minted";
             custody: "gateway";
             warning: string;
@@ -223,14 +281,18 @@ export async function provisionRoutes(app: FastifyInstance) {
           // the sponsored-mint success record.
           try {
             const opWallet = await generateOperatorWallet();
+            // H-12: encrypt the key for storage. The plaintext `opWallet.privateKey`
+            // is used in-memory ONLY to sign the setAgentWallet tx below, then
+            // dropped when the request ends — it is never returned or logged.
+            const operatorKeyEnvelope = encryptSecretAtRest(opWallet.privateKey);
             operatorWalletResponse = {
               address: opWallet.address,
-              private_key: opWallet.privateKey,
               source: "server-minted",
               custody: "gateway",
               warning:
-                "Store the private_key now — it will not be shown again. This wallet " +
-                "controls your ERC-8004 agentWallet; anyone holding it can sign as this agent.",
+                "This operational wallet is custodied by the gateway. Its private " +
+                "key is encrypted at rest and is never returned by the API. A future " +
+                "export flow will let you take custody (see coord bulletin 235).",
             };
             try {
               const walletResult = await setAgentWalletOnChain({
@@ -240,7 +302,7 @@ export async function provisionRoutes(app: FastifyInstance) {
               });
               getRepos().apiKeys.recordOperatorWallet(record.id, {
                 address: opWallet.address,
-                privateKey: opWallet.privateKey,
+                privateKeyEnvelope: operatorKeyEnvelope,
                 onchainStatus: "written",
                 onchainTxHash: walletResult.txHash,
                 onchainError: null,
@@ -267,7 +329,7 @@ export async function provisionRoutes(app: FastifyInstance) {
               try {
                 getRepos().apiKeys.recordOperatorWallet(record.id, {
                   address: opWallet.address,
-                  privateKey: opWallet.privateKey,
+                  privateKeyEnvelope: operatorKeyEnvelope,
                   onchainStatus: "failed",
                   onchainTxHash: null,
                   onchainError: walletErrMsg.slice(0, 1024),

@@ -28,8 +28,10 @@ export interface IApiKeyRepository {
   recordOperatorWallet(
     id: string,
     wallet: {
+      // H-12: envelope-encrypted private key only (`enc:v1:iv:tag:ct`), never
+      // plaintext; null when no KEK is configured (fail-closed at the caller).
       address: string;
-      privateKey: string;
+      privateKeyEnvelope: string | null;
       onchainStatus: "written" | "failed" | "pending";
       onchainTxHash: string | null;
       onchainError: string | null;

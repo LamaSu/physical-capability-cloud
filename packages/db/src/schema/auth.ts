@@ -61,7 +61,18 @@ export const apiKeys = sqliteTable("api_keys", {
   // to `operatorWalletCustody = "operator"`; a future v2 replaces this
   // with an ERC-4337 smart wallet + passkey (see coord bulletin 235).
   operatorWalletAddress: text("operator_wallet_address"),
-  operatorWalletPrivateKey: text("operator_wallet_private_key"), // hex, custodial at bootstrap
+  // H-12 containment (changed 2026-07-13): this column NO LONGER stores a raw
+  // hex private key. It now stores an envelope-encrypted blob in the form
+  // `enc:v1:<ivHex>:<tagHex>:<ciphertextHex>` (AES-256-GCM under the KEK from
+  // env `PCC_KEY_ENCRYPTION_KEK`), or NULL when no KEK is configured (the
+  // gateway fails closed and stores nothing rather than plaintext). The column
+  // type is unchanged (text) so no DDL migration is required — only the
+  // semantics changed.
+  // MIGRATION NOTE: legacy rows written before this change may still contain a
+  // raw plaintext key. TODO(audit P0 follow-up, Wave 3): back-fill = re-encrypt
+  // (or better, rotate) every legacy plaintext value, then move custody to a
+  // non-exportable KMS/HSM. Do NOT read this column expecting plaintext.
+  operatorWalletPrivateKey: text("operator_wallet_private_key"), // encrypted-at-rest envelope; see note above
   operatorWalletCustody: text("operator_wallet_custody").default("gateway"), // gateway | operator
   agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
   agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),

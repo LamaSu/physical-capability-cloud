@@ -1,15 +1,22 @@
 /**
- * Scope Checker middleware — API key scope validation against endpoint requirements.
+ * Scope Checker middleware — principal scope validation against endpoint
+ * requirements. Runs as an `onRequest` hook AFTER api-gate has resolved the
+ * caller into a principal (API-key → req.apiKeyId; SIWE → req.userId).
+ * Endpoint scope requirements come from the endpointScopes table (cached
+ * 5 minutes) with hardcoded defaults as fallback.
  *
- * Attaches an `onRequest` hook that validates the caller's scopes after api-gate
- * has already set req.apiKeyId. Endpoint scope requirements come from the
- * endpointScopes table (cached 5 minutes) with hardcoded defaults as fallback.
- *
- * Behaviour:
- *   - Wildcard scope ("*") grants access to all endpoints.
- *   - If no scope requirement matches the route, access is granted (open by default
- *     for backwards compatibility with existing callers).
- *   - If a requirement exists and the caller lacks all required scopes → 403.
+ * Behaviour (FAIL CLOSED — C-01 / C-02 containment):
+ *   - Requests with NO principal are public routes that api-gate already
+ *     allowed through; they are skipped here.
+ *   - Both API-key AND SIWE principals are scope-checked identically. A SIWE
+ *     principal currently carries NO granted scopes (no authoritative role
+ *     store yet), so it is denied on every scoped/unmatched route — a fresh
+ *     wallet is not privileged.
+ *   - Missing / null / unreadable scopes resolve to an EMPTY set → DENY
+ *     (never a wildcard).
+ *   - A route with NO matching scope requirement → DENY (default-deny).
+ *   - "*" is NOT a grant-all here; a legacy wildcard key matches no requirement
+ *     and is therefore denied.
  *
  * Returns 403 with a descriptive error including the required scopes.
  */
@@ -118,52 +125,66 @@ function matchRoute(
 // ── Scope Extraction ─────────────────────────────────────────────
 
 /**
- * Extract scopes from the API key record.
- * Falls back to ["*"] for backwards compatibility when scopes are not set.
+ * Resolve the caller's granted scopes. FAIL CLOSED (C-01): any missing / null /
+ * unreadable scope source resolves to an EMPTY set (deny), NEVER a wildcard.
+ *
+ * - API-key principal: read the key's scopes column. Unknown key, unreadable
+ *   scopes, or an empty value → [].
+ * - SIWE principal (userId, no apiKeyId): no authoritative scope store is wired
+ *   yet, so a SIWE caller has NO granted scopes and is denied on scoped routes.
+ *   TODO(audit P0 follow-up, Wave 1): resolve SIWE scopes from a normalized
+ *   principal / role record so verified wallets can hold real scopes.
  */
 function getCallerScopes(req: FastifyRequest): string[] {
-  if (!req.apiKeyId) return [];
-
-  try {
-    const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
-    if (!keyRecord) return [];
-
-    let scopesRaw: unknown;
+  if (req.apiKeyId) {
     try {
-      scopesRaw = JSON.parse(keyRecord.scopes);
-    } catch {
-      scopesRaw = keyRecord.scopes;
-    }
+      const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
+      if (!keyRecord) return [];
 
-    if (Array.isArray(scopesRaw)) {
-      return (scopesRaw as string[]).filter((s) => typeof s === "string");
+      let scopesRaw: unknown;
+      try {
+        scopesRaw = JSON.parse(keyRecord.scopes);
+      } catch {
+        scopesRaw = keyRecord.scopes;
+      }
+
+      if (Array.isArray(scopesRaw)) {
+        return (scopesRaw as string[]).filter((s) => typeof s === "string");
+      }
+      if (typeof scopesRaw === "string" && scopesRaw.length > 0) {
+        return scopesRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+    } catch {
+      // Non-fatal — fall through to deny.
     }
-    if (typeof scopesRaw === "string" && scopesRaw.length > 0) {
-      return scopesRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    }
-  } catch {
-    // Non-fatal
+    // Unreadable / empty scopes → deny (no wildcard fallback).
+    return [];
   }
 
-  // Default to wildcard for backwards compatibility
-  return ["*"];
+  // SIWE principal (or any non-api-key principal): no granted scopes.
+  return [];
 }
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
-export async function scopeChecker(app: FastifyInstance) {
+async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith("/api/")) return;
 
-    // Only check scopes for API key callers (api-gate handles unauthenticated reqs)
-    if (!req.apiKeyId) return;
+    // No principal at all → api-gate already allowed this through as a PUBLIC
+    // route (it 401s non-public unauthenticated requests before this hook runs,
+    // short-circuiting the chain). Do NOT scope-check public routes.
+    // C-02: we key on principal PRESENCE (apiKeyId OR userId), not on apiKeyId
+    // alone, so SIWE principals are enforced identically to API-key principals.
+    if (!req.apiKeyId && !req.userId) return;
 
     ensureScopeCacheReady();
 
     const callerScopes = getCallerScopes(req);
 
-    // Wildcard scope grants access to everything
-    if (callerScopes.includes("*")) return;
+    // NOTE: "*" is intentionally NOT a grant-all (C-01). A legacy wildcard key
+    // resolves to the literal scope "*", which matches no requirement below and
+    // is therefore denied. Enforcement is uniform for API-key and SIWE callers.
 
     const requirements =
       scopeCache.length > 0 ? scopeCache : DEFAULT_SCOPE_REQUIREMENTS;
@@ -184,8 +205,23 @@ export async function scopeChecker(app: FastifyInstance) {
       }
     }
 
-    // No scope requirement found for this route — allow (open by default)
-    if (!matchedRequirement) return;
+    // C-01 default-deny: a route with NO matching scope policy is DENIED, not
+    // allowed. An authenticated principal reaching an unpoliced /api/* route
+    // gets 403 until that route declares its required scopes.
+    // TODO(audit P0 follow-up, Wave 1): attach a required-scope policy to every
+    // /api/* route (route metadata) + a CI check that fails on any unpoliced
+    // route, so default-deny never silently over-blocks a legitimate route.
+    if (!matchedRequirement) {
+      return reply.status(403).send({
+        error: "insufficient_scope",
+        message:
+          "This endpoint has no scope policy and access is denied by default. " +
+          "Authenticate with a principal that has an explicit scope grant for this route.",
+        required_scopes: [],
+        caller_scopes: callerScopes,
+        docs: "https://capability.network/whitepaper.md",
+      });
+    }
 
     // Check if caller has any of the required scopes
     const hasScope = matchedRequirement.scopes.some((s) => callerScopes.includes(s));
@@ -193,10 +229,22 @@ export async function scopeChecker(app: FastifyInstance) {
 
     return reply.status(403).send({
       error: "insufficient_scope",
-      message: `This endpoint requires one of the following scopes: ${matchedRequirement.scopes.join(", ")}. Your API key has: ${callerScopes.join(", ") || "none"}.`,
+      message: `This endpoint requires one of the following scopes: ${matchedRequirement.scopes.join(", ")}. Your principal has: ${callerScopes.join(", ") || "none"}.`,
       required_scopes: matchedRequirement.scopes,
       caller_scopes: callerScopes,
       docs: "https://capability.network/whitepaper.md",
     });
   });
 }
+
+// C-01/C-02: scopeChecker MUST run as a NON-ENCAPSULATED plugin (mirroring
+// apiGate) so its onRequest hook applies to the sibling /api/* route plugins.
+// Without the skip-override symbol, Fastify isolates the hook to this plugin's
+// own (empty) scope, leaving scope enforcement INERT on every route registered
+// elsewhere — the pre-existing state this corrects. HIGH BLAST RADIUS: scope
+// enforcement that was effectively off is now on; requires integration testing
+// (cf. apigate-encapsulation.test.ts for the apiGate precedent).
+(scopeCheckerImpl as unknown as Record<symbol, unknown>)[Symbol.for("skip-override")] = true;
+(scopeCheckerImpl as unknown as Record<symbol, unknown>)[Symbol.for("fastify.display-name")] = "scopeChecker";
+
+export const scopeChecker = scopeCheckerImpl;

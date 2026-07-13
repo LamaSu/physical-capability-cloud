@@ -132,14 +132,20 @@ export class ApiKeyRepository implements IApiKeyRepository {
 
   /**
    * Record the per-operator operational wallet (option A ownership stopgap).
-   * Persists the wallet address + custodied private key + on-chain assignment
-   * status from the best-effort setAgentWallet call. See coord bulletin 235.
+   * Persists the wallet address + on-chain assignment status from the
+   * best-effort setAgentWallet call. See coord bulletin 235.
+   *
+   * H-12 containment: the private key is stored ONLY as an envelope-encrypted
+   * blob (`enc:v1:<iv>:<tag>:<ciphertext>`, AES-256-GCM) produced by the
+   * gateway before it reaches this layer — this repository never sees or
+   * stores plaintext. `privateKeyEnvelope` may be null (KEK not configured →
+   * the caller fails closed and stores no key rather than any plaintext).
    */
   recordOperatorWallet(
     id: string,
     wallet: {
       address: string;
-      privateKey: string;
+      privateKeyEnvelope: string | null;
       onchainStatus: "written" | "failed" | "pending";
       onchainTxHash: string | null;
       onchainError: string | null;
@@ -149,7 +155,7 @@ export class ApiKeyRepository implements IApiKeyRepository {
       .update(apiKeys)
       .set({
         operatorWalletAddress: wallet.address,
-        operatorWalletPrivateKey: wallet.privateKey,
+        operatorWalletPrivateKey: wallet.privateKeyEnvelope,
         operatorWalletCustody: "gateway",
         agentWalletOnchainStatus: wallet.onchainStatus,
         agentWalletOnchainTxHash: wallet.onchainTxHash,

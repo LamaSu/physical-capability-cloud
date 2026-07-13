@@ -152,7 +152,9 @@ export function provisionApiKey(opts: {
       operatorId: opts.operatorId,
       name: opts.name ?? null,
       description: opts.description ?? null,
-      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      // C-01: least-privilege default — NEVER wildcard (was `?? ["*"]`). An
+      // omitted scope set grants nothing; scopes must be granted explicitly.
+      scopes: JSON.stringify(opts.scopes ?? []),
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),

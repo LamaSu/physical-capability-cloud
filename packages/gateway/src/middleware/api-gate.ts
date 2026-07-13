@@ -9,6 +9,20 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
+// C-02: expose an explicit principal-type discriminator. Downstream authz
+// (scope-checker, dlp-redactor) must treat API-key and SIWE principals
+// uniformly and must NOT infer privilege from apiKeyId presence. A SIWE
+// principal carries authentication only — no role/scope authority by default.
+// (Declaration-merges with the FastifyRequest augmentation in require-auth.ts.)
+// TODO(audit P0 follow-up, Wave 1): fold apiKeyId/operatorId/userId/principalType
+// into one normalized principal object and route ALL authority through it.
+declare module "fastify" {
+  interface FastifyRequest {
+    /** How the caller authenticated this request (set by apiGate). */
+    principalType?: "api-key" | "siwe" | null;
+  }
+}
+
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
   "/api/health",
@@ -119,13 +133,18 @@ async function apiGateImpl(app: FastifyInstance) {
       req.apiKeyId = apiKey.id;
       req.operatorId = apiKey.operatorId;
       req.userId = apiKey.operatorId as `0x${string}`;
+      req.principalType = "api-key";
       return;
     }
 
-    // Try SIWE session (dashboard users)
+    // Try SIWE session (dashboard users). C-02: this establishes identity ONLY.
+    // The principal gets NO role/scope authority here; scope-checker and
+    // dlp-redactor deny it on scoped routes and give it the redacted view until
+    // it holds an explicit, authoritative grant.
     const session = resolveSession(req);
     if (session) {
       req.userId = session.address;
+      req.principalType = "siwe";
       return;
     }
 

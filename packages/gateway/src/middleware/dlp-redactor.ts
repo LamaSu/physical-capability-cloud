@@ -261,11 +261,14 @@ function applyRedaction(
 // ── Role Resolution ──────────────────────────────────────────────
 
 /**
- * Determine caller's roles from request context.
+ * Determine caller's roles from request context. FAIL CLOSED — an unresolved
+ * caller gets NO privileged role and therefore the fully-redacted view.
  *
- * For API key callers: read scopes from the key record.
- * Scopes are stored as a JSON array or comma-separated string.
- * Wildcard scope ("*") maps to admin.
+ * For API-key callers: read the literal scopes from the key record.
+ * C-01: "*" is NOT a privileged role and does NOT map to admin/all-roles —
+ * un-redaction requires the literal role (e.g. "admin", "operator").
+ * C-02: a SIWE principal is NOT auto-operator; without an authoritative role
+ * record it gets no privileged role.
  */
 function getCallerRoles(req: FastifyRequest): string[] {
   if (!req.apiKeyId && !req.operatorId && !req.userId) {
@@ -285,23 +288,24 @@ function getCallerRoles(req: FastifyRequest): string[] {
       }
 
       const scopes: string[] = Array.isArray(scopesRaw)
-        ? (scopesRaw as string[])
+        ? (scopesRaw as string[]).filter((s) => typeof s === "string")
         : typeof scopesRaw === "string"
-          ? scopesRaw.split(",").map((s) => s.trim())
+          ? scopesRaw.split(",").map((s) => s.trim()).filter(Boolean)
           : [];
 
-      // Wildcard scope → admin role for DLP purposes
-      if (scopes.includes("*")) return ["admin", "operator", "requestor", "verifier", "agent", "auditor", "template_author"];
-      return scopes;
+      // C-01: strip "*" — a wildcard scope confers no privileged visibility.
+      return scopes.filter((s) => s !== "*");
     } catch {
       return [];
     }
   }
 
-  // SIWE session users — default to operator role (they own their resources)
-  if (req.operatorId) return ["operator"];
-  if (req.userId) return ["operator"];
-
+  // C-02: SIWE session users (or a bare operatorId) are NOT defaulted to the
+  // operator role. Without an authoritative record they hold no privileged role
+  // and see the redacted view, identical to any other unprivileged principal.
+  // TODO(audit P0 follow-up, Wave 1): resolve the role from a normalized
+  // principal / ownership record — e.g. grant "operator" only for the wallet
+  // that actually owns the resource in the response being redacted.
   return [];
 }
 
@@ -316,7 +320,7 @@ function isJsonContentType(reply: FastifyReply): boolean {
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
-export async function dlpRedactor(app: FastifyInstance) {
+async function dlpRedactorImpl(app: FastifyInstance) {
   app.addHook("onSend", async (req: FastifyRequest, reply: FastifyReply, payload: unknown) => {
     // Only process JSON responses
     if (!isJsonContentType(reply)) return payload;
@@ -350,3 +354,11 @@ export async function dlpRedactor(app: FastifyInstance) {
     return JSON.stringify(redacted);
   });
 }
+
+// C-01/C-02: dlpRedactor MUST run as a NON-ENCAPSULATED plugin (mirroring
+// apiGate) so its onSend hook applies to sibling route plugins; without the
+// skip-override symbol its redaction is INERT on routes registered elsewhere.
+(dlpRedactorImpl as unknown as Record<symbol, unknown>)[Symbol.for("skip-override")] = true;
+(dlpRedactorImpl as unknown as Record<symbol, unknown>)[Symbol.for("fastify.display-name")] = "dlpRedactor";
+
+export const dlpRedactor = dlpRedactorImpl;
