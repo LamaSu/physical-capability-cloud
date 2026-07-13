@@ -112,10 +112,16 @@ export {
   parsePath,
   validateHardenedPath,
   HARDENED,
+  checkSequence,
+  genesisSequenceState,
   type VerificationFinding,
   type DriftAlert,
   type AssuranceScoreInput,
   type DerivedKey,
+  type SequenceEntry,
+  type SequencePriorState,
+  type SequenceCheckResult,
+  type SequenceRejectReason,
 } from "./workflow/index.js";
 export {
   CaptureDetector,
