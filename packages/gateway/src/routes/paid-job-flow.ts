@@ -63,6 +63,10 @@ import {
   type StoredSignature,
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
+import {
+  sessionRevocationStore,
+  type SessionRevocationRecord,
+} from "../services/session-revocation-store.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import type {
   OperatorPolicy,
@@ -1092,6 +1096,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       let seam2DeviceBundle: SettlementEvidenceSlot | null =
         null;
       let seam2RegisteredSigner: unknown = null;
+      let seam2Revocations: SessionRevocationRecord[] = [];
+      let seam2EffectiveEvidenceTime: number | undefined;
       if (seam2GateOpen) {
         // Extra lookups only when the gate is open — the closed path is unchanged.
         const priorBundles = repos.evidence.findByJob(jobId);
@@ -1111,6 +1117,14 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         }
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
+        // §8.5-2: supply revocation state + a PROVISIONAL effectiveEvidenceTime so the
+        // settlement verify path enforces revocation, keyed to evidence time (§7.3-4).
+        // effectiveEvidenceTime = the submission instant (`now`, an ISO string here) in
+        // Unix SECONDS — the same unit as verifySessionSignedEvent's
+        // Math.floor(Date.now()/1000) clock. This is PROVISIONAL: §8.5 step 4 supplies
+        // the authoritative validity time. No policy number is hardcoded.
+        seam2Revocations = sessionRevocationStore.list();
+        seam2EffectiveEvidenceTime = Math.floor(new Date(now).getTime() / 1000);
       }
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundle: seam2DeviceBundle,
@@ -1124,6 +1138,13 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           assuranceTier: jobAssuranceTier,
         },
         verifyEd25519: naclEd25519Verify,
+        // §8.5-2: revocation enforcement keyed to effectiveEvidenceTime. Both are
+        // empty/undefined on the CLOSED path (populated only inside the gate-open
+        // block above), so the default money path is byte-identical to before.
+        ...(seam2Revocations.length > 0 ? { revocations: seam2Revocations } : {}),
+        ...(seam2EffectiveEvidenceTime !== undefined
+          ? { effectiveEvidenceTime: seam2EffectiveEvidenceTime }
+          : {}),
         gateOpen: seam2GateOpen,
       });
 

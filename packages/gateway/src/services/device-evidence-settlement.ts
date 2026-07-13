@@ -43,6 +43,7 @@ import {
   type SessionSignedEvent,
 } from "@pcc/spec";
 import { SessionKeyService } from "@pcc/verifier";
+import type { SessionRevocationRecord } from "./session-revocation-store.js";
 
 // ── The signature shape stored on / carried by an evidence bundle ────────────
 
@@ -276,6 +277,20 @@ export interface DeviceEvidenceVerifyInput {
   contractId?: string;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
+  /**
+   * Session-key revocations (Unix SECONDS), from the shared revocation store
+   * (§8.5-2). Consulted ONLY on the session-key branch. A revocation disqualifies
+   * the signing session iff it took effect BEFORE `effectiveEvidenceTime` (strict
+   * `<`, §7.3-4). Absent/empty → no revocation disqualifies (unchanged behavior).
+   */
+  revocations?: SessionRevocationRecord[];
+  /**
+   * The evidence-time (Unix SECONDS) revocation is judged against (§7.3-4:
+   * "validity evaluated at effectiveEvidenceTime"). PROVISIONAL — the caller
+   * supplies submission time until §8.5 step 4 supplies the authoritative value.
+   * Defaults to now (Unix seconds) when omitted.
+   */
+  effectiveEvidenceTime?: number;
 }
 
 export interface DeviceEvidenceVerifyResult {
@@ -339,9 +354,31 @@ export async function verifyDeviceSignedEvidence(
           ...(auth.derivationPath ? { derivationPath: auth.derivationPath } : {}),
         },
       };
+      // §7.3-4 / §8.5-2 — revocation keyed to effectiveEvidenceTime. A session-key
+      // revocation disqualifies this evidence iff the key was revoked BEFORE the
+      // effective evidence time (strict `<`): "revokedAt < effectiveEvidenceTime →
+      // invalid; else prior evidence stands" (§7.3-4); "not revoked ... before its
+      // effectiveEvidenceTime" (§8.4-A step 6). A revocation AT-or-AFTER the evidence
+      // time does not disqualify — prior evidence stands. Pre-filtering here (rather
+      // than relying on the verifier's clock) is what makes check-5 time-aware.
+      // effectiveEvidenceTime is PROVISIONAL (submission time) until §8.5 step 4;
+      // defaults to now (Unix seconds) when the caller omits it.
+      // SCOPE: only the revocation set is keyed to evidence time — re-keying the
+      // EXPIRY check to evidence time is §8.5 step 4's job (out of scope), so
+      // `currentTimestamp` is intentionally NOT passed to verifySessionSignedEvent.
+      const evidenceTime = input.effectiveEvidenceTime ?? Math.floor(Date.now() / 1000);
+      const revokedSessionIds =
+        input.revocations && input.revocations.length > 0
+          ? new Set(
+              input.revocations
+                .filter((r) => r.revokedAt < evidenceTime)
+                .map((r) => r.sessionId),
+            )
+          : undefined;
       const result = new SessionKeyService().verifySessionSignedEvent({
         event,
         action: "evidence_submit",
+        ...(revokedSessionIds ? { revokedSessionIds } : {}),
       });
       if (!result.valid) return { ok: false, reason: result.failures[0] ?? "delegation-invalid" };
       return { ok: true, signer };
@@ -419,6 +456,16 @@ export interface SettlementEvidenceInput {
   requestedTier: number;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
+  /**
+   * Session-key revocations (Unix SECONDS) from the shared store (§8.5-2), passed
+   * through to `verifyDeviceSignedEvidence`. Only affects the session-key branch.
+   */
+  revocations?: SessionRevocationRecord[];
+  /**
+   * Evidence-time (Unix SECONDS) revocation is judged against (§7.3-4). PROVISIONAL
+   * (submission time) until §8.5 step 4. Passed through to verifyDeviceSignedEvidence.
+   */
+  effectiveEvidenceTime?: number;
   /** Gate override (default `deviceEvidenceSettlementEnabled(env)`). */
   gateOpen?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -479,6 +526,11 @@ export async function resolveSettlementEvidence(
       : {}),
     ...(input.deviceBundle.contractId ? { contractId: input.deviceBundle.contractId } : {}),
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+    // §8.5-2: revocation state + evidence-time, consulted on the session-key branch.
+    ...(input.revocations ? { revocations: input.revocations } : {}),
+    ...(input.effectiveEvidenceTime !== undefined
+      ? { effectiveEvidenceTime: input.effectiveEvidenceTime }
+      : {}),
   });
   if (!verified.ok) {
     return holdWhenEvidenceInsufficient
