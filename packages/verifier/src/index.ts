@@ -114,6 +114,7 @@ export {
   HARDENED,
   checkSequence,
   genesisSequenceState,
+  merkleRoot,
   type VerificationFinding,
   type DriftAlert,
   type AssuranceScoreInput,

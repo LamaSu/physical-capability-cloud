@@ -20,6 +20,7 @@ export {
   type SequenceCheckResult,
   type SequenceRejectReason,
 } from "./sequence-acceptance.js";
+export { merkleRoot } from "./merkle-root.js";
 export {
   masterKeyFromSeed,
   deriveChild,
