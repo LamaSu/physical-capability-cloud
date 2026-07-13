@@ -30,6 +30,18 @@ import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqli
  * the write path into the live checkpoint-submission / settlement flow is
  * step 6 — no route reads or writes this table yet.
  *
+ * CHECK CONSTRAINTS (authoritative in migrate.ts, NOT here): the raw-SQL CREATE
+ * TABLE in packages/db/src/migrate.ts adds three §8.3 invariant CHECKs that
+ * drizzle-orm cannot cleanly express on a table (no first-class table-CHECK API),
+ * so the migration SQL is the source of truth — this schema is the drizzle
+ * mirror for typed queries only. The enforced rules are:
+ *   - seq >= 1                      (1-based; genesis is seq 1)
+ *   - session_state_version = seq   (they coincide under the strict chain — see
+ *                                    the sessionStateVersion column note below)
+ *   - accepted_at > 0               (a positive Unix-seconds point)
+ * Body/column divergence is caught at READ time by the repository's
+ * assertRowIntegrity (a signed-artifact drift fails closed), not by a DB CHECK.
+ *
  * Mirrors invocation-receipts.ts (column-duplication-for-indexes; body for
  * round-trip; no logic here — the receipt-store owns canonicalization/signing).
  */

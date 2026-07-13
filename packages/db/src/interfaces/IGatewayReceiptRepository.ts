@@ -23,8 +23,20 @@ export interface IGatewayReceiptRepository {
   findById(receiptId: string): GatewayReceiptRow | undefined;
   /** A job's receipts, oldest-first by createdAt. */
   findByJob(jobId: string, limit?: number): GatewayReceiptRow[];
-  /** A session's accepted chain, in seq order (ascending). */
+  /**
+   * A session's accepted chain, in seq order (ascending), CAPPED (default 100 /
+   * max 1000). Fine for UI listing; NOT safe for protocol chain reconstruction —
+   * a chain longer than the cap silently truncates. Use findAllBySession for any
+   * evidenceRoot / recovery path.
+   */
   findBySession(sessionId: string, limit?: number): GatewayReceiptRow[];
+  /**
+   * The FULL session chain, seq-ascending, with NO limit. evidenceRoot /
+   * chain-reconstruction / recovery paths MUST use this — never the capped
+   * findBySession, whose truncation would compute a forked evidence root over a
+   * partial chain. The full-row integrity assert applies here too.
+   */
+  findAllBySession(sessionId: string): GatewayReceiptRow[];
   /**
    * Receipt(s) attesting a checkpoint hash. Returns an array: a hash is unique
    * WITHIN a session's chain (never accepted twice), but the mechanism does not

@@ -1632,20 +1632,34 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // anchor of §8.3 (receipt ⟺ committed acceptance, serialized per session).
   // NEW table → CREATE TABLE IF NOT EXISTS (idempotent). Additive: no route
   // reads/writes it until step 6 wires the checkpoint-submission path.
+  //
+  // CHECK constraints (step-5 hardening) express the §8.3 receipt invariants the
+  // DB can enforce structurally: seq is 1-based (genesis is seq 1);
+  // session_state_version === seq (they coincide under the strict
+  // seq===lastAcceptedSeq+1 chain from genesis — see gateway-receipt-store.ts);
+  // accepted_at (= effectiveEvidenceTime, Unix seconds) is a positive point.
+  // CAVEAT: `CREATE TABLE IF NOT EXISTS` applies a CHECK only when it CREATES a
+  // FRESH table — it does NOT retro-alter an already-created table (SQLite has no
+  // ALTER TABLE ADD CONSTRAINT). That is acceptable here: step 5 is route-inert,
+  // so there are no production gateway_receipts rows yet, and every test DB is a
+  // fresh `:memory:`. A retro-migration (table rebuild: create-new → copy → drop
+  // → rename) for a pre-existing DEPLOYED table is a separate concern, out of
+  // scope for this additive step.
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS gateway_receipts (
       receipt_id TEXT PRIMARY KEY,
       gateway_key_id TEXT NOT NULL,
       job_id TEXT NOT NULL,
       session_id TEXT NOT NULL,
-      seq INTEGER NOT NULL,
+      seq INTEGER NOT NULL CHECK (seq >= 1),
       checkpoint_hash TEXT NOT NULL,
       previous_accepted_hash TEXT,
       session_state_version INTEGER NOT NULL,
-      accepted_at INTEGER NOT NULL,
+      accepted_at INTEGER NOT NULL CHECK (accepted_at > 0),
       signature TEXT NOT NULL,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      CHECK (session_state_version = seq)
     );
     CREATE INDEX IF NOT EXISTS gateway_receipts_job_idx ON gateway_receipts(job_id);
     CREATE INDEX IF NOT EXISTS gateway_receipts_session_idx ON gateway_receipts(session_id);
