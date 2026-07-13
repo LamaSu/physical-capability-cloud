@@ -35,6 +35,8 @@ import {
   isValidCid,
   detectMediaType,
 } from "../services/cid-blob-storage.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import type { JobOffer } from "../services/job-offers-store.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,6 +117,45 @@ function callerIdentity(req: FastifyRequest): {
     "anonymous";
   const agentId = (req as any).apiKeyId ?? null;
   return { operatorId: operatorId || "anonymous", agentId };
+}
+
+// ---------------------------------------------------------------------------
+// Blob response hardening (C-05 containment)
+// ---------------------------------------------------------------------------
+//
+// The uploader controls BOTH the bytes AND the declared media_type. Echoing
+// that media_type on an inline, same-origin GET is a stored-XSS vector: upload
+// text/html or image/svg+xml carrying <script>, serve it inline from the
+// gateway origin, and it executes with the victim's session. Containment:
+// serve every user-uploaded blob as a forced download — a non-renderable
+// Content-Type (application/octet-stream) plus Content-Disposition: attachment
+// so the browser downloads instead of rendering. The true media type stays
+// available on GET /api/storage/:cid/meta for consumers that need it.
+// X-Content-Type-Options: nosniff is set globally in security-hardening.ts; we
+// set it here too so this route is safe independent of hook ordering.
+//
+// TODO(audit P0 follow-up, Wave 3): serve blobs from a separate cookieless
+// origin + signed URLs, so a hostile blob can never reach app-origin cookies
+// even if a client ignores the attachment disposition.
+function applyDownloadHeaders(reply: FastifyReply, row: StorageBlobRow): void {
+  // cid is already validated by isValidCid before we reach here; strip to a
+  // conservative charset anyway so nothing can inject into the header value.
+  const safeName = row.cid.replace(/[^A-Za-z0-9._-]/g, "");
+  reply
+    .header("Content-Type", "application/octet-stream")
+    .header("Content-Disposition", `attachment; filename="${safeName}.bin"`)
+    .header("X-Content-Type-Options", "nosniff");
+}
+
+// Server-side offer lookup for public-read gating. Returns undefined if the
+// offers store isn't initialised (e.g. isolated unit tests) so callers fail
+// CLOSED — deny public read and fall back to auth — rather than open.
+function safeGetOffer(offerId: string): JobOffer | undefined {
+  try {
+    return getJobOffersStore().get(offerId);
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,18 +289,26 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Shared helper to decide whether a GET can proceed without auth.
-  function canPublicRead(
-    row: StorageBlobRow,
-    req: FastifyRequest,
-  ): boolean {
+  // Decide whether a GET can proceed WITHOUT auth. Public status is now
+  // SERVER-DERIVED, not caller-supplied (C-05). The upload-time public_read
+  // flag only expresses uploader intent — necessary, never sufficient. The
+  // authoritative gate is the linked offer's live state, looked up server-side:
+  //   1. uploader opted in (public_read = 1), and
+  //   2. related_offer_id resolves to a REAL offer — kills the forged/dangling
+  //      links a caller could invent at upload time, and
+  //   3. the uploader OWNS that offer (offer.posterDid === uploaded_by) so
+  //      nobody can attach their blob to someone else's offer to force it
+  //      public, and
+  //   4. the offer is still publicly visible (not cancelled/expired).
+  // The caller-supplied ?public query flag is no longer consulted at all.
+  function canPublicRead(row: StorageBlobRow): boolean {
     if (!row.public_read) return false;
     if (!row.related_offer_id) return false;
-    // For now the public-read flag plus an offer linkage is sufficient.
-    // A follow-up will verify the offer is actually publicly visible — for
-    // v0.1 the operator marks at upload time and that is the gate.
-    if (req.query && (req.query as any).public === "true") return true;
-    return false;
+    const offer = safeGetOffer(row.related_offer_id);
+    if (!offer) return false;
+    if (!row.uploaded_by || offer.posterDid !== row.uploaded_by) return false;
+    if (offer.status === "cancelled" || offer.status === "expired") return false;
+    return true;
   }
 
   // GET /api/storage/:cid — retrieve bytes
@@ -284,7 +333,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // Auth gating
-      const publicAllowed = canPublicRead(row, req);
+      const publicAllowed = canPublicRead(row);
       if (!publicAllowed) {
         // Run requireAuth manually since route doesn't preHandler — we need
         // to permit unauthenticated public reads above.
@@ -311,9 +360,9 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
             req.log.error({ err }, "[storage] backend getRange failed");
             return reply.code(500).send({ error: "storage_backend_error" });
           }
+          applyDownloadHeaders(reply, row);
           reply
             .code(206)
-            .header("Content-Type", row.media_type)
             .header("Content-Length", String(bytes.length))
             .header("Content-Range", `bytes ${start}-${end}/${row.size_bytes}`)
             .header("Accept-Ranges", "bytes");
@@ -328,8 +377,8 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(404).send({ error: "not_found_in_backend" });
       }
 
+      applyDownloadHeaders(reply, row);
       reply
-        .header("Content-Type", row.media_type)
         .header("Content-Length", String(bytes.length))
         .header("Accept-Ranges", "bytes");
       return reply.send(Buffer.from(bytes));
@@ -348,7 +397,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
       if (!row) return reply.code(404).send({ error: "not_found" });
       if (row.deleted_at) return reply.code(410).send({ error: "gone" });
 
-      const publicAllowed = canPublicRead(row, req);
+      const publicAllowed = canPublicRead(row);
       if (!publicAllowed) {
         await requireAuth(req, reply);
         if (reply.sent) return;

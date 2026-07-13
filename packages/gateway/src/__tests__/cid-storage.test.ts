@@ -34,6 +34,11 @@ import {
   LocalBlobBackend,
   computeCid,
 } from "../services/cid-blob-storage.js";
+import {
+  initJobOffersStore,
+  getJobOffersStore,
+  _resetJobOffersStoreForTests,
+} from "../services/job-offers-store.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
 const mockSession = resolveSession as ReturnType<typeof vi.fn>;
@@ -228,7 +233,13 @@ describe("storage — upload", () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe("storage — retrieve", () => {
-  it("GET returns the exact bytes that were uploaded", async () => {
+  it("GET returns the exact bytes as a forced download (C-05 containment)", async () => {
+    // RULE 18 rewrite: this test previously asserted the served Content-Type
+    // echoed the uploader-declared type inline (`text/plain`). That IS the
+    // stored-XSS vector C-05 — an uploader who declares text/html or
+    // image/svg+xml would get it rendered in the app origin. Correct behavior
+    // is a non-renderable forced download, so we now assert octet-stream +
+    // attachment while still requiring the bytes to round-trip exactly.
     const bytes = Buffer.from("retrieve-me");
     const up = await app.inject({
       method: "POST",
@@ -243,7 +254,9 @@ describe("storage — retrieve", () => {
       url: `/api/storage/${cid}`,
     });
     expect(get.statusCode).toBe(200);
-    expect(get.headers["content-type"]).toBe("text/plain");
+    expect(get.headers["content-type"]).toBe("application/octet-stream");
+    expect(String(get.headers["content-disposition"])).toMatch(/^attachment/);
+    expect(get.headers["x-content-type-options"]).toBe("nosniff");
     expect(get.rawPayload.toString("utf8")).toBe("retrieve-me");
   });
 
@@ -381,5 +394,148 @@ describe("storage — delete", () => {
       url: `/api/storage/${cid}`,
     });
     expect(get.statusCode).toBe(200);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// C-05 — stored-XSS containment + server-derived public-read gating
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("storage — C-05 containment", () => {
+  beforeAll(() => {
+    // Public-read gating now consults the job-offers store server-side.
+    initJobOffersStore({});
+  });
+  afterAll(() => {
+    _resetJobOffersStoreForTests();
+  });
+
+  it("serves an uploaded HTML blob as a non-renderable attachment, never inline text/html", async () => {
+    mockSession.mockReturnValue({ address: OWNER });
+    const html = Buffer.from("<script>alert(document.domain)</script>");
+    const up = await app.inject({
+      method: "POST",
+      url: "/api/storage",
+      headers: { "content-type": "text/html" },
+      payload: html,
+    });
+    expect(up.statusCode).toBe(201);
+    const { cid } = up.json();
+
+    const get = await app.inject({ method: "GET", url: `/api/storage/${cid}` });
+    expect(get.statusCode).toBe(200);
+    // The uploader-declared text/html type must never be echoed back — that
+    // is exactly what let the script execute in the app origin.
+    expect(get.headers["content-type"]).toBe("application/octet-stream");
+    expect(String(get.headers["content-disposition"])).toMatch(/^attachment/);
+    // Bytes still round-trip — containment neutralizes rendering, not delivery.
+    expect(get.rawPayload.toString("utf8")).toBe(html.toString("utf8"));
+  });
+
+  it("caller-supplied ?public flag alone does NOT grant unauthenticated read", async () => {
+    // Marked public but linked to an offer id the server cannot resolve.
+    mockSession.mockReturnValue({ address: OWNER });
+    const up = await app.inject({
+      method: "POST",
+      url: "/api/storage?public=true&related_offer_id=offer-does-not-exist",
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("not-really-public"),
+    });
+    expect(up.statusCode).toBe(201);
+    const { cid } = up.json();
+
+    // No session; the caller flag must not bypass auth without a real offer.
+    mockSession.mockReturnValue(null);
+    const get = await app.inject({
+      method: "GET",
+      url: `/api/storage/${cid}?public=true`,
+    });
+    expect(get.statusCode).toBe(401);
+  });
+
+  it("a blob bound to an owned, open offer is publicly readable (server-derived)", async () => {
+    // A real, open offer posted by OWNER.
+    const store = getJobOffersStore();
+    const created = await store.create({
+      capabilityType: "creative.sample",
+      requirements: {},
+      pricing: { amount: 1, currency: "USD", model: "fixed" },
+      posterDid: OWNER,
+    });
+    if (!created.ok) throw new Error("offer setup failed");
+    const offerId = created.offer.id;
+
+    // OWNER uploads a public blob linked to their own offer.
+    mockSession.mockReturnValue({ address: OWNER });
+    const up = await app.inject({
+      method: "POST",
+      url: `/api/storage?public=true&related_offer_id=${offerId}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("portfolio-sample"),
+    });
+    expect(up.statusCode).toBe(201);
+    const { cid } = up.json();
+
+    // Unauthenticated read succeeds because the server verified the offer.
+    mockSession.mockReturnValue(null);
+    const get = await app.inject({ method: "GET", url: `/api/storage/${cid}` });
+    expect(get.statusCode).toBe(200);
+    expect(get.headers["content-type"]).toBe("application/octet-stream");
+    expect(String(get.headers["content-disposition"])).toMatch(/^attachment/);
+    expect(get.rawPayload.toString("utf8")).toBe("portfolio-sample");
+  });
+
+  it("public read is denied when the uploader does NOT own the linked offer", async () => {
+    // Offer posted by OTHER; OWNER cannot make their blob public via it.
+    const store = getJobOffersStore();
+    const created = await store.create({
+      capabilityType: "creative.sample",
+      requirements: {},
+      pricing: { amount: 1, currency: "USD", model: "fixed" },
+      posterDid: OTHER,
+    });
+    if (!created.ok) throw new Error("offer setup failed");
+    const offerId = created.offer.id;
+
+    mockSession.mockReturnValue({ address: OWNER });
+    const up = await app.inject({
+      method: "POST",
+      url: `/api/storage?public=true&related_offer_id=${offerId}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("hijack-attempt"),
+    });
+    const { cid } = up.json();
+
+    mockSession.mockReturnValue(null);
+    const get = await app.inject({ method: "GET", url: `/api/storage/${cid}` });
+    expect(get.statusCode).toBe(401);
+  });
+
+  it("public read is denied once the linked offer is cancelled (visibility)", async () => {
+    const store = getJobOffersStore();
+    const created = await store.create({
+      capabilityType: "creative.sample",
+      requirements: {},
+      pricing: { amount: 1, currency: "USD", model: "fixed" },
+      posterDid: OWNER,
+    });
+    if (!created.ok) throw new Error("offer setup failed");
+    const offerId = created.offer.id;
+
+    mockSession.mockReturnValue({ address: OWNER });
+    const up = await app.inject({
+      method: "POST",
+      url: `/api/storage?public=true&related_offer_id=${offerId}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("was-public"),
+    });
+    const { cid } = up.json();
+
+    // Poster cancels the offer → it is no longer publicly visible.
+    store.cancel(offerId, OWNER);
+
+    mockSession.mockReturnValue(null);
+    const get = await app.inject({ method: "GET", url: `/api/storage/${cid}` });
+    expect(get.statusCode).toBe(401);
   });
 });

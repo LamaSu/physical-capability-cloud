@@ -214,20 +214,40 @@ export async function securityHeaders(app: FastifyInstance) {
       );
     }
     // Content Security Policy
-    reply.header(
-      "Content-Security-Policy",
-      [
-        "default-src 'self'",
-        "script-src 'self' 'unsafe-inline'",  // unsafe-inline needed for Vite/React in dev
-        "style-src 'self' 'unsafe-inline'",   // inline styles used by dashboard
-        "img-src 'self' data: https:",
-        "font-src 'self' https://fonts.gstatic.com",
-        "connect-src 'self' https://capability.network https://*.posthog.com https://*.sentry.io wss://capability.network",
-        "frame-ancestors 'none'",
-        "base-uri 'self'",
-        "form-action 'self'",
-      ].join("; "),
-    );
+    //
+    // User-controlled downloads (Content-Disposition: attachment — e.g. the
+    // CID blob store in routes/storage.ts) must NOT inherit the app CSP that
+    // permits 'unsafe-inline' script. A stored blob is same-origin, so an
+    // inline-script CSP would let an uploaded HTML/SVG execute if a client
+    // ignored the attachment disposition (C-05 defense-in-depth). Lock those
+    // responses to a no-script policy instead. Keyed off the disposition
+    // header the download route already sets, so any future download route
+    // inherits the hardening automatically.
+    const disposition = reply.getHeader("content-disposition");
+    const isUserDownload =
+      typeof disposition === "string" &&
+      disposition.toLowerCase().startsWith("attachment");
+    if (isUserDownload) {
+      reply.header(
+        "Content-Security-Policy",
+        "default-src 'none'; sandbox; frame-ancestors 'none'; base-uri 'none'",
+      );
+    } else {
+      reply.header(
+        "Content-Security-Policy",
+        [
+          "default-src 'self'",
+          "script-src 'self' 'unsafe-inline'",  // unsafe-inline needed for Vite/React in dev
+          "style-src 'self' 'unsafe-inline'",   // inline styles used by dashboard
+          "img-src 'self' data: https:",
+          "font-src 'self' https://fonts.gstatic.com",
+          "connect-src 'self' https://capability.network https://*.posthog.com https://*.sentry.io wss://capability.network",
+          "frame-ancestors 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+        ].join("; "),
+      );
+    }
   });
 }
 
