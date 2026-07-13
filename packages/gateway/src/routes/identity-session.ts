@@ -46,6 +46,19 @@ const sessionKeyService = new SessionKeyService();
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 export async function identitySessionRoutes(app: FastifyInstance) {
+  // SECURITY STARTUP GUARD (separate pre-existing issue — NOT part of the v3 evidence
+  // slice; greenlit by audit round-2). The POST /api/identity/session handler below MOCKS
+  // the principal by deriving its Ed25519 keypair DETERMINISTICALLY from principalAgentId,
+  // so anyone who knows an agent id can mint that agent's session keys. That is acceptable
+  // only for dev/test. Fail closed in production: the real principal key must come from the
+  // agent's identity wallet before this route may ship. Throwing here refuses to register
+  // the mock route in a production boot rather than silently exposing forgeable auth.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "identity-session routes use a MOCK deterministic principal key and must not be " +
+        "registered in production (NODE_ENV=production). Wire real principal-key custody first.",
+    );
+  }
   /**
    * POST /api/identity/session
    *
