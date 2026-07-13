@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { CapabilityDTO } from "../facades/index.js";
 import { getCapabilityFacade } from "../facades/index.js";
+import { loadAgentPackage } from "../mcp/http-mcp-server.js";
 
 const PUBLIC_BASE_URL = "https://capability.network";
 const NLWEB_VERSION = "0.55";
@@ -185,7 +186,7 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         tags: ["well-known"],
         summary: "MCP server discovery",
         description:
-          "Describes PCC's repository-hosted stdio MCP server. PCC does not expose an HTTP MCP transport.",
+          "Describes PCC's public Streamable HTTP MCP server and repository-hosted stdio transport.",
       },
     },
     async (_request, reply) => {
@@ -199,7 +200,8 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         name: "Physical Capability Cloud MCP Server",
         description:
           "MCP tools for discovering, negotiating, and orchestrating real-world physical capabilities through PCC.",
-        transport: "stdio",
+        transport: "streamable-http",
+        url: `${PUBLIC_BASE_URL}/mcp`,
         serverCard: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
         serverCardUrl: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
         configuration: {
@@ -209,6 +211,10 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         },
         transports: [
           {
+            type: "streamable-http",
+            url: `${PUBLIC_BASE_URL}/mcp`,
+          },
+          {
             type: "stdio",
             description:
               "Run from a cloned and built physical-capability-cloud repository.",
@@ -216,6 +222,75 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
           },
         ],
         documentation: `${PUBLIC_BASE_URL}/docs`,
+      });
+    },
+  );
+
+  app.get(
+    "/.well-known/mcp/server-card.json",
+    {
+      schema: {
+        tags: ["well-known"],
+        summary: "MCP server card",
+        description:
+          "Generates PCC's MCP server card from the current agent tool package.",
+      },
+    },
+    async (_request, reply) => {
+      const agentPackage = await loadAgentPackage();
+      const stdioConfiguration = {
+        command: "node",
+        args: ["packages/mcp-server/dist/index.js"],
+        env: { PCC_URL: PUBLIC_BASE_URL },
+      };
+
+      return sendPublicJson(reply, {
+        name: `${agentPackage.name} MCP Server`,
+        description: agentPackage.description,
+        version: agentPackage.version,
+        serverUrl: `${PUBLIC_BASE_URL}/mcp`,
+        logo: `${PUBLIC_BASE_URL}/pcc-icon.svg`,
+        transport: {
+          type: "streamable-http",
+          url: `${PUBLIC_BASE_URL}/mcp`,
+        },
+        transports: [
+          {
+            type: "streamable-http",
+            url: `${PUBLIC_BASE_URL}/mcp`,
+          },
+          {
+            type: "stdio",
+            ...stdioConfiguration,
+          },
+        ],
+        tools: agentPackage.tools.map(({ name, description }) => ({
+          name,
+          description,
+        })),
+      });
+    },
+  );
+
+  app.get(
+    "/.well-known/agent-skills/index.json",
+    {
+      schema: {
+        tags: ["well-known"],
+        summary: "Agent Skills discovery index",
+        description:
+          "Generates the Agent Skills discovery index from the current agent tool package.",
+      },
+    },
+    async (_request, reply) => {
+      const agentPackage = await loadAgentPackage();
+
+      return sendPublicJson(reply, {
+        $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+        skills: agentPackage.tools.map(({ name, description }) => ({
+          name,
+          description,
+        })),
       });
     },
   );

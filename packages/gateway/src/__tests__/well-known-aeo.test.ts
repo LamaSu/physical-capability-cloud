@@ -37,7 +37,7 @@ describe("public AEO discovery routes", () => {
     expect(response.body).not.toContain("graphql");
   });
 
-  it("advertises the repository MCP server as stdio only", async () => {
+  it("advertises the Streamable HTTP MCP server and retains stdio", async () => {
     const response = await app.inject({
       method: "GET",
       url: "/.well-known/mcp",
@@ -45,13 +45,69 @@ describe("public AEO discovery routes", () => {
     const body = response.json();
 
     expect(response.statusCode).toBe(200);
-    expect(body.transport).toBe("stdio");
-    expect(body.transports).toHaveLength(1);
-    expect(body.transports[0].type).toBe("stdio");
+    expect(body.transport).toBe("streamable-http");
+    expect(body.url).toBe("https://capability.network/mcp");
+    expect(body.transports).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "streamable-http",
+          url: "https://capability.network/mcp",
+        }),
+        expect.objectContaining({ type: "stdio" }),
+      ]),
+    );
     expect(body.serverCardUrl).toBe(
       "https://capability.network/.well-known/mcp/server-card.json",
     );
-    expect(response.body).not.toContain("streamable");
+  });
+
+  it("generates the MCP server card from the live agent package", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/mcp/server-card.json",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(body.name).toBe("Physical Capability Cloud MCP Server");
+    expect(body.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(body.serverUrl).toBe("https://capability.network/mcp");
+    expect(body.transports).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "streamable-http",
+          url: "https://capability.network/mcp",
+        }),
+        expect.objectContaining({ type: "stdio" }),
+      ]),
+    );
+    expect(body.tools.length).toBeGreaterThanOrEqual(50);
+    expect(body.tools[0]).toEqual(
+      expect.objectContaining({
+        name: expect.any(String),
+        description: expect.any(String),
+      }),
+    );
+  });
+
+  it("generates the Agent Skills index from the live agent package", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/agent-skills/index.json",
+    });
+    const body = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(body.$schema).toBe(
+      "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+    );
+    expect(body.skills.length).toBeGreaterThanOrEqual(50);
+    expect(body.skills[0]).toEqual(
+      expect.objectContaining({
+        name: expect.any(String),
+        description: expect.any(String),
+      }),
+    );
   });
 
   it("backs NLWeb /ask with the real capability search facade", async () => {
