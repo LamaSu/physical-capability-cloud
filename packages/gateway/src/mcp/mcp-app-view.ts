@@ -32,9 +32,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
+import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { DashboardManifestSchema, containsApiKey } from "@pcc/spec";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { DashboardManifestSchema, containsApiKey, type DashboardManifest } from "@pcc/spec";
+import { getPublicArtifactForRender } from "../routes/artifacts.js";
 
 // ---------------------------------------------------------------------------
 // Constants — URIs, MIME, and the CSP shared by BOTH the MCP resource read
@@ -46,6 +48,49 @@ import { DashboardManifestSchema, containsApiKey } from "@pcc/spec";
 export const MCP_APP_DASHBOARD_URI = "ui://pcc/dashboard";
 export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 export const RENDER_DASHBOARD_TOOL_NAME = "render_pcc_dashboard";
+
+/** Resource TEMPLATE for a SAVED dashboard artifact, keyed by its slug. Distinct
+ * from the static MCP_APP_DASHBOARD_URI above (the transient host-handoff view for
+ * render_pcc_dashboard): this one renders a persisted on-ramp artifact. The SDK
+ * advertises it via `resources/templates/list` and matches a concrete
+ * `ui://pcc/dashboard/<slug>` read against it, handing the read callback `{slug}`. */
+export const MCP_APP_DASHBOARD_TEMPLATE_URI = "ui://pcc/dashboard/{slug}";
+
+/** Live gateway origin baked into a self-contained (host-iframe) view's manifest
+ * so the kit's live-data bindings resolve to the network instead of the opaque
+ * host origin. Mirrors http-mcp-server.ts's PCC_API_BASE_URL. */
+const MCP_APP_API_BASE_URL = "https://capability.network";
+
+/** The 5 On-Ramp dashboard tools (from agent-package.json) that carry a UI:
+ * save/get/fork/update return one artifact; search returns a list. Their MCP
+ * tool definitions get `_meta.ui.resourceUri` = the template, and their CallTool
+ * results get a resource_link to the concrete `ui://pcc/dashboard/<slug>`. */
+export const ON_RAMP_UI_TOOL_NAMES = [
+  "save_dashboard",
+  "get_dashboard",
+  "search_dashboards",
+  "fork_dashboard",
+  "update_dashboard",
+] as const;
+
+const ON_RAMP_UI_TOOL_SET: ReadonlySet<string> = new Set(ON_RAMP_UI_TOOL_NAMES);
+
+/** Whether a tool name is one of the On-Ramp dashboard UI tools. */
+export function isOnRampUiTool(name: string): boolean {
+  return ON_RAMP_UI_TOOL_SET.has(name);
+}
+
+/** The concrete `ui://` resource URI for one saved dashboard slug. Slugs are
+ * minted `[a-z0-9-]` (routes/artifacts.ts slugify), so no escaping is needed. */
+export function dashboardResourceUriForSlug(slug: string): string {
+  return `ui://pcc/dashboard/${slug}`;
+}
+
+/** The `_meta` block a UI-bearing tool carries on tools/list — points a host at
+ * the dashboard template so it knows the tool renders UI before ever calling it. */
+export function onRampToolUiMeta(): { ui: { resourceUri: string } } {
+  return { ui: { resourceUri: MCP_APP_DASHBOARD_TEMPLATE_URI } };
+}
 
 /** Anthropic MCP Apps view CSP. No `*` anywhere — every directive names the
  * specific origins the view is allowed to talk to / be framed by. */
@@ -118,15 +163,26 @@ function readDashboardManifestJsonSchema(): Record<string, unknown> {
 // `resources/read` handler and the plain HTTP mirror route.
 // ---------------------------------------------------------------------------
 
+/** pcc-ui.js source as a safe JS string literal for inline embedding.
+ * JSON.stringify escapes backslash/quote/control-chars/unicode; the extra
+ * replace guards the ONE thing it does not — a literal "</script" substring,
+ * which would otherwise prematurely terminate the embedding <script> element
+ * when the page's HTML is tokenized (pcc-ui.js contains no such substring
+ * today; this is defensive for future edits). Shared by both the host-handoff
+ * view and the self-contained per-slug view below. */
+function pccUiKitSourceLiteral(): string {
+  return JSON.stringify(readPccUiKitSource()).replace(/<\/script/gi, "<\\/script");
+}
+
+/** Escape a JSON string for safe placement inside a `<script type="application/json">`
+ * data block — only `<`/`>` need neutralizing (mirrors routes/artifacts.ts's
+ * inlineManifestJson). U+2028/U+2029 are harmless in a non-executable block. */
+function inlineJsonForScriptData(value: unknown): string {
+  return JSON.stringify(value).split("<").join("\\u003c").split(">").join("\\u003e");
+}
+
 function buildMcpAppDashboardHtml(): string {
-  const kitSource = readPccUiKitSource();
-  // JSON.stringify safely escapes backslash/quote/control-chars/unicode for
-  // embedding as a JS string literal; the extra replace guards the ONE thing
-  // it does not escape — a literal "</script" substring, which would
-  // otherwise prematurely terminate OUR <script> element when this page's
-  // HTML is tokenized (pcc-ui.js itself contains no such substring today;
-  // this is defensive for future edits to that file).
-  const kitSourceLiteral = JSON.stringify(kitSource).replace(/<\/script/gi, "<\\/script");
+  const kitSourceLiteral = pccUiKitSourceLiteral();
 
   return `<!doctype html>
 <html lang="en">
@@ -249,6 +305,184 @@ export function registerMcpAppResource(server: McpServer): void {
       ],
     }),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Per-slug SAVED-dashboard view — a self-contained MCP App document (manifest
+// pre-inlined + kit inlined, boots immediately, no host handoff) plus the
+// `ui://pcc/dashboard/{slug}` resource TEMPLATE that serves it. This is the
+// artifact-backed complement to the transient render_pcc_dashboard view above.
+// ---------------------------------------------------------------------------
+
+/** Minimal HTML-text escape for the `<title>` / not-found copy. */
+function escapeHtmlText(s: string): string {
+  return s.split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
+}
+
+/** A self-contained MCP App document for one already-resolved manifest: the
+ * manifest is inlined (kit reads it synchronously on mount) and the kit is
+ * injected via textContent so a literal "</script" in it can't break parsing.
+ * Unlike buildMcpAppDashboardHtml() this needs NO host handoff — it renders the
+ * moment the host loads it. The live gateway origin is baked into api_base so
+ * bindings resolve from the host iframe's opaque origin. */
+function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displayTitle: string): string {
+  const kitSourceLiteral = pccUiKitSourceLiteral();
+  const withApiBase: DashboardManifest =
+    manifest.api_base ? manifest : { ...manifest, api_base: MCP_APP_API_BASE_URL };
+  const manifestJson = inlineJsonForScriptData(withApiBase);
+  const title = escapeHtmlText(displayTitle);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta name="color-scheme" content="dark light">
+<title>${title} - PCC</title>
+</head>
+<body>
+<main id="pcc-root">
+  <p id="pcc-kit-status">Loading the PCC dashboard&hellip;</p>
+</main>
+<script type="application/json" id="pcc-manifest">${manifestJson}</script>
+<script>
+(function () {
+  'use strict';
+  // Self-contained: the manifest is already inlined above, so boot the kit
+  // immediately (no host handoff). textContent injection keeps a literal
+  // "</script" in the kit source from terminating this element.
+  var KIT_SOURCE = ${kitSourceLiteral};
+  var kit = document.createElement('script');
+  kit.textContent = KIT_SOURCE;
+  document.body.appendChild(kit);
+})();
+</script>
+</body>
+</html>`;
+}
+
+/** The MCP App document shown when a slug names no publicly-readable artifact
+ * (missing, retired, or private) — a valid resource read, never a thrown error,
+ * so the host renders a friendly page rather than a protocol failure. */
+function buildDashboardNotFoundHtml(slug: string): string {
+  const s = escapeHtmlText(slug);
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<title>Dashboard not found - PCC</title></head>
+<body><main id="pcc-root"><h1>Dashboard not found</h1>
+<p>No public dashboard exists at <code>${s}</code>, or it has been retired or is private.</p></main></body>
+</html>`;
+}
+
+/** Resolve a saved public/unlisted artifact by slug to its self-contained MCP
+ * App HTML (or the not-found page). Split out from the resource callback so it
+ * is unit-testable against a seeded store without the MCP transport. */
+export function renderSavedDashboardHtml(slug: string): string {
+  const artifact = getPublicArtifactForRender(slug);
+  if (!artifact) return buildDashboardNotFoundHtml(slug);
+  const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
+  return buildMcpAppDashboardHtmlForManifest(artifact.manifest, title);
+}
+
+/** Register the `ui://pcc/dashboard/{slug}` resource TEMPLATE. The SDK advertises
+ * it via resources/templates/list and routes a concrete `ui://pcc/dashboard/<slug>`
+ * read here with the resolved `{slug}`. `list` is undefined on purpose: the MCP
+ * server is an origin-locked proxy and does not enumerate the whole public
+ * artifact set on every resources/list — hosts reach a specific view through the
+ * resource_link carried on the on-ramp tool results. */
+export function registerMcpAppDashboardSlugResource(server: McpServer): void {
+  server.registerResource(
+    "pcc-dashboard-by-slug",
+    new ResourceTemplate(MCP_APP_DASHBOARD_TEMPLATE_URI, { list: undefined }),
+    {
+      title: "PCC saved dashboard (MCP App)",
+      description:
+        "Renders a SAVED On-Ramp dashboard artifact by slug as a live MCP App view (the " +
+        "shipped pcc-ui kit). The concrete ui://pcc/dashboard/<slug> is carried on the " +
+        "save_dashboard / get_dashboard / fork_dashboard / update_dashboard tool results.",
+      mimeType: MCP_APP_MIME_TYPE,
+    },
+    async (uri, variables) => {
+      const raw = variables.slug;
+      const slug = Array.isArray(raw) ? raw[0] : raw;
+      const html =
+        typeof slug === "string" && slug.length
+          ? renderSavedDashboardHtml(slug)
+          : buildDashboardNotFoundHtml(String(slug ?? ""));
+      return {
+        contents: [{ uri: uri.toString(), mimeType: MCP_APP_MIME_TYPE, text: html }],
+      };
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CallTool result enrichment for the 5 On-Ramp UI tools — adds an MCP-Apps
+// resource_link (and, for the single-artifact tools, `_meta.ui.resourceUri`)
+// to the SAME result IN ADDITION to the existing text content, so text-only
+// consumers are unaffected and MCP-Apps hosts gain a renderable view.
+// ---------------------------------------------------------------------------
+
+function asObject(payload: unknown): Record<string, unknown> | undefined {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : undefined;
+}
+
+function stringField(obj: Record<string, unknown> | undefined, key: string): string | undefined {
+  const v = obj?.[key];
+  return typeof v === "string" && v.length ? v : undefined;
+}
+
+function resourceLinkForSlug(slug: string, name?: string) {
+  return {
+    type: "resource_link" as const,
+    uri: dashboardResourceUriForSlug(slug),
+    name: `pcc-dashboard-${slug}`,
+    title: name ?? "PCC dashboard",
+    mimeType: MCP_APP_MIME_TYPE,
+    description: "Open this saved PCC dashboard as a live MCP App view.",
+  };
+}
+
+/**
+ * Enrich an On-Ramp tool result. `payload` is the parsed upstream JSON (an
+ * artifact for save/get/fork/update; `{ entries, ... }` for search). Returns a
+ * CallToolResult carrying the original text PLUS resource_link(s); the four
+ * single-artifact tools additionally set `_meta.ui.resourceUri` to the concrete
+ * saved-dashboard view. If no slug can be found the result is text-only.
+ */
+export function enrichOnRampToolResult(
+  toolName: string,
+  payload: unknown,
+  text: string,
+): CallToolResult {
+  const textItem = { type: "text" as const, text };
+
+  if (toolName === "search_dashboards") {
+    const entries = Array.isArray(asObject(payload)?.entries)
+      ? (asObject(payload)!.entries as unknown[])
+      : [];
+    const links = entries
+      .map((e) => {
+        const obj = asObject(e);
+        const slug = stringField(obj, "slug");
+        return slug ? resourceLinkForSlug(slug, stringField(obj, "name")) : undefined;
+      })
+      .filter((x): x is ReturnType<typeof resourceLinkForSlug> => x !== undefined);
+    return { content: [textItem, ...links] };
+  }
+
+  const obj = asObject(payload);
+  const slug = stringField(obj, "slug");
+  if (!slug) return { content: [textItem] };
+  return {
+    _meta: { ui: { resourceUri: dashboardResourceUriForSlug(slug) } },
+    content: [textItem, resourceLinkForSlug(slug, stringField(obj, "name"))],
+  };
 }
 
 // ---------------------------------------------------------------------------

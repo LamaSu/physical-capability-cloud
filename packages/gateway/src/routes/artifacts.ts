@@ -160,6 +160,21 @@ function getByIdOrSlug(idOrSlug: string): UiArtifact | undefined {
   return getById(idOrSlug) ?? getBySlug(idOrSlug);
 }
 
+/**
+ * Look up an artifact for a no-auth render surface (the MCP-Apps `ui://` resource
+ * read — see mcp/mcp-app-view.ts). Returns the artifact ONLY if it exists, is
+ * active, and is publicly readable (public|unlisted) — the same gate `/a/:slug`
+ * applies for an anonymous caller (`canRead(a, null)`). Private artifacts are
+ * never exposed here; a host embeds the returned view with no PCC credential.
+ * Reuses the store helpers above so a dashboard saved via POST /api/artifacts is
+ * the exact one the MCP resource renders (same process, same store).
+ */
+export function getPublicArtifactForRender(idOrSlug: string): UiArtifact | undefined {
+  const a = getByIdOrSlug(idOrSlug);
+  if (!a || a.status === "retired") return undefined;
+  return canRead(a, null) ? a : undefined;
+}
+
 function saveArtifact(a: UiArtifact): void {
   const cols = {
     slug: a.slug,

@@ -16,7 +16,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   buildRenderDashboardTool,
+  enrichOnRampToolResult,
   handleRenderDashboardTool,
+  isOnRampUiTool,
+  onRampToolUiMeta,
+  registerMcpAppDashboardSlugResource,
   registerMcpAppHttpRoute,
   registerMcpAppResource,
   RENDER_DASHBOARD_TOOL_NAME,
@@ -139,6 +143,11 @@ function toMcpTool(tool: AgentPackageTool): Tool {
       readOnlyHint: method === "GET",
       destructiveHint: method === "DELETE",
     },
+    // MCP Apps: the 5 On-Ramp dashboard tools render UI. Declaring
+    // `_meta.ui.resourceUri` = the ui://pcc/dashboard/{slug} template on the
+    // tools/list definition lets a host know the tool is UI-bearing before it
+    // is ever called; the concrete per-slug view is carried on the call result.
+    ...(isOnRampUiTool(tool.name) ? { _meta: onRampToolUiMeta() } : {}),
   };
 }
 
@@ -259,8 +268,15 @@ async function proxyToolCall(
       );
     }
 
+    // On-Ramp UI tools additionally carry an MCP-Apps resource_link (and, for
+    // the single-artifact tools, `_meta.ui.resourceUri`) to the saved-dashboard
+    // view — IN ADDITION to the text below, so text-only consumers are intact.
+    const text = resultText(payload);
+    if (isOnRampUiTool(tool.name)) {
+      return enrichOnRampToolResult(tool.name, payload, text);
+    }
     return {
-      content: [{ type: "text" as const, text: resultText(payload) }],
+      content: [{ type: "text" as const, text }],
     };
   } catch (error) {
     return errorResult(
@@ -332,6 +348,7 @@ function createMcpServer(pack: AgentPackage): McpServer {
   });
 
   registerMcpAppResource(server);
+  registerMcpAppDashboardSlugResource(server);
 
   return server;
 }
