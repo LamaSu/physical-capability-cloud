@@ -411,6 +411,12 @@ export interface SettlementEvidenceInput {
   registeredSigner: unknown;
   /** The gateway's own rebuilt anchor (today's behavior). */
   fallback: SettlementEvidenceSlot;
+  /** The purchased/contracted assurance tier for this job. Tier >= 1 REQUIRES real
+   *  device evidence: with the gate open, a missing bundle or a verify failure at
+   *  tier >= 1 HOLDS settlement (§8.5-1 / §7.3-3) rather than silently downgrading
+   *  onto the gateway placeholder. Tier 0 (self-attested) keeps the buyer-approved
+   *  gateway fallback, exactly as before. */
+  requestedTier: number;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
   /** Gate override (default `deviceEvidenceSettlementEnabled(env)`). */
@@ -419,26 +425,50 @@ export interface SettlementEvidenceInput {
 }
 
 export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
-  source: "device" | "gateway-fallback";
+  /** `"device"` = anchored on the device's own verified hash + signature.
+   *  `"gateway-fallback"` = anchored on the gateway placeholder (gate closed, or a
+   *  tier-0 buyer-approved fallback). `"hold"` = the purchased tier (>= 1) required
+   *  device evidence that did not verify; settlement HOLDS and does NOT anchor. */
+  source: "device" | "gateway-fallback" | "hold";
   reason?: string;
 }
 
 /**
- * Decide which evidence anchors settlement. When the gate is CLOSED (default)
- * this ALWAYS returns the gateway fallback — identical to today's behavior, so
- * the money path is unchanged. When the gate is OPEN and a device bundle verifies
- * against its registered signer, it anchors on the DEVICE's real hash +
- * signature. Fails closed to the fallback on any verify failure.
+ * Decide which evidence anchors settlement.
+ *
+ * When the gate is CLOSED (the default in every current env) this ALWAYS returns
+ * the gateway fallback — identical to today's behavior, so the live money path is
+ * byte-identical and tier-agnostic.
+ *
+ * When the gate is OPEN (SEAM-2 live):
+ *   - a device bundle that verifies against its registered signer anchors on the
+ *     DEVICE's real hash + signature (`source:"device"`);
+ *   - if the purchased tier is >= 1 and the required device evidence is MISSING or
+ *     FAILS to verify, settlement HOLDS (`source:"hold"`) — it is NOT silently
+ *     downgraded onto the gateway placeholder (§8.5-1, §7.3-3, §8.4-C). HOLD means
+ *     "do not anchor settlement on the gateway placeholder when the purchased tier
+ *     (>= 1) required real device evidence that did not verify": the money holds in
+ *     escrow — it does not move and it does not auto-refund. The caller surfaces the
+ *     hold; supplement / buyer-accept / Mode-C-D dispute are later, owner-gated steps;
+ *   - at tier 0 (self-attested) a missing/failed device bundle keeps the
+ *     buyer-approved gateway fallback (`source:"gateway-fallback"`), exactly as before.
  */
 export async function resolveSettlementEvidence(
   input: SettlementEvidenceInput,
 ): Promise<SettlementEvidenceDecision> {
   const gateOpen = input.gateOpen ?? deviceEvidenceSettlementEnabled(input.env);
   if (!gateOpen) {
+    // Gate CLOSED — the inert default. Unchanged, tier-agnostic: the live money
+    // path stays byte-identical to today regardless of the purchased tier.
     return { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
   }
+  // Gate OPEN. Tier >= 1 required real device evidence, so a missing bundle or a
+  // verify failure HOLDS (never a silent downgrade). Tier 0 keeps the fallback.
+  const holdWhenEvidenceInsufficient = input.requestedTier >= 1;
   if (!input.deviceBundle) {
-    return { ...input.fallback, source: "gateway-fallback", reason: "no-device-bundle" };
+    return holdWhenEvidenceInsufficient
+      ? { ...input.fallback, source: "hold", reason: "no-device-bundle" }
+      : { ...input.fallback, source: "gateway-fallback", reason: "no-device-bundle" };
   }
   const verified = await verifyDeviceSignedEvidence({
     signature: input.deviceBundle.kernelSignature,
@@ -451,7 +481,9 @@ export async function resolveSettlementEvidence(
     ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
   });
   if (!verified.ok) {
-    return { ...input.fallback, source: "gateway-fallback", reason: verified.reason ?? "verify-failed" };
+    return holdWhenEvidenceInsufficient
+      ? { ...input.fallback, source: "hold", reason: verified.reason ?? "verify-failed" }
+      : { ...input.fallback, source: "gateway-fallback", reason: verified.reason ?? "verify-failed" };
   }
   return {
     source: "device",
