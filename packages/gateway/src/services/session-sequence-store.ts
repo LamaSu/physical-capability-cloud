@@ -38,6 +38,7 @@ import {
   checkSequence,
   genesisSequenceState,
   type SequenceEntry,
+  type SequencePriorState,
   type SequenceRejectReason,
 } from "@pcc/verifier";
 
@@ -96,6 +97,20 @@ export class SessionSequenceStore {
   /** True iff at least one checkpoint has been accepted for this session. */
   hasSession(sessionId: string): boolean {
     return this.stateBySession.has(sessionId);
+  }
+
+  /**
+   * Peek a session's prior accepted-chain state (incl. `seen`) WITHOUT creating
+   * or mutating it — the READ half of the transactional-receipt critical section
+   * in `gateway-receipt-store.ts`. That path must call the pure `checkSequence`
+   * ITSELF (before persisting) and then advance via {@link accept} ONLY after
+   * the DB commit; it needs `seen`, which {@link snapshot} deliberately does not
+   * expose. Returns a FRESH genesis view for an unknown session and never stores
+   * it. Typed as the read-only {@link SequencePriorState} so callers cannot
+   * mutate the store's internal state through it.
+   */
+  priorState(sessionId: string): SequencePriorState {
+    return this.stateBySession.get(sessionId) ?? genesisSequenceState();
   }
 
   /**
