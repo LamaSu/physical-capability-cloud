@@ -12,6 +12,7 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
+import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
@@ -266,6 +267,11 @@ export async function createGateway(port = 3200) {
   const gatewayUrlForOpenApi =
     process.env.PCC_GATEWAY_URL ?? "https://capability.network";
   await app.register(fastifySwagger, {
+    // Stamps a stable, unique operationId onto every operation (derived from
+    // method + URL when a route doesn't declare one explicitly). Required for
+    // ChatGPT GPT Actions import and other OpenAPI-driven tooling that needs
+    // operationId — see openapi/operation-id.ts.
+    transform: createOperationIdTransform(),
     openapi: {
       info: {
         title: "Physical Capability Cloud Gateway",
