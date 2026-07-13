@@ -332,6 +332,19 @@
     {
       "name": "pcc_negotiate_cancel",
       "description": "Cancel a negotiation session before commit. Records a 'cancelled' transition and returns {cancelled:true, sessionId}. Rejected (409) once the session is committed — committed sessions are immutable."
+    },
+    {
+      "name": "render_pcc_dashboard",
+      "description": "Compose a live PCC dashboard for a physical-capability task — pass a DashboardManifest (windows + live data bindings + actions) and it renders as an interactive MCP App."
+    }
+  ],
+  "resources": [
+    {
+      "uri": "ui://pcc/dashboard",
+      "name": "pcc-dashboard",
+      "title": "PCC Dashboard (MCP App)",
+      "description": "Interactive MCP App view. Renders a DashboardManifest (from render_pcc_dashboard) as a live PCC dashboard using the On-Ramp pcc-ui kit. MIME text/html;profile=mcp-app.",
+      "mimeType": "text/html;profile=mcp-app"
     }
   ]
 }

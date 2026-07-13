@@ -100,5 +100,136 @@ describe("Streamable HTTP MCP server", () => {
           tool.annotations?.readOnlyHint === true,
       ),
     ).toBe(true);
+    expect(tools.some((tool: { name: string }) => tool.name === "render_pcc_dashboard")).toBe(
+      true,
+    );
+  });
+
+  it("exposes the ui://pcc/dashboard MCP App resource with the correct MIME + host markers", async () => {
+    const listed = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "resources/list",
+        params: {},
+      },
+    });
+    const resources = listed.json().result.resources;
+    expect(listed.statusCode).toBe(200);
+    expect(
+      resources.some((r: { uri: string }) => r.uri === "ui://pcc/dashboard"),
+    ).toBe(true);
+
+    const read = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "resources/read",
+        params: { uri: "ui://pcc/dashboard" },
+      },
+    });
+    const contents = read.json().result.contents;
+    expect(read.statusCode).toBe(200);
+    expect(contents).toHaveLength(1);
+    expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
+    expect(contents[0].text).toContain("__PCC_HOST__");
+    expect(contents[0].text).toContain('<meta name="color-scheme"');
+  });
+
+  it("render_pcc_dashboard renders a valid manifest and rejects one containing an API key", async () => {
+    const goodManifest = {
+      csd: "pcc://artifacts/dashboard/v1",
+      title: "Watch my print job",
+      sections: [{ windows: [{ kind: "note", text: "Your print is in progress." }] }],
+    };
+
+    const good = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard", arguments: goodManifest },
+      },
+    });
+    const goodResult = good.json().result;
+    expect(good.statusCode).toBe(200);
+    expect(goodResult.isError).not.toBe(true);
+    expect(goodResult._meta.ui.resourceUri).toBe("ui://pcc/dashboard");
+    expect(goodResult.structuredContent.manifest.title).toBe("Watch my print job");
+
+    const keyedManifest = {
+      ...goodManifest,
+      sections: [
+        { windows: [{ kind: "note", text: "leaked key pcc_live_abc123 in text" }] },
+      ],
+    };
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "render_pcc_dashboard", arguments: keyedManifest },
+      },
+    });
+    const rejectedResult = rejected.json().result;
+    expect(rejected.statusCode).toBe(200);
+    expect(rejectedResult.isError).toBe(true);
+  });
+
+  it("tools/call with an unknown tool name returns a structured JSON-RPC error", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": sessionId,
+        "mcp-protocol-version": protocolVersion,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "definitely_not_a_real_pcc_tool", arguments: {} },
+      },
+    });
+    const body = response.json();
+    expect(response.statusCode).toBe(200);
+    expect(body.error).toBeDefined();
+    expect(typeof body.error.code).toBe("number");
+    expect(typeof body.error.message).toBe("string");
+    expect(body.error.message.length).toBeGreaterThan(0);
   });
 });
