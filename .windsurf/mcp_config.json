@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "pcc": {
+      "serverUrl": "https://capability.network/mcp"
+    }
+  }
+}

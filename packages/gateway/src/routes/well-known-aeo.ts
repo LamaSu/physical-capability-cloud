@@ -418,6 +418,31 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
     },
   );
 
+  // Ed25519 public-key proof for HTTP domain authentication to the official
+  // MCP Registry (registry.modelcontextprotocol.io). PCC owns capability.network,
+  // so domain-based auth needs no interactive OAuth: the registry fetches this
+  // file and verifies a signature made with the matching private key (held
+  // off-repo). A dedicated route (not a static file) so the SPA catch-all can
+  // never shadow it with HTML. Public, pre-auth-gate.
+  app.get(
+    "/.well-known/mcp-registry-auth",
+    {
+      schema: {
+        tags: ["well-known", "discovery"],
+        summary: "MCP Registry domain-ownership proof",
+        description:
+          "Ed25519 public-key record so PCC can publish to the official MCP Registry via HTTP domain authentication.",
+      },
+    },
+    async (_request, reply) => {
+      return reply
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("access-control-allow-origin", "*")
+        .header("cache-control", "public, max-age=300")
+        .send("v=MCPv1; k=ed25519; p=cL5ml6MK4ndfBPt/0s3uX5CizJcGSsA5bSA0jF0n3zE=\n");
+    },
+  );
+
   app.get(
     "/.well-known/mcp/server-card.json",
     {

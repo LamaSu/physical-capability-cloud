@@ -7,6 +7,9 @@
  *   - 8 high-value routes are present with proper schema metadata
  *   - the bearer security scheme is declared
  *   - the spec is reachable without authentication (PUBLIC)
+ *   - every operation in the document has a unique, non-empty operationId
+ *     (see ../openapi/operation-id.ts — required for GPT Actions import and
+ *     other OpenAPI-driven tooling)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -17,11 +20,14 @@ import { capabilityRoutes } from "../routes/capabilities.js";
 import { buildRoutes } from "../routes/build.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { wellKnownRoutes } from "../routes/well-known.js";
+import { kernelRoutes } from "../routes/kernels.js";
+import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore } from "../db.js";
+import { createOperationIdTransform } from "../openapi/operation-id.js";
 
 // ---------------------------------------------------------------------------
-// Test app — registers swagger plugins + the 4 route plugins whose schemas
-// we want to validate. NO auth middleware: this test exercises the spec
+// Test app — registers swagger plugins + 6 route plugins whose schemas we
+// want to validate. NO auth middleware: this test exercises the spec
 // generation, not the API gate. The api-gate test covers PUBLIC routing.
 // ---------------------------------------------------------------------------
 
@@ -32,6 +38,10 @@ async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 
   await app.register(fastifySwagger, {
+    // Mirrors server.ts's registration — every operation gets a stable,
+    // unique operationId even though none of these route files declare one
+    // explicitly. See ../openapi/operation-id.ts.
+    transform: createOperationIdTransform(),
     openapi: {
       info: {
         title: "Physical Capability Cloud Gateway",
@@ -54,6 +64,13 @@ async function buildApp(): Promise<FastifyInstance> {
   await app.register(buildRoutes);
   await app.register(jobSubmitRoutes);
   await app.register(wellKnownRoutes);
+  // Pulled in for operationId-coverage tests below: both route files
+  // declare :param routes (e.g. "/api/kernels/:kernelId",
+  // "/api/kernels/:kernelId/devices", "/api/jobs/:jobId") so the spec this
+  // test app produces exercises path-param normalization + collision
+  // handling on real, production route definitions — not synthetic ones.
+  await app.register(kernelRoutes);
+  await app.register(jobRoutes);
 
   await app.ready();
   return app;
@@ -170,5 +187,75 @@ describe("GET /openapi.json — OpenAPI 3.x spec", () => {
   it("does not contain the placeholder x-swagger-rendered-by field", () => {
     // Sanity — swagger-ui sometimes leaks meta fields when misconfigured.
     expect(spec["x-swagger-rendered-by"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// operationId coverage — every operation must have a unique, non-empty id.
+//
+// Reuses the same buildApp() (and therefore the same production
+// createOperationIdTransform() wiring as server.ts) but registers a wider
+// set of route plugins, including two with real :param routes
+// (kernelRoutes, jobRoutes), so this exercises path-param normalization and
+// collision handling against actual production route definitions rather
+// than synthetic ones.
+// ---------------------------------------------------------------------------
+
+describe("operationId coverage", () => {
+  let app: FastifyInstance;
+  let spec: any;
+  /** Flat list of every {path, method, operationId} triple in the spec. */
+  let operations: Array<{ path: string; method: string; operationId: unknown }>;
+
+  const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
+
+  beforeAll(async () => {
+    app = await buildApp();
+    const res = await app.inject({ method: "GET", url: "/openapi.json" });
+    expect(res.statusCode).toBe(200);
+    spec = res.json();
+
+    operations = [];
+    for (const [path, pathItem] of Object.entries<any>(spec.paths ?? {})) {
+      for (const method of HTTP_METHODS) {
+        if (pathItem[method]) {
+          operations.push({ path, method, operationId: pathItem[method].operationId });
+        }
+      }
+    }
+  });
+
+  afterAll(async () => {
+    await app.close();
+    closeStore();
+  });
+
+  it("found more than one operation to check (sanity — a 0-op run would pass trivially)", () => {
+    expect(operations.length).toBeGreaterThan(10);
+  });
+
+  it("every operation has a non-empty string operationId", () => {
+    const missing = operations.filter(
+      (op) => typeof op.operationId !== "string" || op.operationId.trim().length === 0,
+    );
+    expect(missing, `operations missing operationId: ${JSON.stringify(missing)}`).toEqual([]);
+  });
+
+  it("every operationId is unique across the whole spec", () => {
+    const ids = operations.map((op) => op.operationId as string);
+    const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
+    expect([...new Set(duplicates)], `duplicate operationIds: ${duplicates.join(", ")}`).toEqual([]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("derives the documented deterministic naming convention for a plain route", () => {
+    expect(spec.paths["/api/capabilities/types"]?.get?.operationId).toBe("get_api_capabilities_types");
+  });
+
+  it("derives the documented :param -> by_<param> convention for a real route", () => {
+    // kernelRoutes registers GET /api/kernels/:kernelId.
+    const op = spec.paths["/api/kernels/{kernelId}"]?.get;
+    expect(op).toBeDefined();
+    expect(op.operationId).toBe("get_api_kernels_by_kernelid");
   });
 });
