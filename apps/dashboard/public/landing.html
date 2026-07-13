@@ -334,6 +334,43 @@
       .reveal { opacity:1; transform:none; } .shot.kb .shot-bg { animation: none; }
       .hero-canvas-mount { display:none!important; } /* belt-and-suspenders: JS also skips init under reduced motion */
     }
+    /* ---- feedback & contact ---- */
+    .contact .contact-lead { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); max-width: 24ch; text-align: right; align-self: flex-end; }
+    .contact-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: var(--sp-m); align-items: start; }
+    .fb-form { padding: var(--sp-l); display: flex; flex-direction: column; gap: var(--sp-m); }
+    .hp { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+    .fb-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-m); }
+    .fb-field { display: flex; flex-direction: column; gap: .5rem; }
+    .fb-lbl { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .12em; text-transform: uppercase; color: var(--yellow); }
+    .fb-lbl em { color: var(--faint); font-style: normal; text-transform: none; letter-spacing: 0; }
+    .fb-form input, .fb-form select, .fb-form textarea {
+      font-family: var(--sans); font-size: var(--t-body); color: var(--cream);
+      background: rgba(19,10,29,.55); border: 1px solid var(--line); border-radius: 10px;
+      padding: .8em 1em; width: 100%; transition: border-color .3s var(--ease), box-shadow .3s var(--ease); }
+    .fb-form textarea { resize: vertical; min-height: 8em; line-height: 1.5; }
+    .fb-form input::placeholder, .fb-form textarea::placeholder { color: var(--faint); }
+    .fb-form input:focus, .fb-form select:focus, .fb-form textarea:focus {
+      outline: none; border-color: rgba(242,169,14,.6); box-shadow: 0 0 0 3px rgba(242,169,14,.14); }
+    .fb-form select { appearance: none; -webkit-appearance: none; cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23F2A90E' d='M6 8 0 0h12z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 1em center; padding-right: 2.5em; }
+    .fb-actions { display: flex; align-items: center; gap: var(--sp-m); flex-wrap: wrap; }
+    .fb-form .btn--do[disabled] { opacity: .55; cursor: default; transform: none; box-shadow: none; }
+    .fb-status { font-family: var(--mono); font-size: var(--t-label); letter-spacing: .04em; color: var(--muted); }
+    .fb-status.ok { color: var(--yellow); } .fb-status.err { color: #ff9b9b; }
+    .contact-side { display: flex; flex-direction: column; gap: var(--sp-s); }
+    .contact-side .label { margin-bottom: .3rem; }
+    .contact-link { display: flex; flex-direction: column; gap: .35rem; padding: var(--sp-m); border: 1px solid var(--line); border-radius: var(--r);
+      background: rgba(246,238,223,.03); text-decoration: none; transition: border-color .3s var(--ease), background .3s var(--ease), transform .3s var(--ease); }
+    .contact-link:hover { border-color: rgba(242,169,14,.45); background: rgba(246,238,223,.06); transform: translateY(-2px); }
+    .contact-link .ci { font-family: var(--display); font-weight: 700; font-size: var(--t-head); color: var(--cream); display: inline-flex; align-items: center; gap: .4em; }
+    .contact-link:hover .ci { color: var(--yellow); }
+    .contact-link .ci .arr { transition: transform .35s var(--ease); } .contact-link:hover .ci .arr { transform: translateX(5px); }
+    .contact-link .cd { font-size: var(--t-body); color: var(--muted); }
+    @media (max-width: 900px) {
+      .contact-grid { grid-template-columns: 1fr; } .fb-row { grid-template-columns: 1fr; }
+      .contact .contact-lead { text-align: left; align-self: flex-start; }
+    }
   </style>
 </head>
 <body>
@@ -443,6 +480,55 @@
     </div>
   </section>
 
+  <section class="wrap contact reveal" id="contact">
+    <div class="head">
+      <div>
+        <p class="label">Feedback &amp; contact</p>
+        <h2>Tell us what&rsquo;s working &mdash; and what isn&rsquo;t.</h2>
+      </div>
+      <p class="contact-lead">Built in the open. Every report is read.</p>
+    </div>
+    <div class="contact-grid">
+      <form class="glass fb-form" id="fb-form" novalidate>
+        <input type="text" name="website" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <div class="fb-row">
+          <label class="fb-field">
+            <span class="fb-lbl">Type</span>
+            <select name="type">
+              <option value="comment">Comment</option>
+              <option value="idea">Idea / request</option>
+              <option value="bug">Bug</option>
+              <option value="friction">Friction</option>
+            </select>
+          </label>
+          <label class="fb-field">
+            <span class="fb-lbl">Email <em>&mdash; optional, for a reply</em></span>
+            <input type="email" name="email" placeholder="you@domain.com" autocomplete="email">
+          </label>
+        </div>
+        <label class="fb-field">
+          <span class="fb-lbl">Message</span>
+          <textarea name="summary" rows="5" required placeholder="What are you trying to do &mdash; and what got in the way?"></textarea>
+        </label>
+        <div class="fb-actions">
+          <button type="submit" class="btn btn--do" id="fb-send">Send feedback <span class="arr">&rarr;</span></button>
+          <p class="fb-status" id="fb-status" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+      <aside class="contact-side">
+        <p class="label">Reach us directly</p>
+        <a class="contact-link" href="https://discord.gg/CRFvvUgeV4" target="_blank" rel="noopener">
+          <span class="ci">Discord <span class="arr">&rarr;</span></span>
+          <span class="cd">PCC Network &mdash; fastest way to reach the team.</span>
+        </a>
+        <a class="contact-link" href="https://github.com/LamaSu/physical-capability-cloud" target="_blank" rel="noopener">
+          <span class="ci">GitHub <span class="arr">&rarr;</span></span>
+          <span class="cd">Issues, source, and the 249-tool agent package.</span>
+        </a>
+      </aside>
+    </div>
+  </section>
+
   </main>
 
   <footer class="footer">
@@ -479,6 +565,38 @@
     document.querySelectorAll('.doors .btn').forEach(b=>b.addEventListener('click',()=>PCC.capture('door_click',{door:b.classList.contains('btn--do')?'do':'offer'})));
     const proofCta=document.querySelector('.verify .btn');
     if(proofCta) proofCta.addEventListener('click',()=>PCC.capture('cta_click',{cta:'see_it_live'}));
+
+    /* Feedback form -> same-origin /api/feedback (stores JSONL + rate-limits + honeypot; admin-readable).
+       Same-origin here, so no CORS needed (unlike the lamasu.github.io marketing copy). */
+    (function () {
+      var form = document.getElementById('fb-form');
+      if (!form) return;
+      var statusEl = document.getElementById('fb-status');
+      var btn = document.getElementById('fb-send');
+      var ENDPOINT = '/api/feedback';
+      function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = 'fb-status' + (cls ? ' ' + cls : ''); }
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        if (form.website && form.website.value) return; // honeypot
+        var summary = (form.summary.value || '').trim();
+        if (!summary) { setStatus('Add a message first.', 'err'); form.summary.focus(); return; }
+        var payload = { type: form.type.value, summary: summary, email: (form.email.value || '').trim(), page: location.href };
+        btn.disabled = true; setStatus('Sending…', '');
+        try { if (window.PCC && PCC.capture) PCC.capture('feedback_submitted', { type: payload.type }); } catch (_) {}
+        fetch(ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+          .then(function (r) {
+            if (r.status === 429) { setStatus('Too many messages — try again in a minute.', 'err'); btn.disabled = false; return null; }
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then(function (d) {
+            if (!d) return;
+            setStatus(d.message || 'Thanks — your feedback was recorded.', 'ok');
+            form.summary.value = ''; form.email.value = ''; btn.textContent = 'Sent';
+          })
+          .catch(function () { setStatus('Couldn’t send right now — reach us on Discord and we’ll get it.', 'err'); btn.disabled = false; });
+      });
+    })();
   </script>
 
   <script type="module">
