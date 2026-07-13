@@ -29,6 +29,13 @@ export const evidenceBundles = sqliteTable("evidence_bundles", {
   /** Wave 4.1.x — tenant scoping. Nullable; backfilled at write time from
    *  the buyer/operator on the parent job. Routes pass `tenantOpts(req)`. */
   tenantId: text("tenant_id"),
+  /** §7.1 / §8.5-4 — the gateway RECEIPT time (ISO-8601) persisted WHEN this evidence
+   *  entered/was accepted by the gateway (operator-relay ingestion, or the /complete
+   *  settlement-anchor write). This is the AUTHORITATIVE effectiveEvidenceTime source
+   *  for settlement validity: expiry/revocation are judged at EVIDENCE time, never at
+   *  settlement wall-clock, never on the device's advisory `createdAt`. Nullable: legacy
+   *  rows written before this column fall back to `createdAt` (the gateway-insert time). */
+  gatewayReceivedAt: text("gateway_received_at"),
   createdAt: text("created_at").notNull(),
 });
 

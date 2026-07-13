@@ -1445,6 +1445,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   // Wave 4.1.x — tenant_id on evidence_bundles, capabilities, sensor_aggregates
   safeAddColumn("evidence_bundles", "tenant_id", "TEXT");
   safeAddColumn("evidence_bundles", "session_key_authorization", "TEXT");
+  // §7.1 / §8.5-4 — gateway RECEIPT time; authoritative effectiveEvidenceTime source.
+  // Nullable/additive; legacy rows fall back to created_at (the gateway-insert time).
+  safeAddColumn("evidence_bundles", "gateway_received_at", "TEXT");
   safeAddColumn("capabilities", "tenant_id", "TEXT");
   // Human-node SLA (accept/deadline windows + presence + scheduling mode) on
   // capabilities — additive JSON-as-TEXT column; null for machine capabilities.

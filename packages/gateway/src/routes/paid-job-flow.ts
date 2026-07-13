@@ -1093,16 +1093,19 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         value: "gateway-auto-sign",
       };
       const seam2GateOpen = deviceEvidenceSettlementEnabled();
-      // §7.1 / §8.5-4 — the AUTHORITATIVE effectiveEvidenceTime. In the current
-      // SYNCHRONOUS submit flow submission ≈ creation, so the gateway's own receipt
-      // time (`now`) is a tight, unforgeable evidence time: validity is judged at
-      // EVIDENCE time, NEVER at settlement wall-clock-now, NEVER on the device's raw
-      // `createdAt` claim (§3.1 CVE-2024-55655 fix). Unix SECONDS — the unit
-      // verifySessionSignedEvent uses. ALWAYS computed and passed below, so the
-      // settlement path never silently falls back to Date.now()-at-settlement. Inert on
-      // the CLOSED path (resolveSettlementEvidence returns the fallback without consuming
-      // it) → the default money path stays byte-identical.
-      const seam2EffectiveEvidenceTime = Math.floor(new Date(now).getTime() / 1000);
+      // §7.1 / §8.5-4 — the AUTHORITATIVE effectiveEvidenceTime is the gateway RECEIPT
+      // time persisted WHEN the device evidence entered, NOT this /complete handler's
+      // wall-clock (`now`). A device bundle is captured EARLIER (operator-relay
+      // POST /api/operator/evidence) and RETRIEVED below; `now` here is the later
+      // settlement-stage clock, so using it would swap one settlement wall-clock for
+      // another. Validity (expiry/revocation) is judged at EVIDENCE time, NEVER at
+      // settlement-now, NEVER on the device's raw `createdAt` claim (§3.1 CVE-2024-55655
+      // fix). It is therefore sourced from the retrieved row's persisted gatewayReceivedAt
+      // (derived inside the gate-open block). Left undefined when there is no device row
+      // (closed path / no bundle): resolveSettlementEvidence returns the fallback/hold
+      // without consuming it, so the default money path is unchanged; and a delegated
+      // bundle that somehow lacks a trusted time then fails closed (§8.5-4, fix #3).
+      let seam2EffectiveEvidenceTime: number | undefined;
       let seam2DeviceBundle: SettlementEvidenceSlot | null = null;
       let seam2RegisteredSigner: unknown = null;
       let seam2Revocations: SessionRevocationRecord[] = [];
@@ -1122,6 +1125,19 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             typeof rawCreatedAt === "string" || typeof rawCreatedAt === "number"
               ? Math.floor(new Date(rawCreatedAt).getTime() / 1000)
               : NaN;
+          // §7.1 / §8.5-4 — the AUTHORITATIVE evidence time: the gateway RECEIPT time
+          // persisted at ingestion (gatewayReceivedAt). Legacy rows written before that
+          // column existed fall back to the row's gateway-insert time (createdAt, which
+          // operator-relay set to the gateway clock) — never `now`, never the device's
+          // advisory createdAt, never settlement time.
+          const receiptRaw =
+            (deviceRow as { gatewayReceivedAt?: unknown }).gatewayReceivedAt ??
+            (deviceRow as { createdAt?: unknown }).createdAt;
+          const receiptSec =
+            typeof receiptRaw === "string" || typeof receiptRaw === "number"
+              ? Math.floor(new Date(receiptRaw).getTime() / 1000)
+              : NaN;
+          if (Number.isFinite(receiptSec)) seam2EffectiveEvidenceTime = receiptSec;
           seam2DeviceBundle = {
             bundleHash: deviceRow.bundleHash,
             kernelSignature: deviceRow.kernelSignature as StoredSignature,
@@ -1156,11 +1172,14 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         verifyEd25519: naclEd25519Verify,
         // §8.5-2: revocation enforcement keyed to §8.5-4 effectiveEvidenceTime.
         // `revocations` is empty on the CLOSED path (populated only inside the gate-open
-        // block), so it is omitted there. effectiveEvidenceTime is ALWAYS supplied
-        // (authoritative §7.1 gateway receivedAt) but inert when the gate is closed
-        // (fallback returned without consuming it) — default money path byte-identical.
+        // block), so it is omitted there. effectiveEvidenceTime is supplied only when a
+        // device row was retrieved (its persisted §7.1 gatewayReceivedAt); it is omitted
+        // on the closed path / when there is no bundle, where it is never consumed
+        // (fallback/hold returned) — so the default money path is unchanged.
         ...(seam2Revocations.length > 0 ? { revocations: seam2Revocations } : {}),
-        effectiveEvidenceTime: seam2EffectiveEvidenceTime,
+        ...(seam2EffectiveEvidenceTime !== undefined
+          ? { effectiveEvidenceTime: seam2EffectiveEvidenceTime }
+          : {}),
         gateOpen: seam2GateOpen,
       });
 
@@ -1236,6 +1255,10 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         // SEAM-2: the settlement anchor's signature — the gateway placeholder when
         // the gate is closed (default), the DEVICE's real Ed25519 signature when open.
         kernelSignature: settlementSignature,
+        // §7.1 — gateway receipt time for THIS settlement-anchor row, created here at
+        // /complete (so receipt ≈ creation for this row). Persisted for the same reason
+        // as the ingestion path: the authoritative effectiveEvidenceTime if ever retrieved.
+        gatewayReceivedAt: now,
         createdAt: now,
       });
 
