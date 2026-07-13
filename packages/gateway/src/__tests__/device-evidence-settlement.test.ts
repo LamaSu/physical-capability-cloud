@@ -13,7 +13,7 @@
  * Plus: the path-1 parser, isDeviceSignedSignature, and fail-closed behavior.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import nacl from "tweetnacl";
 import { getPrimitive } from "@pcc/spec";
 import { createKernelHandler } from "@pcc/kernel-sdk";
@@ -27,6 +27,7 @@ import {
   machineLogVerifierLive,
   deviceEvidenceSettlementFlagEnabled,
   deviceEvidenceSettlementEnabled,
+  DEFAULT_PERMITTED_SKEW_SECONDS,
   ZERO_ADDRESS,
   type StoredSignature,
   type SettlementEvidenceSlot,
@@ -458,9 +459,11 @@ describe("SEAM-2 §8.5-1 hard-gate — tier >= 1 HOLDS instead of silent downgra
 // ── §8.5-2. Revocation into settlement, keyed to effectiveEvidenceTime ─────────
 // §7.3-4: "revokedAt < effectiveEvidenceTime → invalid; else prior evidence stands"
 // (§8.4-A step 6: "not revoked ... BEFORE its effectiveEvidenceTime"). Strict `<`,
-// so a revocation AT the exact evidence time → prior evidence STANDS (valid). The
-// evidenceTime/revokedAt integers below are only compared for revocation; expiry
-// still uses the real clock (currentTimestamp is intentionally not re-keyed here).
+// so a revocation AT the exact evidence time → prior evidence STANDS (valid).
+// UPDATED for §8.5-4: expiry is now ALSO judged at effectiveEvidenceTime (one unified
+// value). So these fixtures key effectiveEvidenceTime/revokedAt off the session's real
+// `issuedAt` — placing effectiveEvidenceTime INSIDE [issuedAt, expiresAt] — which keeps
+// the session VALID at that time and isolates the revocation semantics under test.
 
 /** A real SDK session-signed bundle (principal-delegated session key), plus the
  *  registered signer + the delegated sessionId — the exact shape /complete captures. */
@@ -497,63 +500,71 @@ async function realSessionSignedBundle(jobId = "job-revoke-247") {
     registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
     sessionId: auth.sessionId,
     jobId,
+    // The session's real validity window (Unix seconds). Fixtures key evidence/revocation
+    // times off issuedAt so the session is VALID at the chosen effectiveEvidenceTime — now
+    // that §8.5-4 judges expiry AT effectiveEvidenceTime, isolating the revocation semantics.
+    issuedAt: auth.issuedAt,
+    expiresAt: auth.expiresAt,
   };
 }
 
 describe("verifyDeviceSignedEvidence — session-key revocation keyed to effectiveEvidenceTime (§8.5-2)", () => {
   it("revoked BEFORE effectiveEvidenceTime → invalid (session_revoked)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const res = await verifyDeviceSignedEvidence({
       signature: evidenceBundle.kernelSignature,
       bundleHash: evidenceBundle.bundleHash,
       registeredSigner,
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
       contractId: jobId,
-      revocations: [{ sessionId, revokedAt: 1000 }],
-      effectiveEvidenceTime: 2000, // 1000 < 2000 → revoked before evidence → invalid
+      // effectiveEvidenceTime INSIDE the window (session valid there); revokedAt < it → revoked before evidence.
+      revocations: [{ sessionId, revokedAt: issuedAt + 50 }],
+      effectiveEvidenceTime: issuedAt + 100,
     });
     expect(res.ok).toBe(false);
     expect(res.reason).toBe("session_revoked");
   });
 
   it("revoked AFTER effectiveEvidenceTime → prior evidence stands (valid)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const res = await verifyDeviceSignedEvidence({
       signature: evidenceBundle.kernelSignature,
       bundleHash: evidenceBundle.bundleHash,
       registeredSigner,
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
       contractId: jobId,
-      revocations: [{ sessionId, revokedAt: 3000 }],
-      effectiveEvidenceTime: 2000, // 3000 < 2000 is false → not disqualified → valid
+      // revokedAt (issuedAt+200) < effectiveEvidenceTime (issuedAt+100) is false → not disqualified → valid.
+      revocations: [{ sessionId, revokedAt: issuedAt + 200 }],
+      effectiveEvidenceTime: issuedAt + 100,
     });
     expect(res.ok).toBe(true);
   });
 
   it("revoked AT effectiveEvidenceTime (boundary) → prior evidence stands (strict `<`, §7.3-4)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const res = await verifyDeviceSignedEvidence({
       signature: evidenceBundle.kernelSignature,
       bundleHash: evidenceBundle.bundleHash,
       registeredSigner,
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
       contractId: jobId,
-      revocations: [{ sessionId, revokedAt: 2000 }],
-      effectiveEvidenceTime: 2000, // 2000 < 2000 is false → valid ("prior evidence stands")
+      // revokedAt == effectiveEvidenceTime → strict `<` is false → valid ("prior evidence stands").
+      revocations: [{ sessionId, revokedAt: issuedAt + 100 }],
+      effectiveEvidenceTime: issuedAt + 100,
     });
     expect(res.ok).toBe(true);
   });
 
   it("a DIFFERENT session's revocation does not disqualify", async () => {
-    const { evidenceBundle, registeredSigner, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, jobId, issuedAt } = await realSessionSignedBundle();
     const res = await verifyDeviceSignedEvidence({
       signature: evidenceBundle.kernelSignature,
       bundleHash: evidenceBundle.bundleHash,
       registeredSigner,
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
       contractId: jobId,
-      revocations: [{ sessionId: "some-other-session", revokedAt: 1 }],
-      effectiveEvidenceTime: 2000,
+      revocations: [{ sessionId: "some-other-session", revokedAt: issuedAt + 1 }],
+      effectiveEvidenceTime: issuedAt + 100,
     });
     expect(res.ok).toBe(true);
   });
@@ -586,7 +597,7 @@ describe("verifyDeviceSignedEvidence — session-key revocation keyed to effecti
 
 describe("resolveSettlementEvidence — revocation flows into the tier/HOLD decision (§8.5-2)", () => {
   it("gate open + tier >= 1 + revoked BEFORE evidence time → source 'hold' (session_revoked)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const decision = await resolveSettlementEvidence({
       deviceBundle: {
         bundleHash: evidenceBundle.bundleHash,
@@ -598,8 +609,8 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
       registeredSigner,
       requestedTier: 2,
       fallback: GATEWAY_FALLBACK,
-      revocations: [{ sessionId, revokedAt: 1000 }],
-      effectiveEvidenceTime: 2000,
+      revocations: [{ sessionId, revokedAt: issuedAt + 50 }],
+      effectiveEvidenceTime: issuedAt + 100,
       gateOpen: true,
     });
     expect(decision.source).toBe("hold"); // tier >= 1 → HOLD, never silent downgrade
@@ -607,7 +618,7 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
   });
 
   it("gate open + revoked AFTER evidence time → source 'device' (prior evidence stands)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const decision = await resolveSettlementEvidence({
       deviceBundle: {
         bundleHash: evidenceBundle.bundleHash,
@@ -619,8 +630,8 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
       registeredSigner,
       requestedTier: 2,
       fallback: GATEWAY_FALLBACK,
-      revocations: [{ sessionId, revokedAt: 3000 }],
-      effectiveEvidenceTime: 2000,
+      revocations: [{ sessionId, revokedAt: issuedAt + 200 }],
+      effectiveEvidenceTime: issuedAt + 100,
       gateOpen: true,
     });
     expect(decision.source).toBe("device");
@@ -628,7 +639,7 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
   });
 
   it("gate open + tier 0 + revoked BEFORE evidence time → 'gateway-fallback' (T0 keeps buyer-approved fallback)", async () => {
-    const { evidenceBundle, registeredSigner, sessionId, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, sessionId, jobId, issuedAt } = await realSessionSignedBundle();
     const decision = await resolveSettlementEvidence({
       deviceBundle: {
         bundleHash: evidenceBundle.bundleHash,
@@ -640,8 +651,8 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
       registeredSigner,
       requestedTier: 0,
       fallback: GATEWAY_FALLBACK,
-      revocations: [{ sessionId, revokedAt: 1000 }],
-      effectiveEvidenceTime: 2000,
+      revocations: [{ sessionId, revokedAt: issuedAt + 50 }],
+      effectiveEvidenceTime: issuedAt + 100,
       gateOpen: true,
     });
     expect(decision.source).toBe("gateway-fallback");
@@ -668,5 +679,219 @@ describe("resolveSettlementEvidence — revocation flows into the tier/HOLD deci
     });
     expect(decision.source).toBe("gateway-fallback");
     expect(decision.reason).toBe("gate-closed");
+  });
+});
+
+// ── §8.5-4. effectiveEvidenceTime — validity judged at EVIDENCE time (CVE-2024-55655) ──
+// §3.1/§7.1/§8.4-A: expiry (`notBefore(issuedAt) ≤ effectiveEvidenceTime ≤ expiresAt`) is
+// judged at the gateway's authoritative evidence time — NEVER at settlement wall-clock-now,
+// NEVER on the device's raw `createdAt`. Step 4 only PASSES verifySessionSignedEvent a
+// currentTimestamp; it does not change that verifier. Plus the §8.4-A skew FLAG.
+
+/** A genuine session-signed bundle whose validity window is entirely in the PAST
+ *  (issuedAt..expiresAt < real now). Built by running the real SDK signing path under a
+ *  Date-only fake clock so the stamped issuedAt/expiresAt are in the past — no manual
+ *  canonical-bytes reconstruction, no timer/promise faking (only Date is mocked). */
+async function pastDatedSessionBundle(issuedAtSec: number, jobId = "job-cve-247") {
+  const principal = nacl.sign.keyPair();
+  const handler = createKernelHandler({
+    manifest: {
+      manifestVersion: "1.0.0",
+      kernelId: "kernel-cve-247",
+      name: "CVE Kernel",
+      description: "test",
+      builder: { agentId: "agent:test" },
+      capabilityType: "test.transform",
+      workflowSteps: [],
+      pricing: { currency: "USDC", baseUSD: 0 },
+      maxAssuranceTier: 0,
+      endpointURL: "https://example.test/run",
+      sessionKeyPolicy: { maxTTLSeconds: 300, allowedActions: ["evidence_submit"] },
+      status: "pending",
+    } as any,
+    principalKey: {
+      agentId: "eip155:1:0x0000000000000000000000000000000000000009",
+      walletAddress: "0x0000000000000000000000000000000000000009",
+      publicKey: principal.publicKey,
+    },
+    principalPrivateKey: principal.secretKey,
+    execute: async () => ({ ok: true }),
+  });
+  // Fake ONLY Date so issueSessionKey's `Math.floor(Date.now()/1000)` stamps a past
+  // issuedAt; timers/microtasks are untouched so `await handler(...)` still resolves.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(issuedAtSec * 1000);
+  const result = await handler({ jobId, input: { value: 1 } });
+  vi.useRealTimers();
+  const evidenceBundle = result.evidenceBundle;
+  const auth = evidenceBundle.sessionKeyAuthorization;
+  if (!auth) throw new Error("expected sessionKeyAuthorization on the SDK bundle");
+  return {
+    evidenceBundle,
+    registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
+    sessionId: auth.sessionId,
+    jobId,
+    issuedAt: auth.issuedAt,
+    expiresAt: auth.expiresAt,
+  };
+}
+
+describe("verifyDeviceSignedEvidence — validity at effectiveEvidenceTime (§8.5-4 / CVE-2024-55655 fix)", () => {
+  it("session EXPIRED by settlement-now but VALID at effectiveEvidenceTime → verify OK (the whole point)", async () => {
+    const b = await pastDatedSessionBundle(1_600_000_000); // window [t, t+300], far before real now
+    // Precondition: the session really is expired at the real clock now.
+    expect(b.expiresAt).toBeLessThan(Math.floor(Date.now() / 1000));
+    const res = await verifyDeviceSignedEvidence({
+      signature: b.evidenceBundle.kernelSignature,
+      bundleHash: b.evidenceBundle.bundleHash,
+      registeredSigner: b.registeredSigner,
+      sessionKeyAuthorization: b.evidenceBundle.sessionKeyAuthorization!,
+      contractId: b.jobId,
+      // WITHIN [issuedAt, expiresAt] → valid AT evidence time even though expired at now.
+      effectiveEvidenceTime: b.issuedAt + 100,
+    });
+    expect(res.ok).toBe(true); // long/late-but-legit evidence is judged at EVIDENCE time
+  });
+
+  it("session EXPIRED at effectiveEvidenceTime → invalid (session_expired → tier>=1 HOLD)", async () => {
+    const { evidenceBundle, registeredSigner, jobId, expiresAt } = await realSessionSignedBundle("job-exp-247");
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      effectiveEvidenceTime: expiresAt + 100, // past the session's expiry
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("session_expired");
+  });
+
+  it("effectiveEvidenceTime < issuedAt → session_not_yet_valid", async () => {
+    const { evidenceBundle, registeredSigner, jobId, issuedAt } = await realSessionSignedBundle("job-nyv-247");
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      effectiveEvidenceTime: issuedAt - 100, // before the session was issued
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("session_not_yet_valid");
+  });
+
+  it("sourcing: the expiry verdict tracks effectiveEvidenceTime, NOT Date.now() and NOT the device createdAt", async () => {
+    const { evidenceBundle, registeredSigner, jobId, issuedAt, expiresAt } = await realSessionSignedBundle("job-src-247");
+    const realNow = Math.floor(Date.now() / 1000);
+    // The session IS valid at the real clock now (so a Date.now()-keyed check would PASS)...
+    expect(realNow).toBeGreaterThanOrEqual(issuedAt);
+    expect(realNow).toBeLessThanOrEqual(expiresAt);
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      effectiveEvidenceTime: expiresAt + 5000, // expired ONLY at this evidence time
+      deviceCreatedAt: issuedAt, // a valid-looking time; must NOT be used for validity
+    });
+    // ...yet the verdict is session_expired → it tracked effectiveEvidenceTime, not now, not createdAt.
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("session_expired");
+  });
+});
+
+describe("verifyDeviceSignedEvidence — §8.4-A skew FLAG (advisory createdAt vs effectiveEvidenceTime)", () => {
+  const EV = 1_700_000_000;
+
+  it("skew within DEFAULT_PERMITTED_SKEW → skewWithinPolicy true (boundary ==) and verify passes", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      effectiveEvidenceTime: EV,
+      deviceCreatedAt: EV + DEFAULT_PERMITTED_SKEW_SECONDS, // exactly the bound → within (≤)
+    });
+    expect(res.ok).toBe(true);
+    expect(res.skewSeconds).toBe(DEFAULT_PERMITTED_SKEW_SECONDS);
+    expect(res.skewWithinPolicy).toBe(true);
+  });
+
+  it("skew beyond DEFAULT_PERMITTED_SKEW → skewWithinPolicy false, but verify STILL passes (flag only)", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      effectiveEvidenceTime: EV,
+      deviceCreatedAt: EV - (DEFAULT_PERMITTED_SKEW_SECONDS + 1), // 301s early → beyond (abs value)
+    });
+    expect(res.ok).toBe(true); // FLAG only — skew never gates ok in this cut
+    expect(res.skewSeconds).toBe(DEFAULT_PERMITTED_SKEW_SECONDS + 1);
+    expect(res.skewWithinPolicy).toBe(false);
+  });
+
+  it("no device createdAt → no skew flag computed (fields absent)", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      effectiveEvidenceTime: EV,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.skewSeconds).toBeUndefined();
+    expect(res.skewWithinPolicy).toBeUndefined();
+  });
+
+  it("owner-policy permittedSkewSeconds override tightens the flag", async () => {
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      effectiveEvidenceTime: EV,
+      deviceCreatedAt: EV + 100, // within the 300 default...
+      permittedSkewSeconds: 60, // ...but beyond a tightened 60s owner policy
+    });
+    expect(res.ok).toBe(true);
+    expect(res.skewSeconds).toBe(100);
+    expect(res.skewWithinPolicy).toBe(false);
+  });
+});
+
+describe("verifyDeviceSignedEvidence — revocation + expiry share ONE effectiveEvidenceTime (§8.5-4)", () => {
+  it("valid at evidence time (expiry PASSES) but revoked BEFORE it → session_revoked (not session_expired)", async () => {
+    const b = await pastDatedSessionBundle(1_600_000_500, "job-combined-247");
+    const evTime = b.issuedAt + 120; // inside [issuedAt, expiresAt] → expiry PASSES at evTime
+    const res = await verifyDeviceSignedEvidence({
+      signature: b.evidenceBundle.kernelSignature,
+      bundleHash: b.evidenceBundle.bundleHash,
+      registeredSigner: b.registeredSigner,
+      sessionKeyAuthorization: b.evidenceBundle.sessionKeyAuthorization!,
+      contractId: b.jobId,
+      effectiveEvidenceTime: evTime,
+      revocations: [{ sessionId: b.sessionId, revokedAt: evTime - 10 }], // revoked before the SAME evTime
+    });
+    expect(res.ok).toBe(false);
+    // Proves both share evTime: expiry passed AT evTime, revocation failed AT evTime.
+    expect(res.reason).toBe("session_revoked");
+  });
+
+  it("same evidence time, revoked AFTER it → valid (expiry passes AND not-yet-revoked, one value)", async () => {
+    const b = await pastDatedSessionBundle(1_600_001_000, "job-combined-ok-247");
+    const evTime = b.issuedAt + 120;
+    const res = await verifyDeviceSignedEvidence({
+      signature: b.evidenceBundle.kernelSignature,
+      bundleHash: b.evidenceBundle.bundleHash,
+      registeredSigner: b.registeredSigner,
+      sessionKeyAuthorization: b.evidenceBundle.sessionKeyAuthorization!,
+      contractId: b.jobId,
+      effectiveEvidenceTime: evTime,
+      revocations: [{ sessionId: b.sessionId, revokedAt: evTime + 10 }], // revoked after evTime
+    });
+    expect(res.ok).toBe(true);
   });
 });
