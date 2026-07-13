@@ -229,6 +229,9 @@ describe("verifyDeviceSignedEvidence — registered-signer → Ed25519 verify (r
       registeredSigner: { algorithm: "ed25519", publicKey: `0x${toHex(principal.publicKey)}` },
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization,
       contractId: jobId,
+      // §8.5-4 (fix #3): the delegated path now REQUIRES an explicit trusted evidence
+      // time. The session was just issued, so now is inside its [issuedAt, expiresAt].
+      effectiveEvidenceTime: Math.floor(Date.now() / 1000),
     });
     expect(result).toMatchObject({ ok: true });
   });
@@ -570,13 +573,15 @@ describe("verifyDeviceSignedEvidence — session-key revocation keyed to effecti
   });
 
   it("no revocations supplied → unchanged (valid)", async () => {
-    const { evidenceBundle, registeredSigner, jobId } = await realSessionSignedBundle();
+    const { evidenceBundle, registeredSigner, jobId, issuedAt } = await realSessionSignedBundle();
     const res = await verifyDeviceSignedEvidence({
       signature: evidenceBundle.kernelSignature,
       bundleHash: evidenceBundle.bundleHash,
       registeredSigner,
       sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
       contractId: jobId,
+      // §8.5-4 (fix #3): delegated path requires an explicit trusted evidence time (inside window).
+      effectiveEvidenceTime: issuedAt + 100,
     });
     expect(res.ok).toBe(true);
   });
@@ -799,6 +804,37 @@ describe("verifyDeviceSignedEvidence — validity at effectiveEvidenceTime (§8.
     // ...yet the verdict is session_expired → it tracked effectiveEvidenceTime, not now, not createdAt.
     expect(res.ok).toBe(false);
     expect(res.reason).toBe("session_expired");
+  });
+
+  it("delegated (session-key) path REQUIRES effectiveEvidenceTime → missing-effective-evidence-time (fix #3)", async () => {
+    // Fix #3: the live delegated path must supply the gateway receipt time. Omitting it
+    // is a caller error returned CLOSED — NOT silently defaulted to settlement wall-clock
+    // (Date.now() at settlement), which would let a since-expired/revoked delegation verify
+    // as if it were still fresh.
+    const { evidenceBundle, registeredSigner, jobId } = await realSessionSignedBundle("job-missing-evt-247");
+    const res = await verifyDeviceSignedEvidence({
+      signature: evidenceBundle.kernelSignature,
+      bundleHash: evidenceBundle.bundleHash,
+      registeredSigner,
+      sessionKeyAuthorization: evidenceBundle.sessionKeyAuthorization!,
+      contractId: jobId,
+      // effectiveEvidenceTime deliberately omitted.
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("missing-effective-evidence-time");
+  });
+
+  it("non-delegated direct-Ed25519 path keeps the now() default when time is omitted (fallback retained, fix #3)", async () => {
+    // The `?? now` fallback is retained ONLY here: no session key → nothing is time-judged
+    // (no expiry, no revocation), so a legacy direct caller may omit the time.
+    const dev = realDeviceEvidence();
+    const res = await verifyDeviceSignedEvidence({
+      signature: dev.signature,
+      bundleHash: dev.bundleHash,
+      registeredSigner: { algorithm: "ed25519", publicKey: dev.publicKeyHex },
+      // no sessionKeyAuthorization + no effectiveEvidenceTime → direct path, defaults to now.
+    });
+    expect(res.ok).toBe(true);
   });
 });
 

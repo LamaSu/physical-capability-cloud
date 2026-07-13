@@ -304,8 +304,11 @@ export interface DeviceEvidenceVerifyInput {
    * (`revokedAt < effectiveEvidenceTime`) — never settlement wall-clock-now, never
    * the device's raw `createdAt` (§3.1 CVE-2024-55655 fix: check the timestamp
    * against cert validity using the LOG's/gateway's time, not the signer's claim).
-   * Sourced from the gateway `receivedAt` (§7.1). Defaults to now (Unix seconds)
-   * when omitted, which keeps legacy direct callers/tests unchanged.
+   * Sourced from the gateway `receivedAt` (§7.1). REQUIRED on the delegated
+   * (session-key) path — omitting it there returns `missing-effective-evidence-time`
+   * rather than fabricating one from settlement wall-clock. On the non-delegated
+   * direct-Ed25519 path (nothing time-judged) it defaults to now when omitted, which
+   * keeps legacy direct callers/tests unchanged.
    */
   effectiveEvidenceTime?: number;
   /**
@@ -366,8 +369,19 @@ export async function verifyDeviceSignedEvidence(
   // §8.5-4 — resolve the ONE authoritative evidence time (Unix SECONDS) up front.
   // It is used for BOTH the session-key EXPIRY check (passed as currentTimestamp to
   // verifySessionSignedEvent below) AND the step-2 revocation filter — unified, so
-  // the two can never diverge. The optional `?? now` fallback keeps legacy direct
-  // callers/tests (which omit effectiveEvidenceTime) behaving exactly as before.
+  // the two can never diverge.
+  //
+  // The DELEGATED (session-key) live path REQUIRES an explicit trusted evidence time
+  // (the gateway receipt time, §7.1 receivedAt). Fabricating one from settlement
+  // wall-clock (Date.now() at settlement) is a fail-open: a since-expired or
+  // since-revoked delegation would then verify as if it were still fresh. So on the
+  // session-key branch a missing effectiveEvidenceTime is a caller error, returned
+  // CLOSED. The `?? now` fallback is retained ONLY for the non-delegated direct-Ed25519
+  // path, where nothing is time-judged (no expiry, no revocation) and legacy direct
+  // callers/tests legitimately omit it.
+  if (input.sessionKeyAuthorization && input.effectiveEvidenceTime === undefined) {
+    return { ok: false, reason: "missing-effective-evidence-time" };
+  }
   const evidenceTime = input.effectiveEvidenceTime ?? Math.floor(Date.now() / 1000);
 
   // §8.4-A skew FLAG (advisory): |deviceCreatedAt − effectiveEvidenceTime| ≤ permittedSkew.
