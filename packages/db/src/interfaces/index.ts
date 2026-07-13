@@ -238,6 +238,9 @@ import type { IRequestRepository } from "./IRequestRepository.js";
 import type { IInvocationReceiptRepository } from "./IInvocationReceiptRepository.js";
 import type { IGatewayReceiptRepository } from "./IGatewayReceiptRepository.js";
 import type { ICsdUsageRepository } from "./ICsdUsageRepository.js";
+import type { IEvidenceSessionRepository } from "./IEvidenceSessionRepository.js";
+import type { IMilestonePackageRepository } from "./IMilestonePackageRepository.js";
+import type { ICheckpointBodyRepository } from "./ICheckpointBodyRepository.js";
 
 export type {
   IRatingRepository,
@@ -273,6 +276,24 @@ export type {
   GatewayReceiptInsert,
   GatewayReceiptSessionSnapshot,
 } from "./IGatewayReceiptRepository.js";
+
+export type {
+  IEvidenceSessionRepository,
+  EvidenceSessionRow,
+  EvidenceSessionInsert,
+} from "./IEvidenceSessionRepository.js";
+
+export type {
+  IMilestonePackageRepository,
+  MilestonePackageRow,
+  MilestonePackageInsert,
+} from "./IMilestonePackageRepository.js";
+
+export type {
+  ICheckpointBodyRepository,
+  CheckpointBodyRow,
+  CheckpointBodyInsert,
+} from "./ICheckpointBodyRepository.js";
 
 /**
  * Aggregate interface for the full repository collection.
@@ -323,6 +344,11 @@ export interface IRepositories {
   // receipts (§8.3: receipt ⟺ committed acceptance). Additive; not wired into
   // the live settlement path until step 6.
   gatewayReceipts: IGatewayReceiptRepository;
+  // v3 evidence-signing (§8.5 step 6) — async evidence split. Additive; backs the
+  // new begin/checkpoint/finalize endpoints, not the legacy settlement path.
+  evidenceSessions: IEvidenceSessionRepository;
+  milestonePackages: IMilestonePackageRepository;
+  checkpointBodies: ICheckpointBodyRepository;
   // PR #118 follow-on — persistent CSD usage attribution (replaces in-memory
   // Map on CsdRegistry). Opt-in via PCC_CSD_PERSIST=true in gateway boot.
   csdUsage: ICsdUsageRepository;

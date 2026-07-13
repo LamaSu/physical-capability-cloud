@@ -1659,6 +1659,74 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_session_checkpoint_unique ON gateway_receipts(session_id, checkpoint_hash);
   `);
 
+  // v3 evidence-signing (§8.5 step 6) — async evidence split (begin/checkpoint/
+  // finalize). Three additive tables backing the new phase-scoped endpoints; no
+  // existing route reads/writes them until step 6 wires the endpoints. Raw SQL
+  // mirrors packages/db/src/schema/{evidence-sessions,milestone-packages,
+  // checkpoint-bodies}.ts exactly (snake_case columns + indexes).
+
+  // evidence_sessions — the open execution-authority window for one
+  // (job, milestone). UNIQUE(job_id, milestone_index) fail-closes the
+  // one-session-per-(job,milestone) rule (§2.1-4).
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS evidence_sessions (
+      session_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      milestone_index INTEGER NOT NULL,
+      session_key_authorization TEXT NOT NULL,
+      not_before INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      evidence_submission_deadline INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      opened_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS evidence_sessions_job_idx ON evidence_sessions(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS evidence_sessions_job_milestone_unique ON evidence_sessions(job_id, milestone_index);
+  `);
+
+  // milestone_packages — the persisted claim-free FinalMilestonePackage + its
+  // PackageReceipt (§8.4-B). UNIQUE(job_id, milestone_index) makes permissionless
+  // re-finalize idempotent (§2.3-6). body/receipt_body carry the JSON round-trips.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS milestone_packages (
+      package_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      milestone_index INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      evidence_root TEXT NOT NULL,
+      package_hash TEXT NOT NULL,
+      receipt_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      receipt_body TEXT NOT NULL,
+      accepted_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS milestone_packages_job_idx ON milestone_packages(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS milestone_packages_job_milestone_unique ON milestone_packages(job_id, milestone_index);
+  `);
+
+  // checkpoint_bodies — persisted checkpoint content (payload revealed at
+  // finalize), sibling to gateway_receipts (which holds only hashes) so that
+  // table stays pure. UNIQUE(session_id, seq) mirrors the per-(session,seq) invariant.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS checkpoint_bodies (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      job_id TEXT NOT NULL,
+      checkpoint_hash TEXT NOT NULL,
+      prev_checkpoint_hash TEXT,
+      events_root TEXT NOT NULL,
+      checkpoint_type TEXT NOT NULL,
+      device_created_at INTEGER NOT NULL,
+      signature TEXT NOT NULL,
+      payload TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS checkpoint_bodies_session_idx ON checkpoint_bodies(session_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS checkpoint_bodies_session_seq_unique ON checkpoint_bodies(session_id, seq);
+  `);
+
   // ══════════════════════════════════════════════════════════════════
   // Substrate persistence — the five agentic-substrate routes (compose,
   // asset-outbound, skills, reputation, graph-search) previously held all
