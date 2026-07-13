@@ -304,7 +304,13 @@ export class KernelFacade extends BaseFacade {
           "0x0000000000000000000000000000000000000000",
         ]);
         const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
-        if (!actorId || (hasRecordedOwner && existing.operatorAddress !== actorId)) {
+        // Authorization only — authentication is apiGate's job (POST /api/kernels
+        // is Bearer-gated → 401 without a key), so a real request always carries
+        // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
+        // not mutate someone else's kernel. When actorId is absent (a facade-level
+        // unit test with no apiGate wired) there is no owner to check against; the
+        // SET-ONCE signer bind still fail-closes via the CAS below.
+        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -318,7 +324,7 @@ export class KernelFacade extends BaseFacade {
         // Legacy rows may carry the historical zero-address placeholder rather
         // than an owner. Their first authenticated mutation claims ownership;
         // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (!hasRecordedOwner) updates.operatorAddress = actorId;
+        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.

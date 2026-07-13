@@ -86,7 +86,11 @@ describe("POST /api/kernels authentication and ownership", () => {
     });
     expect(response.statusCode).toBe(403);
 
-    const stored = await app.inject({ method: "GET", url: "/api/kernels/owned-profile" });
+    const stored = await app.inject({
+      method: "GET",
+      url: "/api/kernels/owned-profile",
+      headers: { authorization: `Bearer ${owner}` },
+    });
     expect(stored.json().kernel.name).toBe("Owner profile");
     expect(stored.json().kernel.maxAssuranceTier).toBe(2);
   });
