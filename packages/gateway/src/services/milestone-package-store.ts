@@ -288,71 +288,77 @@ export class MilestonePackageStore {
     const acceptedCheckpointHashes = receiptRows.map((r) => r.checkpointHash);
     const receiptIds = receiptRows.map((r) => r.receiptId);
 
-    // TERMINAL-COMPLETION GUARD (frozen §8.1-#1): completion is a CLAIM that must be
-    // signed + receipted under LIVE authority. The LAST accepted checkpoint (highest seq
-    // == tip.lastSeq, verified by the completeness guard above) must be a terminal-
-    // completion checkpoint; a chain that never reached completion — or ended in a fault
-    // — is NOT finalizable into a success package. All reads are sync (the await-free
-    // critical section holds). Runs BEFORE payload verification and assembly.
     const lastReceipt = receiptRows[receiptRows.length - 1];
-    const lastBody = this.checkpointBodies.findBySessionSeq(sessionId, lastReceipt.seq);
-    if (!lastBody) {
+
+    // WHOLE-CHAIN INTEGRITY (round-6 P1-3): the package is a settlement ROOT, so EVERY accepted
+    // checkpoint — not just the terminal one — must be independently reproducible from its durable
+    // body AND receipt-bound. Read the full durable body chain (findAllBySession is UNCAPPED) and
+    // verify, one body per receipt, in seq order:
+    //   • EXACTLY one body per receipt — fail closed on a missing / extra / duplicate body;
+    //   • the body recomputes to its OWN checkpointHash over the same 6 canonical keys the route
+    //     signs (§2.2), AND that hash equals the RECEIPTED hash (receipt-bound — a consistently
+    //     altered body can't be trusted to classify for a DIFFERENT receipt commitment);
+    //   • seq is contiguous (i+1), the receipt belongs to THIS job, and prevCheckpointHash chains
+    //     to the previous receipt's hash (no reorder / splice / graft);
+    //   • S6-2b: no NON-last body is a terminal type (a terminal ENDS the run — the chain must not
+    //     continue past it, else `fault_report → execution_completed` would finalize as success).
+    // All reads are sync (the await-free critical section holds); runs BEFORE assembly.
+    const allBodies = this.checkpointBodies.findAllBySession(sessionId); // seq-asc, uncapped
+    if (allBodies.length !== receiptRows.length) {
       return {
         status: "errored",
         error: new Error(
-          `finalize integrity: terminal checkpoint body missing despite receipt ` +
-            `${lastReceipt.receiptId} (session ${sessionId}, seq ${lastReceipt.seq})`,
+          `finalize integrity: body/receipt count mismatch for ${sessionId} ` +
+            `(${allBodies.length} bodies, ${receiptRows.length} receipts)`,
         ),
       };
     }
-    // The body must attest EXACTLY the receipted hash: recompute over the same 6 canonical
-    // keys the route signs (§2.2 checkpointContent) and fail closed on any divergence — a
-    // tampered/forked body row must not be trusted to classify the terminal type.
-    const recomputedLastHash = canonicalSha256({
-      sessionId,
-      seq: lastBody.seq,
-      createdAt: lastBody.deviceCreatedAt,
-      prevCheckpointHash: lastBody.prevCheckpointHash ?? null,
-      eventsRoot: lastBody.eventsRoot,
-      checkpointType: lastBody.checkpointType,
-    });
-    // Terminal integrity (round-5): the body must be self-consistent (recompute == its own hash)
-    // AND receipt-bound (its hash == the RECEIPTED hash). A consistently-altered body row could
-    // otherwise pass its own recomputation while classifying the terminal type for a DIFFERENT
-    // receipt commitment; requiring `lastBody.checkpointHash === lastReceipt.checkpointHash` closes
-    // that. Fail closed on either divergence.
-    if (
-      recomputedLastHash !== lastBody.checkpointHash ||
-      lastBody.checkpointHash !== lastReceipt.checkpointHash
-    ) {
-      return {
-        status: "errored",
-        error: new Error(
-          `finalize integrity: terminal checkpoint hash mismatch for ${lastReceipt.receiptId} ` +
-            `(session ${sessionId}, seq ${lastBody.seq})`,
-        ),
-      };
+    for (let i = 0; i < allBodies.length; i++) {
+      const body = allBodies[i];
+      const receipt = receiptRows[i];
+      const recomputed = canonicalSha256({
+        sessionId,
+        seq: body.seq,
+        createdAt: body.deviceCreatedAt,
+        prevCheckpointHash: body.prevCheckpointHash ?? null,
+        eventsRoot: body.eventsRoot,
+        checkpointType: body.checkpointType,
+      });
+      const expectedPrev = i > 0 ? receiptRows[i - 1].checkpointHash : null;
+      if (
+        body.seq !== i + 1 ||
+        receipt.seq !== i + 1 ||
+        receipt.jobId !== jobId ||
+        recomputed !== body.checkpointHash ||
+        body.checkpointHash !== receipt.checkpointHash ||
+        (body.prevCheckpointHash ?? null) !== expectedPrev
+      ) {
+        return {
+          status: "errored",
+          error: new Error(
+            `finalize integrity: chain divergence at seq ${i + 1} for ${sessionId} ` +
+              `(receipt ${receipt.receiptId})`,
+          ),
+        };
+      }
+      // A terminal checkpoint must be the LAST — reject a chain that continued past one.
+      if (
+        i < allBodies.length - 1 &&
+        (TERMINAL_COMPLETION_TYPES.has(body.checkpointType) ||
+          body.checkpointType === TERMINAL_FAULT_TYPE)
+      ) {
+        return { status: "rejected", reason: "post_terminal_checkpoint" };
+      }
     }
+
+    // TERMINAL-COMPLETION GUARD (frozen §8.1-#1): the LAST accepted checkpoint must be a terminal-
+    // completion type; a chain that never completed — or ended in a fault — is NOT a success package.
+    const lastBody = allBodies[allBodies.length - 1];
     if (!TERMINAL_COMPLETION_TYPES.has(lastBody.checkpointType)) {
-      // A completed-but-FAILED run (terminal fault) is a distinct outcome from a chain
-      // that simply never reached completion — surface each with its own reason.
       if (lastBody.checkpointType === TERMINAL_FAULT_TYPE) {
         return { status: "rejected", reason: "terminal_fault" };
       }
       return { status: "rejected", reason: "terminal_checkpoint_missing" };
-    }
-
-    // S6-2b — TERMINAL-STATE integrity: a terminal checkpoint (completion OR fault) must be the
-    // LAST accepted checkpoint. Scan the WHOLE durable chain (findAllBySession is UNCAPPED) and
-    // reject if ANY non-last body is a terminal type — otherwise `fault_report → execution_completed`
-    // would finalize as SUCCESS (the terminal guard above trusts only the LAST type). A chain that
-    // continued past a terminal is malformed: the run ended; later checkpoints are invalid.
-    const allBodies = this.checkpointBodies.findAllBySession(sessionId); // seq-asc, uncapped
-    for (let i = 0; i < allBodies.length - 1; i++) {
-      const t = allBodies[i].checkpointType;
-      if (TERMINAL_COMPLETION_TYPES.has(t) || t === TERMINAL_FAULT_TYPE) {
-        return { status: "rejected", reason: "post_terminal_checkpoint" };
-      }
     }
     // Round-5 payloads-out: NO payloads are collected or assembled into the package. Revealed
     // payloads live OUTSIDE the immutable package (content-addressed by checkpoint hash, fetched

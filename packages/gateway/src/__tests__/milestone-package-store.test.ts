@@ -273,6 +273,24 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     if (r.status === "rejected") expect(r.reason).toBe("post_terminal_checkpoint");
   });
 
+  // ── Round-6 P1-3: WHOLE-CHAIN body↔receipt integrity (every body, not just the last) ─
+  it("round-6 whole-chain: a tampered NON-terminal body → errored, no package (the terminal body is intact)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]); // 3 checkpoints; last is the terminal completion
+    // Corrupt the FIRST (non-terminal) body's checkpointHash directly (bypassing record()). It no
+    // longer recomputes to its own hash NOR matches its receipt — the whole-chain check must catch it
+    // even though the TERMINAL body is untouched (the old last-only check would have missed this).
+    store.db
+      .update(schema.checkpointBodies)
+      .set({ checkpointHash: `sha256:${"de".repeat(32)}` })
+      .where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-1`))
+      .run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored");
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+  });
+
   it("finalize with zero accepted checkpoints -> rejected no_checkpoints", () => {
     openSession(); // session open, but no receipts recorded
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
@@ -424,15 +442,16 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
   it("S6-2: terminal checkpoint body missing despite a receipt → errored (integrity, fail closed)", () => {
     openSession();
     seedChain([[{ a: 1 }], [{ b: 2 }]], "execution_completed");
-    // Force the split state: delete the LAST (terminal) checkpoint's body while its
-    // receipt remains. finalize must fail closed on the missing terminal body.
+    // Force the split state: delete the LAST (terminal) checkpoint's body while its receipt remains.
+    // The round-6 whole-chain check fails closed on the resulting body/receipt COUNT mismatch — a more
+    // general catch than the old last-only "body missing" (it also catches a missing MIDDLE body).
     store.db
       .delete(schema.checkpointBodies)
       .where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-2`))
       .run();
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("errored");
-    if (r.status === "errored") expect(r.error.message).toContain("terminal checkpoint body missing");
+    if (r.status === "errored") expect(r.error.message).toContain("body/receipt count mismatch");
     // Fail closed: no package, session unchanged.
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
