@@ -291,13 +291,15 @@ describe("evidence async → settlement (§2.4 package-anchored /complete)", () 
     const hashes: string[] = [];
     let prev: string | null = null;
     for (let i = 0; i < count; i++) {
+      // Last checkpoint is the terminal completion — finalize now requires it (§8.1-#1).
+      const checkpointType = i === count - 1 ? "execution_completed" : ACTIONS[i % ACTIONS.length];
       const cp = signCheckpoint({
         sessionId,
         seq: i + 1,
         createdAt: now,
         prevCheckpointHash: prev,
         events: [{ i }],
-        checkpointType: ACTIONS[i % ACTIONS.length],
+        checkpointType,
         sessionPrivateKey: del.sessionPrivateKey,
       });
       const res = await app.inject({

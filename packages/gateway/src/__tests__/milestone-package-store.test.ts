@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { createStore, type Store } from "@pcc/store";
+import { createStore, schema, eq, type Store } from "@pcc/store";
 import { canonicalize } from "@pcc/spec";
 import { merkleRoot } from "@pcc/verifier";
 import { GatewayReceiptStore } from "../services/gateway-receipt-store.js";
@@ -334,5 +334,71 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       // And it is NOT the (wrong) root over just the first 1000 (the old capped fetch).
       expect(r.evidenceRoot).not.toBe(merkleRoot(hashes.slice(0, 1000)));
     }
+  });
+
+  // ── S6-2: finalize requires a TERMINAL completion checkpoint (frozen §8.1-#1) ──────
+  // Completion is a CLAIM signed + receipted under live authority; the LAST accepted
+  // checkpoint must be a terminal-completion type. seedChain's `terminalType` param sets
+  // the last checkpoint's type (a legitimate fixture control — finalize's contract now
+  // depends on it). A non-terminal / fault last checkpoint must NOT finalize a success.
+
+  it("S6-2: a single execution_started checkpoint → rejected terminal_checkpoint_missing", () => {
+    openSession();
+    seedChain([[{ a: 1 }]], "execution_started"); // the only (last) checkpoint is non-terminal
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("rejected");
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_checkpoint_missing");
+    // Fail closed: no package minted, session stays open.
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+  });
+
+  it("S6-2: a chain whose LAST checkpoint is workflow_step_completed → rejected terminal_checkpoint_missing", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }]], "workflow_step_completed"); // last is non-terminal
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("rejected");
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_checkpoint_missing");
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
+  it("S6-2: a chain ending in execution_completed → finalized", () => {
+    openSession();
+    const hashes = seedChain([[{ a: 1 }], [{ b: 2 }]], "execution_completed");
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("finalized");
+    if (r.status === "finalized") {
+      expect(r.package.acceptedCheckpointHashes).toEqual(hashes);
+      expect(r.evidenceRoot).toBe(merkleRoot(hashes));
+    }
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("finalized");
+  });
+
+  it("S6-2: a chain whose LAST checkpoint is a terminal fault_report → rejected terminal_fault (NOT finalized)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }]], "fault_report"); // completed-but-failed
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("rejected");
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_fault");
+    // A terminal fault is a DISTINCT outcome from a never-completed chain; not a success finalize.
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+  });
+
+  it("S6-2: terminal checkpoint body missing despite a receipt → errored (integrity, fail closed)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }]], "execution_completed");
+    // Force the split state: delete the LAST (terminal) checkpoint's body while its
+    // receipt remains. finalize must fail closed on the missing terminal body.
+    store.db
+      .delete(schema.checkpointBodies)
+      .where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-2`))
+      .run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored");
+    if (r.status === "errored") expect(r.error.message).toContain("terminal checkpoint body missing");
+    // Fail closed: no package, session unchanged.
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
   });
 });

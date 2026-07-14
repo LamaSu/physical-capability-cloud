@@ -81,6 +81,21 @@ function canonicalSha256(value: unknown): string {
 }
 
 /**
+ * Terminal-completion checkpoint types (frozen §8.1-#1): the LAST accepted checkpoint
+ * must be one of these for finalize to assemble a success package — completion is a
+ * CLAIM signed + receipted under LIVE authority, not an inference the package makes.
+ * A named, extensible set (add future terminal-completion types here).
+ */
+const TERMINAL_COMPLETION_TYPES: ReadonlySet<string> = new Set(["execution_completed"]);
+
+/**
+ * The terminal FAULT checkpoint type — a run that reached a terminal state but FAILED.
+ * Distinct from a chain that simply never completed: it yields its own reject reason
+ * (`terminal_fault`), never a success finalize.
+ */
+const TERMINAL_FAULT_TYPE = "fault_report";
+
+/**
  * The §8.3 claim-free FinalMilestonePackage (L317-324, interim fields). Content-
  * addressed by `packageHash = canonicalSha256(thisObject)`; the object carries
  * NEITHER its own hash NOR any tier/success claim.
@@ -139,7 +154,10 @@ export type FinalizeRejectReason =
   | "session_not_found"
   | "evidence_deadline_passed"
   | "no_checkpoints"
-  | "payload_commitment_mismatch";
+  | "payload_commitment_mismatch"
+  // Frozen §8.1-#1 terminal-completion requirement (the Wave-3 route maps both → 422):
+  | "terminal_checkpoint_missing" // last accepted checkpoint is not a completion type
+  | "terminal_fault"; // last accepted checkpoint is a terminal FAULT (completed-but-failed)
 
 /**
  * Discriminated outcome. `finalized`/`idempotent` carry the package + receipt built
@@ -251,6 +269,52 @@ export class MilestonePackageStore {
     }
     const acceptedCheckpointHashes = receiptRows.map((r) => r.checkpointHash);
     const receiptIds = receiptRows.map((r) => r.receiptId);
+
+    // TERMINAL-COMPLETION GUARD (frozen §8.1-#1): completion is a CLAIM that must be
+    // signed + receipted under LIVE authority. The LAST accepted checkpoint (highest seq
+    // == tip.lastSeq, verified by the completeness guard above) must be a terminal-
+    // completion checkpoint; a chain that never reached completion — or ended in a fault
+    // — is NOT finalizable into a success package. All reads are sync (the await-free
+    // critical section holds). Runs BEFORE payload verification and assembly.
+    const lastReceipt = receiptRows[receiptRows.length - 1];
+    const lastBody = this.checkpointBodies.findBySessionSeq(sessionId, lastReceipt.seq);
+    if (!lastBody) {
+      return {
+        status: "errored",
+        error: new Error(
+          `finalize integrity: terminal checkpoint body missing despite receipt ` +
+            `${lastReceipt.receiptId} (session ${sessionId}, seq ${lastReceipt.seq})`,
+        ),
+      };
+    }
+    // The body must attest EXACTLY the receipted hash: recompute over the same 6 canonical
+    // keys the route signs (§2.2 checkpointContent) and fail closed on any divergence — a
+    // tampered/forked body row must not be trusted to classify the terminal type.
+    const recomputedLastHash = canonicalSha256({
+      sessionId,
+      seq: lastBody.seq,
+      createdAt: lastBody.deviceCreatedAt,
+      prevCheckpointHash: lastBody.prevCheckpointHash ?? null,
+      eventsRoot: lastBody.eventsRoot,
+      checkpointType: lastBody.checkpointType,
+    });
+    if (recomputedLastHash !== lastBody.checkpointHash) {
+      return {
+        status: "errored",
+        error: new Error(
+          `finalize integrity: terminal checkpoint hash mismatch for ${lastReceipt.receiptId} ` +
+            `(session ${sessionId}, seq ${lastBody.seq})`,
+        ),
+      };
+    }
+    if (!TERMINAL_COMPLETION_TYPES.has(lastBody.checkpointType)) {
+      // A completed-but-FAILED run (terminal fault) is a distinct outcome from a chain
+      // that simply never reached completion — surface each with its own reason.
+      if (lastBody.checkpointType === TERMINAL_FAULT_TYPE) {
+        return { status: "rejected", reason: "terminal_fault" };
+      }
+      return { status: "rejected", reason: "terminal_checkpoint_missing" };
+    }
 
     // B-3 (clause 5): verify revealed payloads against the persisted eventsRoot
     // commitments. Introduces NO new claims — payloads only. A missing body or a
