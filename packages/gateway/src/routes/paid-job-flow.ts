@@ -919,6 +919,24 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "Job not found" });
       }
 
+      // STICKY STEP-6 (round-6 P0-1): once a job has EVER opened an async evidence session for
+      // milestone 0, the async package path is AUTHORITATIVE — the legacy gateway-synthesized
+      // fallback is permanently unreachable for it. A job that began async evidence but has no
+      // finalized package MUST NOT settle on the placeholder envelope: that would bypass the
+      // terminal-completion requirement, the package receipt, and the accepted checkpoint chain.
+      // It must finalize the package first. Checked BEFORE the completion claim so a blocked job is
+      // never stranded in `completing`. (Legacy jobs that never opened a session are unaffected —
+      // no session ⇒ this guard is inert and the legacy anchor path runs byte-identically.)
+      const stickyEvidenceSession = repos.evidenceSessions.findByJobMilestone(jobId, 0);
+      const stickyFinalizedPackage = repos.milestonePackages.findByJobMilestone(jobId, 0);
+      if (stickyEvidenceSession && !stickyFinalizedPackage) {
+        return reply.status(409).send({
+          error: "evidence_not_finalized",
+          evidenceSessionId: stickyEvidenceSession.sessionId,
+          sessionStatus: stickyEvidenceSession.status,
+        });
+      }
+
       // Atomic completion claim (P1). better-sqlite3 is synchronous, so this
       // UPDATE ... WHERE ... RETURNING runs to completion without yielding the
       // event loop — only ONE caller can flip a job into 'completing'. Closes

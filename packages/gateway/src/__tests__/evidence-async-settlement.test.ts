@@ -377,6 +377,31 @@ describe("evidence async → settlement (§2.4 package-anchored /complete)", () 
     expect(serve.body).not.toContain("0x0000000000000000000000000000000000000000");
   });
 
+  // ── P0-1 (round-6): sticky step-6 — opening a session disables the legacy fallback ─────
+  it("sticky step-6: begin an async session then /complete WITHOUT finalizing → 409 evidence_not_finalized (no legacy bypass)", async () => {
+    const { jobId } = await beginAndAccept(3); // opens a session, accepts the terminal checkpoint
+    // No finalize → no package. The legacy synthesized-envelope fallback MUST be unreachable now:
+    // a job that entered the async evidence flow cannot settle on the placeholder envelope (that
+    // would bypass the terminal-completion requirement, the package receipt, and the accepted chain).
+    expect(getRepos().milestonePackages.findByJobMilestone(jobId, 0)).toBeUndefined();
+    expect(getRepos().evidenceSessions.findByJobMilestone(jobId, 0)).toBeDefined();
+
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("evidence_not_finalized");
+    // The guard runs BEFORE the completion claim, so the job is neither stranded in `completing`
+    // nor settled via the bypass.
+    expect(getStore().repos.jobs.findById(jobId)?.status).not.toBe("settled");
+    expect(getStore().repos.jobs.findById(jobId)?.status).not.toBe("completing");
+
+    // And it CAN still finalize + settle afterward — the guard blocks ONLY the bypass, not the
+    // legitimate package path.
+    await finalize(jobId);
+    const ok = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().status).toBe("settled");
+  });
+
   // ── 3. long-job (§8.1-#1 acceptance test / TTL-bug regression) ───────────────
   it("long-job: execution window elapses after last checkpoint, before finalize+/complete — still settles on the package", async () => {
     const t0 = Math.floor(Date.now() / 1000);
