@@ -32,7 +32,7 @@
  * as runtime CSDs.
  */
 
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, randomBytes, createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -123,19 +123,87 @@ function slugify(name: string): string {
   return base || "dashboard";
 }
 
-/** Short, unguessable-enough suffix so unlisted slugs aren't enumerable. */
-function shortId(len: number): string {
-  return randomUUID().replace(/-/g, "").slice(0, len);
+/**
+ * A crypto-random hex suffix so unlisted/public slugs are NOT enumerable
+ * (directive 13). `randomBytes` is a CSPRNG; `bytes` bytes → `bytes*8` bits of
+ * entropy → `bytes*2` hex chars.
+ *
+ * NEW links use SLUG_SUFFIX_BYTES = 12 → 96 random bits (the audit floor),
+ * replacing the old 6-hex-char / 24-bit suffix. EXISTING slugs are NOT rewritten
+ * — they are looked up by exact string, so short legacy slugs keep resolving;
+ * only newly-minted links get the wider suffix. No redirect/migration is needed
+ * (nothing changes the stored slug of an existing artifact).
+ */
+const SLUG_SUFFIX_BYTES = 12; // 96 bits
+const SLUG_SUFFIX_BYTES_FALLBACK = 16; // 128 bits, used only on the rare clash
+
+function randomSuffix(bytes: number): string {
+  return randomBytes(bytes).toString("hex");
 }
 
-/** Mint a slug not already taken (random suffix; retried on the rare clash). */
+/** Mint a slug not already taken (96-bit random suffix; widened on the rare clash). */
 function uniqueSlug(name: string): string {
   const base = slugify(name);
   for (let i = 0; i < 5; i++) {
-    const candidate = `${base}-${shortId(6)}`;
+    const candidate = `${base}-${randomSuffix(SLUG_SUFFIX_BYTES)}`;
     if (!getBySlug(candidate)) return candidate;
   }
-  return `${base}-${shortId(12)}`;
+  return `${base}-${randomSuffix(SLUG_SUFFIX_BYTES_FALLBACK)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Failed-lookup rate limiting (anti-enumeration, directive 13)
+//
+// A sliding-window counter of FAILED public lookups per caller key. SUCCESSFUL
+// lookups are never counted and never throttled, so a real user browsing their
+// own shared dashboards is unaffected; only a burst of MISSES (the enumeration
+// signature) trips the limit. This is defense-in-depth — the primary
+// anti-enumeration guarantee is the ≥96-bit slug entropy above.
+//
+// Keying: the HTTP share/recall routes key on `req.ip` (a real per-caller
+// throttle). The MCP `resources/read` share path has NO per-caller identity at
+// its resource layer beyond an optional host session id (an interface gap noted
+// in the remediation report), so it keys on the session id when present, else a
+// shared "mcp:anon" bucket — coarse, but it still bounds a single session's
+// miss rate and never hides a real (successful) artifact.
+// ---------------------------------------------------------------------------
+
+const FAILED_LOOKUP_WINDOW_MS = 60_000;
+const FAILED_LOOKUP_MAX = 30; // failed public lookups per key per window
+const FAILED_LOOKUP_MAX_KEYS = 10_000; // memory bound on the tracking map
+const failedLookups = new Map<string, number[]>();
+
+function freshFailures(key: string, now: number): number[] {
+  const arr = failedLookups.get(key);
+  if (!arr) return [];
+  return arr.filter((t) => now - t < FAILED_LOOKUP_WINDOW_MS);
+}
+
+/** True when `key` has exceeded the failed-lookup budget in the current window
+ * (read-only; does not record). Callers should short-circuit to a generic
+ * response — never one that reveals whether a given artifact exists. */
+export function publicLookupThrottled(key: string): boolean {
+  return freshFailures(key, Date.now()).length >= FAILED_LOOKUP_MAX;
+}
+
+/** Record one FAILED (miss/forbidden) public lookup for `key`. */
+export function notePublicLookupFailure(key: string): void {
+  const now = Date.now();
+  const arr = freshFailures(key, now);
+  arr.push(now);
+  failedLookups.set(key, arr);
+  if (failedLookups.size > FAILED_LOOKUP_MAX_KEYS) {
+    for (const [k, v] of failedLookups) {
+      const fresh = v.filter((t) => now - t < FAILED_LOOKUP_WINDOW_MS);
+      if (fresh.length === 0) failedLookups.delete(k);
+      else failedLookups.set(k, fresh);
+    }
+  }
+}
+
+/** Test reset hook for the failed-lookup limiter. */
+export function _resetPublicLookupLimiterForTests(): void {
+  failedLookups.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +230,11 @@ function getByIdOrSlug(idOrSlug: string): UiArtifact | undefined {
 
 /** Valid slug format — lowercase alnum with internal hyphens (exactly what
  * slugify() mints). Rejects an id (`ua_…`, underscores), uppercase, spaces, or
- * junk, so the public share surface accepts only a well-formed slug. */
+ * junk, so the public share surface accepts only a well-formed slug. Length cap
+ * accommodates the 96-bit suffix (base ≤40 + "-" + 24 hex = 65; 128-bit clash
+ * fallback = 73) with headroom, while still bounding the input. */
 function isValidSlugFormat(slug: string): boolean {
-  return slug.length <= 64 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
+  return slug.length <= 80 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
 }
 
 /**
@@ -435,11 +505,25 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { idOrSlug: string } }>(
     "/api/artifacts/:idOrSlug",
     async (req, reply) => {
+      const rateKey = req.ip || "unknown";
+      if (publicLookupThrottled(rateKey)) {
+        return reply.status(429).send({
+          error: "rate_limited",
+          message: "Too many lookups. Please slow down and try again shortly.",
+        });
+      }
+
       const a = getByIdOrSlug(req.params.idOrSlug);
-      if (!a || a.status === "retired") return notFound(reply, req.params.idOrSlug);
+      if (!a || a.status === "retired") {
+        notePublicLookupFailure(rateKey);
+        return notFound(reply, req.params.idOrSlug);
+      }
 
       const caller = resolveCaller(req);
-      if (!canRead(a, caller)) return forbidden(reply, "This artifact is private.");
+      if (!canRead(a, caller)) {
+        notePublicLookupFailure(rateKey);
+        return forbidden(reply, "This artifact is private.");
+      }
 
       a.loadCount += 1;
       a.updatedAt = new Date().toISOString();
@@ -563,8 +647,17 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
   // ═════════════════════════════════════════════════════════════════
 
   app.get<{ Params: { slug: string } }>("/a/:slug", async (req, reply) => {
+    const rateKey = req.ip || "unknown";
+    if (publicLookupThrottled(rateKey)) {
+      return reply
+        .status(429)
+        .type("text/html; charset=utf-8")
+        .send(htmlMessage("Too many requests", "Please slow down and try again shortly."));
+    }
+
     const a = getBySlug(req.params.slug) ?? getById(req.params.slug);
     if (!a || a.status === "retired") {
+      notePublicLookupFailure(rateKey);
       return reply
         .status(404)
         .type("text/html; charset=utf-8")
@@ -573,6 +666,7 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
 
     const caller = resolveCaller(req);
     if (!canRead(a, caller)) {
+      notePublicLookupFailure(rateKey);
       return reply
         .status(403)
         .type("text/html; charset=utf-8")
