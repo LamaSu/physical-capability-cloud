@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 // @ts-expect-error — JS audit tool, no d.ts
-import { validateManifest, seedRoutePolicies, ruleId } from "../../../../scripts/audit/seed-route-policy.mjs";
-import { initStore, getRepos, closeStore } from "../db.js";
+import { validateManifest, seedRoutePolicies, seedRoutePolicyManifest, ruleId } from "../../../../scripts/audit/seed-route-policy.mjs";
+import { initStore, getRepos, getStore, closeStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
 
 /**
  * Seeder test (audit P0, lane d749deff): the route-policy manifest loads into the
@@ -15,8 +16,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST = join(HERE, "..", "..", "..", "..", "scripts", "audit", "route-policy-manifest.json");
 
 describe("route-policy seeder (manifest -> endpoint_scopes)", () => {
-  const rules: Array<{ method: string; pattern: string; scopes: string[]; note?: string }> =
-    JSON.parse(readFileSync(MANIFEST, "utf8")).rules;
+  const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
+  const rules: Array<{ method: string; pattern: string; scopes: string[]; note?: string }> = manifest.rules;
 
   beforeAll(() => {
     process.env.PCC_DB_PATH = ":memory:";
@@ -74,5 +75,20 @@ describe("route-policy seeder (manifest -> endpoint_scopes)", () => {
     expect(() =>
       seedRoutePolicies(getRepos().governance, [{ method: "GET", pattern: "/api/x/**", scopes: ["*"] }]),
     ).toThrow(/refusing to seed/);
+  });
+
+  it("seedRoutePolicyManifest deletes stale rp_ rows in one transaction (R2 #7)", () => {
+    const gov = getRepos().governance;
+    // A stale manifest-owned row no longer in the current manifest.
+    gov.insertEndpointScope({
+      id: "rp_stale_row", method: "POST", routePattern: "/api/gone/x", requiredScopes: ["admin"], description: null,
+    });
+    expect(gov.findEndpointScopeById("rp_stale_row")).toBeTruthy();
+
+    const res = seedRoutePolicyManifest(getStore(), manifest, { schema, eq });
+    expect(res.deleted).toBeGreaterThanOrEqual(1);
+    expect(gov.findEndpointScopeById("rp_stale_row")).toBeUndefined(); // stale row removed
+    const rpRows = gov.findAllEndpointScopes().filter((r: { id: string }) => r.id.startsWith("rp_"));
+    expect(rpRows.length).toBe(rules.length); // exactly the manifest, no orphans
   });
 });

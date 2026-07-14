@@ -148,6 +148,35 @@ export function seedRoutePolicies(gov, rules) {
   return { inserted, updated, total: rules.length };
 }
 
+/**
+ * Transactional seed (review R2 #7): validate, upsert every rule, DELETE stale
+ * manifest-owned (rp_*) rows no longer in the manifest, and write the marker — all
+ * in ONE transaction. A failure rolls everything back, so a running gateway can
+ * never observe a partial set and a shrunk manifest leaves no orphan rows to break
+ * the exact-count gate. Returns { inserted, updated, deleted, total }.
+ */
+export function seedRoutePolicyManifest(store, manifest, { schema, eq }) {
+  const rules = manifest.rules;
+  const errors = validateManifest(rules);
+  if (errors.length) {
+    throw new Error(`refusing to seed invalid route-policy manifest: ${errors.join("; ")}`);
+  }
+  const expected = new Set(rules.map((r) => ruleId(r.method, r.pattern)));
+  return store.db.transaction(() => {
+    const res = seedRoutePolicies(store.repos.governance, rules);
+    let deleted = 0;
+    for (const row of store.repos.governance.findAllEndpointScopes()) {
+      // Manifest-owned rows use rp_* ids; delete any no longer in this manifest.
+      if (row.id.startsWith("rp_") && !expected.has(row.id)) {
+        store.db.delete(schema.endpointScopes).where(eq(schema.endpointScopes.id, row.id)).run();
+        deleted++;
+      }
+    }
+    writeManifestMarker(store.repos.governance, rules, manifest.version);
+    return { ...res, deleted };
+  });
+}
+
 // ── CLI (only when run directly) ──
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
 if (isMain) await runCli();
@@ -180,12 +209,11 @@ async function runCli() {
     return;
   }
 
-  const { createStore } = await import("@pcc/store");
+  const { createStore, schema, eq } = await import("@pcc/store");
   const store = createStore({ dbPath, seed: false });
   try {
-    const res = seedRoutePolicies(store.repos.governance, rules);
-    const marker = writeManifestMarker(store.repos.governance, rules, manifest.version);
-    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated (${res.total} total). marker ${marker}`);
+    const res = seedRoutePolicyManifest(store, manifest, { schema, eq });
+    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated, ${res.deleted} stale deleted (${res.total} total).`);
   } finally {
     store.close();
   }
