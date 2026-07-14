@@ -1,7 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 // @ts-expect-error — JS audit tool, no d.ts; buildInventory returns the shape below.
 import { buildInventory } from "../../../../scripts/audit/route-policy-inventory.mjs";
 
@@ -9,59 +6,60 @@ import { buildInventory } from "../../../../scripts/audit/route-policy-inventory
  * Route-policy COVERAGE GATE (audit P0, lane d749deff).
  *
  * The thing that lets gateway default-deny (fix/audit-p0 scope-checker) ship
- * without silently bricking a legitimate route: it enumerates every /api/* route
- * and fails if a private MUTATING route has no scope policy. It's a RATCHET —
- * the known gap (route-policy-baseline.json) may only shrink. Adding a scope
- * policy moves a route to "policed" and it drops off the baseline; adding a new
- * unpoliced mutating route fails CI until it gets a policy.
+ * without silently 403-ing a legitimate route: it enumerates every /api/* route
+ * and requires that EVERY private route (mutating or read) is covered by a scope
+ * policy — the 11 DEFAULT_SCOPE_REQUIREMENTS plus scripts/audit/route-policy-
+ * manifest.json. At full coverage (0 unpoliced) the scope-checker's unmatched-
+ * route default can be flipped allow→deny with nothing bricked.
  *
- * Goal state: baseline == [] → every private mutating route is policed → the
- * scope-checker's unmatched-route default can be flipped allow→deny safely.
+ * A new /api/* route with no policy fails this gate until it gets a manifest rule.
+ *
+ * PREREQUISITE for enforcement: scope-checker.ts patternToRegex must handle `**`
+ * (any-depth) correctly — it currently does NOT (flagged to 9de363c7). The
+ * inventory tool models the corrected matcher; without the scope-checker fix,
+ * the manifest's multi-segment rules will not actually enforce.
  */
-const HERE = dirname(fileURLToPath(import.meta.url));
-const BASELINE_PATH = join(HERE, "..", "..", "..", "..", "scripts", "audit", "route-policy-baseline.json");
-
 describe("route-policy coverage gate (unblocks default-deny)", () => {
   const inv = buildInventory() as {
-    totals: { policed: number; unpoliced_private_mutating: number };
-    routes: Array<{ method: string; path: string; bucket: string; mutating: boolean }>;
+    totals: {
+      policed: number;
+      policed_by_default: number;
+      unpoliced_private_mutating: number;
+      unpoliced_private_read: number;
+    };
+    routes: Array<{ method: string; path: string; bucket: string }>;
   };
-  const currentMutating = inv.routes
-    .filter((r) => r.bucket === "unpoliced_private_mutating")
-    .map((r) => `${r.method} ${r.path}`);
-  const baseline: string[] = JSON.parse(readFileSync(BASELINE_PATH, "utf8")).routes;
-  const baselineSet = new Set(baseline);
+  const unpoliced = (b: string) =>
+    inv.routes.filter((r) => r.bucket === b).map((r) => `${r.method} ${r.path}`).sort();
 
-  it("no NEW unpoliced private mutating route (ratchet against the baseline)", () => {
-    const novel = currentMutating.filter((k) => !baselineSet.has(k)).sort();
+  it("FULL coverage: no unpoliced private MUTATING route", () => {
     expect(
-      novel,
-      `New unpoliced MUTATING /api/* route(s) with NO scope policy. Add a scope rule ` +
-        `(fix/audit-p0 scope-checker/governance) or — only if it is legitimately covered — ` +
-        `regenerate scripts/audit/route-policy-baseline.json:\n${novel.join("\n")}`,
+      unpoliced("unpoliced_private_mutating"),
+      "Unpoliced MUTATING /api/* route(s) — add a rule to scripts/audit/route-policy-manifest.json:",
     ).toEqual([]);
   });
 
-  it("the coverage gap only shrinks (mutating count <= baseline)", () => {
-    expect(inv.totals.unpoliced_private_mutating).toBeLessThanOrEqual(baseline.length);
+  it("FULL coverage: no unpoliced private READ route", () => {
+    expect(
+      unpoliced("unpoliced_private_read"),
+      "Unpoliced READ /api/* route(s) — add a rule to scripts/audit/route-policy-manifest.json:",
+    ).toEqual([]);
   });
 
-  it("classifier stays faithful to the scope snapshot (exactly 11 default-policed)", () => {
-    // Anchors the DEFAULT_SCOPE_REQUIREMENTS snapshot in the inventory tool.
-    // If fix/audit-p0 changes the default scope rules, re-sync the snapshot and
-    // this number together.
-    expect(inv.totals.policed).toBe(11);
+  it("classifier stays faithful to the DEFAULT_SCOPE_REQUIREMENTS snapshot (11)", () => {
+    // Anchors the scope-checker.ts default-rules snapshot in the inventory tool.
+    // If fix/audit-p0 changes the defaults, re-sync the snapshot and this number.
+    expect(inv.totals.policed_by_default).toBe(11);
   });
 
   it("no money-path route is PUBLIC (escrow/settlement/fiat-ramp/payout/pool/swf/rewards)", () => {
-    const moneyPublic = inv.routes.filter(
-      (r) =>
-        r.bucket === "public" &&
-        /\/api\/(escrow|settlement|fiat-ramp|payout|pool|swf|rewards)(\/|$)/.test(r.path),
-    );
-    expect(
-      moneyPublic.map((r) => `${r.method} ${r.path}`),
-      "Money-path routes must never be classified public (auth-gate them in api-gate).",
-    ).toEqual([]);
+    const moneyPublic = inv.routes
+      .filter(
+        (r) =>
+          r.bucket === "public" &&
+          /\/api\/(escrow|settlement|fiat-ramp|payout|pool|swf|rewards)(\/|$)/.test(r.path),
+      )
+      .map((r) => `${r.method} ${r.path}`);
+    expect(moneyPublic, "Money-path routes must never be classified public.").toEqual([]);
   });
 });
