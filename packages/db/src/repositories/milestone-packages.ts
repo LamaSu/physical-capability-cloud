@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { milestonePackages } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type {
@@ -41,6 +41,24 @@ export class MilestonePackageRepository implements IMilestonePackageRepository {
           eq(milestonePackages.milestoneIndex, milestoneIndex),
         ),
       )
+      .get();
+  }
+
+  findByPackageHash(packageHash: string) {
+    // Normalize to bare lowercase 64-hex, then match every stored form. The
+    // store commits packageHash as `sha256:<hex>`, but the oracle's fetch may
+    // pass `0x<hex>` (on-chain form) or bare hex — the digest is the key.
+    // Mirrors EvidenceBundleRepository.findByHash.
+    let hex = packageHash.trim();
+    if (hex.startsWith("sha256:")) hex = hex.slice("sha256:".length);
+    else if (hex.startsWith("0x") || hex.startsWith("0X")) hex = hex.slice(2);
+    hex = hex.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) return undefined;
+    const candidates = [`sha256:${hex}`, `0x${hex}`, hex];
+    return this.db
+      .select()
+      .from(milestonePackages)
+      .where(inArray(milestonePackages.packageHash, candidates))
       .get();
   }
 }

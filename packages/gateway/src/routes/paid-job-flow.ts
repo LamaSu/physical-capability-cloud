@@ -1075,6 +1075,25 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       );
       const gatewayBundleHash = `sha256:${crypto.createHash("sha256").update(envelopeCanonical).digest("hex")}`;
 
+      // ── §2.4 package-anchored settlement (ADDITIVE; activates only on new state) ──
+      // When a finalized FinalMilestonePackage exists for (job, milestone 0), the
+      // settlement anchor is the package's OWN content hash (packageHash) and the
+      // oracle is served the canonical PACKAGE bytes at GET /api/evidence/:packageHash
+      // (served package-first in settlement.ts) — NOT the gateway-synthesized envelope
+      // above. This quarantines the legacy fallback disease §2.4 names: a job carrying
+      // REAL, receipted async evidence never settles on the gateway's self-synthesized
+      // placeholder-signed envelope. Per the step-6 scope this swaps ONLY the anchored
+      // hash + the served bytes — the SEAM-2 decision, HOLD gate, tier logic, oracle,
+      // EAS and escrow below all run byte-identically, just against packageHash.
+      //   `gatewayBundleHash` is still computed above but UNUSED on the package path.
+      //   When NO package exists (every legacy job + every existing test),
+      //   `anchorFallbackHash === gatewayBundleHash` and this whole handler is
+      //   byte-identical to before (legacy zero-diff).
+      const finalizedPackage = repos.milestonePackages.findByJobMilestone(jobId, 0);
+      const anchorFallbackHash = finalizedPackage
+        ? finalizedPackage.packageHash
+        : gatewayBundleHash;
+
       // ── SEAM-2 (path 2): choose the settlement anchor. READY BUT GATED. ──
       // By DEFAULT the gate is CLOSED — the #52 machine.execution_log verifier is
       // stubbed/fail-closed AND the SEAM2_DEVICE_EVIDENCE_SETTLEMENT flag is unset —
@@ -1165,7 +1184,9 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         // HOLDS (below) instead of silently anchoring on the gateway placeholder.
         requestedTier: jobAssuranceTier,
         fallback: {
-          bundleHash: gatewayBundleHash,
+          // §2.4: the package's content hash when a finalized package exists,
+          // else the synthesized gateway-envelope hash (legacy, byte-identical).
+          bundleHash: anchorFallbackHash,
           kernelSignature: gatewaySignature,
           assuranceTier: jobAssuranceTier,
         },

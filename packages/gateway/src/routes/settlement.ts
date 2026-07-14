@@ -13,6 +13,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
+import { canonicalize } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 import { pipelineTelemetry } from "../telemetry.js";
 import { getRepos } from "../db.js";
@@ -246,6 +247,21 @@ export async function settlementRoutes(app: FastifyInstance) {
 
     if (isEvidenceHashForm(param)) {
       const repos = getRepos();
+      // §2.4 — a finalized FinalMilestonePackage is the content-addressed unit the
+      // settlement oracle fetch-and-rehashes when a job settled on the async package
+      // path (bundleHash = packageHash). Checked BEFORE the evidence-bundle lookup:
+      // on that path an evidence row is ALSO stored under the same packageHash, but
+      // the oracle MUST receive the canonical PACKAGE bytes — whose sha256 IS the
+      // packageHash — not a reconstructed envelope (that would fail the byte re-hash
+      // closed). Serve canonicalize(pkg.body) as a RAW string (Fastify must NOT
+      // re-serialize; key order / whitespace are load-bearing for the re-hash), the
+      // same discipline as the envelope branch below.
+      const pkg = repos.milestonePackages.findByPackageHash(param);
+      if (pkg) {
+        return reply
+          .type("application/json; charset=utf-8")
+          .send(canonicalize(pkg.body));
+      }
       const bundle = repos.evidence.findByHash(param);
       if (bundle) {
         const events = repos.evidence.findEventsByBundle(bundle.id);
