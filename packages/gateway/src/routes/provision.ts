@@ -617,20 +617,31 @@ export async function provisionRoutes(app: FastifyInstance) {
                 // settlement-relevant state on a mere logging outage. Logging
                 // here decouples audit availability from wallet correctness.
                 if (walletWritten) {
-                  auditService.log({
-                    eventType: "auth.agent_wallet_written",
-                    actor: operatorId,
-                    resourceType: "api_key",
-                    resourceId: record.id,
-                    action: "update",
-                    metadata: {
-                      agent_wallet: opWallet.address,
-                      tx_hash: walletTxHash,
-                      agent_id: String(onchain.agentId),
-                    },
-                    ip: req.ip,
-                    userAgent: req.headers["user-agent"],
-                  });
+                  // Review r3 #5: this call sits outside the inner chain try/catch
+                  // but still inside the outer `catch (opWalletErr)`. Wrap it in its
+                  // own best-effort try/catch so an audit-log outage can never reach
+                  // that handler and misclassify an already-written wallet as failed.
+                  try {
+                    auditService.log({
+                      eventType: "auth.agent_wallet_written",
+                      actor: operatorId,
+                      resourceType: "api_key",
+                      resourceId: record.id,
+                      action: "update",
+                      metadata: {
+                        agent_wallet: opWallet.address,
+                        tx_hash: walletTxHash,
+                        agent_id: String(onchain.agentId),
+                      },
+                      ip: req.ip,
+                      userAgent: req.headers["user-agent"],
+                    });
+                  } catch (auditErr) {
+                    req.log?.warn(
+                      { keyId: record.id, error: String(auditErr) },
+                      "agent-wallet-written audit log failed (best-effort) — wallet state unaffected",
+                    );
+                  }
                 }
               }
             }
