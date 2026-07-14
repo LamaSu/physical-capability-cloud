@@ -29,6 +29,9 @@ const MANIFEST_PATH = join(HERE, "route-policy-manifest.json");
 export const VALID_SCOPES = new Set([
   "operator", "requestor", "verifier", "admin", "agent", "auditor", "template_author",
 ]);
+export const VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]);
+// A clean /api/ route pattern (rejects query strings, spaces, control chars, etc).
+const CLEAN_PATTERN_RE = /^\/api\/[A-Za-z0-9/_:*.-]*$/;
 
 /** Deterministic id so re-seeding upserts the same row. */
 export function ruleId(method, pattern) {
@@ -47,9 +50,16 @@ export function validateManifest(rules) {
       errors.push(`malformed rule: ${JSON.stringify(r)}`);
       continue;
     }
+    if (!VALID_METHODS.has(r.method)) errors.push(`invalid method "${r.method}": ${where}`);
+    if (!CLEAN_PATTERN_RE.test(r.pattern)) errors.push(`pattern must be a clean /api/ route: ${where}`);
     if (r.scopes.includes("*")) errors.push(`wildcard "*" scope forbidden in a policy: ${where}`);
-    // "*" is already reported as wildcard above; don't also flag it as unknown.
-    for (const s of r.scopes) if (s !== "*" && !VALID_SCOPES.has(s)) errors.push(`unknown scope "${s}": ${where}`);
+    const scopeSeen = new Set();
+    for (const s of r.scopes) {
+      // "*" is already reported as wildcard above; don't also flag it as unknown.
+      if (s !== "*" && !VALID_SCOPES.has(s)) errors.push(`unknown scope "${s}": ${where}`);
+      if (scopeSeen.has(s)) errors.push(`duplicate scope "${s}": ${where}`);
+      scopeSeen.add(s);
+    }
     const key = `${r.method} ${r.pattern}`;
     if (seen.has(key)) errors.push(`duplicate rule: ${where}`);
     seen.add(key);
@@ -111,6 +121,12 @@ export function emitConstantsModule(manifest) {
 
 /** Upsert every rule into endpoint_scopes via the governance repo. */
 export function seedRoutePolicies(gov, rules) {
+  // Validate INSIDE the function (finding #8) so a direct importer can't bypass the
+  // CLI's pre-check and seed an invalid manifest.
+  const errors = validateManifest(rules);
+  if (errors.length) {
+    throw new Error(`refusing to seed invalid route-policy manifest: ${errors.join("; ")}`);
+  }
   let inserted = 0, updated = 0;
   for (const r of rules) {
     const id = ruleId(r.method, r.pattern);

@@ -58,4 +58,21 @@ describe("route-policy seeder (manifest -> endpoint_scopes)", () => {
       expect.stringContaining("unknown scope"),
     ]);
   });
+
+  it("validateManifest REJECTS an invalid method, unclean pattern, and duplicate scope (finding #8)", () => {
+    expect(validateManifest([{ method: "FETCH", pattern: "/api/x/**", scopes: ["operator"] }]))
+      .toEqual([expect.stringContaining("invalid method")]);
+    expect(validateManifest([{ method: "GET", pattern: "/api/x?y=1", scopes: ["operator"] }]))
+      .toEqual([expect.stringContaining("clean /api/ route")]);
+    expect(validateManifest([{ method: "GET", pattern: "/nope/x", scopes: ["operator"] }]))
+      .toEqual([expect.stringContaining("clean /api/ route")]);
+    expect(validateManifest([{ method: "GET", pattern: "/api/x/**", scopes: ["operator", "operator"] }]))
+      .toEqual([expect.stringContaining("duplicate scope")]);
+  });
+
+  it("seedRoutePolicies REFUSES invalid rules directly — validation can't be bypassed (finding #8)", () => {
+    expect(() =>
+      seedRoutePolicies(getRepos().governance, [{ method: "GET", pattern: "/api/x/**", scopes: ["*"] }]),
+    ).toThrow(/refusing to seed/);
+  });
 });
