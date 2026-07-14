@@ -103,14 +103,51 @@ export interface CheckpointReceiptInput {
 
 /**
  * Discriminated outcome. `accepted` carries the signed receipt (built from the
- * persisted row) + the raw row; `rejected` carries the §8.4-A step-5 reason and
- * guarantees NO persist + NO advance; `errored` means the persist transaction
- * threw (rolled back) — NO receipt and, critically, NO in-memory advance.
+ * persisted row) + the raw row; `idempotent` (H1) is an EXACT resubmit of an
+ * already-committed checkpoint (response-lost-after-commit) — the committed
+ * receipt, NO 2nd row; `conflict` (H1) is a DIFFERENT checkpoint at an
+ * already-committed (sessionId, seq) — an equivocation attempt, committed row
+ * left untouched; `rejected` carries the §8.4-A step-5 reason and guarantees NO
+ * persist + NO advance; `errored` means a contract-violating input (R-14b) or a
+ * persist transaction that threw (rolled back) — NO receipt and NO advance.
  */
 export type RecordCheckpointResult =
   | { status: "accepted"; receipt: GatewayReceipt; row: GatewayReceiptRow }
+  | { status: "idempotent"; receipt: GatewayReceipt; row: GatewayReceiptRow }
+  | { status: "conflict"; reason: "equivocation" }
   | { status: "rejected"; reason: SequenceRejectReason }
   | { status: "errored"; error: Error };
+
+/**
+ * R-14b defensive input validation for `record()`. A structurally invalid input
+ * is a CONTRACT VIOLATION (→ `errored`), never a sequence reject: it must never
+ * reach checkSequence / the signer / the DB. Returns a clear message on the
+ * first violation, or null when the input is structurally sound. (`gatewayKeyId`
+ * comes from the signer and `sessionStateVersion` is set to `seq` by record(),
+ * so those are correct by construction; the W2.5a DB CHECKs are the storage-layer
+ * backstop below this service-layer guard.)
+ */
+function validateCheckpointInput(input: CheckpointReceiptInput): string | null {
+  if (!Number.isInteger(input.seq) || input.seq < 1) {
+    return `invalid seq ${JSON.stringify(input.seq)} (must be an integer >= 1)`;
+  }
+  if (!Number.isInteger(input.maxSignatures) || input.maxSignatures < 0) {
+    return `invalid maxSignatures ${JSON.stringify(input.maxSignatures)} (must be an integer >= 0)`;
+  }
+  if (!Number.isFinite(input.effectiveEvidenceTime) || input.effectiveEvidenceTime <= 0) {
+    return `invalid effectiveEvidenceTime ${JSON.stringify(input.effectiveEvidenceTime)} (must be a finite number > 0)`;
+  }
+  if (typeof input.jobId !== "string" || input.jobId.trim() === "") {
+    return "invalid jobId (must be a non-empty string)";
+  }
+  if (typeof input.sessionId !== "string" || input.sessionId.trim() === "") {
+    return "invalid sessionId (must be a non-empty string)";
+  }
+  if (typeof input.checkpointHash !== "string" || input.checkpointHash.trim() === "") {
+    return "invalid checkpointHash (must be a non-empty string)";
+  }
+  return null;
+}
 
 export interface GatewayReceiptStoreDeps {
   /** The store's drizzle DB — owns `.transaction()`. Must be the SAME connection the repo writes through. */
@@ -148,6 +185,17 @@ export class GatewayReceiptStore {
    * file header for why that is the single-writer guarantee.
    */
   record(input: CheckpointReceiptInput): RecordCheckpointResult {
+    // R-14b. DEFENSIVE INPUT VALIDATION (contract violation → `errored`, NOT a
+    //    sequence reject). record() is the money-path acceptance gate; a
+    //    structurally invalid input must never reach the rehydrate probe,
+    //    checkSequence, the signer, or the DB. Runs first so a garbage sessionId
+    //    never triggers a rehydrate read. The DB CHECKs (W2.5a) are the storage
+    //    backstop; this fails fast at the service layer with a clear message.
+    const invalidInput = validateCheckpointInput(input);
+    if (invalidInput) {
+      return { status: "errored", error: new Error(`gateway receipt record: ${invalidInput}`) };
+    }
+
     // 0. REHYDRATE-ON-FIRST-TOUCH (§1): after a restart, in-memory state is genesis
     //    for every session, but the durable gateway_receipts rows hold the real
     //    accepted tip. Recover it INSIDE this same synchronous span (before the
@@ -175,6 +223,38 @@ export class GatewayReceiptStore {
           seen: new Set(rows.map((r) => r.checkpointHash)), // rebuild the dup-hash set
         });
       }
+    }
+
+    // H1. DB-AUTHORITATIVE idempotency / equivocation guard. The durable
+    //    gateway_receipts row at (sessionId, seq) is the SOURCE OF TRUTH; the
+    //    in-memory chain is only a cache over it. Resolve the deterministic id
+    //    BEFORE checkSequence so the discriminator is "does a committed row exist
+    //    AT THIS seq?":
+    //      - yes + SAME (jobId, checkpointHash, prevCheckpointHash)  → idempotent
+    //        (the response was lost after commit; return the committed receipt,
+    //        insert NO 2nd row, do NOT mis-classify as a replay).
+    //      - yes + DIFFERENT any of those                           → conflict
+    //        (equivocation: a fork attempt at a committed height; NEVER overwrite
+    //        the committed row).
+    //      - no row                                                 → fall through
+    //        to the existing checkSequence path (accept / seq_gap_or_replay /
+    //        chain_broken / max_signatures / duplicate_hash), UNCHANGED.
+    //    findById is sync + integrity-asserted (W2.5a), so the critical section
+    //    stays await-free (the single-writer property in the file header).
+    const committed = this.repo.findById(`grcpt-${input.sessionId}-${input.seq}`);
+    if (committed) {
+      const sameCheckpoint =
+        committed.jobId === input.jobId &&
+        committed.checkpointHash === input.checkpointHash &&
+        (committed.previousAcceptedHash ?? null) === (input.prevCheckpointHash ?? null);
+      if (sameCheckpoint) {
+        return {
+          status: "idempotent",
+          receipt: committed.body as unknown as GatewayReceipt,
+          row: committed,
+        };
+      }
+      return { status: "conflict", reason: "equivocation" };
     }
 
     // 1. READ the prior accepted-chain state (incl. `seen`, for the dup-hash clause).

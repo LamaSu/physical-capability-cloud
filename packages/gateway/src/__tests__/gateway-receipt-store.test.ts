@@ -103,10 +103,16 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1", maxSignatures: 2 })).status,
     ).toBe("accepted");
 
-    // Double-accept the same seq (2) → reject (seq === lastSeq, not last+1).
+    // Re-submit seq 2 with a DIFFERENT hash (h2x vs the committed h2). INTENDED H1
+    // CHANGE (RULE 18): a row IS committed at (sess-1, 2) and the checkpoint differs,
+    // so the DB-authoritative guard classifies this as conflict:equivocation — the
+    // precise "you cannot fork history at a committed height" outcome. Pre-H1 this fell
+    // through to checkSequence (seq===lastSeq, not last+1) and was seq_gap_or_replay.
+    // Same H1 behavior the audit specifies ("different-hash-same-seq → equivocation
+    // because a row DOES exist at that seq"); full matrix in the H1 describe block.
     const replay = svc.record(input({ seq: 2, checkpointHash: "h2x", prevCheckpointHash: "h1", maxSignatures: 2 }));
-    expect(replay.status).toBe("rejected");
-    if (replay.status === "rejected") expect(replay.reason).toBe("seq_gap_or_replay");
+    expect(replay.status).toBe("conflict");
+    if (replay.status === "conflict") expect(replay.reason).toBe("equivocation");
 
     // seq 3 exceeds maxSignatures=2 → reject.
     const overMax = svc.record(input({ seq: 3, checkpointHash: "h3", prevCheckpointHash: "h2", maxSignatures: 2 }));
@@ -186,16 +192,20 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
   // (e) --------------------------------------------------------------------
   it("on a persist failure: returns errored, persists nothing, and does NOT advance the in-memory chain", () => {
     // A repo whose insert throws; the failure under test is the persist. record()'s
-    // step-0 rehydrate probe (§1) reads lastAcceptedForSession + findBySession BEFORE
-    // the insert — for this never-committed session those faithfully return "no tip"
-    // / empty chain, so step 0 is a no-op and the throwing insert stays the thing
-    // being tested. Keep the REAL db for the txn.
+    // step-0 rehydrate probe (§1) reads lastAcceptedForSession + findBySession, and the
+    // H1 guard reads findById, BEFORE the insert — for this never-committed session all
+    // three faithfully return "no tip" / empty chain / no committed row, so steps 0+H1
+    // are no-ops and the throwing insert stays the thing being tested. Keep the REAL db
+    // for the txn.
     const throwingRepo = {
       insert: () => {
         throw new Error("simulated disk failure");
       },
       lastAcceptedForSession: () => undefined,
       findBySession: () => [],
+      // H1 adds a findById probe before the insert; report "no committed row" so the
+      // throwing insert remains the failure under test.
+      findById: () => undefined,
     } as unknown as IGatewayReceiptRepository;
 
     const failingSvc = new GatewayReceiptStore({
@@ -294,15 +304,24 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     expect(sequenceStore.snapshot(sessionId)).toEqual({ lastSeq: 4, lastHash: "h4", acceptedCount: 4 });
   });
 
-  it("a replayed seq-1 after restart rejects cleanly (seq_gap_or_replay, NOT errored — no PK collision)", () => {
+  it("a replayed seq-1 after restart is idempotent (exact-retry of the committed seq-1; H1)", () => {
     const sessionId = "sess-replay";
     seedCommittedChain(sessionId, ["h1", "h2", "h3"]);
     const { svc } = restartedStore();
 
-    // Rehydrate sets lastSeq=3, so seq 1 fails the seq clause BEFORE any insert.
+    // INTENDED H1 CHANGE (RULE 18): this replays the EXACT checkpoint committed at seq 1
+    // (hash "h1", jobId "job-1", prevHash null). Under H1 the DB-authoritative guard finds
+    // the committed row at (sess-replay, 1) and returns `idempotent` (the response-lost-
+    // after-commit case) — NOT `seq_gap_or_replay`. Pre-H1 it fell through to checkSequence
+    // (rehydrate had set lastSeq=3) and was a seq_gap_or_replay reject. Both outcomes insert
+    // NO row and mint NO 2nd receipt; H1 makes the safe-resubmit case explicit and returns
+    // the already-committed receipt.
     const replay = svc.record(input({ sessionId, seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
-    expect(replay.status).toBe("rejected");
-    if (replay.status === "rejected") expect(replay.reason).toBe("seq_gap_or_replay");
+    expect(replay.status).toBe("idempotent");
+    if (replay.status === "idempotent") {
+      expect(replay.row.receiptId).toBe(`grcpt-${sessionId}-1`);
+      expect(replay.receipt.checkpointHash).toBe("h1");
+    }
 
     // No insert attempted → durable rows unchanged (still the original 3).
     expect(store.repos.gatewayReceipts.findBySession(sessionId).map((r) => r.seq)).toEqual([1, 2, 3]);
@@ -350,5 +369,170 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     expect(r.status).toBe("accepted");
     expect(sequenceStore.snapshot(sessionId)).toEqual({ lastSeq: 1, lastHash: "n1", acceptedCount: 1 });
     expect(store.repos.gatewayReceipts.findBySession(sessionId).map((row) => row.seq)).toEqual([1]);
+  });
+});
+
+/**
+ * H1 — checkpoint acceptance is DB-AUTHORITATIVE + IDEMPOTENT. The durable
+ * gateway_receipts row at (sessionId, seq) is the source of truth; the in-memory
+ * chain is only a cache over it. The discriminator is "does a committed row exist
+ * AT THIS seq?": yes+match → idempotent (response-lost-after-commit, no 2nd row);
+ * yes+differ → conflict:equivocation (no overwrite); no → fall through to
+ * checkSequence (accept / seq_gap_or_replay / ...), unchanged.
+ */
+describe("GatewayReceiptStore — H1 DB-authoritative idempotency / equivocation", () => {
+  let store: Store;
+  let sequenceStore: SessionSequenceStore;
+  let signer: GatewayReceiptSigner;
+  let svc: GatewayReceiptStore;
+
+  beforeEach(() => {
+    store = createStore({ seed: false });
+    sequenceStore = new SessionSequenceStore();
+    signer = makeSigner();
+    svc = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      sequenceStore,
+      signer,
+    });
+  });
+  afterEach(() => store.close());
+
+  it("exact resubmit of a committed checkpoint → idempotent (returns the committed receipt, NO 2nd row)", () => {
+    const first = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(first.status).toBe("accepted");
+
+    // Response-lost-after-commit: the IDENTICAL checkpoint is resubmitted.
+    const retry = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(retry.status).toBe("idempotent");
+    if (retry.status === "idempotent" && first.status === "accepted") {
+      expect(retry.receipt).toEqual(first.receipt); // the committed receipt (round-trip)
+      expect(retry.row.receiptId).toBe("grcpt-sess-1-1");
+    }
+    // NO second row; tip unchanged.
+    expect(store.repos.gatewayReceipts.findBySession("sess-1")).toHaveLength(1);
+    expect(sequenceStore.snapshot("sess-1")).toEqual({ lastSeq: 1, lastHash: "h1", acceptedCount: 1 });
+  });
+
+  it("exact resubmit of a MID-CHAIN committed seq → idempotent; findBySession count unchanged (no 2nd row)", () => {
+    expect(svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null })).status).toBe("accepted");
+    expect(svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1" })).status).toBe("accepted");
+    expect(svc.record(input({ seq: 3, checkpointHash: "h3", prevCheckpointHash: "h2" })).status).toBe("accepted");
+    const before = store.repos.gatewayReceipts.findBySession("sess-1").length;
+
+    // Resubmit the exact seq-2 checkpoint (jobId/hash/prevHash all match the committed row).
+    const retry = svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1" }));
+    expect(retry.status).toBe("idempotent");
+    if (retry.status === "idempotent") expect(retry.row.seq).toBe(2);
+
+    // No duplicate row; tip still seq 3 (an old-seq idempotent replay never disturbs the chain).
+    expect(store.repos.gatewayReceipts.findBySession("sess-1")).toHaveLength(before);
+    expect(sequenceStore.snapshot("sess-1")).toEqual({ lastSeq: 3, lastHash: "h3", acceptedCount: 3 });
+  });
+
+  it("a DIFFERENT checkpoint at a committed (sessionId, seq) → conflict:equivocation (committed row untouched)", () => {
+    expect(svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null })).status).toBe("accepted");
+    expect(svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1" })).status).toBe("accepted");
+
+    // Any of jobId / checkpointHash / prevCheckpointHash differing at a committed seq = equivocation.
+    const forkHash = svc.record(input({ seq: 2, checkpointHash: "h2-FORK", prevCheckpointHash: "h1" }));
+    expect(forkHash.status).toBe("conflict");
+    if (forkHash.status === "conflict") expect(forkHash.reason).toBe("equivocation");
+
+    const forkJob = svc.record(input({ seq: 2, jobId: "other-job", checkpointHash: "h2", prevCheckpointHash: "h1" }));
+    expect(forkJob.status).toBe("conflict");
+
+    const forkPrev = svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1-FORK" }));
+    expect(forkPrev.status).toBe("conflict");
+
+    // The committed seq-2 row is UNTOUCHED and no new row was inserted.
+    const row2 = store.repos.gatewayReceipts.findById("grcpt-sess-1-2");
+    expect(row2?.checkpointHash).toBe("h2");
+    expect(row2?.jobId).toBe("job-1");
+    expect(store.repos.gatewayReceipts.findBySession("sess-1").map((r) => r.seq)).toEqual([1, 2]);
+    expect(sequenceStore.snapshot("sess-1")).toEqual({ lastSeq: 2, lastHash: "h2", acceptedCount: 2 });
+  });
+
+  it("a genuine seq GAP with NO committed row at that seq → rejected seq_gap_or_replay (not conflict)", () => {
+    expect(svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null })).status).toBe("accepted");
+    expect(svc.record(input({ seq: 2, checkpointHash: "h2", prevCheckpointHash: "h1" })).status).toBe("accepted");
+    expect(svc.record(input({ seq: 3, checkpointHash: "h3", prevCheckpointHash: "h2" })).status).toBe("accepted");
+
+    // seq 9 with tip 3: NO row at seq 9 → fall through → checkSequence → seq_gap_or_replay.
+    const gap = svc.record(input({ seq: 9, checkpointHash: "h9", prevCheckpointHash: "h3" }));
+    expect(gap.status).toBe("rejected");
+    if (gap.status === "rejected") expect(gap.reason).toBe("seq_gap_or_replay");
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-9")).toBeUndefined();
+
+    // seq 1 with a DIFFERENT hash than the committed seq-1: a row DOES exist at seq 1
+    // → equivocation (contrast the gap above, which had no row).
+    const sameSeqDiff = svc.record(input({ seq: 1, checkpointHash: "h1-DIFF", prevCheckpointHash: null }));
+    expect(sameSeqDiff.status).toBe("conflict");
+    if (sameSeqDiff.status === "conflict") expect(sameSeqDiff.reason).toBe("equivocation");
+
+    // Chain unchanged throughout.
+    expect(sequenceStore.snapshot("sess-1")).toEqual({ lastSeq: 3, lastHash: "h3", acceptedCount: 3 });
+  });
+});
+
+/**
+ * R-14b — defensive input validation at the top of record(). A structurally
+ * invalid input is a CONTRACT VIOLATION (→ errored), not a sequence reject: it
+ * must never reach the rehydrate probe, the H1 lookup, checkSequence, the signer,
+ * or the DB. Nothing is persisted and the in-memory chain is never created.
+ */
+describe("GatewayReceiptStore — R-14b defensive input validation", () => {
+  let store: Store;
+  let sequenceStore: SessionSequenceStore;
+  let signer: GatewayReceiptSigner;
+  let svc: GatewayReceiptStore;
+
+  beforeEach(() => {
+    store = createStore({ seed: false });
+    sequenceStore = new SessionSequenceStore();
+    signer = makeSigner();
+    svc = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      sequenceStore,
+      signer,
+    });
+  });
+  afterEach(() => store.close());
+
+  const cases: Array<{ name: string; overrides: Partial<CheckpointReceiptInput> }> = [
+    { name: "seq = 0 (below 1)", overrides: { seq: 0 } },
+    { name: "seq negative", overrides: { seq: -1 } },
+    { name: "seq non-integer", overrides: { seq: 1.5 } },
+    { name: "seq NaN", overrides: { seq: Number.NaN } },
+    { name: "maxSignatures negative", overrides: { maxSignatures: -1 } },
+    { name: "maxSignatures non-integer", overrides: { maxSignatures: 2.5 } },
+    { name: "effectiveEvidenceTime = 0", overrides: { effectiveEvidenceTime: 0 } },
+    { name: "effectiveEvidenceTime negative", overrides: { effectiveEvidenceTime: -5 } },
+    { name: "effectiveEvidenceTime Infinity", overrides: { effectiveEvidenceTime: Number.POSITIVE_INFINITY } },
+    { name: "effectiveEvidenceTime NaN", overrides: { effectiveEvidenceTime: Number.NaN } },
+    { name: "jobId empty", overrides: { jobId: "" } },
+    { name: "jobId blank", overrides: { jobId: "   " } },
+    { name: "sessionId empty", overrides: { sessionId: "" } },
+    { name: "checkpointHash empty", overrides: { checkpointHash: "" } },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} → errored, nothing persisted, chain not advanced`, () => {
+      const r = svc.record(input(c.overrides));
+      expect(r.status).toBe("errored");
+      if (r.status === "errored") expect(r.error).toBeInstanceOf(Error);
+
+      // The guard returns BEFORE any persist / in-memory advance.
+      const sid = c.overrides.sessionId ?? "sess-1";
+      expect(store.repos.gatewayReceipts.findBySession(sid)).toEqual([]);
+      expect(sequenceStore.hasSession(sid)).toBe(false);
+    });
+  }
+
+  it("a structurally-valid input still accepts (the guard does not block the happy path)", () => {
+    const r = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(r.status).toBe("accepted");
   });
 });
