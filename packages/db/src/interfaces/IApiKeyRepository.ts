@@ -11,6 +11,12 @@ export interface IApiKeyRepository {
   insert(key: ApiKeyInsert): ApiKeyRow | undefined;
   incrementUsage(id: string): void;
   revoke(id: string): ApiKeyRow | undefined;
+  /**
+   * Verified-onboarding scope-grant (Wave-1): replace the scopes on an ACTIVE
+   * key. The caller MUST pass a bounded, validated scope list — never `["*"]`
+   * (C-01). Returns the updated row, or undefined if the key is missing/revoked.
+   */
+  updateScopes(id: string, scopes: string[]): ApiKeyRow | undefined;
   listActive(): ApiKeyRow[];
   countByOperator(operatorId: string): number;
   // ── ERC-8004 IdentityRegistry write tracking ──────────────────────

@@ -50,6 +50,20 @@ export class ApiKeyRepository implements IApiKeyRepository {
       .get();
   }
 
+  updateScopes(id: string, scopes: string[]) {
+    // Verified-onboarding scope-grant (Wave-1). Replace scopes on an ACTIVE key
+    // only (a revoked key stays scopeless). Stored as a JSON string to match
+    // insert(). The caller is responsible for passing a bounded, validated list
+    // — this method must NEVER be handed ["*"] (C-01). Returns the updated row,
+    // or undefined if the key is missing or revoked.
+    return this.db
+      .update(apiKeys)
+      .set({ scopes: JSON.stringify(scopes) })
+      .where(and(eq(apiKeys.id, id), isNull(apiKeys.revokedAt)))
+      .returning()
+      .get();
+  }
+
   listActive() {
     return this.db
       .select()
