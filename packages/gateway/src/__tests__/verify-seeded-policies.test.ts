@@ -101,6 +101,18 @@ describe("verifySeededPolicies (runtime inventory gate)", () => {
     expect(() => verifySeededPolicies(gov)).toThrow(/invalid method/);
   });
 
+  it("throws on a TAMPERED marker (valid description, but inert shape rewritten to a real policy)", () => {
+    // Attacker keeps the signed-off {version,count,digest} description but turns the
+    // marker into an active policy for a protected route — excluded from the digest
+    // here, but loaded by the runtime scope cache. Full-row validation must catch it.
+    gov.updateEndpointScope(MANIFEST_MARKER_ID, {
+      method: "POST",
+      routePattern: "/api/onboard/registrations/*/approve",
+      requiredScopes: ["operator", "admin"],
+    });
+    expect(() => verifySeededPolicies(gov)).toThrow(/marker row has been tampered/);
+  });
+
   it("regen guard: the generated constants match the current manifest", async () => {
     // Fails if the manifest is edited without re-running `--emit-constants`.
     const c = await import("../policy/manifest-digest.generated.js");
