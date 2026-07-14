@@ -316,6 +316,16 @@ const DashboardManifestBase = z.object({
  * substring ANYWHERE in the manifest — SHARE means the artifact travels, so a
  * baked key would travel with it. Cheap; catches the dumb mistake (§3, §5.2,
  * acceptance #2).
+ *
+ * Source model, NOT a wire format (audit directive 18). `DashboardManifest` is
+ * PCC's SOURCE model for a dashboard. Consumers ADAPT it: the MCP Apps bridge
+ * (packages/gateway/src/mcp/mcp-app-view.ts) delivers it as MCP Apps
+ * `structuredContent` for a fixed predeclared HTML view. It is NOT itself an A2UI
+ * (a2ui.org) wire format, and PCC intentionally ships NO A2UI transport and NO
+ * in-repo Atelier producer — those adapters are deferred until there is a
+ * concrete non-MCP consumer that needs declarative, streamed, native UI. Until
+ * then MCP Apps is the ONE UI transport (F11/directive 18); do not claim this
+ * manifest is A2UI, and add an A2UI/Atelier adapter only against a real consumer.
  */
 export const DashboardManifestSchema = DashboardManifestBase.refine(
   (m) => !containsApiKey(m),
