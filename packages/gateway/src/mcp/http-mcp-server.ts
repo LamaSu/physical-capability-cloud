@@ -24,6 +24,13 @@ import {
   registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
 } from "./mcp-app-view.js";
+import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
+import {
+  getOperationPolicyByToolName,
+  typedOperationTools,
+  TYPED_OP_TOOL_PREFIX,
+  type OpPrincipal,
+} from "./operation-policy.js";
 
 const PCC_API_BASE_URL = "https://capability.network";
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -314,6 +321,59 @@ export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
  * this runs, so no arg-type guard is needed or wanted here — a non-object simply
  * cannot reach this function through the transport.
  */
+/**
+ * Derive the authenticated principal for a typed operation IN-PROCESS from the
+ * forwarded bearer — the string the transport surfaces as `extra.authInfo.token`
+ * (see attachBearerAuth). This is a local key-DB hash lookup (resolveApiKeyFromToken);
+ * the token is NEVER forwarded to the upstream API for a typed op. Returns null
+ * (fail closed) for a missing / malformed / expired / revoked / unknown token —
+ * i.e. anonymous or invalid credentials cannot obtain a principal.
+ */
+function deriveOpPrincipal(token: string | undefined): OpPrincipal | null {
+  const record = resolveApiKeyFromToken(token);
+  if (!record || !record.operatorId) return null;
+  return { operatorId: record.operatorId, apiKeyId: record.id };
+}
+
+/**
+ * Handle a dedicated `pcc.op.*` typed operation. This path NEVER proxies to the
+ * upstream API — it derives the principal in-process and drives the facade
+ * directly — so the forwarded bearer is never sent to any proxy destination.
+ *
+ * Order (fail closed at each step): (1) resolve the operation policy by tool
+ * name (default-DENY — an unregistered tool is unknown); (2) validate + STRIP
+ * arguments to a fresh whitelisted object (a manifest-supplied actor/tenant/
+ * operator/owner id is dropped, never trusted); (3) derive the principal from
+ * the credential (missing/invalid ⇒ auth-required); (4) resource-authorize
+ * against the DERIVED principal; (5) invoke. Errors are tool-level isError
+ * results and never contain the credential.
+ */
+export async function handleTypedOperation(
+  toolName: string,
+  args: JsonObject,
+  token: string | undefined,
+) {
+  const policy = getOperationPolicyByToolName(toolName);
+  if (!policy) return errorResult(`Unknown operation: ${toolName}`);
+
+  const validated = policy.validateArguments(args);
+  if (!validated) return errorResult(`Invalid arguments for ${policy.operationId}`);
+
+  const principal = deriveOpPrincipal(token);
+  if (!principal) return errorResult("Authentication required");
+
+  const authz = await policy.authorize(principal, validated);
+  if (!authz.ok) return errorResult(authz.message);
+
+  const result = await policy.invoke(principal, validated);
+  if (!result.ok) return errorResult(result.message);
+
+  return {
+    structuredContent: result.data,
+    content: [{ type: "text" as const, text: resultText(result.data) }],
+  };
+}
+
 export async function dispatchToolCall(
   toolsByName: Map<string, AgentPackageTool>,
   name: string,
@@ -323,6 +383,12 @@ export async function dispatchToolCall(
 ) {
   if (name === RENDER_DASHBOARD_TOOL_NAME) {
     return handleRenderDashboardTool(args);
+  }
+  // Typed host-mediated operations (R4 PR2): the registry IS the allowlist and
+  // the handler derives the principal + authorizes in-process. Routed BEFORE the
+  // raw proxy lookup so a typed op never falls through to the pass-through relay.
+  if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
+    return handleTypedOperation(name, args, token);
   }
   const tool = toolsByName.get(name);
   if (!tool) {
@@ -353,7 +419,14 @@ function createMcpServer(pack: AgentPackage): McpServer {
   );
 
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...pack.tools.map(toMcpTool), buildRenderDashboardTool()],
+    // Raw proxy tools + the UI render tool + the dedicated typed-operation tools
+    // (pcc.op.*). The typed tools are additive: they never replace or shadow a
+    // raw tool, and only they route through the server-authorized policy handler.
+    tools: [
+      ...pack.tools.map(toMcpTool),
+      buildRenderDashboardTool(),
+      ...typedOperationTools(),
+    ],
   }));
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {

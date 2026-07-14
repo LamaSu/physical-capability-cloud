@@ -65,6 +65,7 @@ import {
   publicLookupThrottled,
   notePublicLookupFailure,
 } from "../routes/artifacts.js";
+import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
 
 // ---------------------------------------------------------------------------
 // Constants — MIME, tool name, and the FIXED predeclared UI resource URIs.
@@ -421,6 +422,14 @@ interface ViewWindow {
   addEventListener(type: string, handler: (event: ViewMessageEvent) => void): void;
   __PCC_HOST__?: boolean;
   __PCC_BOOTED__?: boolean;
+  /** R4 PR2 — the typed-operation bridge the kit uses to run a registered
+   *  operation via the host's tools/call (set by mountManifestIntoView). */
+  __PCC_HOST_BRIDGE__?: {
+    callOperation?: (operationId: string, args: unknown) => Promise<unknown>;
+    [key: string]: unknown;
+  };
+  /** R4 PR2 — the server-authored allowlist of registered operation ids. */
+  __PCC_HOST_OPERATIONS__?: string[];
 }
 
 /**
@@ -533,10 +542,27 @@ export function extractToolResultEntries(source: unknown, parent: unknown, data:
  * bridge (`__PCC_HOST__` → the kit's detectMode() resolves to 'host'), then
  * injects the kit LAST. NEVER writes a credential to storage.
  */
-export function mountManifestIntoView(win: ViewWindow, manifest: unknown, kitSource: string): boolean {
+export function mountManifestIntoView(
+  win: ViewWindow,
+  manifest: unknown,
+  kitSource: string,
+  callHostTool?: (name: string, args: unknown) => Promise<unknown>,
+): boolean {
   if (win.__PCC_BOOTED__) return false;
   win.__PCC_BOOTED__ = true;
   win.__PCC_HOST__ = true;
+  // R4 PR2 — expose the typed-operation bridge BEFORE the kit boots. The kit
+  // calls callOperation(operationId, args) for a REGISTERED operation (present
+  // in __PCC_HOST_OPERATIONS__), which sends a tools/call for the mapped
+  // pcc.op.<id> tool through the host. With no bridge the kit stays inert (the
+  // PR1 read-only lockdown), so raw manifest-authored writes never resurface.
+  if (typeof callHostTool === "function") {
+    var bridge = win.__PCC_HOST_BRIDGE__ || {};
+    bridge.callOperation = function (operationId: string, args: unknown): Promise<unknown> {
+      return callHostTool("pcc.op." + operationId, args);
+    };
+    win.__PCC_HOST_BRIDGE__ = bridge;
+  }
   var doc = win.document;
   var manifestNode = doc.getElementById("pcc-manifest");
   if (manifestNode) manifestNode.textContent = JSON.stringify(manifest);
@@ -596,23 +622,46 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
  * `ui/notifications/tool-result` to the view-specific `onToolResult` handler.
  * Every inbound message is gated on `source === win.parent` + JSON-RPC 2.0 here,
  * before any handler runs.
+ *
+ * R4 PR2 — returns a `callHostTool(name, args)` that sends an OUTBOUND
+ * `tools/call` request to the host and resolves on the matching-`id` response.
+ * This is how a locked-down hosted view performs a registered typed operation:
+ * it never issues a raw HTTP write (still inert in host mode), it asks the HOST
+ * to invoke the server-authorized `pcc.op.*` tool. The response listener lives
+ * HERE (same `source === parent` + JSON-RPC gate), correlating each response to
+ * its pending request by id (ids start at 2, distinct from INIT_ID=1).
  */
 export function connectMcpAppView(
   win: ViewWindow,
   onToolResult: (source: unknown, parent: unknown, data: unknown) => void,
-): void {
+): (name: string, args: unknown) => Promise<unknown> {
   var INIT_ID = 1;
   var initialized = false;
+  var nextCallId = 2;
+  var pending: Record<string, { resolve: (v: unknown) => void; reject: (e: unknown) => void }> = {};
   win.addEventListener("message", function (event: ViewMessageEvent) {
     var source = event ? event.source : undefined;
     var data = event ? event.data : undefined;
     if (source !== win.parent) return;
     if (!data || typeof data !== "object") return;
-    var msg = data as { jsonrpc?: unknown; id?: unknown; result?: unknown; method?: unknown };
+    var msg = data as { jsonrpc?: unknown; id?: unknown; result?: unknown; error?: unknown; method?: unknown };
     if (msg.jsonrpc !== "2.0") return;
     if (msg.id === INIT_ID && msg.result && !initialized) {
       initialized = true;
       win.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+      return;
+    }
+    // Correlate a tools/call RESPONSE (result or error) back to its caller. Only
+    // ids we actually issued are in `pending`, so an unsolicited id is ignored.
+    if (msg.id !== undefined && msg.id !== null && pending[String(msg.id)]) {
+      var entry = pending[String(msg.id)];
+      delete pending[String(msg.id)];
+      if (msg.error) {
+        var em = msg.error as { message?: unknown };
+        entry.reject(new Error(em && typeof em.message === "string" ? em.message : "operation failed"));
+      } else {
+        entry.resolve(msg.result);
+      }
       return;
     }
     if (msg.method === "ui/notifications/tool-result") {
@@ -634,14 +683,24 @@ export function connectMcpAppView(
     },
     "*",
   );
+  return function callHostTool(name: string, args: unknown): Promise<unknown> {
+    return new Promise(function (resolve, reject) {
+      var id = nextCallId++;
+      pending[String(id)] = { resolve: resolve, reject: reject };
+      win.parent.postMessage(
+        { jsonrpc: "2.0", id: id, method: "tools/call", params: { name: name, arguments: args || {} } },
+        "*",
+      );
+    });
+  };
 }
 
 /** Boot the single-manifest view (render + saved): validate the host's
  * tool-result manifest in-view and mount the kit. */
 export function runDashboardViewBoot(win: ViewWindow, kitSource: string): void {
-  connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
+  var callHostTool = connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
     var manifest = extractToolResultManifest(source, parent, data);
-    if (manifest) mountManifestIntoView(win, manifest, kitSource);
+    if (manifest) mountManifestIntoView(win, manifest, kitSource, callHostTool);
   });
 }
 
@@ -716,9 +775,14 @@ function inlineJsonForScriptData(value: unknown): string {
 /** The shared inlined-function preamble for the single-manifest view. */
 function dashboardViewBootScript(): string {
   const kitSourceLiteral = pccUiKitSourceLiteral();
+  // R4 PR2 — the registered typed-operation ids, server-authored. Injected onto
+  // the window so the inlined kit offers ONLY these operations under host
+  // lockdown; every other action stays inert (default-DENY on the client too).
+  const operationsLiteral = JSON.stringify([...REGISTERED_OPERATION_IDS]);
   return `(function () {
   'use strict';
   var KIT_SOURCE = ${kitSourceLiteral};
+  window.__PCC_HOST_OPERATIONS__ = ${operationsLiteral};
   var isValidDashboardManifest = ${isValidDashboardManifest.toString()};
   var extractToolResultManifest = ${extractToolResultManifest.toString()};
   var mountManifestIntoView = ${mountManifestIntoView.toString()};

@@ -73,6 +73,20 @@ export const ActionSchema = z.object({
   idempotencyFrom: z.string().optional(),
   /** Snapshot-mode chip text handed back to the LLM (e.g. "pcc: approve offer …"). */
   intentText: z.string().min(1),
+  /**
+   * R4 PR2 — typed host-mediated operation id. When present, a hosted (MCP-App)
+   * view routes the click to the registered `pcc.op.<operationId>` tool via the
+   * host's `tools/call` instead of the raw HTTP `kind`/`path` (which is inert in
+   * host mode). The SERVER registry (packages/gateway/src/mcp/operation-policy.ts)
+   * is the allowlist: an unregistered id stays inert. Standalone/non-host
+   * rendering ignores this and uses `kind`/`path` unchanged. Must be an explicit
+   * optional field so it survives schema parsing (z.object strips unknown keys).
+   */
+  operation_id: z.string().min(1).optional(),
+  /** Bounded arguments for the typed operation (host mode only). The manifest
+   *  supplies ONLY these; the server strips any actor/tenant/operator id and
+   *  fixes server-owned fields (e.g. job status). Guarded by the no-key refine. */
+  arguments: z.record(z.unknown()).optional(),
 });
 export type Action = z.infer<typeof ActionSchema>;
 
