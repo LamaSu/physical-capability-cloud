@@ -80,9 +80,6 @@ function canonicalSha256(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalize(value)).digest("hex")}`;
 }
 
-/** Mirrors the gateway-receipts repo cap (MAX_LIMIT); the guard below fails closed above it. */
-const CHAIN_FETCH_LIMIT = 1000;
-
 /**
  * The §8.3 claim-free FinalMilestonePackage (L317-324, interim fields). Content-
  * addressed by `packageHash = canonicalSha256(thisObject)`; the object carries
@@ -224,14 +221,20 @@ export class MilestonePackageStore {
     }
 
     // B-1 (clause 4): rebuild the accepted chain from the DURABLE store ONLY, seq-asc.
-    const receiptRows = this.gatewayReceipts.findBySession(sessionId, CHAIN_FETCH_LIMIT);
+    // R-14c: use the UNCAPPED finder — evidenceRoot is a money-path root and MUST be
+    // computed over the WHOLE chain. The capped findBySession would silently truncate
+    // a >1000-checkpoint session and fork the root (§8.4-B-2). findAllBySession returns
+    // every row (integrity-asserted, W2.5a).
+    const receiptRows = this.gatewayReceipts.findAllBySession(sessionId);
     if (receiptRows.length === 0) {
       return { status: "rejected", reason: "no_checkpoints" };
     }
-    // Fail-closed completeness guard: the accepted chain is contiguous seq 1..lastSeq
-    // by construction (record() enforces seq===lastSeq+1 from genesis). If the fetch
-    // did not cover the FULL chain (a session exceeding the repo cap), we must NOT
-    // compute evidenceRoot over a partial chain — that would be a settlement fork.
+    // Fail-closed completeness guard (defense-in-depth): the accepted chain is
+    // contiguous seq 1..lastSeq by construction (record() enforces seq===lastSeq+1
+    // from genesis). With findAllBySession (uncapped) truncation can no longer cause
+    // a short read, so this should NEVER trip — if it does, that is a genuine hole in
+    // the durable chain (real corruption) and we must NOT compute evidenceRoot over a
+    // partial chain (a settlement fork) → `errored`, never a partial root.
     const tip = this.gatewayReceipts.lastAcceptedForSession(sessionId);
     if (
       !tip ||

@@ -267,4 +267,56 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     expect(body).toHaveProperty("evidenceRoot");
     expect(body).toHaveProperty("evidenceTimeProvenance");
   });
+
+  it("R-14c: evidenceRoot is computed over the FULL chain (>1000), not a capped/truncated one", () => {
+    openSession();
+
+    // Seed 1001 accepted checkpoints (> the repo's 1000 MAX_LIMIT) directly via
+    // record() with a high maxSignatures. No checkpoint_bodies needed (no payload
+    // revelation in this test), keeping the loop tight.
+    const N = 1001;
+    const seq = new SessionSequenceStore();
+    const receiptStore = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      sequenceStore: seq,
+      signer,
+    });
+    const hashes: string[] = [];
+    let prev: string | null = null;
+    for (let i = 0; i < N; i++) {
+      // A valid leaf hash ("sha256:"+64hex) — merkleRoot rejects malformed leaves.
+      const checkpointHash = canonicalSha256(`ckpt-${SESSION_ID}-${i + 1}`);
+      const res = receiptStore.record({
+        jobId: JOB,
+        sessionId: SESSION_ID,
+        seq: i + 1,
+        checkpointHash,
+        prevCheckpointHash: prev,
+        maxSignatures: N + 10,
+        effectiveEvidenceTime: NOW + i,
+      });
+      expect(res.status).toBe("accepted");
+      prev = checkpointHash;
+      hashes.push(checkpointHash);
+    }
+    expect(hashes).toHaveLength(N);
+
+    // The OLD capped path (findBySession up to MAX_LIMIT=1000) truncates; the R-14c
+    // uncapped path returns all N. (Pre-R-14c finalize even ERRORED on such a chain —
+    // its completeness guard tripped when the 1000-cap fetch < tip seq 1001.)
+    expect(store.repos.gatewayReceipts.findBySession(SESSION_ID, 1000)).toHaveLength(1000);
+    expect(store.repos.gatewayReceipts.findAllBySession(SESSION_ID)).toHaveLength(N);
+
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("finalized");
+    if (r.status === "finalized") {
+      // The money-path root is the merkleRoot over ALL N hashes in seq order — proving
+      // the cap no longer truncates it. A truncated root would differ.
+      expect(r.package.acceptedCheckpointHashes).toHaveLength(N);
+      expect(r.evidenceRoot).toBe(merkleRoot(hashes));
+      // And it is NOT the (wrong) root over just the first 1000 (the old capped fetch).
+      expect(r.evidenceRoot).not.toBe(merkleRoot(hashes.slice(0, 1000)));
+    }
+  });
 });
