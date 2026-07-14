@@ -694,8 +694,9 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
 
     switch (result.status) {
       case "finalized":
-        // The route owns job-status vocabulary; the store already flipped the SESSION to
-        // finalized. A later checkpoint on this session → 409 (session no longer `open`).
+        // The route owns job-status vocabulary (the store's boundary reserves it — job-status
+        // is deliberately NOT in the store's finalize txn); the store already flipped the
+        // SESSION to finalized. A later checkpoint on this session → 409 (no longer `open`).
         repos.jobs.update(jobId, { status: "evidence_finalized" });
         return reply.status(201).send({
           package: result.package,
@@ -704,6 +705,13 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
           packageHash: result.packageHash,
         });
       case "idempotent":
+        // S6-7 crash-boundary reconcile: the store commits package + session-finalize
+        // atomically, but the job-status flip lives HERE (the route), AFTER that txn. A crash
+        // between the two leaves a finalized package/session with an un-flipped job. finalize
+        // is permissionless + idempotent + settlement re-triggers it, so reconcile the job on
+        // the idempotent path too — a finalized package MEANS the job is evidence_finalized.
+        // Idempotent set (same value): harmless when already correct, repair when not.
+        repos.jobs.update(jobId, { status: "evidence_finalized" });
         return reply.status(200).send({
           package: result.package,
           packageReceipt: result.packageReceipt,

@@ -760,6 +760,25 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(post.json().error).toBe("session_not_open");
     });
 
+    it("S6-7 crash-boundary: a re-finalize reconciles a job left un-flipped by a crash between package-commit and job-flip", async () => {
+      const { jobId } = await beginAndAccept(2);
+      const first = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+      expect(first.statusCode).toBe(201);
+      expect(getStore().repos.jobs.findById(jobId)?.status).toBe("evidence_finalized");
+
+      // Simulate the crash: package + session committed as finalized (the store txn), but the
+      // job-status flip (the route's post-txn step) was LOST.
+      getStore().repos.jobs.update(jobId, { status: "executing" });
+      expect(getStore().repos.jobs.findById(jobId)?.status).toBe("executing");
+
+      // A later idempotent finalize (permissionless; settlement re-triggers it) MUST reconcile
+      // the job back to evidence_finalized — a finalized package MEANS the job is finalized.
+      const second = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+      expect(second.statusCode).toBe(200);
+      expect(second.json().idempotent).toBe(true);
+      expect(getStore().repos.jobs.findById(jobId)?.status).toBe("evidence_finalized");
+    });
+
     it("finalize with no session → 404", async () => {
       const res = await app.inject({ method: "POST", url: `/api/jobs/no-such-job/evidence/finalize`, payload: {} });
       expect(res.statusCode).toBe(404);
