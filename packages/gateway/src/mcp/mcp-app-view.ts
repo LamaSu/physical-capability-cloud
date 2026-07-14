@@ -47,6 +47,7 @@
  * lifecycle is small enough to implement directly per the spec (clean-room).
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,7 +60,11 @@ import {
   containsApiKey,
   type DashboardManifest,
 } from "@pcc/spec";
-import { getPublicArtifactForRender } from "../routes/artifacts.js";
+import {
+  getPublicArtifactForRender,
+  publicLookupThrottled,
+  notePublicLookupFailure,
+} from "../routes/artifacts.js";
 
 // ---------------------------------------------------------------------------
 // Constants — MIME, tool name, and the FIXED predeclared UI resource URIs.
@@ -477,13 +482,43 @@ export function runGalleryViewBoot(win: ViewWindow): void {
 // `.toString()` (single source of truth), then calls the view's boot fn.
 // ---------------------------------------------------------------------------
 
-/** Anthropic MCP Apps view CSP for the HTML `<meta>` (defense-in-depth; the
- * host-enforced sandbox CSP comes from resource-content `_meta.ui.csp`). No `*`
- * anywhere — every directive names the specific origins the view may talk to. */
-export const MCP_APP_CSP =
-  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data:; connect-src 'self' https://capability.network; " +
-  "form-action 'self' https://capability.network; frame-ancestors https://chatgpt.com https://claude.ai";
+/** Hosts allowed to FRAME the mirror view. Meaningful ONLY in an HTTP response
+ * header (see registerMcpAppHttpRoute) — a `frame-ancestors` directive in a
+ * `<meta>` CSP is silently ignored by browsers, so it is deliberately absent
+ * from buildMcpAppCsp() below (directive 12). In the MCP transport the HOST
+ * sandbox controls framing. */
+export const MCP_APP_FRAME_ANCESTORS = "https://chatgpt.com https://claude.ai";
+
+/** A fresh CSP nonce (128 bits, base64) for one rendered document. */
+export function cspNonce(): string {
+  return randomBytes(16).toString("base64");
+}
+
+/**
+ * The MCP Apps view CSP for the HTML `<meta>` (defense-in-depth; the
+ * host-enforced sandbox CSP comes from resource-content `_meta.ui.csp`).
+ * Directive 12:
+ *   - NO `unsafe-eval` (never present — the kit uses no eval/new Function).
+ *   - script-src is `'nonce-<n>' 'strict-dynamic'` — the inline boot `<script
+ *     nonce>` is trusted and, via strict-dynamic, may inject the kit `<script>`
+ *     it builds; NO `unsafe-inline` for scripts.
+ *   - NO `frame-ancestors` here (meaningless in a `<meta>`; it lives on the HTTP
+ *     mirror header where it is enforced).
+ *   - style-src keeps `'unsafe-inline'` — the kit injects its BUILD-CONTROLLED
+ *     stylesheet as a programmatic `<style>` textContent; a nonce on a
+ *     programmatically-created `<style>` is not reliably honored across engines,
+ *     and CSS cannot execute script, so this is the low-risk residue. No `*`.
+ */
+export function buildMcpAppCsp(nonce: string): string {
+  return (
+    "default-src 'self'; " +
+    `script-src 'nonce-${nonce}' 'strict-dynamic'; ` +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; " +
+    "connect-src 'self' https://capability.network; " +
+    "form-action 'self' https://capability.network"
+  );
+}
 
 /** pcc-ui.js source as a safe JS string literal for inline embedding.
  * JSON.stringify escapes backslash/quote/control-chars; the extra replace guards
@@ -533,13 +568,13 @@ function galleryViewBootScript(): string {
  * for the host" state and boots the kit only when a VALIDATED manifest arrives
  * over the standard `ui/notifications/tool-result` lifecycle notification.
  */
-function buildMcpAppDashboardHtml(): string {
+function buildMcpAppDashboardHtml(nonce: string = cspNonce()): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <meta name="color-scheme" content="dark light">
 <title>PCC Dashboard</title>
 </head>
@@ -548,7 +583,7 @@ function buildMcpAppDashboardHtml(): string {
   <p id="pcc-kit-status">Waiting for the host to hand off a dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">null</script>
-<script>
+<script nonce="${nonce}">
 ${dashboardViewBootScript()}
 </script>
 </body>
@@ -560,13 +595,13 @@ ${dashboardViewBootScript()}
  * renders the list only when a VALIDATED entries array arrives over the standard
  * `ui/notifications/tool-result` lifecycle notification.
  */
-function buildMcpAppGalleryHtml(): string {
+function buildMcpAppGalleryHtml(nonce: string = cspNonce()): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <meta name="color-scheme" content="dark light">
 <title>PCC Dashboards</title>
 <style>
@@ -581,7 +616,7 @@ function buildMcpAppGalleryHtml(): string {
 <main id="pcc-root">
   <p id="pcc-kit-status">Waiting for the host to hand off saved dashboards&hellip;</p>
 </main>
-<script>
+<script nonce="${nonce}">
 ${galleryViewBootScript()}
 </script>
 </body>
@@ -603,7 +638,11 @@ function escapeHtmlText(s: string): string {
 /** A self-contained MCP App document for one already-resolved public manifest:
  * the manifest is inlined (kit reads it synchronously on mount) and the kit is
  * injected via textContent. Renders the moment the host loads it (no handoff). */
-function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displayTitle: string): string {
+function buildMcpAppDashboardHtmlForManifest(
+  manifest: DashboardManifest,
+  displayTitle: string,
+  nonce: string = cspNonce(),
+): string {
   const kitSourceLiteral = pccUiKitSourceLiteral();
   const withApiBase: DashboardManifest =
     manifest.api_base ? manifest : { ...manifest, api_base: MCP_APP_API_BASE_URL };
@@ -615,7 +654,7 @@ function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displa
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <meta name="color-scheme" content="dark light">
 <title>${title} - PCC</title>
 </head>
@@ -624,12 +663,14 @@ function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displa
   <p id="pcc-kit-status">Loading the PCC dashboard&hellip;</p>
 </main>
 <script type="application/json" id="pcc-manifest">${manifestJson}</script>
-<script>
+<script nonce="${nonce}">
 (function () {
   'use strict';
   // Self-contained: the manifest is already inlined above, so announce the host
   // bridge and boot the kit immediately (no host handoff). textContent injection
   // keeps a literal "</script" in the kit source from terminating this element.
+  // The kit <script> is injected by THIS nonce-trusted boot script, so it runs
+  // under 'strict-dynamic' without needing its own nonce.
   window.__PCC_HOST__ = true;
   var KIT_SOURCE = ${kitSourceLiteral};
   var kit = document.createElement('script');
@@ -644,12 +685,12 @@ function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displa
 /** The MCP App document shown when a slug names no publicly-readable artifact
  * (missing, retired, private, or malformed) — a valid resource read, never a
  * thrown error, so the host renders a friendly page. */
-function buildDashboardNotFoundHtml(slug: string): string {
+function buildDashboardNotFoundHtml(slug: string, nonce: string = cspNonce()): string {
   const s = escapeHtmlText(slug);
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <title>Dashboard not found - PCC</title></head>
 <body><main id="pcc-root"><h1>Dashboard not found</h1>
 <p>No public dashboard exists at <code>${s}</code>, or it has been retired or is private.</p></main></body>
@@ -733,14 +774,34 @@ export function registerMcpAppResources(server: McpServer): void {
         "Sharing surface only — private dashboards are never exposed here.",
       mimeType: MCP_APP_MIME_TYPE,
     },
-    async (uri, variables) => {
+    async (uri, variables, extra) => {
       const raw = variables.slug;
       const slug = Array.isArray(raw) ? raw[0] : raw;
-      const html =
-        typeof slug === "string" && slug.length
-          ? renderSavedDashboardHtml(slug)
-          : buildDashboardNotFoundHtml(String(slug ?? ""));
-      return uiResourceContents(uri.toString(), html);
+      const slugStr = typeof slug === "string" ? slug : String(slug ?? "");
+      // Anti-enumeration rate limit (directive 13). There is no per-caller IP at
+      // the MCP resource layer — key on the host session id when present, else a
+      // shared bucket. A throttled caller gets the SAME not-found view (no
+      // existence oracle) and no store lookup.
+      const sessionId =
+        extra && typeof extra === "object" && extra !== null && "sessionId" in extra
+          ? String((extra as { sessionId?: unknown }).sessionId ?? "")
+          : "";
+      const rateKey = "mcp:" + (sessionId || "anon");
+      if (publicLookupThrottled(rateKey)) {
+        return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
+      }
+      const artifact = slugStr.length ? getPublicArtifactForRender(slugStr) : undefined;
+      if (!artifact) {
+        // Missing / retired / private ALL collapse to the SAME not-found view —
+        // the response never reveals whether a private artifact exists.
+        notePublicLookupFailure(rateKey);
+        return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
+      }
+      const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
+      return uiResourceContents(
+        uri.toString(),
+        buildMcpAppDashboardHtmlForManifest(artifact.manifest, title),
+      );
     },
   );
 }
@@ -911,20 +972,28 @@ export function enrichOnRampToolResult(
 // ---------------------------------------------------------------------------
 
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
-  app.get(
-    HTTP_MIRROR_PATH,
-    {
-      onSend: async (_request, reply, payload) => {
-        reply.header("Content-Security-Policy", MCP_APP_CSP);
-        reply.removeHeader("X-Frame-Options");
-        reply.header("access-control-allow-origin", "*");
-        return payload;
-      },
-    },
-    async (_request, reply) => {
-      return reply.type("text/html; charset=utf-8").send(buildMcpAppDashboardHtml());
-    },
-  );
+  app.get(HTTP_MIRROR_PATH, async (_request, reply) => {
+    // One nonce per response, shared by the served HTML's inline <script nonce>
+    // and this REAL Content-Security-Policy header (directive 12). Because the
+    // mirror is fetched by a browser directly, the HEADER — not the <meta> — is
+    // the authoritative policy: nonce + 'strict-dynamic' means the boot script is
+    // trusted and may inject the kit <script>, with NO unsafe-inline / unsafe-eval
+    // for scripts. `frame-ancestors` is meaningful in a header (it is ignored in a
+    // <meta>), so the embed allowlist lives HERE.
+    const nonce = cspNonce();
+    reply.header(
+      "Content-Security-Policy",
+      `${buildMcpAppCsp(nonce)}; frame-ancestors ${MCP_APP_FRAME_ANCESTORS}`,
+    );
+    // X-Frame-Options is intentionally NOT set: it is superseded by the CSP
+    // frame-ancestors allowlist above, and an XFO of DENY/SAMEORIGIN would break
+    // the required host framing. Strip any XFO a global hook may have added.
+    reply.removeHeader("X-Frame-Options");
+    // `Access-Control-Allow-Origin: *` removed — this view is host-embedded or
+    // same-origin fetched, not a cross-origin-readable API; the wildcard was
+    // unnecessary exposure.
+    return reply.type("text/html; charset=utf-8").send(buildMcpAppDashboardHtml(nonce));
+  });
 }
 
 // ---------------------------------------------------------------------------
