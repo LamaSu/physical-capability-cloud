@@ -402,6 +402,27 @@ describe("evidence async → settlement (§2.4 package-anchored /complete)", () 
     expect(ok.json().status).toBe("settled");
   });
 
+  // ── P0 (round-6): idempotent finalize must be lifecycle-MONOTONIC (no settlement rerun) ─────
+  it("P0: an idempotent finalize on a SETTLED job does NOT roll status back to evidence_finalized", async () => {
+    const { jobId } = await beginAndAccept(2);
+    await finalize(jobId);
+    const settle = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(settle.statusCode).toBe(200);
+    expect(settle.json().status).toBe("settled");
+    expect(getStore().repos.jobs.findById(jobId)?.status).toBe("settled");
+
+    // Repeat finalize (permissionless + idempotent — the package already exists) reaches the store
+    // and returns idempotent. The status reconcile MUST be monotonic: `settled` stays `settled`.
+    const refin = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+    expect(refin.statusCode).toBe(200);
+    expect(refin.json().idempotent).toBe(true);
+    expect(getStore().repos.jobs.findById(jobId)?.status).toBe("settled"); // NOT rewound
+
+    // Therefore a second /complete cannot re-claim + re-run settlement.
+    const resettle = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(resettle.statusCode).toBe(409);
+  });
+
   // ── 3. long-job (§8.1-#1 acceptance test / TTL-bug regression) ───────────────
   it("long-job: execution window elapses after last checkpoint, before finalize+/complete — still settles on the package", async () => {
     const t0 = Math.floor(Date.now() / 1000);
