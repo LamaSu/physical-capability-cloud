@@ -1,36 +1,35 @@
 /**
- * Scope grants (audit P0, lane d749deff).
+ * Scope grants (audit P0, lane d749deff; review finding #3).
  *
  * A freshly-provisioned key is minted SCOPELESS (`scopes: []`) — fail-closed, so
- * it can't act until a grant assigns scopes (paired with 9de363c7's provision +
- * scope-checker on fix/audit-p0). Two authorities may grant, both on top of
- * `apiKeys.updateScopes` (active-key-only):
+ * it can't act until a grant assigns scopes. Two authorities may grant, both on
+ * top of `apiKeys.updateScopes` (active-key-only):
  *
- *   - grantVerifiedOnboardingScopes — the self-service path. May grant ONLY
- *     least-privilege operator/requestor. The CALLER must invoke it only AFTER a
- *     verified onboarding step (registration approved/activated, identity proof);
- *     this module owns "what may be granted", not "was it earned".
- *   - grantAdminScopes — the admin-controlled path. May grant any real role
- *     (operator/requestor/verifier/auditor/agent/template_author/admin). The
- *     CALLER must gate it behind an admin principal (the route's scope policy).
+ *   - grantVerifiedOnboardingScopes — self-service; may grant ONLY operator/requestor.
+ *   - grantAdminScopes — admin-controlled; may grant any real role.
  *
- * NEITHER path can ever grant a wildcard "*". EVERY grant is audited by
- * construction — the audit sink is a required argument, so no scope change can
- * happen without a record.
+ * NEITHER can ever grant a wildcard "*".
+ *
+ * ATOMIC AUDIT (finding #3): the scope update and the durable audit record are one
+ * TRANSACTION. If the audit insert fails, the scope update rolls back — so there is
+ * no committed privilege grant without a matching durable record. The caller
+ * supplies a transaction runner + a concrete audit recorder (not an arbitrary
+ * callback): a no-op recorder cannot satisfy the contract because a real recorder
+ * performs a durable insert whose failure is what triggers rollback.
+ *
+ * The caller still owns the AUTHORIZATION (verified onboarding step / admin route);
+ * this module owns what-may-be-granted + the atomicity.
  */
 import type { IApiKeyRepository } from "@pcc/store";
 
-// ApiKeyRow isn't a named @pcc/store export; derive it from updateScopes' return.
 type ApiKeyRow = NonNullable<ReturnType<IApiKeyRepository["updateScopes"]>>;
 
 /** Every real scope. Admin grants may assign any of these; NONE is "*". */
 export const VALID_SCOPES = new Set<string>([
   "operator", "requestor", "verifier", "admin", "agent", "auditor", "template_author",
 ]);
-
 /** The only scopes a self-service onboarding flow may grant. */
 export const GRANTABLE_ONBOARDING_SCOPES = new Set<string>(["operator", "requestor"]);
-
 /** Default grant for a verified operator/requestor onboarding. */
 export const DEFAULT_ONBOARDING_SCOPES: readonly string[] = ["operator", "requestor"];
 
@@ -41,7 +40,7 @@ export class ScopeGrantError extends Error {
   }
 }
 
-/** Audit event emitted for EVERY successful scope change. */
+/** The durable audit event for EVERY scope change. */
 export interface ScopeGrantAudit {
   keyId: string;
   scopes: string[];
@@ -49,7 +48,22 @@ export interface ScopeGrantAudit {
   /** who authorized it: an admin operator id, or "system:verified-onboarding". */
   grantedBy: string;
 }
-export type ScopeGrantAuditSink = (event: ScopeGrantAudit) => void;
+
+/** A concrete, durable audit recorder — NOT an arbitrary callback. */
+export interface ScopeGrantAuditRecorder {
+  record(event: ScopeGrantAudit): void;
+}
+
+/**
+ * Dependencies for an atomic grant. `runInTransaction` must run its callback in a
+ * DB transaction that rolls back on throw (e.g. store.db.transaction). apiKeys +
+ * audit operations inside it commit or roll back together.
+ */
+export interface ScopeGrantDeps {
+  runInTransaction<T>(fn: () => T): T;
+  apiKeys: Pick<IApiKeyRepository, "updateScopes">;
+  audit: ScopeGrantAuditRecorder;
+}
 
 function validate(scopes: unknown, allowlist: Set<string>, allowedLabel: string): string[] {
   const errors: string[] = [];
@@ -73,53 +87,53 @@ export function validateAdminGrant(scopes: unknown): string[] {
 }
 
 function doGrant(
-  apiKeys: Pick<IApiKeyRepository, "updateScopes">,
+  deps: ScopeGrantDeps,
   keyId: string,
   scopes: readonly string[],
   errors: string[],
   via: ScopeGrantAudit["via"],
   grantedBy: string,
-  audit: ScopeGrantAuditSink,
 ): ApiKeyRow {
   if (errors.length) {
     throw new ScopeGrantError(`invalid ${via} scope grant: ${errors.join("; ")}`);
   }
   const list = [...scopes];
-  const updated = apiKeys.updateScopes(keyId, list);
-  if (!updated) {
-    // updateScopes returns undefined for a missing OR revoked/inactive key.
-    throw new ScopeGrantError(`scope grant failed: key ${keyId} not found or revoked`);
-  }
-  audit({ keyId, scopes: list, via, grantedBy });
-  return updated;
+  // Update + durable audit in ONE transaction — audit failure rolls back the grant.
+  return deps.runInTransaction(() => {
+    const updated = deps.apiKeys.updateScopes(keyId, list);
+    if (!updated) {
+      // undefined for a missing OR revoked/inactive key.
+      throw new ScopeGrantError(`scope grant failed: key ${keyId} not found or revoked`);
+    }
+    deps.audit.record({ keyId, scopes: list, via, grantedBy });
+    return updated;
+  });
 }
 
 /**
  * Grant scopes to a verified-onboarding key (default: operator + requestor). May
  * grant ONLY operator/requestor. Throws on an invalid grant or a missing/revoked
- * key. Audits on success.
+ * key. Grant + audit are atomic.
  */
 export function grantVerifiedOnboardingScopes(
-  apiKeys: Pick<IApiKeyRepository, "updateScopes">,
+  deps: ScopeGrantDeps,
   keyId: string,
-  audit: ScopeGrantAuditSink,
   scopes: readonly string[] = DEFAULT_ONBOARDING_SCOPES,
   grantedBy = "system:verified-onboarding",
 ): ApiKeyRow {
-  return doGrant(apiKeys, keyId, scopes, validateOnboardingGrant([...scopes]), "verified-onboarding", grantedBy, audit);
+  return doGrant(deps, keyId, scopes, validateOnboardingGrant([...scopes]), "verified-onboarding", grantedBy);
 }
 
 /**
  * Admin-controlled grant: assign any real role (never "*"). The CALLER must have
  * already authorized the actor as an admin (the route's admin scope policy).
- * Throws on an invalid grant or a missing/revoked key. Audits on success.
+ * Throws on an invalid grant or a missing/revoked key. Grant + audit are atomic.
  */
 export function grantAdminScopes(
-  apiKeys: Pick<IApiKeyRepository, "updateScopes">,
+  deps: ScopeGrantDeps,
   keyId: string,
   scopes: readonly string[],
-  audit: ScopeGrantAuditSink,
   grantedBy: string,
 ): ApiKeyRow {
-  return doGrant(apiKeys, keyId, scopes, validateAdminGrant(scopes), "admin", grantedBy, audit);
+  return doGrant(deps, keyId, scopes, validateAdminGrant(scopes), "admin", grantedBy);
 }

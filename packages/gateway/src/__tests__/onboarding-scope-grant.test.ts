@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { initStore, getRepos, closeStore } from "../db.js";
+import { initStore, getRepos, getStore, closeStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import {
   grantVerifiedOnboardingScopes,
@@ -8,15 +8,15 @@ import {
   validateAdminGrant,
   ScopeGrantError,
   type ScopeGrantAudit,
+  type ScopeGrantDeps,
 } from "../auth/onboarding-scope-grant.js";
 
 /**
- * Scope grants (audit P0, lane d749deff). A scopeless key is elevated only through
- * an audited grant: verified-onboarding may grant operator/requestor; admin may
- * grant any real role. Neither may ever grant a wildcard, and every grant is
- * recorded (the audit sink is required).
+ * Scope grants (audit P0, lane d749deff; review findings #1/#3). A scopeless key
+ * is elevated only through an ATOMIC audited grant — grant + durable audit commit
+ * or roll back together, and neither authority may ever grant a wildcard.
  */
-describe("scope grants (verified-onboarding + admin)", () => {
+describe("scope grants (atomic, audited)", () => {
   beforeAll(() => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
@@ -24,55 +24,81 @@ describe("scope grants (verified-onboarding + admin)", () => {
   afterAll(() => closeStore());
 
   let n = 0;
-  const audits: ScopeGrantAudit[] = [];
-  const audit = (e: ScopeGrantAudit) => audits.push(e);
   const keys = () => getRepos().apiKeys;
-  const freshScopelessKey = () => provisionApiKey({ operatorId: `onb-${++n}@x.com`, scopes: [] }).record!.id;
   const scopesOf = (id: string) => JSON.parse(getRepos().apiKeys.findById(id)!.scopes);
+  const freshScopelessKey = () => provisionApiKey({ operatorId: `onb-${++n}@x.com`, scopes: [] }).record!.id;
+  const grantEvents = () => getRepos().auditLog.query({ eventType: "auth.scope_granted" });
 
-  it("verified onboarding: elevates a scopeless key to operator+requestor, and AUDITS it", () => {
-    audits.length = 0;
-    const id = freshScopelessKey();
-    expect(scopesOf(id)).toEqual([]);
-    grantVerifiedOnboardingScopes(keys(), id, audit);
-    expect(scopesOf(id)).toEqual(["operator", "requestor"]);
-    expect(audits).toEqual([
-      { keyId: id, scopes: ["operator", "requestor"], via: "verified-onboarding", grantedBy: "system:verified-onboarding" },
-    ]);
+  // Real transaction + a durable audit recorder that inserts into audit_log.
+  const durableDeps = (): ScopeGrantDeps => ({
+    runInTransaction: (fn) => getStore().db.transaction(() => fn()),
+    apiKeys: keys(),
+    audit: {
+      record: (e: ScopeGrantAudit) =>
+        getRepos().auditLog.insert({
+          timestamp: new Date().toISOString(),
+          eventType: "auth.scope_granted",
+          actor: e.grantedBy,
+          resourceType: "api_key",
+          resourceId: e.keyId,
+          action: "grant",
+          metadata: { scopes: e.scopes, via: e.via },
+        }),
+    },
   });
 
-  it("verified onboarding: REFUSES wildcard/admin/verifier/unknown/empty — key untouched, no audit", () => {
-    audits.length = 0;
+  it("verified onboarding: elevates a scopeless key, writing a durable audit row", () => {
+    const before = grantEvents().length;
+    const id = freshScopelessKey();
+    grantVerifiedOnboardingScopes(durableDeps(), id);
+    expect(scopesOf(id)).toEqual(["operator", "requestor"]);
+    expect(grantEvents().length).toBe(before + 1);
+    expect(grantEvents().find((e) => e.resourceId === id)).toMatchObject({ action: "grant" });
+  });
+
+  it("ATOMIC: if the audit insert throws, the scope update ROLLS BACK (no grant, no record)", () => {
+    const before = grantEvents().length;
+    const id = freshScopelessKey();
+    const deps: ScopeGrantDeps = {
+      runInTransaction: (fn) => getStore().db.transaction(() => fn()),
+      apiKeys: keys(),
+      audit: { record: () => { throw new Error("audit sink down"); } },
+    };
+    expect(() => grantVerifiedOnboardingScopes(deps, id)).toThrow(/audit sink down/);
+    expect(scopesOf(id)).toEqual([]); // rolled back — NOT granted
+    expect(grantEvents().length).toBe(before); // no audit row either
+  });
+
+  it("verified onboarding: REFUSES wildcard/admin/verifier/unknown/empty — no update, no audit", () => {
+    const before = grantEvents().length;
     const id = freshScopelessKey();
     for (const bad of [["*"], ["admin"], ["verifier"], ["superuser"], []]) {
-      expect(() => grantVerifiedOnboardingScopes(keys(), id, audit, bad)).toThrow(ScopeGrantError);
+      expect(() => grantVerifiedOnboardingScopes(durableDeps(), id, bad)).toThrow(ScopeGrantError);
     }
     expect(scopesOf(id)).toEqual([]);
-    expect(audits).toEqual([]);
+    expect(grantEvents().length).toBe(before);
   });
 
-  it("admin grant: may assign a privileged role (verifier/auditor), audited as via:admin", () => {
-    audits.length = 0;
+  it("admin grant: may assign a privileged role (verifier/auditor), audited via:admin", () => {
     const id = freshScopelessKey();
-    grantAdminScopes(keys(), id, ["verifier", "auditor"], audit, "admin-op@x.com");
+    grantAdminScopes(durableDeps(), id, ["verifier", "auditor"], "admin-op@x.com");
     expect(scopesOf(id)).toEqual(["verifier", "auditor"]);
-    expect(audits[0]).toMatchObject({ keyId: id, via: "admin", grantedBy: "admin-op@x.com" });
+    expect(grantEvents().find((e) => e.resourceId === id)).toMatchObject({ actor: "admin-op@x.com" });
   });
 
   it("admin grant: still REFUSES a wildcard", () => {
     const id = freshScopelessKey();
-    expect(() => grantAdminScopes(keys(), id, ["*"], audit, "admin-op@x.com")).toThrow(/wildcard/);
+    expect(() => grantAdminScopes(durableDeps(), id, ["*"], "admin-op@x.com")).toThrow(/wildcard/);
     expect(scopesOf(id)).toEqual([]);
   });
 
-  it("throws when the key is missing", () => {
-    expect(() => grantVerifiedOnboardingScopes(keys(), "nonexistent-key", audit)).toThrow(/not found or revoked/);
-  });
-
-  it("throws when the key is REVOKED (updateScopes is active-only)", () => {
+  it("throws (and does not audit) when the key is missing or revoked", () => {
+    const before = grantEvents().length;
+    expect(() => grantVerifiedOnboardingScopes(durableDeps(), "nonexistent-key")).toThrow(/not found or revoked/);
     const id = freshScopelessKey();
     keys().revoke(id);
-    expect(() => grantVerifiedOnboardingScopes(keys(), id, audit)).toThrow(/not found or revoked/);
+    expect(() => grantVerifiedOnboardingScopes(durableDeps(), id)).toThrow(/not found or revoked/);
+    expect(grantEvents().length).toBe(before);
   });
 
   it("validators flag each problem", () => {
