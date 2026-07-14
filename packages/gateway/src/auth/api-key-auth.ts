@@ -10,6 +10,7 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
+import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import {
   generateEd25519Keypair,
@@ -20,7 +21,9 @@ import {
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
 
-const KEY_PREFIX = "pcc_live_";
+// Canonical live prefix comes from @pcc/spec (single source of truth shared with
+// the manifest key-guard `containsApiKey` and sse-auth's query-string rejection).
+const KEY_PREFIX = PCC_API_KEY_LIVE_PREFIX;
 
 /** Hash a raw API key for storage/lookup */
 export function hashApiKey(rawKey: string): string {

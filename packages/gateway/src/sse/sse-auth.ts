@@ -16,6 +16,7 @@
  */
 
 import type { FastifyRequest } from "fastify";
+import { PCC_API_KEY_PREFIXES } from "@pcc/spec";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 
@@ -62,8 +63,9 @@ export async function resolveSSEAuth(req: FastifyRequest): Promise<SSEAuthResult
   // the Authorization header instead to avoid leaking into logs.
   const tokenParam = (req.query as Record<string, string>).token;
   if (tokenParam) {
-    // Reject long-lived API keys in query string (logged leak risk)
-    if (tokenParam.startsWith("pcc_live_") || tokenParam.startsWith("pcc_test_")) {
+    // Reject long-lived API keys in query string (logged leak risk). Prefix set
+    // is the canonical @pcc/spec source shared with the manifest key-guard.
+    if (PCC_API_KEY_PREFIXES.some((p) => tokenParam.startsWith(p))) {
       return {
         authenticated: false,
         reason:

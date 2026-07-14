@@ -159,18 +159,146 @@ export type Section = z.infer<typeof SectionSchema>;
 // The manifest itself + the no-key refine.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Canonical PCC API-key prefixes — SINGLE SOURCE OF TRUTH, shared with the auth
+// layer. `packages/gateway/src/auth/api-key-auth.ts` derives its live prefix
+// from PCC_API_KEY_LIVE_PREFIX; `sse-auth.ts` rejects the whole set in query
+// strings; `containsApiKey` (below) uses the set to guard the SHARE boundary.
+// A raw PCC key is `<prefix><hex secret>`. One definition, no drift.
+// ---------------------------------------------------------------------------
+
+export const PCC_API_KEY_LIVE_PREFIX = "pcc_live_" as const;
+export const PCC_API_KEY_TEST_PREFIX = "pcc_test_" as const;
+export const PCC_API_KEY_PREFIXES = [
+  PCC_API_KEY_LIVE_PREFIX,
+  PCC_API_KEY_TEST_PREFIX,
+] as const;
+
 /**
- * True if the JSON value contains a live/test API-key substring ANYWHERE.
+ * Object-key names that must never carry a baked credential VALUE inside a
+ * shared manifest/body (confused-deputy / credential-transport guard). Compared
+ * after normalization (lowercased, `_`/`-` stripped), so api_key / apiKey /
+ * API-KEY / apikey all collapse to a single entry.
+ */
+const SENSITIVE_FIELD_NAMES: ReadonlySet<string> = new Set([
+  "token",
+  "apikey",
+  "authorization",
+  "bearer",
+  "secret",
+  "password",
+  "privatekey",
+  "accesstoken",
+  "refreshtoken",
+  "clientsecret",
+  "sessiontoken",
+]);
+
+function normalizeFieldName(k: string): string {
+  return k.toLowerCase().replace(/[_-]/g, "");
+}
+
+/**
+ * Percent-decode up to a few passes so an ENCODED prefix can't slip past
+ * (`pcc%5Flive%5F…`, `%70%63%63_live_…`, double-encoded). Fails open: a fully
+ * malformed sequence falls back to a lenient per-token decode, never throws.
+ */
+function decodePercentDeep(s: string): string {
+  let cur = s;
+  for (let i = 0; i < 3; i++) {
+    if (cur.indexOf("%") === -1) break;
+    let next: string;
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      next = cur.replace(/%[0-9a-fA-F]{2}/g, (m) => {
+        try {
+          return decodeURIComponent(m);
+        } catch {
+          return m;
+        }
+      });
+    }
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/**
+ * True if a single string carries a PCC key prefix, tolerant of CASE and
+ * PERCENT-ENCODING — so `PCC_LIVE_…`, `pcc%5Flive%5F…`, `%70%63%63_live_…` all
+ * match, not just the exact lowercase literal.
+ */
+function stringHasKeyPrefix(raw: string): boolean {
+  const forms = new Set<string>([raw, raw.toLowerCase()]);
+  const decoded = decodePercentDeep(raw);
+  if (decoded !== raw) {
+    forms.add(decoded);
+    forms.add(decoded.toLowerCase());
+  }
+  for (const form of forms) {
+    for (const prefix of PCC_API_KEY_PREFIXES) {
+      if (form.indexOf(prefix) !== -1) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True if `value` IS, or contains anywhere, a PCC API key — the defense-in-depth
+ * guard for the SHARE boundary (a saved/shared manifest travels with its
+ * contents, so a baked key would leak; §3, §5.2, acceptance #2).
  *
- * Exported so the gateway can apply the SAME predicate to the whole
- * create/update body (name/description/capabilityTypes/composeRefs), not just
- * the manifest the `.refine` below guards — those top-level fields are stored
- * AND publicly returned (and `name` renders into the `/a/:slug` HTML), so a
- * baked key would still travel with a shared artifact (§3, §5.2, acceptance #2).
+ * Exported so the gateway applies the SAME predicate to the whole create/update
+ * body (name/description/capabilityTypes/composeRefs), not just the manifest the
+ * `.refine` below guards. Recursively walks EVERY nested string — URLs, query
+ * values, action paths, form defaults, labels, descriptions, snapshots,
+ * composeRefs — and rejects on either:
+ *   1. a string carrying a `pcc_live_`/`pcc_test_` prefix, tolerant of case and
+ *      percent-encoding (so an encoded/upper-cased prefix can't slip past); or
+ *   2. an object KEY named like a credential (token/apiKey/api_key/authorization/
+ *      bearer/secret/password/privateKey/…) that holds a concrete scalar VALUE —
+ *      a baked credential. A credential-shaped NAME is ALLOWED when its value is
+ *      an object/array (a nested schema/definition — e.g. a form field named
+ *      `password` in a JSON-Schema `properties` block is a field DEFINITION, not
+ *      a baked secret), so benign form schemas are not false-positives.
+ *
+ * The primary guarantee stays architectural (a manifest is not a credential
+ * transport — Round 1); this is cheap, conservative defense-in-depth. Robust
+ * against cycles / pathological depth (visited set + node budget); a
+ * degenerate input fails "clean" (returns false), never hangs.
  */
 export function containsApiKey(value: unknown): boolean {
-  const s = JSON.stringify(value ?? null);
-  return s.includes("pcc_live_") || s.includes("pcc_test_");
+  const seen = new WeakSet<object>();
+  let budget = 100000;
+
+  function walk(v: unknown): boolean {
+    if (budget-- <= 0) return false;
+    if (typeof v === "string") return stringHasKeyPrefix(v);
+    if (typeof v !== "object" || v === null) return false;
+    if (seen.has(v)) return false;
+    seen.add(v);
+
+    if (Array.isArray(v)) {
+      for (const item of v) if (walk(item)) return true;
+      return false;
+    }
+
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      // (2) credential-named field holding a concrete scalar = baked secret.
+      // An object/array value under the same name is a definition — recurse,
+      // don't auto-flag.
+      if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(k))) {
+        if (typeof val === "string" && val.trim().length > 0) return true;
+        if (typeof val === "number" && Number.isFinite(val)) return true;
+      }
+      if (walk(val)) return true;
+    }
+    return false;
+  }
+
+  return walk(value);
 }
 
 const DashboardManifestBase = z.object({
