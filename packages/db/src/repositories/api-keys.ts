@@ -150,10 +150,16 @@ export class ApiKeyRepository implements IApiKeyRepository {
    * best-effort setAgentWallet call. See coord bulletin 235.
    *
    * H-12 containment: the private key is stored ONLY as an envelope-encrypted
-   * blob (`enc:v1:<iv>:<tag>:<ciphertext>`, AES-256-GCM) produced by the
-   * gateway before it reaches this layer — this repository never sees or
-   * stores plaintext. `privateKeyEnvelope` may be null (KEK not configured →
-   * the caller fails closed and stores no key rather than any plaintext).
+   * blob (`enc:v2:<ivHex>:<tagHex>:<ciphertextHex>`, AES-256-GCM) produced by
+   * the gateway before it reaches this layer — this repository never sees or
+   * stores plaintext. The GCM AAD binds the FULL row identity —
+   * `JSON.stringify(["pcc:operator-wallet","v2",<id>,<operator_id>,
+   * <operator_wallet_address lower-cased>])` — so an envelope cannot be
+   * relocated to a different row (and two rows that share a wallet address stay
+   * distinct via their id). `privateKeyEnvelope` may be null (KEK not
+   * configured → the caller fails closed and stores no key rather than any
+   * plaintext). Legacy `enc:v1` blobs (address-only AAD) predate this and must
+   * be rotated to `enc:v2` (Wave 3).
    */
   recordOperatorWallet(
     id: string,

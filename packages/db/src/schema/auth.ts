@@ -63,16 +63,23 @@ export const apiKeys = sqliteTable("api_keys", {
   operatorWalletAddress: text("operator_wallet_address"),
   // H-12 containment (changed 2026-07-13): this column NO LONGER stores a raw
   // hex private key. It now stores an envelope-encrypted blob in the form
-  // `enc:v1:<ivHex>:<tagHex>:<ciphertextHex>` (AES-256-GCM under the KEK from
+  // `enc:v2:<ivHex>:<tagHex>:<ciphertextHex>` (AES-256-GCM under the KEK from
   // env `PCC_KEY_ENCRYPTION_KEK`), or NULL when no KEK is configured (the
-  // gateway fails closed and stores nothing rather than plaintext). The column
-  // type is unchanged (text) so no DDL migration is required — only the
-  // semantics changed.
-  // MIGRATION NOTE: legacy rows written before this change may still contain a
-  // raw plaintext key. TODO(audit P0 follow-up, Wave 3): back-fill = re-encrypt
-  // (or better, rotate) every legacy plaintext value, then move custody to a
-  // non-exportable KMS/HSM. Do NOT read this column expecting plaintext.
-  operatorWalletPrivateKey: text("operator_wallet_private_key"), // encrypted-at-rest envelope; see note above
+  // gateway fails closed and stores nothing rather than plaintext). The GCM
+  // Additional Authenticated Data binds the FULL row identity so a ciphertext
+  // cannot be moved between rows; a version-aware decryptor (Wave 3) MUST
+  // reconstruct the AAD from THIS row as:
+  //   JSON.stringify(["pcc:operator-wallet", "v2",
+  //     <id>, <operator_id>, <operator_wallet_address lower-cased>])
+  // and verify it under AES-256-GCM. The column type is unchanged (text) so no
+  // DDL migration is required — only the semantics changed.
+  // MIGRATION NOTE: legacy rows may contain either a raw plaintext key OR an
+  // `enc:v1` blob (address-only AAD, pre-2026-07-13). TODO(audit P0 follow-up,
+  // Wave 3): back-fill = re-encrypt (or better, rotate) every legacy plaintext
+  // AND every `enc:v1` value into `enc:v2`, then move custody to a
+  // non-exportable KMS/HSM. Do NOT read this column expecting plaintext, and
+  // branch on the `enc:v1`/`enc:v2` version prefix before decrypting.
+  operatorWalletPrivateKey: text("operator_wallet_private_key"), // encrypted-at-rest envelope (enc:v2); see note above
   operatorWalletCustody: text("operator_wallet_custody").default("gateway"), // gateway | operator
   agentWalletOnchainStatus: text("agent_wallet_onchain_status").default("pending"), // pending | written | failed
   agentWalletOnchainTxHash: text("agent_wallet_onchain_tx_hash"),

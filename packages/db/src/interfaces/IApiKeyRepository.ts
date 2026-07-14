@@ -34,8 +34,14 @@ export interface IApiKeyRepository {
   recordOperatorWallet(
     id: string,
     wallet: {
-      // H-12: envelope-encrypted private key only (`enc:v1:iv:tag:ct`), never
-      // plaintext; null when no KEK is configured (fail-closed at the caller).
+      // H-12: envelope-encrypted private key only, never plaintext; null when no
+      // KEK is configured (fail-closed at the caller). The gateway writes
+      // `enc:v2:<ivHex>:<tagHex>:<ciphertextHex>` (AES-256-GCM). The GCM AAD
+      // binds the FULL row identity —
+      //   JSON.stringify(["pcc:operator-wallet","v2",<id>,<operator_id>,
+      //     <operator_wallet_address lower-cased>])
+      // — so an envelope cannot be relocated to another row. Legacy `enc:v1`
+      // blobs (address-only AAD) predate this and must be rotated (Wave 3).
       address: string;
       privateKeyEnvelope: string | null;
       onchainStatus: "written" | "failed" | "pending";

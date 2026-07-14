@@ -27,12 +27,14 @@ import {
 // AES-256-GCM under a Key-Encryption-Key (KEK) sourced from the environment.
 // The stored value is a self-describing string
 // `enc:v2:<ivHex>:<tagHex>:<ctHex>` (iv + auth tag + ciphertext). The GCM cipher
-// is bound with Additional Authenticated Data (AAD) derived from the wallet
-// address (review #5): a ciphertext cannot be lifted from one db row and
-// replayed into another, because decrypting under a different row's AAD fails
-// the GCM tag check. The existing `operator_wallet_private_key` text column
-// needs no schema/type change — only a semantic one (see packages/db/src/
-// schema/auth.ts).
+// is bound with Additional Authenticated Data (AAD) derived from the FULL row
+// identity (review #4) — envelope version + api-key record id + operator subject
+// id + wallet address — NOT the wallet address alone. Binding the whole tuple
+// means a ciphertext cannot be lifted from one db row and replayed into another
+// (a different key id / operator / address fails the GCM tag check), and two
+// rows that happen to share a wallet address are still distinguished by their
+// key id. The existing `operator_wallet_private_key` text column needs no
+// schema/type change — only a semantic one (see packages/db/src/schema/auth.ts).
 //
 // KEK STRENGTH (review #5): the KEK MUST be exactly 32 random bytes, supplied as
 // base64 or hex. A short/weak passphrase like "password" is REJECTED — we do
@@ -52,12 +54,16 @@ import {
 // handler therefore checks availability BEFORE generating/assigning a wallet and
 // only ever assigns on-chain when it already holds a storable envelope.
 //
-// VERSION / MIGRATION: new writes are `enc:v2:` (AAD-bound). Any legacy
-// `enc:v1:` blob (no AAD) predates this change; a future decrypt-on-use path
-// MUST branch on the version prefix — v1 decrypts WITHOUT AAD, v2 decrypts WITH
-// the wallet-address AAD (see `walletKeyAad`). No decrypt path exists yet (keys
-// are used only in-memory at provision time), so there is nothing to keep
-// back-compatible in code today; the branch is a Wave-3 requirement.
+// VERSION / MIGRATION: new writes are `enc:v2:` (full-identity AAD-bound). Any
+// legacy `enc:v1:` blob (address-only AAD, or none) predates this change; a
+// future decrypt-on-use path MUST branch on the version prefix — v1 decrypts
+// under the old address-only AAD, v2 decrypts under the full-identity AAD, which
+// the decryptor MUST reconstruct from the AUTHORITATIVE db row as
+// `JSON.stringify(["pcc:operator-wallet", "v2", <api_keys.id>,
+// <api_keys.operator_id>, <operator_wallet_address lower-cased>])` (see
+// `walletKeyAad`). No decrypt path exists yet (keys are used only in-memory at
+// provision time), so there is nothing to keep back-compatible in code today;
+// the branch is a Wave-3 requirement.
 //
 // TODO(audit P0 follow-up, Wave 3): move custody to a non-exportable KMS/HSM
 // (envelope key wrapping via cloud KMS); rotate/re-encrypt every previously
@@ -127,31 +133,64 @@ function isKeyEncryptionAvailable(): boolean {
 }
 
 /**
- * AAD binding the ciphertext to the wallet it controls. MUST be reconstructed
- * identically at decrypt time from the row's `operator_wallet_address`
- * (lower-cased). Binding to the address means an envelope cannot be swapped
- * between db rows without failing the GCM tag check.
+ * Full identity an operator-wallet envelope is bound to (review #4). Every
+ * field is part of the AAD, so the ciphertext is inseparable from the exact db
+ * row it belongs to. The decrypt path (Wave 3) MUST rebuild this from the
+ * AUTHORITATIVE row: `version` = the `enc:<v>` prefix, `keyId` = `api_keys.id`,
+ * `operatorId` = `api_keys.operator_id` (verbatim), `walletAddress` =
+ * `api_keys.operator_wallet_address` (lower-cased below).
  */
-function walletKeyAad(walletAddress: string): Buffer {
-  return Buffer.from(`pcc:operator-wallet:${walletAddress.toLowerCase()}`, "utf8");
+interface WalletKeyIdentity {
+  version: string;
+  keyId: string;
+  operatorId: string;
+  walletAddress: string;
 }
 
 /**
- * Envelope-encrypt a secret for storage at rest, bound by AAD to `aadIdentity`
- * (the wallet address). Returns `enc:v2:<ivHex>:<tagHex>:<ciphertextHex>`, or
- * `null` when no valid KEK is set (fail closed — the caller must persist null,
- * never the plaintext, and must NOT create a custodial wallet it cannot store;
- * see the orphaned-wallet guard in the handler).
+ * AAD binding the ciphertext to the FULL row identity it controls — version +
+ * api-key record id + operator subject id + wallet address (review #4). MUST be
+ * reconstructed byte-for-byte at decrypt time from the authoritative db row.
+ * Binding the whole tuple (not the address alone) means an envelope cannot be
+ * swapped into another row without failing the GCM tag check, and two rows that
+ * share a wallet address remain distinct via their key id.
+ *
+ * Wire format is a canonical JSON string array (each element individually quoted
+ * + escaped, so no field can be confused with a delimiter):
+ *   ["pcc:operator-wallet", version, keyId, operatorId, walletAddress(lowercased)]
+ * Only the wallet address is lower-cased; keyId and operatorId are verbatim.
  */
-function encryptSecretAtRest(plaintext: string, aadIdentity: string): string | null {
+function walletKeyAad(identity: WalletKeyIdentity): Buffer {
+  return Buffer.from(
+    JSON.stringify([
+      "pcc:operator-wallet",
+      identity.version,
+      identity.keyId,
+      identity.operatorId,
+      identity.walletAddress.toLowerCase(),
+    ]),
+    "utf8",
+  );
+}
+
+/**
+ * Envelope-encrypt a secret for storage at rest, bound by AAD to the full row
+ * `identity` (review #4). Returns `enc:<identity.version>:<ivHex>:<tagHex>:
+ * <ciphertextHex>`, or `null` when no valid KEK is set (fail closed — the caller
+ * must persist null, never the plaintext, and must NOT create a custodial wallet
+ * it cannot store; see the orphaned-wallet guard in the handler). The version in
+ * the envelope prefix and in the AAD are the SAME value, so a decryptor keys off
+ * one prefix to pick the correct AAD shape.
+ */
+function encryptSecretAtRest(plaintext: string, identity: WalletKeyIdentity): string | null {
   const kek = resolveKeyEncryptionKey();
   if (!kek) return null;
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", kek, iv);
-  cipher.setAAD(walletKeyAad(aadIdentity));
+  cipher.setAAD(walletKeyAad(identity));
   const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return `enc:${ENC_VERSION}:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
+  return `enc:${identity.version}:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
 }
 
 export async function provisionRoutes(app: FastifyInstance) {
@@ -411,12 +450,18 @@ export async function provisionRoutes(app: FastifyInstance) {
               ? await generateOperatorWallet()
               : null;
             // H-12: encrypt the key BEFORE any on-chain assignment, bound by AAD
-            // to this wallet address (so a ciphertext can't be swapped between
-            // db rows). The plaintext key is used in-memory ONLY to sign the
-            // setAgentWallet tx below, then dropped when the request ends — it
-            // is never returned or logged.
+            // to this row's FULL identity (envelope version + api-key id +
+            // operator id + wallet address) so a ciphertext can't be swapped
+            // between db rows. The plaintext key is used in-memory ONLY to sign
+            // the setAgentWallet tx below, then dropped when the request ends —
+            // it is never returned or logged.
             const operatorKeyEnvelope = opWallet
-              ? encryptSecretAtRest(opWallet.privateKey, opWallet.address)
+              ? encryptSecretAtRest(opWallet.privateKey, {
+                  version: ENC_VERSION,
+                  keyId: record.id,
+                  operatorId,
+                  walletAddress: opWallet.address,
+                })
               : null;
 
             if (!opWallet || !operatorKeyEnvelope) {
@@ -438,7 +483,19 @@ export async function provisionRoutes(app: FastifyInstance) {
                 "operator wallet skipped — refusing to create an unrecoverable custodial wallet (no storable envelope)",
               );
             } else {
-              operatorWalletResponse = {
+              // Server-minted wallet response object, mutated in place with the
+              // on-chain outcome below. Held as a typed const so we keep a
+              // reference even if `operatorWalletResponse` is reassigned to the
+              // wallet_not_created variant on a pre-chain persist failure.
+              const mintedResponse: {
+                address: string;
+                source: "server-minted";
+                custody: "gateway";
+                warning: string;
+                onchain_status?: "written" | "failed" | "pending";
+                onchain_tx_hash?: string;
+                onchain_error?: string;
+              } = {
                 address: opWallet.address,
                 source: "server-minted",
                 custody: "gateway",
@@ -447,55 +504,134 @@ export async function provisionRoutes(app: FastifyInstance) {
                   "key is encrypted at rest and is never returned by the API. A future " +
                   "export flow will let you take custody (see coord bulletin 235).",
               };
+              operatorWalletResponse = mintedResponse;
+
+              // ── H-12 orphan-wallet fix (review #2): PERSIST BEFORE CHAIN ────
+              // Durably store the address + encrypted envelope with
+              // onchain_status:"pending" FIRST, and submit the on-chain
+              // assignment ONLY if that persist succeeds. Previously the tx was
+              // sent BEFORE the DB write, so a tx-success + persist-failure left
+              // the chain pointing at a wallet whose private key existed only in
+              // this request's memory — an unrecoverable orphan. If this persist
+              // throws we abort WITHOUT submitting the tx, so no orphan is
+              // possible; the API key is still provisioned (it just has no
+              // wallet).
+              let walletPersisted = false;
               try {
-                const walletResult = await setAgentWalletOnChain({
-                  agentId: onchain.agentId,
-                  newWallet: opWallet.address,
-                  newWalletPrivateKey: opWallet.privateKey,
-                });
                 getRepos().apiKeys.recordOperatorWallet(record.id, {
                   address: opWallet.address,
                   privateKeyEnvelope: operatorKeyEnvelope,
-                  onchainStatus: "written",
-                  onchainTxHash: walletResult.txHash,
+                  onchainStatus: "pending",
+                  onchainTxHash: null,
                   onchainError: null,
                 });
-                operatorWalletResponse.onchain_status = "written";
-                operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
-                auditService.log({
-                  eventType: "auth.agent_wallet_written",
-                  actor: operatorId,
-                  resourceType: "api_key",
-                  resourceId: record.id,
-                  action: "update",
-                  metadata: {
-                    agent_wallet: opWallet.address,
-                    tx_hash: walletResult.txHash,
-                    agent_id: String(onchain.agentId),
-                  },
-                  ip: req.ip,
-                  userAgent: req.headers["user-agent"],
-                });
-              } catch (walletErr) {
-                const walletErrMsg =
-                  walletErr instanceof Error ? walletErr.message : String(walletErr);
-                try {
-                  getRepos().apiKeys.recordOperatorWallet(record.id, {
-                    address: opWallet.address,
-                    privateKeyEnvelope: operatorKeyEnvelope,
-                    onchainStatus: "failed",
-                    onchainTxHash: null,
-                    onchainError: walletErrMsg.slice(0, 1024),
-                  });
-                } catch {
-                  // Non-fatal.
-                }
-                operatorWalletResponse.onchain_status = "failed";
-                operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+                walletPersisted = true;
+              } catch (persistErr) {
+                const persistErrMsg =
+                  persistErr instanceof Error ? persistErr.message : String(persistErr);
+                operatorWalletResponse = {
+                  source: "none",
+                  custody: "none",
+                  reason: "wallet_not_created",
+                  message:
+                    "Operator wallet was not created: its encrypted key could not be " +
+                    "persisted before on-chain assignment, so no key was written " +
+                    "on-chain (no orphan created). Please retry provisioning.",
+                };
                 req.log?.warn(
-                  { keyId: record.id, error: walletErrMsg },
-                  "setAgentWallet best-effort failed — off-chain wallet preserved (key encrypted at rest)",
+                  { keyId: record.id, error: persistErrMsg },
+                  "operator wallet persist failed before chain tx — aborting assignment (no orphan created)",
                 );
+              }
+
+              if (walletPersisted) {
+                // Envelope is now durable (status "pending"). Submit the on-chain
+                // assignment. From here the wallet is NEVER discarded on failure —
+                // only its status changes — because the recoverable key already
+                // exists in the row.
+                let walletWritten = false;
+                let walletTxHash = "";
+                try {
+                  const walletResult = await setAgentWalletOnChain({
+                    agentId: onchain.agentId,
+                    newWallet: opWallet.address,
+                    newWalletPrivateKey: opWallet.privateKey,
+                  });
+                  walletWritten = true;
+                  walletTxHash = walletResult.txHash;
+                  // Advance pending → written. A failure of THIS status update is
+                  // recoverable: the envelope already exists, so we keep the
+                  // wallet and let the reconciliation sweeper confirm the tx hash
+                  // and finalize the status later — we do NOT discard the key.
+                  try {
+                    getRepos().apiKeys.recordOperatorWallet(record.id, {
+                      address: opWallet.address,
+                      privateKeyEnvelope: operatorKeyEnvelope,
+                      onchainStatus: "written",
+                      onchainTxHash: walletResult.txHash,
+                      onchainError: null,
+                    });
+                  } catch (statusErr) {
+                    req.log?.warn(
+                      {
+                        keyId: record.id,
+                        error:
+                          statusErr instanceof Error
+                            ? statusErr.message
+                            : String(statusErr),
+                      },
+                      "wallet status update pending→written failed — envelope preserved, sweeper will reconcile",
+                    );
+                  }
+                  mintedResponse.onchain_status = "written";
+                  mintedResponse.onchain_tx_hash = walletResult.txHash;
+                } catch (walletErr) {
+                  const walletErrMsg =
+                    walletErr instanceof Error ? walletErr.message : String(walletErr);
+                  // Chain assignment failed. The envelope stays durably stored;
+                  // flip status pending → failed so the sweeper retries. Never
+                  // drop the wallet.
+                  try {
+                    getRepos().apiKeys.recordOperatorWallet(record.id, {
+                      address: opWallet.address,
+                      privateKeyEnvelope: operatorKeyEnvelope,
+                      onchainStatus: "failed",
+                      onchainTxHash: null,
+                      onchainError: walletErrMsg.slice(0, 1024),
+                    });
+                  } catch {
+                    // Non-fatal: envelope already persisted as "pending".
+                  }
+                  mintedResponse.onchain_status = "failed";
+                  mintedResponse.onchain_error = walletErrMsg.slice(0, 256);
+                  req.log?.warn(
+                    { keyId: record.id, error: walletErrMsg },
+                    "setAgentWallet best-effort failed — off-chain wallet preserved (key encrypted at rest)",
+                  );
+                }
+
+                // ── Audit-log isolation (review #2) ─────────────────────────
+                // Emit the success audit event OUTSIDE the chain-assignment / DB
+                // try/catch above. If this log call threw from INSIDE that try,
+                // the catch would flip a written wallet to "failed" and corrupt
+                // settlement-relevant state on a mere logging outage. Logging
+                // here decouples audit availability from wallet correctness.
+                if (walletWritten) {
+                  auditService.log({
+                    eventType: "auth.agent_wallet_written",
+                    actor: operatorId,
+                    resourceType: "api_key",
+                    resourceId: record.id,
+                    action: "update",
+                    metadata: {
+                      agent_wallet: opWallet.address,
+                      tx_hash: walletTxHash,
+                      agent_id: String(onchain.agentId),
+                    },
+                    ip: req.ip,
+                    userAgent: req.headers["user-agent"],
+                  });
+                }
               }
             }
           } catch (opWalletErr) {
