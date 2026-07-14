@@ -63,7 +63,7 @@ export const PUBLIC_COURIER_JOBS_DETAIL_RE = /^\/api\/courier-jobs\/(?:jobs\/)?[
 export const PUBLIC_ARTIFACTS_READ_RE = /^\/api\/artifacts(?:\/[^/]+)?$/;
 
 /** Mirror of api-gate.ts isPublicRoute(url, method) against a CONCRETE path. */
-function isPublicRoute(path, method) {
+export function isPublicRoute(path, method) {
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (method === "GET" && path === "/api/kernels") return true;
@@ -76,8 +76,8 @@ function isPublicRoute(path, method) {
   return false;
 }
 
-// ── SNAPSHOT: scope-checker.ts DEFAULT_SCOPE_REQUIREMENTS (:22-45) ──
-const DEFAULT_SCOPE_REQUIREMENTS = [
+// ── SNAPSHOT: scope-checker.ts DEFAULT_SCOPE_REQUIREMENTS (:39-61) ──
+export const DEFAULT_SCOPE_REQUIREMENTS = [
   { method: "POST", pattern: "/api/kernels/*", scopes: ["operator", "admin"] },
   { method: "PUT", pattern: "/api/kernels/*", scopes: ["operator", "admin"] },
   { method: "POST", pattern: "/api/evidence/*", scopes: ["operator", "verifier", "admin"] },
