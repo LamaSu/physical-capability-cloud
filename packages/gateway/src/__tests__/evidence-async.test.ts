@@ -17,7 +17,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { canonicalize } from "@pcc/spec";
 import { SessionKeyService, merkleRoot } from "@pcc/verifier";
@@ -89,6 +89,54 @@ function toAuthorization(sk: {
     parentSignature: `0x${toHex(sk.parentSignature)}`,
     ...(sk.derivationPath ? { derivationPath: sk.derivationPath } : {}),
   };
+}
+
+/**
+ * Forge a parent-signed delegation with an ARBITRARY window/scope — for inputs
+ * `issueSessionKey` cannot produce (it enforces ttl > 0, so it can never mint an
+ * expiresAt < issuedAt window). Signs the verifier's canonical session-key form
+ * (mirrors `canonicalSessionKeyBytes` in ephemeral-identity.ts: sorted actions/contracts,
+ * lowercase-hex publicKey, key order sessionId→parentAgentId→publicKey→issuedAt→expiresAt→scope),
+ * so the parent signature VERIFIES and the begin route reaches the policy checks (not a 403).
+ */
+function forgeDelegation(
+  principal: nacl.SignKeyPair,
+  jobId: string,
+  opts: { issuedAt: number; expiresAt: number; allowedActions?: string[]; maxSignatures?: number },
+) {
+  const sessionKeypair = nacl.sign.keyPair();
+  const parentAgentId = "eip155:84532:0x0000000000000000000000000000000000000001";
+  const sessionId = randomUUID();
+  const scope = {
+    allowedActions: opts.allowedActions ?? ACTIONS,
+    contractIds: [jobId],
+    maxSignatures: opts.maxSignatures ?? 100,
+  };
+  const canonical = JSON.stringify({
+    sessionId,
+    parentAgentId,
+    publicKey: toHex(sessionKeypair.publicKey),
+    issuedAt: opts.issuedAt,
+    expiresAt: opts.expiresAt,
+    scope: {
+      allowedActions: [...scope.allowedActions].sort(),
+      contractIds: [...scope.contractIds].sort(),
+      maxSignatures: scope.maxSignatures,
+    },
+  });
+  const parentSignature = nacl.sign.detached(
+    new TextEncoder().encode(canonical),
+    principal.secretKey,
+  );
+  return toAuthorization({
+    sessionId,
+    parentAgentId,
+    publicKey: sessionKeypair.publicKey,
+    issuedAt: opts.issuedAt,
+    expiresAt: opts.expiresAt,
+    scope,
+    parentSignature,
+  });
 }
 
 /** Seed a kernel (with `principal` as its REGISTERED ed25519 signer) + job + negotiation. */
@@ -320,10 +368,118 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
     });
   });
 
+  // ─── begin: S6-3 delegation validity + authority limits ─────────────────────
+  describe("POST /begin — S6-3 delegation validity + authority limits", () => {
+    /** seed a fresh job whose kernel's registered signer is `principal`. */
+    function freshSeeded() {
+      const jobId = freshJobId();
+      const principal = nacl.sign.keyPair();
+      seedJob(jobId, principal.publicKey);
+      return { jobId, principal };
+    }
+    const beginUrl = (jobId: string) => `/api/jobs/${jobId}/evidence/begin`;
+
+    it("expired-before-begin delegation → 422 delegation_expired (DoS fix: dead authority cannot open the single session slot)", async () => {
+      const { jobId, principal } = freshSeeded();
+      const del = issueDelegation(principal, jobId, { ttlSeconds: 300 });
+      // Advance the gateway clock PAST the delegation expiry; expiry is judged at begin `now`.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((del.sessionKey.expiresAt + 100) * 1000);
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: del.authorization } });
+      vi.useRealTimers();
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("delegation_expired");
+    });
+
+    it("future-issued delegation → 422 delegation_not_yet_valid", async () => {
+      const { jobId, principal } = freshSeeded();
+      const nowReal = Math.floor(Date.now() / 1000);
+      // Issue with the clock 10000s in the FUTURE, then begin at real-now (< issuedAt).
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((nowReal + 10_000) * 1000);
+      const { authorization } = issueDelegation(principal, jobId, { ttlSeconds: 300 });
+      vi.useRealTimers();
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("delegation_not_yet_valid");
+    });
+
+    it("malformed window (expiresAt < issuedAt) → 422 delegation_malformed_window", async () => {
+      const { jobId, principal } = freshSeeded();
+      const now = Math.floor(Date.now() / 1000);
+      // issueSessionKey enforces ttl > 0, so FORGE a parent-signed delegation with an inverted window.
+      const authorization = forgeDelegation(principal, jobId, { issuedAt: now, expiresAt: now - 100 });
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("delegation_malformed_window");
+    });
+
+    const maxSigCases: Array<[string, number]> = [
+      ["zero", 0],
+      ["negative", -1],
+      ["fractional", 1.5],
+      ["unsafe-huge", Number.MAX_SAFE_INTEGER + 1],
+    ];
+    it.each(maxSigCases)("maxSignatures %s → 422 invalid_max_signatures", async (_label, maxSignatures) => {
+      const { jobId, principal } = freshSeeded();
+      // issueSessionKey does not validate maxSignatures, so the parent signature is valid over it.
+      const { authorization } = issueDelegation(principal, jobId, { maxSignatures });
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("invalid_max_signatures");
+    });
+
+    it("empty allowedActions → 422 empty_allowed_actions", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId, { allowedActions: [] });
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("empty_allowed_actions");
+    });
+
+    it("delegation scope.milestoneIndex that MISMATCHES the begin milestone → 422 milestone_scope_mismatch", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId);
+      // milestoneIndex is NOT in the parent-signed canonical bytes, so adding it here does not
+      // break the parent signature — it is an out-of-band scope constraint the route enforces.
+      const scoped = { ...authorization, scope: { ...authorization.scope, milestoneIndex: 3 } };
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: scoped, milestoneIndex: 0 } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("milestone_scope_mismatch");
+    });
+
+    it("delegation scope.milestoneIndex that MATCHES the begin milestone → opens (201)", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId);
+      const scoped = { ...authorization, scope: { ...authorization.scope, milestoneIndex: 2 } };
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: scoped, milestoneIndex: 2 } });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().sessionId).toBe(`evs-${jobId}-2`);
+    });
+
+    it("non-number scope.milestoneIndex → 403 delegation_invalid (coerce fails closed)", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId);
+      const bad = { ...authorization, scope: { ...authorization.scope, milestoneIndex: "not-a-number" } };
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: bad } });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("delegation_invalid");
+    });
+
+    it("a valid delegation still opens a session (no regression) → 201", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId);
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().sessionId).toBe(`evs-${jobId}-0`);
+      expect(res.json().nextSeq).toBe(1);
+    });
+  });
+
   // ─── checkpoints ───────────────────────────────────────────────────────────
   describe("POST /checkpoints", () => {
     /** begin a session and return its context. */
-    async function begin(opts?: { maxSignatures?: number; ttlSeconds?: number }) {
+    async function begin(opts?: { maxSignatures?: number; ttlSeconds?: number; allowedActions?: string[] }) {
       const jobId = freshJobId();
       const principal = nacl.sign.keyPair();
       seedJob(jobId, principal.publicKey);
@@ -390,6 +546,22 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       });
       const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: cp.body });
       expect(res.statusCode).toBe(403);
+      expect(res.json().reason).toBe("action_not_allowed");
+    });
+
+    it("S6-3: an execution_completed checkpoint under a delegation whose allowedActions LACKS it → 403 (phase-action binding, NOT a begin-time requirement)", async () => {
+      // A delegation covering only non-terminal phases (no execution_completed) STILL opens a
+      // session — begin imposes NO terminal-action requirement (a delegation may legitimately
+      // cover only some phases). The terminal binding is enforced at CHECKPOINT submission:
+      // checkpointType must be in scope.allowedActions (§2.2-1, the EXISTING phase-action check).
+      const { jobId, del, sessionId } = await begin({ allowedActions: ["execution_started", "workflow_step_completed"] });
+      const cp = signCheckpoint({
+        sessionId, seq: 1, createdAt: Math.floor(Date.now() / 1000), prevCheckpointHash: null,
+        events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey,
+      });
+      const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: cp.body });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("checkpoint_verification_failed");
       expect(res.json().reason).toBe("action_not_allowed");
     });
 

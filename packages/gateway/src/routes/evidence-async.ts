@@ -137,7 +137,19 @@ interface WireSessionKeyAuthorization {
   publicKey: string;
   issuedAt: number;
   expiresAt: number;
-  scope: { allowedActions: string[]; contractIds: string[]; maxSignatures: number };
+  scope: {
+    allowedActions: string[];
+    contractIds: string[];
+    maxSignatures: number;
+    /**
+     * OPTIONAL milestone binding (S6-3, additive). NOT part of the parent-signed
+     * canonical session key (canonicalSessionKeyBytes covers only allowedActions /
+     * contractIds / maxSignatures), so it never affects parent-signature verification;
+     * begin enforces it against the requested milestoneIndex WHEN PRESENT, and imposes
+     * no constraint when absent (step-6 default).
+     */
+    milestoneIndex?: number;
+  };
   parentSignature: string;
   derivationPath?: string;
 }
@@ -167,6 +179,11 @@ function coerceAuthorization(input: unknown): WireSessionKeyAuthorization | null
   ) {
     return null;
   }
+  // Optional milestone binding (S6-3, additive): if PRESENT it must be a number — a
+  // non-number present value is malformed → fail closed. Absent is fine (no constraint).
+  if (scope.milestoneIndex !== undefined && typeof scope.milestoneIndex !== "number") {
+    return null;
+  }
   return {
     sessionId: a.sessionId,
     parentAgentId: a.parentAgentId,
@@ -177,6 +194,9 @@ function coerceAuthorization(input: unknown): WireSessionKeyAuthorization | null
       allowedActions: scope.allowedActions as string[],
       contractIds: scope.contractIds as string[],
       maxSignatures: scope.maxSignatures,
+      ...(typeof scope.milestoneIndex === "number"
+        ? { milestoneIndex: scope.milestoneIndex }
+        : {}),
     },
     parentSignature: a.parentSignature,
     ...(typeof a.derivationPath === "string" ? { derivationPath: a.derivationPath } : {}),
@@ -402,20 +422,68 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       .where(eq(schema.negotiationSessions.jobId, jobId))
       .get();
     const window = computeWindow(termsRow?.contractTerms ?? null, now);
-    // §2.1-3 delegation ⊆ terms-authorized window. RESOLVED SPEC CONFLICT (flagged in the
-    // build report): `computeWindow` anchors `notBefore = now` (begin time), but a real
-    // delegation is minted BEFORE begin (issuedAt <= now), so the literal `issuedAt >=
-    // notBefore` would 422 every legitimate begin. The LOAD-BEARING half is the UPPER
-    // bound — the delegation must not authorize execution past the terms-derived window
-    // close (`expiresAt <= window.expiresAt`); the corrected LOWER bound asserts the
-    // delegation is already active, not future-dated (`issuedAt <= window.notBefore`).
-    const withinWindow =
-      sessionKey.issuedAt <= window.notBefore && sessionKey.expiresAt <= window.expiresAt;
-    if (!withinWindow) {
+
+    // §2.1-3 EXPLICIT delegation validity + authority-limit checks (S6-3). Authenticity was
+    // already proven at 403 by verifyBeginDelegation above; these are POLICY/window failures →
+    // 422, each with a STABLE distinct reason so the client sees which check failed. We
+    // validate explicitly rather than inferring validity by filtering the verifier to one
+    // reason. `window.notBefore === now` by computeWindow. ORDER: the structural
+    // (well-formed window) check runs FIRST so `delegation_malformed_window` is reachable and
+    // not masked by `delegation_expired`/`delegation_not_yet_valid`; then temporal (not
+    // future / not expired), then the terms-window bound, then authority limits.
+    const { issuedAt, expiresAt } = sessionKey;
+    const { maxSignatures, allowedActions } = sessionKey.scope;
+    // 1. Structural: the delegation's own window must be well-formed (expiresAt >= issuedAt).
+    if (!(issuedAt <= expiresAt)) {
+      return reply.status(422).send({
+        error: "delegation_malformed_window",
+        delegation: { issuedAt, expiresAt },
+      });
+    }
+    // 2. Not future-dated: authority must already be active at begin (issuedAt <= now).
+    if (!(issuedAt <= now)) {
+      return reply.status(422).send({
+        error: "delegation_not_yet_valid",
+        now,
+        delegation: { issuedAt, expiresAt },
+      });
+    }
+    // 3. Not expired AT BEGIN — THE DoS fix: an expired-but-parent-signed delegation must not
+    //    occupy the single (job, milestone) session slot with dead authority (now <= expiresAt).
+    if (!(now <= expiresAt)) {
+      return reply.status(422).send({
+        error: "delegation_expired",
+        now,
+        delegation: { issuedAt, expiresAt },
+      });
+    }
+    // 4. Delegation authority must not extend past the terms-derived window close (§2.1-3).
+    if (!(expiresAt <= window.expiresAt)) {
       return reply.status(422).send({
         error: "delegation_outside_window",
         window,
-        delegation: { issuedAt: sessionKey.issuedAt, expiresAt: sessionKey.expiresAt },
+        delegation: { issuedAt, expiresAt },
+      });
+    }
+    // 5. maxSignatures must be a usable positive, SAFE-integer ceiling — catches 0, negative,
+    //    fractional, and huge/unsafe values that would defeat the compromise-blast-radius bound.
+    if (!(Number.isSafeInteger(maxSignatures) && maxSignatures > 0)) {
+      return reply.status(422).send({ error: "invalid_max_signatures", maxSignatures });
+    }
+    // 6. A delegation that permits no actions can sign nothing — reject it up front.
+    if (!(allowedActions.length > 0)) {
+      return reply.status(422).send({ error: "empty_allowed_actions" });
+    }
+    // 7. Milestone scope binding WHEN PRESENT (additive; absent = step-6 default, no constraint).
+    //    Read from the wire auth (the verifier SessionKey deliberately omits milestoneIndex).
+    if (
+      auth.scope.milestoneIndex !== undefined &&
+      auth.scope.milestoneIndex !== milestoneIndex
+    ) {
+      return reply.status(422).send({
+        error: "milestone_scope_mismatch",
+        delegationMilestoneIndex: auth.scope.milestoneIndex,
+        milestoneIndex,
       });
     }
 
