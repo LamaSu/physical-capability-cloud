@@ -158,6 +158,60 @@ function safeGetOffer(offerId: string): JobOffer | undefined {
   }
 }
 
+// Allowlist of offer states in which a linked blob may be read WITHOUT auth.
+// Mirrors the public open-offers feed (JobOffersStore.listOpen exposes only
+// status === "open"). ALLOWLIST, not denylist: any state not listed here —
+// claimed, in_progress, delivered, settled, disputed, cancelled, expired, or
+// any future/unknown status — fails closed (blob stays private, auth required).
+// Round-1 used a denylist (public unless cancelled/expired), which left
+// claimed/delivered/settled/disputed blobs world-readable. (review #12)
+const PUBLIC_OFFER_STATES: ReadonlySet<JobOffer["status"]> = new Set<JobOffer["status"]>([
+  "open",
+]);
+
+// Authorization for reading a NON-public blob (bytes or metadata). requireAuth
+// only proves the caller is *some* authenticated principal; it does NOT prove
+// they may read THIS blob. Without this, any authenticated principal who learns
+// a CID could read private evidence photos, lab data, or customer files (H-11,
+// review #11). DLP can't help — the response is binary, not JSON.
+//
+// A caller may read a private blob when they are:
+//   1. the uploader (row.uploaded_by). This is also the blob's TENANT OWNER:
+//      per middleware/tenant-context.ts a request's tenantId IS its API-key
+//      operatorId / SIWE address, and a blob's uploaded_by is set to that same
+//      operatorId at upload time — so "tenant owner" and "uploader" are one
+//      check for storage_blobs (there is no org-above-operator layer). OR
+//   2. a participant in the linked offer/job — the offer's poster
+//      (offer.posterDid) or the operator/kernel that claimed it
+//      (offer.claimedByKernelId). This lets a job's two sides exchange files:
+//      the poster reads the operator's evidence photos; the operator reads the
+//      poster's input files.
+//
+// A third path — an explicit per-blob access grant (share-with-user) — is named
+// in the finding but has no backing store yet. TODO(audit P0 follow-up): when a
+// storage-grants table lands, consult it here. Until then the two checks above
+// are the entire model and everything else fails CLOSED (deny).
+//
+// Mirrors the uploader-ownership check the DELETE route already enforces.
+function isAuthorizedForPrivateBlob(row: StorageBlobRow, caller: string): boolean {
+  // Empty / anonymous caller can never read a private blob.
+  if (!caller || caller === "anonymous") return false;
+
+  // 1. Uploader (== tenant owner of the row).
+  if (row.uploaded_by && row.uploaded_by === caller) return true;
+
+  // 2. Participant in the linked offer/job.
+  if (row.related_offer_id) {
+    const offer = safeGetOffer(row.related_offer_id);
+    if (offer) {
+      if (offer.posterDid && offer.posterDid === caller) return true;
+      if (offer.claimedByKernelId && offer.claimedByKernelId === caller) return true;
+    }
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -299,7 +353,12 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
   //   3. the uploader OWNS that offer (offer.posterDid === uploaded_by) so
   //      nobody can attach their blob to someone else's offer to force it
   //      public, and
-  //   4. the offer is still publicly visible (not cancelled/expired).
+  //   4. the offer is in a publicly-visible state — an ALLOWLIST
+  //      (PUBLIC_OFFER_STATES = the states the public open-offers feed exposes,
+  //      i.e. "open"), so post-open states (claimed/delivered/settled/disputed)
+  //      and any unknown/future status fail closed. Round-1 used a denylist
+  //      (public unless cancelled/expired), which wrongly kept those blobs
+  //      world-readable. (review #12)
   // The caller-supplied ?public query flag is no longer consulted at all.
   function canPublicRead(row: StorageBlobRow): boolean {
     if (!row.public_read) return false;
@@ -307,7 +366,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
     const offer = safeGetOffer(row.related_offer_id);
     if (!offer) return false;
     if (!row.uploaded_by || offer.posterDid !== row.uploaded_by) return false;
-    if (offer.status === "cancelled" || offer.status === "expired") return false;
+    if (!PUBLIC_OFFER_STATES.has(offer.status)) return false;
     return true;
   }
 
@@ -339,6 +398,15 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
         // to permit unauthenticated public reads above.
         await requireAuth(req, reply);
         if (reply.sent) return;
+
+        // H-11: requireAuth only proves the caller is *some* authenticated
+        // principal — not that they may read THIS blob. Authorize per-blob.
+        const { operatorId } = callerIdentity(req);
+        if (!isAuthorizedForPrivateBlob(row, operatorId)) {
+          return reply
+            .code(403)
+            .send({ error: "forbidden", message: "Not authorized to read this blob." });
+        }
       }
 
       const storage = await getCidBlobStorage();
@@ -401,6 +469,15 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
       if (!publicAllowed) {
         await requireAuth(req, reply);
         if (reply.sent) return;
+
+        // H-11: authorize per-blob — requireAuth alone doesn't prove the
+        // caller may read THIS blob's metadata.
+        const { operatorId } = callerIdentity(req);
+        if (!isAuthorizedForPrivateBlob(row, operatorId)) {
+          return reply
+            .code(403)
+            .send({ error: "forbidden", message: "Not authorized to read this blob metadata." });
+        }
       }
 
       return {
