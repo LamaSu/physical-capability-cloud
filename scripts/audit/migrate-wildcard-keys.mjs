@@ -66,19 +66,30 @@ export function planMigration(rows, isVerifiedOnboarding = () => false) {
 }
 
 /**
- * Apply only the auto-rescope set, TOCTOU-safe: re-read each key and confirm it
- * is still present and still exactly ["*"] before updating (updateScopes is
- * additionally active-only). Returns { changed, skipped }.
+ * Apply the auto-rescope set. TOCTOU-safe AND re-authorizing (review R2 #3): for
+ * each key, immediately before updating, re-read the fresh row and require it to be
+ * still present, still exactly ["*"], and STILL verified by the authoritative
+ * predicate (authorization can go stale between plan and apply). The plan's `to`
+ * field is IGNORED — the hardcoded SELF_SERVICE_SCOPES is always what gets written,
+ * so a crafted/tampered plan can never escalate. A predicate that throws fails
+ * closed (skip), never grants. Returns { changed, skipped }.
  */
-export function applyMigration(apiKeys, plan) {
+export function applyMigration(apiKeys, plan, isVerifiedOnboarding = () => false) {
   let changed = 0, skipped = 0;
   for (const k of plan.rescope) {
     const cur = apiKeys.findById(k.id);
-    if (!cur || !isWildcardScopes(cur.scopes)) {
-      skipped++; // changed/removed since the plan was computed — do not apply
+    let ok = false;
+    try {
+      ok = !!cur && isWildcardScopes(cur.scopes) && isVerifiedOnboarding(cur) === true;
+    } catch {
+      ok = false; // predicate/authority failure → fail closed
+    }
+    if (!ok) {
+      skipped++;
       continue;
     }
-    if (apiKeys.updateScopes(k.id, k.to)) changed++;
+    // Ignore k.to — ALWAYS write the hardcoded least-privilege set.
+    if (apiKeys.updateScopes(cur.id, SELF_SERVICE_SCOPES)) changed++;
     else skipped++;
   }
   return { changed, skipped };
@@ -111,7 +122,7 @@ async function runCli() {
       console.log(`[migrate-wildcard-keys] DRY RUN. Wildcard keys are NEVER auto-granted on source alone — wire an approved-registration join to auto-migrate; otherwise classify the ${plan.review.length} review key(s) manually (rescope, leave scopeless, or revoke).`);
       return;
     }
-    const res = applyMigration(store.repos.apiKeys, plan);
+    const res = applyMigration(store.repos.apiKeys, plan, isVerifiedOnboarding);
     console.log(`[migrate-wildcard-keys] APPLIED — re-scoped ${res.changed}, skipped ${res.skipped} (TOCTOU/inactive). ${plan.review.length} still need manual classification.`);
   } finally {
     store.close();
