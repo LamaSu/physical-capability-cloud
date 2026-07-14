@@ -89,6 +89,7 @@ class FakeGateway {
       hashes: string[];
       eventsRootBySeq: Map<number, string>;
       revealedBySeq: Map<number, unknown>;
+      receiptsBySeq: Map<number, unknown>;
     }
   >();
   readonly calls: RecordedCall[] = [];
@@ -99,6 +100,10 @@ class FakeGateway {
   blipCheckpointOnce = false;
   /** Corrupt the next minted receipt signature (integrity-failure simulation). */
   corruptNextReceiptSig = false;
+  /** Drop the checkpoint RESPONSE once AFTER committing (S6-4 uncertain-commit simulation). */
+  dropCheckpointResponseOnce = false;
+  /** Throw once BEFORE the checkpoint is processed (S6-4 timeout-before-commit simulation). */
+  dropCheckpointBeforeCommitOnce = false;
 
   constructor() {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -110,8 +115,19 @@ class FakeGateway {
   get fetchImpl(): typeof fetch {
     return (async (url: unknown, init: any) => {
       const path = new URL(String(url)).pathname;
+      const method = (init?.method ?? "GET").toUpperCase();
       const body = init?.body ? JSON.parse(init.body as string) : {};
       this.calls.push({ path, body });
+      // GET receipt (S6-4 recovery) — before the POST dispatch.
+      if (method === "GET" && path.includes("/receipts/")) {
+        const gr = this.getReceipt(path);
+        return { ok: gr.status >= 200 && gr.status < 300, status: gr.status, json: async () => gr.body } as Response;
+      }
+      // S6-4: drop the checkpoint REQUEST BEFORE processing (timeout-before-commit sim).
+      if (this.dropCheckpointBeforeCommitOnce && path.endsWith("/evidence/checkpoints")) {
+        this.dropCheckpointBeforeCommitOnce = false;
+        throw new Error("simulated network drop before checkpoint commit");
+      }
       const jobId = path.split("/")[3];
       let out: { status: number; body: unknown };
       if (path.endsWith("/evidence/begin")) out = this.begin(jobId, body);
@@ -119,6 +135,12 @@ class FakeGateway {
       else if (path.endsWith("/evidence/checkpoints")) out = this.checkpoint(jobId, body);
       else if (path.endsWith("/evidence/finalize")) out = this.finalize(jobId, body);
       else out = { status: 404, body: { error: "not_found" } };
+      // S6-4: drop the checkpoint RESPONSE after committing (uncertain-commit simulation) —
+      // the server processed + committed the checkpoint, but the client never sees the response.
+      if (this.dropCheckpointResponseOnce && path.endsWith("/evidence/checkpoints")) {
+        this.dropCheckpointResponseOnce = false;
+        throw new Error("simulated network drop after checkpoint commit");
+      }
       return {
         ok: out.status >= 200 && out.status < 300,
         status: out.status,
@@ -140,7 +162,7 @@ class FakeGateway {
     let s = this.sessions.get(auth.sessionId);
     const idempotent = Boolean(s);
     if (!s) {
-      s = { auth, nextSeq: 1, lastHash: null, hashes: [], eventsRootBySeq: new Map(), revealedBySeq: new Map() };
+      s = { auth, nextSeq: 1, lastHash: null, hashes: [], eventsRootBySeq: new Map(), revealedBySeq: new Map(), receiptsBySeq: new Map() };
       this.sessions.set(auth.sessionId, s);
     }
     return {
@@ -214,6 +236,7 @@ class FakeGateway {
     s.lastHash = checkpointHash;
     s.hashes.push(checkpointHash);
     s.eventsRootBySeq.set(body.seq, body.eventsRoot);
+    s.receiptsBySeq.set(body.seq, receipt); // S6-4: retained for GET-receipt recovery.
     return {
       status: 201,
       body: { receipt, skewSeconds: Math.abs(body.createdAt - receiptContent.acceptedAt), skewWithinPolicy: true },
@@ -231,6 +254,17 @@ class FakeGateway {
     }
     s.revealedBySeq.set(seq, body.events); // idempotent overwrite
     return { status: 200, body: { revealed: true, sessionId: body.sessionId, seq } };
+  }
+
+  private getReceipt(path: string): { status: number; body: unknown } {
+    const parts = path.split("/"); // /api/jobs/:jobId/evidence/sessions/:sessionId/receipts/:seq
+    const sessionId = parts[6];
+    const seq = Number(parts[8]);
+    const s = this.sessions.get(sessionId);
+    if (!s) return { status: 404, body: { error: "session_not_found" } };
+    const receipt = s.receiptsBySeq.get(seq);
+    if (!receipt) return { status: 404, body: { error: "receipt_not_found" } };
+    return { status: 200, body: { receipt } };
   }
 
   private finalize(jobId: string, _body: any): { status: number; body: unknown } {
@@ -474,6 +508,48 @@ describe("CheckpointClient — resume after a network blip", () => {
     expect(receipt.seq).toBe(1);
     expect(client.seq).toBe(2);
     expect(client.lastAcceptedHash).toBe(receipt.checkpointHash);
+  });
+});
+
+describe("CheckpointClient — uncertain-commit recovery (S6-4)", () => {
+  function mkClient(gw: FakeGateway, jobId: string): CheckpointClient {
+    const kp = nacl.sign.keyPair();
+    const auth = makeAuth({ sessionKeypair: kp, jobId, actions: ["execution_started", "execution_completed"] });
+    return new CheckpointClient({
+      gatewayUrl: "https://gw.test",
+      apiKey: "k",
+      jobId,
+      sessionKeyAuthorization: auth,
+      sessionPrivateKey: kp.secretKey,
+      fetchImpl: gw.fetchImpl,
+    });
+  }
+
+  it("response lost AFTER commit → recovers the committed receipt via GET (no fork, no re-POST)", async () => {
+    const gw = new FakeGateway();
+    const client = mkClient(gw, "job-uncertain-after");
+    await client.begin();
+    gw.dropCheckpointResponseOnce = true; // server COMMITS, client never sees the response
+    const r1 = await client.submitCheckpoint({ type: "execution_started", events: { a: 1 } });
+    expect(r1.seq).toBe(1);
+    // Exactly ONE checkpoint POST at seq 1 — recovery fetched the receipt (GET), never re-POSTed.
+    expect(gw.checkpointCalls().filter((c) => c.seq === 1)).toHaveLength(1);
+    // The local chain advanced correctly — a next checkpoint is accepted at seq 2.
+    const r2 = await client.submitCheckpoint({ type: "execution_completed", events: { b: 2 } });
+    expect(r2.seq).toBe(2);
+  });
+
+  it("timeout BEFORE commit → resubmits the EXACT same bytes (same createdAt, no fork)", async () => {
+    const gw = new FakeGateway();
+    const client = mkClient(gw, "job-uncertain-before");
+    await client.begin();
+    gw.dropCheckpointBeforeCommitOnce = true; // throw BEFORE the server processes → nothing commits
+    const r1 = await client.submitCheckpoint({ type: "execution_started", events: { a: 1 } });
+    expect(r1.seq).toBe(1);
+    // Two POSTs at seq 1 (the dropped attempt + the exact-bytes resubmit) with the SAME createdAt.
+    const seq1 = gw.checkpointCalls().filter((c) => c.seq === 1);
+    expect(seq1).toHaveLength(2);
+    expect(seq1[0].createdAt).toBe(seq1[1].createdAt); // exact-retry: createdAt NOT regenerated
   });
 });
 

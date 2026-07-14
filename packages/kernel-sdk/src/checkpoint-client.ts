@@ -154,6 +154,26 @@ export class CheckpointClient {
   /** Kept payloads keyed by seq, for revelation at finalize (§8.1-#1). */
   private readonly payloadsBySeq = new Map<number, unknown>();
 
+  /**
+   * The EXACT bytes of the in-flight checkpoint for the current seq (S6-4). Retained across
+   * retries so an uncertain-commit retry reuses the SAME createdAt/hash (never a fork), and
+   * cleared once a verified receipt advances the chain.
+   */
+  private pending: {
+    seq: number;
+    content: {
+      sessionId: string;
+      seq: number;
+      createdAt: number;
+      prevCheckpointHash: string | null;
+      eventsRoot: string;
+      checkpointType: string;
+    };
+    signature: string;
+    checkpointHash: string;
+    events: unknown;
+  } | null = null;
+
   /** Serial-emitter mutex: one in-flight submission; the rest queue behind this. */
   private queue: Promise<unknown> = Promise.resolve();
   /** Set once a non-recoverable failure occurs — further submits fail fast (stop emitting). */
@@ -238,47 +258,147 @@ export class CheckpointClient {
     if (!this.sessionId) {
       throw new CheckpointSubmissionError("begin_not_called", 0);
     }
+    // Build the pending checkpoint ONCE per seq position, then reuse it verbatim on any retry
+    // (S6-4: never regenerate createdAt — the EXACT bytes must be reproducible so an
+    // uncertain-commit retry recovers the committed receipt instead of forking the hash).
+    if (!this.pending || this.pending.seq !== this.seq) {
+      const eventsRoot = await sha256(canonicalize(cp.events));
+      const content = {
+        sessionId: this.sessionId,
+        seq: this.seq,
+        createdAt: nowSeconds(),
+        prevCheckpointHash: this.lastAcceptedHash, // explicit null at genesis
+        eventsRoot,
+        checkpointType: cp.type,
+      };
+      const canonical = canonicalize(content);
+      const signature = toHex(nacl.sign.detached(new TextEncoder().encode(canonical), this.sessionPrivateKey));
+      const checkpointHash = await sha256(canonical);
+      this.pending = { seq: this.seq, content, signature, checkpointHash, events: cp.events };
+    }
+    return this.sendPending(cp, allowResync);
+  }
 
-    // Build the canonical checkpoint content with the CURRENT local chain position.
-    const eventsRoot = await sha256(canonicalize(cp.events));
-    const content = {
-      sessionId: this.sessionId,
-      seq: this.seq,
-      createdAt: nowSeconds(),
-      prevCheckpointHash: this.lastAcceptedHash, // explicit null at genesis
-      eventsRoot,
-      checkpointType: cp.type,
-    };
-    const canonical = canonicalize(content);
-    const signature = toHex(nacl.sign.detached(new TextEncoder().encode(canonical), this.sessionPrivateKey));
-
-    const { status, body } = await this.post(`/api/jobs/${this.jobId}/evidence/checkpoints`, {
-      ...content,
-      signature,
-    });
+  /**
+   * POST the retained pending checkpoint. On a network/timeout error the outcome is UNCERTAIN
+   * (the server may or may not have committed) → recover deterministically (§4.5, S6-4).
+   */
+  private async sendPending(
+    cp: { type: string; events: Record<string, unknown> },
+    allowResync: boolean,
+  ): Promise<GatewayReceipt> {
+    const pending = this.pending!;
+    const canonical = canonicalize(pending.content);
+    let status: number;
+    let body: unknown;
+    try {
+      ({ status, body } = await this.post(`/api/jobs/${this.jobId}/evidence/checkpoints`, {
+        ...pending.content,
+        signature: pending.signature,
+      }));
+    } catch (err) {
+      return this.recoverUncertain(cp, allowResync, err);
+    }
     const b = body as { receipt?: GatewayReceipt; idempotent?: boolean; error?: string; reason?: string } | undefined;
 
     // 201 accepted / 200 idempotent — both carry a receipt; verify then advance.
     const receipt = b?.receipt;
     if (receipt && (status === 201 || (status === 200 && b?.idempotent))) {
-      return this.acceptReceipt(receipt, canonical, content.seq, cp.events, status, body);
+      return this.acceptReceipt(receipt, canonical, pending.seq, pending.events, status, body);
     }
 
-    // Recoverable: a plain sequence reject after a blip → resync from begin, resubmit ONCE.
+    // A plain sequence reject after a blip → resync from begin, then recover-or-resubmit ONCE.
     if (
       status === 409 &&
       b?.error === "checkpoint_rejected" &&
       b?.reason === "seq_gap_or_replay" &&
       allowResync
     ) {
-      await this.begin(); // idempotent — re-reads nextSeq / lastAcceptedHash
-      return this.submitOne(cp, false); // resubmit from the resynced position, no second resync
+      return this.resyncAndRetry(cp);
     }
 
     // Non-recoverable: equivocation, a second seq failure, or any 4xx — stop emitting.
     const reason = b?.reason ?? b?.error ?? `http_${status}`;
     this.broken = { reason, statusCode: status, body };
     throw new CheckpointSubmissionError(reason, status, body);
+  }
+
+  /**
+   * Uncertain outcome (network/timeout): re-read the durable tip and either recover the
+   * already-committed receipt (tip == our checkpoint) or resubmit the EXACT same bytes once
+   * (tip still at our prev). Never regenerates the checkpoint (that would fork the hash).
+   */
+  private async recoverUncertain(
+    cp: { type: string; events: Record<string, unknown> },
+    allowResync: boolean,
+    err: unknown,
+  ): Promise<GatewayReceipt> {
+    const pending = this.pending!;
+    if (!allowResync) {
+      // Already recovered once — surface the uncertain outcome rather than loop.
+      this.broken = { reason: "uncertain_commit", statusCode: 0 };
+      throw new CheckpointSubmissionError(
+        "uncertain_commit",
+        0,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    await this.begin(); // idempotent — re-reads the durable tip (lastAcceptedHash / nextSeq)
+    if (this.lastAcceptedHash === pending.checkpointHash) {
+      // Our checkpoint WAS committed (it is the tip) — fetch its receipt + advance; never re-submit.
+      const receipt = await this.fetchReceipt(pending.seq);
+      return this.acceptReceipt(
+        receipt,
+        canonicalize(pending.content),
+        pending.seq,
+        pending.events,
+        200,
+        { recovered: true },
+      );
+    }
+    if (this.seq === pending.seq) {
+      // NOT committed (tip is still our prev) — resubmit the EXACT same bytes, once.
+      return this.sendPending(cp, false);
+    }
+    // The chain moved unexpectedly (tip is neither our checkpoint nor our prev) — ambiguous.
+    this.broken = { reason: "uncertain_commit_chain_moved", statusCode: 0 };
+    throw new CheckpointSubmissionError("uncertain_commit_chain_moved", 0);
+  }
+
+  /**
+   * Resync after a 409 seq reject: if our pending checkpoint turns out to BE the tip (a replay
+   * of one that was actually accepted), recover its receipt; else rebuild for the resynced
+   * position and submit once.
+   */
+  private async resyncAndRetry(
+    cp: { type: string; events: Record<string, unknown> },
+  ): Promise<GatewayReceipt> {
+    await this.begin(); // idempotent — re-reads nextSeq / lastAcceptedHash
+    if (this.pending && this.lastAcceptedHash === this.pending.checkpointHash) {
+      const receipt = await this.fetchReceipt(this.pending.seq);
+      return this.acceptReceipt(
+        receipt,
+        canonicalize(this.pending.content),
+        this.pending.seq,
+        this.pending.events,
+        200,
+        { recovered: true },
+      );
+    }
+    this.pending = null; // stale position — rebuild for the resynced seq
+    return this.submitOne(cp, false);
+  }
+
+  /** GET a committed receipt for a seq (S6-4 recovery). Throws if the gateway has none. */
+  private async fetchReceipt(seq: number): Promise<GatewayReceipt> {
+    const { status, body } = await this.get(
+      `/api/jobs/${this.jobId}/evidence/sessions/${this.sessionId}/receipts/${seq}`,
+    );
+    const b = body as { receipt?: GatewayReceipt } | undefined;
+    if (status !== 200 || !b?.receipt) {
+      throw new CheckpointSubmissionError("receipt_recovery_failed", status, body);
+    }
+    return b.receipt;
   }
 
   /**
@@ -314,6 +434,7 @@ export class CheckpointClient {
     this.payloadsBySeq.set(receipt.seq, events);
     this.lastAcceptedHash = receipt.checkpointHash;
     this.seq = receipt.seq + 1;
+    this.pending = null; // S6-4: the pending checkpoint is now durably receipted — release it.
     return receipt;
   }
 
@@ -391,6 +512,29 @@ export class CheckpointClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(jsonBody),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    let parsed: unknown;
+    try {
+      parsed = await res.json();
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** GET with a per-request timeout; parse the JSON response (or undefined). (S6-4 recovery.) */
+  private async get(path: string): Promise<{ status: number; body: unknown }> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let res: Response;
+    try {
+      res = await this.f(`${this.gatewayUrl}${path}`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.apiKey}` },
         signal: ctrl.signal,
       });
     } finally {

@@ -715,6 +715,33 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(200).send({ revealed: true, sessionId, seq });
   });
 
+  // ─── 2.2c  GET /api/jobs/:jobId/evidence/sessions/:sessionId/receipts/:seq ────
+  // S6-4: receipt recovery for the device client's uncertain-commit path. After a lost
+  // response (the gateway committed the receipt but the client never saw it), the client
+  // re-reads the tip via begin and, if the tip is its pending checkpoint, fetches the
+  // committed receipt HERE to advance WITHOUT re-submitting (a re-submit with a fresh
+  // createdAt would fork the hash → equivocation). Read-only + idempotent; 404 if none.
+  app.get<{ Params: { jobId: string; sessionId: string; seq: string } }>(
+    "/api/jobs/:jobId/evidence/sessions/:sessionId/receipts/:seq",
+    async (req, reply) => {
+      const { jobId, sessionId } = req.params;
+      const seq = Number(req.params.seq);
+      if (!Number.isInteger(seq) || seq < 1) {
+        return reply.status(400).send({ error: "receipt_query_invalid" });
+      }
+      const { repos } = getStore();
+      const session = repos.evidenceSessions.findById(sessionId);
+      if (!session || session.jobId !== jobId) {
+        return reply.status(404).send({ error: "session_not_found" });
+      }
+      const row = repos.gatewayReceipts.findById(`grcpt-${sessionId}-${seq}`);
+      if (!row) {
+        return reply.status(404).send({ error: "receipt_not_found" });
+      }
+      return reply.status(200).send({ receipt: row.body });
+    },
+  );
+
   // ─── 2.3  POST /api/jobs/:jobId/evidence/finalize ────────────────────────────
   app.post<{
     Params: { jobId: string };

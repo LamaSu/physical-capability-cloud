@@ -784,6 +784,23 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(fin.json().package.payloads).toEqual([{ seq: 1, events: events0 }]);
     });
 
+    it("S6-4: GET receipt returns the committed receipt for a seq; 404 for a missing seq", async () => {
+      const { jobId, sessionId } = await beginAndAccept(1);
+      const ok = await app.inject({
+        method: "GET",
+        url: `/api/jobs/${jobId}/evidence/sessions/${sessionId}/receipts/1`,
+      });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json().receipt.seq).toBe(1);
+      expect(ok.json().receipt.sessionId).toBe(sessionId);
+      // A seq with no committed receipt → 404 (the client treats this as "not committed").
+      const missing = await app.inject({
+        method: "GET",
+        url: `/api/jobs/${jobId}/evidence/sessions/${sessionId}/receipts/99`,
+      });
+      expect(missing.statusCode).toBe(404);
+    });
+
     it("idempotent re-finalize → 200; and a post-finalize checkpoint → 409", async () => {
       const { jobId, sessionId, del } = await beginAndAccept(2);
       const first = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
