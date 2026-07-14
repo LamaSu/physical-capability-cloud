@@ -27,13 +27,26 @@ import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqli
 export const evidenceSessions = sqliteTable(
   "evidence_sessions",
   {
-    /** Session id (the delegation's session key id); PK. */
+    /**
+     * The EVIDENCE session id — derived deterministically as `evs-<jobId>-<milestoneIndex>`
+     * (§2.1-4); PK. This is NOT the delegation's cryptographic session-key id — that is
+     * `delegationSessionId` below (S6-8: the two are distinct and both recorded, so the
+     * step-10 oracle's session-key / revocation / chain-continuity checks are unambiguous).
+     */
     sessionId: text("session_id").primaryKey(),
     jobId: text("job_id").notNull(),
     /** Milestone within the job; default 0 in the single-milestone step-6 flow. */
     milestoneIndex: integer("milestone_index").notNull(),
     /** The verified §8.3 PhaseDelegation / SessionKeyAuthorization, JSON. */
     sessionKeyAuthorization: text("session_key_authorization", { mode: "json" }).notNull(),
+    /**
+     * The DELEGATION's cryptographic session-key id (`sessionKeyAuthorization.sessionId`),
+     * recorded DISTINCTLY from the evidence `sessionId` above (S6-8). This is the id the
+     * session signature, expiry, and REVOCATION key off — binding it here makes the
+     * evidence-chain ↔ authorization link explicit + queryable (never inferred from the
+     * JSON). Nullable/additive; populated at `begin` for every step-6 session.
+     */
+    delegationSessionId: text("delegation_session_id"),
     /** Window 1 open bound (Unix seconds); authority is invalid before this. */
     notBefore: integer("not_before").notNull(),
     /** Window 2 close bound (Unix seconds); checkpoints accepted only at/before. */

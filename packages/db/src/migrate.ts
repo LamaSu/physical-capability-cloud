@@ -1697,6 +1697,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS evidence_sessions_job_idx ON evidence_sessions(job_id);
     CREATE UNIQUE INDEX IF NOT EXISTS evidence_sessions_job_milestone_unique ON evidence_sessions(job_id, milestone_index);
   `);
+  // S6-8: the delegation's cryptographic session-key id, recorded distinctly from the
+  // evidence session_id (additive; populated at begin for every step-6 session).
+  safeAddColumn("evidence_sessions", "delegation_session_id", "TEXT");
 
   // milestone_packages — the persisted claim-free FinalMilestonePackage + its
   // PackageReceipt (§8.4-B). UNIQUE(job_id, milestone_index) makes permissionless

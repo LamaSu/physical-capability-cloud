@@ -121,6 +121,21 @@ describe("EvidenceSessionStore.open (§2.1-4 one-open-session)", () => {
     expect(evidenceSessionId("job-1", 0)).toBe("evs-job-1-0");
   });
 
+  it("S6-8: records the DELEGATION's session-key id distinctly from the evidence sessionId", () => {
+    const r = open();
+    expect(r.status).toBe("opened");
+    if (r.status === "opened") {
+      // The evidence sessionId (PK) is the DERIVED one; the delegation's crypto id is separate.
+      expect(r.session.sessionId).toBe("evs-job-1-0");
+      expect(r.session.delegationSessionId).toBe("sk-1");
+      expect(r.session.sessionId).not.toBe(r.session.delegationSessionId);
+    }
+    // Persisted on the row — queryable, not buried in the auth JSON.
+    expect(store.repos.evidenceSessions.findByJobMilestone(jobId, mi)?.delegationSessionId).toBe(
+      "sk-1",
+    );
+  });
+
   it("re-open with the SAME delegation is idempotent (stored session returned, still one row)", () => {
     expect(open().status).toBe("opened");
     const second = open();

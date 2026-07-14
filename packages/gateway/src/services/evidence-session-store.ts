@@ -187,12 +187,19 @@ export class EvidenceSessionStore {
     }
 
     const sessionId = evidenceSessionId(input.jobId, input.milestoneIndex);
+    // S6-8: record the DELEGATION's cryptographic session-key id distinctly from the
+    // evidence sessionId (the two must not be conflated — see the schema). The route
+    // verifies the auth, so sessionId is present; fail-open to null on a shapeless auth.
+    const a = input.sessionKeyAuthorization as { sessionId?: unknown } | null;
+    const delegationSessionId =
+      a && typeof a === "object" && typeof a.sessionId === "string" ? a.sessionId : null;
     const record: EvidenceSessionInsert = {
       sessionId,
       jobId: input.jobId,
       milestoneIndex: input.milestoneIndex,
       sessionKeyAuthorization:
         input.sessionKeyAuthorization as EvidenceSessionInsert["sessionKeyAuthorization"],
+      delegationSessionId,
       notBefore: input.window.notBefore,
       expiresAt: input.window.expiresAt,
       evidenceSubmissionDeadline: input.window.evidenceSubmissionDeadline,
