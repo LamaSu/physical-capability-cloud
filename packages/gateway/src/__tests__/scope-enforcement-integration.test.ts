@@ -32,6 +32,7 @@ describe("apiGate → scopeChecker integration (enforce mode)", () => {
   let app: FastifyInstance;
   const prevMode = process.env.SCOPE_ENFORCEMENT_MODE;
   let n = 0;
+  const hits = { admin: 0, unpoliced: 0 }; // handler side-effect counters (finding #6)
 
   beforeAll(async () => {
     process.env.PCC_DB_PATH = ":memory:";
@@ -49,9 +50,9 @@ describe("apiGate → scopeChecker integration (enforce mode)", () => {
     app = Fastify({ logger: false });
     await app.register(apiGate); // server.ts:456 — resolves API-key / SIWE principal
     await app.register(scopeChecker); // server.ts:533 — enforces scopes on it
-    app.post("/api/admin/itest", async () => ({ ok: true })); // default policy: ["admin"]
+    app.post("/api/admin/itest", async () => { hits.admin++; return { ok: true }; }); // default ["admin"]
     app.post("/api/admin/audit-only", async () => ({ ok: true })); // specific policy: ["auditor"]
-    app.post("/api/itest/unpoliced", async () => ({ ok: true })); // no policy → default-deny
+    app.post("/api/itest/unpoliced", async () => { hits.unpoliced++; return { ok: true }; }); // no policy
     app.get("/api/health/itest", async () => ({ ok: true })); // public prefix /api/health
     // Encapsulation: a route registered in a SEPARATE child plugin must still be
     // enforced by the non-encapsulated (skip-override) scopeChecker hook.
@@ -82,14 +83,18 @@ describe("apiGate → scopeChecker integration (enforce mode)", () => {
     expect((await post("/api/admin/itest", bearer(["admin"]))).statusCode).toBe(200);
   });
 
-  it("scopeChecker DENIES a resolved principal that lacks the scope (403)", async () => {
+  it("scopeChecker DENIES a lacking principal (403) and the handler does NOT execute", async () => {
+    const before = hits.admin;
     const res = await post("/api/admin/itest", bearer(["operator"]));
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("insufficient_scope");
+    expect(hits.admin).toBe(before); // finding #6: a 403 leaves the handler side-effect at zero
   });
 
-  it("default-deny: an authenticated key on an unpoliced route is 403", async () => {
+  it("default-deny: an authenticated key on an unpoliced route is 403, handler not run", async () => {
+    const before = hits.unpoliced;
     expect((await post("/api/itest/unpoliced", bearer(["admin"]))).statusCode).toBe(403);
+    expect(hits.unpoliced).toBe(before);
   });
 
   it("C-02: a SIWE principal REACHES scopeChecker and is DENIED, not skipped", async () => {
