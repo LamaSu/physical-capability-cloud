@@ -89,6 +89,20 @@ const toolResult = (structuredContent: Record<string, unknown>) => ({
   params: { content: [{ type: "text", text: "ok" }], structuredContent },
 });
 
+// Complete the MCP Apps init handshake: reply to the view's `ui/initialize`
+// request with the host's init result, so the view flips `initialized` and will
+// accept a subsequent `ui/notifications/tool-result`. Spec order is
+// initialize -> initialized -> tool-result, so any test that expects a mount
+// MUST call this after boot and before delivering a tool-result.
+function completeInit(
+  posted: Array<Record<string, unknown>>,
+  deliver: (data: unknown, source?: unknown) => void,
+): void {
+  const init = posted.find((m) => m.method === "ui/initialize");
+  if (!init) throw new Error("no ui/initialize was posted — did the view boot?");
+  deliver({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: "2026-01-26", hostContext: {} } });
+}
+
 describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
   it("sends ui/initialize on boot and answers the host init result with ui/notifications/initialized", () => {
     setupManifestDom();
@@ -106,13 +120,15 @@ describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
 
   it("MOUNTS the manifest from a real tool-result and removes the waiting placeholder", () => {
     setupManifestDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
 
     // Before the handoff: the neutral "waiting" placeholder is present.
     expect(document.getElementById("pcc-kit-status")).not.toBeNull();
 
+    // A tool-result is only honored once the init handshake completes.
+    completeInit(posted, deliver);
     const manifest = manifestFor("Live dashboard");
     deliver(toolResult({ manifest }));
 
@@ -130,9 +146,14 @@ describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
 
   it("does NOT latch on a hostile first message; a later valid one still mounts", () => {
     setupManifestDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
+
+    // Complete init so the results below are judged on their merits (post-init),
+    // not simply dropped by the pre-init gate — the hostile ones must STILL be
+    // refused: (a) by the source check, (b) by in-view manifest validation.
+    completeInit(posted, deliver);
 
     // (a) a valid-looking result from a FOREIGN frame (source !== parent)
     deliver(toolResult({ manifest: manifestFor("phish") }), { name: "evil-frame" });
@@ -160,10 +181,11 @@ describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
   it("IGNORES a token in the message and never writes a credential to storage", () => {
     setupManifestDom();
     window.sessionStorage.clear();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
 
+    completeInit(posted, deliver);
     const manifest = manifestFor("Live dashboard");
     deliver(toolResult({ manifest, token: "pcc_live_should_be_ignored", apiBase: "https://evil.example" }));
 
@@ -173,16 +195,44 @@ describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
     expect(window.sessionStorage.getItem("pcc.key")).toBeNull();
     expect(window.sessionStorage.length).toBe(0);
   });
+
+  it("IGNORES a tool-result that arrives before the init handshake; a post-init one still mounts", () => {
+    setupManifestDom();
+    const { win, posted, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runDashboardViewBoot(win as any, STUB_KIT);
+
+    const manifest = manifestFor("Pre-init dashboard");
+
+    // A VALID parent tool-result delivered BEFORE init completes must be ignored
+    // (spec order: initialize -> initialized -> tool-result). Nothing mounts:
+    // the waiting placeholder stays, the manifest node is still "null", the view
+    // is un-booted.
+    deliver(toolResult({ manifest }));
+    expect(document.getElementById("pcc-kit-status")).not.toBeNull();
+    expect((document.getElementById("pcc-manifest") as HTMLScriptElement).textContent).toBe("null");
+    expect((win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBeFalsy();
+
+    // Once the handshake completes, the SAME result now mounts.
+    completeInit(posted, deliver);
+    deliver(toolResult({ manifest }));
+    expect((win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBe(true);
+    expect(document.getElementById("pcc-kit-status")).toBeNull();
+    expect(
+      JSON.parse((document.getElementById("pcc-manifest") as HTMLScriptElement).textContent || "null"),
+    ).toEqual(manifest);
+  });
 });
 
 describe("MCP Apps lifecycle — gallery (search) view", () => {
   it("renders the entries list from a real tool-result and removes the placeholder", () => {
     setupGalleryDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runGalleryViewBoot(win as any);
 
     expect(document.getElementById("pcc-kit-status")).not.toBeNull();
+    completeInit(posted, deliver);
     deliver(
       toolResult({
         entries: [
@@ -201,9 +251,10 @@ describe("MCP Apps lifecycle — gallery (search) view", () => {
 
   it("shows an empty state for zero entries", () => {
     setupGalleryDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runGalleryViewBoot(win as any);
+    completeInit(posted, deliver);
     deliver(toolResult({ entries: [], total: 0 }));
     expect(document.body.textContent).toContain("No dashboards found.");
   });

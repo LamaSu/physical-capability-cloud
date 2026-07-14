@@ -236,6 +236,18 @@ const toolResult = (structuredContent: Record<string, unknown>) => ({
   params: { content: [{ type: "text", text: "ok" }], structuredContent },
 });
 
+// Complete the MCP Apps init handshake so the view will accept a subsequent
+// tool-result (spec order: initialize -> initialized -> tool-result). Any test
+// that expects a mount must call this after boot and before delivering a result.
+function completeInit(
+  posted: Array<Record<string, unknown>>,
+  deliver: (data: unknown, source?: unknown) => void,
+): void {
+  const init = posted.find((m) => m.method === "ui/initialize");
+  if (!init) throw new Error("no ui/initialize was posted — did the view boot?");
+  deliver({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: "2026-01-26", hostContext: {} } });
+}
+
 describe("directive 14 — the transport writes NO credential (cross-view pcc.key isolation)", () => {
   beforeEach(() => window.sessionStorage.clear());
   afterEach(() => window.sessionStorage.clear());
@@ -246,6 +258,7 @@ describe("directive 14 — the transport writes NO credential (cross-view pcc.ke
     const a = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(a.win as any, STUB_KIT);
+    completeInit(a.posted, a.deliver);
     a.deliver(toolResult({ manifest: manifestFor("View A"), token: "pcc_live_A", apiBase: "https://evil.a" }));
     expect((a.win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBe(true);
 
@@ -254,6 +267,7 @@ describe("directive 14 — the transport writes NO credential (cross-view pcc.ke
     const b = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(b.win as any, STUB_KIT);
+    completeInit(b.posted, b.deliver);
     b.deliver(toolResult({ manifest: manifestFor("View B"), token: "pcc_live_B", apiBase: "https://evil.b" }));
     expect((b.win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBe(true);
 
@@ -274,9 +288,13 @@ describe("directive 14 — the transport writes NO credential (cross-view pcc.ke
 describe("directive 14 — malformed structuredContent is inert (no render, no throw)", () => {
   const bootAndDeliver = (payload: unknown) => {
     setupManifestDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
+    // Complete init first so the payload is judged on its (malformed) merits and
+    // not merely dropped by the pre-init gate — this keeps the test about
+    // malformed-content inertness, which is its point.
+    completeInit(posted, deliver);
     expect(() => deliver(payload)).not.toThrow();
     return win as { __PCC_BOOTED__?: boolean };
   };
@@ -306,10 +324,11 @@ describe("directive 14 — malformed structuredContent is inert (no render, no t
 describe("directive 14 — a PRIVATE dashboard renders from the AUTHENTICATED result (no 2nd lookup)", () => {
   it("the saved view mounts whatever manifest the authenticated tool result carried", () => {
     setupManifestDom();
-    const { win, deliver } = makeWin();
+    const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
 
+    completeInit(posted, deliver);
     const manifest = manifestFor("My private ops");
     // Simulates the owner's authenticated get_dashboard result for a PRIVATE
     // artifact: the manifest travels in structuredContent; the view renders it
