@@ -1,6 +1,6 @@
 {
   "note": "Route -> required-scope policy manifest (audit P0, lane d749deff). Consumed by 9de363c7's scope-checker on fix/audit-p0 (cache-merge over DEFAULT_SCOPE_REQUIREMENTS): each rule maps to an endpoint_scopes row { method, routePattern: pattern, requiredScopes: scopes }. Wildcard/precedence semantics follow scope-checker.ts (patternToRegex + most-specific-first). Scope vocab: operator|requestor|verifier|admin|agent|auditor|template_author. Every rule includes admin as the superset. Public routes bypass the scope-checker (no principal), so '*'-method rules only gate AUTHENTICATED traffic and cannot block a public route. Goal: drive route-policy-baseline.json unpoliced-mutating set to 0.",
-  "version": 2,
+  "version": 3,
   "webhook_carveout_note": "EXTERNAL PROVIDER CALLBACKS — NOT authenticated user routes: POST /api/fiat-ramp/webhook/stripe and POST /api/fiat-ramp/webhook/yellowcard are called by Stripe/Yellowcard carrying a PROVIDER signature, never a PCC bearer key. The broad /api/fiat-ramp/** rule below does NOT authorize them: they must be marked PUBLIC at the api-gate (owned by 9de363c7) and their handlers MUST verify the provider signature + timestamp freshness + replay/idempotency. Until api-gate marks them public, enforce mode would 401 legitimate callbacks BEFORE their signature check runs (rollout risk, review R3 #3). Flagged cross-lane; this manifest cannot fix it (api-gate owns public classification).",
   "rules": [
     { "method": "*", "pattern": "/api/escrow/**", "scopes": ["requestor", "operator", "admin"], "note": "money-path: fund/release/dispute (C-03 lives here — buyer/operator only)" },
@@ -12,6 +12,9 @@
     { "method": "*", "pattern": "/api/swf/**", "scopes": ["operator", "admin"], "note": "sovereign-wealth-fund governance (participants)" },
     { "method": "*", "pattern": "/api/rewards/**", "scopes": ["operator", "admin"], "note": "DePIN rewards / treasury" },
     { "method": "*", "pattern": "/api/faucet/**", "scopes": ["operator", "requestor", "admin"], "note": "testnet faucet (low stakes)" },
+    { "method": "*", "pattern": "/api/aegis/**", "scopes": ["admin"], "note": "R3 #4: observability for the aegis safety gate — internal stats, admin-only (fail-safe; widen if an operator dashboard needs it)" },
+    { "method": "*", "pattern": "/api/x402/**", "scopes": ["admin"], "note": "R3 #4: x402 payment-gate stats/route-discovery — internal, admin-only (fail-safe; if route-discovery is intended public, api-gate must classify it)" },
+    { "method": "*", "pattern": "/api/producers/**", "scopes": ["operator", "admin"], "note": "R3 #4: agent-network producer status — operator/admin (registered in server.ts, previously unscanned)" },
     { "method": "*", "pattern": "/api/gasless/**", "scopes": ["operator", "requestor", "admin"], "note": "gasless / meta-tx relay" },
 
     { "method": "*", "pattern": "/api/kernels/**", "scopes": ["operator", "admin"], "note": "kernel infra (broadens the POST/PUT defaults to all methods/subpaths)" },
