@@ -136,6 +136,75 @@ export function onRampToolUiMeta(toolName: string): { ui: { resourceUri: string 
  * accepts a handoff ONLY from a message whose method equals this string. */
 export const MCP_APP_TOOL_RESULT_METHOD = "ui/notifications/tool-result";
 
+// ---------------------------------------------------------------------------
+// Unique MCP-App domain (`_meta.ui.domain`) — the D14 browser-storage isolation
+// signal. A compliant host uses `_meta.ui.domain` to give the view its OWN
+// iframe origin, so the view's sessionStorage/localStorage is isolated from
+// every other view and no sibling view can read a credential a different one
+// stored. Sourced from PCC_MCP_APP_DOMAIN: a bare https origin, required in
+// production, a reserved placeholder in dev/test.
+// ---------------------------------------------------------------------------
+
+/** Env var naming the UNIQUE https origin the MCP App view is served under. */
+export const MCP_APP_DOMAIN_ENV = "PCC_MCP_APP_DOMAIN";
+
+/** Non-production fallback when PCC_MCP_APP_DOMAIN is unset. `.invalid` is
+ * reserved (RFC 2606) and never resolves — safe in dev/test, never shipped to
+ * production (resolveMcpAppDomain THROWS there instead). */
+export const MCP_APP_DOMAIN_PLACEHOLDER = "https://pcc-mcp-app.invalid";
+
+/**
+ * Validate a configured MCP-App domain: it MUST be a bare https ORIGIN — a valid
+ * absolute https URL with NO credentials, path, query, or fragment. Returns the
+ * normalized origin; throws a clear, actionable diagnostic otherwise.
+ */
+export function validateMcpAppDomain(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must be a valid absolute https origin URL — got "${value}"`);
+  }
+  if (url.protocol !== "https:") {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must be an https:// origin — got "${value}"`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must not contain credentials — got "${value}"`);
+  }
+  if (url.pathname !== "/" && url.pathname !== "") {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must be a bare origin with no path — got "${value}"`);
+  }
+  if (url.search) {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must not contain a query string — got "${value}"`);
+  }
+  if (url.hash) {
+    throw new Error(`${MCP_APP_DOMAIN_ENV} must not contain a fragment — got "${value}"`);
+  }
+  return url.origin;
+}
+
+/**
+ * Resolve the MCP-App `_meta.ui.domain`. Reads + validates PCC_MCP_APP_DOMAIN.
+ * Unset in production → THROWS (surfaced at startup via primeMcpAppAssets, so a
+ * misconfigured prod image fails to BOOT rather than serving non-isolated views).
+ * Unset in non-production → the reserved placeholder origin.
+ */
+export function resolveMcpAppDomain(): string {
+  const configured = process.env[MCP_APP_DOMAIN_ENV];
+  if (configured && configured.trim().length > 0) {
+    return validateMcpAppDomain(configured.trim());
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      `${MCP_APP_DOMAIN_ENV} must be set to a UNIQUE https origin in production. It becomes the MCP App view's ` +
+        `_meta.ui.domain — the host uses it to give the view its own iframe origin so its browser storage is ` +
+        `isolated from every other view (D14 cross-view credential-theft mitigation). Set it to a dedicated ` +
+        `origin (e.g. https://pcc-mcp-app.example); non-production defaults to ${MCP_APP_DOMAIN_PLACEHOLDER}.`,
+    );
+  }
+  return MCP_APP_DOMAIN_PLACEHOLDER;
+}
+
 /** MCP Apps (SEP-1865) resource-content CSP metadata. A compliant host builds
  * the view iframe's sandbox Content-Security-Policy from `_meta.ui.csp`
  * (camelCase keys) — it does NOT read the HTML `<meta http-equiv>` CSP for the
@@ -154,6 +223,21 @@ export const MCP_APP_CSP_META = {
     prefersBorder: true,
   },
 };
+
+/** The canonical `_meta.ui` block attached to EVERY UI `resources/read` (render,
+ * saved, gallery, and the per-slug share view): the host-enforced CSP + border
+ * hint from MCP_APP_CSP_META, PLUS the unique `domain` (D14 browser-storage
+ * isolation) resolved FRESH from PCC_MCP_APP_DOMAIN so the value tracks the
+ * runtime env (and a production misconfig fails loudly at startup). */
+export function mcpAppUiResourceMeta(): {
+  ui: {
+    domain: string;
+    csp: { connectDomains: string[]; resourceDomains: string[] };
+    prefersBorder: boolean;
+  };
+} {
+  return { ui: { domain: resolveMcpAppDomain(), ...MCP_APP_CSP_META.ui } };
+}
 
 const HTTP_MIRROR_PATH = "/mcp-apps/ui/dashboard";
 
@@ -256,6 +340,14 @@ export function primeMcpAppAssets(): void {
     failures.push(
       `manifest.schema.json — ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  // Fail at boot if the unique MCP-App domain is misconfigured (unset in prod, or
+  // an invalid origin) — a non-storage-isolated MCP App view must never reach
+  // production (D14). In non-prod this is the harmless placeholder and never throws.
+  try {
+    resolveMcpAppDomain();
+  } catch (error) {
+    failures.push(`${MCP_APP_DOMAIN_ENV} — ${error instanceof Error ? error.message : String(error)}`);
   }
   if (failures.length > 0) {
     throw new Error(
@@ -781,7 +873,7 @@ export function renderSavedDashboardHtml(slug: string): string {
 // ---------------------------------------------------------------------------
 
 function uiResourceContents(uri: string, html: string) {
-  return { contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: html, _meta: MCP_APP_CSP_META }] };
+  return { contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: html, _meta: mcpAppUiResourceMeta() }] };
 }
 
 /** Register the three fixed UI resources (render, saved, gallery) + the per-slug
