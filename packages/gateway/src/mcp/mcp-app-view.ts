@@ -55,7 +55,6 @@ import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
-  DASHBOARD_CSD_URL,
   DashboardManifestSchema,
   containsApiKey,
   type DashboardManifest,
@@ -256,7 +255,7 @@ export function isValidDashboardManifest(m: unknown): boolean {
   var man = m as { csd?: unknown; title?: unknown; sections?: unknown; theme?: unknown };
   if (man.csd !== "pcc://artifacts/dashboard/v1") return false;
   if (typeof man.title !== "string" || man.title.length === 0) return false;
-  if (!(man.sections instanceof Array)) return false;
+  if (!Array.isArray(man.sections)) return false;
   var kinds = [
     "note",
     "metric",
@@ -273,7 +272,7 @@ export function isValidDashboardManifest(m: unknown): boolean {
     var sec = man.sections[i] as { windows?: unknown };
     if (!sec || typeof sec !== "object") return false;
     var wins = sec.windows;
-    if (!(wins instanceof Array)) return false;
+    if (!Array.isArray(wins)) return false;
     for (var j = 0; j < wins.length; j++) {
       var w = wins[j] as { kind?: unknown };
       if (!w || typeof w !== "object") return false;
@@ -338,7 +337,7 @@ export function extractToolResultEntries(source: unknown, parent: unknown, data:
   var structured = (params as { structuredContent?: unknown }).structuredContent;
   if (!structured || typeof structured !== "object") return null;
   var entries = (structured as { entries?: unknown }).entries;
-  if (!(entries instanceof Array)) return null;
+  if (!Array.isArray(entries)) return null;
   return entries;
 }
 
@@ -997,8 +996,3 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
     ],
   };
 }
-
-// Re-export the canonical CSD URL literal the in-view validator hard-codes, so a
-// drift-guard test can assert isValidDashboardManifest stays in sync with the
-// imported schema constant.
-export { DASHBOARD_CSD_URL };

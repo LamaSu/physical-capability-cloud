@@ -188,8 +188,11 @@ describe("Streamable HTTP MCP server", () => {
     expect(contents[0].text).toContain("ui/notifications/tool-result");
     expect(contents[0].text).not.toContain("ui-lifecycle-iframe-ready");
     expect(contents[0].text).not.toContain("data.toolOutput");
-    // Directive 2: no PCC key is ever written to storage from a message.
-    expect(contents[0].text).not.toContain("sessionStorage");
+    // Directive 2: the TRANSPORT never accepts a credential from a message. (The
+    // inlined pcc-ui kit legitimately uses sessionStorage for the USER's own
+    // typed key — a separate concern from the host handoff — so we can't string-
+    // match "sessionStorage" here; the "token ignored, no sessionStorage write"
+    // guarantee is proven behaviorally in mcp-app-view-lifecycle.test.ts.)
   });
 
   it("render_pcc_dashboard renders a valid manifest and rejects one containing an API key", async () => {
