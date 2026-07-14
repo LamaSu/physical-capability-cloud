@@ -33,6 +33,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getRepos } from "../db.js";
+import { verifySeededPolicies } from "../policy/verify-seeded-policies.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
 
@@ -251,9 +252,38 @@ function resolveEnforcementMode(): ScopeEnforcementMode {
  * TODO(coordinate with d749deff): replace with the real coverage-completeness check
  */
 function assertCompleteRoutePolicyInventory(): void {
-  throw new Error(
-    "route-policy inventory gate not wired — see d749deff coverage lane",
-  );
+  // Wired (d749deff lane, finding #2): the live endpoint_scopes table must be a
+  // complete, untampered seed of THIS build's manifest — verified against the
+  // build-checked-in digest; fails closed (throws) on drift / partial / stale /
+  // tamper. So prod cannot boot in enforce against an incomplete policy set.
+  verifySeededPolicies(getRepos().governance);
+}
+
+// ── Policy specificity comparator (audit review #4/#5) ────────────
+// Rank a policy so the MOST-specific matching rule wins, aligned with the audit
+// route-policy matrix / route-policy-inventory.mjs `resolvePolicy`: exact method
+// > more literal path segments > fewer "**" > fewer "*". The old star-count-only
+// sort tied /api/jobs/*/attestations/* (verifier) with the broad /api/jobs/**
+// (requestor) and let input order decide — so the wrong rule could win.
+function policySpecificityKey(r: ScopeRequirement): number[] {
+  const literalSegs = r.pattern
+    .split("/")
+    .filter((s) => s && !s.includes("*")).length;
+  const doubleStars = (r.pattern.match(/\*\*/g) ?? []).length;
+  const singleStars = (r.pattern.match(/\*/g) ?? []).length - 2 * doubleStars;
+  const methodExact = r.method === "*" ? 0 : 1;
+  return [methodExact, literalSegs, -doubleStars, -singleStars];
+}
+function comparePolicySpecificity(a: ScopeRequirement, b: ScopeRequirement): number {
+  const ka = policySpecificityKey(a);
+  const kb = policySpecificityKey(b);
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return kb[i] - ka[i]; // higher key = more specific = first
+  }
+  // deterministic tie-break so equal-specificity policies never depend on input order
+  return a.method === b.method
+    ? a.pattern.localeCompare(b.pattern)
+    : a.method.localeCompare(b.method);
 }
 
 // ── Fastify Plugin ───────────────────────────────────────────────
@@ -305,13 +335,10 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     const requirements =
       scopeCache.length > 0 ? scopeCache : DEFAULT_SCOPE_REQUIREMENTS;
 
-    // Find the most-specific matching requirement for this request.
-    // We rank by specificity: fewer wildcards = more specific = checked first.
-    const sorted = [...requirements].sort((a, b) => {
-      const wildA = (a.pattern.match(/\*/g) ?? []).length;
-      const wildB = (b.pattern.match(/\*/g) ?? []).length;
-      return wildA - wildB;
-    });
+    // Most-specific matching policy wins (comparePolicySpecificity, review
+    // #4/#5) — the winner must match the audit route-policy matrix, not the old
+    // star-count-only order that tied specific rules with broad globs.
+    const sorted = [...requirements].sort(comparePolicySpecificity);
 
     let matchedRequirement: ScopeRequirement | undefined;
     for (const req_ of sorted) {
