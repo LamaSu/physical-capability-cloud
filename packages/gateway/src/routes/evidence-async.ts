@@ -665,10 +665,60 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // ─── 2.2b  POST /api/jobs/:jobId/evidence/checkpoints/:seq/reveal ─────────────
+  // S6-5: revelation is a SEPARATE, verified step from finalization. The device reveals a
+  // checkpoint's payload (the events behind its already-receipted eventsRoot commitment)
+  // here; finalize later includes ALL revealed payloads deterministically. This closes the
+  // griefing vector where a permissionless keeper could finalize with an empty payload set
+  // and permanently exclude the device's measurements. The eventsRoot commitment — NOT the
+  // caller identity — is the security boundary: any authenticated caller may reveal, but the
+  // events MUST hash to the receipted eventsRoot, so a wrong reveal is rejected and
+  // re-revealing the same events is idempotent.
+  app.post<{
+    Params: { jobId: string; seq: string };
+    Body: { sessionId?: unknown; events?: unknown };
+  }>("/api/jobs/:jobId/evidence/checkpoints/:seq/reveal", async (req, reply) => {
+    const { jobId } = req.params;
+    const seq = Number(req.params.seq);
+    const body = req.body ?? {};
+    if (
+      !Number.isInteger(seq) ||
+      seq < 1 ||
+      typeof body.sessionId !== "string" ||
+      !Array.isArray(body.events)
+    ) {
+      return reply.status(400).send({ error: "reveal_invalid", reason: "malformed-request" });
+    }
+    const sessionId = body.sessionId;
+    const events = body.events as unknown[];
+    const { repos } = getStore();
+
+    // Session must belong to this job (fail closed).
+    const session = repos.evidenceSessions.findById(sessionId);
+    if (!session || session.jobId !== jobId) {
+      return reply.status(404).send({ error: "session_not_found" });
+    }
+    // A checkpoint must have been receipted at this seq (its body carries the commitment).
+    const cbody = repos.checkpointBodies.findBySessionSeq(sessionId, seq);
+    if (!cbody) {
+      return reply.status(404).send({ error: "checkpoint_not_found" });
+    }
+    // The revealed events MUST hash to the RECEIPTED eventsRoot (§8.1-#1: new data is allowed
+    // iff it matches a receipted commitment) — the whole security of a permissionless reveal.
+    // Same canonicalSha256 idiom as the checkpoint route + finalize.
+    const eventsHash = `sha256:${createHash("sha256").update(canonicalize(events)).digest("hex")}`;
+    if (eventsHash !== cbody.eventsRoot) {
+      return reply.status(422).send({ error: "payload_commitment_mismatch" });
+    }
+    // Persist idempotently (re-reveal of the same events → identical stored payload).
+    repos.checkpointBodies.setPayload(sessionId, seq, events);
+    return reply.status(200).send({ revealed: true, sessionId, seq });
+  });
+
   // ─── 2.3  POST /api/jobs/:jobId/evidence/finalize ────────────────────────────
   app.post<{
     Params: { jobId: string };
-    Body: { milestoneIndex?: number; payloads?: Array<{ seq: number; events: unknown[] }> };
+    Body: { milestoneIndex?: number };
   }>("/api/jobs/:jobId/evidence/finalize", async (req, reply) => {
     const { jobId } = req.params;
     const body = req.body ?? {};
@@ -688,7 +738,6 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const result = packages.finalize({
       jobId,
       milestoneIndex,
-      ...(body.payloads ? { payloads: body.payloads } : {}),
       now,
     });
 

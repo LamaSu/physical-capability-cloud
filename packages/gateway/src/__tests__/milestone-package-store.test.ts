@@ -205,34 +205,63 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
   });
 
-  it("a revealed payload matching the receipted eventsRoot is accepted and rides in the package", () => {
+  // ── S6-5: revealed payloads are read from the DURABLE store, never caller input ──────
+  // finalize takes NO payloads argument; it includes every checkpoint_bodies.payload (set
+  // by the reveal route — verified at the route level) in seq order. This is the griefing
+  // fix: a permissionless finalizer cannot curate/exclude the device's revealed payloads.
+
+  it("S6-5: revealed payloads (stored on the bodies) ride in the package in seq order", () => {
     openSession();
     const events0 = [{ step: "start", ts: 1 }];
-    seedChain([events0, [{ b: 2 }]]);
-    const r = pkgStore().finalize({
-      jobId: JOB,
-      milestoneIndex: MI,
-      now: NOW + 100,
-      payloads: [{ seq: 1, events: events0 }],
-    });
+    const events1 = [{ step: "done", ts: 2 }];
+    seedChain([events0, events1]);
+    // Reveal both durably (the reveal route does this after checking each events hash to
+    // its receipted eventsRoot — that check is exercised at the route level).
+    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, events0);
+    store.repos.checkpointBodies.setPayload(SESSION_ID, 2, events1);
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("finalized");
     if (r.status === "finalized") {
+      expect(r.package.payloads).toEqual([
+        { seq: 1, events: events0 },
+        { seq: 2, events: events1 },
+      ]);
+    }
+  });
+
+  it("S6-5 griefing fix: finalize includes ALL revealed payloads — a caller cannot exclude them", () => {
+    openSession();
+    const events0 = [{ measured: 42 }];
+    seedChain([events0, [{ b: 2 }]]);
+    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, events0);
+    // finalize takes NO payload argument at all — a would-be griefer's only lever is gone.
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("finalized");
+    if (r.status === "finalized") {
+      // The device's revealed measurement is in the package despite the caller supplying nothing.
       expect(r.package.payloads).toEqual([{ seq: 1, events: events0 }]);
     }
   });
 
-  it("a revealed payload that does NOT hash to the receipted eventsRoot -> rejected payload_commitment_mismatch", () => {
+  it("S6-5: no revealed payloads → the package omits the payloads field", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }]]); // nothing revealed
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("finalized");
+    if (r.status === "finalized") {
+      expect(r.package.payloads).toBeUndefined();
+    }
+  });
+
+  it("S6-5 defense-in-depth: a stored payload that does NOT hash to its receipted eventsRoot → rejected payload_commitment_mismatch", () => {
     openSession();
     seedChain([[{ a: 1 }], [{ b: 2 }]]);
-    const r = pkgStore().finalize({
-      jobId: JOB,
-      milestoneIndex: MI,
-      now: NOW + 100,
-      payloads: [{ seq: 1, events: [{ tampered: true }] }],
-    });
+    // Corrupt the durable row directly (bypassing the reveal route's hash check) to simulate
+    // a tampered/divergent body — finalize's re-verify must fail closed.
+    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, [{ tampered: true }]);
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("rejected");
     if (r.status === "rejected") expect(r.reason).toBe("payload_commitment_mismatch");
-    // Fail closed: no package, session unchanged.
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
   });

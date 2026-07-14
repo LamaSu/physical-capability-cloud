@@ -733,15 +733,55 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(res.json().error).toBe("evidence_deadline_passed");
     });
 
-    it("revealed payload that does not match the receipted eventsRoot → 422", async () => {
-      const { jobId } = await beginAndAccept(1, { events: [[{ real: 1 }]] });
+    it("S6-5 reveal: events that do NOT hash to the receipted eventsRoot → 422", async () => {
+      const { jobId, sessionId } = await beginAndAccept(1, { events: [[{ real: 1 }]] });
       const res = await app.inject({
         method: "POST",
-        url: `/api/jobs/${jobId}/evidence/finalize`,
-        payload: { payloads: [{ seq: 1, events: [{ tampered: true }] }] },
+        url: `/api/jobs/${jobId}/evidence/checkpoints/1/reveal`,
+        payload: { sessionId, events: [{ tampered: true }] },
       });
       expect(res.statusCode).toBe(422);
       expect(res.json().error).toBe("payload_commitment_mismatch");
+    });
+
+    it("S6-5 reveal: correct events → 200 (idempotent), and the payload rides in the finalized package", async () => {
+      const events0 = [{ real: 1, measured: 42 }];
+      const { jobId, sessionId } = await beginAndAccept(1, { events: [events0] });
+      const r1 = await app.inject({
+        method: "POST",
+        url: `/api/jobs/${jobId}/evidence/checkpoints/1/reveal`,
+        payload: { sessionId, events: events0 },
+      });
+      expect(r1.statusCode).toBe(200);
+      expect(r1.json().revealed).toBe(true);
+      // Idempotent: re-reveal the same events → still 200.
+      const r2 = await app.inject({
+        method: "POST",
+        url: `/api/jobs/${jobId}/evidence/checkpoints/1/reveal`,
+        payload: { sessionId, events: events0 },
+      });
+      expect(r2.statusCode).toBe(200);
+      // finalize takes NO caller payloads; it includes the revealed one from the store.
+      const fin = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+      expect(fin.statusCode).toBe(201);
+      expect(fin.json().package.payloads).toEqual([{ seq: 1, events: events0 }]);
+    });
+
+    it("S6-5 griefing fix: a keeper finalizing with an EMPTY body cannot exclude the device's revealed payload", async () => {
+      const events0 = [{ measured: 99 }];
+      const { jobId, sessionId } = await beginAndAccept(1, { events: [events0] });
+      // Device reveals its measurement.
+      const rev = await app.inject({
+        method: "POST",
+        url: `/api/jobs/${jobId}/evidence/checkpoints/1/reveal`,
+        payload: { sessionId, events: events0 },
+      });
+      expect(rev.statusCode).toBe(200);
+      // A different (permissionless) caller finalizes with an empty body — no payload lever.
+      const fin = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+      expect(fin.statusCode).toBe(201);
+      // The revealed measurement is STILL in the package — the griefing vector is closed.
+      expect(fin.json().package.payloads).toEqual([{ seq: 1, events: events0 }]);
     });
 
     it("idempotent re-finalize → 200; and a post-finalize checkpoint → 409", async () => {

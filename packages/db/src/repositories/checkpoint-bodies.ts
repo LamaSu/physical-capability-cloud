@@ -45,4 +45,27 @@ export class CheckpointBodyRepository implements ICheckpointBodyRepository {
       .limit(capLimit(limit))
       .all();
   }
+
+  findAllBySession(sessionId: string) {
+    // UNCAPPED seq-asc replay — finalize's payload assembly must not truncate a
+    // >MAX_LIMIT session (a truncated payload set would silently drop revealed
+    // measurements). Mirrors gateway-receipts.findAllBySession (S6-6/R-14c).
+    return this.db
+      .select()
+      .from(checkpointBodies)
+      .where(eq(checkpointBodies.sessionId, sessionId))
+      .orderBy(asc(checkpointBodies.seq))
+      .all();
+  }
+
+  setPayload(sessionId: string, seq: number, payload: unknown) {
+    // Update ONLY the payload column for an existing (sessionId, seq) body; the
+    // receipted checkpoint fields (hash, eventsRoot, signature, …) are immutable.
+    return this.db
+      .update(checkpointBodies)
+      .set({ payload: payload as CheckpointBodyInsert["payload"] })
+      .where(and(eq(checkpointBodies.sessionId, sessionId), eq(checkpointBodies.seq, seq)))
+      .returning()
+      .get();
+  }
 }

@@ -140,12 +140,14 @@ export interface PackageReceipt {
 /** The exact bytes signed: the package receipt without its own signature. */
 export type PackageReceiptContent = Omit<PackageReceipt, "signature">;
 
-/** Input for one finalize attempt. `now` is the finalize receivedAt (Unix seconds). */
+/**
+ * Input for one finalize attempt. `now` is the finalize receivedAt (Unix seconds).
+ * S6-5: finalize takes NO caller payloads — revealed payloads are read from the durable
+ * store (checkpoint_bodies.payload), so a permissionless finalizer cannot curate them.
+ */
 export interface FinalizeMilestoneInput {
   jobId: string;
   milestoneIndex: number;
-  /** Optional late data revelation — each must hash to the receipted eventsRoot (§8.1-#1). */
-  payloads?: Array<{ seq: number; events: unknown[] }>;
   now: number;
 }
 
@@ -316,16 +318,23 @@ export class MilestonePackageStore {
       return { status: "rejected", reason: "terminal_checkpoint_missing" };
     }
 
-    // B-3 (clause 5): verify revealed payloads against the persisted eventsRoot
-    // commitments. Introduces NO new claims — payloads only. A missing body or a
-    // recomputed-eventsRoot mismatch fails closed.
-    if (input.payloads && input.payloads.length > 0) {
-      for (const p of input.payloads) {
-        const body = this.checkpointBodies.findBySessionSeq(sessionId, p.seq);
-        if (!body || canonicalSha256(p.events) !== body.eventsRoot) {
-          return { status: "rejected", reason: "payload_commitment_mismatch" };
-        }
+    // B-3 (clause 5) — S6-5: collect revealed payloads from the DURABLE store; the
+    // package NEVER trusts caller-supplied payloads. A permissionless finalizer must
+    // not be able to grief by finalizing with an empty/curated payload set to exclude
+    // the device's measurements. Revelation is a SEPARATE verified step
+    // (POST …/checkpoints/:seq/reveal, which checks events hash → the receipted
+    // eventsRoot before persisting `payload`). finalize deterministically includes
+    // EVERY revealed payload in seq order (findAllBySession is UNCAPPED — a truncated
+    // read would silently drop revelations). Defense-in-depth: re-verify each stored
+    // payload against its receipted eventsRoot and fail closed on any drift.
+    const revealedPayloads: Array<{ seq: number; events: unknown[] }> = [];
+    for (const body of this.checkpointBodies.findAllBySession(sessionId)) {
+      if (body.payload === null || body.payload === undefined) continue;
+      const events = body.payload as unknown[];
+      if (canonicalSha256(events) !== body.eventsRoot) {
+        return { status: "rejected", reason: "payload_commitment_mismatch" };
       }
+      revealedPayloads.push({ seq: body.seq, events });
     }
 
     // B-2 (clause 6): evidenceRoot = merkleRoot over the accepted hashes (seq order).
@@ -341,9 +350,7 @@ export class MilestonePackageStore {
       acceptedCheckpointHashes,
       receiptIds,
       evidenceRoot,
-      ...(input.payloads && input.payloads.length > 0
-        ? { payloads: input.payloads }
-        : {}),
+      ...(revealedPayloads.length > 0 ? { payloads: revealedPayloads } : {}),
       evidenceTimeProvenance: {
         kind: "gateway-receipt-points",
         firstAcceptedAt: receiptRows[0].acceptedAt,
