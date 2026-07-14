@@ -148,9 +148,10 @@ export const MCP_APP_TOOL_RESULT_METHOD = "ui/notifications/tool-result";
 /** Env var naming the UNIQUE https origin the MCP App view is served under. */
 export const MCP_APP_DOMAIN_ENV = "PCC_MCP_APP_DOMAIN";
 
-/** Non-production fallback when PCC_MCP_APP_DOMAIN is unset. `.invalid` is
- * reserved (RFC 2606) and never resolves — safe in dev/test, never shipped to
- * production (resolveMcpAppDomain THROWS there instead). */
+/** Fallback when PCC_MCP_APP_DOMAIN is unset or invalid. `.invalid` is reserved
+ * (RFC 2606) and never resolves. A missing/invalid domain degrades to this + a
+ * one-time warning — it must NEVER crash the gateway. A real unique origin is
+ * required at the PROD RELEASE GATE (deploy record), not at boot. */
 export const MCP_APP_DOMAIN_PLACEHOLDER = "https://pcc-mcp-app.invalid";
 
 /**
@@ -183,25 +184,43 @@ export function validateMcpAppDomain(value: string): string {
   return url.origin;
 }
 
+let mcpAppDomainWarned = false;
+/** Warn ONCE about a missing/invalid MCP-App domain — resolveMcpAppDomain runs
+ * per resource-read AND at startup, so dedupe to avoid log spam. */
+function warnMcpAppDomainOnce(message: string): void {
+  if (mcpAppDomainWarned) return;
+  mcpAppDomainWarned = true;
+  // eslint-disable-next-line no-console
+  console.warn(`[mcp-app] ${message}`);
+}
+
 /**
- * Resolve the MCP-App `_meta.ui.domain`. Reads + validates PCC_MCP_APP_DOMAIN.
- * Unset in production → THROWS (surfaced at startup via primeMcpAppAssets, so a
- * misconfigured prod image fails to BOOT rather than serving non-isolated views).
- * Unset in non-production → the reserved placeholder origin.
+ * Resolve the MCP-App `_meta.ui.domain` from PCC_MCP_APP_DOMAIN.
+ * A missing OR invalid value NEVER crashes the gateway — it degrades to the
+ * reserved placeholder origin and logs ONE warning. A real, unique https origin
+ * is still REQUIRED before ChatGPT app submission / prod release (it gives each
+ * view its own iframe origin so browser storage is isolated — D14 mitigation,
+ * release criterion #9); that requirement is enforced at the release gate +
+ * deploy record, NOT by taking the whole gateway down when a niche feature's
+ * config is absent.
  */
 export function resolveMcpAppDomain(): string {
   const configured = process.env[MCP_APP_DOMAIN_ENV];
   if (configured && configured.trim().length > 0) {
-    return validateMcpAppDomain(configured.trim());
+    try {
+      return validateMcpAppDomain(configured.trim());
+    } catch (error) {
+      warnMcpAppDomainOnce(
+        `${MCP_APP_DOMAIN_ENV} is set but invalid (${error instanceof Error ? error.message : String(error)}) — ` +
+          `MCP App views advertise the placeholder origin ${MCP_APP_DOMAIN_PLACEHOLDER} until it is fixed.`,
+      );
+      return MCP_APP_DOMAIN_PLACEHOLDER;
+    }
   }
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      `${MCP_APP_DOMAIN_ENV} must be set to a UNIQUE https origin in production. It becomes the MCP App view's ` +
-        `_meta.ui.domain — the host uses it to give the view its own iframe origin so its browser storage is ` +
-        `isolated from every other view (D14 cross-view credential-theft mitigation). Set it to a dedicated ` +
-        `origin (e.g. https://pcc-mcp-app.example); non-production defaults to ${MCP_APP_DOMAIN_PLACEHOLDER}.`,
-    );
-  }
+  warnMcpAppDomainOnce(
+    `${MCP_APP_DOMAIN_ENV} is not set — MCP App views advertise the placeholder origin ${MCP_APP_DOMAIN_PLACEHOLDER}. ` +
+      `Set a UNIQUE https origin before prod release (D14 per-view storage isolation, release criterion #9).`,
+  );
   return MCP_APP_DOMAIN_PLACEHOLDER;
 }
 
