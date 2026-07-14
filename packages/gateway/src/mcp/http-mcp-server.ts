@@ -274,9 +274,11 @@ async function proxyToolCall(
       );
     }
 
-    // On-Ramp UI tools additionally carry an MCP-Apps resource_link (and, for
-    // the single-artifact tools, `_meta.ui.resourceUri`) to the saved-dashboard
-    // view — IN ADDITION to the text below, so text-only consumers are intact.
+    // On-Ramp UI tools additionally carry `structuredContent` (the artifact's
+    // manifest, or projected search entries) + the canonical `_meta.ui.resourceUri`
+    // for the fixed saved/gallery view — IN ADDITION to the text below, so
+    // text-only consumers are intact and private artifacts render from THIS
+    // authenticated result (never a second anonymous lookup).
     const text = resultText(payload);
     if (isOnRampUiTool(tool.name)) {
       return enrichOnRampToolResult(tool.name, payload, text);
