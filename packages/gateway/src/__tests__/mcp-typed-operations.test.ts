@@ -460,6 +460,26 @@ describe("[adversarial] end-to-end /mcp — the bearer reaches the handler; sess
     expect(names).toContain("render_pcc_dashboard"); // raw surface intact
   });
 
+  it("the served render view injects the operation allowlist + the tools/call bridge wiring", async () => {
+    const session = await initSession();
+    const read = await app.inject({
+      method: "POST", url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream", "content-type": "application/json",
+        "mcp-session-id": session.sessionId, "mcp-protocol-version": session.protocolVersion,
+      },
+      payload: { jsonrpc: "2.0", id: 2, method: "resources/read", params: { uri: "ui://pcc/dashboard/render" } },
+    });
+    const html = read.json().result.contents[0].text as string;
+    // The server injects the registered-op allowlist and the inlined bridge +
+    // outbound tools/call sender into the actual served boot script.
+    expect(html).toContain("__PCC_HOST_OPERATIONS__");
+    expect(html).toContain("capability.request_quote");
+    expect(html).toContain("job.cancel");
+    expect(html).toContain("callOperation");
+    expect(html).toContain("tools/call");
+  });
+
   it("the forwarded Authorization header reaches the handler → an authed op succeeds", async () => {
     const session = await initSession();
     const res = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);

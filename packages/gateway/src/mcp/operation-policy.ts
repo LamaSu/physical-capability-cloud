@@ -29,6 +29,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getRepos } from "../db.js";
 import { getJobFacade } from "../facades/index.js";
 import { getCapabilityDescriptor } from "../services/ad-hoc-pricing.js";
+import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
 
 /** The dedicated typed-operation tool-name prefix. These tools are SEPARATE from
  *  the raw agent-package proxy tools; the dispatcher routes any `pcc.op.*` name
@@ -354,6 +355,24 @@ register(jobCancelPolicy as unknown as DashboardOperationPolicy<never>);
 // The `financial` approval class is DEFINED above and exercised by unit tests via
 // buildApprovalDescription, but NO financial operation is registered here — money
 // paths (escrow release/dispute) ship in a separate, independently-reviewed PR.
+
+// Drift guard: the live registry MUST match the dependency-free canonical id list
+// (operation-ids.ts) that the MCP-App view injects as the client-side allowlist.
+// If they ever diverge, a hosted view could offer an operation the server does not
+// implement (or hide one it does) — fail fast at module load instead.
+(() => {
+  const registered = [...REGISTRY.keys()].sort();
+  const canonical = [...REGISTERED_OPERATION_IDS].sort();
+  const same =
+    registered.length === canonical.length &&
+    registered.every((id, i) => id === canonical[i]);
+  if (!same) {
+    throw new Error(
+      `operation-policy registry {${registered.join(", ")}} disagrees with ` +
+        `REGISTERED_OPERATION_IDS {${canonical.join(", ")}} — keep operation-ids.ts in sync.`,
+    );
+  }
+})();
 
 /** Look up a registered operation by its `operation_id`. Default-DENY: an
  *  unregistered id returns null. */

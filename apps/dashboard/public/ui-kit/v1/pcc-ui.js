@@ -89,13 +89,39 @@
     if ((' ' + btn.className + ' ').indexOf(' pcc-btn-disabled ') === -1) btn.className += ' pcc-btn-disabled';
     if (!btn.title) btn.title = HOST_WRITE_NOTE;
   }
+  // R4 PR2 — the registered typed-operation allowlist injected onto the window by
+  // the host boot script (window.__PCC_HOST_OPERATIONS__). An action naming one
+  // of these operations may run in host mode via the bridge; every other action
+  // stays inert. Client-side default-DENY that mirrors the server registry.
+  function hostOperationAllowed(operationId) {
+    if (!operationId) return false;
+    var ops = window.__PCC_HOST_OPERATIONS__;
+    if (!ops || !ops.length) return false;
+    for (var i = 0; i < ops.length; i++) { if (ops[i] === operationId) return true; }
+    return false;
+  }
+  // True when an action maps to a REGISTERED typed operation reachable through
+  // the host bridge — the only writes a hosted view may perform (PR2). Anything
+  // else (no operation_id, an unregistered id, or no bridge) stays inert.
+  function hostActionEnabled(action) {
+    if (!isHostEmbed() || !action) return false;
+    if (!hostOperationAllowed(action.operation_id)) return false;
+    var b = window.__PCC_HOST_BRIDGE__;
+    return !!(b && typeof b.callOperation === 'function');
+  }
   // In host mode, disable every button inside an action container and append one
-  // "unavailable" note. No-op outside host mode (non-host behaviour unchanged).
+  // "unavailable" note — EXCEPT buttons wired to a registered typed operation
+  // (class pcc-host-op-enabled), which stay live. No-op outside host mode.
   function hostLockActionBar(container) {
     if (!isHostEmbed() || !container) return;
     var btns = container.querySelectorAll ? container.querySelectorAll('button') : [];
-    for (var i = 0; i < btns.length; i++) hostDisableBtn(btns[i]);
-    container.appendChild(el('div', 'pcc-host-note pcc-muted', HOST_WRITE_NOTE));
+    var lockedAny = false;
+    for (var i = 0; i < btns.length; i++) {
+      if ((' ' + btns[i].className + ' ').indexOf(' pcc-host-op-enabled ') !== -1) continue;
+      hostDisableBtn(btns[i]);
+      lockedAny = true;
+    }
+    if (lockedAny) container.appendChild(el('div', 'pcc-host-note pcc-muted', HOST_WRITE_NOTE));
   }
   function markWriteUnavailable(status) {
     if (!status) return;
@@ -968,10 +994,13 @@
       var isMoney = a.confirm === 'approval' || MONEY_VERB.test(a.path + ' ' + a.label + ' ' + a.id);
       var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
       btn.type = 'button';
+      // PR2: a button wired to a registered typed operation stays live under the
+      // host lockdown (hostLockActionBar skips the pcc-host-op-enabled class).
+      if (hostActionEnabled(a)) btn.className += ' pcc-host-op-enabled';
       btn.onclick = function () { dispatchAction(ctx, a, { status: status }); };
       bar.appendChild(btn);
     });
-    hostLockActionBar(bar); // host lockdown: disable every action button + note
+    hostLockActionBar(bar); // host lockdown: disable non-typed action buttons + note
     wrap._body.appendChild(bar);
     wrap._body.appendChild(status);
     return wrap;
@@ -986,6 +1015,42 @@
     return action.confirm === 'approval' || MONEY_VERB.test(String(action.path) + ' ' + String(action.label) + ' ' + String(action.id));
   }
 
+  // Pull the first text line out of an MCP tool-error result (server-authored,
+  // never containing a credential) for display.
+  function hostOpErrorText(result) {
+    try {
+      var c = result && result.content;
+      if (c && c.length) {
+        for (var i = 0; i < c.length; i++) {
+          if (c[i] && c[i].type === 'text' && c[i].text) return c[i].text;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  // R4 PR2 — run a REGISTERED typed operation from a hosted view. The manifest
+  // action carries { operation_id, arguments }; the bridge sends a tools/call for
+  // the mapped pcc.op.<id> tool and the SERVER derives the principal (from the
+  // host connection's key) and authorizes. A raw HTTP write is never issued.
+  // Unregistered/unknown ops (or no bridge) stay inert (the PR1 read-only state).
+  function dispatchHostOperation(ctx, action, status) {
+    if (!hostActionEnabled(action)) { markWriteUnavailable(status); return; }
+    status.className = 'pcc-action-status'; status.textContent = 'Working…';
+    window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}).then(function (result) {
+      if (result && result.isError) {
+        status.className = 'pcc-action-status st-failed';
+        status.textContent = hostOpErrorText(result) || 'Operation failed';
+      } else {
+        status.className = 'pcc-action-status st-settled';
+        status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
+      }
+    }, function (err) {
+      status.className = 'pcc-action-status st-failed';
+      status.textContent = String((err && err.message) || 'Operation failed');
+    });
+  }
+
   function dispatchAction(ctx, action, opts) {
     opts = opts || {};
     var status = opts.status || el('span', 'pcc-action-status');
@@ -994,10 +1059,11 @@
     // Snapshot: never POST. Hand the LLM a copyable intent chip.
     if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return; }
 
-    // R4 PR1 lockdown: in MCP-App/host mode the kit is read-only — a manifest
-    // cannot author a write. Never POST; report unavailable. (Write controls are
-    // already rendered disabled in host mode; this is the click-path backstop.)
-    if (ctx.mode === 'host') { markWriteUnavailable(status); return; }
+    // R4 PR2: in MCP-App/host mode a manifest still cannot author a RAW write,
+    // but it MAY name a REGISTERED typed operation, executed via the host bridge
+    // (a server-authorized tools/call). An unregistered/unknown operation, or no
+    // bridge, stays inert exactly as PR1 shipped.
+    if (ctx.mode === 'host') { dispatchHostOperation(ctx, action, status); return; }
 
     // Money verbs MUST pass through the Approval gate (unless we ARE that gate).
     if (isMoneyAction(action) && !opts.viaApproval) {
