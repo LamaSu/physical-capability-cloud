@@ -137,3 +137,65 @@ export function grantAdminScopes(
 ): ApiKeyRow {
   return doGrant(deps, keyId, scopes, validateAdminGrant(scopes), "admin", grantedBy);
 }
+
+// ── Production factory (review R2 #2) ─────────────────────────────────────────
+// The bare grant* functions above accept an arbitrary ScopeGrantDeps, which a
+// caller could assemble with a no-op transaction + no-op recorder — defeating the
+// atomic-audit invariant. PRODUCTION ROUTE CODE MUST NOT do that: it constructs the
+// service from the store via this factory, which binds the REAL transaction, the
+// real api-keys repo, and a durable audit_log insert. The bare functions remain
+// exported only for unit tests that inject a controlled (still real-tx) store.
+
+/** The minimal store shape the factory needs (a subset of @pcc/store's Store). */
+export interface ScopeGrantStore {
+  db: { transaction<T>(fn: () => T): T };
+  repos: {
+    apiKeys: Pick<IApiKeyRepository, "updateScopes">;
+    auditLog: {
+      insert(entry: {
+        timestamp: string;
+        eventType: string;
+        actor: string | null;
+        resourceType: string;
+        resourceId: string;
+        action: string;
+        metadata: unknown;
+      }): unknown;
+    };
+  };
+}
+
+export interface ScopeGrantService {
+  grantVerifiedOnboardingScopes(keyId: string, scopes?: readonly string[], grantedBy?: string): ApiKeyRow;
+  grantAdminScopes(keyId: string, scopes: readonly string[], grantedBy: string): ApiKeyRow;
+}
+
+/**
+ * Build the production scope-grant service bound to ONE store — its real
+ * transaction, api-keys repo, and audit_log. Every grant it performs is atomic +
+ * durably audited by construction; a caller cannot substitute a no-op transaction
+ * or recorder. This is the ONLY scope-grant entry point route code should use.
+ */
+export function createScopeGrantService(store: ScopeGrantStore): ScopeGrantService {
+  const deps: ScopeGrantDeps = {
+    runInTransaction: (fn) => store.db.transaction(() => fn()),
+    apiKeys: store.repos.apiKeys,
+    audit: {
+      record: (e) =>
+        store.repos.auditLog.insert({
+          timestamp: new Date().toISOString(),
+          eventType: "auth.scope_granted",
+          actor: e.grantedBy,
+          resourceType: "api_key",
+          resourceId: e.keyId,
+          action: "grant",
+          metadata: { scopes: e.scopes, via: e.via },
+        }),
+    },
+  };
+  return {
+    grantVerifiedOnboardingScopes: (keyId, scopes, grantedBy) =>
+      grantVerifiedOnboardingScopes(deps, keyId, scopes, grantedBy),
+    grantAdminScopes: (keyId, scopes, grantedBy) => grantAdminScopes(deps, keyId, scopes, grantedBy),
+  };
+}
