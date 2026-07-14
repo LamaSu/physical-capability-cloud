@@ -19,10 +19,10 @@ import {
   enrichOnRampToolResult,
   handleRenderDashboardTool,
   isOnRampUiTool,
+  onRampToolOutputSchema,
   onRampToolUiMeta,
-  registerMcpAppDashboardSlugResource,
   registerMcpAppHttpRoute,
-  registerMcpAppResource,
+  registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
 } from "./mcp-app-view.js";
 
@@ -135,7 +135,7 @@ function toolDescription(tool: AgentPackageTool): string {
 
 function toMcpTool(tool: AgentPackageTool): Tool {
   const method = tool.endpoint.method;
-  return {
+  const mcpTool: Tool = {
     name: tool.name,
     description: toolDescription(tool),
     inputSchema: tool.input_schema,
@@ -143,12 +143,18 @@ function toMcpTool(tool: AgentPackageTool): Tool {
       readOnlyHint: method === "GET",
       destructiveHint: method === "DELETE",
     },
-    // MCP Apps: the 5 On-Ramp dashboard tools render UI. Declaring
-    // `_meta.ui.resourceUri` = the ui://pcc/dashboard/{slug} template on the
-    // tools/list definition lets a host know the tool is UI-bearing before it
-    // is ever called; the concrete per-slug view is carried on the call result.
-    ...(isOnRampUiTool(tool.name) ? { _meta: onRampToolUiMeta() } : {}),
   };
+  if (isOnRampUiTool(tool.name)) {
+    // MCP Apps: the 5 On-Ramp dashboard tools render UI. Declare the FIXED,
+    // predeclared ui:// resource on the tools/list definition (saved for the
+    // single-artifact tools, gallery for search — never a {slug} template) so a
+    // host can tell the tool is UI-bearing and prefetch the view before ever
+    // calling it, plus an outputSchema for the structuredContent the call
+    // returns (which the fixed view renders over the lifecycle).
+    mcpTool._meta = onRampToolUiMeta(tool.name);
+    mcpTool.outputSchema = onRampToolOutputSchema(tool.name) as unknown as Tool["outputSchema"];
+  }
+  return mcpTool;
 }
 
 function encodeQueryValue(value: unknown): string[] {
@@ -347,8 +353,7 @@ function createMcpServer(pack: AgentPackage): McpServer {
     return proxyToolCall(tool, args, extra.authInfo?.token, extra.signal);
   });
 
-  registerMcpAppResource(server);
-  registerMcpAppDashboardSlugResource(server);
+  registerMcpAppResources(server);
 
   return server;
 }

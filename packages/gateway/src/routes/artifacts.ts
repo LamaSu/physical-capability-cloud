@@ -160,17 +160,27 @@ function getByIdOrSlug(idOrSlug: string): UiArtifact | undefined {
   return getById(idOrSlug) ?? getBySlug(idOrSlug);
 }
 
+/** Valid slug format — lowercase alnum with internal hyphens (exactly what
+ * slugify() mints). Rejects an id (`ua_…`, underscores), uppercase, spaces, or
+ * junk, so the public share surface accepts only a well-formed slug. */
+function isValidSlugFormat(slug: string): boolean {
+  return slug.length <= 64 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
+}
+
 /**
- * Look up an artifact for a no-auth render surface (the MCP-Apps `ui://` resource
- * read — see mcp/mcp-app-view.ts). Returns the artifact ONLY if it exists, is
- * active, and is publicly readable (public|unlisted) — the same gate `/a/:slug`
- * applies for an anonymous caller (`canRead(a, null)`). Private artifacts are
- * never exposed here; a host embeds the returned view with no PCC credential.
- * Reuses the store helpers above so a dashboard saved via POST /api/artifacts is
- * the exact one the MCP resource renders (same process, same store).
+ * Look up an artifact for the no-auth PUBLIC SHARE surface (the MCP-Apps
+ * `ui://pcc/dashboard/<slug>` resource read — see mcp/mcp-app-view.ts). Accepts
+ * a well-formed SLUG ONLY (never an id — a resource read must not double as an
+ * id oracle), and returns the artifact ONLY if it exists, is active, and is
+ * publicly readable (public|unlisted) via `canRead(a, null)`. This is a PASSIVE
+ * read: it does NOT mutate loadCount/updatedAt (unlike GET /api/artifacts/:id,
+ * which is an explicit recall). Private artifacts are never exposed here; a host
+ * embeds the returned view with no PCC credential. Same process, same store as
+ * POST /api/artifacts, so a saved dashboard is the exact one rendered.
  */
-export function getPublicArtifactForRender(idOrSlug: string): UiArtifact | undefined {
-  const a = getByIdOrSlug(idOrSlug);
+export function getPublicArtifactForRender(slug: string): UiArtifact | undefined {
+  if (typeof slug !== "string" || !isValidSlugFormat(slug)) return undefined;
+  const a = getBySlug(slug);
   if (!a || a.status === "retired") return undefined;
   return canRead(a, null) ? a : undefined;
 }

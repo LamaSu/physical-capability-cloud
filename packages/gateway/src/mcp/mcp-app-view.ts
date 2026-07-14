@@ -1,34 +1,50 @@
 /**
- * MCP Apps bridge — the ONE unbuilt transport for PCC's shipped On-Ramp
- * generative-UI kit (see apps/dashboard/public/ui-kit/v1/pcc-ui.js).
+ * MCP Apps bridge — the ONE transport for PCC's shipped On-Ramp generative-UI
+ * kit (see apps/dashboard/public/ui-kit/v1/pcc-ui.js), speaking the STANDARD
+ * MCP Apps protocol (SEP-1865, spec status Stable 2026-01-26).
  *
  * PCC's LLM-authored `DashboardManifest` + the pcc-ui kit already render live
- * dashboards over four transports (gateway shell, standalone shell, inlined
- * artifact export, and now this one). This module exposes the SAME kit as an
- * MCP App (Anthropic MCP Apps convention: `ui://` resources,
- * `_meta.ui.resourceUri` on tool results, a strict per-view CSP) so a host
- * that calls the PCC MCP server's `render_pcc_dashboard` tool can render the
- * composed dashboard inline in the conversation (Claude Desktop / ChatGPT
- * Apps), instead of only returning text.
+ * dashboards over several transports (gateway shell, standalone shell, inlined
+ * artifact export). This module exposes the SAME kit as an MCP App so a host
+ * (Claude Desktop / ChatGPT Apps) that calls the PCC MCP server can render the
+ * composed dashboard inline instead of only returning text.
  *
- * This is a BRIDGE, not a new renderer: the view resource below inlines the
- * EXISTING pcc-ui.js kit unmodified (this file only reads it from disk and
- * wraps it in an MCP-Apps-shaped HTML document), the tool validates against
- * the EXISTING `DashboardManifestSchema`, and nothing here touches
- * settlement/escrow/auth.
+ * ─── ONE transport contract (all three UI surfaces converge here) ───────────
+ * Every UI-bearing tool declares a FIXED, predeclared, fetchable `ui://`
+ * resource on its descriptor (`_meta.ui.resourceUri`, canonical nested form) —
+ * NO unresolved `{slug}` template:
+ *   - `render_pcc_dashboard`                → ui://pcc/dashboard/render
+ *   - save/get/fork/update_dashboard        → ui://pcc/dashboard/saved
+ *   - search_dashboards                     → ui://pcc/dashboard/gallery
+ * The tool's DATA travels in the tool result's `structuredContent` (validated
+ * by each tool's `outputSchema`), and the host delivers it to the view over the
+ * standard lifecycle notification `ui/notifications/tool-result`. The view then
+ * VALIDATES the payload in-browser before rendering. `render` and `saved` are
+ * the same single-manifest view (manifest at `params.structuredContent.manifest`);
+ * `gallery` is the list view (`params.structuredContent.entries`).
  *
- * Host->view handoff (MCP Apps SEP-1865 contract): the transient view's boot
- * script accepts a DashboardManifest ONLY from a VERIFIED host->view
- * notification — a `window` "message" whose `event.source` is `window.parent`,
- * carrying a JSON-RPC 2.0 envelope with method
- * `ui/notifications/tool-result` (params is a standard `CallToolResult`, so the
- * manifest arrives at `params.structuredContent.manifest`, matching the
- * `structuredContent: { manifest }` shape `handleRenderDashboardTool` returns).
- * Any other message is ignored; the page holds a neutral "waiting for the host"
- * state and never boots on an unverified message. See `extractVerifiedHandoff`
- * (exported + unit-tested; inlined into the boot script via `.toString()` so the
- * two can't drift). NOTE: the per-slug `ui://pcc/dashboard/{slug}` view has NO
- * host handoff — it pre-inlines its manifest and boots immediately.
+ * The per-slug `ui://pcc/dashboard/{slug}` resource is kept ONLY as an optional
+ * public/unlisted SHARING view (self-contained, manifest pre-inlined, no host
+ * handoff, public|unlisted-only via getPublicArtifactForRender). It is not
+ * advertised on any tool descriptor or result.
+ *
+ * ─── Standard MCP Apps lifecycle (hand-implemented per apps.mdx; NO new dep) ──
+ * The view acts as an MCP client over `postMessage`:
+ *   1. View → Host:  `ui/initialize` request (protocolVersion "2026-01-26").
+ *   2. Host → View:  `McpUiInitializeResult` (the response to step 1).
+ *   3. View → Host:  `ui/notifications/initialized` notification.
+ *   4. Host → View:  `ui/notifications/tool-input` (params.arguments) — accepted, no-op.
+ *   5. Host → View:  `ui/notifications/tool-result` (params IS a CallToolResult).
+ * The view accepts a tool-result ONLY from a message whose `event.source ===
+ * window.parent`, carrying a JSON-RPC 2.0 envelope with method
+ * `ui/notifications/tool-result`; it reads the manifest/entries ONLY from
+ * `params.structuredContent`, re-validates in-view, and boots. It NEVER accepts
+ * a token/apiBase/snapshot from a message and NEVER writes a credential to
+ * storage. A hostile first message cannot latch the view.
+ *
+ * `@modelcontextprotocol/ext-apps` is deliberately NOT added: it is not an
+ * installed/transitive dependency (verified against the lockfile), and the
+ * lifecycle is small enough to implement directly per the spec (clean-room).
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -38,36 +54,44 @@ import type { FastifyInstance } from "fastify";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import { DashboardManifestSchema, containsApiKey, type DashboardManifest } from "@pcc/spec";
+import {
+  DASHBOARD_CSD_URL,
+  DashboardManifestSchema,
+  containsApiKey,
+  type DashboardManifest,
+} from "@pcc/spec";
 import { getPublicArtifactForRender } from "../routes/artifacts.js";
 
 // ---------------------------------------------------------------------------
-// Constants — URIs, MIME, and the CSP shared by BOTH the MCP resource read
-// (JSON-RPC over /mcp — that transport hijacks the raw HTTP reply, so no
-// Fastify headers apply there; the CSP travels only via <meta http-equiv>)
-// and the plain HTTP mirror route below (which DOES carry a real header).
+// Constants — MIME, tool name, and the FIXED predeclared UI resource URIs.
+// Each fixed URI is fetchable before its tool runs and contains no `{slug}`
+// template variable (directive 4/15). The SDK resolves an exact resource read
+// before any template match, so these never collide with the `{slug}` share
+// template (and real slugs always carry a random `-<hex>` suffix).
 // ---------------------------------------------------------------------------
 
-export const MCP_APP_DASHBOARD_URI = "ui://pcc/dashboard";
 export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 export const RENDER_DASHBOARD_TOOL_NAME = "render_pcc_dashboard";
 
-/** Resource TEMPLATE for a SAVED dashboard artifact, keyed by its slug. Distinct
- * from the static MCP_APP_DASHBOARD_URI above (the transient host-handoff view for
- * render_pcc_dashboard): this one renders a persisted on-ramp artifact. The SDK
- * advertises it via `resources/templates/list` and matches a concrete
- * `ui://pcc/dashboard/<slug>` read against it, handing the read callback `{slug}`. */
+/** Transient composed dashboard (render_pcc_dashboard). Single-manifest view. */
+export const MCP_APP_RENDER_URI = "ui://pcc/dashboard/render";
+/** Saved artifact (save/get/fork/update_dashboard). Same single-manifest view. */
+export const MCP_APP_SAVED_URI = "ui://pcc/dashboard/saved";
+/** Search results (search_dashboards). List view. */
+export const MCP_APP_GALLERY_URI = "ui://pcc/dashboard/gallery";
+
+/** Optional public/unlisted SHARING resource TEMPLATE, keyed by slug. Reached
+ * only via an out-of-band public share URI — never advertised on a tool
+ * descriptor or result. Kept for public|unlisted sharing (directive 4/16). */
 export const MCP_APP_DASHBOARD_TEMPLATE_URI = "ui://pcc/dashboard/{slug}";
 
-/** Live gateway origin baked into a self-contained (host-iframe) view's manifest
- * so the kit's live-data bindings resolve to the network instead of the opaque
- * host origin. Mirrors http-mcp-server.ts's PCC_API_BASE_URL. */
+/** Live gateway origin baked into a self-contained (share) view's manifest so
+ * the kit's live-data bindings resolve to the network, not the opaque host
+ * origin. Mirrors http-mcp-server.ts's PCC_API_BASE_URL. */
 const MCP_APP_API_BASE_URL = "https://capability.network";
 
-/** The 5 On-Ramp dashboard tools (from agent-package.json) that carry a UI:
- * save/get/fork/update return one artifact; search returns a list. Their MCP
- * tool definitions get `_meta.ui.resourceUri` = the template, and their CallTool
- * results get a resource_link to the concrete `ui://pcc/dashboard/<slug>`. */
+/** The 5 On-Ramp dashboard tools (from agent-package.json) that carry a UI.
+ * search returns a list (gallery); the other four return one artifact (saved). */
 export const ON_RAMP_UI_TOOL_NAMES = [
   "save_dashboard",
   "get_dashboard",
@@ -83,56 +107,60 @@ export function isOnRampUiTool(name: string): boolean {
   return ON_RAMP_UI_TOOL_SET.has(name);
 }
 
-/** The concrete `ui://` resource URI for one saved dashboard slug. Slugs are
- * minted `[a-z0-9-]` (routes/artifacts.ts slugify), so no escaping is needed. */
+/** The concrete `ui://` SHARE resource URI for one saved dashboard slug. Slugs
+ * are minted `[a-z0-9-]` (routes/artifacts.ts slugify), so no escaping needed. */
 export function dashboardResourceUriForSlug(slug: string): string {
   return `ui://pcc/dashboard/${slug}`;
 }
 
-/** The `_meta` block a UI-bearing tool carries on tools/list — points a host at
- * the dashboard template so it knows the tool renders UI before ever calling it. */
-export function onRampToolUiMeta(): { ui: { resourceUri: string } } {
-  return { ui: { resourceUri: MCP_APP_DASHBOARD_TEMPLATE_URI } };
+/** The fixed UI resource a UI-bearing On-Ramp tool renders into: the gallery
+ * (list) view for search, the saved (single-manifest) view for the rest. Used
+ * BOTH on the tools/list descriptor and on the call result, so the two agree
+ * and the host never needs a post-exec override (directive 4/5/17). */
+export function onRampToolResourceUri(toolName: string): string {
+  return toolName === "search_dashboards" ? MCP_APP_GALLERY_URI : MCP_APP_SAVED_URI;
 }
 
-/** Anthropic MCP Apps view CSP. No `*` anywhere — every directive names the
- * specific origins the view is allowed to talk to / be framed by. */
-export const MCP_APP_CSP =
-  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data:; connect-src 'self' https://capability.network; " +
-  "form-action 'self' https://capability.network; frame-ancestors https://chatgpt.com https://claude.ai";
+/** Canonical `_meta.ui` block for a UI-bearing On-Ramp tool (directive 17 —
+ * nested `ui.resourceUri`, never the deprecated flat `ui/resourceUri`). */
+export function onRampToolUiMeta(toolName: string): { ui: { resourceUri: string } } {
+  return { ui: { resourceUri: onRampToolResourceUri(toolName) } };
+}
 
 /** MCP Apps (SEP-1865) host->view notification method that carries a tool's
- * result into the embedded view. Its params IS a standard `CallToolResult`, so
- * the `render_pcc_dashboard` result's `structuredContent: { manifest }` arrives
- * at `params.structuredContent`. The view accepts a manifest handoff ONLY from a
- * message whose method equals this string (see `extractVerifiedHandoff`). */
+ * result into the view. Its params IS a standard `CallToolResult`. The view
+ * accepts a handoff ONLY from a message whose method equals this string. */
 export const MCP_APP_TOOL_RESULT_METHOD = "ui/notifications/tool-result";
 
 /** MCP Apps (SEP-1865) resource-content CSP metadata. A compliant host builds
  * the view iframe's sandbox Content-Security-Policy from `_meta.ui.csp`
  * (camelCase keys) — it does NOT read the HTML `<meta http-equiv>` CSP for the
- * sandbox — so the live PCC API origin the kit fetches from MUST be declared
- * here as a connect-src origin, or the host blocks those requests.
- * `connectDomains` maps to the CSP `connect-src` directive. Attached to BOTH
- * ui:// resources' content so each ships an identical policy; the HTML `<meta>`
- * CSP stays as defense-in-depth. */
+ * sandbox — so the live PCC API origin the kit fetches from MUST be declared as
+ * a connect-src origin here, or the host blocks those requests. Attached to
+ * EVERY UI `resources/read` (render, saved, gallery, and the per-slug share
+ * view) so each ships an identical policy; the HTML `<meta>` CSP stays as
+ * defense-in-depth (directive 3).
+ *   - connectDomains → CSP connect-src (the live PCC API the kit calls)
+ *   - resourceDomains: [] → no external scripts/styles/images/fonts (self-only)
+ *   - prefersBorder: true → request a host-drawn border (hosts' defaults vary)
+ */
 export const MCP_APP_CSP_META = {
-  ui: { csp: { connectDomains: [MCP_APP_API_BASE_URL] } },
+  ui: {
+    csp: { connectDomains: [MCP_APP_API_BASE_URL], resourceDomains: [] as string[] },
+    prefersBorder: true,
+  },
 };
 
 const HTTP_MIRROR_PATH = "/mcp-apps/ui/dashboard";
 
 // ---------------------------------------------------------------------------
-// Asset resolution — mirrors http-mcp-server.ts's resolveAgentPackagePath()
-// candidate-path search (compiled dist/, tsx-run src/, or cwd-relative),
-// generalized here so it can also locate pcc-ui.js + manifest.schema.json,
-// both of which live under apps/dashboard/public (outside this package).
+// Asset resolution — mirrors http-mcp-server.ts's candidate-path search
+// (compiled dist/, tsx-run src/, or cwd-relative), generalized so it can also
+// locate pcc-ui.js + manifest.schema.json (under apps/dashboard/public).
 // ---------------------------------------------------------------------------
 
 /** Exported so other MCP surfaces (e.g. docs-mcp-server.ts) that also need to
- * locate a repo-root-relative asset from either compiled dist/ or tsx-run
- * src/ don't have to re-derive this candidate-path search a third time. */
+ * locate a repo-root-relative asset don't re-derive this candidate search. */
 export function resolveGatewayAsset(relativeSegments: string[], envVarOverride?: string): string {
   const override = envVarOverride ? process.env[envVarOverride] : undefined;
   if (override && existsSync(override)) return resolvePath(override);
@@ -162,9 +190,8 @@ const DASHBOARD_MANIFEST_SCHEMA_RELATIVE = [
   "manifest.schema.json",
 ];
 
-/** Read pcc-ui.js fresh on every call — same "discovery follows updates"
- * choice loadAgentPackage() makes; the kit is small and this is not a hot
- * path (an MCP resource is fetched once per conversation, not per request). */
+/** Read pcc-ui.js fresh on every call — same "discovery follows updates" choice
+ * loadAgentPackage() makes; the kit is small and this is not a hot path. */
 function readPccUiKitSource(): string {
   return readFileSync(resolveGatewayAsset(PCC_UI_KIT_RELATIVE, "PCC_UI_KIT_PATH"), "utf8");
 }
@@ -178,59 +205,110 @@ function readDashboardManifestJsonSchema(): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// The MCP App view — self-contained HTML: inlines pcc-ui.js, sets
-// window.__PCC_HOST__ BEFORE the kit ever runs, and defers actually booting
-// the kit until a DashboardManifest arrives from a VERIFIED host->view
-// notification (see the module doc comment's host->view handoff contract and
-// extractVerifiedHandoff). Shared verbatim by the MCP `resources/read` handler
-// and the plain HTTP mirror route.
+// Browser-safe in-view logic. Every function in this block is (a) exported and
+// unit-tested and (b) inlined VERBATIM into the view HTML via `.toString()`, so
+// the browser boot script and the tested definition are ONE source of truth and
+// cannot drift. They are written in conservative ES5 style (var + function
+// expressions; no arrow fns, optional chaining, or `??`) so `.toString()` yields
+// stable, widely-compatible browser JS regardless of the TS compile target, and
+// are deliberately self-contained EXCEPT for calling their siblings by name
+// (every sibling is inlined in the same IIFE scope, so the names resolve).
 // ---------------------------------------------------------------------------
 
-/** pcc-ui.js source as a safe JS string literal for inline embedding.
- * JSON.stringify escapes backslash/quote/control-chars/unicode; the extra
- * replace guards the ONE thing it does not — a literal "</script" substring,
- * which would otherwise prematurely terminate the embedding <script> element
- * when the page's HTML is tokenized (pcc-ui.js contains no such substring
- * today; this is defensive for future edits). Shared by both the host-handoff
- * view and the self-contained per-slug view below. */
-function pccUiKitSourceLiteral(): string {
-  return JSON.stringify(readPccUiKitSource()).replace(/<\/script/gi, "<\\/script");
+/** Minimal structural view-DOM types (the gateway tsconfig has no "dom" lib). */
+interface ViewNode {
+  textContent: string | null;
+  parentNode: { removeChild(child: ViewNode): void } | null;
+  className: string;
+  appendChild(child: ViewNode): ViewNode;
 }
-
-/** Escape a JSON string for safe placement inside a `<script type="application/json">`
- * data block — only `<`/`>` need neutralizing (mirrors routes/artifacts.ts's
- * inlineManifestJson). U+2028/U+2029 are harmless in a non-executable block. */
-function inlineJsonForScriptData(value: unknown): string {
-  return JSON.stringify(value).split("<").join("\\u003c").split(">").join("\\u003e");
+interface ViewDocument {
+  getElementById(id: string): ViewNode | null;
+  createElement(tag: string): ViewNode;
+  body: ViewNode;
+}
+interface ViewParent {
+  postMessage(message: unknown, targetOrigin: string): void;
+}
+interface ViewMessageEvent {
+  source: unknown;
+  data: unknown;
+}
+interface ViewWindow {
+  parent: ViewParent;
+  document: ViewDocument;
+  addEventListener(type: string, handler: (event: ViewMessageEvent) => void): void;
+  __PCC_HOST__?: boolean;
+  __PCC_BOOTED__?: boolean;
 }
 
 /**
- * Verify + extract a host->view handoff from a `window` "message" event, per the
- * MCP Apps (SEP-1865) host->view contract. Returns the DashboardManifest (plus
- * any standardized extras) ONLY when the message is a genuine tool-result
- * notification from the embedding host; returns `null` for everything else, so a
- * caller never boots on an unverified message.
- *
- * Requires ALL of:
- *  - `source === parent` — the message came from the embedding host frame
- *    (`window.parent`), not an arbitrary / nested / opener window;
- *  - a JSON-RPC 2.0 envelope (`jsonrpc === "2.0"`);
- *  - `method === "ui/notifications/tool-result"` (the SEP host->view method);
- * then reads `manifest` (and optional `apiBase` / `snapshot` / `token`) ONLY
- * from the notification's standardized `params.structuredContent` — `params` IS
- * a `CallToolResult`, so the tool's `structuredContent` (`{ manifest }` from
- * `handleRenderDashboardTool`) sits there. Any deviation yields `null`.
- *
- * Deliberately self-contained (no module-scope references; the method string is
- * a literal): `buildMcpAppDashboardHtml()` inlines this verbatim via
- * `.toString()`, so the browser boot script and this unit-tested definition are
- * ONE source of truth and cannot drift.
+ * Browser-safe structural validator for a DashboardManifest — the in-view
+ * re-validation the spec's threat model requires (a hostile parent must not be
+ * able to inject a forged manifest that renders as an approval/payment/receipt).
+ * Mirrors the top-level shape + closed window-kind set + the no-API-key refine
+ * of `DashboardManifestSchema` (a unit test asserts these literals stay in sync
+ * with the imported schema, so they cannot silently drift). Server validation is
+ * NOT assumed sufficient — the host is untrusted from the view's perspective.
  */
-export function extractVerifiedHandoff(
-  source: unknown,
-  parent: unknown,
-  data: unknown,
-): { manifest: unknown; snapshot?: unknown; apiBase?: unknown; token?: unknown } | null {
+export function isValidDashboardManifest(m: unknown): boolean {
+  if (!m || typeof m !== "object") return false;
+  var man = m as { csd?: unknown; title?: unknown; sections?: unknown; theme?: unknown };
+  if (man.csd !== "pcc://artifacts/dashboard/v1") return false;
+  if (typeof man.title !== "string" || man.title.length === 0) return false;
+  if (!(man.sections instanceof Array)) return false;
+  var kinds = [
+    "note",
+    "metric",
+    "capability",
+    "list",
+    "form",
+    "run",
+    "approval",
+    "receipt",
+    "chain",
+    "actions",
+  ];
+  for (var i = 0; i < man.sections.length; i++) {
+    var sec = man.sections[i] as { windows?: unknown };
+    if (!sec || typeof sec !== "object") return false;
+    var wins = sec.windows;
+    if (!(wins instanceof Array)) return false;
+    for (var j = 0; j < wins.length; j++) {
+      var w = wins[j] as { kind?: unknown };
+      if (!w || typeof w !== "object") return false;
+      if (typeof w.kind !== "string") return false;
+      var known = false;
+      for (var k = 0; k < kinds.length; k++) {
+        if (kinds[k] === w.kind) {
+          known = true;
+          break;
+        }
+      }
+      if (!known) return false;
+    }
+  }
+  if (man.theme !== undefined && man.theme !== "auto" && man.theme !== "dark" && man.theme !== "light") {
+    return false;
+  }
+  // No-key refine (matches DashboardManifestSchema): a rendered manifest must
+  // never carry an API key — it would travel with the view.
+  var s = JSON.stringify(m);
+  if (s.indexOf("pcc_live_") !== -1 || s.indexOf("pcc_test_") !== -1) return false;
+  return true;
+}
+
+/**
+ * Verify + extract a DashboardManifest from a `window` "message" event, per the
+ * MCP Apps host->view contract. Returns the validated manifest ONLY when the
+ * message is a genuine tool-result notification from the embedding host; returns
+ * `null` for everything else, so a caller never boots on an unverified message.
+ * Requires ALL of: `source === parent`; a JSON-RPC 2.0 envelope; method
+ * `ui/notifications/tool-result`; a `params.structuredContent.manifest` that
+ * passes `isValidDashboardManifest`. Reads NOTHING else from the message — no
+ * token, no apiBase, no snapshot (those are never accepted from a message).
+ */
+export function extractToolResultManifest(source: unknown, parent: unknown, data: unknown): unknown | null {
   if (source !== parent) return null;
   if (!data || typeof data !== "object") return null;
   var envelope = data as { jsonrpc?: unknown; method?: unknown; params?: unknown };
@@ -240,24 +318,223 @@ export function extractVerifiedHandoff(
   if (!params || typeof params !== "object") return null;
   var structured = (params as { structuredContent?: unknown }).structuredContent;
   if (!structured || typeof structured !== "object") return null;
-  var payload = structured as {
-    manifest?: unknown;
-    snapshot?: unknown;
-    apiBase?: unknown;
-    token?: unknown;
-  };
-  if (!payload.manifest || typeof payload.manifest !== "object") return null;
-  return {
-    manifest: payload.manifest,
-    snapshot: payload.snapshot,
-    apiBase: payload.apiBase,
-    token: payload.token,
-  };
+  var manifest = (structured as { manifest?: unknown }).manifest;
+  if (!isValidDashboardManifest(manifest)) return null;
+  return manifest;
 }
 
-function buildMcpAppDashboardHtml(): string {
-  const kitSourceLiteral = pccUiKitSourceLiteral();
+/**
+ * Same host->view verification as extractToolResultManifest, but for the gallery
+ * (search) view: returns the `params.structuredContent.entries` array, or null.
+ */
+export function extractToolResultEntries(source: unknown, parent: unknown, data: unknown): unknown[] | null {
+  if (source !== parent) return null;
+  if (!data || typeof data !== "object") return null;
+  var envelope = data as { jsonrpc?: unknown; method?: unknown; params?: unknown };
+  if (envelope.jsonrpc !== "2.0") return null;
+  if (envelope.method !== "ui/notifications/tool-result") return null;
+  var params = envelope.params;
+  if (!params || typeof params !== "object") return null;
+  var structured = (params as { structuredContent?: unknown }).structuredContent;
+  if (!structured || typeof structured !== "object") return null;
+  var entries = (structured as { entries?: unknown }).entries;
+  if (!(entries instanceof Array)) return null;
+  return entries;
+}
 
+/**
+ * Mount a validated manifest into the single-manifest view and boot the kit.
+ * Idempotent (a `__PCC_BOOTED__` latch renders at most once — so a hostile
+ * message that arrives BEFORE a valid one can never pre-empt the real mount,
+ * and a duplicate result can't remount). Writes the manifest into
+ * `#pcc-manifest` (programmatic textContent — no HTML re-parse, no escaping
+ * needed), removes the "waiting for the host" placeholder, announces the host
+ * bridge (`__PCC_HOST__` → the kit's detectMode() resolves to 'host'), then
+ * injects the kit LAST. NEVER writes a credential to storage.
+ */
+export function mountManifestIntoView(win: ViewWindow, manifest: unknown, kitSource: string): boolean {
+  if (win.__PCC_BOOTED__) return false;
+  win.__PCC_BOOTED__ = true;
+  win.__PCC_HOST__ = true;
+  var doc = win.document;
+  var manifestNode = doc.getElementById("pcc-manifest");
+  if (manifestNode) manifestNode.textContent = JSON.stringify(manifest);
+  var status = doc.getElementById("pcc-kit-status");
+  if (status && status.parentNode) status.parentNode.removeChild(status);
+  var kit = doc.createElement("script");
+  kit.textContent = kitSource;
+  doc.body.appendChild(kit);
+  return true;
+}
+
+/**
+ * Render the gallery (search results) into the list view, from a validated
+ * entries array. Idempotent via the same `__PCC_BOOTED__` latch. Builds the DOM
+ * with createElement + textContent ONLY (never innerHTML) — search entries are
+ * untrusted content. Removes the "waiting" placeholder on first render.
+ */
+export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): boolean {
+  if (win.__PCC_BOOTED__) return false;
+  win.__PCC_BOOTED__ = true;
+  var doc = win.document;
+  var root = doc.getElementById("pcc-root") || doc.body;
+  var status = doc.getElementById("pcc-kit-status");
+  if (status && status.parentNode) status.parentNode.removeChild(status);
+  if (!entries.length) {
+    var empty = doc.createElement("p");
+    empty.textContent = "No dashboards found.";
+    root.appendChild(empty);
+    return true;
+  }
+  var list = doc.createElement("ul");
+  list.className = "pcc-gallery";
+  for (var i = 0; i < entries.length; i++) {
+    var e = (entries[i] || {}) as { slug?: unknown; name?: unknown; title?: unknown };
+    var li = doc.createElement("li");
+    var titleNode = doc.createElement("span");
+    titleNode.className = "pcc-gallery-title";
+    var title = e.title || e.name || e.slug || "Untitled dashboard";
+    titleNode.textContent = String(title);
+    li.appendChild(titleNode);
+    if (e.slug) {
+      var slugNode = doc.createElement("code");
+      slugNode.className = "pcc-gallery-slug";
+      slugNode.textContent = String(e.slug);
+      li.appendChild(slugNode);
+    }
+    list.appendChild(li);
+  }
+  root.appendChild(list);
+  return true;
+}
+
+/**
+ * The ONE MCP Apps lifecycle client, shared by every view (directive 15). Sends
+ * `ui/initialize`, replies to the host's init result with
+ * `ui/notifications/initialized`, and dispatches a verified
+ * `ui/notifications/tool-result` to the view-specific `onToolResult` handler.
+ * Every inbound message is gated on `source === win.parent` + JSON-RPC 2.0 here,
+ * before any handler runs.
+ */
+export function connectMcpAppView(
+  win: ViewWindow,
+  onToolResult: (source: unknown, parent: unknown, data: unknown) => void,
+): void {
+  var INIT_ID = 1;
+  var initialized = false;
+  win.addEventListener("message", function (event: ViewMessageEvent) {
+    var source = event ? event.source : undefined;
+    var data = event ? event.data : undefined;
+    if (source !== win.parent) return;
+    if (!data || typeof data !== "object") return;
+    var msg = data as { jsonrpc?: unknown; id?: unknown; result?: unknown; method?: unknown };
+    if (msg.jsonrpc !== "2.0") return;
+    if (msg.id === INIT_ID && msg.result && !initialized) {
+      initialized = true;
+      win.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-result") {
+      onToolResult(source, win.parent, data);
+    }
+    // ui/notifications/tool-input is accepted but a no-op: the render/saved view
+    // takes its manifest from the tool RESULT, not the input arguments.
+  });
+  win.parent.postMessage(
+    {
+      jsonrpc: "2.0",
+      id: INIT_ID,
+      method: "ui/initialize",
+      params: {
+        protocolVersion: "2026-01-26",
+        appCapabilities: {},
+        clientInfo: { name: "pcc-dashboard-view", version: "1.0.0" },
+      },
+    },
+    "*",
+  );
+}
+
+/** Boot the single-manifest view (render + saved): validate the host's
+ * tool-result manifest in-view and mount the kit. */
+export function runDashboardViewBoot(win: ViewWindow, kitSource: string): void {
+  connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
+    var manifest = extractToolResultManifest(source, parent, data);
+    if (manifest) mountManifestIntoView(win, manifest, kitSource);
+  });
+}
+
+/** Boot the gallery (search) view: validate the host's tool-result entries
+ * in-view and render the list. */
+export function runGalleryViewBoot(win: ViewWindow): void {
+  connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
+    var entries = extractToolResultEntries(source, parent, data);
+    if (entries) renderGalleryIntoView(win, entries);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// HTML builders. Each inlines the browser-safe functions above verbatim via
+// `.toString()` (single source of truth), then calls the view's boot fn.
+// ---------------------------------------------------------------------------
+
+/** Anthropic MCP Apps view CSP for the HTML `<meta>` (defense-in-depth; the
+ * host-enforced sandbox CSP comes from resource-content `_meta.ui.csp`). No `*`
+ * anywhere — every directive names the specific origins the view may talk to. */
+export const MCP_APP_CSP =
+  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; connect-src 'self' https://capability.network; " +
+  "form-action 'self' https://capability.network; frame-ancestors https://chatgpt.com https://claude.ai";
+
+/** pcc-ui.js source as a safe JS string literal for inline embedding.
+ * JSON.stringify escapes backslash/quote/control-chars; the extra replace guards
+ * the ONE thing it does not — a literal "</script" substring, which would
+ * otherwise prematurely terminate the embedding <script> when the HTML is
+ * tokenized. */
+function pccUiKitSourceLiteral(): string {
+  return JSON.stringify(readPccUiKitSource()).replace(/<\/script/gi, "<\\/script");
+}
+
+/** Escape a JSON string for safe placement inside a `<script type="application/json">`
+ * data block that IS parsed by the HTML tokenizer (only `<`/`>` need neutralizing;
+ * `JSON.parse` recovers them). Used only for build-time PRE-inlined manifests. */
+function inlineJsonForScriptData(value: unknown): string {
+  return JSON.stringify(value).split("<").join("\\u003c").split(">").join("\\u003e");
+}
+
+/** The shared inlined-function preamble for the single-manifest view. */
+function dashboardViewBootScript(): string {
+  const kitSourceLiteral = pccUiKitSourceLiteral();
+  return `(function () {
+  'use strict';
+  var KIT_SOURCE = ${kitSourceLiteral};
+  var isValidDashboardManifest = ${isValidDashboardManifest.toString()};
+  var extractToolResultManifest = ${extractToolResultManifest.toString()};
+  var mountManifestIntoView = ${mountManifestIntoView.toString()};
+  var connectMcpAppView = ${connectMcpAppView.toString()};
+  var runDashboardViewBoot = ${runDashboardViewBoot.toString()};
+  runDashboardViewBoot(window, KIT_SOURCE);
+})();`;
+}
+
+/** The shared inlined-function preamble for the gallery (list) view. */
+function galleryViewBootScript(): string {
+  return `(function () {
+  'use strict';
+  var extractToolResultEntries = ${extractToolResultEntries.toString()};
+  var renderGalleryIntoView = ${renderGalleryIntoView.toString()};
+  var connectMcpAppView = ${connectMcpAppView.toString()};
+  var runGalleryViewBoot = ${runGalleryViewBoot.toString()};
+  runGalleryViewBoot(window);
+})();`;
+}
+
+/**
+ * The single-manifest MCP App view (render + saved). Holds a neutral "waiting
+ * for the host" state and boots the kit only when a VALIDATED manifest arrives
+ * over the standard `ui/notifications/tool-result` lifecycle notification.
+ */
+function buildMcpAppDashboardHtml(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -273,111 +550,50 @@ function buildMcpAppDashboardHtml(): string {
 </main>
 <script type="application/json" id="pcc-manifest">null</script>
 <script>
-(function () {
-  'use strict';
-  // Tier D: announce the host bridge BEFORE the kit ever runs, so
-  // pcc-ui.js's detectMode() resolves to 'host' the instant it boots.
-  window.__PCC_HOST__ = true;
+${dashboardViewBootScript()}
+</script>
+</body>
+</html>`;
+}
 
-  var KIT_SOURCE = ${kitSourceLiteral};
-  var booted = false;
-
-  function escapeForScriptData(s) {
-    return s.split('<').join('\\u003c').split('>').join('\\u003e');
-  }
-
-  function bootWithManifest(manifest, snapshot, apiBase, token) {
-    if (booted || !manifest) return;
-    booted = true;
-    var m = (apiBase && !manifest.api_base) ? Object.assign({}, manifest, { api_base: apiBase }) : manifest;
-    var manifestNode = document.getElementById('pcc-manifest');
-    if (manifestNode) manifestNode.textContent = escapeForScriptData(JSON.stringify(m));
-    if (snapshot) {
-      var snapNode = document.createElement('script');
-      snapNode.type = 'application/json';
-      snapNode.id = 'pcc-snapshot';
-      snapNode.textContent = escapeForScriptData(JSON.stringify(snapshot));
-      document.body.appendChild(snapNode);
-    }
-    if (token) {
-      try { sessionStorage.setItem('pcc.key', String(token)); } catch (e) {}
-    }
-    // Inject the kit LAST, only once the manifest is in place — pcc-ui.js
-    // mounts synchronously against #pcc-manifest the moment it executes.
-    var kit = document.createElement('script');
-    kit.textContent = KIT_SOURCE;
-    document.body.appendChild(kit);
-  }
-
-  // Accept a DashboardManifest ONLY from a VERIFIED MCP Apps (SEP-1865)
-  // host->view tool-result notification. extractVerifiedHandoff is inlined from
-  // the module's exported, unit-tested definition via .toString() (so the two
-  // cannot drift): it requires the message to originate from window.parent,
-  // carry a JSON-RPC 2.0 envelope, and use method "ui/notifications/tool-result",
-  // then reads manifest/apiBase/snapshot/token ONLY from the notification's
-  // standardized params.structuredContent. It returns null for anything else —
-  // wrong source, wrong shape, or an unsolicited message — so the kit never
-  // boots on an unverified handoff; the page just holds its neutral
-  // "waiting for the host" state until a real notification arrives.
-  var extractVerifiedHandoff = ${extractVerifiedHandoff.toString()};
-
-  window.addEventListener('message', function (event) {
-    var handoff = extractVerifiedHandoff(event && event.source, window.parent, event && event.data);
-    if (!handoff) return;
-    bootWithManifest(handoff.manifest, handoff.snapshot, handoff.apiBase, handoff.token);
-  });
-
-  // Announce readiness to the embedding host — the MCP-UI / Apps-SDK
-  // convention of the view signalling it is ready to receive the tool's
-  // structured output over postMessage.
-  try {
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage({ type: 'ui-lifecycle-iframe-ready' }, '*');
-    }
-  } catch (e) {}
-})();
+/**
+ * The gallery (search results) MCP App view. Holds a neutral "waiting" state and
+ * renders the list only when a VALIDATED entries array arrives over the standard
+ * `ui/notifications/tool-result` lifecycle notification.
+ */
+function buildMcpAppGalleryHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${MCP_APP_CSP}">
+<meta name="color-scheme" content="dark light">
+<title>PCC Dashboards</title>
+<style>
+#pcc-root{font:14px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:12px}
+.pcc-gallery{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.pcc-gallery li{display:flex;flex-direction:column;gap:2px}
+.pcc-gallery-title{font-weight:600}
+.pcc-gallery-slug{opacity:.6;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+</style>
+</head>
+<body>
+<main id="pcc-root">
+  <p id="pcc-kit-status">Waiting for the host to hand off saved dashboards&hellip;</p>
+</main>
+<script>
+${galleryViewBootScript()}
 </script>
 </body>
 </html>`;
 }
 
 // ---------------------------------------------------------------------------
-// resources/list + resources/read — registered on the McpServer so the
-// `resources` capability is advertised in the initialize handshake.
-// ---------------------------------------------------------------------------
-
-export function registerMcpAppResource(server: McpServer): void {
-  server.registerResource(
-    "pcc-dashboard",
-    MCP_APP_DASHBOARD_URI,
-    {
-      title: "PCC Dashboard (MCP App)",
-      description:
-        "Interactive MCP App view for render_pcc_dashboard. Renders a DashboardManifest as a live " +
-        "PCC dashboard using the shipped On-Ramp pcc-ui kit.",
-      mimeType: MCP_APP_MIME_TYPE,
-    },
-    async () => ({
-      contents: [
-        {
-          uri: MCP_APP_DASHBOARD_URI,
-          mimeType: MCP_APP_MIME_TYPE,
-          text: buildMcpAppDashboardHtml(),
-          // Finding 3: the sandbox CSP a compliant host enforces comes from
-          // resource-content `_meta.ui.csp`, not the HTML <meta> — declare the
-          // live PCC API origin as a connect-src domain here.
-          _meta: MCP_APP_CSP_META,
-        },
-      ],
-    }),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Per-slug SAVED-dashboard view — a self-contained MCP App document (manifest
-// pre-inlined + kit inlined, boots immediately, no host handoff) plus the
-// `ui://pcc/dashboard/{slug}` resource TEMPLATE that serves it. This is the
-// artifact-backed complement to the transient render_pcc_dashboard view above.
+// Per-slug SAVED-dashboard SHARE view — a self-contained MCP App document
+// (manifest pre-inlined + kit inlined, boots immediately, no host handoff) plus
+// the `ui://pcc/dashboard/{slug}` resource TEMPLATE that serves it. Public /
+// unlisted sharing ONLY (directive 16).
 // ---------------------------------------------------------------------------
 
 /** Minimal HTML-text escape for the `<title>` / not-found copy. */
@@ -385,12 +601,9 @@ function escapeHtmlText(s: string): string {
   return s.split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
 }
 
-/** A self-contained MCP App document for one already-resolved manifest: the
- * manifest is inlined (kit reads it synchronously on mount) and the kit is
- * injected via textContent so a literal "</script" in it can't break parsing.
- * Unlike buildMcpAppDashboardHtml() this needs NO host handoff — it renders the
- * moment the host loads it. The live gateway origin is baked into api_base so
- * bindings resolve from the host iframe's opaque origin. */
+/** A self-contained MCP App document for one already-resolved public manifest:
+ * the manifest is inlined (kit reads it synchronously on mount) and the kit is
+ * injected via textContent. Renders the moment the host loads it (no handoff). */
 function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displayTitle: string): string {
   const kitSourceLiteral = pccUiKitSourceLiteral();
   const withApiBase: DashboardManifest =
@@ -415,9 +628,10 @@ function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displa
 <script>
 (function () {
   'use strict';
-  // Self-contained: the manifest is already inlined above, so boot the kit
-  // immediately (no host handoff). textContent injection keeps a literal
-  // "</script" in the kit source from terminating this element.
+  // Self-contained: the manifest is already inlined above, so announce the host
+  // bridge and boot the kit immediately (no host handoff). textContent injection
+  // keeps a literal "</script" in the kit source from terminating this element.
+  window.__PCC_HOST__ = true;
   var KIT_SOURCE = ${kitSourceLiteral};
   var kit = document.createElement('script');
   kit.textContent = KIT_SOURCE;
@@ -429,8 +643,8 @@ function buildMcpAppDashboardHtmlForManifest(manifest: DashboardManifest, displa
 }
 
 /** The MCP App document shown when a slug names no publicly-readable artifact
- * (missing, retired, or private) — a valid resource read, never a thrown error,
- * so the host renders a friendly page rather than a protocol failure. */
+ * (missing, retired, private, or malformed) — a valid resource read, never a
+ * thrown error, so the host renders a friendly page. */
 function buildDashboardNotFoundHtml(slug: string): string {
   const s = escapeHtmlText(slug);
   return `<!doctype html>
@@ -453,22 +667,71 @@ export function renderSavedDashboardHtml(slug: string): string {
   return buildMcpAppDashboardHtmlForManifest(artifact.manifest, title);
 }
 
-/** Register the `ui://pcc/dashboard/{slug}` resource TEMPLATE. The SDK advertises
- * it via resources/templates/list and routes a concrete `ui://pcc/dashboard/<slug>`
- * read here with the resolved `{slug}`. `list` is undefined on purpose: the MCP
- * server is an origin-locked proxy and does not enumerate the whole public
- * artifact set on every resources/list — hosts reach a specific view through the
- * resource_link carried on the on-ramp tool results. */
-export function registerMcpAppDashboardSlugResource(server: McpServer): void {
+// ---------------------------------------------------------------------------
+// Resource registration — render, saved, gallery (fixed) + the {slug} share
+// template. All are registered on the McpServer so the `resources` capability is
+// advertised in the initialize handshake, and each `resources/read` ships the
+// full `_meta.ui.csp` (directive 3).
+// ---------------------------------------------------------------------------
+
+function uiResourceContents(uri: string, html: string) {
+  return { contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: html, _meta: MCP_APP_CSP_META }] };
+}
+
+/** Register the three fixed UI resources (render, saved, gallery) + the per-slug
+ * public share template. One entry point so http-mcp-server wires them together. */
+export function registerMcpAppResources(server: McpServer): void {
   server.registerResource(
-    "pcc-dashboard-by-slug",
-    new ResourceTemplate(MCP_APP_DASHBOARD_TEMPLATE_URI, { list: undefined }),
+    "pcc-dashboard-render",
+    MCP_APP_RENDER_URI,
+    {
+      title: "PCC Dashboard (MCP App)",
+      description:
+        "Interactive MCP App view for render_pcc_dashboard. Renders the composed DashboardManifest " +
+        "delivered in the tool result's structuredContent, using the shipped On-Ramp pcc-ui kit.",
+      mimeType: MCP_APP_MIME_TYPE,
+    },
+    async () => uiResourceContents(MCP_APP_RENDER_URI, buildMcpAppDashboardHtml()),
+  );
+
+  server.registerResource(
+    "pcc-dashboard-saved",
+    MCP_APP_SAVED_URI,
     {
       title: "PCC saved dashboard (MCP App)",
       description:
-        "Renders a SAVED On-Ramp dashboard artifact by slug as a live MCP App view (the " +
-        "shipped pcc-ui kit). The concrete ui://pcc/dashboard/<slug> is carried on the " +
-        "save_dashboard / get_dashboard / fork_dashboard / update_dashboard tool results.",
+        "MCP App view for save/get/fork/update_dashboard. Renders the artifact's DashboardManifest " +
+        "delivered in the AUTHENTICATED tool result's structuredContent (never a second anonymous lookup).",
+      mimeType: MCP_APP_MIME_TYPE,
+    },
+    async () => uiResourceContents(MCP_APP_SAVED_URI, buildMcpAppDashboardHtml()),
+  );
+
+  server.registerResource(
+    "pcc-dashboard-gallery",
+    MCP_APP_GALLERY_URI,
+    {
+      title: "PCC dashboard gallery (MCP App)",
+      description:
+        "MCP App view for search_dashboards. Renders the list of matching dashboards delivered in the " +
+        "tool result's structuredContent.",
+      mimeType: MCP_APP_MIME_TYPE,
+    },
+    async () => uiResourceContents(MCP_APP_GALLERY_URI, buildMcpAppGalleryHtml()),
+  );
+
+  // Optional public/unlisted SHARE template — self-contained, boots immediately,
+  // reached only via an out-of-band `ui://pcc/dashboard/<slug>` (never on a tool
+  // descriptor/result). `list` is undefined: the server does not enumerate the
+  // whole public artifact set on resources/list.
+  server.registerResource(
+    "pcc-dashboard-share",
+    new ResourceTemplate(MCP_APP_DASHBOARD_TEMPLATE_URI, { list: undefined }),
+    {
+      title: "PCC shared dashboard (MCP App)",
+      description:
+        "Renders a PUBLIC or UNLISTED saved On-Ramp dashboard by slug as a self-contained MCP App view. " +
+        "Sharing surface only — private dashboards are never exposed here.",
       mimeType: MCP_APP_MIME_TYPE,
     },
     async (uri, variables) => {
@@ -478,23 +741,94 @@ export function registerMcpAppDashboardSlugResource(server: McpServer): void {
         typeof slug === "string" && slug.length
           ? renderSavedDashboardHtml(slug)
           : buildDashboardNotFoundHtml(String(slug ?? ""));
-      return {
-        // Finding 3: same resource-content `_meta.ui.csp` as the transient view
-        // — the self-contained per-slug view also fetches live PCC data, so its
-        // connect-src origin must be declared for the host to permit it.
-        contents: [
-          { uri: uri.toString(), mimeType: MCP_APP_MIME_TYPE, text: html, _meta: MCP_APP_CSP_META },
-        ],
-      };
+      return uiResourceContents(uri.toString(), html);
     },
   );
 }
 
 // ---------------------------------------------------------------------------
-// CallTool result enrichment for the 5 On-Ramp UI tools — adds an MCP-Apps
-// resource_link (and, for the single-artifact tools, `_meta.ui.resourceUri`)
-// to the SAME result IN ADDITION to the existing text content, so text-only
-// consumers are unaffected and MCP-Apps hosts gain a renderable view.
+// outputSchema for every structuredContent-bearing tool (directive 7). Each is
+// a JSON Schema with `additionalProperties: false` at the wrapper; returned
+// structuredContent MUST conform (enrichOnRampToolResult guarantees it).
+// ---------------------------------------------------------------------------
+
+export const RENDER_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { manifest: { type: "object" } },
+  required: ["manifest"],
+  additionalProperties: false,
+};
+
+export const SAVED_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    manifest: { type: "object" },
+    slug: { type: "string" },
+    name: { type: "string" },
+  },
+  required: ["manifest"],
+  additionalProperties: false,
+};
+
+export const GALLERY_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    entries: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          slug: { type: "string" },
+          name: { type: "string" },
+          title: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+    total: { type: "number" },
+  },
+  required: ["entries"],
+  additionalProperties: false,
+};
+
+/** The outputSchema a UI-bearing On-Ramp tool declares. */
+export function onRampToolOutputSchema(toolName: string): Record<string, unknown> {
+  return toolName === "search_dashboards" ? GALLERY_OUTPUT_SCHEMA : SAVED_OUTPUT_SCHEMA;
+}
+
+/**
+ * Minimal structural conformance check of a structuredContent value against one
+ * of the outputSchema shapes above (top-level `required` present + no keys
+ * outside `properties` when `additionalProperties:false`). Exported for the
+ * runtime guard below and for tests. Not a full JSON-Schema validator — it
+ * covers exactly the wrapper-level guarantees the directive requires.
+ */
+export function structuredContentConformsTo(
+  outputSchema: Record<string, unknown>,
+  value: unknown,
+): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const obj = value as Record<string, unknown>;
+  const required = Array.isArray(outputSchema.required) ? (outputSchema.required as string[]) : [];
+  for (const key of required) {
+    if (!(key in obj)) return false;
+  }
+  if (outputSchema.additionalProperties === false) {
+    const props = (outputSchema.properties as Record<string, unknown> | undefined) ?? {};
+    for (const key of Object.keys(obj)) {
+      if (!(key in props)) return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// CallTool result enrichment for the 5 On-Ramp UI tools — attaches the tool's
+// data as `structuredContent` (which the fixed saved/gallery view renders over
+// the lifecycle), plus the canonical `_meta.ui.resourceUri` matching the tool
+// descriptor. The ORIGINAL text content is preserved so text-only consumers are
+// unaffected. Private artifacts render from THIS authenticated result — never a
+// second anonymous lookup (directive 5/15).
 // ---------------------------------------------------------------------------
 
 function asObject(payload: unknown): Record<string, unknown> | undefined {
@@ -508,23 +842,28 @@ function stringField(obj: Record<string, unknown> | undefined, key: string): str
   return typeof v === "string" && v.length ? v : undefined;
 }
 
-function resourceLinkForSlug(slug: string, name?: string) {
-  return {
-    type: "resource_link" as const,
-    uri: dashboardResourceUriForSlug(slug),
-    name: `pcc-dashboard-${slug}`,
-    title: name ?? "PCC dashboard",
-    mimeType: MCP_APP_MIME_TYPE,
-    description: "Open this saved PCC dashboard as a live MCP App view.",
-  };
+/** Project one search entry (a full UiArtifact) to the compact {slug,name,title}
+ * shape the gallery outputSchema declares. */
+function projectGalleryEntry(entry: unknown): { slug?: string; name?: string; title?: string } | undefined {
+  const o = asObject(entry);
+  if (!o) return undefined;
+  const out: { slug?: string; name?: string; title?: string } = {};
+  const slug = stringField(o, "slug");
+  const name = stringField(o, "name");
+  const title = stringField(asObject(o.manifest), "title") ?? name;
+  if (slug) out.slug = slug;
+  if (name) out.name = name;
+  if (title) out.title = title;
+  return Object.keys(out).length ? out : undefined;
 }
 
 /**
- * Enrich an On-Ramp tool result. `payload` is the parsed upstream JSON (an
- * artifact for save/get/fork/update; `{ entries, ... }` for search). Returns a
- * CallToolResult carrying the original text PLUS resource_link(s); the four
- * single-artifact tools additionally set `_meta.ui.resourceUri` to the concrete
- * saved-dashboard view. If no slug can be found the result is text-only.
+ * Enrich an On-Ramp tool result. `payload` is the parsed upstream JSON (a
+ * UiArtifact for save/get/fork/update; `{ entries, ... }` for search). Returns a
+ * CallToolResult carrying the original text PLUS `structuredContent` conforming
+ * to the tool's outputSchema, and the canonical `_meta.ui.resourceUri`. If no
+ * renderable data is present (e.g. an upstream error passthrough), the result is
+ * text-only (no UI, no structuredContent) — a valid MCP result.
  */
 export function enrichOnRampToolResult(
   toolName: string,
@@ -534,41 +873,42 @@ export function enrichOnRampToolResult(
   const textItem = { type: "text" as const, text };
 
   if (toolName === "search_dashboards") {
-    const entries = Array.isArray(asObject(payload)?.entries)
-      ? (asObject(payload)!.entries as unknown[])
-      : [];
-    const links = entries
-      .map((e) => {
-        const obj = asObject(e);
-        const slug = stringField(obj, "slug");
-        return slug ? resourceLinkForSlug(slug, stringField(obj, "name")) : undefined;
-      })
-      .filter((x): x is ReturnType<typeof resourceLinkForSlug> => x !== undefined);
-    return { content: [textItem, ...links] };
+    const obj = asObject(payload);
+    const rawEntries = Array.isArray(obj?.entries) ? (obj!.entries as unknown[]) : [];
+    const entries = rawEntries
+      .map(projectGalleryEntry)
+      .filter((e): e is { slug?: string; name?: string; title?: string } => e !== undefined);
+    const total = typeof obj?.total === "number" ? (obj.total as number) : entries.length;
+    const structuredContent = { entries, total };
+    if (!structuredContentConformsTo(GALLERY_OUTPUT_SCHEMA, structuredContent)) {
+      return { content: [textItem] };
+    }
+    return { _meta: onRampToolUiMeta(toolName), structuredContent, content: [textItem] };
   }
 
   const obj = asObject(payload);
+  const manifest = asObject(obj?.manifest);
+  if (!manifest) {
+    // No renderable manifest (e.g. an upstream error/passthrough) → text-only.
+    return { content: [textItem] };
+  }
+  const structuredContent: Record<string, unknown> = { manifest };
   const slug = stringField(obj, "slug");
-  if (!slug) return { content: [textItem] };
-  return {
-    _meta: { ui: { resourceUri: dashboardResourceUriForSlug(slug) } },
-    content: [textItem, resourceLinkForSlug(slug, stringField(obj, "name"))],
-  };
+  if (slug) structuredContent.slug = slug;
+  const name = stringField(obj, "name");
+  if (name) structuredContent.name = name;
+  if (!structuredContentConformsTo(SAVED_OUTPUT_SCHEMA, structuredContent)) {
+    return { content: [textItem] };
+  }
+  return { _meta: onRampToolUiMeta(toolName), structuredContent, content: [textItem] };
 }
 
 // ---------------------------------------------------------------------------
-// Plain HTTP mirror of the SAME view. The MCP `resources/read` path above is
-// served over the /mcp JSON-RPC transport, which hijacks the raw HTTP
-// response (no Fastify onSend hooks run there) — so it carries the CSP only
-// via the <meta http-equiv> tag baked into the HTML. This route serves the
-// IDENTICAL document with a REAL "Content-Security-Policy" HTTP header, for
-// any consumer that fetches the view directly instead of over MCP. The
-// gateway's site-wide default CSP (frame-ancestors 'none') and
-// X-Frame-Options: DENY — set by security-hardening.ts's onSend hook — would
-// otherwise forbid embedding this view in the Claude/ChatGPT hosts; the
-// route-level onSend hook here runs AFTER that app-level hook (Fastify
-// always runs route-level hooks after application-level ones) and overrides
-// both, for this one public, self-contained view only.
+// Plain HTTP mirror of the render view. The MCP `resources/read` path is served
+// over the /mcp JSON-RPC transport (which hijacks the raw HTTP response, so no
+// Fastify onSend hooks run there — it carries the CSP only via <meta>). This
+// route serves the IDENTICAL render document with a REAL Content-Security-Policy
+// header, for any consumer that fetches the view directly instead of over MCP.
 // ---------------------------------------------------------------------------
 
 export function registerMcpAppHttpRoute(app: FastifyInstance): void {
@@ -590,9 +930,9 @@ export function registerMcpAppHttpRoute(app: FastifyInstance): void {
 
 // ---------------------------------------------------------------------------
 // render_pcc_dashboard — the UI-composition tool. inputSchema reuses the
-// EXISTING manifest.schema.json (the JSON-Schema mirror of
-// DashboardManifestSchema) verbatim; the handler validates with the SAME
-// Zod schema the gateway's artifact routes already use.
+// EXISTING manifest.schema.json; the handler validates with the SAME Zod schema
+// the gateway's artifact routes use, and returns the manifest in structuredContent
+// (conforming to RENDER_OUTPUT_SCHEMA) for the fixed render view.
 // ---------------------------------------------------------------------------
 
 export function buildRenderDashboardTool(): Tool {
@@ -602,6 +942,7 @@ export function buildRenderDashboardTool(): Tool {
       "Compose a live PCC dashboard for a physical-capability task — pass a DashboardManifest " +
       "(windows + live data bindings + actions) and it renders as an interactive MCP App.",
     inputSchema: readDashboardManifestJsonSchema() as unknown as Tool["inputSchema"],
+    outputSchema: RENDER_OUTPUT_SCHEMA as unknown as Tool["outputSchema"],
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -609,12 +950,9 @@ export function buildRenderDashboardTool(): Tool {
       openWorldHint: false,
     },
     // MCP Apps convention: a tool that RENDERS a ui:// resource declares the
-    // link on the tools/list definition itself, not only on the call result
-    // (handleRenderDashboardTool already returns the same _meta below) — a
-    // host/scanner reading tools/list should be able to tell up front that
-    // this tool has a UI without first calling it. The SDK's Tool._meta is
-    // typed Record<string, unknown>, so this needs no schema workaround.
-    _meta: { ui: { resourceUri: MCP_APP_DASHBOARD_URI } },
+    // FIXED link on the tools/list definition itself, so a host/scanner reading
+    // tools/list can tell up front that this tool has a UI (no {slug} template).
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_URI } },
   };
 }
 
@@ -623,11 +961,11 @@ function toolErrorResult(text: string) {
 }
 
 /**
- * Handler for render_pcc_dashboard. Arguments ARE the DashboardManifest
- * directly (no wrapper) — the manifest is the whole UI-composition surface
- * the agent authors. Validation failures return an MCP tool-result error
- * (isError: true content) and never throw — a malformed manifest is the
- * agent's mistake to see and fix, not a protocol-level failure.
+ * Handler for render_pcc_dashboard. Arguments ARE the DashboardManifest directly
+ * (no wrapper). Validation failures return an MCP tool-result error (never
+ * throw). On success, returns the manifest in `structuredContent` (conforming to
+ * RENDER_OUTPUT_SCHEMA) — the host delivers it to the fixed render view over the
+ * `ui/notifications/tool-result` lifecycle notification.
  */
 export function handleRenderDashboardTool(rawArguments: unknown) {
   const parsed = DashboardManifestSchema.safeParse(rawArguments);
@@ -640,10 +978,7 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
 
   const manifest = parsed.data;
   // DashboardManifestSchema's own .refine already rejects pcc_live_/pcc_test_
-  // substrings (so this branch is effectively unreachable via THIS schema
-  // today) — kept explicit per spec, and as defense-in-depth against a
-  // future schema change, matching the same belt-and-suspenders pattern
-  // routes/artifacts.ts uses for the identical guard.
+  // substrings; kept explicit as defense-in-depth (matches routes/artifacts.ts).
   if (containsApiKey(manifest)) {
     return toolErrorResult(
       "Refused: the manifest must not contain an API key (pcc_live_/pcc_test_ substring) — it would travel with the rendered dashboard.",
@@ -652,7 +987,7 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
 
   const sectionCount = manifest.sections.length;
   return {
-    _meta: { ui: { resourceUri: MCP_APP_DASHBOARD_URI } },
+    _meta: { ui: { resourceUri: MCP_APP_RENDER_URI } },
     structuredContent: { manifest },
     content: [
       {
@@ -662,3 +997,8 @@ export function handleRenderDashboardTool(rawArguments: unknown) {
     ],
   };
 }
+
+// Re-export the canonical CSD URL literal the in-view validator hard-codes, so a
+// drift-guard test can assert isValidDashboardManifest stays in sync with the
+// imported schema constant.
+export { DASHBOARD_CSD_URL };
