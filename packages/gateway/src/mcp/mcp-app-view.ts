@@ -504,7 +504,10 @@ export function connectMcpAppView(
       win.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
       return;
     }
-    if (msg.method === "ui/notifications/tool-result") {
+    // A tool-result is only valid AFTER the init handshake completes (spec order:
+    // initialize -> initialized -> tool-input -> tool-result). Gate on `initialized`
+    // so a result delivered before init is ignored, never dispatched or rendered.
+    if (initialized && msg.method === "ui/notifications/tool-result") {
       onToolResult(source, win.parent, data);
     }
     // ui/notifications/tool-input is accepted but a no-op: the render/saved view
