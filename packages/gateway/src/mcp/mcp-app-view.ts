@@ -167,7 +167,14 @@ const HTTP_MIRROR_PATH = "/mcp-apps/ui/dashboard";
  * locate a repo-root-relative asset don't re-derive this candidate search. */
 export function resolveGatewayAsset(relativeSegments: string[], envVarOverride?: string): string {
   const override = envVarOverride ? process.env[envVarOverride] : undefined;
-  if (override && existsSync(override)) return resolvePath(override);
+  if (override) {
+    // An EXPLICIT override that points nowhere is an operator misconfiguration —
+    // fail loudly rather than silently falling back to a bundled copy (directive 6).
+    if (existsSync(override)) return resolvePath(override);
+    throw new Error(
+      `${relativeSegments.join("/")}: ${envVarOverride}="${override}" was set but no file exists there`,
+    );
+  }
 
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -194,18 +201,77 @@ const DASHBOARD_MANIFEST_SCHEMA_RELATIVE = [
   "manifest.schema.json",
 ];
 
-/** Read pcc-ui.js fresh on every call — same "discovery follows updates" choice
- * loadAgentPackage() makes; the kit is small and this is not a hot path. */
+// Startup asset cache (directive 6). Each mandatory MCP-App asset is read from
+// disk ONCE — at server boot via primeMcpAppAssets(), or lazily on first use in a
+// test — and served from memory thereafter. This (a) removes a per-request disk
+// read from tools/list (buildRenderDashboardTool) and every UI resources/read
+// (the HTML builders), and (b) lets the gateway FAIL AT STARTUP with a clear
+// diagnostic when the production image is missing an asset, instead of throwing
+// deep inside tools/list / resources/read at request time — which would make
+// every PCC tool undiscoverable, silently (audit finding/directive 6).
+let pccUiKitSourceCache: string | undefined;
+let dashboardManifestSchemaCache: Record<string, unknown> | undefined;
+
+/** pcc-ui.js source — read + cached once (primed at startup, see primeMcpAppAssets). */
 function readPccUiKitSource(): string {
-  return readFileSync(resolveGatewayAsset(PCC_UI_KIT_RELATIVE, "PCC_UI_KIT_PATH"), "utf8");
+  if (pccUiKitSourceCache === undefined) {
+    pccUiKitSourceCache = readFileSync(
+      resolveGatewayAsset(PCC_UI_KIT_RELATIVE, "PCC_UI_KIT_PATH"),
+      "utf8",
+    );
+  }
+  return pccUiKitSourceCache;
 }
 
+/** manifest.schema.json — read + parsed + cached once (primed at startup). */
 function readDashboardManifestJsonSchema(): Record<string, unknown> {
-  const raw = readFileSync(
-    resolveGatewayAsset(DASHBOARD_MANIFEST_SCHEMA_RELATIVE, "PCC_DASHBOARD_SCHEMA_PATH"),
-    "utf8",
-  );
-  return JSON.parse(raw) as Record<string, unknown>;
+  if (dashboardManifestSchemaCache === undefined) {
+    const raw = readFileSync(
+      resolveGatewayAsset(DASHBOARD_MANIFEST_SCHEMA_RELATIVE, "PCC_DASHBOARD_SCHEMA_PATH"),
+      "utf8",
+    );
+    dashboardManifestSchemaCache = JSON.parse(raw) as Record<string, unknown>;
+  }
+  return dashboardManifestSchemaCache;
+}
+
+/**
+ * Eagerly load + cache every mandatory MCP-App runtime asset (pcc-ui.js and
+ * manifest.schema.json) at server startup. Throws a SINGLE clear diagnostic
+ * naming EVERY missing/unreadable asset, so a misbuilt production image fails to
+ * BOOT (loud, caught by the deploy /health smoke check) rather than serving a
+ * broken tools/list at request time. Called once from httpMcpRoutes; idempotent
+ * (the underlying reads are cached).
+ */
+export function primeMcpAppAssets(): void {
+  const failures: string[] = [];
+  try {
+    readPccUiKitSource();
+  } catch (error) {
+    failures.push(`pcc-ui.js — ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    readDashboardManifestJsonSchema();
+  } catch (error) {
+    failures.push(
+      `manifest.schema.json — ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      "MCP Apps assets are missing from the runtime image — the gateway cannot serve the " +
+        `generative-UI surface. Missing: ${failures.join("; ")}. These are committed under ` +
+        "apps/dashboard/public/ui-kit/v1/ and MUST ship in the production image (see " +
+        "docs/DEPLOY.md / Dockerfile). Override paths with PCC_UI_KIT_PATH / " +
+        "PCC_DASHBOARD_SCHEMA_PATH.",
+    );
+  }
+}
+
+/** Test-only: drop the startup asset cache so a following prime re-reads disk. */
+export function _resetMcpAppAssetCacheForTests(): void {
+  pccUiKitSourceCache = undefined;
+  dashboardManifestSchemaCache = undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -55,9 +55,10 @@ interface ProseDoc {
   envVarOverride: string;
 }
 
-// The two prose docs — real files already in the repo, read fresh on every
-// resource/search call (same "discovery follows updates" choice
-// loadAgentPackage() and mcp-app-view.ts's readPccUiKitSource() make).
+// The two prose docs — real files committed to the repo, read + cached ONCE at
+// startup (primeDocsAssets), so a production image missing a doc fails to BOOT
+// with a clear diagnostic instead of throwing at the first resources/read or
+// search_docs call (directive 6).
 const PROSE_DOCS: ProseDoc[] = [
   {
     uri: DOCS_AGENT_GUIDE_URI,
@@ -80,8 +81,50 @@ const PROSE_DOCS: ProseDoc[] = [
   },
 ];
 
+// Startup cache for the committed prose docs (directive 6). The API-reference
+// resource is generated live from app.swagger() (no file), so only these two
+// file-backed docs are cached here.
+const proseDocCache = new Map<string, string>();
+
 function readProseDoc(doc: ProseDoc): string {
-  return readFileSync(resolveGatewayAsset(doc.segments, doc.envVarOverride), "utf8");
+  let text = proseDocCache.get(doc.uri);
+  if (text === undefined) {
+    text = readFileSync(resolveGatewayAsset(doc.segments, doc.envVarOverride), "utf8");
+    proseDocCache.set(doc.uri, text);
+  }
+  return text;
+}
+
+/**
+ * Eagerly load + cache every committed docs asset at server startup. Throws a
+ * single clear diagnostic naming EVERY missing/unreadable doc so the gateway
+ * fails to BOOT rather than serving a broken /mcp/docs surface at request time
+ * (directive 6). Called once from docsHttpMcpRoutes; idempotent.
+ */
+export function primeDocsAssets(): void {
+  const failures: string[] = [];
+  for (const doc of PROSE_DOCS) {
+    try {
+      readProseDoc(doc);
+    } catch (error) {
+      failures.push(
+        `${doc.segments.join("/")} — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      "PCC docs assets are missing from the runtime image — the /mcp/docs surface cannot " +
+        `serve its resources. Missing: ${failures.join("; ")}. These are committed under docs/ ` +
+        "and MUST ship in the production image (see docs/DEPLOY.md / Dockerfile). Override paths " +
+        "with the per-doc env vars (e.g. PCC_DOC_AGENT_GUIDE_PATH).",
+    );
+  }
+}
+
+/** Test-only: drop the docs startup cache so a following prime re-reads disk. */
+export function _resetDocsAssetCacheForTests(): void {
+  proseDocCache.clear();
 }
 
 function registerDocsResources(server: McpServer, app: FastifyInstance): void {
@@ -213,6 +256,9 @@ function sendDocsJsonRpcError(response: ServerResponse, statusCode: number, mess
 /** Public, read-only Streamable HTTP MCP transport for PCC's documentation.
  * Register before the gateway API auth gate — docs are public. */
 export async function docsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
+  // Fail fast at BOOT if a committed doc is missing from the runtime image
+  // (directive 6). loadAgentPackage() below likewise validates the agent package.
+  primeDocsAssets();
   const sessions = new Map<string, DocsSession>();
   const packVersion = loadAgentPackage().version;
 

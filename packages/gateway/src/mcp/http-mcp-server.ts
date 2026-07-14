@@ -19,6 +19,7 @@ import {
   isOnRampUiTool,
   onRampToolOutputSchema,
   onRampToolUiMeta,
+  primeMcpAppAssets,
   registerMcpAppHttpRoute,
   registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
@@ -428,6 +429,14 @@ function sendJsonRpcError(
 
 /** Public Streamable HTTP MCP transport. Register before the gateway API auth gate. */
 export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+  // Fail fast at BOOT if a mandatory MCP-App asset (pcc-ui.js / manifest.schema.json)
+  // or the agent package is missing from the runtime image, rather than throwing
+  // inside tools/list / resources/read at request time (directive 6). server.ts
+  // awaits this registration, so a throw here aborts startup with a clear message
+  // and the deploy /health smoke check catches it.
+  primeMcpAppAssets();
+  loadAgentPackage();
+
   const sessions = new Map<string, McpSession>();
 
   registerMcpAppHttpRoute(app);
