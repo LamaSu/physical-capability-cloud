@@ -101,7 +101,11 @@
   //   ?api= → localStorage → manifest.api_base → same-origin(http/s) → default
   // ═══════════════════════════════════════════════════════════════════════
 
-  function resolveApiBase(manifest) {
+  function resolveApiBase(manifest, isHost) {
+    // MCP-App/host embedding: the manifest is UNTRUSTED (a hostile parent could
+    // forge api_base to redirect writes/reads). FORCE the configured PCC origin —
+    // ignore manifest.api_base, ?api=, and any stored override (directive 10).
+    if (isHost) return API_DEFAULT;
     try {
       var q = new URLSearchParams(location.search).get('api');
       if (q) { try { localStorage.setItem('pcc.apiBase', q); } catch (e) {} return q.replace(/\/+$/, ''); }
@@ -117,6 +121,59 @@
   function isSameOrigin(apiBase) {
     if (apiBase === '') return true;
     try { return apiBase.replace(/\/+$/, '') === location.origin; } catch (e) { return false; }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Request-path safety (directive 10). Every manifest-supplied path is
+  // UNTRUSTED. A path is only used against the RESOLVED base (forced to the PCC
+  // origin in host mode) after passing here — no absolute/scheme URLs, no
+  // protocol-relative //host, no path traversal, no backslash escapes. In host
+  // mode it must also be in the PCC "/api" or "/sse" operation namespace — an
+  // allowlist of supported operations instead of an arbitrary method+path.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function isAbsoluteOrSchemeUrl(p) {
+    // any URL scheme (http, https, data, blob, or a script-URL scheme) or a
+    // protocol-relative //host — all refused for a manifest-supplied path.
+    return /^[a-z][a-z0-9+.\-]*:/i.test(p) || p.indexOf('//') === 0;
+  }
+
+  function safeApiPath(path, isHost) {
+    if (typeof path !== 'string' || !path) return null;
+    if (isAbsoluteOrSchemeUrl(path)) return null;   // no absolute / scheme / //host
+    if (path.charAt(0) !== '/') return null;         // must be root-relative
+    if (path.indexOf('\\') !== -1) return null;      // backslash escape
+    var pathPart = path.split('?')[0];
+    var decoded;
+    try { decoded = decodeURIComponent(pathPart); } catch (e) { return null; } // malformed %-escape
+    if (decoded.indexOf('\\') !== -1) return null;
+    var segs = decoded.split('/');
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i] === '..' || segs[i] === '.') return null; // traversal (incl. %2e%2e)
+    }
+    if (decoded.indexOf('..') !== -1) return null;   // belt-and-suspenders (encoded joins)
+    if (isHost && !/^\/(api|sse)(\/|$)/.test(decoded)) return null; // PCC namespace allowlist
+    return path; // original path (query preserved) — safe against the fixed base
+  }
+
+  // The kit-derived TRUTH about the request an action will actually send —
+  // method, resolved destination, amount/asset, and job/escrow ref — computed
+  // from the REAL request (never manifest-supplied confirmation text, which can
+  // differ from what is sent). `destination === null` means the path was refused.
+  function describeRealRequest(apiBase, action, body, isHost) {
+    var method = (action && action.kind === 'patch') ? 'PATCH' : 'POST';
+    var safe = safeApiPath(action ? action.path : '', isHost);
+    var destination = safe === null ? null : ((apiBase || '') + safe);
+    var b = body || {};
+    var amount = b.amount != null ? b.amount
+      : (b.totalAmount != null ? b.totalAmount
+      : (b.value != null ? b.value
+      : (b.priceUSD != null ? b.priceUSD
+      : (b.budgetUSD != null ? b.budgetUSD : null))));
+    var asset = b.currency || b.asset || (amount != null ? 'USDC' : null);
+    var refId = b.jobId || b.escrowId || b.escrowAddress || b.offerId
+      || b.compositionId || b.id || null;
+    return { method: method, destination: destination, amount: amount, asset: asset, refId: refId };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -196,8 +253,9 @@
   // EventSource+?token=). Never fires a write on its own.
   // ═══════════════════════════════════════════════════════════════════════
 
-  function Transport(apiBase) {
+  function Transport(apiBase, isHost) {
     this.base = apiBase;
+    this.isHost = !!isHost;
     this.lastTrace = null;
   }
   Transport.prototype._headers = function (extra) {
@@ -222,16 +280,20 @@
   };
   Transport.prototype.getJSON = function (path, query) {
     var self = this;
-    return fetch(this.base + path + this.qs(query), { headers: this._headers({ Accept: 'application/json' }) })
+    var safe = safeApiPath(path, this.isHost);
+    if (safe === null) return Promise.reject(new Error('refused unsafe request path: ' + path));
+    return fetch(this.base + safe + this.qs(query), { headers: this._headers({ Accept: 'application/json' }) })
       .then(function (r) {
         self._trace(r);
-        if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + path);
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + safe);
         return r.json();
       });
   };
   Transport.prototype.send = function (method, path, body) {
     var self = this;
-    return fetch(this.base + path, {
+    var safe = safeApiPath(path, this.isHost);
+    if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
+    return fetch(this.base + safe, {
       method: method,
       headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
       body: body != null ? JSON.stringify(body) : undefined
@@ -247,9 +309,11 @@
   Transport.prototype.streamSSE = function (path, onEvent, opts) {
     opts = opts || {};
     var self = this;
+    var safe = safeApiPath(path, this.isHost);
+    if (safe === null) return Promise.reject(new Error('refused unsafe sse path: ' + path));
     var init = { headers: this._headers({ Accept: 'text/event-stream' }) };
     if (opts.signal) init.signal = opts.signal;
-    return fetch(this.base + path, init).then(function (res) {
+    return fetch(this.base + safe, init).then(function (res) {
       self._trace(res);
       if (!res.ok || !res.body) throw new Error('sse dispatch failed (HTTP ' + res.status + ')');
       var reader = res.body.getReader();
@@ -292,7 +356,7 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function HostTransport(apiBase) {
-    Transport.call(this, apiBase);
+    Transport.call(this, apiBase, true); // host mode: forced-origin + /api allowlist
   }
   HostTransport.prototype = Object.create(Transport.prototype);
   HostTransport.prototype.constructor = HostTransport;
@@ -301,17 +365,21 @@
     return (b && typeof b.fetch === 'function') ? b : null;
   };
   HostTransport.prototype.getJSON = function (path, query) {
+    var safe = safeApiPath(path, true);
+    if (safe === null) return Promise.reject(new Error('refused unsafe request path: ' + path));
     var bridge = this._bridge();
-    if (!bridge) return Transport.prototype.getJSON.call(this, path, query);
-    return bridge.fetch(path, { method: 'GET', query: query }).then(function (r) {
-      if (!r || r.ok === false) throw new Error('host bridge fetch failed on ' + path);
+    if (!bridge) return Transport.prototype.getJSON.call(this, safe, query);
+    return bridge.fetch(safe, { method: 'GET', query: query }).then(function (r) {
+      if (!r || r.ok === false) throw new Error('host bridge fetch failed on ' + safe);
       return r.json;
     });
   };
   HostTransport.prototype.send = function (method, path, body) {
+    var safe = safeApiPath(path, true);
+    if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
     var bridge = this._bridge();
-    if (!bridge) return Transport.prototype.send.call(this, method, path, body);
-    return bridge.fetch(path, { method: method, body: body }).then(function (r) {
+    if (!bridge) return Transport.prototype.send.call(this, method, safe, body);
+    return bridge.fetch(safe, { method: method, body: body }).then(function (r) {
       return { ok: !!(r && r.ok), status: (r && r.status) || 0, body: (r && r.json) || {} };
     });
   };
@@ -335,7 +403,7 @@
   // HostTransport (falls back to the same direct fetch as every other live
   // mode); every other mode keeps the existing plain Transport.
   function createTransport(ctx) {
-    return ctx.mode === 'host' ? new HostTransport(ctx.apiBase) : new Transport(ctx.apiBase);
+    return ctx.mode === 'host' ? new HostTransport(ctx.apiBase) : new Transport(ctx.apiBase, false);
   }
 
   // Resolve a binding to data. In snapshot mode, look the path up in the baked
@@ -676,11 +744,21 @@
       clear(wrap._body);
       var info = r.data || {};
       wrap._body.appendChild(approvalDetails(info));
+      // Kit-derived TRUTH about the request the Approve button actually sends
+      // (directive 10) — computed from w.approve, never manifest confirmation text.
+      var realBody = Object.assign({}, (w.approve && w.approve.body) || {});
+      var desc = describeRealRequest(ctx.apiBase, w.approve, realBody, ctx.mode === 'host');
+      wrap._body.appendChild(realRequestNode(desc));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
       var approve = el('button', 'pcc-btn pcc-btn-primary', (w.approve && w.approve.label) || 'Approve');
       approve.type = 'button';
       approve.onclick = function () {
+        if (desc.destination === null) {
+          status.className = 'pcc-action-status st-failed';
+          status.textContent = 'Refused: unsafe or non-PCC destination.';
+          return;
+        }
         // The approval WINDOW is itself the confirmation surface: fire directly.
         dispatchAction(ctx, w.approve, { status: status, viaApproval: true, rebind: function () { rebindApproval(ctx, w, wrap); } });
       };
@@ -922,6 +1000,30 @@
     status.appendChild(no);
   }
 
+  // Kit-derived, textContent-only "This will send" block — the honest summary of
+  // the REAL request (method + resolved destination + amount/asset + job/escrow
+  // ref) that the money action fires. Rendered ALONGSIDE the manifest label so a
+  // misleading label can never hide the true destination/amount (directive 10).
+  function realRequestNode(desc) {
+    var box = el('div', 'pcc-realreq');
+    box.appendChild(el('div', 'pcc-realreq-title', 'This will send'));
+    var line = el('div', 'pcc-realreq-line');
+    if (desc.destination === null) {
+      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — unsafe or non-PCC destination'));
+    } else {
+      line.appendChild(el('span', 'pcc-realreq-method', desc.method));
+      line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', desc.destination));
+    }
+    box.appendChild(line);
+    if (desc.amount != null) {
+      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum', 'Amount ' + fmtUsd(desc.amount) + (desc.asset ? ' ' + desc.asset : '')));
+    }
+    if (desc.refId != null) {
+      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', 'ref ' + String(desc.refId)));
+    }
+    return box;
+  }
+
   // The kit's Approval window as a floating modal — only Approve POSTs.
   function openApprovalGate(ctx, action, opts) {
     var overlay = el('div', 'pcc-overlay');
@@ -930,8 +1032,13 @@
     head.appendChild(el('span', 'pcc-win-title', 'Approve'));
     head.appendChild(el('span', 'pcc-pill st-waiting', 'confirm'));
     card.appendChild(head);
+    // Manifest-supplied label (may mislead) — shown, but NOT authoritative.
     card.appendChild(el('p', 'pcc-approval-what', action.label));
-    var info = { args: Object.assign({}, action.body || {}, opts.formValues || {}) };
+    // Kit-derived TRUTH about the request that will actually be sent.
+    var realBody = Object.assign({}, action.body || {}, opts.formValues || {});
+    var desc = describeRealRequest(ctx.apiBase, action, realBody, ctx.mode === 'host');
+    card.appendChild(realRequestNode(desc));
+    var info = { args: realBody };
     card.appendChild(approvalDetails(info));
     var foot = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
@@ -941,6 +1048,12 @@
     cancel.type = 'button';
     function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     approve.onclick = function () {
+      if (desc.destination === null) {
+        status.className = 'pcc-action-status st-failed';
+        status.textContent = 'Refused: unsafe or non-PCC destination.';
+        if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
+        return;
+      }
       doPost(ctx, action, Object.assign({}, opts, { viaApproval: true }), status);
       setTimeout(close, 1200);
       if (opts.status) { opts.status.className = status.className; opts.status.textContent = status.textContent; }
@@ -1066,7 +1179,8 @@
     applyTheme(manifest);
 
     var snapshot = readSnapshot();
-    var apiBase = resolveApiBase(manifest);
+    var isHost = (window.__PCC_HOST__ === true);
+    var apiBase = resolveApiBase(manifest, isHost);
     var ctx = { manifest: manifest, apiBase: apiBase, snapshot: snapshot, tx: null, degraded: false };
     ctx.mode = detectMode(ctx);
     ctx.tx = createTransport(ctx);
@@ -1228,6 +1342,15 @@
       '.pcc-args-row{display:flex;justify-content:space-between;gap:10px;}',
       '.pcc-args-k{font:400 12px/18px var(--font);color:var(--ink-3);}',
       '.pcc-args-v{color:var(--ink-2);word-break:break-all;text-align:right;}',
+      /* honest "this will send" block (directive 10) */
+      '.pcc-realreq{display:flex;flex-direction:column;gap:3px;background:var(--surface-2);border:1px solid var(--hairline-strong);border-radius:10px;padding:8px 10px;}',
+      '.pcc-realreq-title{font:450 11px/16px var(--font);color:var(--ink-3);text-transform:uppercase;letter-spacing:.04em;}',
+      '.pcc-realreq-line{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}',
+      '.pcc-realreq-method{font:650 12px/18px var(--font);color:var(--ink);}',
+      '.pcc-realreq-dest{color:var(--ink-2);word-break:break-all;}',
+      '.pcc-realreq-amt{font:650 14px/20px var(--font);color:var(--ink);}',
+      '.pcc-realreq-ref{color:var(--ink-3);}',
+      '.pcc-realreq-blocked{color:var(--deny);font:650 12px/18px var(--font);}',
       /* receipt */
       '.pcc-receipt-amount{display:flex;align-items:baseline;gap:2px;}',
       '.pcc-receipt-num{font:650 22px/28px var(--font);color:var(--ink);}',

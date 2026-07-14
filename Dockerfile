@@ -114,6 +114,23 @@ RUN ls -la packages/gateway/dist/server.js && echo "[docker] gateway build outpu
 # Test that better-sqlite3 native module loads from within the @pcc/store context
 RUN cd packages/db && node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.close(); console.log('[docker] better-sqlite3 native module OK')"
 
+# Verify the MCP Apps / generative-UI + docs runtime assets are present in the
+# image (directive 6). The gateway loads these at STARTUP (primeMcpAppAssets /
+# primeDocsAssets in packages/gateway/src/mcp/*) and REFUSES TO BOOT without them.
+# Asserting here fails the IMAGE BUILD instead — the earliest, loudest signal — if
+# a future .dockerignore / COPY change drops them. They are committed SOURCE assets
+# (not build output), so they arrive via `COPY . .` above; this guards that path.
+RUN set -e; \
+    for f in \
+      apps/dashboard/public/agent-package.json \
+      apps/dashboard/public/ui-kit/v1/manifest.schema.json \
+      apps/dashboard/public/ui-kit/v1/pcc-ui.js \
+      docs/AGENT_INTEGRATION.md \
+      docs/quickstart/README.md; do \
+      test -f "/app/$f" || { echo "[docker] MISSING MCP-App runtime asset: $f" >&2; exit 1; }; \
+    done; \
+    echo "[docker] MCP Apps + docs runtime assets present"
+
 # ── Security Hardening ────────────────────────────────────────────────────────
 
 # Remove build tools from production image (reduces attack surface).

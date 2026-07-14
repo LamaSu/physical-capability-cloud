@@ -8,17 +8,20 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   CallToolRequestSchema,
-  ErrorCode,
   isInitializeRequest,
   ListToolsRequestSchema,
-  McpError,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   buildRenderDashboardTool,
+  enrichOnRampToolResult,
   handleRenderDashboardTool,
+  isOnRampUiTool,
+  onRampToolOutputSchema,
+  onRampToolUiMeta,
+  primeMcpAppAssets,
   registerMcpAppHttpRoute,
-  registerMcpAppResource,
+  registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
 } from "./mcp-app-view.js";
 
@@ -131,7 +134,7 @@ function toolDescription(tool: AgentPackageTool): string {
 
 function toMcpTool(tool: AgentPackageTool): Tool {
   const method = tool.endpoint.method;
-  return {
+  const mcpTool: Tool = {
     name: tool.name,
     description: toolDescription(tool),
     inputSchema: tool.input_schema,
@@ -140,6 +143,17 @@ function toMcpTool(tool: AgentPackageTool): Tool {
       destructiveHint: method === "DELETE",
     },
   };
+  if (isOnRampUiTool(tool.name)) {
+    // MCP Apps: the 5 On-Ramp dashboard tools render UI. Declare the FIXED,
+    // predeclared ui:// resource on the tools/list definition (saved for the
+    // single-artifact tools, gallery for search — never a {slug} template) so a
+    // host can tell the tool is UI-bearing and prefetch the view before ever
+    // calling it, plus an outputSchema for the structuredContent the call
+    // returns (which the fixed view renders over the lifecycle).
+    mcpTool._meta = onRampToolUiMeta(tool.name);
+    mcpTool.outputSchema = onRampToolOutputSchema(tool.name) as unknown as Tool["outputSchema"];
+  }
+  return mcpTool;
 }
 
 function encodeQueryValue(value: unknown): string[] {
@@ -259,8 +273,17 @@ async function proxyToolCall(
       );
     }
 
+    // On-Ramp UI tools additionally carry `structuredContent` (the artifact's
+    // manifest, or projected search entries) + the canonical `_meta.ui.resourceUri`
+    // for the fixed saved/gallery view — IN ADDITION to the text below, so
+    // text-only consumers are intact and private artifacts render from THIS
+    // authenticated result (never a second anonymous lookup).
+    const text = resultText(payload);
+    if (isOnRampUiTool(tool.name)) {
+      return enrichOnRampToolResult(tool.name, payload, text);
+    }
     return {
-      content: [{ type: "text" as const, text: resultText(payload) }],
+      content: [{ type: "text" as const, text }],
     };
   } catch (error) {
     return errorResult(
@@ -276,6 +299,37 @@ async function proxyToolCall(
  * that /.well-known/mcp/server-card.json's `logo`/`icon` fields already
  * reference. Kept as one constant so a future icon swap only edits one line. */
 export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
+
+/**
+ * Dispatch a validated tools/call to its handler. Exported as a pure function so
+ * the unknown-tool + argument-coercion CONTRACT is unit-testable without standing
+ * up the Streamable HTTP transport.
+ *
+ * Restores the pre-#257 `/mcp` behavior existing clients depend on (audit
+ * directive 8): an unknown (or empty) tool name resolves to a tool-level
+ * `CallToolResult { isError: true }`, NEVER a thrown JSON-RPC protocol error
+ * (MethodNotFound). The caller passes `params.arguments ?? {}` exactly as before —
+ * no added `InvalidParams` throw. Non-object `arguments` are already rejected by
+ * the SDK's CallToolRequestSchema (`z.record(z.string(), z.unknown())`) BEFORE
+ * this runs, so no arg-type guard is needed or wanted here — a non-object simply
+ * cannot reach this function through the transport.
+ */
+export async function dispatchToolCall(
+  toolsByName: Map<string, AgentPackageTool>,
+  name: string,
+  args: JsonObject,
+  token: string | undefined,
+  signal: AbortSignal,
+) {
+  if (name === RENDER_DASHBOARD_TOOL_NAME) {
+    return handleRenderDashboardTool(args);
+  }
+  const tool = toolsByName.get(name);
+  if (!tool) {
+    return errorResult(`Unknown PCC tool: ${name}`);
+  }
+  return proxyToolCall(tool, args, token, signal);
+}
 
 function createMcpServer(pack: AgentPackage): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
@@ -303,35 +357,22 @@ function createMcpServer(pack: AgentPackage): McpServer {
   }));
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name } = request.params;
-    const rawArguments = request.params.arguments;
-
-    if (typeof name !== "string" || name.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "Invalid params: tool name is required");
-    }
-    if (
-      rawArguments !== undefined &&
-      (typeof rawArguments !== "object" || rawArguments === null || Array.isArray(rawArguments))
-    ) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Invalid params: arguments for "${name}" must be an object`,
-      );
-    }
-    const args = rawArguments ?? {};
-
-    if (name === RENDER_DASHBOARD_TOOL_NAME) {
-      return handleRenderDashboardTool(args);
-    }
-
-    const tool = toolsByName.get(name);
-    if (!tool) {
-      throw new McpError(ErrorCode.MethodNotFound, `Method not found: unknown PCC tool "${name}"`);
-    }
-    return proxyToolCall(tool, args, extra.authInfo?.token, extra.signal);
+    // Coerce arguments exactly as the pre-#257 handler did (`?? {}`); the SDK
+    // schema has already guaranteed `arguments` is an object-or-undefined. All
+    // tool-not-found / handler routing lives in the exported dispatchToolCall so
+    // the restored contract (unknown tool → isError result, never a thrown
+    // protocol error — directive 8) is unit-testable off-transport.
+    const args = request.params.arguments ?? {};
+    return dispatchToolCall(
+      toolsByName,
+      request.params.name,
+      args,
+      extra.authInfo?.token,
+      extra.signal,
+    );
   });
 
-  registerMcpAppResource(server);
+  registerMcpAppResources(server);
 
   return server;
 }
@@ -388,6 +429,14 @@ function sendJsonRpcError(
 
 /** Public Streamable HTTP MCP transport. Register before the gateway API auth gate. */
 export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+  // Fail fast at BOOT if a mandatory MCP-App asset (pcc-ui.js / manifest.schema.json)
+  // or the agent package is missing from the runtime image, rather than throwing
+  // inside tools/list / resources/read at request time (directive 6). server.ts
+  // awaits this registration, so a throw here aborts startup with a clear message
+  // and the deploy /health smoke check catches it.
+  primeMcpAppAssets();
+  loadAgentPackage();
+
   const sessions = new Map<string, McpSession>();
 
   registerMcpAppHttpRoute(app);

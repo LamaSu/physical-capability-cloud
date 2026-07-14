@@ -1,0 +1,210 @@
+/**
+ * @vitest-environment jsdom
+ *
+ * MCP Apps view — the STANDARD lifecycle, exercised end-to-end in a real DOM
+ * (directive 1/2/15). These drive the ACTUAL exported boot functions
+ * (runDashboardViewBoot / runGalleryViewBoot) — the exact logic inlined into the
+ * view HTML via `.toString()` — against a jsdom document, and assert on DOM
+ * mutations (NOT string-contains). We inject a controllable `win` so we can
+ * observe what the view posts to its parent (the real window doesn't expose that).
+ *
+ * Proven: view sends `ui/initialize`; replies to the host's init result with
+ * `ui/notifications/initialized`; a real `ui/notifications/tool-result` MOUNTS
+ * the manifest and the waiting placeholder disappears; a hostile-first message
+ * cannot latch the view; a token in the message is ignored (no storage write);
+ * the gallery renders its entries list.
+ *
+ * NOT covered here (a LATER round): a real browser / real host, the double-iframe
+ * sandbox proxy, and the kit's full live-data render.
+ */
+
+import { describe, it, expect } from "vitest";
+import { DASHBOARD_CSD_URL } from "@pcc/spec";
+import {
+  runDashboardViewBoot,
+  runGalleryViewBoot,
+  MCP_APP_TOOL_RESULT_METHOD,
+} from "../mcp/mcp-app-view.js";
+
+// A harmless stand-in for pcc-ui.js — we assert it was injected, not that it runs.
+const STUB_KIT = "/* stub kit */ window.__STUB_KIT_RAN__ = true;";
+
+function manifestFor(title: string) {
+  return {
+    csd: DASHBOARD_CSD_URL,
+    title,
+    sections: [{ windows: [{ kind: "note", text: "hello" }] }],
+  };
+}
+
+function setupManifestDom(): void {
+  document.body.innerHTML = "";
+  const main = document.createElement("main");
+  main.id = "pcc-root";
+  const status = document.createElement("p");
+  status.id = "pcc-kit-status";
+  status.textContent = "Waiting for the host…";
+  main.appendChild(status);
+  document.body.appendChild(main);
+  const m = document.createElement("script");
+  m.type = "application/json";
+  m.id = "pcc-manifest";
+  m.textContent = "null";
+  document.body.appendChild(m);
+}
+
+function setupGalleryDom(): void {
+  document.body.innerHTML = "";
+  const main = document.createElement("main");
+  main.id = "pcc-root";
+  const status = document.createElement("p");
+  status.id = "pcc-kit-status";
+  status.textContent = "Waiting for the host…";
+  main.appendChild(status);
+  document.body.appendChild(main);
+}
+
+// A controllable window: real jsdom `document`, a mock `parent` whose
+// postMessage we can observe, and a captured `message` handler we can drive.
+function makeWin() {
+  const posted: Array<Record<string, unknown>> = [];
+  const parent = { postMessage: (m: Record<string, unknown>) => posted.push(m) };
+  let handler: ((event: { source: unknown; data: unknown }) => void) | undefined;
+  const win = {
+    parent,
+    document,
+    addEventListener: (type: string, h: (event: { source: unknown; data: unknown }) => void) => {
+      if (type === "message") handler = h;
+    },
+  } as Record<string, unknown>;
+  const deliver = (data: unknown, source: unknown = parent) => {
+    if (handler) handler({ source, data });
+  };
+  return { win, parent, posted, deliver };
+}
+
+const toolResult = (structuredContent: Record<string, unknown>) => ({
+  jsonrpc: "2.0",
+  method: MCP_APP_TOOL_RESULT_METHOD,
+  params: { content: [{ type: "text", text: "ok" }], structuredContent },
+});
+
+describe("MCP Apps lifecycle — single-manifest view (render/saved)", () => {
+  it("sends ui/initialize on boot and answers the host init result with ui/notifications/initialized", () => {
+    setupManifestDom();
+    const { win, posted, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runDashboardViewBoot(win as any, STUB_KIT);
+
+    expect(posted[0].method).toBe("ui/initialize");
+    expect((posted[0].params as { protocolVersion?: string }).protocolVersion).toBe("2026-01-26");
+
+    // Host answers our ui/initialize request → we must send `initialized`.
+    deliver({ jsonrpc: "2.0", id: posted[0].id, result: { protocolVersion: "2026-01-26", hostContext: {} } });
+    expect(posted.some((m) => m.method === "ui/notifications/initialized")).toBe(true);
+  });
+
+  it("MOUNTS the manifest from a real tool-result and removes the waiting placeholder", () => {
+    setupManifestDom();
+    const { win, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runDashboardViewBoot(win as any, STUB_KIT);
+
+    // Before the handoff: the neutral "waiting" placeholder is present.
+    expect(document.getElementById("pcc-kit-status")).not.toBeNull();
+
+    const manifest = manifestFor("Live dashboard");
+    deliver(toolResult({ manifest }));
+
+    // After the handoff: placeholder gone, manifest mounted, host bridge announced,
+    // kit injected.
+    expect(document.getElementById("pcc-kit-status")).toBeNull();
+    const node = document.getElementById("pcc-manifest") as HTMLScriptElement;
+    expect(JSON.parse(node.textContent || "null")).toEqual(manifest);
+    expect((win as { __PCC_HOST__?: boolean }).__PCC_HOST__).toBe(true);
+    const kitInjected = Array.from(document.body.querySelectorAll("script")).some(
+      (s) => s.textContent === STUB_KIT,
+    );
+    expect(kitInjected).toBe(true);
+  });
+
+  it("does NOT latch on a hostile first message; a later valid one still mounts", () => {
+    setupManifestDom();
+    const { win, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runDashboardViewBoot(win as any, STUB_KIT);
+
+    // (a) a valid-looking result from a FOREIGN frame (source !== parent)
+    deliver(toolResult({ manifest: manifestFor("phish") }), { name: "evil-frame" });
+    // (b) a forged manifest (unknown window kind) from the REAL parent
+    deliver(
+      toolResult({
+        manifest: { csd: DASHBOARD_CSD_URL, title: "x", sections: [{ windows: [{ kind: "evil-iframe" }] }] },
+      }),
+    );
+
+    // Nothing mounted — the view still waits.
+    expect(document.getElementById("pcc-kit-status")).not.toBeNull();
+    expect((document.getElementById("pcc-manifest") as HTMLScriptElement).textContent).toBe("null");
+    expect((win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBeFalsy();
+
+    // The real handoff still succeeds.
+    const good = manifestFor("Real dashboard");
+    deliver(toolResult({ manifest: good }));
+    expect((win as { __PCC_BOOTED__?: boolean }).__PCC_BOOTED__).toBe(true);
+    expect(JSON.parse((document.getElementById("pcc-manifest") as HTMLScriptElement).textContent || "null")).toEqual(
+      good,
+    );
+  });
+
+  it("IGNORES a token in the message and never writes a credential to storage", () => {
+    setupManifestDom();
+    window.sessionStorage.clear();
+    const { win, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runDashboardViewBoot(win as any, STUB_KIT);
+
+    const manifest = manifestFor("Live dashboard");
+    deliver(toolResult({ manifest, token: "pcc_live_should_be_ignored", apiBase: "https://evil.example" }));
+
+    // Only the manifest is mounted — no token merged in, no sessionStorage write.
+    const mounted = JSON.parse((document.getElementById("pcc-manifest") as HTMLScriptElement).textContent || "null");
+    expect(mounted).toEqual(manifest);
+    expect(window.sessionStorage.getItem("pcc.key")).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+  });
+});
+
+describe("MCP Apps lifecycle — gallery (search) view", () => {
+  it("renders the entries list from a real tool-result and removes the placeholder", () => {
+    setupGalleryDom();
+    const { win, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runGalleryViewBoot(win as any);
+
+    expect(document.getElementById("pcc-kit-status")).not.toBeNull();
+    deliver(
+      toolResult({
+        entries: [
+          { slug: "a-dash-1111", name: "A", title: "Alpha" },
+          { slug: "b-dash-2222", name: "B", title: "Bravo" },
+        ],
+        total: 2,
+      }),
+    );
+
+    expect(document.getElementById("pcc-kit-status")).toBeNull();
+    expect(document.querySelectorAll(".pcc-gallery li").length).toBe(2);
+    expect(document.body.textContent).toContain("Alpha");
+    expect(document.body.textContent).toContain("a-dash-1111");
+  });
+
+  it("shows an empty state for zero entries", () => {
+    setupGalleryDom();
+    const { win, deliver } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    runGalleryViewBoot(win as any);
+    deliver(toolResult({ entries: [], total: 0 }));
+    expect(document.body.textContent).toContain("No dashboards found.");
+  });
+});
