@@ -44,7 +44,7 @@ describe("wildcard-key migration", () => {
     expect(plan.rescope.map((k: { id: string }) => k.id)).toEqual([ss]);
     expect(plan.review.map((k: { id: string }) => k.id)).toEqual([priv]);
 
-    expect(applyMigration(getRepos().apiKeys, plan)).toEqual({ changed: 1, skipped: 0 });
+    expect(applyMigration(getRepos().apiKeys, plan, verified)).toEqual({ changed: 1, skipped: 0 });
     expect(scopesOf(ss)).toEqual(["operator", "requestor"]);
     expect(scopesOf(priv)).toEqual(["*"]); // not verified → untouched
   });
@@ -56,8 +56,24 @@ describe("wildcard-key migration", () => {
 
     // Concurrent change between plan and apply: the key is no longer wildcard.
     getRepos().apiKeys.updateScopes(k, ["operator"]);
-    expect(applyMigration(getRepos().apiKeys, plan)).toEqual({ changed: 0, skipped: 1 });
+    expect(applyMigration(getRepos().apiKeys, plan, () => true)).toEqual({ changed: 0, skipped: 1 });
     expect(scopesOf(k)).toEqual(["operator"]); // migration left it alone
+  });
+
+  it("RE-VERIFIES at apply: authorization revoked between plan and apply → skipped (R2 #3)", () => {
+    const k = provisionApiKey({ operatorId: "stale@x.com", scopes: ["*"], metadata: { source: "landing-page" } }).record!.id;
+    const plan = planMigration(active("stale@x.com"), () => true); // verified at plan time
+    expect(plan.rescope.map((x: { id: string }) => x.id)).toEqual([k]);
+    // Authorization now revoked → the apply-time predicate returns false.
+    expect(applyMigration(getRepos().apiKeys, plan, () => false)).toEqual({ changed: 0, skipped: 1 });
+    expect(scopesOf(k)).toEqual(["*"]); // NOT granted
+  });
+
+  it("IGNORES a crafted plan.to — only SELF_SERVICE_SCOPES is ever written (R2 #3)", () => {
+    const k = provisionApiKey({ operatorId: "craft@x.com", scopes: ["*"], metadata: { source: "landing-page" } }).record!.id;
+    const craftedPlan = { rescope: [{ id: k, operatorId: "craft@x.com", to: ["admin"] }], review: [], skip: [] };
+    expect(applyMigration(getRepos().apiKeys, craftedPlan, () => true)).toEqual({ changed: 1, skipped: 0 });
+    expect(scopesOf(k)).toEqual(["operator", "requestor"]); // "admin" from the plan was IGNORED
   });
 
   it("classifyKey: no predicate->review, predicate true->rescope, non-wildcard->skip", () => {

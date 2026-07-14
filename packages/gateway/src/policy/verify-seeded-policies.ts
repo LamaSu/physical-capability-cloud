@@ -23,6 +23,9 @@ import {
 
 /** Kept in sync with scripts/audit/seed-route-policy.mjs MANIFEST_MARKER_ID. */
 export const MANIFEST_MARKER_ID = "__route_policy_manifest__";
+/** The seeder's inert marker method + scope sentinel (matchRoute never matches it). */
+const MARKER_METHOD = "MARKER";
+const MARKER_SCOPE = "__marker__";
 
 const VALID_SCOPES = new Set<string>([
   "operator", "requestor", "verifier", "admin", "agent", "auditor", "template_author",
@@ -80,6 +83,20 @@ export function verifySeededPolicies(gov: GovLike): void {
     fail("route-policy manifest not seeded (no marker row). Run scripts/audit/seed-route-policy.mjs " +
       "before SCOPE_ENFORCEMENT_MODE=enforce.");
   }
+  // The marker is excluded from the digest/structural checks below, so its WHOLE
+  // row must retain the inert shape the seeder wrote — otherwise a tampered marker
+  // (valid description, but method/pattern/scopes rewritten to a real protected
+  // route) would become an active policy in the runtime scope cache while passing
+  // this gate. Validate every field, not just the description.
+  if (
+    marker!.method !== MARKER_METHOD ||
+    marker!.routePattern !== MANIFEST_MARKER_ID ||
+    !Array.isArray(marker!.requiredScopes) ||
+    marker!.requiredScopes.length !== 1 ||
+    marker!.requiredScopes[0] !== MARKER_SCOPE
+  ) {
+    fail("route-policy marker row has been tampered (inert shape changed)");
+  }
   let meta: { version?: unknown; count?: unknown; digest?: unknown };
   try {
     meta = JSON.parse(marker!.description ?? "{}");
@@ -106,7 +123,7 @@ export function verifySeededPolicies(gov: GovLike): void {
   }
 
   const rows = all
-    .filter((r) => r.id !== MANIFEST_MARKER_ID && r.method !== "MARKER")
+    .filter((r) => r.id !== MANIFEST_MARKER_ID && r.method !== MARKER_METHOD)
     .map((r) => ({ method: r.method, pattern: r.routePattern, scopes: r.requiredScopes }));
 
   if (rows.length !== EXPECTED_MANIFEST_COUNT) {

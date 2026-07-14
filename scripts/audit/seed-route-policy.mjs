@@ -15,7 +15,13 @@
  *   PCC_DB_PATH=/data/pcc.sqlite node scripts/audit/seed-route-policy.mjs
  *   node scripts/audit/seed-route-policy.mjs --db :memory: --dry-run
  *
- * Exports validateManifest / seedRoutePolicies / ruleId for the test.
+ * PRODUCTION SEEDING has ONE entry point: seedRoutePolicyManifest (transactional —
+ * validate → upsert → delete stale → marker, all-or-nothing). The row-by-row
+ * seedRoutePolicies and standalone writeManifestMarker are NON-transactional
+ * partial-seed primitives (review R3 #6): they are un-exported and reachable only
+ * via __unsafeInternalsForTests so a caller can't half-seed the live table.
+ * Public exports: validateManifest / seedRoutePolicyManifest / ruleId /
+ * manifestDigest / manifestConstants / emitConstantsModule / MANIFEST_MARKER_ID.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -33,9 +39,18 @@ export const VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "
 // A clean /api/ route pattern (rejects query strings, spaces, control chars, etc).
 const CLEAN_PATTERN_RE = /^\/api\/[A-Za-z0-9/_:*.-]*$/;
 
-/** Deterministic id so re-seeding upserts the same row. */
+/**
+ * Reserved id prefix for manifest-owned endpoint_scopes rows (review R3 #6). The
+ * transactional seeder OWNS every rp_* row: it deletes any rp_* row not in the
+ * current manifest. Rows created by other subsystems MUST NOT use this prefix, or
+ * they would be swept on the next seed. The marker row uses its own id
+ * (MANIFEST_MARKER_ID), which is deliberately NOT rp_* so it is never swept.
+ */
+export const MANIFEST_OWNED_PREFIX = "rp_";
+
+/** Deterministic id so re-seeding upserts the same row. Always MANIFEST_OWNED_PREFIX. */
 export function ruleId(method, pattern) {
-  return "rp_" + createHash("sha256").update(`${method} ${pattern}`).digest("hex").slice(0, 20);
+  return MANIFEST_OWNED_PREFIX + createHash("sha256").update(`${method} ${pattern}`).digest("hex").slice(0, 20);
 }
 
 /** Returns a list of validation errors ([] means the manifest is safe to seed). */
@@ -84,8 +99,12 @@ export function manifestDigest(rules) {
   return createHash("sha256").update(canon).digest("hex");
 }
 
-/** Write/refresh the marker row recording {version, count, digest} of this seed. */
-export function writeManifestMarker(gov, rules, version) {
+/**
+ * Write/refresh the marker row recording {version, count, digest} of this seed.
+ * INTERNAL (R3 #6): a standalone marker write can certify a table it didn't seed;
+ * production writes it only inside seedRoutePolicyManifest's transaction.
+ */
+function writeManifestMarker(gov, rules, version) {
   const meta = JSON.stringify({ version: version ?? 0, count: rules.length, digest: manifestDigest(rules) });
   const row = {
     id: MANIFEST_MARKER_ID,
@@ -119,8 +138,12 @@ export function emitConstantsModule(manifest) {
   );
 }
 
-/** Upsert every rule into endpoint_scopes via the governance repo. */
-export function seedRoutePolicies(gov, rules) {
+/**
+ * Upsert every rule into endpoint_scopes via the governance repo. INTERNAL (R3 #6):
+ * non-transactional row-by-row writes — a mid-loop failure leaves a partial table.
+ * Production seeds ONLY through the transactional seedRoutePolicyManifest.
+ */
+function seedRoutePolicies(gov, rules) {
   // Validate INSIDE the function (finding #8) so a direct importer can't bypass the
   // CLI's pre-check and seed an invalid manifest.
   const errors = validateManifest(rules);
@@ -147,6 +170,49 @@ export function seedRoutePolicies(gov, rules) {
   }
   return { inserted, updated, total: rules.length };
 }
+
+/**
+ * Transactional seed (review R2 #7): validate, upsert every rule, DELETE stale
+ * manifest-owned (rp_*) rows no longer in the manifest, and write the marker — all
+ * in ONE transaction. A failure rolls everything back, so a running gateway can
+ * never observe a partial set and a shrunk manifest leaves no orphan rows to break
+ * the exact-count gate. Returns { inserted, updated, deleted, total }.
+ */
+export function seedRoutePolicyManifest(store, manifest, { schema, eq }) {
+  const rules = manifest.rules;
+  // Version must be a positive integer (R3 #6): the runtime gate compares it to the
+  // build-trusted EXPECTED_MANIFEST_VERSION; a 0/undefined/fractional version would
+  // seed a marker the gate can't trust and defeats reseed-on-change detection.
+  if (!Number.isInteger(manifest.version) || manifest.version < 1) {
+    throw new Error(`refusing to seed: manifest.version must be a positive integer, got ${JSON.stringify(manifest.version)}`);
+  }
+  const errors = validateManifest(rules);
+  if (errors.length) {
+    throw new Error(`refusing to seed invalid route-policy manifest: ${errors.join("; ")}`);
+  }
+  const expected = new Set(rules.map((r) => ruleId(r.method, r.pattern)));
+  return store.db.transaction(() => {
+    const res = seedRoutePolicies(store.repos.governance, rules);
+    let deleted = 0;
+    for (const row of store.repos.governance.findAllEndpointScopes()) {
+      // Delete any manifest-owned (rp_*) row no longer in this manifest. Non-rp_*
+      // rows (incl. the marker) are owned elsewhere and never swept.
+      if (row.id.startsWith(MANIFEST_OWNED_PREFIX) && !expected.has(row.id)) {
+        store.db.delete(schema.endpointScopes).where(eq(schema.endpointScopes.id, row.id)).run();
+        deleted++;
+      }
+    }
+    writeManifestMarker(store.repos.governance, rules, manifest.version);
+    return { ...res, deleted };
+  });
+}
+
+// ── Internal test seam (review R3 #6) ─────────────────────────────────────────
+// The non-transactional partial-seed primitives are un-exported so no production
+// path can half-seed the live table. Tests that must set up partial states (rows
+// without a marker, a stale row before a re-seed, failure injection) reach them
+// here. Production code MUST NOT import this — enforced by seed-boundary.test.ts.
+export const __unsafeInternalsForTests = { seedRoutePolicies, writeManifestMarker };
 
 // ── CLI (only when run directly) ──
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
@@ -180,12 +246,11 @@ async function runCli() {
     return;
   }
 
-  const { createStore } = await import("@pcc/store");
+  const { createStore, schema, eq } = await import("@pcc/store");
   const store = createStore({ dbPath, seed: false });
   try {
-    const res = seedRoutePolicies(store.repos.governance, rules);
-    const marker = writeManifestMarker(store.repos.governance, rules, manifest.version);
-    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated (${res.total} total). marker ${marker}`);
+    const res = seedRoutePolicyManifest(store, manifest, { schema, eq });
+    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated, ${res.deleted} stale deleted (${res.total} total).`);
   } finally {
     store.close();
   }

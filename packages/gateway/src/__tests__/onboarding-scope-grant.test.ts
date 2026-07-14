@@ -2,14 +2,17 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { initStore, getRepos, getStore, closeStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import {
-  grantVerifiedOnboardingScopes,
-  grantAdminScopes,
+  createScopeGrantService,
   validateOnboardingGrant,
   validateAdminGrant,
   ScopeGrantError,
+  __unsafeInternalsForTests,
   type ScopeGrantAudit,
   type ScopeGrantDeps,
 } from "../auth/onboarding-scope-grant.js";
+
+// R3 #5: the DI grant functions are only reachable through the explicit test seam.
+const { grantVerifiedOnboardingScopes, grantAdminScopes } = __unsafeInternalsForTests;
 
 /**
  * Scope grants (audit P0, lane d749deff; review findings #1/#3). A scopeless key
@@ -99,6 +102,19 @@ describe("scope grants (atomic, audited)", () => {
     keys().revoke(id);
     expect(() => grantVerifiedOnboardingScopes(durableDeps(), id)).toThrow(/not found or revoked/);
     expect(grantEvents().length).toBe(before);
+  });
+
+  it("createScopeGrantService: store-bound factory grants atomically + audits (R2 #2)", () => {
+    const before = grantEvents().length;
+    const svc = createScopeGrantService(getStore());
+    const id = freshScopelessKey();
+    svc.grantVerifiedOnboardingScopes(id);
+    expect(scopesOf(id)).toEqual(["operator", "requestor"]);
+    expect(grantEvents().length).toBe(before + 1);
+    const id2 = freshScopelessKey();
+    svc.grantAdminScopes(id2, ["verifier"], "admin@x.com");
+    expect(scopesOf(id2)).toEqual(["verifier"]);
+    expect(grantEvents().find((e) => e.resourceId === id2)).toMatchObject({ actor: "admin@x.com" });
   });
 
   it("validators flag each problem", () => {

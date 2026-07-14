@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 // @ts-expect-error — JS audit tool, no d.ts
-import { seedRoutePolicies, writeManifestMarker, ruleId, manifestDigest, MANIFEST_MARKER_ID } from "../../../../scripts/audit/seed-route-policy.mjs";
+import { ruleId, manifestDigest, MANIFEST_MARKER_ID, __unsafeInternalsForTests } from "../../../../scripts/audit/seed-route-policy.mjs";
+// R3 #6: partial-seed primitives are reachable only via the explicit test seam.
+const { seedRoutePolicies, writeManifestMarker } = __unsafeInternalsForTests;
 import { verifySeededPolicies } from "../policy/verify-seeded-policies.js";
 import { initStore, getRepos, closeStore } from "../db.js";
 
@@ -52,18 +54,18 @@ describe("verifySeededPolicies (runtime inventory gate)", () => {
   });
 
   it("throws when the marker has only {version} (count/digest missing)", () => {
-    setMarker({ version: 1 });
+    setMarker({ version: manifest.version });
     expect(() => verifySeededPolicies(gov)).toThrow(/count missing/);
   });
 
   it("throws when the marker digest is removed", () => {
-    setMarker({ version: 1, count: rules.length });
+    setMarker({ version: manifest.version, count: rules.length });
     expect(() => verifySeededPolicies(gov)).toThrow(/digest missing/);
   });
 
   it("throws on a higher unrecognized manifest version", () => {
-    setMarker({ version: 2, count: rules.length, digest: manifestDigest(rules) });
-    expect(() => verifySeededPolicies(gov)).toThrow(/version 2 != expected 1/);
+    setMarker({ version: manifest.version + 1, count: rules.length, digest: manifestDigest(rules) });
+    expect(() => verifySeededPolicies(gov)).toThrow(`!= expected ${manifest.version}`);
   });
 
   it("throws on COORDINATED tamper (row changed + marker digest recomputed to self-certify)", () => {
@@ -76,13 +78,13 @@ describe("verifySeededPolicies (runtime inventory gate)", () => {
       }));
     // Attacker rewrites the marker to match the tampered rows — still fails, because
     // the recomputed digest != the BUILD-trusted constant.
-    setMarker({ version: 1, count: live.length, digest: manifestDigest(live) });
+    setMarker({ version: manifest.version, count: live.length, digest: manifestDigest(live) });
     expect(() => verifySeededPolicies(gov)).toThrow(/build-trusted/);
   });
 
   it("throws on an extra row (even with the marker count bumped)", () => {
     gov.insertEndpointScope({ id: "extra", method: "POST", routePattern: "/api/extra/x", requiredScopes: ["admin"], description: null });
-    setMarker({ version: 1, count: rules.length + 1, digest: manifestDigest(rules) });
+    setMarker({ version: manifest.version, count: rules.length + 1, digest: manifestDigest(rules) });
     expect(() => verifySeededPolicies(gov)).toThrow(/count .* != expected|live rows/);
   });
 
@@ -99,6 +101,18 @@ describe("verifySeededPolicies (runtime inventory gate)", () => {
   it("throws on an INVALID HTTP method in a row", () => {
     gov.updateEndpointScope(escrowId(), { method: "BOGUS" });
     expect(() => verifySeededPolicies(gov)).toThrow(/invalid method/);
+  });
+
+  it("throws on a TAMPERED marker (valid description, but inert shape rewritten to a real policy)", () => {
+    // Attacker keeps the signed-off {version,count,digest} description but turns the
+    // marker into an active policy for a protected route — excluded from the digest
+    // here, but loaded by the runtime scope cache. Full-row validation must catch it.
+    gov.updateEndpointScope(MANIFEST_MARKER_ID, {
+      method: "POST",
+      routePattern: "/api/onboard/registrations/*/approve",
+      requiredScopes: ["operator", "admin"],
+    });
+    expect(() => verifySeededPolicies(gov)).toThrow(/marker row has been tampered/);
   });
 
   it("regen guard: the generated constants match the current manifest", async () => {

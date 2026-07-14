@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
-// @ts-expect-error — JS audit tool, no d.ts; buildInventory returns the shape below.
-import { buildInventory } from "../../../../scripts/audit/route-policy-inventory.mjs";
+import {
+  // @ts-expect-error — JS audit tool, no d.ts; buildInventory returns the shape below.
+  buildInventory,
+  // @ts-expect-error — JS audit tool, no d.ts
+  UNCLASSIFIED_PENDING_OWNER,
+} from "../../../../scripts/audit/route-policy-inventory.mjs";
 
 /**
  * Route-policy COVERAGE GATE (audit P0, lane d749deff).
@@ -22,15 +26,19 @@ import { buildInventory } from "../../../../scripts/audit/route-policy-inventory
 describe("route-policy coverage gate (unblocks default-deny)", () => {
   const inv = buildInventory() as {
     totals: {
+      api_routes: number;
       policed: number;
       policed_by_default: number;
       unpoliced_private_mutating: number;
       unpoliced_private_read: number;
+      cross_lane_pending: number;
     };
-    routes: Array<{ method: string; path: string; bucket: string }>;
+    routes: Array<{ method: string; path: string; bucket: string; file: string }>;
   };
   const unpoliced = (b: string) =>
     inv.routes.filter((r) => r.bucket === b).map((r) => `${r.method} ${r.path}`).sort();
+  const has = (method: string, path: string) =>
+    inv.routes.some((r) => r.method === method && r.path === path);
 
   it("FULL coverage: no unpoliced private MUTATING route", () => {
     expect(
@@ -44,6 +52,53 @@ describe("route-policy coverage gate (unblocks default-deny)", () => {
       unpoliced("unpoliced_private_read"),
       "Unpoliced READ /api/* route(s) — add a rule to scripts/audit/route-policy-manifest.json:",
     ).toEqual([]);
+  });
+
+  it("inventory scans registrations OUTSIDE routes/ — server.ts + middleware (R3 #4)", () => {
+    // The old scan was scoped to routes/ and silently dropped these real routes,
+    // so "0 unpoliced" did not actually cover every registered route. Assert the
+    // known out-of-routes/ registrations are now present in the inventory.
+    const known: Array<[string, string, string]> = [
+      ["GET", "/api/health", "server.ts"],
+      ["GET", "/api/agents/status", "server.ts"],
+      ["GET", "/api/producers/status", "server.ts"],
+      ["GET", "/api/auth/nonce", "auth/siwe-auth.ts"],
+      ["POST", "/api/auth/verify", "auth/siwe-auth.ts"],
+      ["GET", "/api/aegis/stats", "middleware/aegis-gate.ts"],
+      ["GET", "/api/x402/stats", "middleware/x402-gate.ts"],
+    ];
+    for (const [method, path, where] of known) {
+      const route = inv.routes.find((r) => r.method === method && r.path === path);
+      expect(route, `${method} ${path} (registered in ${where}) missing from inventory`).toBeTruthy();
+      expect(route!.file.endsWith(where), `${path} should come from ${where}, got ${route!.file}`).toBe(true);
+    }
+    // Canary: at least one route sourced from server.ts AND one from middleware/ —
+    // proves the scan genuinely spans locations beyond routes/, not just a hardcode.
+    expect(inv.routes.some((r) => r.file.endsWith("server.ts")), "no server.ts route scanned").toBe(true);
+    expect(inv.routes.some((r) => r.file.includes("/middleware/")), "no middleware route scanned").toBe(true);
+  });
+
+  it("a JSDoc example route is NOT mistaken for a real registration (R3 #4)", () => {
+    // auth/require-auth.ts documents `app.get("/api/protected", …)` inside a JSDoc
+    // block. Comment-stripping must keep it out of the inventory.
+    expect(has("GET", "/api/protected"), "/api/protected is a doc example, not a route").toBe(false);
+  });
+
+  it("the ONLY unpoliced routes are the documented cross-lane-pending set (R3 #4)", () => {
+    // Honesty gate: every private route is policed EXCEPT an explicitly enumerated
+    // set owned by another lane (SIWE auth flow → api-gate public / any-auth). A
+    // genuinely NEW unclassified route is NOT on this list, so it still lands in an
+    // unpoliced bucket and fails the two gates above.
+    const pending = inv.routes
+      .filter((r) => r.bucket === "cross_lane_pending")
+      .map((r) => `${r.method} ${r.path}`)
+      .sort();
+    const declared = (UNCLASSIFIED_PENDING_OWNER as Array<{ method: string; path: string }>)
+      .map((r) => `${r.method} ${r.path}`)
+      .sort();
+    expect(pending).toEqual(declared);
+    // All pending routes are SIWE auth-flow routes (the known cross-lane gap).
+    for (const p of pending) expect(p).toMatch(/\/api\/auth\//);
   });
 
   it("classifier stays faithful to the DEFAULT_SCOPE_REQUIREMENTS snapshot (11)", () => {
