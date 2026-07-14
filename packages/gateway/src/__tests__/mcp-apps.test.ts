@@ -519,10 +519,11 @@ describe("MCP Apps — _meta.ui.domain (PCC_MCP_APP_DOMAIN resolution)", () => {
     expect(meta.ui.prefersBorder).toBe(true);
   });
 
-  it("THROWS in production when unset (prod-required — fails the boot)", () => {
+  it("DEGRADES to the placeholder (never throws) in production when unset — a missing niche domain must not crash the gateway", () => {
     delete process.env[MCP_APP_DOMAIN_ENV];
     process.env.NODE_ENV = "production";
-    expect(() => resolveMcpAppDomain()).toThrow(/must be set to a UNIQUE https origin in production/i);
+    expect(() => resolveMcpAppDomain()).not.toThrow();
+    expect(resolveMcpAppDomain()).toBe(MCP_APP_DOMAIN_PLACEHOLDER);
   });
 
   it("accepts a valid origin even in production", () => {
@@ -540,9 +541,9 @@ describe("MCP Apps — _meta.ui.domain (PCC_MCP_APP_DOMAIN resolution)", () => {
     expect(() => validateMcpAppDomain("not a url")).toThrow();
   });
 
-  it("primeMcpAppAssets throws at startup in production when the domain is unset", () => {
+  it("primeMcpAppAssets does NOT crash the boot in production when the domain is unset (degrades to placeholder)", () => {
     delete process.env[MCP_APP_DOMAIN_ENV];
     process.env.NODE_ENV = "production";
-    expect(() => primeMcpAppAssets()).toThrow(new RegExp(MCP_APP_DOMAIN_ENV));
+    expect(() => primeMcpAppAssets()).not.toThrow();
   });
 });
