@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { httpMcpRoutes } from "../mcp/http-mcp-server.js";
+import { dispatchToolCall, httpMcpRoutes, type AgentPackageTool } from "../mcp/http-mcp-server.js";
+import { RENDER_DASHBOARD_TOOL_NAME } from "../mcp/mcp-app-view.js";
 
 describe("Streamable HTTP MCP server", () => {
   const app = Fastify({ logger: false });
@@ -253,7 +254,11 @@ describe("Streamable HTTP MCP server", () => {
     expect(rejectedResult.isError).toBe(true);
   });
 
-  it("tools/call with an unknown tool name returns a structured JSON-RPC error", async () => {
+  it("tools/call with an unknown tool name returns a tool-level isError result, NOT a protocol error", async () => {
+    // Directive 8: the pre-#257 contract existing /mcp clients depend on is a
+    // CallToolResult { isError: true } for an unknown tool — never a thrown
+    // JSON-RPC MethodNotFound. The result rides in `result`, with no top-level
+    // `error` envelope.
     const response = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -272,9 +277,60 @@ describe("Streamable HTTP MCP server", () => {
     });
     const body = response.json();
     expect(response.statusCode).toBe(200);
-    expect(body.error).toBeDefined();
-    expect(typeof body.error.code).toBe("number");
-    expect(typeof body.error.message).toBe("string");
-    expect(body.error.message.length).toBeGreaterThan(0);
+    expect(body.error).toBeUndefined();
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toContain("Unknown PCC tool");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dispatchToolCall — the restored /mcp tool-call contract, unit-tested off the
+// transport (directive 8). Proves: unknown/empty tool → isError result (never a
+// thrown protocol error); a non-object arg reaching the handler does not throw an
+// InvalidParams protocol error but flows to the tool as before.
+// ---------------------------------------------------------------------------
+
+describe("dispatchToolCall — restored unknown-tool + arg contract (directive 8)", () => {
+  const noTools = new Map<string, AgentPackageTool>();
+  const signal = new AbortController().signal;
+  const asResult = (r: unknown) =>
+    r as { isError?: boolean; content?: Array<{ type: string; text?: string }> };
+
+  it("returns a tool-level isError result for an unknown tool (does not throw)", async () => {
+    const res = asResult(
+      await dispatchToolCall(noTools, "definitely_not_a_real_pcc_tool", {}, undefined, signal),
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toContain("Unknown PCC tool");
+  });
+
+  it("treats an EMPTY tool name as unknown (isError), not an InvalidParams throw", async () => {
+    const res = asResult(await dispatchToolCall(noTools, "", {}, undefined, signal));
+    expect(res.isError).toBe(true);
+  });
+
+  it("does NOT throw on a non-object (array) arg — it flows to the handler as before", async () => {
+    // The pre-#257 handler never added an arg-type throw; a non-object reaches the
+    // render handler, which returns a normal tool-error result (isError), NOT a
+    // thrown JSON-RPC InvalidParams. (Via the real transport the SDK schema rejects
+    // non-object args upstream; this proves OUR code adds no second throw.)
+    const res = asResult(
+      await dispatchToolCall(
+        noTools,
+        RENDER_DASHBOARD_TOOL_NAME,
+        [] as unknown as Record<string, unknown>,
+        undefined,
+        signal,
+      ),
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toContain("Invalid DashboardManifest");
+  });
+
+  it("coerced empty args ({}) route to the render handler and validate (isError, no throw)", async () => {
+    const res = asResult(
+      await dispatchToolCall(noTools, RENDER_DASHBOARD_TOOL_NAME, {}, undefined, signal),
+    );
+    expect(res.isError).toBe(true);
   });
 });

@@ -8,10 +8,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   CallToolRequestSchema,
-  ErrorCode,
   isInitializeRequest,
   ListToolsRequestSchema,
-  McpError,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -301,6 +299,37 @@ async function proxyToolCall(
  * reference. Kept as one constant so a future icon swap only edits one line. */
 export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
 
+/**
+ * Dispatch a validated tools/call to its handler. Exported as a pure function so
+ * the unknown-tool + argument-coercion CONTRACT is unit-testable without standing
+ * up the Streamable HTTP transport.
+ *
+ * Restores the pre-#257 `/mcp` behavior existing clients depend on (audit
+ * directive 8): an unknown (or empty) tool name resolves to a tool-level
+ * `CallToolResult { isError: true }`, NEVER a thrown JSON-RPC protocol error
+ * (MethodNotFound). The caller passes `params.arguments ?? {}` exactly as before —
+ * no added `InvalidParams` throw. Non-object `arguments` are already rejected by
+ * the SDK's CallToolRequestSchema (`z.record(z.string(), z.unknown())`) BEFORE
+ * this runs, so no arg-type guard is needed or wanted here — a non-object simply
+ * cannot reach this function through the transport.
+ */
+export async function dispatchToolCall(
+  toolsByName: Map<string, AgentPackageTool>,
+  name: string,
+  args: JsonObject,
+  token: string | undefined,
+  signal: AbortSignal,
+) {
+  if (name === RENDER_DASHBOARD_TOOL_NAME) {
+    return handleRenderDashboardTool(args);
+  }
+  const tool = toolsByName.get(name);
+  if (!tool) {
+    return errorResult(`Unknown PCC tool: ${name}`);
+  }
+  return proxyToolCall(tool, args, token, signal);
+}
+
 function createMcpServer(pack: AgentPackage): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
@@ -327,32 +356,19 @@ function createMcpServer(pack: AgentPackage): McpServer {
   }));
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const { name } = request.params;
-    const rawArguments = request.params.arguments;
-
-    if (typeof name !== "string" || name.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "Invalid params: tool name is required");
-    }
-    if (
-      rawArguments !== undefined &&
-      (typeof rawArguments !== "object" || rawArguments === null || Array.isArray(rawArguments))
-    ) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Invalid params: arguments for "${name}" must be an object`,
-      );
-    }
-    const args = rawArguments ?? {};
-
-    if (name === RENDER_DASHBOARD_TOOL_NAME) {
-      return handleRenderDashboardTool(args);
-    }
-
-    const tool = toolsByName.get(name);
-    if (!tool) {
-      throw new McpError(ErrorCode.MethodNotFound, `Method not found: unknown PCC tool "${name}"`);
-    }
-    return proxyToolCall(tool, args, extra.authInfo?.token, extra.signal);
+    // Coerce arguments exactly as the pre-#257 handler did (`?? {}`); the SDK
+    // schema has already guaranteed `arguments` is an object-or-undefined. All
+    // tool-not-found / handler routing lives in the exported dispatchToolCall so
+    // the restored contract (unknown tool → isError result, never a thrown
+    // protocol error — directive 8) is unit-testable off-transport.
+    const args = request.params.arguments ?? {};
+    return dispatchToolCall(
+      toolsByName,
+      request.params.name,
+      args,
+      extra.authInfo?.token,
+      extra.signal,
+    );
   });
 
   registerMcpAppResources(server);
