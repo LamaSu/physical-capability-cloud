@@ -57,6 +57,38 @@ export function validateManifest(rules) {
   return errors;
 }
 
+/** The endpoint_scopes id of the manifest marker row (inert: method "MARKER"). */
+export const MANIFEST_MARKER_ID = "__route_policy_manifest__";
+
+/**
+ * Order-independent digest of the policy set (method + pattern + sorted scopes).
+ * The seeder records it in the marker row; a runtime gate recomputes it over the
+ * LIVE rows and compares — so prod can't boot enforce against a stale/partial
+ * table even though CI proved the manifest file is complete.
+ */
+export function manifestDigest(rules) {
+  const canon = rules
+    .map((r) => `${r.method} ${r.pattern} ${[...r.scopes].sort().join(",")}`)
+    .sort()
+    .join("\n");
+  return createHash("sha256").update(canon).digest("hex");
+}
+
+/** Write/refresh the marker row recording {version, count, digest} of this seed. */
+export function writeManifestMarker(gov, rules, version) {
+  const meta = JSON.stringify({ version: version ?? 0, count: rules.length, digest: manifestDigest(rules) });
+  const row = {
+    id: MANIFEST_MARKER_ID,
+    method: "MARKER", // never a real HTTP method → matchRoute never matches it (inert)
+    routePattern: MANIFEST_MARKER_ID,
+    requiredScopes: ["__marker__"],
+    description: meta,
+  };
+  if (gov.findEndpointScopeById(MANIFEST_MARKER_ID)) gov.updateEndpointScope(MANIFEST_MARKER_ID, row);
+  else gov.insertEndpointScope(row);
+  return meta;
+}
+
 /** Upsert every rule into endpoint_scopes via the governance repo. */
 export function seedRoutePolicies(gov, rules) {
   let inserted = 0, updated = 0;
@@ -91,7 +123,8 @@ async function runCli() {
   const dbPath = dbIdx !== -1 ? args[dbIdx + 1]
     : (process.env.DATABASE_URL ?? process.env.PCC_DB_PATH ?? "./data/pcc.sqlite");
 
-  const rules = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")).rules;
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+  const rules = manifest.rules;
   const errors = validateManifest(rules);
   if (errors.length) {
     console.error(`[seed-route-policy] REFUSING to seed — ${errors.length} invalid rule(s):`);
@@ -108,7 +141,8 @@ async function runCli() {
   const store = createStore({ dbPath, seed: false });
   try {
     const res = seedRoutePolicies(store.repos.governance, rules);
-    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated (${res.total} total).`);
+    const marker = writeManifestMarker(store.repos.governance, rules, manifest.version);
+    console.log(`[seed-route-policy] endpoint_scopes seeded at ${dbPath}: ${res.inserted} inserted, ${res.updated} updated (${res.total} total). marker ${marker}`);
   } finally {
     store.close();
   }
