@@ -38,6 +38,14 @@ import { resolveWinner } from "../policy/route-policy-precedence.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
 
+// Policy-only sentinel (SIWE authenticated-only routes). NOT a grantable or
+// caller-held scope — the api-keys repo refuses any "@"-namespaced scope at
+// issuance/grant. It means "a normalized principal exists," and is honored ONLY
+// as the exact singleton ["@authenticated"] in a route policy (a rule mixing it
+// with real roles is rejected upstream and grants nothing here). A tie with a
+// business-role rule stays ambiguous → fail closed.
+const AUTHENTICATED_SENTINEL = "@authenticated";
+
 const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   method: string;
   pattern: string;
@@ -61,6 +69,13 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Auditor endpoints — read-only audit and compliance access
   { method: "GET",    pattern: "/api/audit/*",                      scopes: ["auditor", "admin"] },
   { method: "GET",    pattern: "/api/compliance/*",                 scopes: ["auditor", "operator", "admin"] },
+  // SIWE session-introspection — authenticated principal, NO business role
+  // (audit classification). Exact method+path so they win cleanly over any
+  // broader rule; the checker grants on the sentinel (a normalized principal
+  // exists), not a scope intersection. Anonymous is already 401'd by api-gate.
+  { method: "GET",    pattern: "/api/auth/me",                      scopes: [AUTHENTICATED_SENTINEL] },
+  { method: "GET",    pattern: "/api/auth/sessions",                scopes: [AUTHENTICATED_SENTINEL] },
+  { method: "POST",   pattern: "/api/auth/logout",                  scopes: [AUTHENTICATED_SENTINEL] },
 ];
 
 // ── Scope Cache ──────────────────────────────────────────────────
@@ -388,6 +403,19 @@ async function scopeCheckerImpl(app: FastifyInstance) {
         caller_scopes: callerScopes,
         docs: "https://capability.network/whitepaper.md",
       });
+    }
+
+    // Authenticated-only route (policy-only sentinel): the winning rule requires
+    // ONLY that a normalized principal exists — no business role. Honored solely
+    // as the exact singleton ["@authenticated"]; a rule that mixes the sentinel
+    // with real roles grants nothing via this branch and falls through to the
+    // intersection below (where the sentinel matches no caller scope). A principal
+    // is guaranteed present here — the hook returned early for anonymous requests.
+    if (
+      matchedRequirement.scopes.length === 1 &&
+      matchedRequirement.scopes[0] === AUTHENTICATED_SENTINEL
+    ) {
+      return;
     }
 
     // Check if caller has any of the required scopes

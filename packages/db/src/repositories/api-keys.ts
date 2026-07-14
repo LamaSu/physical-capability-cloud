@@ -3,6 +3,39 @@ import { apiKeys } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IApiKeyRepository } from "../interfaces/IApiKeyRepository.js";
 
+/**
+ * Policy-only scopes live in the reserved "@" namespace (e.g. "@authenticated" —
+ * a route-policy sentinel meaning "a normalized principal exists"). They are
+ * NEVER grantable to a caller: a key that HELD "@authenticated" would defeat the
+ * sentinel, which must mean authentication, not possession of a scope. Refuse to
+ * write any "@"-prefixed scope onto a key at issuance OR grant. Reject (throw),
+ * never silently strip — a caller trying to mint one is a bug or an attack.
+ */
+const RESERVED_SCOPE_PREFIX = "@";
+function assertGrantableScopes(scopes: unknown): void {
+  const list = Array.isArray(scopes)
+    ? scopes
+    : typeof scopes === "string"
+      ? (() => {
+          try {
+            const parsed = JSON.parse(scopes);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  for (const s of list) {
+    if (typeof s === "string" && s.startsWith(RESERVED_SCOPE_PREFIX)) {
+      throw new Error(
+        `Refusing to grant reserved policy-only scope "${s}" to an API key. ` +
+          `Scopes in the "${RESERVED_SCOPE_PREFIX}" namespace are route-policy ` +
+          `sentinels, not grantable caller scopes.`,
+      );
+    }
+  }
+}
+
 export class ApiKeyRepository implements IApiKeyRepository {
   constructor(private db: StoreDB) {}
 
@@ -27,6 +60,7 @@ export class ApiKeyRepository implements IApiKeyRepository {
   }
 
   insert(key: typeof apiKeys.$inferInsert) {
+    assertGrantableScopes(key.scopes);
     return this.db.insert(apiKeys).values(key).returning().get();
   }
 
@@ -56,6 +90,7 @@ export class ApiKeyRepository implements IApiKeyRepository {
     // insert(). The caller is responsible for passing a bounded, validated list
     // — this method must NEVER be handed ["*"] (C-01). Returns the updated row,
     // or undefined if the key is missing or revoked.
+    assertGrantableScopes(scopes);
     return this.db
       .update(apiKeys)
       .set({ scopes: JSON.stringify(scopes) })

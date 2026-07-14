@@ -67,6 +67,10 @@ const PUBLIC_EXACT = [
   "/api/courier-jobs/healthz",    // Courier-jobs liveness — public for monitoring (legacy shim)
   "/api/job-offers/open",         // Generic open-offers feed — operator agents poll without API key (PRIMARY)
   "/api/job-offers/healthz",      // Job-offers liveness — public for monitoring (PRIMARY)
+  "/api/auth/nonce",              // SIWE pre-auth handshake — issue a login nonce. Pre-authentication
+                                  // by definition (a caller has no key/session yet), so it cannot be gated.
+  "/api/auth/verify",             // SIWE pre-auth handshake — verify the signature + open a session.
+                                  // Pre-authentication; the session it MINTS is the auth, so the route itself is public.
 ];
 
 // Capability detail routes are public — discovery, widget embedding, etc.
