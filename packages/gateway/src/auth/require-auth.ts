@@ -49,10 +49,12 @@ export async function requireAuth(
   req: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  // apiGate (onRequest) may have already accepted an API key and set userId.
-  // Don't demand a SIWE session on top of that — agents calling with a
-  // pcc_live_* key are already authenticated for this request.
-  if (req.userId) return;
+  // apiGate (onRequest) may have already accepted an API key: it always sets
+  // req.apiKeyId, and sets req.userId only when the key's operatorId is a wallet
+  // address (C-02 review r2). An email-operator key therefore has apiKeyId set
+  // but userId=null — key on EITHER so those callers stay authenticated.
+  // Don't demand a SIWE session on top of a valid API key.
+  if (req.userId || req.apiKeyId) return;
 
   const session = resolveSession(req);
   if (!session) {

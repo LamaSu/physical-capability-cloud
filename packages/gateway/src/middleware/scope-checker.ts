@@ -18,7 +18,17 @@
  *   - "*" is NOT a grant-all here; a legacy wildcard key matches no requirement
  *     and is therefore denied.
  *
- * Returns 403 with a descriptive error including the required scopes.
+ * Rollout mode (review #1) — the deny decisions above are gated by
+ * SCOPE_ENFORCEMENT_MODE:
+ *   - "report-only" (DEFAULT): a would-be 403 is instead logged (req.log.warn)
+ *     and the request is ALLOWED through. Default-deny otherwise bricks the
+ *     ~500 /api/* routes that have no scope policy yet, so we ship the signal
+ *     first and flip to "enforce" only after the Wave-0 route→policy inventory.
+ *   - "enforce": the fail-closed 403 behaviour described above.
+ *   - "off": the hook returns immediately; scope checking is disabled.
+ *
+ * On a denial (enforce mode) returns 403 with a descriptive error including
+ * the required scopes.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
@@ -63,20 +73,40 @@ let scopeCache: ScopeRequirement[] = [];
 let lastScopeCacheRefresh = 0;
 const SCOPE_CACHE_TTL = 300_000; // 5 minutes
 
+/**
+ * Merge DB-sourced requirements over the hardcoded defaults (review #1b).
+ *
+ * The defaults are the BASE set; each DB row either OVERRIDES a default with
+ * the same (method + pattern) key or ADDS a new requirement. This is a union,
+ * DB-wins-on-conflict — one db policy row must NEVER discard all hardcoded
+ * defaults (the prior `rows.length > 0 ? rows : defaults` did exactly that,
+ * turning every un-migrated route into an unmatched 403). Keying is
+ * case-insensitive on method so a db "post" overrides a default "POST".
+ */
+function mergeScopeRequirements(dbRows: ScopeRequirement[]): ScopeRequirement[] {
+  const keyOf = (r: ScopeRequirement) => `${r.method.toUpperCase()} ${r.pattern}`;
+  const byKey = new Map<string, ScopeRequirement>();
+  // Base layer: hardcoded defaults (copied so the module constant is never mutated).
+  for (const d of DEFAULT_SCOPE_REQUIREMENTS) byKey.set(keyOf(d), { ...d });
+  // Overlay layer: db rows override same-key defaults and add new keys.
+  for (const r of dbRows) byKey.set(keyOf(r), { ...r });
+  return [...byKey.values()];
+}
+
 function refreshScopeCache(): void {
   try {
     const rows = getRepos().governance.findAllEndpointScopes();
-    if (rows.length > 0) {
-      scopeCache = rows.map((r) => ({
-        method: r.method,
-        pattern: r.routePattern,
-        scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
-      }));
-    } else {
-      scopeCache = DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r }));
-    }
+    const dbRequirements: ScopeRequirement[] = rows.map((r) => ({
+      method: r.method,
+      pattern: r.routePattern,
+      scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
+    }));
+    // MERGE, don't replace (review #1b): defaults stay as the base even when
+    // the db has rows. mergeScopeRequirements([]) === the full defaults, so the
+    // empty-db case is unchanged.
+    scopeCache = mergeScopeRequirements(dbRequirements);
   } catch {
-    // DB not ready — use defaults
+    // DB not ready — fall back to the pure defaults (still a full set).
     if (scopeCache.length === 0) {
       scopeCache = DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r }));
     }
@@ -165,10 +195,36 @@ function getCallerScopes(req: FastifyRequest): string[] {
   return [];
 }
 
+// ── Enforcement Mode (rollout gate) ──────────────────────────────
+
+type ScopeEnforcementMode = "enforce" | "report-only" | "off";
+
+/**
+ * Resolve the rollout mode from SCOPE_ENFORCEMENT_MODE (review #1). Default is
+ * "report-only" — default-deny would otherwise 403 the ~500 /api/* routes that
+ * carry no scope policy yet. Read ONCE at plugin registration, not per-request.
+ *
+ * TODO(audit P0 follow-up): flip the default to "enforce" only AFTER the Wave-0
+ * route→policy inventory lands (d749deff's lane) so every /api/* route declares
+ * its required scopes and "enforce" cannot over-block a legitimate route.
+ */
+function resolveEnforcementMode(): ScopeEnforcementMode {
+  const raw = (process.env.SCOPE_ENFORCEMENT_MODE ?? "").trim().toLowerCase();
+  if (raw === "enforce" || raw === "report-only" || raw === "off") return raw;
+  return "report-only";
+}
+
 // ── Fastify Plugin ───────────────────────────────────────────────
 
 async function scopeCheckerImpl(app: FastifyInstance) {
+  // review #1: read the rollout mode ONCE at registration (module/plugin
+  // scope), never per-request. The hook closes over this value.
+  const enforcementMode = resolveEnforcementMode();
+
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // "off" — scope checking disabled entirely; bail before any work.
+    if (enforcementMode === "off") return;
+
     if (!req.url.startsWith("/api/")) return;
 
     // No principal at all → api-gate already allowed this through as a PUBLIC
@@ -212,6 +268,20 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // /api/* route (route metadata) + a CI check that fails on any unpoliced
     // route, so default-deny never silently over-blocks a legitimate route.
     if (!matchedRequirement) {
+      // review #1: in report-only mode, log the would-be denial and ALLOW,
+      // so an un-migrated route isn't bricked while the policy inventory lands.
+      if (enforcementMode === "report-only") {
+        req.log.warn(
+          {
+            method: req.method,
+            url: req.url,
+            caller_scopes: callerScopes,
+            reason: "no_scope_policy",
+          },
+          "scope-checker: would DENY (report-only) — route has no scope policy",
+        );
+        return;
+      }
       return reply.status(403).send({
         error: "insufficient_scope",
         message:
@@ -226,6 +296,21 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // Check if caller has any of the required scopes
     const hasScope = matchedRequirement.scopes.some((s) => callerScopes.includes(s));
     if (hasScope) return;
+
+    // review #1: in report-only mode, log the would-be denial and ALLOW.
+    if (enforcementMode === "report-only") {
+      req.log.warn(
+        {
+          method: req.method,
+          url: req.url,
+          caller_scopes: callerScopes,
+          required_scopes: matchedRequirement.scopes,
+          reason: "insufficient_scope",
+        },
+        "scope-checker: would DENY (report-only) — caller lacks a required scope",
+      );
+      return;
+    }
 
     return reply.status(403).send({
       error: "insufficient_scope",

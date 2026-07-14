@@ -6,6 +6,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { isAddress } from "viem";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
@@ -131,8 +132,21 @@ async function apiGateImpl(app: FastifyInstance) {
     const apiKey = resolveApiKey(req);
     if (apiKey) {
       req.apiKeyId = apiKey.id;
+      // operatorId is the authoritative SUBJECT of an API-key principal. PCC
+      // provisioning accepts EITHER an email or a wallet address, so this may
+      // be a non-address string. Always carry it as the subject.
       req.operatorId = apiKey.operatorId;
-      req.userId = apiKey.operatorId as `0x${string}`;
+      // review #3: req.userId means "verified wallet address" (branded
+      // `0x${string}`). Only populate it when operatorId genuinely IS a
+      // 0x-address — never cast an email into the wallet type, or downstream
+      // wallet-dependent code (on-chain calls, isAddress guards) receives a
+      // non-address masquerading as an EVM address. A walletless operator
+      // stays authenticated via apiKeyId with userId left null; downstream
+      // must not assume a wallet exists.
+      req.userId =
+        apiKey.operatorId && isAddress(apiKey.operatorId)
+          ? (apiKey.operatorId as `0x${string}`)
+          : null;
       req.principalType = "api-key";
       return;
     }
