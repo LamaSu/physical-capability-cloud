@@ -181,6 +181,18 @@ function validateCheckpointInput(input: CheckpointReceiptInput): string | null {
   return null;
 }
 
+/**
+ * Accepted checkpoint types that END the run, mapped to the terminal SESSION status record() sets
+ * ATOMICALLY on acceptance (round-6 P1-2). A session in a terminal_* status is no longer `open`, so
+ * the checkpoint route rejects any further checkpoint. finalize accepts terminal_* and classifies
+ * success vs fault from the terminal checkpoint TYPE. Single-sourced with evidence-async.ts
+ * TERMINAL_ACTIONS + milestone-package-store.ts TERMINAL_COMPLETION_TYPES/TERMINAL_FAULT_TYPE.
+ */
+const TERMINAL_SESSION_STATUS: Readonly<Record<string, string>> = {
+  execution_completed: "terminal_success",
+  fault_report: "terminal_fault",
+};
+
 export interface GatewayReceiptStoreDeps {
   /** The store's drizzle DB — owns `.transaction()`. Must be the SAME connection the repos write through. */
   db: StoreDB;
@@ -196,6 +208,13 @@ export interface GatewayReceiptStoreDeps {
   sequenceStore?: SessionSequenceStore;
   /** Ed25519 signer. Defaults to the process-default gateway receipt signer. */
   signer?: GatewayReceiptSigner;
+  /**
+   * Evidence-session repo (OPTIONAL). When provided, record() transitions the session to a terminal
+   * state IN THE SAME transaction as an accepted terminal checkpoint (round-6 P1-2), so a subsequent
+   * checkpoint is rejected at the route's `status !== "open"` gate. Omitted by test seeders that do
+   * not exercise the lifecycle — the transition is then simply skipped.
+   */
+  evidenceSessions?: { setStatus(sessionId: string, status: string): unknown };
 }
 
 export class GatewayReceiptStore {
@@ -204,6 +223,7 @@ export class GatewayReceiptStore {
   private readonly checkpointBodies: ICheckpointBodyRepository;
   private readonly sequenceStore: SessionSequenceStore;
   private readonly signer: GatewayReceiptSigner;
+  private readonly evidenceSessions?: { setStatus(sessionId: string, status: string): unknown };
 
   constructor(deps: GatewayReceiptStoreDeps) {
     this.db = deps.db;
@@ -211,6 +231,7 @@ export class GatewayReceiptStore {
     this.checkpointBodies = deps.checkpointBodies;
     this.sequenceStore = deps.sequenceStore ?? sessionSequenceStore;
     this.signer = deps.signer ?? getDefaultGatewayReceiptSigner();
+    this.evidenceSessions = deps.evidenceSessions;
   }
 
   /** The signer's public key (hex) — for out-of-band verification / key publication. */
@@ -413,6 +434,17 @@ export class GatewayReceiptStore {
         const row = this.repo.insert(insertRow);
         // Receipt inserted FIRST, body SECOND: a body-insert throw rolls the receipt back.
         this.checkpointBodies.insert(bodyRow);
+        // ATOMIC terminal-state transition (round-6 P1-2): if this accepted checkpoint ENDS the run
+        // (execution_completed / fault_report), close the session IN THIS SAME transaction so a
+        // subsequent checkpoint is rejected at the route's `status !== "open"` gate. There is no
+        // await between the receipt/body inserts and this write ⇒ genuinely atomic (a crash cannot
+        // leave a receipted terminal checkpoint with an `open` session). Optional dep: seeders that
+        // omit evidenceSessions skip the transition (their sessions stay `open`, which finalize
+        // still accepts).
+        const terminalStatus = this.evidenceSessions
+          ? TERMINAL_SESSION_STATUS[input.checkpointType]
+          : undefined;
+        if (terminalStatus) this.evidenceSessions!.setStatus(input.sessionId, terminalStatus);
         return row;
       });
     } catch (err) {

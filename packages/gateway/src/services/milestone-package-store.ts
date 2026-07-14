@@ -231,8 +231,15 @@ export class MilestonePackageStore {
     // B (clause 1): load the session for (job, milestone); require open|finalized.
     const session = this.evidenceSessions.findByJobMilestone(jobId, milestoneIndex);
     if (!session) return { status: "rejected", reason: "session_not_found" };
-    if (session.status !== "open" && session.status !== "finalized") {
-      // No finalizable session (step 6 statuses are only open|finalized) — fail closed.
+    if (
+      session.status !== "open" &&
+      session.status !== "terminal_success" &&
+      session.status !== "terminal_fault" &&
+      session.status !== "finalized"
+    ) {
+      // Not a finalizable session state — fail closed. (open: seeder path with no terminal
+      // transition; terminal_success/terminal_fault: the route path after the P1-2 transition on the
+      // terminal checkpoint; finalized: idempotent re-finalize.)
       return { status: "rejected", reason: "session_not_found" };
     }
     const sessionId = session.sessionId;

@@ -606,6 +606,15 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
 
     // Registered signer (parent pubkey) — the delegation authenticity anchor.
     const job = repos.jobs.findById(jobId);
+    // Lifecycle (round-6 P1-2a): a settled / completed / held / cancelled / failed / completing job
+    // (or one already `evidence_finalized`) must NOT accept new checkpoints, even if its session is
+    // somehow still `open`. The session-status gate above catches the normal case; this catches a
+    // job whose lifecycle advanced out-of-band.
+    if (job && EVIDENCE_UNCOLLECTABLE_STATUSES.has(job.status)) {
+      return reply
+        .status(409)
+        .send({ error: "job_not_evidence_collectable", status: job.status });
+    }
     const parentPublicKey = registeredParentPublicKeyBytes(
       job ? repos.kernels.findById(job.kernelId) : null,
     );
@@ -658,6 +667,7 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       db,
       repo: repos.gatewayReceipts,
       checkpointBodies: repos.checkpointBodies,
+      evidenceSessions: repos.evidenceSessions, // round-6 P1-2: atomic terminal-state transition on accept
     });
     const result = receipts.record({
       jobId,
@@ -786,6 +796,20 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     }
     const now = nowSeconds();
     const { db, repos } = getStore();
+
+    // Lifecycle (round-6 P1-2a): a settled / completed / held / cancelled / failed job must not run
+    // a NEW finalization. Idempotency is preserved — if a package already exists the store returns it
+    // below; this ONLY blocks a FRESH finalize on a job whose lifecycle is already terminal.
+    const finalizeJob = repos.jobs.findById(jobId);
+    if (
+      finalizeJob &&
+      EVIDENCE_UNCOLLECTABLE_STATUSES.has(finalizeJob.status) &&
+      !repos.milestonePackages.findByJobMilestone(jobId, milestoneIndex)
+    ) {
+      return reply
+        .status(409)
+        .send({ error: "job_not_evidence_collectable", status: finalizeJob.status });
+    }
 
     const packages = new MilestonePackageStore({
       db,

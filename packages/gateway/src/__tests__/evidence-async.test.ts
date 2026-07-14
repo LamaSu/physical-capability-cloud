@@ -711,6 +711,47 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       const res = await app.inject({ method: "POST", url: `/api/jobs/other-job/evidence/checkpoints`, payload: cp.body });
       expect(res.statusCode).toBe(404);
     });
+
+    // ── P1-2: atomic terminal-state transition on accepting a terminal checkpoint ──────
+    it("P1-2: an accepted execution_completed transitions the session to terminal_success; a subsequent checkpoint → 409 session_not_open", async () => {
+      const { jobId, del, sessionId } = await begin();
+      const now = Math.floor(Date.now() / 1000);
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      const r1 = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c1.body });
+      expect(r1.statusCode).toBe(201);
+      // The session is CLOSED atomically with the accept — no longer `open`.
+      expect(getStore().repos.evidenceSessions.findById(sessionId)?.status).toBe("terminal_success");
+      // A subsequent checkpoint is rejected — the run ended. The transition PREVENTS the poisoning
+      // the finalizer scan can only DETECT after the fact.
+      const c2 = signCheckpoint({ sessionId, seq: 2, createdAt: now, prevCheckpointHash: c1.checkpointHash, events: [{ b: 2 }], checkpointType: "workflow_step_completed", sessionPrivateKey: del.sessionPrivateKey });
+      const r2 = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c2.body });
+      expect(r2.statusCode).toBe(409);
+      expect(r2.json().error).toBe("session_not_open");
+    });
+
+    it("P1-2: an accepted fault_report transitions the session to terminal_fault; a subsequent checkpoint → 409", async () => {
+      const { jobId, del, sessionId } = await begin({ allowedActions: ["execution_started", "fault_report"] });
+      const now = Math.floor(Date.now() / 1000);
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ fault: true }], checkpointType: "fault_report", sessionPrivateKey: del.sessionPrivateKey });
+      const r1 = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c1.body });
+      expect(r1.statusCode).toBe(201);
+      expect(getStore().repos.evidenceSessions.findById(sessionId)?.status).toBe("terminal_fault");
+      const c2 = signCheckpoint({ sessionId, seq: 2, createdAt: now, prevCheckpointHash: c1.checkpointHash, events: [{ b: 2 }], checkpointType: "execution_started", sessionPrivateKey: del.sessionPrivateKey });
+      const r2 = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c2.body });
+      expect(r2.statusCode).toBe(409);
+    });
+
+    // ── P1-2a: job-lifecycle enforcement on the checkpoint route ──────────────────────
+    it("P1-2a: a checkpoint on a job whose lifecycle went terminal out-of-band → 409 job_not_evidence_collectable", async () => {
+      const { jobId, del, sessionId } = await begin();
+      // Force the job terminal while the session is still `open` (simulates an out-of-band advance).
+      getStore().repos.jobs.update(jobId, { status: "settled" });
+      const now = Math.floor(Date.now() / 1000);
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ a: 1 }], checkpointType: "execution_started", sessionPrivateKey: del.sessionPrivateKey });
+      const r1 = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c1.body });
+      expect(r1.statusCode).toBe(409);
+      expect(r1.json().error).toBe("job_not_evidence_collectable");
+    });
   });
 
   // ─── finalize ────────────────────────────────────────────────────────────
