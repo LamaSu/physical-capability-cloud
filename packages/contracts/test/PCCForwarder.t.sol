@@ -40,6 +40,16 @@ contract PCCForwarderTest is Test {
 
     uint256 internal constant AMOUNT = 1_000e6;
 
+    /// @dev A second payer identity, used to forge an EIP-3009 authorization
+    ///      signed by the WRONG party — it must not settle against a valid intent.
+    uint256 internal constant OTHER_KEY = 0xB0B;
+
+    /// @dev secp256k1 group order N. For a canonical (low-s) signature, `N - s`
+    ///      is the upper-half s of its malleable twin — exactly what the EIP-2
+    ///      guard in PCCForwarder._recover must reject.
+    uint256 internal constant SECP256K1_N =
+        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+
     /// @dev Bundle of the two payer signatures relay() needs, so tests can sign
     ///      an intent ONCE, then mutate a field and submit with the stale
     ///      signatures — and to keep per-test stack depth shallow.
@@ -343,5 +353,220 @@ contract PCCForwarderTest is Test {
         Sigs memory sg = _sign(it);
         vm.expectRevert("PCCForwarder: untrusted target");
         _relayWith(it, cd, sg);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // review #6 — edge-case hardening (impl3-delta)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// @dev Sign an EIP-3009 ReceiveWithAuthorization over ARBITRARY fields with
+    ///      an arbitrary key, so a test can pair a valid ExecutionIntent with a
+    ///      payment authorization that disagrees on payer / amount / nonce /
+    ///      validAfter-validBefore. The forwarder always rebuilds the digest from
+    ///      intent.{payer,amount,nonce,deadline} + validAfter=0, so any such
+    ///      disagreement recovers a signer != payer and the EIP-3009 call fails.
+    function _signPayFull(
+        address from,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint256 signerKey
+    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                usdc.RECEIVE_WITH_AUTHORIZATION_TYPEHASH(),
+                from,
+                address(forwarder),
+                value,
+                validAfter,
+                validBefore,
+                nonce
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash));
+        (v, r, s) = vm.sign(signerKey, digest);
+    }
+
+    // ── Intent-field mutation: payer / nonce / deadline break the binding ────
+
+    function test_mutate_payer_breaksSignature() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("mp"), recipient);
+        Sigs memory sg = _sign(it); // signed while payer == the real signer
+        // Nonzero so the zero-payer guard passes; the digest now recovers to
+        // neither the real payer nor 0xBAD -> signer != intent.payer.
+        it.payer = address(0xBAD);
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_mutate_nonce_breaksSignature_originalStillSettles() public {
+        bytes memory cd = _pingCd();
+        bytes32 originalNonce = keccak256("orig-nonce");
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, originalNonce, recipient);
+        Sigs memory sg = _sign(it);
+
+        it.nonce = keccak256("mutated-nonce"); // digest changes -> intent sig invalid
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+
+        // The reverted attempt never reached the nonce write, so the original
+        // (payer, nonce) is still free and the untouched signatures still settle.
+        it.nonce = originalNonce;
+        _relayWith(it, cd, sg);
+        assertEq(usdc.balanceOf(recipient), AMOUNT, "original nonce settles after mutated-nonce revert");
+        assertTrue(forwarder.usedNonces(payer, originalNonce), "original nonce consumed exactly once");
+    }
+
+    function test_mutate_deadline_breaksSignature() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("md"), recipient);
+        Sigs memory sg = _sign(it);
+        // A DIFFERENT still-future deadline: the expiry guard passes, so the ONLY
+        // failure is the signature binding over `deadline`.
+        it.deadline = block.timestamp + 2 hours;
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_expiredIntent_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("exp"), recipient);
+        Sigs memory sg = _sign(it); // signatures are fully valid...
+        vm.warp(it.deadline + 1); // ...but now block.timestamp > deadline (expiry precedes the sig check)
+        vm.expectRevert("PCCForwarder: expired");
+        _relayWith(it, cd, sg);
+    }
+
+    // ── The two payer signatures must agree (ExecutionIntent <-> EIP-3009) ───
+    // A valid intent paired with a payment authorization for the wrong
+    // payer / amount / nonce / validity window must NOT settle. The forwarder
+    // rebuilds the EIP-3009 digest from the intent, so a mismatched pay sig
+    // recovers a non-payer signer and USDC rejects it -> "USDC auth failed".
+
+    function test_payAuth_wrongPayer_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("wp"), recipient);
+        Sigs memory sg;
+        (sg.iv, sg.ir, sg.isig) = _signIntentFor(forwarder, it); // valid intent
+        // Authorization signed by a DIFFERENT payer key.
+        (sg.pv, sg.pr, sg.psig) =
+            _signPayFull(vm.addr(OTHER_KEY), AMOUNT, 0, it.deadline, it.nonce, OTHER_KEY);
+        vm.expectRevert("PCCForwarder: USDC auth failed");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_payAuth_wrongAmount_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("wa"), recipient);
+        Sigs memory sg;
+        (sg.iv, sg.ir, sg.isig) = _signIntentFor(forwarder, it);
+        // Authorization over a value != intent.amount.
+        (sg.pv, sg.pr, sg.psig) =
+            _signPayFull(payer, AMOUNT - 1, 0, it.deadline, it.nonce, PAYER_KEY);
+        vm.expectRevert("PCCForwarder: USDC auth failed");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_payAuth_wrongNonce_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("wn"), recipient);
+        Sigs memory sg;
+        (sg.iv, sg.ir, sg.isig) = _signIntentFor(forwarder, it);
+        // Authorization over a nonce != intent.nonce.
+        (sg.pv, sg.pr, sg.psig) =
+            _signPayFull(payer, AMOUNT, 0, it.deadline, keccak256("other-nonce"), PAYER_KEY);
+        vm.expectRevert("PCCForwarder: USDC auth failed");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_payAuth_wrongValidWindow_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("ww"), recipient);
+        Sigs memory sg;
+        (sg.iv, sg.ir, sg.isig) = _signIntentFor(forwarder, it);
+        // Forwarder pins validAfter=0, validBefore=intent.deadline; an
+        // authorization signed over a different window won't match that digest.
+        (sg.pv, sg.pr, sg.psig) =
+            _signPayFull(payer, AMOUNT, 1, it.deadline + 1, it.nonce, PAYER_KEY);
+        vm.expectRevert("PCCForwarder: USDC auth failed");
+        _relayWith(it, cd, sg);
+    }
+
+    // ── Malformed / malleable intent signatures fail closed ─────────────────
+
+    function test_malformedIntentSig_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("bad"), recipient);
+        Sigs memory sg = _sign(it);
+        // Garbage r/s with a structurally valid v -> ecrecover yields junk != payer.
+        sg.iv = 27;
+        sg.ir = bytes32(uint256(1));
+        sg.isig = bytes32(uint256(1));
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_intentSig_invalidV_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("badv"), recipient);
+        Sigs memory sg = _sign(it);
+        // v outside {27,28} -> _recover returns address(0) -> fail closed.
+        sg.iv = 29;
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+    }
+
+    function test_highSIntentSig_reverts() public {
+        bytes memory cd = _pingCd();
+        PCCForwarder.ExecutionIntent memory it = _intent(address(targetA), cd, AMOUNT, keccak256("hs"), recipient);
+
+        (uint8 v, bytes32 r, bytes32 s) = _signIntentFor(forwarder, it); // canonical low-s
+        bytes32 highS = bytes32(SECP256K1_N - uint256(s)); // malleable upper-half twin
+        assertGt(uint256(highS), SECP256K1_N / 2, "twin s is in the upper half");
+
+        Sigs memory sg;
+        sg.iv = v == 27 ? 28 : 27; // the twin flips v parity...
+        sg.ir = r;
+        sg.isig = highS;
+        (sg.pv, sg.pr, sg.psig) = _signPay(it); // valid pay sig; the intent check fails first
+
+        // ...and the EIP-2 malleability guard in _recover rejects the upper-half s.
+        vm.expectRevert("PCCForwarder: bad intent signature");
+        _relayWith(it, cd, sg);
+    }
+
+    // ── sweepStuckTokens: access control + argument guards + defined behavior ─
+
+    function test_sweep_onlyOwner() public {
+        // An authorized relayer is still NOT the owner.
+        vm.prank(relayer);
+        vm.expectRevert("PCCForwarder: not owner");
+        forwarder.sweepStuckTokens(usdc, recipient, 1);
+    }
+
+    function test_sweep_zeroRecipient_reverts() public {
+        // Caller is the owner (this test contract, per setUp).
+        vm.expectRevert("PCCForwarder: zero sweep recipient");
+        forwarder.sweepStuckTokens(usdc, address(0), 1);
+    }
+
+    function test_sweep_zeroAmount_reverts() public {
+        // Zero-amount sweep is explicitly rejected (no-op sweeps disallowed).
+        vm.expectRevert("PCCForwarder: zero sweep amount");
+        forwarder.sweepStuckTokens(usdc, recipient, 0);
+    }
+
+    function test_sweep_rescuesStuckTokens() public {
+        // Simulate tokens sent directly to the forwarder — the H-01 stuck-funds
+        // scenario the sweep exists to rescue.
+        address dest = address(0x5177);
+        usdc.mint(address(forwarder), 500e6);
+        assertEq(usdc.balanceOf(address(forwarder)), 500e6, "forwarder holds stuck funds");
+
+        forwarder.sweepStuckTokens(usdc, dest, 500e6); // owner rescues
+        assertEq(usdc.balanceOf(dest), 500e6, "swept to destination");
+        assertEq(usdc.balanceOf(address(forwarder)), 0, "forwarder emptied");
     }
 }
