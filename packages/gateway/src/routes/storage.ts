@@ -28,7 +28,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { sql } from "@pcc/store";
-import { getStore } from "../db.js";
+import { getStore, getRepos } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
 import {
   getCidBlobStorage,
@@ -158,6 +158,44 @@ function safeGetOffer(offerId: string): JobOffer | undefined {
   }
 }
 
+// Placeholder operator addresses that mean "no real owner". Mirrors the kernel
+// facade's own unowned set (kernel.facade.register) so a caller can never be
+// treated as owning an unowned/legacy-placeholder kernel row.
+const UNOWNED_OPERATOR_ADDRESSES: ReadonlySet<string> = new Set<string>([
+  "",
+  "0x0000000000000000000000000000000000000000",
+]);
+
+// Resolve the set of kernel ids OWNED by a caller principal, via the
+// AUTHORITATIVE ownership source: shop_kernels.operator_address. The kernel
+// facade binds operator_address to the authenticated operatorId at
+// registration (kernel.facade.register: `operatorAddress: actorId`) and
+// enforces owner-only on every mutation (`existing.operatorAddress === actorId`).
+// So "caller owns kernel K" ⇔ K.operatorAddress === caller — the SAME operatorId
+// namespace as `caller`, NOT the kernel-id namespace. This is why a raw
+// `claimedByKernelId === caller` compare was wrong (review #3): claimedByKernelId
+// is a kernel id, caller is an operator principal.
+//
+// Read-only. Fails CLOSED (returns []) if the store isn't reachable — e.g.
+// isolated unit tests with no gateway store wired — so the claimant path denies
+// rather than throws. `caller` is assumed already non-empty/non-anonymous
+// (guarded by the sole caller below); the UNOWNED filter is defense-in-depth so
+// an unowned placeholder address can never be matched even if it leaks in.
+function callerOwnedKernelIds(caller: string): string[] {
+  try {
+    return getRepos()
+      .kernels.findAll()
+      .filter(
+        (k) =>
+          k.operatorAddress === caller &&
+          !UNOWNED_OPERATOR_ADDRESSES.has(k.operatorAddress),
+      )
+      .map((k) => k.id);
+  } catch {
+    return [];
+  }
+}
+
 // Allowlist of offer states in which a linked blob may be read WITHOUT auth.
 // Mirrors the public open-offers feed (JobOffersStore.listOpen exposes only
 // status === "open"). ALLOWLIST, not denylist: any state not listed here —
@@ -181,11 +219,23 @@ const PUBLIC_OFFER_STATES: ReadonlySet<JobOffer["status"]> = new Set<JobOffer["s
 //      operatorId / SIWE address, and a blob's uploaded_by is set to that same
 //      operatorId at upload time — so "tenant owner" and "uploader" are one
 //      check for storage_blobs (there is no org-above-operator layer). OR
-//   2. a participant in the linked offer/job — the offer's poster
-//      (offer.posterDid) or the operator/kernel that claimed it
-//      (offer.claimedByKernelId). This lets a job's two sides exchange files:
-//      the poster reads the operator's evidence photos; the operator reads the
-//      poster's input files.
+//   2. a participant in the linked offer/job — the offer's POSTER, or the
+//      OPERATOR that owns the kernel which claimed it. This lets a job's two
+//      sides exchange files: the poster reads the operator's evidence photos;
+//      the operator reads the poster's input files. Both sides must be resolved
+//      in the caller's own identity namespace (operatorId), NOT by raw-string
+//      equality across namespaces (review #3):
+//        - Poster side: offer.posterDid is set to the poster's operatorId by the
+//          job-offers route (resolvePoster → operatorId), the SAME namespace as
+//          `caller`; canPublicRead already relies on this (posterDid ===
+//          uploaded_by). So a direct `posterDid === caller` compare is correct.
+//        - Claimant side: offer.claimedByKernelId is a KERNEL id, a DIFFERENT
+//          namespace from `caller` (an operator principal). Comparing them
+//          directly (round-2) denied the real operator behind the claiming
+//          kernel, and would have wrongly allowed an operatorId that merely
+//          equalled a kernel-id string. Resolve real ownership instead:
+//          authorize when the caller OWNS the claiming kernel
+//          (shop_kernels.operator_address === caller).
 //
 // A third path — an explicit per-blob access grant (share-with-user) — is named
 // in the finding but has no backing store yet. TODO(audit P0 follow-up): when a
@@ -204,8 +254,18 @@ function isAuthorizedForPrivateBlob(row: StorageBlobRow, caller: string): boolea
   if (row.related_offer_id) {
     const offer = safeGetOffer(row.related_offer_id);
     if (offer) {
+      // 2a. Poster side — posterDid is the poster's operatorId (same namespace
+      //     as `caller`); a direct compare is namespace-correct here.
       if (offer.posterDid && offer.posterDid === caller) return true;
-      if (offer.claimedByKernelId && offer.claimedByKernelId === caller) return true;
+
+      // 2b. Claimant side — claimedByKernelId is a KERNEL id, not an operatorId.
+      //     Authorize only when the caller OWNS that kernel, resolved through the
+      //     authoritative operator_address ownership source. (Replaces the round-2
+      //     cross-namespace `claimedByKernelId === caller` bug, review #3.)
+      if (offer.claimedByKernelId) {
+        const ownedKernelIds = callerOwnedKernelIds(caller);
+        if (ownedKernelIds.includes(offer.claimedByKernelId)) return true;
+      }
     }
   }
 
