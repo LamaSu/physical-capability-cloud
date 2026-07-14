@@ -1,32 +1,38 @@
 /**
- * Runtime route-policy inventory gate (audit P0, lane d749deff).
+ * Runtime route-policy inventory gate (audit P0, lane d749deff; review finding #2).
  *
  * The RUNTIME half of the completeness guarantee (the build-time half is the CI
- * coverage gate, route-policy-coverage.test.ts, which proves the manifest covers
- * every /api/* route). This verifies the LIVE endpoint_scopes table was fully and
- * correctly seeded from the manifest before prod boots in enforce — so CI can't
- * pass on a complete JSON while production starts against an empty/stale/partial
- * policy table. Fails closed (throws) on any problem.
+ * coverage gate). It verifies the LIVE endpoint_scopes table is a complete,
+ * untampered seed of the manifest BEFORE prod boots in enforce.
+ *
+ * TRUST ROOT = the build-checked-in constants in manifest-digest.generated.ts —
+ * NOT the marker row inside the DB being validated. The live rows must hash to the
+ * EXACTLY-expected digest, so a stale/partial/tampered table (even one whose marker
+ * was recomputed to self-certify) cannot pass: the attacker cannot change the
+ * compiled constant. Fails closed (throws) on any problem.
  *
  * Wire into scope-checker.ts assertCompleteRoutePolicyInventory():
  *     verifySeededPolicies(getRepos().governance);
  */
 import { createHash } from "node:crypto";
+import {
+  EXPECTED_MANIFEST_VERSION,
+  EXPECTED_MANIFEST_COUNT,
+  EXPECTED_MANIFEST_DIGEST,
+} from "./manifest-digest.generated.js";
 
 /** Kept in sync with scripts/audit/seed-route-policy.mjs MANIFEST_MARKER_ID. */
 export const MANIFEST_MARKER_ID = "__route_policy_manifest__";
 
-/**
- * Minimum manifest version the deployed gateway will accept from the live table.
- * Bump in lockstep with the manifest's `version` field so a table seeded from an
- * older manifest than this build expects is rejected (fail closed).
- */
-export const MIN_MANIFEST_VERSION = 1;
+const VALID_SCOPES = new Set<string>([
+  "operator", "requestor", "verifier", "admin", "agent", "auditor", "template_author",
+]);
+const VALID_METHODS = new Set<string>(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]);
+const DIGEST_RE = /^[0-9a-f]{64}$/;
+// A clean /api/ route pattern: only these characters. Rejects query strings,
+// spaces, control characters, and anything else in one ASCII-safe check.
+const CLEAN_PATTERN_RE = /^\/api\/[A-Za-z0-9/_:*.-]*$/;
 
-/** The manifest ships ~112 rules; a table far below that was not fully seeded. */
-export const MIN_POLICY_ROWS = 100;
-
-/** Minimal shape this gate needs — avoids a hard dependency on the repo type. */
 export interface EndpointScopeRowLike {
   id: string;
   method: string;
@@ -45,7 +51,7 @@ export class RoutePolicyInventoryError extends Error {
   }
 }
 
-/** Same canonical digest the seeder records (method + pattern + sorted scopes). */
+/** Same canonical digest the seeder writes (method + pattern + sorted scopes). */
 function digestOf(rows: Array<{ method: string; pattern: string; scopes: string[] }>): string {
   const canon = rows
     .map((r) => `${r.method} ${r.pattern} ${[...r.scopes].sort().join(",")}`)
@@ -54,57 +60,85 @@ function digestOf(rows: Array<{ method: string; pattern: string; scopes: string[
   return createHash("sha256").update(canon).digest("hex");
 }
 
+function fail(msg: string): never {
+  throw new RoutePolicyInventoryError(msg);
+}
+
 /**
- * Verify the live endpoint_scopes table is a complete, untampered seed of the
- * manifest. Throws RoutePolicyInventoryError on: no marker (never seeded), corrupt
- * marker, too few rows, count mismatch (partial seed), stale version, a malformed
- * row, or a digest mismatch (the table drifted from what the seeder wrote).
+ * Verify the live endpoint_scopes table is a complete, untampered seed of THIS
+ * build's manifest. Fails closed on: no/corrupt marker; missing or malformed
+ * version/count/digest; version/count/digest not exactly the build constants; wrong
+ * live row count; a malformed row (bad method, unclean /api pattern, empty /
+ * duplicate / unknown / wildcard scope); a duplicate method+pattern; or a live
+ * digest that differs from the build-trusted digest (drift / coordinated tamper).
  */
 export function verifySeededPolicies(gov: GovLike): void {
   const all = gov.findAllEndpointScopes();
+
   const marker = all.find((r) => r.id === MANIFEST_MARKER_ID);
   if (!marker) {
-    throw new RoutePolicyInventoryError(
-      "route-policy manifest not seeded (no marker row). Run scripts/audit/seed-route-policy.mjs " +
-        "before SCOPE_ENFORCEMENT_MODE=enforce.",
-    );
+    fail("route-policy manifest not seeded (no marker row). Run scripts/audit/seed-route-policy.mjs " +
+      "before SCOPE_ENFORCEMENT_MODE=enforce.");
+  }
+  let meta: { version?: unknown; count?: unknown; digest?: unknown };
+  try {
+    meta = JSON.parse(marker!.description ?? "{}");
+  } catch {
+    return fail("route-policy marker is corrupt (unparseable metadata)");
   }
 
-  let meta: { version?: number; count?: number; digest?: string };
-  try {
-    meta = JSON.parse(marker.description ?? "{}");
-  } catch {
-    throw new RoutePolicyInventoryError("route-policy marker is corrupt (unparseable metadata)");
+  // Presence + shape — missing count/digest/version must NOT be tolerated.
+  if (!Number.isInteger(meta.version)) fail("route-policy marker: version missing or malformed");
+  if (!Number.isInteger(meta.count)) fail("route-policy marker: count missing or malformed");
+  if (typeof meta.digest !== "string" || !DIGEST_RE.test(meta.digest)) {
+    fail("route-policy marker: digest missing or malformed");
+  }
+
+  // EXACT equality against the build-trusted constants (the trust root).
+  if (meta.version !== EXPECTED_MANIFEST_VERSION) {
+    fail(`route-policy version ${meta.version} != expected ${EXPECTED_MANIFEST_VERSION} — reseed with this build's manifest`);
+  }
+  if (meta.count !== EXPECTED_MANIFEST_COUNT) {
+    fail(`route-policy marker count ${meta.count} != expected ${EXPECTED_MANIFEST_COUNT}`);
+  }
+  if (meta.digest !== EXPECTED_MANIFEST_DIGEST) {
+    fail("route-policy marker digest != build-trusted digest — reseed");
   }
 
   const rows = all
     .filter((r) => r.id !== MANIFEST_MARKER_ID && r.method !== "MARKER")
     .map((r) => ({ method: r.method, pattern: r.routePattern, scopes: r.requiredScopes }));
 
-  if (rows.length < MIN_POLICY_ROWS) {
-    throw new RoutePolicyInventoryError(
-      `route-policy inventory too small: ${rows.length} rows (< ${MIN_POLICY_ROWS}) — reseed`,
-    );
+  if (rows.length !== EXPECTED_MANIFEST_COUNT) {
+    fail(`route-policy inventory has ${rows.length} live rows, expected ${EXPECTED_MANIFEST_COUNT} — partial/extra seed, reseed`);
   }
-  if (typeof meta.count === "number" && rows.length !== meta.count) {
-    throw new RoutePolicyInventoryError(
-      `route-policy partial seed: ${rows.length} live rows vs ${meta.count} recorded — reseed`,
-    );
-  }
-  if ((meta.version ?? 0) < MIN_MANIFEST_VERSION) {
-    throw new RoutePolicyInventoryError(
-      `route-policy manifest too old: v${meta.version} < v${MIN_MANIFEST_VERSION} — reseed with the current manifest`,
-    );
-  }
+
+  // Structural validity + de-dup (clear diagnostics; also fail-closed on any bad row).
+  const seenRoute = new Set<string>();
   for (const r of rows) {
-    if (!Array.isArray(r.scopes) || r.scopes.length === 0) {
-      throw new RoutePolicyInventoryError(`malformed policy row (empty scopes): ${r.method} ${r.pattern}`);
+    if (!VALID_METHODS.has(r.method)) fail(`route-policy: invalid method "${r.method}" (${r.pattern})`);
+    if (typeof r.pattern !== "string" || !CLEAN_PATTERN_RE.test(r.pattern)) {
+      fail(`route-policy: unclean /api/ pattern (${r.method} ${JSON.stringify(r.pattern)})`);
     }
+    if (!Array.isArray(r.scopes) || r.scopes.length === 0) {
+      fail(`route-policy: empty scopes (${r.method} ${r.pattern})`);
+    }
+    const seenScope = new Set<string>();
+    for (const s of r.scopes) {
+      if (s === "*") fail(`route-policy: wildcard "*" scope forbidden (${r.method} ${r.pattern})`);
+      if (!VALID_SCOPES.has(s)) fail(`route-policy: unknown scope "${s}" (${r.method} ${r.pattern})`);
+      if (seenScope.has(s)) fail(`route-policy: duplicate scope "${s}" (${r.method} ${r.pattern})`);
+      seenScope.add(s);
+    }
+    const key = `${r.method} ${r.pattern}`;
+    if (seenRoute.has(key)) fail(`route-policy: duplicate method+pattern (${key})`);
+    seenRoute.add(key);
   }
+
+  // Integrity: the live rows must hash to the BUILD-trusted digest. This is what
+  // defeats coordinated row+marker tampering — the constant cannot be forged.
   const live = digestOf(rows);
-  if (meta.digest && live !== meta.digest) {
-    throw new RoutePolicyInventoryError(
-      `route-policy table drift: live digest ${live.slice(0, 12)} != seeded ${String(meta.digest).slice(0, 12)} — reseed`,
-    );
+  if (live !== EXPECTED_MANIFEST_DIGEST) {
+    fail(`route-policy table drift: live digest ${live.slice(0, 12)} != build-trusted ${EXPECTED_MANIFEST_DIGEST.slice(0, 12)} — reseed`);
   }
 }
