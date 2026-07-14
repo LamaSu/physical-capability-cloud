@@ -85,6 +85,7 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
   function seedChain(
     eventsPerCheckpoint: unknown[][],
     terminalType = "execution_completed",
+    typesOverride?: string[],
   ): string[] {
     const seq = new SessionSequenceStore();
     const receiptStore = new GatewayReceiptStore({
@@ -100,7 +101,11 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     eventsPerCheckpoint.forEach((events, i) => {
       const seqNum = i + 1;
       const eventsRoot = canonicalSha256(events);
-      const checkpointType = i === n - 1 ? terminalType : "workflow_step_completed";
+      const checkpointType = typesOverride
+        ? typesOverride[i]
+        : i === n - 1
+          ? terminalType
+          : "workflow_step_completed";
       // checkpointHash: server-computed sha256 over the canonical checkpoint content —
       // the SAME 6 keys finalize recomputes over (S6-2 terminal-hash integrity check).
       const checkpointHash = canonicalSha256({
@@ -205,65 +210,67 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
   });
 
-  // ── S6-5: revealed payloads are read from the DURABLE store, never caller input ──────
-  // finalize takes NO payloads argument; it includes every checkpoint_bodies.payload (set
-  // by the reveal route — verified at the route level) in seq order. This is the griefing
-  // fix: a permissionless finalizer cannot curate/exclude the device's revealed payloads.
+  // ── Round-5 payloads-out: the package binds ONLY commitments, NEVER payloads ─────────
+  // Revealed payloads live OUTSIDE the immutable package (content-addressed by checkpoint hash,
+  // fetched independently). This kills the S6-5 finalize-before-reveal griefing race: the package
+  // never carries payloads, so a permissionless finalizer cannot curate/exclude them, and the
+  // package is identical whether payloads were revealed before finalize or never at all.
 
-  it("S6-5: revealed payloads (stored on the bodies) ride in the package in seq order", () => {
+  it("round-5 payloads-out: the finalized package carries NO payloads and binds the terminal + delegation session", () => {
     openSession();
     const events0 = [{ step: "start", ts: 1 }];
-    const events1 = [{ step: "done", ts: 2 }];
-    seedChain([events0, events1]);
-    // Reveal both durably (the reveal route does this after checking each events hash to
-    // its receipted eventsRoot — that check is exercised at the route level).
-    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, events0);
-    store.repos.checkpointBodies.setPayload(SESSION_ID, 2, events1);
+    const hashes = seedChain([events0, [{ done: true }]]);
+    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, events0); // revealed durably
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("finalized");
     if (r.status === "finalized") {
-      expect(r.package.payloads).toEqual([
-        { seq: 1, events: events0 },
-        { seq: 2, events: events1 },
-      ]);
+      // NO payloads in the package (even though one was revealed) — payloads-out.
+      expect((r.package as Record<string, unknown>).payloads).toBeUndefined();
+      // Instead the package binds the terminal checkpoint hash + the delegation session id.
+      expect(r.package.terminalCheckpointHash).toBe(hashes[hashes.length - 1]);
+      expect(r.package).toHaveProperty("delegationSessionId");
     }
   });
 
-  it("S6-5 griefing fix: finalize includes ALL revealed payloads — a caller cannot exclude them", () => {
+  it("round-5 griefing fix: finalizing with NOTHING revealed still yields a complete package (nothing to exclude)", () => {
+    // A permissionless keeper finalizes BEFORE the device reveals any payload. Payloads-out ⇒ the
+    // package binds the full accepted chain regardless, so the keeper excludes nothing; a later
+    // reveal is retrievable independently and never needs to amend the already-frozen package.
     openSession();
-    const events0 = [{ measured: 42 }];
-    seedChain([events0, [{ b: 2 }]]);
-    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, events0);
-    // finalize takes NO payload argument at all — a would-be griefer's only lever is gone.
+    const hashes = seedChain([[{ measured: 42 }], [{ b: 2 }]]); // nothing revealed
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("finalized");
     if (r.status === "finalized") {
-      // The device's revealed measurement is in the package despite the caller supplying nothing.
-      expect(r.package.payloads).toEqual([{ seq: 1, events: events0 }]);
+      expect((r.package as Record<string, unknown>).payloads).toBeUndefined();
+      expect(r.package.acceptedCheckpointHashes).toEqual(hashes); // whole chain bound
+      expect(r.package.evidenceRoot).toBe(merkleRoot(hashes));
     }
   });
 
-  it("S6-5: no revealed payloads → the package omits the payloads field", () => {
+  // ── S6-2b: a terminal checkpoint must be the LAST accepted checkpoint ────────────────
+  it("S6-2b: fault_report THEN execution_completed does NOT finalize as success → rejected post_terminal_checkpoint", () => {
     openSession();
-    seedChain([[{ a: 1 }], [{ b: 2 }]]); // nothing revealed
-    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
-    expect(r.status).toBe("finalized");
-    if (r.status === "finalized") {
-      expect(r.package.payloads).toBeUndefined();
-    }
-  });
-
-  it("S6-5 defense-in-depth: a stored payload that does NOT hash to its receipted eventsRoot → rejected payload_commitment_mismatch", () => {
-    openSession();
-    seedChain([[{ a: 1 }], [{ b: 2 }]]);
-    // Corrupt the durable row directly (bypassing the reveal route's hash check) to simulate
-    // a tampered/divergent body — finalize's re-verify must fail closed.
-    store.repos.checkpointBodies.setPayload(SESSION_ID, 1, [{ tampered: true }]);
+    // A fault ends the run; a later execution_completed is invalid. The finalizer trusts only the
+    // LAST type, so without the S6-2b scan this would settle as success — the exact audit case.
+    seedChain([[{ fault: true }], [{ done: true }]], "execution_completed", [
+      "fault_report",
+      "execution_completed",
+    ]);
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("rejected");
-    if (r.status === "rejected") expect(r.reason).toBe("payload_commitment_mismatch");
+    if (r.status === "rejected") expect(r.reason).toBe("post_terminal_checkpoint");
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
-    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+  });
+
+  it("S6-2b: a completion checkpoint that is NOT last → rejected post_terminal_checkpoint", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }]], "execution_completed", [
+      "execution_completed",
+      "execution_completed",
+    ]);
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("rejected");
+    if (r.status === "rejected") expect(r.reason).toBe("post_terminal_checkpoint");
   });
 
   it("finalize with zero accepted checkpoints -> rejected no_checkpoints", () => {

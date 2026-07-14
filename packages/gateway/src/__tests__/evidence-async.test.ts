@@ -784,7 +784,7 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(res.json().error).toBe("payload_commitment_mismatch");
     });
 
-    it("S6-5 reveal: correct events → 200 (idempotent), and the payload rides in the finalized package", async () => {
+    it("round-5 reveal: correct events → 200 (idempotent); the finalized package is payloads-out (payload NOT in the package)", async () => {
       const events0 = [{ real: 1, measured: 42 }];
       const { jobId, sessionId } = await beginAndAccept(1, { events: [events0] });
       const r1 = await app.inject({
@@ -801,27 +801,28 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
         payload: { sessionId, events: events0 },
       });
       expect(r2.statusCode).toBe(200);
-      // finalize takes NO caller payloads; it includes the revealed one from the store.
+      // Payloads-out: the finalized package binds commitments (terminal checkpoint), NOT payloads.
       const fin = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
       expect(fin.statusCode).toBe(201);
-      expect(fin.json().package.payloads).toEqual([{ seq: 1, events: events0 }]);
+      expect(fin.json().package.payloads).toBeUndefined();
+      expect(typeof fin.json().package.terminalCheckpointHash).toBe("string");
     });
 
-    it("S6-5 griefing fix: a keeper finalizing with an EMPTY body cannot exclude the device's revealed payload", async () => {
+    it("round-5 griefing fix: with payloads-out, finalize excludes nothing — the package carries no payloads whether the device revealed or not", async () => {
       const events0 = [{ measured: 99 }];
       const { jobId, sessionId } = await beginAndAccept(1, { events: [events0] });
-      // Device reveals its measurement.
+      // Device reveals its measurement (persisted independently of the package).
       const rev = await app.inject({
         method: "POST",
         url: `/api/jobs/${jobId}/evidence/checkpoints/1/reveal`,
         payload: { sessionId, events: events0 },
       });
       expect(rev.statusCode).toBe(200);
-      // A different (permissionless) caller finalizes with an empty body — no payload lever.
+      // A permissionless caller finalizes — the package is payloads-out, so it neither includes nor
+      // excludes the payload; nothing to grief. The reveal remains retrievable independently.
       const fin = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
       expect(fin.statusCode).toBe(201);
-      // The revealed measurement is STILL in the package — the griefing vector is closed.
-      expect(fin.json().package.payloads).toEqual([{ seq: 1, events: events0 }]);
+      expect(fin.json().package.payloads).toBeUndefined();
     });
 
     it("S6-4: GET receipt returns the committed receipt for a seq; 404 for a missing seq", async () => {

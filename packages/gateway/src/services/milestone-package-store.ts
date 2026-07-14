@@ -111,8 +111,13 @@ export interface FinalMilestonePackage {
   receiptIds: string[];
   /** MerkleRoot(acceptedCheckpointHashes) (§3.3, §8.4-B-2). */
   evidenceRoot: string;
-  /** Optional revealed payloads (each verified against its receipted eventsRoot). */
-  payloads?: Array<{ seq: number; events: unknown[] }>;
+  /** The receipted hash of the terminal completion checkpoint (the last accepted checkpoint). */
+  terminalCheckpointHash: string;
+  /** The delegation's crypto session-key id (S6-8), distinct from the evidence sessionId; null on pre-S6-8 rows. */
+  delegationSessionId: string | null;
+  // Round-5 payloads-out: the package carries NO payloads. Revealed payloads live OUTSIDE the
+  // immutable package (content-addressed by checkpoint hash, fetched independently), so a
+  // permissionless finalizer cannot curate/exclude them and finalize-before-reveal is a no-op.
   /** §7.1 — how time was established (step-6 online path). */
   evidenceTimeProvenance: {
     kind: "gateway-receipt-points";
@@ -142,8 +147,11 @@ export type PackageReceiptContent = Omit<PackageReceipt, "signature">;
 
 /**
  * Input for one finalize attempt. `now` is the finalize receivedAt (Unix seconds).
- * S6-5: finalize takes NO caller payloads — revealed payloads are read from the durable
- * store (checkpoint_bodies.payload), so a permissionless finalizer cannot curate them.
+ * Round-5 payloads-out: the package binds ONLY commitments (accepted chain + receipts +
+ * evidenceRoot + terminal checkpoint + delegation session) — it carries NO payloads at all.
+ * Revealed payloads live outside the immutable package, content-addressed by checkpoint hash and
+ * fetched independently, so a permissionless finalizer cannot curate/exclude them AND finalizing
+ * before the device reveals changes nothing in the package (the S6-5 griefing race is gone).
  */
 export interface FinalizeMilestoneInput {
   jobId: string;
@@ -157,9 +165,10 @@ export type FinalizeRejectReason =
   | "evidence_deadline_passed"
   | "no_checkpoints"
   | "payload_commitment_mismatch"
-  // Frozen §8.1-#1 terminal-completion requirement (the Wave-3 route maps both → 422):
+  // Frozen §8.1-#1 terminal-completion requirement (the Wave-3 route maps these → 422):
   | "terminal_checkpoint_missing" // last accepted checkpoint is not a completion type
-  | "terminal_fault"; // last accepted checkpoint is a terminal FAULT (completed-but-failed)
+  | "terminal_fault" // last accepted checkpoint is a terminal FAULT (completed-but-failed)
+  | "post_terminal_checkpoint"; // S6-2b: a terminal checkpoint appears BEFORE the last (chain continued past a terminal)
 
 /**
  * Discriminated outcome. `finalized`/`idempotent` carry the package + receipt built
@@ -300,7 +309,15 @@ export class MilestonePackageStore {
       eventsRoot: lastBody.eventsRoot,
       checkpointType: lastBody.checkpointType,
     });
-    if (recomputedLastHash !== lastBody.checkpointHash) {
+    // Terminal integrity (round-5): the body must be self-consistent (recompute == its own hash)
+    // AND receipt-bound (its hash == the RECEIPTED hash). A consistently-altered body row could
+    // otherwise pass its own recomputation while classifying the terminal type for a DIFFERENT
+    // receipt commitment; requiring `lastBody.checkpointHash === lastReceipt.checkpointHash` closes
+    // that. Fail closed on either divergence.
+    if (
+      recomputedLastHash !== lastBody.checkpointHash ||
+      lastBody.checkpointHash !== lastReceipt.checkpointHash
+    ) {
       return {
         status: "errored",
         error: new Error(
@@ -318,29 +335,29 @@ export class MilestonePackageStore {
       return { status: "rejected", reason: "terminal_checkpoint_missing" };
     }
 
-    // B-3 (clause 5) — S6-5: collect revealed payloads from the DURABLE store; the
-    // package NEVER trusts caller-supplied payloads. A permissionless finalizer must
-    // not be able to grief by finalizing with an empty/curated payload set to exclude
-    // the device's measurements. Revelation is a SEPARATE verified step
-    // (POST …/checkpoints/:seq/reveal, which checks events hash → the receipted
-    // eventsRoot before persisting `payload`). finalize deterministically includes
-    // EVERY revealed payload in seq order (findAllBySession is UNCAPPED — a truncated
-    // read would silently drop revelations). Defense-in-depth: re-verify each stored
-    // payload against its receipted eventsRoot and fail closed on any drift.
-    const revealedPayloads: Array<{ seq: number; events: unknown[] }> = [];
-    for (const body of this.checkpointBodies.findAllBySession(sessionId)) {
-      if (body.payload === null || body.payload === undefined) continue;
-      const events = body.payload as unknown[];
-      if (canonicalSha256(events) !== body.eventsRoot) {
-        return { status: "rejected", reason: "payload_commitment_mismatch" };
+    // S6-2b — TERMINAL-STATE integrity: a terminal checkpoint (completion OR fault) must be the
+    // LAST accepted checkpoint. Scan the WHOLE durable chain (findAllBySession is UNCAPPED) and
+    // reject if ANY non-last body is a terminal type — otherwise `fault_report → execution_completed`
+    // would finalize as SUCCESS (the terminal guard above trusts only the LAST type). A chain that
+    // continued past a terminal is malformed: the run ended; later checkpoints are invalid.
+    const allBodies = this.checkpointBodies.findAllBySession(sessionId); // seq-asc, uncapped
+    for (let i = 0; i < allBodies.length - 1; i++) {
+      const t = allBodies[i].checkpointType;
+      if (TERMINAL_COMPLETION_TYPES.has(t) || t === TERMINAL_FAULT_TYPE) {
+        return { status: "rejected", reason: "post_terminal_checkpoint" };
       }
-      revealedPayloads.push({ seq: body.seq, events });
     }
+    // Round-5 payloads-out: NO payloads are collected or assembled into the package. Revealed
+    // payloads live OUTSIDE the immutable package (content-addressed by checkpoint hash, fetched
+    // independently), so the finalizer cannot curate/exclude them and finalize-before-reveal is a
+    // no-op on the package contents.
 
     // B-2 (clause 6): evidenceRoot = merkleRoot over the accepted hashes (seq order).
     const evidenceRoot = merkleRoot(acceptedCheckpointHashes);
 
-    // Clause 7: assemble the CLAIM-FREE package (no tier / oracleVerified / success).
+    // Clause 7: assemble the CLAIM-FREE, PAYLOAD-FREE package (no tier / oracleVerified / success;
+    // round-5: no payloads either). It binds ONLY commitments: the accepted chain, its receipts,
+    // the Merkle evidenceRoot, the terminal checkpoint hash, and the delegation session id.
     const packageId = `fmp-${jobId}-${milestoneIndex}`;
     const pkg: FinalMilestonePackage = {
       packageId,
@@ -350,7 +367,8 @@ export class MilestonePackageStore {
       acceptedCheckpointHashes,
       receiptIds,
       evidenceRoot,
-      ...(revealedPayloads.length > 0 ? { payloads: revealedPayloads } : {}),
+      terminalCheckpointHash: lastReceipt.checkpointHash,
+      delegationSessionId: session.delegationSessionId ?? null,
       evidenceTimeProvenance: {
         kind: "gateway-receipt-points",
         firstAcceptedAt: receiptRows[0].acceptedAt,

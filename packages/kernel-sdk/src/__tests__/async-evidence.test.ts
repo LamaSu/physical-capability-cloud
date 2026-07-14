@@ -270,18 +270,17 @@ class FakeGateway {
   private finalize(jobId: string, _body: any): { status: number; body: unknown } {
     const s = [...this.sessions.values()].find((x) => x.auth.scope.contractIds.includes(jobId));
     if (!s) return { status: 404, body: { error: "session_not_found" } };
-    // S6-5: finalize takes NO caller payloads; it includes every DURABLY-revealed payload
-    // (set via the reveal endpoint) in seq order — mirrors the real gateway.
-    const payloads = [...s.revealedBySeq.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([seq, events]) => ({ seq, events }));
+    // Round-5 payloads-out: finalize's package binds ONLY commitments — NO payloads. Revealed
+    // payloads live outside the package (persisted via the reveal endpoint, fetched independently).
+    // This mirrors the real gateway so the fake cannot mask a payloads-in-package regression.
     return {
       status: 201,
       body: {
         package: {
           acceptedCheckpointHashes: s.hashes,
           receiptIds: s.hashes.map((_, i) => `grcpt-${i + 1}`),
-          ...(payloads.length > 0 ? { payloads } : {}),
+          terminalCheckpointHash: s.hashes[s.hashes.length - 1] ?? null,
+          delegationSessionId: null,
         },
         packageReceipt: { receiptId: `fmprcpt-${jobId}-0` },
         evidenceRoot: "sha256:merkle-root-placeholder",
@@ -627,7 +626,7 @@ describe("createAsyncKernelHandler — fault path", () => {
 });
 
 describe("createAsyncKernelHandler — checkpoints the builder emits verify end-to-end", () => {
-  it("accepts builder step checkpoints + the terminal completion, then finalizes with revealed payloads", async () => {
+  it("accepts builder step checkpoints + the terminal completion, then reveals each payload and finalizes payloads-out", async () => {
     const gw = new FakeGateway();
     const principal = nacl.sign.keyPair();
     gw.parentPublicKeyHex = toHexT(principal.publicKey);
@@ -657,8 +656,8 @@ describe("createAsyncKernelHandler — checkpoints the builder emits verify end-
     // finalize revealed the kept payloads and the gateway verified every commitment (no 422).
     const fin = gw.finalizeCalls();
     expect(fin).toHaveLength(1);
-    // S6-5: the client REVEALS each payload separately (verified against its eventsRoot),
-    // then finalizes with NO caller payloads.
+    // Round-5: the client REVEALS each payload separately (verified against its eventsRoot);
+    // finalize sends NO caller payloads and the returned package is payloads-out.
     expect(gw.revealCalls().map((c) => c.seq)).toEqual([1, 2, 3]);
     expect((fin[0].body as any).payloads).toBeUndefined();
   });
