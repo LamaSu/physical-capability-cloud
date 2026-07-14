@@ -2,15 +2,17 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { initStore, getRepos, getStore, closeStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import {
-  grantVerifiedOnboardingScopes,
-  grantAdminScopes,
   createScopeGrantService,
   validateOnboardingGrant,
   validateAdminGrant,
   ScopeGrantError,
+  __unsafeInternalsForTests,
   type ScopeGrantAudit,
   type ScopeGrantDeps,
 } from "../auth/onboarding-scope-grant.js";
+
+// R3 #5: the DI grant functions are only reachable through the explicit test seam.
+const { grantVerifiedOnboardingScopes, grantAdminScopes } = __unsafeInternalsForTests;
 
 /**
  * Scope grants (audit P0, lane d749deff; review findings #1/#3). A scopeless key

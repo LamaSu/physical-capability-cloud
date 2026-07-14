@@ -114,8 +114,13 @@ function doGrant(
  * Grant scopes to a verified-onboarding key (default: operator + requestor). May
  * grant ONLY operator/requestor. Throws on an invalid grant or a missing/revoked
  * key. Grant + audit are atomic.
+ *
+ * NOT EXPORTED (review R3 #5): it accepts an arbitrary ScopeGrantDeps, which a
+ * caller could assemble with a no-op transaction/recorder and defeat the atomic-
+ * audit invariant. Reachable only via createScopeGrantService (production) or the
+ * __unsafeInternalsForTests seam (unit tests) — never by route code.
  */
-export function grantVerifiedOnboardingScopes(
+function grantVerifiedOnboardingScopes(
   deps: ScopeGrantDeps,
   keyId: string,
   scopes: readonly string[] = DEFAULT_ONBOARDING_SCOPES,
@@ -128,8 +133,10 @@ export function grantVerifiedOnboardingScopes(
  * Admin-controlled grant: assign any real role (never "*"). The CALLER must have
  * already authorized the actor as an admin (the route's admin scope policy).
  * Throws on an invalid grant or a missing/revoked key. Grant + audit are atomic.
+ *
+ * NOT EXPORTED (review R3 #5): same reason as grantVerifiedOnboardingScopes.
  */
-export function grantAdminScopes(
+function grantAdminScopes(
   deps: ScopeGrantDeps,
   keyId: string,
   scopes: readonly string[],
@@ -138,13 +145,15 @@ export function grantAdminScopes(
   return doGrant(deps, keyId, scopes, validateAdminGrant(scopes), "admin", grantedBy);
 }
 
-// ── Production factory (review R2 #2) ─────────────────────────────────────────
-// The bare grant* functions above accept an arbitrary ScopeGrantDeps, which a
-// caller could assemble with a no-op transaction + no-op recorder — defeating the
-// atomic-audit invariant. PRODUCTION ROUTE CODE MUST NOT do that: it constructs the
-// service from the store via this factory, which binds the REAL transaction, the
-// real api-keys repo, and a durable audit_log insert. The bare functions remain
-// exported only for unit tests that inject a controlled (still real-tx) store.
+// ── Production factory (review R2 #2, boundary-hardened R3 #5) ────────────────
+// The DI grant* functions above accept an arbitrary ScopeGrantDeps, which a caller
+// could assemble with a no-op transaction + no-op recorder — defeating the atomic-
+// audit invariant. R3 #5: they are NO LONGER exported, so route code cannot import
+// them. The ONLY production entry point is createScopeGrantService below, which
+// binds the REAL transaction, api-keys repo, and durable audit_log insert. Unit
+// tests reach the DI layer through the explicit __unsafeInternalsForTests seam at
+// the bottom of this file (asserted un-imported by route code in
+// scope-grant-boundary.test.ts).
 
 /** The minimal store shape the factory needs (a subset of @pcc/store's Store). */
 export interface ScopeGrantStore {
@@ -194,8 +203,25 @@ export function createScopeGrantService(store: ScopeGrantStore): ScopeGrantServi
     },
   };
   return {
+    // grantedBy PROVENANCE (R3 #5): callers MUST pass the authenticated principal
+    // (admin operator id) or a fixed system identity — NEVER a value from request
+    // body data. Verified-onboarding defaults to the fixed "system:verified-
+    // onboarding" identity when grantedBy is omitted, so that path cannot be
+    // spoofed by the caller.
     grantVerifiedOnboardingScopes: (keyId, scopes, grantedBy) =>
       grantVerifiedOnboardingScopes(deps, keyId, scopes, grantedBy),
     grantAdminScopes: (keyId, scopes, grantedBy) => grantAdminScopes(deps, keyId, scopes, grantedBy),
   };
 }
+
+// ── Internal test seam (review R3 #5) ─────────────────────────────────────────
+// The DI grant functions are intentionally un-exported so route code can only reach
+// grants through createScopeGrantService (atomic + audited by construction). Unit
+// tests that need to exercise the DI layer directly (e.g. inject a failing audit
+// sink to prove rollback) use this explicitly-named seam. Route/production code MUST
+// NOT import it — enforced by scope-grant-boundary.test.ts.
+export const __unsafeInternalsForTests = {
+  grantVerifiedOnboardingScopes,
+  grantAdminScopes,
+  doGrant,
+};
