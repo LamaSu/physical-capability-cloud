@@ -67,12 +67,52 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // MCP-App host embedding (R4 PR1 lockdown — D10/D14). An embedding host (an
+  // MCP-Apps view) announces itself with window.__PCC_HOST__ = true BEFORE the
+  // kit boots. In host mode the kit is a READ-ONLY renderer:
+  //   • manifest-authored writes NEVER execute — every write control renders
+  //     visibly disabled, and the action + transport layers refuse (a manifest
+  //     is untrusted content, so it must not be able to author a money/API
+  //     write from inside a host that carries ambient authority);
+  //   • no PCC key is ever read, written, or prompted — a sibling view sharing
+  //     the same host origin can neither drive a write nor read a stored key.
+  // Reads keep working; a read that would need a key simply has none and
+  // degrades to the honest stale/empty state (never fabricated). PR2 reintroduces
+  // writes via a typed, server-authorized operation allowlist.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  var HOST_WRITE_NOTE = 'Actions are unavailable in this host view.';
+  function isHostEmbed() { return window.__PCC_HOST__ === true; }
+  function hostDisableBtn(btn) {
+    btn.disabled = true;
+    btn.setAttribute('aria-disabled', 'true');
+    if ((' ' + btn.className + ' ').indexOf(' pcc-btn-disabled ') === -1) btn.className += ' pcc-btn-disabled';
+    if (!btn.title) btn.title = HOST_WRITE_NOTE;
+  }
+  // In host mode, disable every button inside an action container and append one
+  // "unavailable" note. No-op outside host mode (non-host behaviour unchanged).
+  function hostLockActionBar(container) {
+    if (!isHostEmbed() || !container) return;
+    var btns = container.querySelectorAll ? container.querySelectorAll('button') : [];
+    for (var i = 0; i < btns.length; i++) hostDisableBtn(btns[i]);
+    container.appendChild(el('div', 'pcc-host-note pcc-muted', HOST_WRITE_NOTE));
+  }
+  function markWriteUnavailable(status) {
+    if (!status) return;
+    status.className = 'pcc-action-status';
+    status.textContent = HOST_WRITE_NOTE;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // The person's key — fragment → sessionStorage only, never into the DOM
   // ═══════════════════════════════════════════════════════════════════════
 
   var KEY_STORE = 'pcc.key';
 
   function bootKey() {
+    // Host lockdown (D14): in an MCP-App/host view never read a fragment key or
+    // touch storage — a hosted view holds no browser-persisted PCC credential.
+    if (isHostEmbed()) return;
     // 1. #pcc_key=… in the URL fragment: how an LLM hands its OWN person a
     // private live link. Fragments never reach servers/logs. Strip immediately
     // so it cannot be read back off `location` and cannot leak into history.
@@ -90,9 +130,14 @@
     } catch (e) {}
   }
   function getKey() {
+    // Host lockdown (D14): never read a (possibly sibling-view) stored key when
+    // embedded in a host — a hosted view runs unauthenticated (public reads only).
+    if (isHostEmbed()) return null;
     try { return sessionStorage.getItem(KEY_STORE) || null; } catch (e) { return null; }
   }
   function setKey(k) {
+    // Host lockdown (D14): never persist a credential from inside a host view.
+    if (isHostEmbed()) return;
     try { if (k) sessionStorage.setItem(KEY_STORE, k); else sessionStorage.removeItem(KEY_STORE); } catch (e) {}
   }
 
@@ -375,13 +420,14 @@
     });
   };
   HostTransport.prototype.send = function (method, path, body) {
-    var safe = safeApiPath(path, true);
-    if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
-    var bridge = this._bridge();
-    if (!bridge) return Transport.prototype.send.call(this, method, safe, body);
-    return bridge.fetch(safe, { method: method, body: body }).then(function (r) {
-      return { ok: !!(r && r.ok), status: (r && r.status) || 0, body: (r && r.json) || {} };
-    });
+    // R4 PR1 lockdown (D10): manifest-authored writes are DISABLED in MCP-App/
+    // host mode. No mutating request is ever issued from a hosted view — write
+    // controls render disabled and the action layer refuses; this transport-level
+    // backstop holds even if a caller reaches send() directly (e.g. a compose
+    // POST from renderChain). PR2 reintroduces writes via a typed, server-
+    // authorized operation allowlist. (method/path/body intentionally unused.)
+    void method; void path; void body;
+    return Promise.resolve({ ok: false, status: 0, body: { message: 'Actions are unavailable in this host view.' } });
   };
   // No defined host-bridge equivalent for streaming yet; always use the
   // direct fetch-SSE reader (same Bearer-header contract as every live mode).
@@ -656,6 +702,7 @@
     };
     foot.appendChild(submit);
     foot.appendChild(status);
+    hostLockActionBar(foot); // host lockdown: disable the submit + show the note
     wrap.appendChild(foot);
     return wrap;
   }
@@ -770,6 +817,7 @@
         foot.appendChild(deny);
       }
       foot.appendChild(status);
+      hostLockActionBar(foot); // host lockdown: disable Approve/Deny + show the note
       wrap.appendChild(foot);
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
@@ -906,6 +954,7 @@
     };
     foot.appendChild(plan);
     foot.appendChild(status);
+    hostLockActionBar(foot); // host lockdown: disable Plan (its POST is refused) + note
     wrap.appendChild(foot);
     return wrap;
   }
@@ -922,6 +971,7 @@
       btn.onclick = function () { dispatchAction(ctx, a, { status: status }); };
       bar.appendChild(btn);
     });
+    hostLockActionBar(bar); // host lockdown: disable every action button + note
     wrap._body.appendChild(bar);
     wrap._body.appendChild(status);
     return wrap;
@@ -943,6 +993,11 @@
 
     // Snapshot: never POST. Hand the LLM a copyable intent chip.
     if (ctx.mode === 'snapshot') { intentChip(status, action.intentText || ('pcc: ' + action.label)); return; }
+
+    // R4 PR1 lockdown: in MCP-App/host mode the kit is read-only — a manifest
+    // cannot author a write. Never POST; report unavailable. (Write controls are
+    // already rendered disabled in host mode; this is the click-path backstop.)
+    if (ctx.mode === 'host') { markWriteUnavailable(status); return; }
 
     // Money verbs MUST pass through the Approval gate (unless we ARE that gate).
     if (isMoneyAction(action) && !opts.viaApproval) {
@@ -1026,6 +1081,9 @@
 
   // The kit's Approval window as a floating modal — only Approve POSTs.
   function openApprovalGate(ctx, action, opts) {
+    // Host lockdown: writes are disabled in a hosted view — never open the gate.
+    // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
+    if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
@@ -1317,6 +1375,10 @@
       'background:var(--surface-2);color:var(--ink);cursor:pointer;transition:background 150ms,transform 150ms;}',
       '.pcc-btn:hover{background:var(--surface-3);}',
       '.pcc-btn:active{transform:translateY(1px);}',
+      /* host lockdown — disabled write controls + the "unavailable" note */
+      '.pcc-btn:disabled,.pcc-btn-disabled{opacity:.45;cursor:not-allowed;}',
+      '.pcc-btn:disabled:hover,.pcc-btn-disabled:hover{background:var(--surface-2);}',
+      '.pcc-host-note{margin-top:6px;}',
       '.pcc-btn-primary{background:var(--act);color:var(--act-ink);border-color:var(--act);}',
       '.pcc-btn-primary:hover{opacity:.92;background:var(--act);}',
       '.pcc-btn-quiet{background:transparent;}',
