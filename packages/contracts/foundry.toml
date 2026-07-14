@@ -8,11 +8,10 @@ solc_version = "0.8.24"
 # runs=200 is the standard size/gas balance; verified all contracts fit (see PR).
 optimizer = true
 optimizer_runs = 200
-# audit P0 (C-04/H-01): the new PCCForwarder.relay() — EIP-712 intent verify +
-# EIP-3009 pull + route + target call — has too many locals for the legacy
-# codegen (stack too deep). via_ir compiles it. A reviewer may prefer refactoring
-# relay into helpers over a global via_ir; kept global here to compile for review.
-via_ir = true
+# audit P0 (review #10): PCCForwarder.relay() was refactored to move its payment
+# block into the internal _pullAndRoute() helper, keeping relay()'s live-local
+# count under the legacy codegen's stack limit. No global `via_ir` is needed —
+# so bytecode/gas for every other contract is unchanged from before the P0 work.
 
 [profile.default.fmt]
 line_length = 120

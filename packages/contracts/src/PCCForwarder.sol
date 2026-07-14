@@ -41,8 +41,12 @@ import {SafeERC20} from "./libraries/SafeERC20.sol";
  *    => Changing any of {target, one calldata byte, amount, token, recipient,
  *       chain, forwarder} changes the digest and invalidates the signature.
  *
- * 2. The intent digest is consumed in `usedIntents` (effects-before-
- *    interactions), so a signed intent executes at most once — no replay.
+ * 2. Replay is keyed by (payer, nonce) in `usedNonces` (effects-before-
+ *    interactions), so one payer nonce executes at most once — for BOTH zero-
+ *    and nonzero-amount intents. (Keying on the EIP-712 digest alone, as an
+ *    earlier draft did, let two different intents from one payer reuse a nonce,
+ *    and for amount==0 — where the EIP-3009 nonce is never spent — every
+ *    same-nonce zero-value intent would execute. See review #8.)
  *
  * 3. USDC is pulled with EIP-3009 `receiveWithAuthorization` (which requires
  *    `msg.sender == to`, so the authorization cannot be front-run away from
@@ -130,10 +134,18 @@ contract PCCForwarder is IPGTRForwarder {
     /// @notice Reentrancy lock
     bool private _locked;
 
-    /// @notice Consumed intent digests — a signed intent executes at most once.
-    ///         Keyed by the full EIP-712 digest (covers amount==0 intents too,
-    ///         where USDC's own nonce is never spent).
-    mapping(bytes32 => bool) public usedIntents;
+    /// @notice Replay guard, keyed by (payer, nonce). One payer nonce = exactly
+    ///         one execution, for BOTH zero- and nonzero-amount intents. This is
+    ///         the authoritative replay key (review #8): keying on the EIP-712
+    ///         digest alone let two DIFFERENT intents from one payer reuse a
+    ///         nonce (different digest → different key), and for amount==0 —
+    ///         where the EIP-3009 call (and USDC's own nonce spend) is skipped —
+    ///         every same-nonce zero-value intent would execute. The payer
+    ///         signature + callDataHash bind WHICH action runs (action-binding);
+    ///         this nonce binds HOW MANY times it runs (replay). Digest
+    ///         uniqueness is a secondary side effect of the signature, not the
+    ///         replay key.
+    mapping(address => mapping(bytes32 => bool)) public usedNonces;
 
     // ── Events ───────────────────────────────────────────────────────────
 
@@ -303,15 +315,17 @@ contract PCCForwarder is IPGTRForwarder {
     //  (1) MIGRATION: this is a new contract, not an upgrade. Adopting it is a fresh
     //      deployment + a new `verifyingContract`; any legacy forwarder's trapped USDC
     //      must be rescued/refunded out-of-band before decommissioning it.
-    //  (2) OFF-CHAIN: the `relay` ABI, `usedNonces`->`usedIntents`, and the new
-    //      ExecutionIntent struct change the generated ABI. Regenerate
-    //      packages/contracts/ts/abi/PCCForwarder.ts and update every TS/relayer caller
-    //      + the payer signing SDK to produce the EIP-712 ExecutionIntent AND the
-    //      EIP-3009 receiveWithAuthorization signature. (abi.test.ts will need updating.)
-    //  (3) TESTS: MockUSDC does NOT implement EIP-3009 (receiveWithAuthorization) — add a
-    //      mock that does, then add Foundry tests asserting the acceptance criteria
-    //      (mutate target/1 calldata byte/amount/token/chain/verifyingContract -> reverts;
-    //      replay -> reverts; recipient receives funds; amount==0 identity path).
+    //  (2) OFF-CHAIN: the `relay` ABI, the new `usedNonces(payer,nonce)` mapping (replacing
+    //      the round-1 `usedIntents(digest)` map), and the ExecutionIntent struct change the
+    //      generated ABI. Regenerate packages/contracts/ts/abi/PCCForwarder.ts and update
+    //      every TS/relayer caller + the payer signing SDK to produce the EIP-712
+    //      ExecutionIntent AND the EIP-3009 receiveWithAuthorization signature. (The existing
+    //      ts/abi/PCCForwarder.ts is now STALE — a follow-up, out of this contract's scope.)
+    //  (3) TESTS: done in this pass — test/mocks/MockUSDCEIP3009.sol (faithful EIP-3009 mock)
+    //      + test/PCCForwarder.t.sol assert the acceptance criteria (mutate
+    //      target/1 calldata byte/amount/token/chain/verifyingContract -> reverts; replay
+    //      (nonzero AND amount==0) -> reverts; recipient==self -> reverts; reverting target
+    //      unwinds the payment; a successful relay lands amount at recipient, ~0 at forwarder).
     //  (4) ALTERNATIVE to consider in review: a single-signature variant using
     //      transferFrom + a prior payer approve (or Permit2) would route payer->recipient
     //      directly (no transient custody) at the cost of the EIP-3009 gasless model.
@@ -355,6 +369,13 @@ contract PCCForwarder is IPGTRForwarder {
         // ── Validate intent shape ──
         require(intent.payer != address(0), "PCCForwarder: zero payer");
         require(intent.recipient != address(0), "PCCForwarder: zero recipient"); // H-01: funds must have a home
+        // H-01 (review #7): a signed intent must NOT route USDC back into the
+        // forwarder (where it is trapped until an owner sweep — the exact bug
+        // H-01 fixes) or into the token contract itself. Only `recipient !=
+        // address(0)` was checked before; these two make the routing invariant
+        // complete.
+        require(intent.recipient != address(this), "PCCForwarder: recipient is self");
+        require(intent.recipient != address(usdc), "PCCForwarder: recipient is token");
         require(intent.token == address(usdc), "PCCForwarder: unexpected token");
         require(trustedTargets[intent.target], "PCCForwarder: untrusted target");
         require(intent.target != address(usdc), "PCCForwarder: target is token");
@@ -364,44 +385,24 @@ contract PCCForwarder is IPGTRForwarder {
         require(keccak256(callData) == intent.callDataHash, "PCCForwarder: calldata mismatch");
 
         // ── C-04 core: verify the payer's EIP-712 ExecutionIntent signature ──
-        bytes32 digest = hashIntent(intent);
-        address signer = _recover(digest, intentV, intentR, intentS);
-        require(signer != address(0) && signer == intent.payer, "PCCForwarder: bad intent signature");
+        // In a helper so the digest/signer locals stay out of relay()'s stack
+        // frame — part of keeping relay() under the legacy stack limit without
+        // a global via_ir (review #10).
+        _verifyIntentSignature(intent, intentV, intentR, intentS);
 
-        // ── Bind + consume nonce (no replay). Effects before interactions. ──
-        require(!usedIntents[digest], "PCCForwarder: intent already used");
-        usedIntents[digest] = true;
+        // ── Consume the payer nonce (replay key). Effects before interactions. ──
+        // Keyed by (payer, nonce), NOT the digest (review #8), so one payer
+        // nonce executes exactly once regardless of amount — including the
+        // amount==0 identity path below, which never spends USDC's own nonce.
+        // The signature verified above already bound WHICH action runs.
+        require(!usedNonces[intent.payer][intent.nonce], "PCCForwarder: nonce already used");
+        usedNonces[intent.payer][intent.nonce] = true;
 
         // ── Pull the payment and route it to the signed recipient (H-01) ──
-        if (intent.amount > 0) {
-            uint256 balBefore = usdc.balanceOf(address(this));
-
-            // EIP-3009 receiveWithAuthorization requires msg.sender == `to`, so
-            // this authorization can only be consumed by THIS contract — it
-            // cannot be front-run into a bare transfer that decouples payment
-            // from the gated action. Called low-level so IERC20 need not
-            // declare the EIP-3009 surface (matches USDC's real ABI).
-            (bool ok, ) = address(usdc).call(
-                abi.encodeWithSignature(
-                    "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)",
-                    intent.payer,      // from
-                    address(this),     // to (must be msg.sender == this)
-                    intent.amount,     // value
-                    uint256(0),        // validAfter (immediate)
-                    intent.deadline,   // validBefore
-                    intent.nonce,      // nonce (USDC's own replay protection)
-                    payV, payR, payS   // EIP-3009 signature
-                )
-            );
-            require(ok, "PCCForwarder: USDC auth failed");
-
-            uint256 received = usdc.balanceOf(address(this)) - balBefore;
-            require(received >= intent.amount, "PCCForwarder: short receive");
-
-            // Forward to the payer-signed recipient. Never retained here.
-            usdc.safeTransfer(intent.recipient, intent.amount);
-            emit PaymentRouted(intent.payer, intent.recipient, intent.token, intent.amount, intent.nonce);
-        }
+        // Extracted into _pullAndRoute so relay()'s live-local count stays under
+        // the stack limit — this is what lets the package compile WITHOUT global
+        // via_ir (review #10).
+        _pullAndRoute(intent, payV, payR, payS);
 
         // ── Execute the exact signed action under the payer identity ──
         _currentSender = intent.payer;
@@ -412,10 +413,86 @@ contract PCCForwarder is IPGTRForwarder {
         // payment and action are atomic.
         require(success, "PCCForwarder: target call failed");
 
-        bytes4 selector = callData.length >= 4 ? bytes4(callData[0:4]) : bytes4(0);
-        emit PaymentGatedCall(intent.payer, intent.target, selector, intent.amount);
+        // Selector computed inline (no `selector` local) to keep relay()'s stack
+        // shallow enough to compile without via_ir (review #10).
+        emit PaymentGatedCall(
+            intent.payer,
+            intent.target,
+            callData.length >= 4 ? bytes4(callData[0:4]) : bytes4(0),
+            intent.amount
+        );
 
         return result;
+    }
+
+    /**
+     * @dev Verify the payer's EIP-712 ExecutionIntent signature (C-04). Reverts
+     *      unless it recovers to `intent.payer`. Split out of relay() so the
+     *      `digest`/`signer` locals do not occupy relay()'s stack frame — one of
+     *      the extractions that removes the need for a global `via_ir` (review #10).
+     */
+    function _verifyIntentSignature(
+        ExecutionIntent calldata intent,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal view {
+        bytes32 digest = hashIntent(intent);
+        address signer = _recover(digest, v, r, s);
+        require(signer != address(0) && signer == intent.payer, "PCCForwarder: bad intent signature");
+    }
+
+    /**
+     * @dev Pull `intent.amount` from the payer via EIP-3009 and forward it to
+     *      the signed recipient — atomically within the relay() transaction.
+     *      No-op for a zero-amount (identity) intent.
+     *
+     *      Extracted from relay() (review #10) purely to keep that function's
+     *      local-variable footprint shallow: the balBefore/ok/received locals
+     *      live only here now, so relay() compiles under the legacy codegen's
+     *      stack limit and the package no longer needs a global `via_ir` flag
+     *      (which would have changed bytecode/gas for every other contract).
+     *      `internal` + `calldata` intent → no memory copy of the struct.
+     */
+    function _pullAndRoute(
+        ExecutionIntent calldata intent,
+        uint8 payV,
+        bytes32 payR,
+        bytes32 payS
+    ) internal {
+        if (intent.amount == 0) {
+            // Identity intent: nothing to pull. The nonce was already consumed
+            // in relay(), so this path is still single-execution (review #8).
+            return;
+        }
+
+        uint256 balBefore = usdc.balanceOf(address(this));
+
+        // EIP-3009 receiveWithAuthorization requires msg.sender == `to`, so this
+        // authorization can only be consumed by THIS contract — it cannot be
+        // front-run into a bare transfer that decouples payment from the gated
+        // action. Called low-level so IERC20 need not declare the EIP-3009
+        // surface (matches USDC's real ABI).
+        (bool ok, ) = address(usdc).call(
+            abi.encodeWithSignature(
+                "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)",
+                intent.payer,      // from
+                address(this),     // to (must be msg.sender == this)
+                intent.amount,     // value
+                uint256(0),        // validAfter (immediate)
+                intent.deadline,   // validBefore
+                intent.nonce,      // nonce (USDC's own replay protection)
+                payV, payR, payS   // EIP-3009 signature
+            )
+        );
+        require(ok, "PCCForwarder: USDC auth failed");
+
+        uint256 received = usdc.balanceOf(address(this)) - balBefore;
+        require(received >= intent.amount, "PCCForwarder: short receive");
+
+        // Forward to the payer-signed recipient. Never retained here.
+        usdc.safeTransfer(intent.recipient, intent.amount);
+        emit PaymentRouted(intent.payer, intent.recipient, intent.token, intent.amount, intent.nonce);
     }
 
     // ── ECDSA recovery (self-contained, mirrors PCCVerificationOracle) ────
