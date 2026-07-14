@@ -3,6 +3,6 @@
 // gate verifySeededPolicies (review finding #2). The gate requires the LIVE table
 // to match these EXACTLY, so a stale/partial/tampered table cannot self-certify.
 // Regenerate (and bump the manifest version) whenever the manifest changes.
-export const EXPECTED_MANIFEST_VERSION = 1;
-export const EXPECTED_MANIFEST_COUNT = 112;
-export const EXPECTED_MANIFEST_DIGEST = "e55955264c4d15b47d5344e1d828d023a3814d1a59da458b6fb9a365a5f25231";
+export const EXPECTED_MANIFEST_VERSION = 2;
+export const EXPECTED_MANIFEST_COUNT = 114;
+export const EXPECTED_MANIFEST_DIGEST = "57da591c8345b2d5505a8dc8fac490168f9039a53119e53fb28fccb2b01bac97";
