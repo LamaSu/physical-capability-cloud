@@ -24,7 +24,7 @@
  */
 
 import Fastify from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DASHBOARD_CSD_URL, type UiArtifact } from "@pcc/spec";
 import { httpMcpRoutes } from "../mcp/http-mcp-server.js";
 import {
@@ -37,14 +37,21 @@ import {
   extractToolResultManifest,
   GALLERY_OUTPUT_SCHEMA,
   isValidDashboardManifest,
+  MCP_APP_DOMAIN_ENV,
+  MCP_APP_DOMAIN_PLACEHOLDER,
   MCP_APP_GALLERY_URI,
+  MCP_APP_RENDER_URI,
   MCP_APP_SAVED_URI,
   MCP_APP_TOOL_RESULT_METHOD,
+  mcpAppUiResourceMeta,
   ON_RAMP_UI_TOOL_NAMES,
   onRampToolResourceUri,
+  primeMcpAppAssets,
   renderSavedDashboardHtml,
+  resolveMcpAppDomain,
   SAVED_OUTPUT_SCHEMA,
   structuredContentConformsTo,
+  validateMcpAppDomain,
 } from "../mcp/mcp-app-view.js";
 
 const SEEDED_SLUG = "watch-my-pizza-8k3f";
@@ -434,10 +441,16 @@ describe("MCP Apps — /mcp transport", () => {
     expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain("https://capability.network");
     expect(contents[0]._meta?.ui?.csp?.resourceDomains).toEqual([]);
     expect(contents[0]._meta?.ui?.prefersBorder).toBe(true);
+    // R4 PR1 (D14) — the share read carries the unique app domain (browser-storage
+    // isolation). Env-agnostic: it must be a valid bare https origin.
+    const shareDomain = contents[0]._meta?.ui?.domain;
+    expect(typeof shareDomain).toBe("string");
+    expect(validateMcpAppDomain(String(shareDomain))).toBe(shareDomain);
+    expect(shareDomain).toBe(resolveMcpAppDomain());
   });
 
-  it("reads the fixed saved + gallery views with full _meta.ui.csp", async () => {
-    for (const uri of [MCP_APP_SAVED_URI, MCP_APP_GALLERY_URI]) {
+  it("reads the fixed render + saved + gallery views with full _meta.ui.csp + domain", async () => {
+    for (const uri of [MCP_APP_RENDER_URI, MCP_APP_SAVED_URI, MCP_APP_GALLERY_URI]) {
       const read = await rpc(6, "resources/read", { uri });
       const contents = read.json().result.contents;
       expect(read.statusCode, `read ${uri}`).toBe(200);
@@ -447,6 +460,10 @@ describe("MCP Apps — /mcp transport", () => {
       expect(contents[0].text).toContain("ui/notifications/tool-result");
       expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain("https://capability.network");
       expect(contents[0]._meta?.ui?.prefersBorder).toBe(true);
+      // R4 PR1 (D14) — every fixed UI resources/read carries a valid unique domain.
+      const domain = contents[0]._meta?.ui?.domain;
+      expect(typeof domain, `domain on ${uri}`).toBe("string");
+      expect(validateMcpAppDomain(String(domain))).toBe(domain);
     }
   });
 
@@ -456,5 +473,76 @@ describe("MCP Apps — /mcp transport", () => {
     expect(read.statusCode).toBe(200);
     expect(body.error).toBeUndefined();
     expect(body.result.contents[0].text).toContain("Dashboard not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R4 PR1 (D14) — _meta.ui.domain resolution from PCC_MCP_APP_DOMAIN. The unique
+// app origin gives each MCP-App view its own iframe/storage origin. Required in
+// production; a reserved placeholder in dev/test; validated as a bare https
+// origin. Env is saved/restored per test so nothing leaks across the suite.
+// ---------------------------------------------------------------------------
+
+describe("MCP Apps — _meta.ui.domain (PCC_MCP_APP_DOMAIN resolution)", () => {
+  let savedDomain: string | undefined;
+  let savedNodeEnv: string | undefined;
+
+  beforeEach(() => {
+    savedDomain = process.env[MCP_APP_DOMAIN_ENV];
+    savedNodeEnv = process.env.NODE_ENV;
+  });
+  afterEach(() => {
+    if (savedDomain === undefined) delete process.env[MCP_APP_DOMAIN_ENV];
+    else process.env[MCP_APP_DOMAIN_ENV] = savedDomain;
+    if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = savedNodeEnv;
+  });
+
+  it("returns the configured origin when set to a valid bare https origin", () => {
+    process.env[MCP_APP_DOMAIN_ENV] = "https://pcc-app.example";
+    expect(resolveMcpAppDomain()).toBe("https://pcc-app.example");
+  });
+
+  it("normalizes to the origin (drops a trailing slash / default port noise)", () => {
+    process.env[MCP_APP_DOMAIN_ENV] = "https://pcc-app.example/";
+    expect(resolveMcpAppDomain()).toBe("https://pcc-app.example");
+  });
+
+  it("falls back to the reserved placeholder in non-production when unset", () => {
+    delete process.env[MCP_APP_DOMAIN_ENV];
+    process.env.NODE_ENV = "test";
+    expect(resolveMcpAppDomain()).toBe(MCP_APP_DOMAIN_PLACEHOLDER);
+    // …and mcpAppUiResourceMeta() carries that same domain alongside the CSP block.
+    const meta = mcpAppUiResourceMeta();
+    expect(meta.ui.domain).toBe(MCP_APP_DOMAIN_PLACEHOLDER);
+    expect(meta.ui.csp.connectDomains).toContain("https://capability.network");
+    expect(meta.ui.prefersBorder).toBe(true);
+  });
+
+  it("THROWS in production when unset (prod-required — fails the boot)", () => {
+    delete process.env[MCP_APP_DOMAIN_ENV];
+    process.env.NODE_ENV = "production";
+    expect(() => resolveMcpAppDomain()).toThrow(/must be set to a UNIQUE https origin in production/i);
+  });
+
+  it("accepts a valid origin even in production", () => {
+    process.env.NODE_ENV = "production";
+    process.env[MCP_APP_DOMAIN_ENV] = "https://pcc-mcp-app.example";
+    expect(resolveMcpAppDomain()).toBe("https://pcc-mcp-app.example");
+  });
+
+  it("rejects non-https, credentials, path, query, and fragment", () => {
+    expect(() => validateMcpAppDomain("http://x.example")).toThrow(/https/i);
+    expect(() => validateMcpAppDomain("https://user:pw@x.example")).toThrow(/credentials/i);
+    expect(() => validateMcpAppDomain("https://x.example/dashboard")).toThrow(/path/i);
+    expect(() => validateMcpAppDomain("https://x.example/?q=1")).toThrow(/query/i);
+    expect(() => validateMcpAppDomain("https://x.example/#frag")).toThrow(/fragment/i);
+    expect(() => validateMcpAppDomain("not a url")).toThrow();
+  });
+
+  it("primeMcpAppAssets throws at startup in production when the domain is unset", () => {
+    delete process.env[MCP_APP_DOMAIN_ENV];
+    process.env.NODE_ENV = "production";
+    expect(() => primeMcpAppAssets()).toThrow(new RegExp(MCP_APP_DOMAIN_ENV));
   });
 });

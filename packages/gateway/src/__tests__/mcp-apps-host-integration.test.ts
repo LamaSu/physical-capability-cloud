@@ -7,10 +7,11 @@
  * frame + forged token) and mcp-apps-hardening.test.ts (directive 10 helper unit
  * tests). This file proves the pieces those don't:
  *
- *  1. A live READ binding and an approved WRITE actually flow through the kit's
- *     HostTransport, which forces the PCC origin and runs every path through
- *     safeApiPath — with a mocked fetch as the "server". An absolute/exfil path
- *     and a non-/api path are refused BEFORE any network call.
+ *  1. A live READ binding flows through the kit's HostTransport (forced PCC
+ *     origin, every path via safeApiPath) with a mocked fetch as the "server",
+ *     while every WRITE is DISABLED in host mode (R4 PR1 lockdown, D10) — no
+ *     mutating request leaves a hosted view, and the full-kit boot renders write
+ *     controls visibly disabled.
  *  2. Two independent view boots, each handed a `token`, write NOTHING to
  *     sessionStorage — the transport never persists a credential, so there is no
  *     shared `pcc.key` for one view to inherit from another (the D8b concern).
@@ -124,7 +125,7 @@ function makeResp(body: unknown, ok = true, status = 200) {
   return { ok, status, headers: { get: () => null }, json: () => Promise.resolve(body) };
 }
 
-describe("directive 14 — HostTransport wires reads + writes through the forced-origin safeApiPath", () => {
+describe("R4 PR1 (D10) — HostTransport: reads flow through the forced origin; WRITES are disabled", () => {
   it("a live READ dispatches to the FORCED PCC origin via safeApiPath (Bearer attached)", async () => {
     const calls: Array<{ url: string; init?: Record<string, unknown> }> = [];
     const tx = buildHostTransport((url, init) => {
@@ -141,7 +142,11 @@ describe("directive 14 — HostTransport wires reads + writes through the forced
     );
   });
 
-  it("an approved WRITE posts to the FORCED PCC origin via safeApiPath", async () => {
+  it("a WRITE is REFUSED in host mode — no network call, ever (R4 PR1 lockdown)", async () => {
+    // PR1 disables all manifest-authored writes in a hosted view (a namespace
+    // allowlist is not an operation allowlist — the confused-deputy D10). Even a
+    // well-formed /api write to the correct origin issues NO request; PR2
+    // reintroduces writes via a typed, server-authorized operation.
     const calls: Array<{ url: string; init?: Record<string, unknown> }> = [];
     const tx = buildHostTransport((url, init) => {
       calls.push({ url, init });
@@ -150,14 +155,12 @@ describe("directive 14 — HostTransport wires reads + writes through the forced
 
     const res = await tx.send("POST", "/api/escrow/esc_1/release", { amount: 5, currency: "USDC" });
 
-    expect(res.ok).toBe(true);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe(`${PCC_ORIGIN}/api/escrow/esc_1/release`);
-    expect(calls[0].init?.method).toBe("POST");
-    expect(JSON.parse(String(calls[0].init?.body)).amount).toBe(5);
+    expect(res.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect((res.body as { message?: string }).message).toMatch(/unavailable in this host/i);
   });
 
-  it("REFUSES an absolute/exfil write path BEFORE any network call (no fetch to evil)", async () => {
+  it("an exfil/absolute write path is ALSO refused with no network call", async () => {
     const calls: string[] = [];
     const tx = buildHostTransport((url) => {
       calls.push(url);
@@ -322,5 +325,123 @@ describe("directive 14 — a PRIVATE dashboard renders from the AUTHENTICATED re
       (document.getElementById("pcc-manifest") as HTMLScriptElement).textContent || "null",
     );
     expect(mounted.title).toBe("My private ops");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R4 PR1 (D10/D14) — FULL real-kit boot. Boots apps/dashboard/public/ui-kit/v1/
+// pcc-ui.js (the SAME source the view inlines) in jsdom with window.__PCC_HOST__
+// set + a mocked global fetch + a manifest, then asserts: (a) a mutating action
+// renders disabled and issues NO request even when its handler is invoked; (b)
+// nothing is written to session/local storage and no key prompt renders; (c) a
+// read binding STILL fetches; (d) non-host behaviour is unchanged.
+// ---------------------------------------------------------------------------
+
+describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged", () => {
+  let savedFetch: typeof globalThis.fetch | undefined;
+
+  beforeEach(() => {
+    savedFetch = globalThis.fetch;
+    window.sessionStorage.clear();
+    window.localStorage.clear();
+  });
+  afterEach(() => {
+    globalThis.fetch = savedFetch as typeof globalThis.fetch;
+    delete (window as unknown as { __PCC_HOST__?: boolean }).__PCC_HOST__;
+    delete (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__;
+    window.sessionStorage.clear();
+    window.localStorage.clear();
+    document.body.innerHTML = "";
+  });
+
+  type Call = { url: string; init?: Record<string, unknown> };
+
+  function bootRealKit(host: boolean, manifest: unknown): Call[] {
+    const calls: Call[] = [];
+    (globalThis as unknown as { fetch: unknown }).fetch = (
+      url: string,
+      init?: Record<string, unknown>,
+    ) => {
+      calls.push({ url: String(url), init });
+      return Promise.resolve(makeResp({ ok: true, count: 3 }));
+    };
+    delete (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__;
+    if (host) (window as unknown as { __PCC_HOST__?: boolean }).__PCC_HOST__ = true;
+    else delete (window as unknown as { __PCC_HOST__?: boolean }).__PCC_HOST__;
+    document.body.innerHTML = "";
+    const root = document.createElement("main");
+    root.id = "pcc-root";
+    document.body.appendChild(root);
+    const m = document.createElement("script");
+    m.type = "application/json";
+    m.id = "pcc-manifest";
+    m.textContent = JSON.stringify(manifest);
+    document.body.appendChild(m);
+    // Run the REAL kit IIFE — mount() executes synchronously (readyState complete).
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    new Function(PCC_UI_SRC)();
+    return calls;
+  }
+
+  function buttonByText(text: string): HTMLButtonElement | undefined {
+    const all = Array.from(document.querySelectorAll("button")) as HTMLButtonElement[];
+    return all.find((b) => (b.textContent || "").indexOf(text) !== -1);
+  }
+
+  const actionsManifest = {
+    csd: DASHBOARD_CSD_URL,
+    title: "Ops",
+    sections: [
+      {
+        windows: [
+          { kind: "actions", actions: [{ label: "Cancel job", path: "/api/jobs/j1/cancel", kind: "post" }] },
+        ],
+      },
+    ],
+  };
+
+  it("host mode: a mutating action renders DISABLED and issues no request even if invoked", () => {
+    const calls = bootRealKit(true, actionsManifest);
+    const btn = buttonByText("Cancel job");
+    expect(btn, "action button rendered").toBeDefined();
+    expect(btn?.disabled).toBe(true);
+    expect(document.querySelector(".pcc-host-note")).not.toBeNull();
+    // Invoke the click handler directly (bypassing the disabled attribute) — the
+    // dispatch + transport backstops still issue NO request.
+    (btn as unknown as { onclick?: () => void })?.onclick?.();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("host mode: nothing is written to session/local storage and no key prompt renders", () => {
+    bootRealKit(true, actionsManifest);
+    expect(window.sessionStorage.getItem("pcc.key")).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+    expect(window.localStorage.length).toBe(0);
+    expect(document.querySelector(".pcc-connect")).toBeNull(); // no key-entry prompt in host mode
+  });
+
+  it("host mode: a read binding STILL fetches (forced PCC origin, no Authorization header)", () => {
+    const readManifest = {
+      csd: DASHBOARD_CSD_URL,
+      title: "Status",
+      sections: [{ windows: [{ kind: "metric", label: "Jobs", binding: { path: "/api/status" } }] }],
+    };
+    const calls = bootRealKit(true, readManifest);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`${PCC_ORIGIN}/api/status`);
+    const headers = (calls[0].init?.headers || {}) as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined(); // host mode holds no key
+  });
+
+  it("non-host mode: the SAME mutating action is enabled and DOES issue a request (unchanged)", () => {
+    const calls = bootRealKit(false, actionsManifest);
+    const btn = buttonByText("Cancel job");
+    expect(btn, "action button rendered").toBeDefined();
+    expect(btn?.disabled).toBe(false);
+    expect(document.querySelector(".pcc-host-note")).toBeNull();
+    (btn as unknown as { onclick?: () => void })?.onclick?.();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url.endsWith("/api/jobs/j1/cancel")).toBe(true);
+    expect(calls[0].init?.method).toBe("POST");
   });
 });
