@@ -437,6 +437,39 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(res.json().error).toBe("empty_allowed_actions");
     });
 
+    it("S6-3b: actions present but NO terminal outcome → 422 no_terminal_action_allowed", async () => {
+      // A delegation covering only non-terminal phases can never produce the terminal checkpoint
+      // finalize requires — it would hold the unique (job, milestone) slot forever. begin rejects it.
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId, {
+        allowedActions: ["execution_started", "workflow_step_completed"],
+      });
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("no_terminal_action_allowed");
+    });
+
+    it("S6-3b: fault_report is a terminal outcome → a delegation whose only terminal is fault_report opens", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId, {
+        allowedActions: ["execution_started", "fault_report"],
+      });
+      const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: authorization } });
+      expect(res.statusCode).toBe(201);
+    });
+
+    it("milestone binding: a negative milestoneIndex → 422 unsupported_milestone_index (not the legacy fallback)", async () => {
+      const { jobId, principal } = freshSeeded();
+      const { authorization } = issueDelegation(principal, jobId);
+      const res = await app.inject({
+        method: "POST",
+        url: beginUrl(jobId),
+        payload: { sessionKeyAuthorization: authorization, milestoneIndex: -1 },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("unsupported_milestone_index");
+    });
+
     it("delegation scope.milestoneIndex that MISMATCHES the begin milestone → 422 milestone_scope_mismatch", async () => {
       const { jobId, principal } = freshSeeded();
       const { authorization } = issueDelegation(principal, jobId);
@@ -448,13 +481,18 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(res.json().error).toBe("milestone_scope_mismatch");
     });
 
-    it("delegation scope.milestoneIndex that MATCHES the begin milestone → opens (201)", async () => {
+    it("non-zero milestone (even with matching scope) → 422 unsupported_milestone_index (round-5: step 6 is single-milestone)", async () => {
+      // Pre-round-5 this opened a session for milestone 2. But `milestoneIndex` is NOT in the
+      // parent-signed session key, and finalizing an arbitrary milestone flips the WHOLE job to
+      // evidence_finalized while /complete looks for milestone 0 → legacy fallback. Until
+      // multi-milestone binds the index cryptographically into the delegation + accepted envelope,
+      // only milestone 0 is valid.
       const { jobId, principal } = freshSeeded();
       const { authorization } = issueDelegation(principal, jobId);
       const scoped = { ...authorization, scope: { ...authorization.scope, milestoneIndex: 2 } };
       const res = await app.inject({ method: "POST", url: beginUrl(jobId), payload: { sessionKeyAuthorization: scoped, milestoneIndex: 2 } });
-      expect(res.statusCode).toBe(201);
-      expect(res.json().sessionId).toBe(`evs-${jobId}-2`);
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error).toBe("unsupported_milestone_index");
     });
 
     it("non-number scope.milestoneIndex → 403 delegation_invalid (coerce fails closed)", async () => {
@@ -549,12 +587,14 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(res.json().reason).toBe("action_not_allowed");
     });
 
-    it("S6-3: an execution_completed checkpoint under a delegation whose allowedActions LACKS it → 403 (phase-action binding, NOT a begin-time requirement)", async () => {
-      // A delegation covering only non-terminal phases (no execution_completed) STILL opens a
-      // session — begin imposes NO terminal-action requirement (a delegation may legitimately
-      // cover only some phases). The terminal binding is enforced at CHECKPOINT submission:
-      // checkpointType must be in scope.allowedActions (§2.2-1, the EXISTING phase-action check).
-      const { jobId, del, sessionId } = await begin({ allowedActions: ["execution_started", "workflow_step_completed"] });
+    it("a checkpoint whose type is NOT in allowedActions → 403 action_not_allowed (phase-action binding at CHECKPOINT time)", async () => {
+      // The delegation covers non-terminal phases + a fault_report terminal — so begin's S6-3b
+      // terminal-action requirement is satisfied — but it does NOT allow execution_completed.
+      // Submitting an execution_completed checkpoint is rejected at CHECKPOINT submission:
+      // checkpointType must be in scope.allowedActions (§2.2-1, the per-action phase check).
+      // [Round-5 S6-3b made ≥1 terminal action a BEGIN-time requirement; the per-action binding
+      //  is still enforced per checkpoint, which is what this test proves.]
+      const { jobId, del, sessionId } = await begin({ allowedActions: ["execution_started", "workflow_step_completed", "fault_report"] });
       const cp = signCheckpoint({
         sessionId, seq: 1, createdAt: Math.floor(Date.now() / 1000), prevCheckpointHash: null,
         events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey,

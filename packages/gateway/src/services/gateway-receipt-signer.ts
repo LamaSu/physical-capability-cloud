@@ -32,7 +32,7 @@
  * scope for step 5.
  */
 
-import { createPrivateKey, createPublicKey } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { canonicalize } from "@pcc/spec";
 import {
   generateEd25519Keypair,
@@ -113,13 +113,20 @@ export class GatewayReceiptSigner {
 /**
  * The gatewayKeyId for a given public key: a FINGERPRINT of the key, not a
  * constant. Two DIFFERENT keys can never share one gatewayKeyId (an audit-log /
- * receipt reader can tell keys apart), and the id changes with the key on
- * rotation. `gw-rcpt-<first 8 hex of pubkey>`. (Ephemerals use the distinct
- * `gw-rcpt-eph-` prefix; 8 hex chars can never spell `eph-`, so the two
- * namespaces never collide.)
+ * receipt reader — and an INDEPENDENT oracle key registry — can treat it as a
+ * unique key identity), and the id changes with the key on rotation. The
+ * fingerprint is the FULL sha256 of the public key (256 bits):
+ * `gw-rcpt-<sha256(pubkey)>`. (An 8-hex / 32-bit prefix was birthday-collision-prone
+ * at ~65k keys and forgeable to a chosen prefix in ~2^32 — unsafe for a registry
+ * that keys trust off the id.) Ephemerals use the distinct `gw-rcpt-eph-` prefix;
+ * a hex digest can never spell `eph-` (`p`/`-` are not hex), so the namespaces
+ * never collide.
  */
-function fingerprintKeyId(publicKeyHex: string): string {
-  return `gw-rcpt-${publicKeyHex.slice(0, 8)}`;
+function fingerprintKeyId(publicKeyHex: string, prefix = "gw-rcpt"): string {
+  const fp = createHash("sha256")
+    .update(publicKeyHex.replace(/^0x/i, "").toLowerCase(), "utf8")
+    .digest("hex");
+  return `${prefix}-${fp}`;
 }
 
 /** Cached process-default signer — created once, reused across receipts. */
@@ -175,7 +182,7 @@ export function getDefaultGatewayReceiptSigner(): GatewayReceiptSigner {
   // Non-production (dev/test) only: zero-config ephemeral key.
   const kp = generateEd25519Keypair();
   processDefaultSigner = new GatewayReceiptSigner({
-    keyId: `gw-rcpt-eph-${kp.publicKeyHex.slice(0, 8)}`,
+    keyId: fingerprintKeyId(kp.publicKeyHex, "gw-rcpt-eph"),
     privateKeyHex: kp.privateKeyHex,
     publicKeyHex: kp.publicKeyHex,
   });

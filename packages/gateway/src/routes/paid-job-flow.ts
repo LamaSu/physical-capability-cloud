@@ -935,7 +935,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         .where(
           and(
             eq(schema.jobs.id, jobId),
-            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed')`,
+            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed','settlement_hold')`,
           ),
         )
         .returning()

@@ -90,7 +90,17 @@ const EVIDENCE_UNCOLLECTABLE_STATUSES: ReadonlySet<string> = new Set([
   "cancelled",
   "failed",
   "evidence_finalized",
+  "settlement_hold", // R-09: a job parked in a settlement hold is not re-collectable
 ]);
+
+/**
+ * Terminal-outcome checkpoint actions. A begin delegation must permit at least one (S6-3b) so
+ * the session can reach a finalizable terminal checkpoint — otherwise it occupies the unique
+ * (job, milestone) slot with no way to complete (step 6 has no renewal/chaining; that is step 9).
+ * Vocabulary single-sourced with milestone-package-store.ts (TERMINAL_COMPLETION_TYPES ∪
+ * {TERMINAL_FAULT_TYPE}); step 6 carries it as scope.allowedActions:string[], not the enum.
+ */
+const TERMINAL_ACTIONS: ReadonlySet<string> = new Set(["execution_completed", "fault_report"]);
 
 /** §8.4-A skew bound (FLAG only, never a gate in this cut — §8.6 owner toggle). */
 const PERMITTED_SKEW_SECONDS = DEFAULT_PERMITTED_SKEW_SECONDS;
@@ -382,6 +392,14 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const milestoneIndex = Number.isInteger(body.milestoneIndex)
       ? (body.milestoneIndex as number)
       : 0;
+    // Milestone binding (round-5): step 6 is single-milestone. `milestoneIndex` is NOT part of
+    // the parent-signed session key, so an unbound value is untrusted — and finalizing an
+    // arbitrary milestone flips the WHOLE job to `evidence_finalized`, after which `/complete`
+    // (which looks for milestone 0) falls through to the legacy path. Until multi-milestone binds
+    // the index into the signed delegation + the accepted envelope, only milestone 0 is valid.
+    if (milestoneIndex !== 0) {
+      return reply.status(422).send({ error: "unsupported_milestone_index", milestoneIndex });
+    }
     const now = nowSeconds();
     const { db, repos } = getStore();
 
@@ -473,6 +491,14 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     // 6. A delegation that permits no actions can sign nothing — reject it up front.
     if (!(allowedActions.length > 0)) {
       return reply.status(422).send({ error: "empty_allowed_actions" });
+    }
+    // 6b. S6-3b: a delegation that permits no TERMINAL outcome can never produce the
+    //     execution_completed / fault_report checkpoint that finalize requires — it would hold
+    //     the unique (job, milestone) slot forever with no way to complete (no renewal until
+    //     step 9). Require at least one terminal action so the session is finalizable. (Better:
+    //     derive the required terminal set from the accepted envelope — deferred w/ multi-milestone.)
+    if (!allowedActions.some((a) => TERMINAL_ACTIONS.has(a))) {
+      return reply.status(422).send({ error: "no_terminal_action_allowed", allowedActions });
     }
     // 7. Milestone scope binding WHEN PRESENT (additive; absent = step-6 default, no constraint).
     //    Read from the wire auth (the verifier SessionKey deliberately omits milestoneIndex).
@@ -752,6 +778,12 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const milestoneIndex = Number.isInteger(body.milestoneIndex)
       ? (body.milestoneIndex as number)
       : 0;
+    // Milestone binding (round-5, belt to the begin guard): finalizing a non-zero / arbitrary
+    // milestone would flip the WHOLE job to `evidence_finalized` while `/complete` looks for
+    // milestone 0 → legacy fallback. Step 6 is single-milestone; only 0 is valid.
+    if (milestoneIndex !== 0) {
+      return reply.status(422).send({ error: "unsupported_milestone_index", milestoneIndex });
+    }
     const now = nowSeconds();
     const { db, repos } = getStore();
 

@@ -334,6 +334,27 @@ export class CheckpointClient {
     err: unknown,
   ): Promise<GatewayReceipt> {
     const pending = this.pending!;
+    // S6-4b: retrieving an ALREADY-COMMITTED receipt must NOT require live execution authority.
+    // begin() now rejects a delegation past expiresAt (S6-3), and the long-job boundary is
+    // EXACTLY where the final checkpoint can commit just before expiry and its response be lost —
+    // so try the READ-ONLY receipt lookup FIRST. A committed receipt is proof regardless of
+    // whether the delegation is still live; only SUBMITTING new work needs live authority.
+    const recovered = await this.tryFetchReceipt(pending.seq);
+    if (recovered) {
+      // acceptReceipt re-verifies the signature AND that it attests OUR exact checkpoint — a
+      // receipt for a different checkpoint at our seq → broken (genuine fork), never a false accept.
+      return this.acceptReceipt(
+        recovered,
+        canonicalize(pending.content),
+        pending.seq,
+        pending.events,
+        200,
+        { recovered: true },
+      );
+    }
+    // No committed receipt at our seq → our checkpoint was NOT accepted. RESUBMITTING requires
+    // live authority: begin() re-reads the tip and legitimately 422s if the delegation has expired
+    // (authoring NEW work under dead authority is forbidden — distinct from retrieving old proof).
     if (!allowResync) {
       // Already recovered once — surface the uncertain outcome rather than loop.
       this.broken = { reason: "uncertain_commit", statusCode: 0 };
@@ -345,7 +366,7 @@ export class CheckpointClient {
     }
     await this.begin(); // idempotent — re-reads the durable tip (lastAcceptedHash / nextSeq)
     if (this.lastAcceptedHash === pending.checkpointHash) {
-      // Our checkpoint WAS committed (it is the tip) — fetch its receipt + advance; never re-submit.
+      // Committed after all (raced our GET) — recover its receipt; never re-submit.
       const receipt = await this.fetchReceipt(pending.seq);
       return this.acceptReceipt(
         receipt,
@@ -399,6 +420,32 @@ export class CheckpointClient {
       throw new CheckpointSubmissionError("receipt_recovery_failed", status, body);
     }
     return b.receipt;
+  }
+
+  /**
+   * Read-only receipt lookup for the S6-4b uncertain-recovery path. Returns null when the gateway
+   * has NO committed receipt at `seq` (a clean absent → our checkpoint was not accepted) instead
+   * of throwing, so recovery can distinguish "committed, retrieve it" from "not committed,
+   * resubmit". A transient error also returns null → the caller falls through to begin()/resubmit,
+   * which surfaces the uncertainty honestly. Crucially this needs NO live authority, so it works
+   * after the delegation has expired — the exact long-job boundary the async split exists for.
+   *
+   * NOTE (memory-only pending): the exact pending bytes live in `this.pending` (process memory).
+   * A device-process restart between commit and recovery loses automatic receipt-recovery here.
+   * Persisting `pending` to durable device storage is a follow-up; finalization no longer depends
+   * on it (payloads are revealed independently — round-5 payloads-out).
+   */
+  private async tryFetchReceipt(seq: number): Promise<GatewayReceipt | null> {
+    try {
+      const { status, body } = await this.get(
+        `/api/jobs/${this.jobId}/evidence/sessions/${this.sessionId}/receipts/${seq}`,
+      );
+      const b = body as { receipt?: GatewayReceipt } | undefined;
+      if (status === 200 && b?.receipt) return b.receipt;
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   /**

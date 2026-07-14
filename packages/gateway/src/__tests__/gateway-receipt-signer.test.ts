@@ -22,8 +22,15 @@ import {
   __resetDefaultGatewayReceiptSigner,
 } from "../services/gateway-receipt-signer.js";
 import { generateEd25519Keypair } from "../auth/ed25519.js";
+import { createHash } from "node:crypto";
 
 const ENV_KEY = "PCC_GATEWAY_RECEIPT_PRIVATE_KEY";
+
+// The expected keyId = the SAME full-sha256 fingerprint the signer computes (round-5: an 8-hex /
+// 32-bit prefix was birthday-collision-prone → now `<prefix>-<sha256(pubkey)>`, 256 bits, safe for
+// an independent oracle key registry to treat as unique identity).
+const fpKeyId = (pubHex: string, prefix = "gw-rcpt"): string =>
+  `${prefix}-${createHash("sha256").update(pubHex.replace(/^0x/i, "").toLowerCase(), "utf8").digest("hex")}`;
 
 describe("gateway-receipt-signer — H4 fail-closed + fingerprint keyId + pairing assert", () => {
   let savedNodeEnv: string | undefined;
@@ -91,7 +98,7 @@ describe("gateway-receipt-signer — H4 fail-closed + fingerprint keyId + pairin
     __resetDefaultGatewayReceiptSigner();
 
     const signer = getDefaultGatewayReceiptSigner();
-    expect(signer.keyId).toBe(`gw-rcpt-${kp.publicKeyHex.slice(0, 8)}`);
+    expect(signer.keyId).toBe(fpKeyId(kp.publicKeyHex));
     expect(signer.publicKeyHex).toBe(kp.publicKeyHex);
     // Round-trip: the env-derived key signs and verifies.
     const content = { hello: "world" };
@@ -105,7 +112,7 @@ describe("gateway-receipt-signer — H4 fail-closed + fingerprint keyId + pairin
     __resetDefaultGatewayReceiptSigner();
 
     const signer = getDefaultGatewayReceiptSigner();
-    expect(signer.keyId).toBe(`gw-rcpt-${kp.publicKeyHex.slice(0, 8)}`);
+    expect(signer.keyId).toBe(fpKeyId(kp.publicKeyHex));
     expect(signer.publicKeyHex).toBe(kp.publicKeyHex);
   });
 
@@ -123,8 +130,9 @@ describe("gateway-receipt-signer — H4 fail-closed + fingerprint keyId + pairin
     __resetDefaultGatewayReceiptSigner();
     const idB = getDefaultGatewayReceiptSigner().keyId;
 
-    expect(idA).toBe(`gw-rcpt-${a.publicKeyHex.slice(0, 8)}`);
-    expect(idB).toBe(`gw-rcpt-${b.publicKeyHex.slice(0, 8)}`);
+    expect(idA).toBe(fpKeyId(a.publicKeyHex));
+    expect(idB).toBe(fpKeyId(b.publicKeyHex));
+    expect(idA).toMatch(/^gw-rcpt-[0-9a-f]{64}$/); // full sha256 (256-bit), not the old 32-bit prefix
     expect(idA).not.toBe(idB); // two DIFFERENT keys can NEVER share a gatewayKeyId
     expect(idA).not.toBe("gw-rcpt-1"); // the old constant keyId is gone
   });
@@ -136,7 +144,7 @@ describe("gateway-receipt-signer — H4 fail-closed + fingerprint keyId + pairin
     __resetDefaultGatewayReceiptSigner();
 
     const signer = getDefaultGatewayReceiptSigner();
-    expect(signer.keyId).toMatch(/^gw-rcpt-eph-[0-9a-f]{8}$/);
+    expect(signer.keyId).toMatch(/^gw-rcpt-eph-[0-9a-f]{64}$/);
     // The ephemeral key signs and verifies.
     const content = { a: 1 };
     expect(signer.verify(content, signer.sign(content))).toBe(true);
