@@ -33,7 +33,8 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getRepos } from "../db.js";
-import { verifySeededPolicies } from "../policy/verify-seeded-policies.js";
+import { verifySeededPolicies, MANIFEST_MARKER_ID } from "../policy/verify-seeded-policies.js";
+import { resolveWinner } from "../policy/route-policy-precedence.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
 
@@ -97,11 +98,16 @@ function mergeScopeRequirements(dbRows: ScopeRequirement[]): ScopeRequirement[] 
 function refreshScopeCache(): void {
   try {
     const rows = getRepos().governance.findAllEndpointScopes();
-    const dbRequirements: ScopeRequirement[] = rows.map((r) => ({
-      method: r.method,
-      pattern: r.routePattern,
-      scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
-    }));
+    const dbRequirements: ScopeRequirement[] = rows
+      // Exclude the manifest marker row by EXACT id (d749deff convergence): it
+      // carries digest metadata in `description`, not a route policy, so it must
+      // never become a scope requirement that could match/shadow a real route.
+      .filter((r) => r.id !== MANIFEST_MARKER_ID)
+      .map((r) => ({
+        method: r.method,
+        pattern: r.routePattern,
+        scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
+      }));
     // MERGE, don't replace (review #1b): defaults stay as the base even when
     // the db has rows. mergeScopeRequirements([]) === the full defaults, so the
     // empty-db case is unchanged.
@@ -259,32 +265,13 @@ function assertCompleteRoutePolicyInventory(): void {
   verifySeededPolicies(getRepos().governance);
 }
 
-// ── Policy specificity comparator (audit review #4/#5) ────────────
-// Rank a policy so the MOST-specific matching rule wins, aligned with the audit
-// route-policy matrix / route-policy-inventory.mjs `resolvePolicy`: exact method
-// > more literal path segments > fewer "**" > fewer "*". The old star-count-only
-// sort tied /api/jobs/*/attestations/* (verifier) with the broad /api/jobs/**
-// (requestor) and let input order decide — so the wrong rule could win.
-function policySpecificityKey(r: ScopeRequirement): number[] {
-  const literalSegs = r.pattern
-    .split("/")
-    .filter((s) => s && !s.includes("*")).length;
-  const doubleStars = (r.pattern.match(/\*\*/g) ?? []).length;
-  const singleStars = (r.pattern.match(/\*/g) ?? []).length - 2 * doubleStars;
-  const methodExact = r.method === "*" ? 0 : 1;
-  return [methodExact, literalSegs, -doubleStars, -singleStars];
-}
-function comparePolicySpecificity(a: ScopeRequirement, b: ScopeRequirement): number {
-  const ka = policySpecificityKey(a);
-  const kb = policySpecificityKey(b);
-  for (let i = 0; i < ka.length; i++) {
-    if (ka[i] !== kb[i]) return kb[i] - ka[i]; // higher key = more specific = first
-  }
-  // deterministic tie-break so equal-specificity policies never depend on input order
-  return a.method === b.method
-    ? a.pattern.localeCompare(b.pattern)
-    : a.method.localeCompare(b.method);
-}
+// Policy precedence — which rule wins when several match — is the canonical
+// ../policy/route-policy-precedence.ts (compareSpecificity + resolveWinner,
+// imported above): 5-key specificity (exact method > literal segments > fewer
+// "**" > fewer "*" > more literal chars) with ambiguity rejection, drift-tested
+// against the audit inventory (route-policy-precedence.test.ts). It replaced this
+// file's former inline star-count sort so the runtime winner cannot diverge from
+// the audited route-policy matrix.
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
@@ -335,18 +322,41 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     const requirements =
       scopeCache.length > 0 ? scopeCache : DEFAULT_SCOPE_REQUIREMENTS;
 
-    // Most-specific matching policy wins (comparePolicySpecificity, review
-    // #4/#5) — the winner must match the audit route-policy matrix, not the old
-    // star-count-only order that tied specific rules with broad globs.
-    const sorted = [...requirements].sort(comparePolicySpecificity);
+    // Collect every rule that matches this request, then let the CANONICAL
+    // comparator pick the winner (route-policy-precedence.resolveWinner: 5-key
+    // specificity + ambiguity detection). This replaced the former inline
+    // star-count sort so the runtime winner is identical to the audited matrix.
+    const matching = requirements.filter((r_) =>
+      matchRoute(req.method, req.url, r_.method, r_.pattern),
+    );
+    const resolution = resolveWinner(matching);
 
-    let matchedRequirement: ScopeRequirement | undefined;
-    for (const req_ of sorted) {
-      if (matchRoute(req.method, req.url, req_.method, req_.pattern)) {
-        matchedRequirement = req_;
-        break;
+    // Fail closed on an ambiguous winner: two equally-specific rules with
+    // conflicting scopes both matched. The build-trusted digest gate
+    // (verifySeededPolicies) already proves the LOADED set is the audited,
+    // 0-ambiguous manifest, so this is the per-request backstop — under enforce
+    // it must DENY, never silently pick one; report-only logs and allows.
+    if (resolution.ambiguous) {
+      if (enforcementMode === "report-only") {
+        req.log.warn(
+          { method: req.method, url: req.url, caller_scopes: callerScopes, reason: "ambiguous_scope_policy" },
+          "scope-checker: would DENY (report-only) — ambiguous top-specificity policy",
+        );
+        return;
       }
+      return reply.status(403).send({
+        error: "ambiguous_scope_policy",
+        message:
+          "Multiple equally-specific scope policies match this route with conflicting " +
+          "requirements; access is denied until the policy set is disambiguated.",
+        required_scopes: [],
+        caller_scopes: callerScopes,
+        docs: "https://capability.network/whitepaper.md",
+      });
     }
+
+    const matchedRequirement: ScopeRequirement | undefined =
+      resolution.winner ?? undefined;
 
     // C-01 default-deny: a route with NO matching scope policy is DENIED, not
     // allowed. An authenticated principal reaching an unpoliced /api/* route
