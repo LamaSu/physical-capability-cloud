@@ -7,7 +7,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, randomBytes } from "node:crypto";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
@@ -25,49 +25,155 @@ import {
 // The operator's operational wallet private key must NEVER be returned in an
 // HTTP response NOR persisted in plaintext. We envelope-encrypt it at rest with
 // AES-256-GCM under a Key-Encryption-Key (KEK) sourced from the environment.
-// The stored value is a self-describing string `enc:v1:<ivHex>:<tagHex>:<ctHex>`
-// (iv + auth tag + ciphertext), so the existing `operator_wallet_private_key`
-// text column needs no schema/type change — only a semantic one (see the schema
-// note in packages/db/src/schema/auth.ts).
+// The stored value is a self-describing string
+// `enc:v2:<ivHex>:<tagHex>:<ctHex>` (iv + auth tag + ciphertext). The GCM cipher
+// is bound with Additional Authenticated Data (AAD) derived from the wallet
+// address (review #5): a ciphertext cannot be lifted from one db row and
+// replayed into another, because decrypting under a different row's AAD fails
+// the GCM tag check. The existing `operator_wallet_private_key` text column
+// needs no schema/type change — only a semantic one (see packages/db/src/
+// schema/auth.ts).
 //
-// Fail CLOSED: if no KEK is configured we return null and the caller persists
-// null — we NEVER fall back to storing plaintext. The in-memory key is still
-// used transiently to sign the on-chain setAgentWallet tx at provision time.
+// KEK STRENGTH (review #5): the KEK MUST be exactly 32 random bytes, supplied as
+// base64 or hex. A short/weak passphrase like "password" is REJECTED — we do
+// NOT silently SHA-256 an arbitrary passphrase into a key (that launders low
+// entropy into a legitimate-looking 32-byte key and hides the weakness). "Unset"
+// and "set-but-invalid" are distinct states:
+//   • unset            → encryption unavailable; caller creates NO wallet (fail
+//                        closed) — see the orphaned-wallet guard below.
+//   • set-but-invalid  → operator misconfiguration; `resolveKeyEncryptionKey`
+//                        THROWS, and the startup guard in `provisionRoutes`
+//                        fails the boot LOUDLY rather than degrade silently.
+//
+// ORPHANED-WALLET SAFETY (review #4 — round-1 made this worse): if encryption is
+// unavailable we must NOT create a custodial wallet at all. Generating an EOA,
+// assigning it on-chain, then dropping its only private key (because there is no
+// envelope to store) yields an UNRECOVERABLE on-chain wallet. The provision
+// handler therefore checks availability BEFORE generating/assigning a wallet and
+// only ever assigns on-chain when it already holds a storable envelope.
+//
+// VERSION / MIGRATION: new writes are `enc:v2:` (AAD-bound). Any legacy
+// `enc:v1:` blob (no AAD) predates this change; a future decrypt-on-use path
+// MUST branch on the version prefix — v1 decrypts WITHOUT AAD, v2 decrypts WITH
+// the wallet-address AAD (see `walletKeyAad`). No decrypt path exists yet (keys
+// are used only in-memory at provision time), so there is nothing to keep
+// back-compatible in code today; the branch is a Wave-3 requirement.
 //
 // TODO(audit P0 follow-up, Wave 3): move custody to a non-exportable KMS/HSM
-// (envelope key wrapping via cloud KMS), rotate every previously-generated
-// operator key that was written before this containment landed, and add a
-// governed decrypt-on-use path if a signer ever needs the key after provision.
+// (envelope key wrapping via cloud KMS); rotate/re-encrypt every previously
+// written operator key (any legacy plaintext OR `enc:v1` row → `enc:v2`); and
+// add the governed, version-aware decrypt-on-use path described above.
 const KEK_ENV_VAR = "PCC_KEY_ENCRYPTION_KEK";
+const ENC_VERSION = "v2";
 
-function resolveKeyEncryptionKey(): Buffer | null {
-  const raw = process.env[KEK_ENV_VAR];
-  if (!raw || raw.length === 0) return null;
-  // Accept a 32-byte key as 64 hex chars (optionally 0x-prefixed); otherwise
-  // derive a stable 32-byte key from the provided secret via SHA-256.
-  const hexCandidate = raw.replace(/^0x/, "");
-  if (/^[0-9a-fA-F]{64}$/.test(hexCandidate)) {
-    return Buffer.from(hexCandidate, "hex");
+/**
+ * Decode + validate the raw KEK env value into exactly 32 key bytes.
+ * Accepts 64 hex chars (optional `0x`) OR base64/base64url that decodes to
+ * exactly 32 bytes. Throws with an actionable message on anything else —
+ * notably a passphrase, which is NOT hashed into a key.
+ */
+function decodeKek(raw: string): Buffer {
+  const hex = raw.replace(/^0x/i, "");
+  if (hex.length === 64 && /^[0-9a-fA-F]{64}$/.test(hex)) {
+    return Buffer.from(hex, "hex");
   }
-  return createHash("sha256").update(raw, "utf8").digest();
+  // base64 / base64url — decode then assert exactly 32 bytes. Buffer.from is
+  // lenient (it won't throw on junk), so the length assertion is the real gate.
+  if (/^[A-Za-z0-9+/\-_]+={0,2}$/.test(raw)) {
+    const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const buf = Buffer.from(normalized, "base64");
+    if (buf.length === 32) return buf;
+  }
+  throw new Error(
+    `${KEK_ENV_VAR} must be exactly 32 random bytes, encoded as base64 ` +
+      "(`openssl rand -base64 32`) or hex (`openssl rand -hex 32`). The provided " +
+      "value does not decode to 32 bytes; a weak passphrase is rejected — it is " +
+      "NOT hashed into a key.",
+  );
 }
 
 /**
- * Envelope-encrypt a secret for storage at rest. Returns
- * `enc:v1:<ivHex>:<tagHex>:<ciphertextHex>` or `null` when no KEK is set
- * (fail closed — the caller must persist null, never the plaintext).
+ * Resolve the KEK:
+ *   - unset / blank        → null   (encryption unavailable; fail closed)
+ *   - set but not 32 bytes → throws (loud misconfiguration)
+ *   - set + valid          → 32-byte Buffer
  */
-function encryptSecretAtRest(plaintext: string): string | null {
+function resolveKeyEncryptionKey(): Buffer | null {
+  const raw = process.env[KEK_ENV_VAR];
+  if (raw === undefined || raw.trim().length === 0) return null;
+  return decodeKek(raw.trim());
+}
+
+/**
+ * Non-throwing probe for the startup guard: returns an error message when the
+ * KEK is SET but invalid, else null (covers both "valid" and cleanly "unset").
+ */
+function keyEncryptionConfigError(): string | null {
+  try {
+    resolveKeyEncryptionKey();
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** True only when a valid 32-byte KEK is configured (never throws). */
+function isKeyEncryptionAvailable(): boolean {
+  try {
+    return resolveKeyEncryptionKey() !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * AAD binding the ciphertext to the wallet it controls. MUST be reconstructed
+ * identically at decrypt time from the row's `operator_wallet_address`
+ * (lower-cased). Binding to the address means an envelope cannot be swapped
+ * between db rows without failing the GCM tag check.
+ */
+function walletKeyAad(walletAddress: string): Buffer {
+  return Buffer.from(`pcc:operator-wallet:${walletAddress.toLowerCase()}`, "utf8");
+}
+
+/**
+ * Envelope-encrypt a secret for storage at rest, bound by AAD to `aadIdentity`
+ * (the wallet address). Returns `enc:v2:<ivHex>:<tagHex>:<ciphertextHex>`, or
+ * `null` when no valid KEK is set (fail closed — the caller must persist null,
+ * never the plaintext, and must NOT create a custodial wallet it cannot store;
+ * see the orphaned-wallet guard in the handler).
+ */
+function encryptSecretAtRest(plaintext: string, aadIdentity: string): string | null {
   const kek = resolveKeyEncryptionKey();
   if (!kek) return null;
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", kek, iv);
+  cipher.setAAD(walletKeyAad(aadIdentity));
   const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return `enc:v1:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
+  return `enc:${ENC_VERSION}:${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
 }
 
 export async function provisionRoutes(app: FastifyInstance) {
+  // ── Startup guard (orphaned-wallet + KEK strength, reviews #4/#5) ──────────
+  // If this gateway will create custodial operator wallets (identity write is
+  // enabled), the KEK must be valid, or we would generate keys we cannot store.
+  // A KEK that is SET but malformed (wrong length / a passphrase) is an operator
+  // misconfiguration — fail LOUDLY at boot rather than silently degrade or (the
+  // round-1 bug) orphan wallets. A cleanly UNSET KEK is tolerated here: provision
+  // still issues API keys, just WITHOUT a custodial wallet (request-time guard
+  // below), so the public endpoint keeps working.
+  if (isIdentityWriteEnabled()) {
+    const kekError = keyEncryptionConfigError();
+    if (kekError) {
+      throw new Error(
+        `[provision] Custodial operator wallets are enabled (ERC-8004 identity ` +
+          `write is on) but the key-encryption key is invalid: ${kekError} ` +
+          `Fix ${KEK_ENV_VAR}, or disable identity write, before starting the gateway.`,
+      );
+    }
+  }
+
   // ── POST /api/auth/provision ──────────────────────────────────────
   // Public endpoint — this is how new operators get their API key.
   // They provide email + capability description, we issue a key.
@@ -235,6 +341,16 @@ export async function provisionRoutes(app: FastifyInstance) {
             onchain_tx_hash?: string;
             onchain_error?: string;
           }
+        | {
+            // Orphaned-wallet fix (review #4): explicit "no custodial wallet was
+            // created" state. Returned when encryption at rest is unavailable, so
+            // we refuse to generate/assign a key we cannot store. The API key is
+            // still provisioned — it simply has no wallet.
+            source: "none";
+            custody: "none";
+            reason: "wallet_not_created";
+            message: string;
+          }
         | undefined;
       if (isIdentityWriteEnabled()) {
         onchainAttempted = true;
@@ -280,69 +396,107 @@ export async function provisionRoutes(app: FastifyInstance) {
           // contract, RPC blip) NEVER leaks into the outer catch and reverts
           // the sponsored-mint success record.
           try {
-            const opWallet = await generateOperatorWallet();
-            // H-12: encrypt the key for storage. The plaintext `opWallet.privateKey`
-            // is used in-memory ONLY to sign the setAgentWallet tx below, then
-            // dropped when the request ends — it is never returned or logged.
-            const operatorKeyEnvelope = encryptSecretAtRest(opWallet.privateKey);
-            operatorWalletResponse = {
-              address: opWallet.address,
-              source: "server-minted",
-              custody: "gateway",
-              warning:
-                "This operational wallet is custodied by the gateway. Its private " +
-                "key is encrypted at rest and is never returned by the API. A future " +
-                "export flow will let you take custody (see coord bulletin 235).",
-            };
-            try {
-              const walletResult = await setAgentWalletOnChain({
-                agentId: onchain.agentId,
-                newWallet: opWallet.address,
-                newWalletPrivateKey: opWallet.privateKey,
-              });
-              getRepos().apiKeys.recordOperatorWallet(record.id, {
+            // ── Orphaned-wallet guard (review #4) ──────────────────────────
+            // NEVER create a custodial wallet we cannot encrypt at rest.
+            // Generating an EOA, assigning it on-chain, then dropping its only
+            // private key (no envelope to store) yields an UNRECOVERABLE
+            // on-chain wallet — the exact failure round-1 introduced. So we
+            // generate the key ONLY when encryption is available, and we assign
+            // on-chain / persist ONLY when we already hold a real envelope.
+            // Otherwise we create NO wallet and report an explicit
+            // wallet_not_created / custody:"none" state (the API key was still
+            // provisioned above — it simply has no wallet).
+            const canEncryptAtRest = isKeyEncryptionAvailable();
+            const opWallet = canEncryptAtRest
+              ? await generateOperatorWallet()
+              : null;
+            // H-12: encrypt the key BEFORE any on-chain assignment, bound by AAD
+            // to this wallet address (so a ciphertext can't be swapped between
+            // db rows). The plaintext key is used in-memory ONLY to sign the
+            // setAgentWallet tx below, then dropped when the request ends — it
+            // is never returned or logged.
+            const operatorKeyEnvelope = opWallet
+              ? encryptSecretAtRest(opWallet.privateKey, opWallet.address)
+              : null;
+
+            if (!opWallet || !operatorKeyEnvelope) {
+              // No storable envelope → do NOT generate/assign/persist a wallet.
+              operatorWalletResponse = {
+                source: "none",
+                custody: "none",
+                reason: "wallet_not_created",
+                message: canEncryptAtRest
+                  ? "Operator wallet was not created: its private key could not be " +
+                    "encrypted for storage, so no key was assigned on-chain."
+                  : "Operator wallet was not created: no key-encryption key " +
+                    "(PCC_KEY_ENCRYPTION_KEK) is configured, so the gateway will not " +
+                    "custody a wallet whose private key it cannot store encrypted. " +
+                    "Configure a 32-byte KEK to enable custodial wallets.",
+              };
+              req.log?.warn(
+                { keyId: record.id, canEncryptAtRest },
+                "operator wallet skipped — refusing to create an unrecoverable custodial wallet (no storable envelope)",
+              );
+            } else {
+              operatorWalletResponse = {
                 address: opWallet.address,
-                privateKeyEnvelope: operatorKeyEnvelope,
-                onchainStatus: "written",
-                onchainTxHash: walletResult.txHash,
-                onchainError: null,
-              });
-              operatorWalletResponse.onchain_status = "written";
-              operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
-              auditService.log({
-                eventType: "auth.agent_wallet_written",
-                actor: operatorId,
-                resourceType: "api_key",
-                resourceId: record.id,
-                action: "update",
-                metadata: {
-                  agent_wallet: opWallet.address,
-                  tx_hash: walletResult.txHash,
-                  agent_id: String(onchain.agentId),
-                },
-                ip: req.ip,
-                userAgent: req.headers["user-agent"],
-              });
-            } catch (walletErr) {
-              const walletErrMsg =
-                walletErr instanceof Error ? walletErr.message : String(walletErr);
+                source: "server-minted",
+                custody: "gateway",
+                warning:
+                  "This operational wallet is custodied by the gateway. Its private " +
+                  "key is encrypted at rest and is never returned by the API. A future " +
+                  "export flow will let you take custody (see coord bulletin 235).",
+              };
               try {
+                const walletResult = await setAgentWalletOnChain({
+                  agentId: onchain.agentId,
+                  newWallet: opWallet.address,
+                  newWalletPrivateKey: opWallet.privateKey,
+                });
                 getRepos().apiKeys.recordOperatorWallet(record.id, {
                   address: opWallet.address,
                   privateKeyEnvelope: operatorKeyEnvelope,
-                  onchainStatus: "failed",
-                  onchainTxHash: null,
-                  onchainError: walletErrMsg.slice(0, 1024),
+                  onchainStatus: "written",
+                  onchainTxHash: walletResult.txHash,
+                  onchainError: null,
                 });
-              } catch {
-                // Non-fatal.
+                operatorWalletResponse.onchain_status = "written";
+                operatorWalletResponse.onchain_tx_hash = walletResult.txHash;
+                auditService.log({
+                  eventType: "auth.agent_wallet_written",
+                  actor: operatorId,
+                  resourceType: "api_key",
+                  resourceId: record.id,
+                  action: "update",
+                  metadata: {
+                    agent_wallet: opWallet.address,
+                    tx_hash: walletResult.txHash,
+                    agent_id: String(onchain.agentId),
+                  },
+                  ip: req.ip,
+                  userAgent: req.headers["user-agent"],
+                });
+              } catch (walletErr) {
+                const walletErrMsg =
+                  walletErr instanceof Error ? walletErr.message : String(walletErr);
+                try {
+                  getRepos().apiKeys.recordOperatorWallet(record.id, {
+                    address: opWallet.address,
+                    privateKeyEnvelope: operatorKeyEnvelope,
+                    onchainStatus: "failed",
+                    onchainTxHash: null,
+                    onchainError: walletErrMsg.slice(0, 1024),
+                  });
+                } catch {
+                  // Non-fatal.
+                }
+                operatorWalletResponse.onchain_status = "failed";
+                operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+                req.log?.warn(
+                  { keyId: record.id, error: walletErrMsg },
+                  "setAgentWallet best-effort failed — off-chain wallet preserved (key encrypted at rest)",
+                );
               }
-              operatorWalletResponse.onchain_status = "failed";
-              operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
-              req.log?.warn(
-                { keyId: record.id, error: walletErrMsg },
-                "setAgentWallet best-effort failed — off-chain wallet preserved",
-              );
             }
           } catch (opWalletErr) {
             // generateOperatorWallet failed (e.g. viem import glitch in a
