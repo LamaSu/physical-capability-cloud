@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error — JS audit tool, no d.ts
-import { resolvePolicy } from "../../../../scripts/audit/route-policy-inventory.mjs";
+import { resolvePolicy, buildInventory } from "../../../../scripts/audit/route-policy-inventory.mjs";
 
 /**
  * Route-policy MATRIX (audit P0, lane d749deff; review finding #4).
@@ -23,6 +23,13 @@ const MATRIX: Array<[string, string, string[]]> = [
   ["POST", "/api/escrow/chain/0xabc/fund", ["requestor", "operator", "admin"]],
   ["POST", "/api/fiat-ramp/offramp/withdraw", ["operator", "requestor", "admin"]],
   ["POST", "/api/swf/proposals", ["operator", "admin"]],
+  ["POST", "/api/settlement/finalize", ["requestor", "operator", "admin"]],
+  ["POST", "/api/pool/close/p1", ["requestor", "operator", "admin"]],
+  ["POST", "/api/disputes/abc/resolve", ["requestor", "operator", "verifier", "admin"]],
+  ["POST", "/api/gasless/relay", ["operator", "requestor", "admin"]],
+  ["POST", "/api/treasury/move", ["operator", "admin"]],
+  ["POST", "/api/rewards/distribute", ["operator", "admin"]],
+  ["POST", "/api/milestones/m1/release", ["requestor", "operator", "admin"]],
 ];
 
 describe("route-policy matrix — the WINNING policy for sensitive routes (finding #4)", () => {
@@ -51,5 +58,17 @@ describe("route-policy matrix — the WINNING policy for sensitive routes (findi
     for (const [method, path] of MATRIX) {
       expect(resolvePolicy(method, path).ambiguous, `${method} ${path} ambiguous`).toBe(false);
     }
+  });
+
+  it("GLOBAL: no private /api route resolves to an ambiguous policy (R2 #4)", () => {
+    // Every non-public route the gateway registers must have an unambiguous winner —
+    // else the runtime winner would depend on insertion order.
+    const concretize = (p: string) => p.replace(/:[A-Za-z0-9_]+/g, "x");
+    const inv = buildInventory() as { routes: Array<{ method: string; path: string; bucket: string }> };
+    const ambiguous = inv.routes
+      .filter((r) => r.bucket !== "public")
+      .filter((r) => resolvePolicy(r.method, concretize(r.path)).ambiguous)
+      .map((r) => `${r.method} ${r.path}`);
+    expect(ambiguous).toEqual([]);
   });
 });
