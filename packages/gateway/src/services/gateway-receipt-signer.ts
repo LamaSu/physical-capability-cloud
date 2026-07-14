@@ -71,6 +71,19 @@ export class GatewayReceiptSigner {
   private readonly privateKeyHex: string;
 
   constructor(key: GatewayReceiptKey) {
+    // ASSERT pubkey ⟺ seed (§8.1-#3 hardening): derive the public key from the
+    // supplied private seed and require it to equal the supplied public key.
+    // A mis-paired key would sign under seed A while advertising pubkey B — every
+    // such receipt would be unverifiable. Reject at construction (fail closed)
+    // rather than mint unverifiable receipts. Case-insensitive: derivedPub is
+    // lowercase hex; normalize the supplied pubkey the same way.
+    const derivedPub = publicKeyHexFromSeedHex(key.privateKeyHex);
+    if (derivedPub !== key.publicKeyHex.toLowerCase()) {
+      throw new Error(
+        "gateway receipt signer: supplied public key does not match the private " +
+          "seed (mis-paired key rejected)",
+      );
+    }
     this.keyId = key.keyId;
     this.publicKeyHex = key.publicKeyHex;
     this.privateKeyHex = key.privateKeyHex;
@@ -97,29 +110,69 @@ export class GatewayReceiptSigner {
   }
 }
 
+/**
+ * The gatewayKeyId for a given public key: a FINGERPRINT of the key, not a
+ * constant. Two DIFFERENT keys can never share one gatewayKeyId (an audit-log /
+ * receipt reader can tell keys apart), and the id changes with the key on
+ * rotation. `gw-rcpt-<first 8 hex of pubkey>`. (Ephemerals use the distinct
+ * `gw-rcpt-eph-` prefix; 8 hex chars can never spell `eph-`, so the two
+ * namespaces never collide.)
+ */
+function fingerprintKeyId(publicKeyHex: string): string {
+  return `gw-rcpt-${publicKeyHex.slice(0, 8)}`;
+}
+
 /** Cached process-default signer — created once, reused across receipts. */
 let processDefaultSigner: GatewayReceiptSigner | null = null;
 
 /**
- * The process-default gateway receipt signer. Reads a raw 32-byte Ed25519 seed
- * from `PCC_GATEWAY_RECEIPT_PRIVATE_KEY` (hex, optional 0x) if present; else
- * generates an ephemeral keypair. keyId is "gw-rcpt-1" for env keys and
- * "gw-rcpt-eph-<8 hex of pubkey>" for ephemerals so they're distinguishable in
- * audit logs. Production deploys MUST set the env var so receipts stay
- * verifiable across restarts.
+ * The process-default gateway receipt signer.
+ *
+ * FAIL CLOSED IN PRODUCTION (§8.1-#3): the receipt key is a settlement-time
+ * authority. When `NODE_ENV === "production"` a MISSING or MALFORMED
+ * `PCC_GATEWAY_RECEIPT_PRIVATE_KEY` is FATAL — never fall back to an ephemeral
+ * key. An ephemeral prod key would make receipts unverifiable across restarts
+ * (each restart mints a new identity), silently breaking the time-authority.
+ *
+ * Reads a raw 32-byte Ed25519 seed from `PCC_GATEWAY_RECEIPT_PRIVATE_KEY` (hex,
+ * optional 0x). keyId is a fingerprint of the public key (`gw-rcpt-<8 hex>`) so
+ * two distinct keys never share a gatewayKeyId. In non-production (dev/test)
+ * only, a missing/malformed key falls back to a zero-config ephemeral keypair
+ * (`gw-rcpt-eph-<8 hex>`), keeping local dev and the test suite key-free.
  */
 export function getDefaultGatewayReceiptSigner(): GatewayReceiptSigner {
   if (processDefaultSigner) return processDefaultSigner;
+
+  const isProduction = process.env.NODE_ENV === "production";
   const envKey = process.env.PCC_GATEWAY_RECEIPT_PRIVATE_KEY;
-  if (envKey && /^(0x)?[0-9a-fA-F]{64}$/.test(envKey)) {
+  const envKeyValid =
+    typeof envKey === "string" && /^(0x)?[0-9a-fA-F]{64}$/.test(envKey);
+
+  if (envKeyValid) {
     const seed = (envKey.startsWith("0x") ? envKey.slice(2) : envKey).toLowerCase();
+    const publicKeyHex = publicKeyHexFromSeedHex(seed);
     processDefaultSigner = new GatewayReceiptSigner({
-      keyId: "gw-rcpt-1",
+      keyId: fingerprintKeyId(publicKeyHex),
       privateKeyHex: seed,
-      publicKeyHex: publicKeyHexFromSeedHex(seed),
+      publicKeyHex,
     });
     return processDefaultSigner;
   }
+
+  // No usable env key. Production must not sign under an ephemeral identity.
+  if (isProduction) {
+    throw new Error(
+      envKey === undefined || envKey === ""
+        ? "PCC_GATEWAY_RECEIPT_PRIVATE_KEY is required in production: refusing to " +
+          "sign gateway receipts with an ephemeral key (receipts would be " +
+          "unverifiable across restarts)."
+        : "PCC_GATEWAY_RECEIPT_PRIVATE_KEY is malformed in production (expected a " +
+          "32-byte Ed25519 seed as 64 hex chars, optional 0x): refusing an " +
+          "ephemeral fallback.",
+    );
+  }
+
+  // Non-production (dev/test) only: zero-config ephemeral key.
   const kp = generateEd25519Keypair();
   processDefaultSigner = new GatewayReceiptSigner({
     keyId: `gw-rcpt-eph-${kp.publicKeyHex.slice(0, 8)}`,
@@ -127,4 +180,13 @@ export function getDefaultGatewayReceiptSigner(): GatewayReceiptSigner {
     publicKeyHex: kp.publicKeyHex,
   });
   return processDefaultSigner;
+}
+
+/**
+ * TEST-ONLY: clear the cached process-default signer so a test can exercise
+ * different NODE_ENV / key-env states within one process. Not part of the
+ * production surface — production constructs the default exactly once.
+ */
+export function __resetDefaultGatewayReceiptSigner(): void {
+  processDefaultSigner = null;
 }
