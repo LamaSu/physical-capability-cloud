@@ -118,10 +118,14 @@ describe("Streamable HTTP MCP server", () => {
     const renderDashboardTool = tools.find(
       (tool: { name: string }) => tool.name === "render_pcc_dashboard",
     );
-    expect(renderDashboardTool._meta?.ui?.resourceUri).toBe("ui://pcc/dashboard");
+    // Directive 4/17: a FIXED, predeclared ui:// resource (no {slug} template),
+    // canonical nested _meta.ui.resourceUri.
+    expect(renderDashboardTool._meta?.ui?.resourceUri).toBe("ui://pcc/dashboard/render");
+    // Directive 7: declares an outputSchema requiring `manifest`.
+    expect(renderDashboardTool.outputSchema?.required).toContain("manifest");
   });
 
-  it("exposes the ui://pcc/dashboard MCP App resource with the correct MIME + host markers", async () => {
+  it("exposes the fixed ui://pcc/dashboard/render MCP App resource with the standard lifecycle + full CSP", async () => {
     const listed = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -140,9 +144,14 @@ describe("Streamable HTTP MCP server", () => {
     });
     const resources = listed.json().result.resources;
     expect(listed.statusCode).toBe(200);
-    expect(
-      resources.some((r: { uri: string }) => r.uri === "ui://pcc/dashboard"),
-    ).toBe(true);
+    // The three fixed UI resources are advertised (render/saved/gallery).
+    for (const uri of [
+      "ui://pcc/dashboard/render",
+      "ui://pcc/dashboard/saved",
+      "ui://pcc/dashboard/gallery",
+    ]) {
+      expect(resources.some((r: { uri: string }) => r.uri === uri), `resource ${uri}`).toBe(true);
+    }
 
     const read = await app.inject({
       method: "POST",
@@ -157,27 +166,30 @@ describe("Streamable HTTP MCP server", () => {
         jsonrpc: "2.0",
         id: 4,
         method: "resources/read",
-        params: { uri: "ui://pcc/dashboard" },
+        params: { uri: "ui://pcc/dashboard/render" },
       },
     });
     const contents = read.json().result.contents;
     expect(read.statusCode).toBe(200);
     expect(contents).toHaveLength(1);
     expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
-    expect(contents[0].text).toContain("__PCC_HOST__");
     expect(contents[0].text).toContain('<meta name="color-scheme"');
-    // Finding 3 (test d, resource 1): the sandbox CSP a compliant host enforces
-    // comes from resource-content _meta.ui.csp (NOT the HTML <meta>), and must
-    // declare the live PCC API origin as a connect-src domain.
-    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain(
-      "https://capability.network",
-    );
-    // Finding 2: the boot script accepts a manifest ONLY from a verified MCP
-    // Apps tool-result notification — it names the SEP method + gates on
-    // window.parent, and the old permissive data.toolOutput path is gone.
+    // Directive 3: the sandbox CSP a compliant host enforces comes from
+    // resource-content _meta.ui.csp — full shape (connectDomains + resourceDomains
+    // + prefersBorder), NOT the HTML <meta>.
+    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain("https://capability.network");
+    expect(contents[0]._meta?.ui?.csp?.resourceDomains).toEqual([]);
+    expect(contents[0]._meta?.ui?.prefersBorder).toBe(true);
+    // Directive 1: the boot script speaks the STANDARD lifecycle (ui/initialize
+    // -> initialized -> tool-result); the guessed-envelope + custom iframe-ready
+    // + credential-in-message paths are gone.
+    expect(contents[0].text).toContain("ui/initialize");
+    expect(contents[0].text).toContain("ui/notifications/initialized");
     expect(contents[0].text).toContain("ui/notifications/tool-result");
-    expect(contents[0].text).toContain("window.parent");
+    expect(contents[0].text).not.toContain("ui-lifecycle-iframe-ready");
     expect(contents[0].text).not.toContain("data.toolOutput");
+    // Directive 2: no PCC key is ever written to storage from a message.
+    expect(contents[0].text).not.toContain("sessionStorage");
   });
 
   it("render_pcc_dashboard renders a valid manifest and rejects one containing an API key", async () => {
@@ -206,7 +218,9 @@ describe("Streamable HTTP MCP server", () => {
     const goodResult = good.json().result;
     expect(good.statusCode).toBe(200);
     expect(goodResult.isError).not.toBe(true);
-    expect(goodResult._meta.ui.resourceUri).toBe("ui://pcc/dashboard");
+    // Fixed render URI on the result too (matches the descriptor — no {slug}).
+    expect(goodResult._meta.ui.resourceUri).toBe("ui://pcc/dashboard/render");
+    // structuredContent carries the manifest (what the fixed render view renders).
     expect(goodResult.structuredContent.manifest.title).toBe("Watch my print job");
 
     const keyedManifest = {

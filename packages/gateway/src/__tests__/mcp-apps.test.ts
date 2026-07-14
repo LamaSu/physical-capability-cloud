@@ -1,50 +1,75 @@
 /**
- * MCP Apps bridge — per-slug SAVED-dashboard view (feat/mcp-apps-bridge).
+ * MCP Apps bridge — transport re-architecture (feat/mcp-apps-bridge).
  *
- * Complements http-mcp.test.ts (which already covers the transient
- * render_pcc_dashboard tool + the static ui://pcc/dashboard resource). This
- * file exercises the artifact-backed additions:
- *   - the 5 On-Ramp dashboard tools carry `_meta.ui.resourceUri` on tools/list,
- *   - the ui://pcc/dashboard/{slug} resource TEMPLATE is advertised, and
- *   - reading ui://pcc/dashboard/<slug> returns the shipped-kit shell HTML for a
- *     saved public artifact (and a graceful not-found page otherwise),
- *   - enrichOnRampToolResult attaches a resource_link (+ _meta for the single-
- *     artifact tools) IN ADDITION to the existing text content.
+ * Covers the ONE-transport-contract additions (directives 1-5,7,15-17):
+ *   - enrichOnRampToolResult now returns `structuredContent` (manifest for
+ *     single-artifact tools, projected entries for search) + the canonical FIXED
+ *     `_meta.ui.resourceUri` (saved/gallery) — no more per-slug resource_link;
+ *   - private dashboards render from the AUTHENTICATED result's structuredContent,
+ *     never a second anonymous lookup;
+ *   - the in-view host->view verification (extractToolResultManifest) + the
+ *     browser-safe manifest validator (isValidDashboardManifest) — the exact
+ *     logic inlined into the view boot script;
+ *   - outputSchema conformance for every structuredContent tool;
+ *   - the public/unlisted SHARE view (getPublicArtifactForRender: slug-only,
+ *     format-validated, passive);
+ *   - the live /mcp surface: fixed UI resources, no {slug} on any tool descriptor,
+ *     full _meta.ui.csp on every read.
  *
- * Network-free: the artifact is seeded straight into the same in-memory store
- * the MCP resource read consults (both go through routes/artifacts.ts's db()).
+ * The DOM lifecycle (init handshake + a real tool-result MOUNTS the manifest and
+ * the placeholder disappears) is covered in mcp-app-view-lifecycle.test.ts (jsdom).
+ *
+ * Network-free: artifacts are seeded straight into the same in-memory store the
+ * MCP resource read consults (both go through routes/artifacts.ts's db()).
  */
 
 import Fastify from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DASHBOARD_CSD_URL, type UiArtifact } from "@pcc/spec";
 import { httpMcpRoutes } from "../mcp/http-mcp-server.js";
-import { _clearArtifactsForTests, _seedArtifactForTests } from "../routes/artifacts.js";
 import {
-  dashboardResourceUriForSlug,
+  _clearArtifactsForTests,
+  _seedArtifactForTests,
+  getPublicArtifactForRender,
+} from "../routes/artifacts.js";
+import {
   enrichOnRampToolResult,
-  extractVerifiedHandoff,
-  MCP_APP_DASHBOARD_TEMPLATE_URI,
+  extractToolResultManifest,
+  GALLERY_OUTPUT_SCHEMA,
+  isValidDashboardManifest,
+  MCP_APP_GALLERY_URI,
+  MCP_APP_SAVED_URI,
   MCP_APP_TOOL_RESULT_METHOD,
   ON_RAMP_UI_TOOL_NAMES,
+  onRampToolResourceUri,
   renderSavedDashboardHtml,
+  SAVED_OUTPUT_SCHEMA,
+  structuredContentConformsTo,
 } from "../mcp/mcp-app-view.js";
 
 const SEEDED_SLUG = "watch-my-pizza-8k3f";
 const SEEDED_TITLE = "Watch my pizza + courier";
 
-function seedPublicDashboard(slug: string, title: string, visibility: UiArtifact["visibility"] = "public"): void {
+function manifestFor(title: string) {
+  return {
+    csd: DASHBOARD_CSD_URL,
+    title,
+    sections: [{ windows: [{ kind: "note", text: "Your pizza is in the oven." }] }],
+  };
+}
+
+function seedDashboard(
+  slug: string,
+  title: string,
+  visibility: UiArtifact["visibility"] = "public",
+): void {
   const now = new Date().toISOString();
   _seedArtifactForTests({
     id: `ua_${slug}`,
     slug,
     csd: DASHBOARD_CSD_URL,
     name: title,
-    manifest: {
-      csd: DASHBOARD_CSD_URL,
-      title,
-      sections: [{ windows: [{ kind: "note", text: "Your pizza is in the oven." }] }],
-    },
+    manifest: manifestFor(title),
     capabilityTypes: ["pizza.order"],
     visibility,
     owner: "op_test",
@@ -59,32 +84,51 @@ function seedPublicDashboard(slug: string, title: string, visibility: UiArtifact
 }
 
 // ---------------------------------------------------------------------------
-// Pure-function coverage (no transport) — the enrichment + slug render logic.
+// enrichOnRampToolResult — structuredContent transport (directives 5,7,15,17).
 // ---------------------------------------------------------------------------
 
-describe("MCP Apps — enrichOnRampToolResult", () => {
-  it("attaches _meta + a resource_link to a single-artifact result (save/get/fork/update)", () => {
-    const payload = { slug: SEEDED_SLUG, name: SEEDED_TITLE, id: `ua_${SEEDED_SLUG}` };
+describe("MCP Apps — enrichOnRampToolResult (structuredContent transport)", () => {
+  it("carries the manifest in structuredContent + fixed saved URI for save/get/fork/update", () => {
+    const manifest = manifestFor(SEEDED_TITLE);
+    const payload = { slug: SEEDED_SLUG, name: SEEDED_TITLE, id: `ua_${SEEDED_SLUG}`, manifest };
     const result = enrichOnRampToolResult("save_dashboard", payload, JSON.stringify(payload));
 
-    expect(result._meta).toEqual({
-      ui: { resourceUri: dashboardResourceUriForSlug(SEEDED_SLUG) },
-    });
-    // The original text content survives (text-only consumers unaffected)...
-    const text = result.content.find((c) => c.type === "text");
-    expect(text?.text).toContain(SEEDED_SLUG);
-    // ...alongside a NEW resource_link pointing at the concrete saved view.
-    const link = result.content.find((c) => c.type === "resource_link");
-    expect(link?.uri).toBe(dashboardResourceUriForSlug(SEEDED_SLUG));
-    expect(link?.mimeType).toBe("text/html;profile=mcp-app");
-    expect(link?.name).toBeTruthy();
+    // Canonical fixed URI (no {slug}) matching the descriptor.
+    expect(result._meta).toEqual({ ui: { resourceUri: MCP_APP_SAVED_URI } });
+    // The manifest travels in structuredContent — the fixed saved view renders it.
+    expect(result.structuredContent?.manifest).toEqual(manifest);
+    expect(result.structuredContent?.slug).toBe(SEEDED_SLUG);
+    // Conforms to the declared outputSchema.
+    expect(structuredContentConformsTo(SAVED_OUTPUT_SCHEMA, result.structuredContent)).toBe(true);
+    // Original text preserved; NO resource_link (the old anon-slug transport is gone).
+    expect(result.content.find((c) => c.type === "text")?.text).toContain(SEEDED_SLUG);
+    expect(result.content.some((c) => c.type === "resource_link")).toBe(false);
   });
 
-  it("links every entry (no single-view _meta) for search_dashboards", () => {
+  it("renders a PRIVATE dashboard from the authenticated structuredContent (never a 2nd anon lookup)", () => {
+    const privateManifest = manifestFor("My private ops");
+    // The authenticated get_dashboard result an owner receives for a PRIVATE artifact.
+    const payload = {
+      slug: "my-private-9999",
+      name: "My private ops",
+      visibility: "private",
+      manifest: privateManifest,
+    };
+    const result = enrichOnRampToolResult("get_dashboard", payload, JSON.stringify(payload));
+    expect(result._meta).toEqual({ ui: { resourceUri: MCP_APP_SAVED_URI } });
+    expect(result.structuredContent?.manifest).toEqual(privateManifest);
+
+    // And the public share path would REFUSE the same private slug — proving the
+    // saved view does not depend on it (directive 5).
+    seedDashboard("my-private-9999", "My private ops", "private");
+    expect(getPublicArtifactForRender("my-private-9999")).toBeUndefined();
+  });
+
+  it("projects entries into structuredContent + fixed gallery URI for search_dashboards", () => {
     const payload = {
       entries: [
-        { slug: "a-dash-1111", name: "A" },
-        { slug: "b-dash-2222", name: "B" },
+        { slug: "a-dash-1111", name: "A", manifest: manifestFor("Alpha") },
+        { slug: "b-dash-2222", name: "B", manifest: manifestFor("Bravo") },
       ],
       total: 2,
       offset: 0,
@@ -92,68 +136,85 @@ describe("MCP Apps — enrichOnRampToolResult", () => {
     };
     const result = enrichOnRampToolResult("search_dashboards", payload, JSON.stringify(payload));
 
-    expect(result._meta).toBeUndefined();
-    const links = result.content.filter((c) => c.type === "resource_link");
-    expect(links.map((l) => l.uri)).toEqual([
-      dashboardResourceUriForSlug("a-dash-1111"),
-      dashboardResourceUriForSlug("b-dash-2222"),
-    ]);
+    expect(result._meta).toEqual({ ui: { resourceUri: MCP_APP_GALLERY_URI } });
+    const entries = result.structuredContent?.entries as Array<Record<string, unknown>>;
+    expect(entries.map((e) => e.slug)).toEqual(["a-dash-1111", "b-dash-2222"]);
+    expect(entries[0].title).toBe("Alpha");
+    expect(result.structuredContent?.total).toBe(2);
+    expect(structuredContentConformsTo(GALLERY_OUTPUT_SCHEMA, result.structuredContent)).toBe(true);
+    expect(result.content.some((c) => c.type === "resource_link")).toBe(false);
   });
 
-  it("degrades to text-only when the payload has no slug", () => {
+  it("degrades to text-only (no UI) when the payload has no renderable manifest", () => {
     const result = enrichOnRampToolResult("get_dashboard", { error: "not_found" }, "boom");
     expect(result._meta).toBeUndefined();
+    expect(result.structuredContent).toBeUndefined();
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe("text");
   });
-});
 
-describe("MCP Apps — renderSavedDashboardHtml", () => {
-  beforeAll(() => {
-    _clearArtifactsForTests();
-    seedPublicDashboard(SEEDED_SLUG, SEEDED_TITLE);
-    seedPublicDashboard("private-dash-9999", "Private", "private");
-  });
-
-  it("renders a self-contained kit shell for a public artifact", () => {
-    const html = renderSavedDashboardHtml(SEEDED_SLUG);
-    expect(html).toContain('id="pcc-manifest"');
-    expect(html).toContain(SEEDED_TITLE);
-    // api_base baked so bindings resolve from the host iframe's opaque origin.
-    expect(html).toContain("https://capability.network");
-    // the kit itself is inlined (self-contained, boots without host handoff).
-    expect(html).toContain("KIT_SOURCE");
-  });
-
-  it("returns a graceful not-found page for a missing slug", () => {
-    expect(renderSavedDashboardHtml("no-such-dash-0000")).toContain("Dashboard not found");
-  });
-
-  it("does not expose a private artifact by slug", () => {
-    expect(renderSavedDashboardHtml("private-dash-9999")).toContain("Dashboard not found");
+  it("routes each On-Ramp tool to its fixed UI resource (saved vs gallery)", () => {
+    for (const name of ON_RAMP_UI_TOOL_NAMES) {
+      const expected = name === "search_dashboards" ? MCP_APP_GALLERY_URI : MCP_APP_SAVED_URI;
+      expect(onRampToolResourceUri(name)).toBe(expected);
+      // No fixed URI contains an unresolved template variable.
+      expect(onRampToolResourceUri(name)).not.toContain("{slug}");
+    }
   });
 });
 
 // ---------------------------------------------------------------------------
-// Finding 2 — the transient render_pcc_dashboard view (ui://pcc/dashboard)
-// accepts a manifest ONLY from a VERIFIED MCP Apps (SEP-1865) host->view
-// tool-result notification. extractVerifiedHandoff is the exact logic inlined
-// into that view's boot script via .toString(), so unit-testing it here is the
-// coverage for the browser handoff path (source check + JSON-RPC envelope +
-// method + standardized params location).
+// isValidDashboardManifest — the browser-safe in-view validator (directive 2).
 // ---------------------------------------------------------------------------
 
-describe("MCP Apps — extractVerifiedHandoff (host handoff verification)", () => {
-  // Stand-in for the embedding host frame reference (window.parent). Identity is
-  // what matters: the boot script calls (event.source, window.parent, data).
+describe("MCP Apps — isValidDashboardManifest (in-view validation)", () => {
+  it("accepts a well-formed manifest", () => {
+    expect(isValidDashboardManifest(manifestFor("ok"))).toBe(true);
+  });
+
+  it("rejects a wrong/missing csd, empty title, non-array sections, and unknown window kinds", () => {
+    expect(isValidDashboardManifest({ ...manifestFor("x"), csd: "pcc://other" })).toBe(false);
+    expect(isValidDashboardManifest({ ...manifestFor(""), title: "" })).toBe(false);
+    expect(isValidDashboardManifest({ csd: DASHBOARD_CSD_URL, title: "x", sections: {} })).toBe(false);
+    expect(
+      isValidDashboardManifest({
+        csd: DASHBOARD_CSD_URL,
+        title: "x",
+        sections: [{ windows: [{ kind: "evil-iframe" }] }],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects a manifest carrying an API-key substring (the no-key refine)", () => {
+    const keyed = {
+      csd: DASHBOARD_CSD_URL,
+      title: "x",
+      sections: [{ windows: [{ kind: "note", text: "pcc_live_leak" }] }],
+    };
+    expect(isValidDashboardManifest(keyed)).toBe(false);
+  });
+
+  it("rejects non-objects", () => {
+    expect(isValidDashboardManifest(null)).toBe(false);
+    expect(isValidDashboardManifest("nope")).toBe(false);
+    expect(isValidDashboardManifest([])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractToolResultManifest — host->view verification (directives 1,2). This is
+// the EXACT logic inlined into the view boot script via .toString().
+// ---------------------------------------------------------------------------
+
+describe("MCP Apps — extractToolResultManifest (host handoff verification)", () => {
   const HOST = { name: "host-parent-frame" };
 
-  const toolResultNotification = (manifest: unknown) => ({
+  const toolResult = (manifest: unknown, extra: Record<string, unknown> = {}) => ({
     jsonrpc: "2.0",
     method: MCP_APP_TOOL_RESULT_METHOD,
     params: {
       content: [{ type: "text", text: "Rendered a PCC dashboard." }],
-      structuredContent: { manifest },
+      structuredContent: { manifest, ...extra },
     },
   });
 
@@ -161,65 +222,64 @@ describe("MCP Apps — extractVerifiedHandoff (host handoff verification)", () =
     expect(MCP_APP_TOOL_RESULT_METHOD).toBe("ui/notifications/tool-result");
   });
 
-  it("(c) accepts a valid tool-result notification from window.parent and returns the manifest", () => {
-    const manifest = { csd: DASHBOARD_CSD_URL, title: "Live dashboard", sections: [] };
-    const handoff = extractVerifiedHandoff(HOST, HOST, toolResultNotification(manifest));
-    expect(handoff).not.toBeNull();
-    expect(handoff?.manifest).toEqual(manifest);
+  it("accepts a valid tool-result from window.parent and returns ONLY the manifest", () => {
+    const manifest = manifestFor("Live dashboard");
+    expect(extractToolResultManifest(HOST, HOST, toolResult(manifest))).toEqual(manifest);
   });
 
-  it("(c) surfaces apiBase/snapshot/token ONLY from the standardized params.structuredContent", () => {
-    const handoff = extractVerifiedHandoff(HOST, HOST, {
-      jsonrpc: "2.0",
-      method: MCP_APP_TOOL_RESULT_METHOD,
-      params: {
-        structuredContent: {
-          manifest: { title: "X" },
-          apiBase: "https://capability.network",
-          snapshot: { "x.y": 1 },
-          token: "pcc_live_from_host",
-        },
-      },
-    });
-    expect(handoff?.apiBase).toBe("https://capability.network");
-    expect(handoff?.token).toBe("pcc_live_from_host");
-    expect(handoff?.snapshot).toEqual({ "x.y": 1 });
+  it("IGNORES token/apiBase/snapshot in the message — returns the manifest, never a credential", () => {
+    const manifest = manifestFor("Live dashboard");
+    const out = extractToolResultManifest(
+      HOST,
+      HOST,
+      toolResult(manifest, {
+        apiBase: "https://evil.example",
+        snapshot: { "x.y": 1 },
+        token: "pcc_live_from_host",
+      }),
+    );
+    // The manifest comes back unchanged; nothing else does (no token/apiBase/snapshot).
+    expect(out).toEqual(manifest);
+    expect(JSON.stringify(out)).not.toContain("pcc_live_from_host");
+    expect(JSON.stringify(out)).not.toContain("evil.example");
   });
 
-  it("(a) rejects a message whose source is not window.parent (foreign frame)", () => {
-    const foreignSource = { name: "not-the-parent" };
+  it("rejects a non-parent source (foreign frame)", () => {
+    expect(extractToolResultManifest({ name: "not-parent" }, HOST, toolResult(manifestFor("x")))).toBeNull();
+  });
+
+  it("rejects a message lacking the JSON-RPC 2.0 envelope (the old permissive shapes)", () => {
+    expect(extractToolResultManifest(HOST, HOST, { manifest: manifestFor("x") })).toBeNull();
     expect(
-      extractVerifiedHandoff(foreignSource, HOST, toolResultNotification({ title: "X" })),
+      extractToolResultManifest(HOST, HOST, { structuredContent: { manifest: manifestFor("x") } }),
     ).toBeNull();
+    expect(extractToolResultManifest(HOST, HOST, { toolOutput: { manifest: manifestFor("x") } })).toBeNull();
+    expect(extractToolResultManifest(HOST, HOST, null)).toBeNull();
+    expect(extractToolResultManifest(HOST, HOST, "not-an-object")).toBeNull();
   });
 
-  it("(b) rejects a message lacking the JSON-RPC 2.0 envelope (the old permissive shapes)", () => {
-    // Bare { manifest }, or nested under toolOutput/structuredContent/payload
-    // with no jsonrpc/method — exactly what the old extractHandoff latched on.
-    expect(extractVerifiedHandoff(HOST, HOST, { manifest: { title: "X" } })).toBeNull();
+  it("rejects the wrong method", () => {
     expect(
-      extractVerifiedHandoff(HOST, HOST, { structuredContent: { manifest: { title: "X" } } }),
-    ).toBeNull();
-    expect(
-      extractVerifiedHandoff(HOST, HOST, { toolOutput: { manifest: { title: "X" } } }),
-    ).toBeNull();
-    expect(extractVerifiedHandoff(HOST, HOST, null)).toBeNull();
-    expect(extractVerifiedHandoff(HOST, HOST, "not-an-object")).toBeNull();
-  });
-
-  it("(b) rejects a JSON-RPC message with the wrong method", () => {
-    expect(
-      extractVerifiedHandoff(HOST, HOST, {
+      extractToolResultManifest(HOST, HOST, {
         jsonrpc: "2.0",
         method: "notifications/message",
-        params: { structuredContent: { manifest: { title: "X" } } },
+        params: { structuredContent: { manifest: manifestFor("x") } },
       }),
     ).toBeNull();
   });
 
-  it("(b) rejects a correct notification missing structuredContent.manifest", () => {
+  it("rejects a correct notification whose manifest fails in-view validation", () => {
+    // Right envelope, but the manifest is forged/invalid (unknown window kind).
     expect(
-      extractVerifiedHandoff(HOST, HOST, {
+      extractToolResultManifest(HOST, HOST, {
+        jsonrpc: "2.0",
+        method: MCP_APP_TOOL_RESULT_METHOD,
+        params: { structuredContent: { manifest: { csd: DASHBOARD_CSD_URL, title: "x", sections: [{ windows: [{ kind: "evil" }] }] } } },
+      }),
+    ).toBeNull();
+    // Missing structuredContent.manifest entirely.
+    expect(
+      extractToolResultManifest(HOST, HOST, {
         jsonrpc: "2.0",
         method: MCP_APP_TOOL_RESULT_METHOD,
         params: { content: [{ type: "text", text: "no manifest" }] },
@@ -229,7 +289,49 @@ describe("MCP Apps — extractVerifiedHandoff (host handoff verification)", () =
 });
 
 // ---------------------------------------------------------------------------
-// Transport-level coverage — the live /mcp JSON-RPC surface.
+// getPublicArtifactForRender / renderSavedDashboardHtml — public SHARE surface
+// (directive 16): slug-only, format-validated, passive, public|unlisted-only.
+// ---------------------------------------------------------------------------
+
+describe("MCP Apps — public share view (getPublicArtifactForRender)", () => {
+  beforeAll(() => {
+    _clearArtifactsForTests();
+    seedDashboard(SEEDED_SLUG, SEEDED_TITLE, "public");
+    seedDashboard("unlisted-dash-7777", "Unlisted", "unlisted");
+    seedDashboard("private-dash-9999", "Private", "private");
+  });
+
+  it("renders a self-contained kit shell for a public artifact", () => {
+    const html = renderSavedDashboardHtml(SEEDED_SLUG);
+    expect(html).toContain('id="pcc-manifest"');
+    expect(html).toContain(SEEDED_TITLE);
+    expect(html).toContain("https://capability.network"); // api_base baked
+    expect(html).toContain("KIT_SOURCE"); // kit inlined (boots without handoff)
+  });
+
+  it("serves an unlisted artifact by slug but never a private one", () => {
+    expect(renderSavedDashboardHtml("unlisted-dash-7777")).toContain("Unlisted");
+    expect(renderSavedDashboardHtml("private-dash-9999")).toContain("Dashboard not found");
+  });
+
+  it("accepts a well-formed SLUG only — rejects an id and malformed input", () => {
+    expect(getPublicArtifactForRender(SEEDED_SLUG)?.slug).toBe(SEEDED_SLUG);
+    // An id (ua_… with an underscore) is rejected: a read is not an id oracle.
+    expect(getPublicArtifactForRender(`ua_${SEEDED_SLUG}`)).toBeUndefined();
+    expect(getPublicArtifactForRender("Bad Slug!")).toBeUndefined();
+    expect(getPublicArtifactForRender("../../etc/passwd")).toBeUndefined();
+    expect(renderSavedDashboardHtml("no-such-dash-0000")).toContain("Dashboard not found");
+  });
+
+  it("is a PASSIVE read — does not bump loadCount/updatedAt", () => {
+    getPublicArtifactForRender(SEEDED_SLUG);
+    getPublicArtifactForRender(SEEDED_SLUG);
+    expect(getPublicArtifactForRender(SEEDED_SLUG)?.loadCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live /mcp surface — fixed UI resources, no {slug} on any tool, full CSP.
 // ---------------------------------------------------------------------------
 
 describe("MCP Apps — /mcp transport", () => {
@@ -252,7 +354,7 @@ describe("MCP Apps — /mcp transport", () => {
 
   beforeAll(async () => {
     _clearArtifactsForTests();
-    seedPublicDashboard(SEEDED_SLUG, SEEDED_TITLE);
+    seedDashboard(SEEDED_SLUG, SEEDED_TITLE, "public");
 
     await app.register(httpMcpRoutes);
     await app.ready();
@@ -294,51 +396,62 @@ describe("MCP Apps — /mcp transport", () => {
     await app.close();
   });
 
-  it("carries _meta.ui.resourceUri on every On-Ramp dashboard tool", async () => {
+  it("advertises a FIXED, fetchable UI resource with no {slug} on every On-Ramp tool + outputSchema", async () => {
     const tools = (await rpc(2, "tools/list", {})).json().result.tools as Array<{
       name: string;
       _meta?: { ui?: { resourceUri?: string } };
+      outputSchema?: { required?: string[] };
     }>;
 
     for (const name of ON_RAMP_UI_TOOL_NAMES) {
       const tool = tools.find((t) => t.name === name);
       expect(tool, `tool ${name} present`).toBeDefined();
-      expect(tool?._meta?.ui?.resourceUri, `tool ${name} _meta`).toBe(
-        MCP_APP_DASHBOARD_TEMPLATE_URI,
-      );
+      const uri = tool?._meta?.ui?.resourceUri;
+      expect(uri, `tool ${name} fixed URI`).toBe(onRampToolResourceUri(name));
+      expect(uri, `tool ${name} no template var`).not.toContain("{");
+      expect(tool?.outputSchema, `tool ${name} outputSchema`).toBeDefined();
     }
   });
 
-  it("advertises the ui://pcc/dashboard/{slug} resource template", async () => {
+  it("still advertises the ui://pcc/dashboard/{slug} SHARE template (public sharing only)", async () => {
     const result = (await rpc(3, "resources/templates/list", {})).json().result;
     const templates = result.resourceTemplates as Array<{ uriTemplate: string; mimeType?: string }>;
-    const tmpl = templates.find((t) => t.uriTemplate === MCP_APP_DASHBOARD_TEMPLATE_URI);
+    const tmpl = templates.find((t) => t.uriTemplate === "ui://pcc/dashboard/{slug}");
     expect(tmpl).toBeDefined();
     expect(tmpl?.mimeType).toBe("text/html;profile=mcp-app");
   });
 
-  it("reads ui://pcc/dashboard/<slug> as the saved dashboard's kit shell", async () => {
-    const read = await rpc(4, "resources/read", {
-      uri: dashboardResourceUriForSlug(SEEDED_SLUG),
-    });
+  it("reads a saved public dashboard by slug (share view) with full _meta.ui.csp", async () => {
+    const read = await rpc(4, "resources/read", { uri: `ui://pcc/dashboard/${SEEDED_SLUG}` });
     const contents = read.json().result.contents;
     expect(read.statusCode).toBe(200);
     expect(contents).toHaveLength(1);
-    expect(contents[0].uri).toBe(dashboardResourceUriForSlug(SEEDED_SLUG));
+    expect(contents[0].uri).toBe(`ui://pcc/dashboard/${SEEDED_SLUG}`);
     expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
     expect(contents[0].text).toContain('id="pcc-manifest"');
     expect(contents[0].text).toContain(SEEDED_TITLE);
-    // Finding 3 (test d, resource 2): the per-slug view's content carries
-    // _meta.ui.csp so a compliant host permits its live calls to the PCC API.
-    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain(
-      "https://capability.network",
-    );
+    // Directive 3 — full CSP shape on the share read too.
+    expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain("https://capability.network");
+    expect(contents[0]._meta?.ui?.csp?.resourceDomains).toEqual([]);
+    expect(contents[0]._meta?.ui?.prefersBorder).toBe(true);
+  });
+
+  it("reads the fixed saved + gallery views with full _meta.ui.csp", async () => {
+    for (const uri of [MCP_APP_SAVED_URI, MCP_APP_GALLERY_URI]) {
+      const read = await rpc(6, "resources/read", { uri });
+      const contents = read.json().result.contents;
+      expect(read.statusCode, `read ${uri}`).toBe(200);
+      expect(contents[0].mimeType).toBe("text/html;profile=mcp-app");
+      // Standard lifecycle in every view.
+      expect(contents[0].text).toContain("ui/initialize");
+      expect(contents[0].text).toContain("ui/notifications/tool-result");
+      expect(contents[0]._meta?.ui?.csp?.connectDomains).toContain("https://capability.network");
+      expect(contents[0]._meta?.ui?.prefersBorder).toBe(true);
+    }
   });
 
   it("reads a missing slug as a graceful not-found view, not a protocol error", async () => {
-    const read = await rpc(5, "resources/read", {
-      uri: dashboardResourceUriForSlug("does-not-exist-0000"),
-    });
+    const read = await rpc(5, "resources/read", { uri: `ui://pcc/dashboard/does-not-exist-0000` });
     const body = read.json();
     expect(read.statusCode).toBe(200);
     expect(body.error).toBeUndefined();
