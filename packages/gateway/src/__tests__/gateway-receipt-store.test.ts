@@ -201,17 +201,17 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
   // (e) --------------------------------------------------------------------
   it("on a persist failure: returns errored, persists nothing, and does NOT advance the in-memory chain", () => {
     // A repo whose insert throws; the failure under test is the persist. record()'s
-    // step-0 rehydrate probe (§1) reads lastAcceptedForSession + findBySession, and the
-    // H1 guard reads findById, BEFORE the insert — for this never-committed session all
-    // three faithfully return "no tip" / empty chain / no committed row, so steps 0+H1
-    // are no-ops and the throwing insert stays the thing being tested. Keep the REAL db
-    // for the txn.
+    // step-0 rehydrate probe (§1) reads lastAcceptedForSession + findAllBySession (S6-6:
+    // UNCAPPED), and the H1 guard reads findById, BEFORE the insert — for this
+    // never-committed session all three faithfully return "no tip" / empty chain / no
+    // committed row, so steps 0+H1 are no-ops and the throwing insert stays the thing
+    // being tested. Keep the REAL db for the txn.
     const throwingRepo = {
       insert: () => {
         throw new Error("simulated disk failure");
       },
       lastAcceptedForSession: () => undefined,
-      findBySession: () => [],
+      findAllBySession: () => [],
       // H1 adds a findById probe before the insert; report "no committed row" so the
       // throwing insert remains the failure under test.
       findById: () => undefined,
@@ -263,8 +263,12 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
   });
   afterEach(() => store.close());
 
-  /** Commit a chained seq 1..N receipt run through a throwaway (pre-restart) store. */
-  function seedCommittedChain(sessionId: string, hashes: string[]): void {
+  /**
+   * Commit a chained seq 1..N receipt run through a throwaway (pre-restart) store.
+   * `maxSignatures` (default 100, additive — existing callers unchanged) must be >= N so
+   * long chains (the S6-6 >MAX_LIMIT seed) are all accepted rather than max-signature capped.
+   */
+  function seedCommittedChain(sessionId: string, hashes: string[], maxSignatures = 100): void {
     const seedSeq = new SessionSequenceStore();
     const seeding = new GatewayReceiptStore({
       db: store.db,
@@ -276,7 +280,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     let prev: string | null = null;
     hashes.forEach((hash, i) => {
       const res = seeding.record(
-        input({ sessionId, seq: i + 1, checkpointHash: hash, prevCheckpointHash: prev }),
+        input({ sessionId, seq: i + 1, checkpointHash: hash, prevCheckpointHash: prev, maxSignatures }),
       );
       expect(res.status).toBe("accepted");
       prev = hash;
@@ -383,6 +387,66 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     expect(sequenceStore.snapshot(sessionId)).toEqual({ lastSeq: 1, lastHash: "n1", acceptedCount: 1 });
     expect(store.repos.gatewayReceipts.findBySession(sessionId).map((row) => row.seq)).toEqual([1]);
   });
+
+  // S6-6 — the rehydrate `seen` rebuild MUST read the UNCAPPED chain. Before the fix it used
+  // the capped findBySession (default 100 / max 1000), so a restart on a long session rebuilt
+  // an INCOMPLETE `seen` and a replayed old hash at a fresh seq slipped past the duplicate_hash
+  // clause (a false "complete recovered state", §1). These prove the full set is rebuilt.
+  it("S6-6: rebuilds the FULL `seen` from an UNCAPPED read — a >DEFAULT_LIMIT (100) old hash replayed at a fresh seq → duplicate_hash", () => {
+    const sessionId = "sess-cap100";
+    const N = 150; // > DEFAULT_LIMIT (100): the capped findBySession() would miss seq 101..150
+    const hashes = Array.from({ length: N }, (_, i) => `hc${i + 1}`);
+    seedCommittedChain(sessionId, hashes, 500);
+    const { svc, sequenceStore } = restartedStore();
+    expect(sequenceStore.hasSession(sessionId)).toBe(false);
+
+    // (a) Replay hash from seq 120 (> 100, so absent from a default-100 capped `seen`) at a
+    //     FRESH seq. Only the UNCAPPED rebuild contains it → duplicate_hash (a capped read
+    //     would wrongly ACCEPT this evidence replay). hashes[119] === "hc120".
+    const replay = svc.record(
+      input({ sessionId, seq: N + 1, checkpointHash: hashes[119], prevCheckpointHash: hashes[N - 1], maxSignatures: 500 }),
+    );
+    expect(replay.status).toBe("rejected");
+    if (replay.status === "rejected") expect(replay.reason).toBe("duplicate_hash");
+
+    // (b) A legit next seq still accepts (the rejected replay advanced nothing).
+    const next = svc.record(
+      input({ sessionId, seq: N + 1, checkpointHash: "hc-next", prevCheckpointHash: hashes[N - 1], maxSignatures: 500 }),
+    );
+    expect(next.status).toBe("accepted");
+    expect(store.repos.gatewayReceipts.lastAcceptedForSession(sessionId)).toEqual({
+      lastSeq: N + 1, lastHash: "hc-next", lastReceiptId: `grcpt-${sessionId}-${N + 1}`,
+    });
+  });
+
+  it("S6-6: an UNCAPPED rebuild holds past MAX_LIMIT — a >1000-seq old hash replayed at a fresh seq → duplicate_hash (defeats a capped-1000 read)", () => {
+    const sessionId = "sess-cap1000";
+    const N = 1002; // > MAX_LIMIT (1000): even findBySession(sessionId, 1000) would miss seq 1001..1002
+    const hashes = Array.from({ length: N }, (_, i) => `hh${i + 1}`);
+    seedCommittedChain(sessionId, hashes, 2000);
+    const { svc, sequenceStore } = restartedStore();
+    expect(sequenceStore.hasSession(sessionId)).toBe(false);
+
+    // (a) Replay an OLD hash from seq 1001 (> MAX_LIMIT, so absent from ANY capped `seen`)
+    //     at a FRESH seq. Only findAllBySession (truly uncapped) rebuilds a `seen` that
+    //     contains it → duplicate_hash. A capped-100 OR capped-1000 read would miss it and
+    //     wrongly accept — this is the test a `findBySession(id, 1000)` pseudo-fix FAILS.
+    //     hashes[1000] === "hh1001" (seq 1001); hashes[N-1] === "hh1002" (the tip).
+    const replay = svc.record(
+      input({ sessionId, seq: N + 1, checkpointHash: hashes[1000], prevCheckpointHash: hashes[N - 1], maxSignatures: 2000 }),
+    );
+    expect(replay.status).toBe("rejected");
+    if (replay.status === "rejected") expect(replay.reason).toBe("duplicate_hash");
+
+    // (b) The legit next seq (lastSeq+1, fresh hash) still accepts.
+    const next = svc.record(
+      input({ sessionId, seq: N + 1, checkpointHash: "hh-next", prevCheckpointHash: hashes[N - 1], maxSignatures: 2000 }),
+    );
+    expect(next.status).toBe("accepted");
+    expect(store.repos.gatewayReceipts.lastAcceptedForSession(sessionId)).toEqual({
+      lastSeq: N + 1, lastHash: "hh-next", lastReceiptId: `grcpt-${sessionId}-${N + 1}`,
+    });
+  }, 30_000);
 });
 
 /**

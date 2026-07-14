@@ -256,7 +256,13 @@ export class GatewayReceiptStore {
     if (!this.sequenceStore.hasSession(input.sessionId)) {
       const tip = this.repo.lastAcceptedForSession(input.sessionId); // sync
       if (tip) {
-        const rows = this.repo.findBySession(input.sessionId); // seq-asc chain
+        // S6-6: rebuild `seen` from the FULL committed chain (UNCAPPED). MUST be
+        // findAllBySession, never the capped findBySession (default 100 / max 1000):
+        // `seen` IS the dup-hash guard, so a capped read on a >MAX_LIMIT-checkpoint
+        // session would leave it incomplete — a replayed old hash at a fresh seq would
+        // then slip past the duplicate_hash clause and later collide on the
+        // deterministic PK, making the "complete recovered state" claim (§1) false.
+        const rows = this.repo.findAllBySession(input.sessionId); // seq-asc, full chain
         this.sequenceStore.rehydrate(input.sessionId, {
           lastSeq: tip.lastSeq,
           lastHash: tip.lastHash,
