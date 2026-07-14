@@ -129,7 +129,18 @@ function ensureScopeCacheReady(): void {
  */
 function patternToRegex(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  const reStr = escaped.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+  // Expand "**" (multi-segment) and "*" (single-segment) WITHOUT the second
+  // pass corrupting the first's output. The old
+  // `.replace(**→".*").replace(*→"[^/]*")` turned the "." "*" of ".*" into
+  // ".[^/]*", so "**" never matched multi-segment paths and every
+  // multi-segment policy silently failed to enforce (found by the route-policy
+  // coverage lane). Sentinel-swap "**" first, expand single "*", then expand
+  // the sentinel to ".*".
+  const DOUBLE = "__PCC_DBLSTAR__"; // sentinel token: no regex metachars, never in a URL path
+  const reStr = escaped
+    .replace(/\*\*/g, DOUBLE)
+    .replace(/\*/g, "[^/]*")
+    .replace(new RegExp(DOUBLE, "g"), ".*");
   return new RegExp(`^${reStr}(?:\\?.*)?$`);
 }
 
@@ -200,9 +211,16 @@ function getCallerScopes(req: FastifyRequest): string[] {
 type ScopeEnforcementMode = "enforce" | "report-only" | "off";
 
 /**
- * Resolve the rollout mode from SCOPE_ENFORCEMENT_MODE (review #1). Default is
- * "report-only" — default-deny would otherwise 403 the ~500 /api/* routes that
- * carry no scope policy yet. Read ONCE at plugin registration, not per-request.
+ * Resolve the rollout mode from SCOPE_ENFORCEMENT_MODE (review #1). UNSET (or
+ * whitespace-only) defaults to "report-only" — default-deny would otherwise 403
+ * the ~500 /api/* routes that carry no scope policy yet. Read ONCE at plugin
+ * registration, not per-request.
+ *
+ * review #1 (round 3): a NONEMPTY but invalid value (e.g. a typo "enfore") now
+ * THROWS at startup instead of silently falling through to "report-only". The
+ * old fall-through meant a single typo disabled enforcement while the operator
+ * believed the mode was "enforce" — permitting unauthorized ops. Fail closed:
+ * refuse to boot on an unrecognized mode rather than quietly weaken security.
  *
  * TODO(audit P0 follow-up): flip the default to "enforce" only AFTER the Wave-0
  * route→policy inventory lands (d749deff's lane) so every /api/* route declares
@@ -210,8 +228,32 @@ type ScopeEnforcementMode = "enforce" | "report-only" | "off";
  */
 function resolveEnforcementMode(): ScopeEnforcementMode {
   const raw = (process.env.SCOPE_ENFORCEMENT_MODE ?? "").trim().toLowerCase();
+  // Unset / whitespace-only → the rollout default.
+  if (raw === "") return "report-only";
+  // A recognized mode passes through.
   if (raw === "enforce" || raw === "report-only" || raw === "off") return raw;
-  return "report-only";
+  // Nonempty + unrecognized → fail loudly at startup. Do NOT default silently:
+  // a silent default here is exactly how a typo turns off enforcement.
+  throw new Error(
+    `Invalid SCOPE_ENFORCEMENT_MODE="${process.env.SCOPE_ENFORCEMENT_MODE}". ` +
+      `Valid values: "enforce", "report-only", "off" (unset defaults to "report-only").`,
+  );
+}
+
+/**
+ * Assert that every /api/* route has a declared scope policy before enforce
+ * mode serves production traffic. The authoritative route→policy coverage check
+ * is owned by a SEPARATE lane (session d749deff) and is NOT wired into this repo
+ * yet, so this placeholder FAILS CLOSED — production cannot start in enforce
+ * mode until the real coverage-completeness gate lands. Kept a named, no-arg
+ * function so wiring the real check is a one-line body swap (no call-site edit).
+ *
+ * TODO(coordinate with d749deff): replace with the real coverage-completeness check
+ */
+function assertCompleteRoutePolicyInventory(): void {
+  throw new Error(
+    "route-policy inventory gate not wired — see d749deff coverage lane",
+  );
 }
 
 // ── Fastify Plugin ───────────────────────────────────────────────
@@ -220,6 +262,24 @@ async function scopeCheckerImpl(app: FastifyInstance) {
   // review #1: read the rollout mode ONCE at registration (module/plugin
   // scope), never per-request. The hook closes over this value.
   const enforcementMode = resolveEnforcementMode();
+
+  // review #1 (round 3): production MUST enforce. report-only/off are
+  // dev/staging-only rollout affordances — permitting them in prod would leave
+  // scope enforcement inert (report-only logs but ALLOWS) or absent (off). Fail
+  // closed at registration so a misconfigured prod deploy cannot boot.
+  if (process.env.NODE_ENV === "production") {
+    if (enforcementMode !== "enforce") {
+      throw new Error(
+        `Production requires SCOPE_ENFORCEMENT_MODE=enforce (resolved: "${enforcementMode}"). ` +
+          `report-only/off are permitted only outside production.`,
+      );
+    }
+    // prod + enforce: the route→policy inventory must be provably complete
+    // before fail-closed enforcement serves live traffic, or enforce could
+    // over-block legitimate routes / under-cover unpoliced ones. This gate is
+    // owned by d749deff's lane and currently fails closed until wired.
+    assertCompleteRoutePolicyInventory();
+  }
 
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     // "off" — scope checking disabled entirely; bail before any work.
