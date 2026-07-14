@@ -12,7 +12,7 @@ vi.mock("../auth/siwe-auth.js", () => ({
 import { apiGate } from "../middleware/api-gate.js";
 import { scopeChecker } from "../middleware/scope-checker.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, getRepos, closeStore } from "../db.js";
 
 /**
  * Real-app apiGate → scopeChecker integration (audit P0, lane d749deff).
@@ -37,11 +37,27 @@ describe("apiGate → scopeChecker integration (enforce mode)", () => {
     process.env.PCC_DB_PATH = ":memory:";
     process.env.SCOPE_ENFORCEMENT_MODE = "enforce"; // read at scopeChecker registration
     initStore({ seed: false });
+    // Precedence fixture: a MORE-specific rule (0 wildcards) than the /api/admin/*
+    // default (1 wildcard), so it must win scope-checker's most-specific-first sort.
+    getRepos().governance.insertEndpointScope({
+      id: "it-audit-only",
+      method: "POST",
+      routePattern: "/api/admin/audit-only",
+      requiredScopes: ["auditor"],
+      description: "precedence integration fixture",
+    });
     app = Fastify({ logger: false });
     await app.register(apiGate); // server.ts:456 — resolves API-key / SIWE principal
     await app.register(scopeChecker); // server.ts:533 — enforces scopes on it
     app.post("/api/admin/itest", async () => ({ ok: true })); // default policy: ["admin"]
+    app.post("/api/admin/audit-only", async () => ({ ok: true })); // specific policy: ["auditor"]
     app.post("/api/itest/unpoliced", async () => ({ ok: true })); // no policy → default-deny
+    app.get("/api/health/itest", async () => ({ ok: true })); // public prefix /api/health
+    // Encapsulation: a route registered in a SEPARATE child plugin must still be
+    // enforced by the non-encapsulated (skip-override) scopeChecker hook.
+    await app.register(async (sibling) => {
+      sibling.post("/api/admin/sibling", async () => ({ ok: true })); // default ["admin"]
+    });
     await app.ready();
   });
 
@@ -80,5 +96,28 @@ describe("apiGate → scopeChecker integration (enforce mode)", () => {
     // Mocked SIWE session → apiGate sets req.userId → scopeChecker enforces.
     // A SIWE caller carries no scopes, so it is denied (pre-fix it was skipped).
     expect((await post("/api/admin/itest", { "x-mock-siwe": "1" })).statusCode).toBe(403);
+  });
+
+  it("precedence: a more-specific rule beats the broad domain default", async () => {
+    // /api/admin/audit-only -> ["auditor"] (0 wildcards) must win over the
+    // /api/admin/* -> ["admin"] default (1 wildcard). This is the ordering the
+    // manifest's admin-only sub-paths (approve/reject/activate) rely on.
+    const auditor = bearer(["auditor"]);
+    expect((await post("/api/admin/audit-only", auditor)).statusCode).toBe(200); // specific wins
+    expect((await post("/api/admin/itest", auditor)).statusCode).toBe(403); // broad still needs admin
+  });
+
+  it("public routes stay public — scopeChecker never blocks them, no bypass either way", async () => {
+    const get = (headers: Record<string, string>) =>
+      app.inject({ method: "GET", url: "/api/health/itest", headers });
+    expect((await get({})).statusCode).toBe(200); // unauthenticated public read → allowed
+    expect((await get(bearer(["operator"]))).statusCode).toBe(200); // authed → still public, not scope-gated
+  });
+
+  it("encapsulation: scopeChecker enforces on routes in a SEPARATE child plugin", async () => {
+    // The skip-override symbol makes the hook non-encapsulated; without it a
+    // sibling-plugin route would be unenforced (the pre-fix inert state).
+    expect((await post("/api/admin/sibling", bearer(["operator"]))).statusCode).toBe(403); // enforced
+    expect((await post("/api/admin/sibling", bearer(["admin"]))).statusCode).toBe(200);
   });
 });
