@@ -137,6 +137,20 @@ export function onRampToolUiMeta(toolName: string): { ui: { resourceUri: string 
  * accepts a handoff ONLY from a message whose method equals this string. */
 export const MCP_APP_TOOL_RESULT_METHOD = "ui/notifications/tool-result";
 
+/** The MCP Apps protocol version this view speaks (apps.mdx, status Stable). The
+ *  view sends it on `ui/initialize` and the lifecycle state machine REQUIRES the
+ *  host's init result to echo it EXACTLY — a wrong/absent version is rejected, so
+ *  the handshake never completes against a host speaking a different protocol. */
+export const MCP_APP_PROTOCOL_VERSION = "2026-01-26";
+
+/** Host->view lifecycle notification a host sends with the tool-call arguments,
+ *  BEFORE the tool-result. The state machine requires a complete one of these to
+ *  advance from `waiting_for_tool_input` to `waiting_for_tool_result`. */
+export const MCP_APP_TOOL_INPUT_METHOD = "ui/notifications/tool-input";
+
+/** View->host notification the view posts once the init handshake completes. */
+export const MCP_APP_INITIALIZED_METHOD = "ui/notifications/initialized";
+
 // ---------------------------------------------------------------------------
 // Unique MCP-App domain (`_meta.ui.domain`) — the D14 browser-storage isolation
 // signal. A compliant host uses `_meta.ui.domain` to give the view its OWN
@@ -433,70 +447,307 @@ interface ViewWindow {
 }
 
 /**
- * Browser-safe structural validator for a DashboardManifest — the in-view
- * re-validation the spec's threat model requires (a hostile parent must not be
- * able to inject a forged manifest that renders as an approval/payment/receipt).
- * Mirrors the top-level shape + closed window-kind set + the no-API-key refine
- * of `DashboardManifestSchema` (a unit test asserts these literals stay in sync
- * with the imported schema, so they cannot silently drift). Server validation is
- * NOT assumed sufficient — the host is untrusted from the view's perspective.
+ * Browser-safe STRIPPING PROJECTION for a DashboardManifest — the in-view
+ * re-validation the spec's threat model requires. A hostile parent must not be
+ * able to inject a forged manifest that renders as an approval/payment/receipt or
+ * that drives an arbitrary HTTP write; server validation is NOT assumed
+ * sufficient (the host is untrusted from the view's perspective).
+ *
+ * Unlike a boolean validator that passes the ORIGINAL host object through after a
+ * few checks, this constructs a BRAND-NEW safe view model from a closed whitelist
+ * and the view renders THAT — never the original object. Rules:
+ *   - Closed top level (`csd`/`title`/`description`/`theme`/`sections`); `api_base`
+ *     is DROPPED (host mode forces the PCC origin, so a manifest-supplied base is
+ *     ignored — carrying it is dead, redirectable weight).
+ *   - Closed window-kind set (the 10 DashboardManifest kinds). An unknown kind
+ *     rejects the WHOLE manifest (returns null).
+ *   - Per node, ONLY recognized fields are copied; any other (unknown) field is
+ *     silently STRIPPED — it never reaches the renderer.
+ *   - ACTIONS carry ONLY display + typed-op fields (`id`/`label`/`confirm`/
+ *     `intentText`/`operation_id`/`arguments`). The raw-HTTP execution fields
+ *     (`kind`/`path`/`body`/`bodyFrom`/`idempotencyFrom`) are STRIPPED — a hosted
+ *     view acts ONLY through a registered `operation_id` (PR2), never a raw write.
+ *     A raw-HTTP / credential INJECTION field on an action (`method`/`url`/
+ *     `apiBase`/`headers`/`token`/`authorization`/a manifest-supplied confirmation
+ *     string / …) rejects the WHOLE manifest — those are never legitimate Action
+ *     fields, so their presence means a hand-forged request-bearing action.
+ *   - Depth + node budget bound the work (a pathological/huge manifest → null).
+ *   - No-key guard (matches `DashboardManifestSchema`'s refine): the PROJECTED
+ *     output must carry no `pcc_live_`/`pcc_test_` substring.
+ * Returns the fresh projection, or `null` (fail closed) for anything invalid.
+ *
+ * ES5-conservative + self-contained (nested helpers only): it is inlined VERBATIM
+ * into the view HTML via `.toString()`, so the tested definition and the browser
+ * code are ONE source of truth.
  */
-export function isValidDashboardManifest(m: unknown): boolean {
-  if (!m || typeof m !== "object") return false;
-  var man = m as { csd?: unknown; title?: unknown; sections?: unknown; theme?: unknown };
-  if (man.csd !== "pcc://artifacts/dashboard/v1") return false;
-  if (typeof man.title !== "string" || man.title.length === 0) return false;
-  if (!Array.isArray(man.sections)) return false;
-  var kinds = [
-    "note",
-    "metric",
-    "capability",
-    "list",
-    "form",
-    "run",
-    "approval",
-    "receipt",
-    "chain",
-    "actions",
-  ];
-  for (var i = 0; i < man.sections.length; i++) {
-    var sec = man.sections[i] as { windows?: unknown };
-    if (!sec || typeof sec !== "object") return false;
-    var wins = sec.windows;
-    if (!Array.isArray(wins)) return false;
-    for (var j = 0; j < wins.length; j++) {
-      var w = wins[j] as { kind?: unknown };
-      if (!w || typeof w !== "object") return false;
-      if (typeof w.kind !== "string") return false;
-      var known = false;
-      for (var k = 0; k < kinds.length; k++) {
-        if (kinds[k] === w.kind) {
-          known = true;
-          break;
-        }
+export function projectDashboardForMcpApp(input: unknown): DashboardManifest | null {
+  var MAX_NODES = 5000;
+  var MAX_DEPTH = 20;
+  var budget = MAX_NODES;
+  var rejected = false;
+
+  // Lower-case + strip '_'/'-' so api_base/apiBase/API-BASE collapse to one token.
+  function norm(k: unknown): string {
+    return String(k).toLowerCase().replace(/[_-]/g, "");
+  }
+  // Raw-HTTP / credential field NAMES that must NEVER appear on a manifest ACTION.
+  // None is part of the legitimate Action schema — presence means a hand-forged
+  // request-bearing/credential action → reject the whole manifest (fail closed).
+  var POISON_ACTION_FIELDS: Record<string, number> = {
+    method: 1, url: 1, uri: 1, apibase: 1, baseurl: 1, endpoint: 1, host: 1,
+    origin: 1, headers: 1, header: 1, token: 1, authorization: 1, bearer: 1,
+    secret: 1, password: 1, privatekey: 1, accesstoken: 1, refreshtoken: 1,
+    clientsecret: 1, sessiontoken: 1, apikey: 1, confirmation: 1,
+    confirmationtext: 1, confirmtext: 1,
+  };
+  // Credential-named field holding a concrete SCALAR value anywhere in a data
+  // payload (query/arguments/schema/composeRef) is a baked secret → reject. An
+  // object/array under the same name is a DEFINITION (e.g. a form field), allowed.
+  var CREDENTIAL_FIELDS: Record<string, number> = {
+    token: 1, authorization: 1, bearer: 1, secret: 1, password: 1, privatekey: 1,
+    accesstoken: 1, refreshtoken: 1, clientsecret: 1, sessiontoken: 1, apikey: 1,
+  };
+
+  function spend(): boolean {
+    budget = budget - 1;
+    if (budget <= 0) { rejected = true; return false; }
+    return true;
+  }
+  function isObj(v: unknown): boolean {
+    return !!v && typeof v === "object" && !Array.isArray(v);
+  }
+  function isScalar(v: unknown): boolean {
+    var t = typeof v;
+    return t === "string" || t === "number" || t === "boolean";
+  }
+
+  // Bounded deep-clone of a JSON DATA payload (binding.query, action.arguments,
+  // form.schema, chain.composeRef): plain objects/arrays/scalars only. A function/
+  // undefined/symbol, a credential-named scalar, or exceeding the depth/node
+  // budget → reject. Fresh objects throughout (never the host's own reference).
+  function cloneData(v: unknown, depth: number): unknown {
+    if (rejected) return null;
+    if (depth > MAX_DEPTH) { rejected = true; return null; }
+    if (!spend()) return null;
+    if (v === null) return null;
+    var t = typeof v;
+    if (t === "string" || t === "number" || t === "boolean") return v;
+    if (t !== "object") { rejected = true; return null; }
+    if (Array.isArray(v)) {
+      var arr: unknown[] = [];
+      for (var i = 0; i < (v as unknown[]).length; i++) {
+        var cv = cloneData((v as unknown[])[i], depth + 1);
+        if (rejected) return null;
+        arr.push(cv);
       }
-      if (!known) return false;
+      return arr;
     }
+    var srcObj = v as Record<string, unknown>;
+    var out: Record<string, unknown> = {};
+    var keys = Object.keys(srcObj);
+    for (var j = 0; j < keys.length; j++) {
+      var kk = keys[j];
+      var val = srcObj[kk];
+      if (CREDENTIAL_FIELDS[norm(kk)] && isScalar(val) && String(val).length > 0) {
+        rejected = true; return null;
+      }
+      out[kk] = cloneData(val, depth + 1);
+      if (rejected) return null;
+    }
+    return out;
   }
-  if (man.theme !== undefined && man.theme !== "auto" && man.theme !== "dark" && man.theme !== "light") {
-    return false;
+
+  // Binding — recognized read fields only.
+  function projBinding(b: unknown, depth: number): Record<string, unknown> | null {
+    if (!spend()) return null;
+    if (!isObj(b)) { rejected = true; return null; }
+    var src = b as Record<string, unknown>;
+    if (typeof src.path !== "string" || (src.path as string).length === 0) { rejected = true; return null; }
+    var out: Record<string, unknown> = { path: src.path };
+    if (src.query !== undefined) {
+      var q = cloneData(src.query, depth + 1);
+      if (rejected) return null;
+      if (isObj(q)) out.query = q;
+    }
+    if (typeof src.pollMs === "number" && isFinite(src.pollMs as number) && (src.pollMs as number) > 0) {
+      out.pollMs = src.pollMs;
+    }
+    if (typeof src.sse === "string" && (src.sse as string).length > 0) out.sse = src.sse;
+    if (typeof src.select === "string") out.select = src.select;
+    return out;
   }
-  // No-key refine (matches DashboardManifestSchema): a rendered manifest must
-  // never carry an API key — it would travel with the view.
-  var s = JSON.stringify(m);
-  if (s.indexOf("pcc_live_") !== -1 || s.indexOf("pcc_test_") !== -1) return false;
-  return true;
+
+  // Action — display + typed-op ONLY. Raw-HTTP execution fields are STRIPPED; a
+  // raw-HTTP/credential injection field name rejects the whole manifest.
+  function projAction(a: unknown, depth: number): Record<string, unknown> | null {
+    if (!spend()) return null;
+    if (!isObj(a)) { rejected = true; return null; }
+    var src = a as Record<string, unknown>;
+    var keys = Object.keys(src);
+    for (var i = 0; i < keys.length; i++) {
+      if (POISON_ACTION_FIELDS[norm(keys[i])]) { rejected = true; return null; }
+    }
+    var out: Record<string, unknown> = {};
+    if (typeof src.id === "string" && (src.id as string).length) out.id = src.id;
+    if (typeof src.label === "string" && (src.label as string).length) out.label = src.label;
+    if (src.confirm === "inline" || src.confirm === "approval") out.confirm = src.confirm;
+    if (typeof src.intentText === "string" && (src.intentText as string).length) out.intentText = src.intentText;
+    if (typeof src.operation_id === "string" && (src.operation_id as string).length) out.operation_id = src.operation_id;
+    if (src.arguments !== undefined) {
+      var args = cloneData(src.arguments, depth + 1);
+      if (rejected) return null;
+      if (isObj(args)) out.arguments = args;
+    }
+    return out;
+  }
+
+  var KNOWN_KINDS: Record<string, number> = {
+    note: 1, metric: 1, capability: 1, list: 1, form: 1,
+    run: 1, approval: 1, receipt: 1, chain: 1, actions: 1,
+  };
+
+  // Window — one of the closed 10 kinds; recognized fields per kind only.
+  function projWindow(w: unknown, depth: number): Record<string, unknown> | null {
+    if (!spend()) return null;
+    if (!isObj(w)) { rejected = true; return null; }
+    var src = w as Record<string, unknown>;
+    var kind = src.kind;
+    if (typeof kind !== "string" || !KNOWN_KINDS[kind]) { rejected = true; return null; }
+    var out: Record<string, unknown> = { kind: kind };
+    if (kind === "note") {
+      if (typeof src.text !== "string") { rejected = true; return null; }
+      out.text = src.text;
+      return out;
+    }
+    if (kind === "metric") {
+      if (typeof src.label !== "string" || !(src.label as string).length) { rejected = true; return null; }
+      out.label = src.label;
+      out.binding = projBinding(src.binding, depth + 1); if (rejected) return null;
+      if (typeof src.select === "string") out.select = src.select;
+      if (src.format === "usd" || src.format === "int" || src.format === "pct" || src.format === "ts") {
+        out.format = src.format;
+      }
+      return out;
+    }
+    if (kind === "capability" || kind === "receipt") {
+      out.binding = projBinding(src.binding, depth + 1); if (rejected) return null;
+      return out;
+    }
+    if (kind === "list") {
+      out.binding = projBinding(src.binding, depth + 1); if (rejected) return null;
+      var item = src.item as Record<string, unknown>;
+      if (!isObj(item) || typeof item.title !== "string" || !(item.title as string).length) {
+        rejected = true; return null;
+      }
+      var pi: Record<string, unknown> = { title: item.title, meta: [] };
+      if (Array.isArray(item.meta)) {
+        var metaOut: string[] = [];
+        for (var mi = 0; mi < (item.meta as unknown[]).length; mi++) {
+          if (typeof (item.meta as unknown[])[mi] === "string") metaOut.push((item.meta as string[])[mi]);
+        }
+        pi.meta = metaOut;
+      }
+      if (typeof item.statusFrom === "string") pi.statusFrom = item.statusFrom;
+      out.item = pi;
+      if (typeof src.limit === "number" && isFinite(src.limit as number) && (src.limit as number) > 0) {
+        out.limit = src.limit;
+      }
+      return out;
+    }
+    if (kind === "form") {
+      var schema = cloneData(src.schema, depth + 1); if (rejected) return null;
+      if (!isObj(schema)) { rejected = true; return null; }
+      out.schema = schema;
+      out.submit = projAction(src.submit, depth + 1); if (rejected) return null;
+      return out;
+    }
+    if (kind === "run") {
+      out.binding = projBinding(src.binding, depth + 1); if (rejected) return null;
+      if (typeof src.statusFrom !== "string" || typeof src.latestFrom !== "string") { rejected = true; return null; }
+      out.statusFrom = src.statusFrom;
+      out.latestFrom = src.latestFrom;
+      return out;
+    }
+    if (kind === "approval") {
+      out.binding = projBinding(src.binding, depth + 1); if (rejected) return null;
+      out.approve = projAction(src.approve, depth + 1); if (rejected) return null;
+      if (src.deny !== undefined) { out.deny = projAction(src.deny, depth + 1); if (rejected) return null; }
+      return out;
+    }
+    if (kind === "chain") {
+      var cr = cloneData(src.composeRef, depth + 1); if (rejected) return null;
+      if (!isObj(cr)) { rejected = true; return null; }
+      out.composeRef = cr;
+      if (src.execute !== undefined) { out.execute = projAction(src.execute, depth + 1); if (rejected) return null; }
+      return out;
+    }
+    // kind === "actions"
+    if (!Array.isArray(src.actions) || (src.actions as unknown[]).length === 0) { rejected = true; return null; }
+    var acts: unknown[] = [];
+    for (var ai = 0; ai < (src.actions as unknown[]).length; ai++) {
+      var pa = projAction((src.actions as unknown[])[ai], depth + 1); if (rejected) return null;
+      acts.push(pa);
+    }
+    out.actions = acts;
+    return out;
+  }
+
+  if (!isObj(input)) return null;
+  var m = input as Record<string, unknown>;
+  if (m.csd !== "pcc://artifacts/dashboard/v1") return null;
+  if (typeof m.title !== "string" || (m.title as string).length === 0) return null;
+  if (!Array.isArray(m.sections)) return null;
+
+  var manifest: Record<string, unknown> = { csd: m.csd, title: m.title };
+  if (typeof m.description === "string") manifest.description = m.description;
+  if (m.theme === "auto" || m.theme === "dark" || m.theme === "light") manifest.theme = m.theme;
+  // api_base intentionally NOT copied (host mode forces the PCC origin).
+
+  var sections: unknown[] = [];
+  for (var s = 0; s < (m.sections as unknown[]).length; s++) {
+    if (!spend()) return null;
+    var sec = (m.sections as unknown[])[s] as Record<string, unknown>;
+    if (!isObj(sec) || !Array.isArray(sec.windows)) return null;
+    var psec: Record<string, unknown> = {};
+    if (typeof sec.heading === "string") psec.heading = sec.heading;
+    var wins: unknown[] = [];
+    for (var wi = 0; wi < (sec.windows as unknown[]).length; wi++) {
+      var pw = projWindow((sec.windows as unknown[])[wi], 1);
+      if (rejected) return null;
+      wins.push(pw);
+    }
+    psec.windows = wins;
+    sections.push(psec);
+  }
+  manifest.sections = sections;
+  if (rejected) return null;
+
+  // No-key guard on the PROJECTED (bounded) output — never the raw input.
+  var blob = JSON.stringify(manifest);
+  if (blob.indexOf("pcc_live_") !== -1 || blob.indexOf("pcc_test_") !== -1) return null;
+  return manifest as unknown as DashboardManifest;
 }
 
 /**
- * Verify + extract a DashboardManifest from a `window` "message" event, per the
- * MCP Apps host->view contract. Returns the validated manifest ONLY when the
- * message is a genuine tool-result notification from the embedding host; returns
- * `null` for everything else, so a caller never boots on an unverified message.
- * Requires ALL of: `source === parent`; a JSON-RPC 2.0 envelope; method
- * `ui/notifications/tool-result`; a `params.structuredContent.manifest` that
- * passes `isValidDashboardManifest`. Reads NOTHING else from the message — no
- * token, no apiBase, no snapshot (those are never accepted from a message).
+ * Boolean in-view validity check, kept for callers/tests that only need a yes/no.
+ * Backed by `projectDashboardForMcpApp` (a manifest is valid iff it projects) so
+ * the two can never drift — the projection is the single source of truth.
+ */
+export function isValidDashboardManifest(m: unknown): boolean {
+  return projectDashboardForMcpApp(m) !== null;
+}
+
+/**
+ * Verify + PROJECT a DashboardManifest from a `window` "message" event, per the
+ * MCP Apps host->view contract. Returns a FRESH, stripped safe view model ONLY
+ * when the message is a genuine tool-result notification from the embedding host;
+ * returns `null` for everything else, so a caller never boots on an unverified or
+ * unprojectable message. Requires ALL of: `source === parent`; a JSON-RPC 2.0
+ * envelope; method `ui/notifications/tool-result`; a
+ * `params.structuredContent.manifest` that `projectDashboardForMcpApp` accepts.
+ * Reads NOTHING else from the message — no token, no apiBase, no snapshot. The
+ * value returned is the PROJECTION (a brand-new object), never the host's own
+ * manifest reference — the view renders the projection, not the original.
  */
 export function extractToolResultManifest(source: unknown, parent: unknown, data: unknown): unknown | null {
   if (source !== parent) return null;
@@ -509,8 +760,7 @@ export function extractToolResultManifest(source: unknown, parent: unknown, data
   var structured = (params as { structuredContent?: unknown }).structuredContent;
   if (!structured || typeof structured !== "object") return null;
   var manifest = (structured as { manifest?: unknown }).manifest;
-  if (!isValidDashboardManifest(manifest)) return null;
-  return manifest;
+  return projectDashboardForMcpApp(manifest);
 }
 
 /**
@@ -615,44 +865,138 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
   return true;
 }
 
+/** The strict MCP Apps view lifecycle states, in order. The client refuses any
+ *  message that does not advance the machine FROM its current state (see the
+ *  reducer below): a tool-result before init, a tool-result before a complete
+ *  tool-input, a wrong protocol version, an unknown method, or any repeated /
+ *  out-of-order lifecycle message is rejected. */
+export type McpAppLifecycleState =
+  | "waiting_for_initialize_result"
+  | "waiting_for_tool_input"
+  | "waiting_for_tool_result"
+  | "rendered";
+
+/** One transition decision. `accept:false` = the message is refused (no state
+ *  change, nothing emitted). `emit` names the side effect the client performs on
+ *  an accepted transition: post `initialized`, or deliver the tool-result to the
+ *  view handler. `reason` is for diagnostics/tests only. */
+export interface McpAppLifecycleDecision {
+  accept: boolean;
+  next: McpAppLifecycleState;
+  emit: "none" | "initialized" | "tool_result";
+  reason: string;
+}
+
 /**
- * The ONE MCP Apps lifecycle client, shared by every view (directive 15). Sends
- * `ui/initialize`, replies to the host's init result with
- * `ui/notifications/initialized`, and dispatches a verified
- * `ui/notifications/tool-result` to the view-specific `onToolResult` handler.
- * Every inbound message is gated on `source === win.parent` + JSON-RPC 2.0 here,
- * before any handler runs.
+ * The PURE lifecycle reducer — the single authority on which host->view message
+ * is valid FROM a given state. It owns every REJECT case the transport requires:
+ *   - a tool-result before the init handshake                → reject
+ *   - a wrong / absent `protocolVersion` on the init result  → reject
+ *   - a tool-result before a COMPLETE tool-input             → reject
+ *   - an unknown host method (not tool-input/tool-result)    → reject (any state)
+ *   - a repeated / out-of-order lifecycle message            → reject
+ * `source !== parent` and non-JSON-RPC envelopes are gated by the CLIENT before
+ * this runs (this reducer never sees them). Exported + unit-tested directly, and
+ * inlined into the view via `.toString()`, so the tested logic IS the shipped
+ * logic. ES5-conservative + self-contained.
+ */
+export function mcpAppLifecycleTransition(
+  state: McpAppLifecycleState,
+  msg: unknown,
+  initId: number,
+  protocolVersion: string,
+): McpAppLifecycleDecision {
+  var m = (msg && typeof msg === "object") ? (msg as Record<string, unknown>) : {};
+  var method = typeof m.method === "string" ? (m.method as string) : null;
+  var isToolResult = method === "ui/notifications/tool-result";
+  var isToolInput = method === "ui/notifications/tool-input";
+  var isUnknownMethod = method !== null && !isToolResult && !isToolInput;
+  var isInitResult = method === null && m.id === initId && m.result !== undefined && m.result !== null;
+
+  function reject(reason: string): McpAppLifecycleDecision {
+    return { accept: false, next: state, emit: "none", reason: reason };
+  }
+
+  // An unknown host method is never valid, in any state.
+  if (isUnknownMethod) return reject("unknown host method: " + method);
+
+  if (state === "waiting_for_initialize_result") {
+    if (isInitResult) {
+      var result = m.result as Record<string, unknown>;
+      var pv = (result && typeof result === "object") ? result.protocolVersion : undefined;
+      if (pv !== protocolVersion) return reject("wrong or absent protocol version");
+      return { accept: true, next: "waiting_for_tool_input", emit: "initialized", reason: "initialized" };
+    }
+    return reject("message before initialize result"); // e.g. a pre-init tool-result
+  }
+
+  if (state === "waiting_for_tool_input") {
+    if (isToolInput) {
+      // "complete" tool-input carries a params object (the tool-call arguments).
+      if (!m.params || typeof m.params !== "object") return reject("incomplete tool-input");
+      return { accept: true, next: "waiting_for_tool_result", emit: "none", reason: "tool-input accepted" };
+    }
+    return reject("expected tool-input"); // a tool-result here = result before tool-input
+  }
+
+  if (state === "waiting_for_tool_result") {
+    if (isToolResult) {
+      return { accept: true, next: "rendered", emit: "tool_result", reason: "tool-result accepted" };
+    }
+    return reject("expected tool-result");
+  }
+
+  // "rendered" (terminal): a repeated / out-of-order lifecycle message is refused.
+  return reject("lifecycle already complete");
+}
+
+/**
+ * The ONE MCP Apps lifecycle client, shared by every view (directive 15). It
+ * drives the STRICT state machine (`mcpAppLifecycleTransition`): sends
+ * `ui/initialize`, and only after a valid init result (matching id + exact
+ * `protocolVersion`) replies with `ui/notifications/initialized`; only after a
+ * complete `ui/notifications/tool-input` does it accept a
+ * `ui/notifications/tool-result`, which it hands to the view-specific
+ * `onToolResult` handler. Out-of-order / pre-init / wrong-version / unknown-method
+ * / repeated messages are all refused by the reducer. Every inbound message is
+ * gated on `source === win.parent` + JSON-RPC 2.0 here, before anything else.
  *
- * R4 PR2 — returns a `callHostTool(name, args)` that sends an OUTBOUND
+ * R4 PR2 (PRESERVED) — returns a `callHostTool(name, args)` that sends an OUTBOUND
  * `tools/call` request to the host and resolves on the matching-`id` response.
- * This is how a locked-down hosted view performs a registered typed operation:
- * it never issues a raw HTTP write (still inert in host mode), it asks the HOST
- * to invoke the server-authorized `pcc.op.*` tool. The response listener lives
- * HERE (same `source === parent` + JSON-RPC gate), correlating each response to
- * its pending request by id (ids start at 2, distinct from INIT_ID=1).
+ * This is how a locked-down hosted view performs a registered typed operation: it
+ * never issues a raw HTTP write (still inert in host mode), it asks the HOST to
+ * invoke the server-authorized `pcc.op.*` tool. Response correlation lives HERE
+ * and runs FIRST (before the lifecycle reducer) so a tool-call response — which
+ * may arrive any time after the app calls a tool, independent of lifecycle state —
+ * resolves its pending request by id (ids start at 2, distinct from INIT_ID=1).
+ *
+ * `onToolResult` returns a BOOLEAN (did the view mount/render?). The machine
+ * advances to `rendered` ONLY on a true return, so an invalid/forged tool-result
+ * (projection null → no mount) does not consume the lifecycle and a subsequent
+ * valid one can still render.
  */
 export function connectMcpAppView(
   win: ViewWindow,
-  onToolResult: (source: unknown, parent: unknown, data: unknown) => void,
+  onToolResult: (source: unknown, parent: unknown, data: unknown) => boolean,
 ): (name: string, args: unknown) => Promise<unknown> {
   var INIT_ID = 1;
-  var initialized = false;
+  var PROTOCOL_VERSION = "2026-01-26";
+  var state: McpAppLifecycleState = "waiting_for_initialize_result";
   var nextCallId = 2;
   var pending: Record<string, { resolve: (v: unknown) => void; reject: (e: unknown) => void }> = {};
   win.addEventListener("message", function (event: ViewMessageEvent) {
     var source = event ? event.source : undefined;
     var data = event ? event.data : undefined;
+    // (0) Source + envelope gate — refuse anything not from the host parent and
+    // any non-JSON-RPC-2.0 message, BEFORE the bridge OR the state machine.
     if (source !== win.parent) return;
     if (!data || typeof data !== "object") return;
     var msg = data as { jsonrpc?: unknown; id?: unknown; result?: unknown; error?: unknown; method?: unknown };
     if (msg.jsonrpc !== "2.0") return;
-    if (msg.id === INIT_ID && msg.result && !initialized) {
-      initialized = true;
-      win.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
-      return;
-    }
-    // Correlate a tools/call RESPONSE (result or error) back to its caller. Only
-    // ids we actually issued are in `pending`, so an unsolicited id is ignored.
+    // (1) Outbound tools/call RESPONSE correlation (PR2 bridge) FIRST — resolve an
+    // app-originated request by its id. State-independent: only ids we issued are
+    // in `pending`, and INIT_ID (1) is never there, so this never eats a lifecycle
+    // message. An unsolicited id is ignored.
     if (msg.id !== undefined && msg.id !== null && pending[String(msg.id)]) {
       var entry = pending[String(msg.id)];
       delete pending[String(msg.id)];
@@ -664,11 +1008,21 @@ export function connectMcpAppView(
       }
       return;
     }
-    if (msg.method === "ui/notifications/tool-result") {
-      onToolResult(source, win.parent, data);
+    // (2) Inbound lifecycle STATE MACHINE — the reducer owns every accept/reject.
+    var decision = mcpAppLifecycleTransition(state, msg, INIT_ID, PROTOCOL_VERSION);
+    if (!decision.accept) return;
+    if (decision.emit === "initialized") {
+      state = decision.next;
+      win.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+    } else if (decision.emit === "tool_result") {
+      // Advance to "rendered" only if the view actually mounted — a forged/invalid
+      // manifest (projection null → no mount) leaves the machine in
+      // waiting_for_tool_result so a later valid result can still render.
+      var mounted = onToolResult(source, win.parent, data);
+      if (mounted) state = decision.next;
+    } else {
+      state = decision.next;
     }
-    // ui/notifications/tool-input is accepted but a no-op: the render/saved view
-    // takes its manifest from the tool RESULT, not the input arguments.
   });
   win.parent.postMessage(
     {
@@ -676,7 +1030,7 @@ export function connectMcpAppView(
       id: INIT_ID,
       method: "ui/initialize",
       params: {
-        protocolVersion: "2026-01-26",
+        protocolVersion: PROTOCOL_VERSION,
         appCapabilities: {},
         clientInfo: { name: "pcc-dashboard-view", version: "1.0.0" },
       },
@@ -695,21 +1049,24 @@ export function connectMcpAppView(
   };
 }
 
-/** Boot the single-manifest view (render + saved): validate the host's
- * tool-result manifest in-view and mount the kit. */
+/** Boot the single-manifest view (render + saved): project the host's tool-result
+ * manifest in-view and mount the kit. The callback returns whether it mounted, so
+ * the lifecycle machine advances to `rendered` only on a real mount. */
 export function runDashboardViewBoot(win: ViewWindow, kitSource: string): void {
-  var callHostTool = connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
+  var callHostTool = connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown): boolean {
     var manifest = extractToolResultManifest(source, parent, data);
-    if (manifest) mountManifestIntoView(win, manifest, kitSource, callHostTool);
+    if (!manifest) return false;
+    return mountManifestIntoView(win, manifest, kitSource, callHostTool);
   });
 }
 
-/** Boot the gallery (search) view: validate the host's tool-result entries
- * in-view and render the list. */
+/** Boot the gallery (search) view: verify the host's tool-result entries in-view
+ * and render the list. The callback returns whether it rendered. */
 export function runGalleryViewBoot(win: ViewWindow): void {
-  connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown) {
+  connectMcpAppView(win, function (source: unknown, parent: unknown, data: unknown): boolean {
     var entries = extractToolResultEntries(source, parent, data);
-    if (entries) renderGalleryIntoView(win, entries);
+    if (!entries) return false;
+    return renderGalleryIntoView(win, entries);
   });
 }
 
@@ -783,9 +1140,10 @@ function dashboardViewBootScript(): string {
   'use strict';
   var KIT_SOURCE = ${kitSourceLiteral};
   window.__PCC_HOST_OPERATIONS__ = ${operationsLiteral};
-  var isValidDashboardManifest = ${isValidDashboardManifest.toString()};
+  var projectDashboardForMcpApp = ${projectDashboardForMcpApp.toString()};
   var extractToolResultManifest = ${extractToolResultManifest.toString()};
   var mountManifestIntoView = ${mountManifestIntoView.toString()};
+  var mcpAppLifecycleTransition = ${mcpAppLifecycleTransition.toString()};
   var connectMcpAppView = ${connectMcpAppView.toString()};
   var runDashboardViewBoot = ${runDashboardViewBoot.toString()};
   runDashboardViewBoot(window, KIT_SOURCE);
@@ -798,6 +1156,7 @@ function galleryViewBootScript(): string {
   'use strict';
   var extractToolResultEntries = ${extractToolResultEntries.toString()};
   var renderGalleryIntoView = ${renderGalleryIntoView.toString()};
+  var mcpAppLifecycleTransition = ${mcpAppLifecycleTransition.toString()};
   var connectMcpAppView = ${connectMcpAppView.toString()};
   var runGalleryViewBoot = ${runGalleryViewBoot.toString()};
   runGalleryViewBoot(window);

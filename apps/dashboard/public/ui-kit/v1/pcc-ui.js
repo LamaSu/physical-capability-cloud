@@ -991,7 +991,10 @@
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
-      var isMoney = a.confirm === 'approval' || MONEY_VERB.test(a.path + ' ' + a.label + ' ' + a.id);
+      // NOTE: an MCP-App projected action carries no `path` (raw-HTTP fields are
+      // stripped; it acts only via operation_id) — read money intent from the
+      // fields the projection keeps (label/id), coercing a missing path to ''.
+      var isMoney = a.confirm === 'approval' || MONEY_VERB.test(String(a.path || '') + ' ' + String(a.label || '') + ' ' + String(a.id || ''));
       var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
       btn.type = 'button';
       // PR2: a button wired to a registered typed operation stays live under the
@@ -1012,7 +1015,9 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function isMoneyAction(action) {
-    return action.confirm === 'approval' || MONEY_VERB.test(String(action.path) + ' ' + String(action.label) + ' ' + String(action.id));
+    // Tolerate a projected action with no `path` (MCP-App host mode): a missing
+    // path coerces to '' rather than the literal 'undefined'.
+    return action.confirm === 'approval' || MONEY_VERB.test(String(action.path || '') + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
   }
 
   // Pull the first text line out of an MCP tool-error result (server-authored,
