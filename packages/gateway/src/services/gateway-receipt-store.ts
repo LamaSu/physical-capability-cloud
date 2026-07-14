@@ -43,6 +43,8 @@ import type {
   IGatewayReceiptRepository,
   GatewayReceiptRow,
   GatewayReceiptInsert,
+  ICheckpointBodyRepository,
+  CheckpointBodyInsert,
 } from "@pcc/store";
 import {
   SessionSequenceStore,
@@ -99,6 +101,23 @@ export interface CheckpointReceiptInput {
   effectiveEvidenceTime: number;
   /** ISO row-creation timestamp; defaults to now(). DB metadata, distinct from acceptedAt. */
   createdAt?: string;
+  /**
+   * The checkpoint's events commitment (sha256). Persisted to the checkpoint_bodies
+   * sibling row ATOMICALLY with the receipt (§8.1-#3 split-brain fix).
+   */
+  eventsRoot: string;
+  /**
+   * The checkpoint type (e.g. "execution_completed"). Persisted to the body row and
+   * read by finalize to enforce the terminal-completion requirement (frozen §8.1-#1).
+   */
+  checkpointType: string;
+  /**
+   * The device's ADVISORY createdAt (Unix seconds) — a skew flag only, never authority
+   * (§8.4-A). Persisted to the body row (distinct from the receipt `createdAt` metadata).
+   */
+  deviceCreatedAt: number;
+  /** The session-key Ed25519 signature over the canonical checkpoint content. Persisted to the body row. */
+  signature: string;
 }
 
 /**
@@ -146,14 +165,33 @@ function validateCheckpointInput(input: CheckpointReceiptInput): string | null {
   if (typeof input.checkpointHash !== "string" || input.checkpointHash.trim() === "") {
     return "invalid checkpointHash (must be a non-empty string)";
   }
+  // Body fields (persisted atomically with the receipt) — keep garbage out of the txn.
+  if (typeof input.eventsRoot !== "string" || input.eventsRoot.trim() === "") {
+    return "invalid eventsRoot (must be a non-empty string)";
+  }
+  if (typeof input.checkpointType !== "string" || input.checkpointType.trim() === "") {
+    return "invalid checkpointType (must be a non-empty string)";
+  }
+  if (typeof input.signature !== "string" || input.signature.trim() === "") {
+    return "invalid signature (must be a non-empty string)";
+  }
+  if (!Number.isFinite(input.deviceCreatedAt)) {
+    return `invalid deviceCreatedAt ${JSON.stringify(input.deviceCreatedAt)} (must be a finite number)`;
+  }
   return null;
 }
 
 export interface GatewayReceiptStoreDeps {
-  /** The store's drizzle DB — owns `.transaction()`. Must be the SAME connection the repo writes through. */
+  /** The store's drizzle DB — owns `.transaction()`. Must be the SAME connection the repos write through. */
   db: StoreDB;
   /** Gateway-receipt persistence. Injected so tests can simulate a failing insert. */
   repo: IGatewayReceiptRepository;
+  /**
+   * Checkpoint-body sibling persistence. The body row is inserted ATOMICALLY with the
+   * receipt inside record()'s single transaction (§8.1-#3 split-brain fix), and read
+   * by the H1 idempotent-integrity guard. Same connection as `repo`.
+   */
+  checkpointBodies: ICheckpointBodyRepository;
   /** In-memory accepted-chain store. Defaults to the process-wide singleton. */
   sequenceStore?: SessionSequenceStore;
   /** Ed25519 signer. Defaults to the process-default gateway receipt signer. */
@@ -163,12 +201,14 @@ export interface GatewayReceiptStoreDeps {
 export class GatewayReceiptStore {
   private readonly db: StoreDB;
   private readonly repo: IGatewayReceiptRepository;
+  private readonly checkpointBodies: ICheckpointBodyRepository;
   private readonly sequenceStore: SessionSequenceStore;
   private readonly signer: GatewayReceiptSigner;
 
   constructor(deps: GatewayReceiptStoreDeps) {
     this.db = deps.db;
     this.repo = deps.repo;
+    this.checkpointBodies = deps.checkpointBodies;
     this.sequenceStore = deps.sequenceStore ?? sessionSequenceStore;
     this.signer = deps.signer ?? getDefaultGatewayReceiptSigner();
   }
@@ -248,6 +288,25 @@ export class GatewayReceiptStore {
         committed.checkpointHash === input.checkpointHash &&
         (committed.previousAcceptedHash ?? null) === (input.prevCheckpointHash ?? null);
       if (sameCheckpoint) {
+        // INTEGRITY (§8.1-#3 split-brain fix): a committed receipt row MUST have a
+        // matching checkpoint_bodies row — record() inserts them atomically below. If
+        // the body is MISSING or DIVERGES from the committed receipt / this input, that
+        // is an integrity failure, NOT a safe idempotent replay. Fail closed: a
+        // committed receipt without a matching body must NEVER return `idempotent`.
+        const body = this.checkpointBodies.findBySessionSeq(input.sessionId, input.seq);
+        if (
+          !body ||
+          body.checkpointHash !== committed.checkpointHash ||
+          body.eventsRoot !== input.eventsRoot
+        ) {
+          return {
+            status: "errored",
+            error: new Error(
+              `gateway receipt integrity: committed receipt without a matching checkpoint body ` +
+                `for ${committed.receiptId} (body ${body ? "diverges" : "missing"})`,
+            ),
+          };
+        }
         return {
           status: "idempotent",
           receipt: committed.body as unknown as GatewayReceipt,
@@ -311,18 +370,45 @@ export class GatewayReceiptStore {
       createdAt,
     };
 
+    // The checkpoint_bodies sibling row — inserted ATOMICALLY with the receipt in the
+    // SAME transaction (§8.1-#3 split-brain fix: a committed receipt and its body
+    // commit together or not at all). Its `createdAt` derives from
+    // effectiveEvidenceTime (the acceptance point), matching the route's prior body
+    // createdAt; distinct from the receipt row's ISO metadata `createdAt` above.
+    const bodyRow: CheckpointBodyInsert = {
+      id: `ckpt-${input.sessionId}-${input.seq}`,
+      sessionId: input.sessionId,
+      seq: input.seq,
+      jobId: input.jobId,
+      checkpointHash: input.checkpointHash,
+      prevCheckpointHash: input.prevCheckpointHash,
+      eventsRoot: input.eventsRoot,
+      checkpointType: input.checkpointType,
+      deviceCreatedAt: input.deviceCreatedAt,
+      signature: input.signature,
+      payload: null,
+      createdAt: new Date(input.effectiveEvidenceTime * 1000).toISOString(),
+    };
+
     // 4. PERSIST inside a synchronous transaction; construct-from-persisted via
-    //    the returned row. If the insert throws, drizzle rolls back and rethrows
-    //    → we return `errored` WITHOUT advancing. receipt ⟺ committed row.
+    //    the returned receipt row. The receipt row AND the checkpoint_bodies row insert
+    //    inside the ONE transaction — if EITHER throws, drizzle rolls back BOTH and
+    //    rethrows → we return `errored` WITHOUT advancing (no split-brain). receipt ⟺
+    //    (committed receipt row AND committed body row).
     //    NOTE (better-sqlite3): drizzle's `db.transaction(fn)` RUNS fn immediately
     //    and returns its result (unlike native better-sqlite3, which returns a
-    //    callable). Because @pcc/store is a SINGLE-connection better-sqlite3 DB,
-    //    `repo.insert` (same connection) executed inside the callback runs
-    //    between BEGIN/COMMIT and is part of the transaction — no `tx` handoff
-    //    needed (that is only required for pooled async drivers).
+    //    callable). Because @pcc/store is a SINGLE-connection better-sqlite3 DB, both
+    //    `repo.insert` and `checkpointBodies.insert` (same connection) executed inside
+    //    the callback run between BEGIN/COMMIT and are part of the transaction — no `tx`
+    //    handoff needed (that is only required for pooled async drivers).
     let storedRow: GatewayReceiptRow | undefined;
     try {
-      storedRow = this.db.transaction(() => this.repo.insert(insertRow));
+      storedRow = this.db.transaction(() => {
+        const row = this.repo.insert(insertRow);
+        // Receipt inserted FIRST, body SECOND: a body-insert throw rolls the receipt back.
+        this.checkpointBodies.insert(bodyRow);
+        return row;
+      });
     } catch (err) {
       return {
         status: "errored",

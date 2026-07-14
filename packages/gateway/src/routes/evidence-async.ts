@@ -435,7 +435,11 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const sessionId = sessionRow.sessionId;
 
     // Device resume support: nextSeq / lastAcceptedHash from the DURABLE accepted chain.
-    const receipts = new GatewayReceiptStore({ db, repo: repos.gatewayReceipts });
+    const receipts = new GatewayReceiptStore({
+      db,
+      repo: repos.gatewayReceipts,
+      checkpointBodies: repos.checkpointBodies,
+    });
     const tip = repos.gatewayReceipts.lastAcceptedForSession(sessionId);
     // Respond with the PERSISTED session window (on idempotent re-begin, the original).
     const storedWindow = {
@@ -552,8 +556,15 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const skewSeconds = Math.abs(createdAt - effectiveEvidenceTime);
     const skewWithinPolicy = skewSeconds <= PERMITTED_SKEW_SECONDS;
 
-    // (e) the transactional receipt (§8.3 verify→persist→advance; rehydration §1).
-    const receipts = new GatewayReceiptStore({ db, repo: repos.gatewayReceipts });
+    // (e) the transactional receipt (§8.3 verify→persist→advance; rehydration §1). The
+    // receipt row AND the checkpoint_bodies sibling row insert ATOMICALLY inside
+    // record() now (§8.1-#3 split-brain fix) — the route no longer writes the body
+    // separately, so a crash can no longer leave a committed receipt with no body.
+    const receipts = new GatewayReceiptStore({
+      db,
+      repo: repos.gatewayReceipts,
+      checkpointBodies: repos.checkpointBodies,
+    });
     const result = receipts.record({
       jobId,
       sessionId,
@@ -562,29 +573,20 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       prevCheckpointHash,
       maxSignatures: sessionKey.scope.maxSignatures,
       effectiveEvidenceTime,
+      eventsRoot,
+      checkpointType,
+      deviceCreatedAt: createdAt,
+      signature: signatureHex,
     });
 
-    // (f) map the store result; (g) persist the checkpoint BODY on accept (so finalize
-    // can verify payload commitments). accepted ⟹ a NEW seq ⟹ no prior body exists.
+    // (f) map the store result. record() OWNS the checkpoint_bodies insert now:
+    //   accepted   ⟹ receipt + body committed atomically (§2.2 step 7 folded into step 5);
+    //   idempotent ⟹ receipt + body already present and integrity-checked (H1);
+    //   errored    ⟹ a rolled-back txn or a receipt/body split detected — fail closed.
     switch (result.status) {
       case "accepted":
-        repos.checkpointBodies.insert({
-          id: `ckpt-${sessionId}-${seq}`,
-          sessionId,
-          seq,
-          jobId,
-          checkpointHash,
-          prevCheckpointHash,
-          eventsRoot,
-          checkpointType,
-          deviceCreatedAt: createdAt,
-          signature: signatureHex,
-          payload: null,
-          createdAt: new Date(effectiveEvidenceTime * 1000).toISOString(),
-        });
         return reply.status(201).send({ receipt: result.receipt, skewSeconds, skewWithinPolicy });
       case "idempotent":
-        // The body already exists (this is an exact resubmit) — do NOT duplicate it.
         return reply.status(200).send({ receipt: result.receipt, idempotent: true });
       case "conflict":
         return reply.status(409).send({ error: "equivocation", reason: result.reason });

@@ -15,8 +15,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   createStore,
+  schema,
+  eq,
   type Store,
   type IGatewayReceiptRepository,
+  type ICheckpointBodyRepository,
 } from "@pcc/store";
 import { SessionSequenceStore } from "../services/session-sequence-store.js";
 import { GatewayReceiptSigner } from "../services/gateway-receipt-signer.js";
@@ -46,6 +49,11 @@ function input(
     prevCheckpointHash: null,
     maxSignatures: 100,
     effectiveEvidenceTime: 1_800_000_000,
+    // Body fields (S6-1: record() persists the checkpoint_bodies row atomically with the receipt).
+    eventsRoot: "er1",
+    checkpointType: "workflow_step_completed",
+    deviceCreatedAt: 1_800_000_000,
+    signature: "sig1",
     ...overrides,
   };
 }
@@ -63,6 +71,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
     svc = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
       signer,
     });
@@ -211,6 +220,8 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
     const failingSvc = new GatewayReceiptStore({
       db: store.db,
       repo: throwingRepo,
+      // Never reached: the receipt insert throws FIRST inside the txn (real body repo is fine here).
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
       signer,
     });
@@ -258,6 +269,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     const seeding = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seedSeq,
       signer,
     });
@@ -277,6 +289,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
     const svc = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
       signer,
     });
@@ -393,6 +406,7 @@ describe("GatewayReceiptStore — H1 DB-authoritative idempotency / equivocation
     svc = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
       signer,
     });
@@ -495,6 +509,7 @@ describe("GatewayReceiptStore — R-14b defensive input validation", () => {
     svc = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
       signer,
     });
@@ -534,5 +549,116 @@ describe("GatewayReceiptStore — R-14b defensive input validation", () => {
   it("a structurally-valid input still accepts (the guard does not block the happy path)", () => {
     const r = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
     expect(r.status).toBe("accepted");
+  });
+});
+
+/**
+ * S6-1 — receipt + checkpoint_bodies ATOMICITY (§8.1-#3 split-brain fix). record()
+ * now inserts the gateway_receipts row AND the checkpoint_bodies sibling row in ONE
+ * transaction (previously the route wrote the body separately, so a crash between the
+ * committed receipt and the body left a receipt with no body). The H1 idempotent
+ * branch additionally requires a matching body: a committed receipt without an agreeing
+ * body is an INTEGRITY failure (errored), never a safe idempotent replay.
+ */
+describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () => {
+  let store: Store;
+  let sequenceStore: SessionSequenceStore;
+  let signer: GatewayReceiptSigner;
+  let svc: GatewayReceiptStore;
+
+  beforeEach(() => {
+    store = createStore({ seed: false });
+    sequenceStore = new SessionSequenceStore();
+    signer = makeSigner();
+    svc = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
+      sequenceStore,
+      signer,
+    });
+  });
+  afterEach(() => store.close());
+
+  it("a body-insert throw AFTER the receipt insert rolls BOTH back: errored, no receipt, no body, no advance", () => {
+    // REAL gateway_receipts repo (the receipt insert succeeds) + a checkpointBodies stub
+    // whose insert throws — so the body insert throws INSIDE the txn, AFTER the receipt
+    // insert. Atomicity must roll the receipt back too (the split-brain this fix closes).
+    const throwingBodies = {
+      insert: () => {
+        throw new Error("simulated body-insert failure");
+      },
+      findBySessionSeq: () => undefined,
+      findBySession: () => [],
+    } as unknown as ICheckpointBodyRepository;
+    const atomicSvc = new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      checkpointBodies: throwingBodies,
+      sequenceStore,
+      signer,
+    });
+
+    const r = atomicSvc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(r.status).toBe("errored");
+    if (r.status === "errored") expect(r.error.message).toContain("simulated body-insert failure");
+
+    // The receipt was ROLLED BACK with the body (atomic) — nothing durably committed.
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
+    expect(store.repos.gatewayReceipts.findBySession("sess-1")).toEqual([]);
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
+    // The in-memory accepted chain did NOT advance.
+    expect(sequenceStore.hasSession("sess-1")).toBe(false);
+  });
+
+  it("accept persists the receipt AND its checkpoint body atomically; exact replay → idempotent (no 2nd row)", () => {
+    const first = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(first.status).toBe("accepted");
+    // record() OWNS the body insert now — the sibling row is present after accept.
+    const body = store.repos.checkpointBodies.findBySessionSeq("sess-1", 1);
+    expect(body).toBeDefined();
+    expect(body?.checkpointHash).toBe("h1");
+    expect(body?.eventsRoot).toBe("er1");
+
+    // Exact resubmit → idempotent (body + receipt both present and agree); no duplicate rows.
+    const retry = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(retry.status).toBe("idempotent");
+    expect(store.repos.gatewayReceipts.findBySession("sess-1")).toHaveLength(1);
+    expect(store.repos.checkpointBodies.findBySession("sess-1")).toHaveLength(1);
+  });
+
+  it("a committed receipt whose body was REMOVED → errored (integrity), NOT idempotent", () => {
+    expect(
+      svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null })).status,
+    ).toBe("accepted");
+    // Force the split-brain state this fix prevents: delete the body under a committed receipt.
+    store.db
+      .delete(schema.checkpointBodies)
+      .where(eq(schema.checkpointBodies.id, "ckpt-sess-1-1"))
+      .run();
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
+
+    const retry = svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null }));
+    expect(retry.status).toBe("errored");
+    if (retry.status === "errored") expect(retry.error.message).toContain("integrity");
+  });
+
+  it("a committed receipt whose body eventsRoot DIVERGES → errored (integrity), NOT idempotent", () => {
+    expect(
+      svc.record(input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null, eventsRoot: "er-original" }))
+        .status,
+    ).toBe("accepted");
+    // Diverge the stored body's eventsRoot from what the receipt attests / the input claims.
+    store.db
+      .update(schema.checkpointBodies)
+      .set({ eventsRoot: "er-DIVERGED" })
+      .where(eq(schema.checkpointBodies.id, "ckpt-sess-1-1"))
+      .run();
+
+    const retry = svc.record(
+      input({ seq: 1, checkpointHash: "h1", prevCheckpointHash: null, eventsRoot: "er-original" }),
+    );
+    expect(retry.status).toBe("errored");
+    if (retry.status === "errored") expect(retry.error.message).toContain("integrity");
   });
 });

@@ -74,32 +74,41 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
   }
 
   /**
-   * Seed an accepted checkpoint chain (seq 1..N) for SESSION_ID: record the
-   * transactional receipt AND insert the matching checkpoint_bodies row (the route
-   * writes the body after the receipt, §2.2 step 7). `eventsPerCheckpoint[i]` is the
-   * events array committed by checkpoint i; body.eventsRoot = canonicalSha256(events).
-   * Returns the accepted checkpoint hashes in seq order.
+   * Seed an accepted checkpoint chain (seq 1..N) for SESSION_ID. record() now inserts
+   * the matching checkpoint_bodies row ATOMICALLY with the receipt (S6-1) — the SETUP
+   * no longer writes the body separately. The LAST checkpoint's type is `terminalType`
+   * (default "execution_completed") so the chain satisfies finalize's terminal-completion
+   * requirement (S6-2); earlier checkpoints are "workflow_step_completed".
+   * `eventsPerCheckpoint[i]` is the events array committed by checkpoint i;
+   * body.eventsRoot = canonicalSha256(events). Returns the accepted hashes in seq order.
    */
-  function seedChain(eventsPerCheckpoint: unknown[][]): string[] {
+  function seedChain(
+    eventsPerCheckpoint: unknown[][],
+    terminalType = "execution_completed",
+  ): string[] {
     const seq = new SessionSequenceStore();
     const receiptStore = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
       signer,
     });
     let prev: string | null = null;
     const hashes: string[] = [];
+    const n = eventsPerCheckpoint.length;
     eventsPerCheckpoint.forEach((events, i) => {
       const seqNum = i + 1;
       const eventsRoot = canonicalSha256(events);
-      // checkpointHash: server-computed sha256 over the canonical checkpoint content.
+      const checkpointType = i === n - 1 ? terminalType : "workflow_step_completed";
+      // checkpointHash: server-computed sha256 over the canonical checkpoint content —
+      // the SAME 6 keys finalize recomputes over (S6-2 terminal-hash integrity check).
       const checkpointHash = canonicalSha256({
         sessionId: SESSION_ID,
         seq: seqNum,
         eventsRoot,
         prevCheckpointHash: prev,
-        checkpointType: "workflow_step_completed",
+        checkpointType,
         createdAt: NOW,
       });
       const res = receiptStore.record({
@@ -110,22 +119,13 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
         prevCheckpointHash: prev,
         maxSignatures: 100,
         effectiveEvidenceTime: NOW + i, // first=NOW, last=NOW+(N-1)
-      });
-      expect(res.status).toBe("accepted");
-      store.repos.checkpointBodies.insert({
-        id: `ckpt-${SESSION_ID}-${seqNum}`,
-        sessionId: SESSION_ID,
-        seq: seqNum,
-        jobId: JOB,
-        checkpointHash,
-        prevCheckpointHash: prev,
         eventsRoot,
-        checkpointType: "workflow_step_completed",
+        checkpointType,
         deviceCreatedAt: NOW,
         signature: `sig-${seqNum}`,
-        payload: null,
-        createdAt: new Date((NOW + i) * 1000).toISOString(),
       });
+      expect(res.status).toBe("accepted");
+      // record() owns the checkpoint_bodies insert now (S6-1) — no manual insert here.
       prev = checkpointHash;
       hashes.push(checkpointHash);
     });
@@ -279,22 +279,38 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     const receiptStore = new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
       signer,
     });
     const hashes: string[] = [];
     let prev: string | null = null;
     for (let i = 0; i < N; i++) {
-      // A valid leaf hash ("sha256:"+64hex) — merkleRoot rejects malformed leaves.
-      const checkpointHash = canonicalSha256(`ckpt-${SESSION_ID}-${i + 1}`);
+      const seqNum = i + 1;
+      const eventsRoot = canonicalSha256(`events-${seqNum}`);
+      // Last checkpoint is terminal so finalize (S6-2) proceeds; hash over the same 6
+      // canonical keys finalize recomputes. A valid leaf ("sha256:"+64hex) for merkleRoot.
+      const checkpointType = i === N - 1 ? "execution_completed" : "workflow_step_completed";
+      const checkpointHash = canonicalSha256({
+        sessionId: SESSION_ID,
+        seq: seqNum,
+        eventsRoot,
+        prevCheckpointHash: prev,
+        checkpointType,
+        createdAt: NOW,
+      });
       const res = receiptStore.record({
         jobId: JOB,
         sessionId: SESSION_ID,
-        seq: i + 1,
+        seq: seqNum,
         checkpointHash,
         prevCheckpointHash: prev,
         maxSignatures: N + 10,
         effectiveEvidenceTime: NOW + i,
+        eventsRoot,
+        checkpointType,
+        deviceCreatedAt: NOW,
+        signature: `sig-${seqNum}`,
       });
       expect(res.status).toBe("accepted");
       prev = checkpointHash;
