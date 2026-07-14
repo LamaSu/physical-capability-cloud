@@ -346,14 +346,29 @@ export class CheckpointClient {
    * recomputes everything from its own store, so this needs no session signature.
    */
   async finalize(payloads?: RevealedPayload[]): Promise<FinalizeMilestoneResponse> {
+    if (!this.sessionId) throw new CheckpointSubmissionError("begin_not_called", 0);
+    // S6-5: revelation is a SEPARATE, verified step from finalization. Reveal every kept
+    // payload (the gateway checks each against its receipted eventsRoot), THEN finalize with
+    // NO payloads — the gateway includes all durably-revealed payloads itself, so a
+    // permissionless keeper cannot exclude ours. Reveal is idempotent, so a retried finalize
+    // re-reveals harmlessly.
     const revealed =
       payloads ??
       [...this.payloadsBySeq.entries()]
         .sort((a, b) => a[0] - b[0])
         .map(([seq, events]) => ({ seq, events }));
+    for (const p of revealed) {
+      const { status, body } = await this.post(
+        `/api/jobs/${this.jobId}/evidence/checkpoints/${p.seq}/reveal`,
+        { sessionId: this.sessionId, events: p.events },
+      );
+      if (status !== 200) {
+        const b = body as { error?: string } | undefined;
+        throw new CheckpointSubmissionError(b?.error ?? "reveal_failed", status, body);
+      }
+    }
     const { status, body } = await this.post(`/api/jobs/${this.jobId}/evidence/finalize`, {
       milestoneIndex: this.milestoneIndex,
-      payloads: revealed,
     });
     if (status !== 201 && status !== 200) {
       const b = body as { error?: string } | undefined;

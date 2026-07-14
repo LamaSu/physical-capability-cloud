@@ -82,7 +82,14 @@ class FakeGateway {
   readonly keyId = "gw-rcpt-test";
   private readonly sessions = new Map<
     string,
-    { auth: SessionKeyAuthorization; nextSeq: number; lastHash: string | null; hashes: string[]; eventsRootBySeq: Map<number, string> }
+    {
+      auth: SessionKeyAuthorization;
+      nextSeq: number;
+      lastHash: string | null;
+      hashes: string[];
+      eventsRootBySeq: Map<number, string>;
+      revealedBySeq: Map<number, unknown>;
+    }
   >();
   readonly calls: RecordedCall[] = [];
 
@@ -108,6 +115,7 @@ class FakeGateway {
       const jobId = path.split("/")[3];
       let out: { status: number; body: unknown };
       if (path.endsWith("/evidence/begin")) out = this.begin(jobId, body);
+      else if (path.endsWith("/reveal")) out = this.reveal(path, body);
       else if (path.endsWith("/evidence/checkpoints")) out = this.checkpoint(jobId, body);
       else if (path.endsWith("/evidence/finalize")) out = this.finalize(jobId, body);
       else out = { status: 404, body: { error: "not_found" } };
@@ -132,7 +140,7 @@ class FakeGateway {
     let s = this.sessions.get(auth.sessionId);
     const idempotent = Boolean(s);
     if (!s) {
-      s = { auth, nextSeq: 1, lastHash: null, hashes: [], eventsRootBySeq: new Map() };
+      s = { auth, nextSeq: 1, lastHash: null, hashes: [], eventsRootBySeq: new Map(), revealedBySeq: new Map() };
       this.sessions.set(auth.sessionId, s);
     }
     return {
@@ -212,18 +220,35 @@ class FakeGateway {
     };
   }
 
-  private finalize(jobId: string, body: any): { status: number; body: unknown } {
+  private reveal(path: string, body: any): { status: number; body: unknown } {
+    const seq = Number(path.split("/")[6]); // /api/jobs/:jobId/evidence/checkpoints/:seq/reveal
+    const s = this.sessions.get(body.sessionId);
+    if (!s) return { status: 404, body: { error: "session_not_found" } };
+    const eventsRoot = s.eventsRootBySeq.get(seq);
+    if (eventsRoot === undefined) return { status: 404, body: { error: "checkpoint_not_found" } };
+    if (canonicalSha256T(body.events) !== eventsRoot) {
+      return { status: 422, body: { error: "payload_commitment_mismatch" } };
+    }
+    s.revealedBySeq.set(seq, body.events); // idempotent overwrite
+    return { status: 200, body: { revealed: true, sessionId: body.sessionId, seq } };
+  }
+
+  private finalize(jobId: string, _body: any): { status: number; body: unknown } {
     const s = [...this.sessions.values()].find((x) => x.auth.scope.contractIds.includes(jobId));
     if (!s) return { status: 404, body: { error: "session_not_found" } };
-    for (const p of body.payloads ?? []) {
-      if (canonicalSha256T(p.events) !== s.eventsRootBySeq.get(p.seq)) {
-        return { status: 422, body: { error: "payload_commitment_mismatch" } };
-      }
-    }
+    // S6-5: finalize takes NO caller payloads; it includes every DURABLY-revealed payload
+    // (set via the reveal endpoint) in seq order — mirrors the real gateway.
+    const payloads = [...s.revealedBySeq.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([seq, events]) => ({ seq, events }));
     return {
       status: 201,
       body: {
-        package: { acceptedCheckpointHashes: s.hashes, receiptIds: s.hashes.map((_, i) => `grcpt-${i + 1}`) },
+        package: {
+          acceptedCheckpointHashes: s.hashes,
+          receiptIds: s.hashes.map((_, i) => `grcpt-${i + 1}`),
+          ...(payloads.length > 0 ? { payloads } : {}),
+        },
         packageReceipt: { receiptId: `fmprcpt-${jobId}-0` },
         evidenceRoot: "sha256:merkle-root-placeholder",
         packageHash: "sha256:package-hash-placeholder",
@@ -239,6 +264,11 @@ class FakeGateway {
   }
   finalizeCalls(): RecordedCall[] {
     return this.calls.filter((c) => c.path.endsWith("/evidence/finalize"));
+  }
+  revealCalls(): Array<{ seq: number; body: any }> {
+    return this.calls
+      .filter((c) => c.path.endsWith("/reveal"))
+      .map((c) => ({ seq: Number(c.path.split("/")[6]), body: c.body }));
   }
 }
 
@@ -551,7 +581,10 @@ describe("createAsyncKernelHandler — checkpoints the builder emits verify end-
     // finalize revealed the kept payloads and the gateway verified every commitment (no 422).
     const fin = gw.finalizeCalls();
     expect(fin).toHaveLength(1);
-    expect(fin[0].body.payloads.map((p: any) => p.seq)).toEqual([1, 2, 3]);
+    // S6-5: the client REVEALS each payload separately (verified against its eventsRoot),
+    // then finalizes with NO caller payloads.
+    expect(gw.revealCalls().map((c) => c.seq)).toEqual([1, 2, 3]);
+    expect((fin[0].body as any).payloads).toBeUndefined();
   });
 });
 
