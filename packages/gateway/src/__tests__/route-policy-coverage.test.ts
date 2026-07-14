@@ -84,11 +84,12 @@ describe("route-policy coverage gate (unblocks default-deny)", () => {
     expect(has("GET", "/api/protected"), "/api/protected is a doc example, not a route").toBe(false);
   });
 
-  it("the ONLY unpoliced routes are the documented cross-lane-pending set (R3 #4)", () => {
-    // Honesty gate: every private route is policed EXCEPT an explicitly enumerated
-    // set owned by another lane (SIWE auth flow → api-gate public / any-auth). A
-    // genuinely NEW unclassified route is NOT on this list, so it still lands in an
-    // unpoliced bucket and fails the two gates above.
+  it("cross-lane-pending set is now EMPTY — every route classified (R3 #4 resolved)", () => {
+    // Invariant: the live cross_lane_pending bucket must equal the declared list.
+    // 9de363c7 PR1 classified all 5 SIWE routes (nonce/verify public; me/sessions/
+    // logout @authenticated defaults), so both are now EMPTY. A genuinely NEW route
+    // registered outside routes/ that lands unpoliced would be neither policed nor
+    // declared here → it falls into an unpoliced bucket and fails the gates above.
     const pending = inv.routes
       .filter((r) => r.bucket === "cross_lane_pending")
       .map((r) => `${r.method} ${r.path}`)
@@ -97,14 +98,29 @@ describe("route-policy coverage gate (unblocks default-deny)", () => {
       .map((r) => `${r.method} ${r.path}`)
       .sort();
     expect(pending).toEqual(declared);
-    // All pending routes are SIWE auth-flow routes (the known cross-lane gap).
-    for (const p of pending) expect(p).toMatch(/\/api\/auth\//);
+    expect(pending).toEqual([]); // all cross-lane routes now classified
   });
 
-  it("classifier stays faithful to the DEFAULT_SCOPE_REQUIREMENTS snapshot (11)", () => {
+  it("SIWE session routes resolve to the @authenticated policy-only sentinel (R3 re-sync)", () => {
+    // me/sessions/logout are policed by an exact "@authenticated" default — an
+    // authenticated principal with NO business role, never an unpoliced gap.
+    for (const [method, path] of [["GET", "/api/auth/me"], ["GET", "/api/auth/sessions"], ["POST", "/api/auth/logout"]] as const) {
+      const r = inv.routes.find((x) => x.method === method && x.path === path);
+      expect(r?.bucket, `${method} ${path} must be policed`).toBe("policed");
+    }
+    // nonce/verify are the pre-auth handshake → public, not scope-gated.
+    for (const [method, path] of [["GET", "/api/auth/nonce"], ["POST", "/api/auth/verify"]] as const) {
+      const r = inv.routes.find((x) => x.method === method && x.path === path);
+      expect(r?.bucket, `${method} ${path} must be public`).toBe("public");
+    }
+  });
+
+  it("classifier stays faithful to the DEFAULT_SCOPE_REQUIREMENTS snapshot (14)", () => {
     // Anchors the scope-checker.ts default-rules snapshot in the inventory tool.
     // If fix/audit-p0 changes the defaults, re-sync the snapshot and this number.
-    expect(inv.totals.policed_by_default).toBe(11);
+    // 11 -> 14: 9de363c7 PR1 added GET /api/auth/me + /sessions + POST /logout as
+    // "@authenticated" default rules (SIWE session introspection).
+    expect(inv.totals.policed_by_default).toBe(14);
   });
 
   it("no money-path route is PUBLIC (escrow/settlement/fiat-ramp/payout/pool/swf/rewards)", () => {

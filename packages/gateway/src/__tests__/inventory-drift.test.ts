@@ -80,7 +80,12 @@ describe("inventory drift guard — api-gate public snapshot == source (finding 
     // would otherwise truncate the slice), then take up to the array's `];`.
     const arrStart = checkerSrc.indexOf("= [", decl);
     expect(arrStart, "DEFAULT_SCOPE_REQUIREMENTS array literal not found").toBeGreaterThan(-1);
-    const block = checkerSrc.slice(arrStart, checkerSrc.indexOf("];", arrStart));
+    // scope-checker uses `scopes: [AUTHENTICATED_SENTINEL]` (a const, not a string
+    // literal). Resolve it to its value so the scope parser (which reads quoted
+    // strings) sees "@authenticated" instead of an empty scope list.
+    const block = checkerSrc
+      .slice(arrStart, checkerSrc.indexOf("];", arrStart))
+      .replace(/AUTHENTICATED_SENTINEL/g, '"@authenticated"');
     const srcRules = [...block.matchAll(/\{\s*method:\s*"([^"]+)",\s*pattern:\s*"([^"]+)",\s*scopes:\s*\[([^\]]*)\]/g)].map((m) => ({
       method: m[1],
       pattern: m[2],

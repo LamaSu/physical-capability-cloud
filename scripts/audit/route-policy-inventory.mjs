@@ -54,6 +54,9 @@ export const PUBLIC_EXACT = [
   "/api/capabilities/templates/match", "/openapi.json",
   "/api/courier-jobs/open", "/api/courier-jobs/jobs/open", "/api/courier-jobs/healthz",
   "/api/job-offers/open", "/api/job-offers/healthz",
+  // SIWE pre-auth handshake (9de363c7 api-gate PR1 @ 5d602a6a): a caller has no
+  // key/session yet, so these must be public — the verify mints the session.
+  "/api/auth/nonce", "/api/auth/verify",
 ];
 export const PUBLIC_CAPABILITY_DETAIL_RE = /^\/api\/capabilities\/[^/]+(?:\/button|\/td)?$/;
 export const PUBLIC_OPERATOR_RATINGS_RE = /^\/api\/operators\/[^/]+\/ratings$/;
@@ -90,25 +93,25 @@ export const DEFAULT_SCOPE_REQUIREMENTS = [
   { method: "PUT", pattern: "/api/templates/*", scopes: ["template_author", "operator", "admin"] },
   { method: "GET", pattern: "/api/audit/*", scopes: ["auditor", "admin"] },
   { method: "GET", pattern: "/api/compliance/*", scopes: ["auditor", "operator", "admin"] },
+  // SIWE session-introspection (9de363c7 scope-checker PR1 @ 5d602a6a): authenticated
+  // principal, NO business role. "@authenticated" is a POLICY-ONLY sentinel — allowed
+  // ONLY as this exact singleton (a normalized principal exists; anon is already 401'd
+  // at api-gate), never grantable/caller-held. Mirrors AUTHENTICATED_SENTINEL rules.
+  { method: "GET", pattern: "/api/auth/me", scopes: ["@authenticated"] },
+  { method: "GET", pattern: "/api/auth/sessions", scopes: ["@authenticated"] },
+  { method: "POST", pattern: "/api/auth/logout", scopes: ["@authenticated"] },
 ];
 
 // ── Cross-lane pending classification (review R3 #4) ──────────────────────────
 // Widening the scan to all of gateway/src surfaced the SIWE session-auth routes,
-// whose policy is NOT this lane's to set: the pre-auth LOGIN HANDSHAKE must be
-// api-gate PUBLIC (no principal exists yet), and the session ops need an
-// "any-authenticated principal, no specific scope" allowance in the scope model —
-// both owned by 9de363c7 (api-gate.ts / auth model). Rather than fabricate a scope
-// rule or hide them behind a false "0 unpoliced", they are enumerated here so the
-// coverage gate documents the exact gap and still fails on any NEW unclassified
-// route. Flagged cross-lane. When 9de363c7 classifies each (public, or an
-// any-authenticated allowance), it leaves this list.
-export const UNCLASSIFIED_PENDING_OWNER = [
-  { method: "GET",  path: "/api/auth/nonce",    owner: "api-gate/9de363c7", reason: "SIWE login handshake — pre-auth, MUST be api-gate PUBLIC" },
-  { method: "POST", path: "/api/auth/verify",   owner: "api-gate/9de363c7", reason: "SIWE login handshake — pre-auth, MUST be api-gate PUBLIC" },
-  { method: "GET",  path: "/api/auth/me",       owner: "auth-model/9de363c7", reason: "own session info — any authenticated principal, no scope" },
-  { method: "GET",  path: "/api/auth/sessions", owner: "auth-model/9de363c7", reason: "own sessions — any authenticated principal, no scope" },
-  { method: "POST", path: "/api/auth/logout",   owner: "auth-model/9de363c7", reason: "logout — any authenticated principal, no scope" },
-];
+// whose policy was NOT this lane's to set. 9de363c7 has now CLASSIFIED all five
+// (api-gate PR1 @ 5d602a6a): nonce/verify are api-gate PUBLIC (mirrored into
+// PUBLIC_EXACT above); me/sessions/logout are scope-checker defaults with the
+// "@authenticated" policy-only sentinel (mirrored into DEFAULT_SCOPE_REQUIREMENTS
+// above). So the pending set is now EMPTY. The bucket + this export stay in place:
+// they still catch any FUTURE route registered outside routes/ that lands unpoliced
+// (it would be neither policed nor declared here, so the coverage gate fails).
+export const UNCLASSIFIED_PENDING_OWNER = [];
 const PENDING_KEYS = new Set(UNCLASSIFIED_PENDING_OWNER.map((r) => `${r.method} ${r.path}`));
 
 // patternToRegex with CORRECT double-star (any-depth) semantics.
