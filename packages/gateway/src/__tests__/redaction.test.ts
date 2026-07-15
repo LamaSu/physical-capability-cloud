@@ -23,14 +23,16 @@ describe("redactSecrets", () => {
     expect(redactSecrets(`token=${jwt}`)).not.toContain("eyJhbGciOiJI");
   });
 
-  it("redacts a 64-hex private key WITH OR WITHOUT 0x, but NOT a 40-hex address (review #2)", () => {
+  it("redacts a 64-hex private key WITH 0x/0X/no-prefix, but NOT a 40-hex address (review #2/#3)", () => {
     const pk = "0x" + "a".repeat(64);
+    const upper = "0X" + "d".repeat(64); // uppercase 0X prefix (round 2 #3)
     const bare = "c".repeat(64); // private key pasted without the 0x prefix
     const addr = "0x" + "b".repeat(40);
-    const out = redactSecrets(`pk=${pk} bare=${bare} addr=${addr}`);
+    const out = redactSecrets(`pk=${pk} up=${upper} bare=${bare} addr=${addr}`);
     expect(out).toContain("[redacted-hex]");
-    expect(out).not.toContain(pk);
-    expect(out).not.toContain(bare); // unprefixed key must also be caught
+    expect(out).not.toContain("a".repeat(64));
+    expect(out).not.toContain("d".repeat(64)); // 0X-prefixed key caught
+    expect(out).not.toContain("c".repeat(64)); // unprefixed key caught
     expect(out).toContain(addr); // public address (40 hex) must survive
   });
 

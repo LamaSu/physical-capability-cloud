@@ -141,17 +141,31 @@ function clampHttpStatus(v: unknown): number | null {
   return Number.isInteger(n) && n >= 100 && n < 600 ? n : null;
 }
 
+// Hard cap on the input handed to redaction — well above any legitimate field
+// (detail is 20000), so nothing real is lost, but it bounds the regex work on this
+// PUBLIC route so a pathologically huge body can't burn CPU/memory (review #4).
+const PRE_REDACT_MAX = 64_000;
+
 // Redact secrets from a free-text field, THEN clamp — redact BEFORE truncation so a
-// secret that would straddle the size limit is still fully matched (review #6).
+// secret that would straddle the size limit is still fully matched (review #6). The
+// input is first bounded to PRE_REDACT_MAX so redaction never scans an unbounded value.
 function redactClamp(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
-  return clampStr(redactSecrets(v), max);
+  const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
+  return clampStr(redactSecrets(bounded), max);
 }
 // Path-like fields (endpoint / logs[].path / page): drop any query string first —
 // that's where a `?api_key=…` would hide — then redact + clamp (review #1).
 function pathClamp(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
   return redactClamp(v.split("?")[0], max);
+}
+// HTTP method (top-level or a logs step). A real method is short uppercase alpha; a
+// value that isn't one (e.g. a secret with separators/digits) is dropped rather than
+// persisted unredacted (review #1 — method fields bypassed the scrubber).
+function clampMethod(v: unknown): string | null {
+  const m = clampStr(v, 16);
+  return m && /^[A-Za-z]{2,10}$/.test(m) ? m.toUpperCase() : null;
 }
 
 interface LogEntry {
@@ -174,7 +188,7 @@ function clampLogs(v: unknown): LogEntry[] | null {
     const e = raw as Record<string, unknown>;
     const entry: LogEntry = {};
     if (Number.isInteger(Number(e.step))) entry.step = Number(e.step);
-    const method = clampStr(e.method, 16); // HTTP method — no secrets
+    const method = clampMethod(e.method); // validated HTTP verb, or dropped
     if (method) entry.method = method;
     const path = pathClamp(e.path ?? e.endpoint, FIELD_MAX); // strip query + redact
     if (path) entry.path = path;
@@ -263,7 +277,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const severityRaw = String(b.severity ?? "").trim().toLowerCase();
     const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
 
-    const email = clampStr(b.email, 256);
+    const email = redactClamp(b.email, 256);
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }
@@ -279,18 +293,19 @@ export async function feedbackRoutes(app: FastifyInstance) {
       logs: clampLogs(b.logs),
       // Path-like: strip any query string (where a ?api_key=… hides) + redact (#1).
       endpoint: pathClamp(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
-      traceId: clampStr(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
+      traceId: redactClamp(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
       severity,
       agentId: redactClamp(b.agentId ?? b.agent_kind, FIELD_MAX),
       errorCode: redactClamp(b.errorCode ?? b.last_error_code, FIELD_MAX),
       // Auto-feedback: the HTTP method + status the agent hit (from a report_hint
       // send{} block). Lets the team see "500 on POST /api/build/contract" directly.
-      method: clampStr(b.method, 16),
+      method: clampMethod(b.method), // validated verb, never a stashed secret
       httpStatus: clampHttpStatus(b.status ?? b.httpStatus),
       // Legacy dashboard fields ride along (no migration).
       page: pathClamp(b.page, FIELD_MAX),
       email,
-      walletAddress: clampStr(b.walletAddress, 128),
+      // A public 0x+40hex address survives; a 0x+64hex private key is redacted.
+      walletAddress: redactClamp(b.walletAddress, 128),
       status: "new",
       createdAt: new Date().toISOString(),
       ip: req.ip,
@@ -300,10 +315,16 @@ export async function feedbackRoutes(app: FastifyInstance) {
     // Dedup: collapse a retry-looping agent's repeated reports of the SAME failure
     // within the window. Accepted (200, not an error, so the agent doesn't retry) but
     // not persisted or re-notified. Key = SHA-256 over a serialized tuple with a
-    // TRUSTED principal (req.ip, not the spoofable agent traceId) + the FULL endpoint,
-    // errorCode, and summary; JSON.stringify avoids `|`-delimiter collisions (#4).
+    // trusted principal + the FULL endpoint, errorCode, and summary; JSON.stringify
+    // avoids `|`-delimiter collisions (review #4). Prefer an authenticated principal
+    // (apiKeyId/userId) so users behind one NAT/proxy IP don't cross-suppress each
+    // other; fall back to IP for cold, unauthenticated agents (review #2).
+    const principal =
+      (req as unknown as { apiKeyId?: string }).apiKeyId ??
+      (req as unknown as { userId?: string }).userId ??
+      req.ip;
     const dedupKey = createHash("sha256")
-      .update(JSON.stringify([req.ip, rec.endpoint ?? "", rec.errorCode ?? "", rec.summary]))
+      .update(JSON.stringify([principal, rec.endpoint ?? "", rec.errorCode ?? "", rec.summary]))
       .digest("hex");
     if (seenRecently(dedupKey)) {
       return reply.code(200).send({

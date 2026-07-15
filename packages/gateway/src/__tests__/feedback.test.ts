@@ -234,6 +234,37 @@ describe("POST /api/feedback (public)", () => {
     expect((await adminItems()).total).toBe(1);
   });
 
+  it("validates method + redacts identifier fields, dropping stashed secrets (review r2 #1)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "leak attempt in structured fields",
+        method: "pcc_live_NOTAVERB1", // not a real HTTP verb → dropped
+        traceId: "0x" + "a".repeat(64), // private key stashed in traceId → redacted
+        walletAddress: "0x" + "e".repeat(64), // private key in wallet field → redacted
+        logs: [{ method: "sk-secretkeyhere1234567", note: "x" }], // bad log method → dropped
+      },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.method).toBeNull(); // non-verb method dropped, not persisted
+    expect(rec.traceId).not.toContain("a".repeat(64)); // redacted
+    expect(rec.walletAddress).not.toContain("e".repeat(64)); // redacted
+    expect(rec.logs[0].method).toBeUndefined(); // bad log-step method dropped
+    expect(JSON.stringify(rec)).toContain("[redacted-hex]");
+  });
+
+  it("keeps a real HTTP method (normalized) + a public wallet address", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: { summary: "normal report", method: "post", walletAddress: "0x" + "b".repeat(40) },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.method).toBe("POST"); // validated + upper-cased
+    expect(rec.walletAddress).toBe("0x" + "b".repeat(40)); // public 40-hex address survives
+  });
+
   it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
     // A realistic key: preceded by a separator (so \b matches), body crosses the
     // 500-char clamp. Redact-before-clamp catches the whole key; clamp-first would

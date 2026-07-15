@@ -21,10 +21,10 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/\bpcc_(live|test)_[A-Za-z0-9_-]{6,}/gi, "pcc_$1_redacted"],
   // JSON Web Tokens (header.payload.signature; header is base64 of `{"…`)
   [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, "[redacted-jwt]"],
-  // 64-hex secret (private key / secret), WITH OR WITHOUT the 0x prefix. A 40-hex
+  // 64-hex secret (private key / secret), WITH OR WITHOUT a 0x/0X prefix. A 40-hex
   // address (public) is shorter and is NOT matched. Over-redacts a 64-hex sha256
   // hash — acceptable: better to lose a hash than leak a key.
-  [/\b(?:0x)?[0-9a-fA-F]{64,}\b/g, "[redacted-hex]"],
+  [/\b(?:0[xX])?[0-9a-fA-F]{64,}\b/g, "[redacted-hex]"],
   // Vendor key shapes: OpenAI sk- (incl. modern sk-proj-… with separators), GitHub
   // ghp_/gho_, Slack xox*, AWS AKIA.
   [/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "[redacted-key]"],
