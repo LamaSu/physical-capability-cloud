@@ -163,8 +163,16 @@ if (JSON.stringify(pkg.error_reporting) !== JSON.stringify(ERROR_REPORTING)) {
   changed = true;
 }
 
-pkg.toolCount = pkg.tools.length;
-if (pkg.metadata && typeof pkg.metadata === "object") pkg.metadata.tool_count = pkg.tools.length;
+// Keep the counts in sync — and mark changed if only a stale count differs, so the
+// file is actually written (previously these mutated without setting `changed`).
+if (pkg.toolCount !== pkg.tools.length) {
+  pkg.toolCount = pkg.tools.length;
+  changed = true;
+}
+if (pkg.metadata && typeof pkg.metadata === "object" && pkg.metadata.tool_count !== pkg.tools.length) {
+  pkg.metadata.tool_count = pkg.tools.length;
+  changed = true;
+}
 
 if (!changed) {
   console.log("No changes — agent-package.json already wired for auto-feedback.");

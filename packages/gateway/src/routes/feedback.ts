@@ -102,7 +102,9 @@ function clampStr(v: unknown, max: number): string | null {
 // with the record's own workflow `status` field.
 function clampHttpStatus(v: unknown): number | null {
   const n = Number(v);
-  return Number.isFinite(n) && n >= 100 && n < 600 ? Math.trunc(n) : null;
+  // Must be a whole HTTP status (100..599). Reject fractional values rather than
+  // silently truncating (503.9 -> null, not 503) — the field is documented integer.
+  return Number.isInteger(n) && n >= 100 && n < 600 ? n : null;
 }
 
 // Discord webhook for live feedback notifications — preserved from the prior

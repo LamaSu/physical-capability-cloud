@@ -136,13 +136,15 @@ describe("POST /api/feedback (public)", () => {
     expect(items[0].status).toBe("new"); // workflow status is unaffected by the HTTP status
   });
 
-  it("coerces a string HTTP status and nulls an out-of-range one", async () => {
+  it("coerces a string HTTP status, nulls out-of-range and fractional ones", async () => {
     await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "string status here", status: "503" } });
     await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "bogus status here", status: 99999 } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "fractional status here", status: 503.9 } });
     const { items } = await adminItems();
     const byStatus = Object.fromEntries(items.map((i) => [i.summary, i.httpStatus]));
     expect(byStatus["string status here"]).toBe(503);
     expect(byStatus["bogus status here"]).toBeNull();
+    expect(byStatus["fractional status here"]).toBeNull(); // not silently truncated to 503
   });
 
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {

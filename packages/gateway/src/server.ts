@@ -1,5 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
-import { buildReportHint } from "./report-hint.js";
+import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -233,6 +233,26 @@ export async function createGateway(port = 3200) {
     });
     if (reportHint) body.report_hint = reportHint;
     return reply.status(statusCode).send(body);
+  });
+
+  // Auto-feedback completeness: setErrorHandler only sees THROWN errors. Many routes
+  // return `reply.status(500).send(...)` explicitly, which never reach it — so this
+  // onSend hook decorates every JSON 5xx that isn't already carrying a report_hint,
+  // making the package's "any 5xx carries report_hint" contract actually true. The
+  // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
+  // itself. See ai/research/agent-feedback-auto-design.md.
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
+    return decorateWithReportHint(payload, {
+      statusCode: reply.statusCode,
+      contentType: String(reply.getHeader("content-type") ?? ""),
+      url: request.url,
+      method: request.method,
+      traceId:
+        (request as unknown as { traceId?: string }).traceId ??
+        (request.headers["x-pcc-trace-id"] as string | undefined) ??
+        null,
+    });
   });
 
   // Close the DB, IPFS node, and batch settlement when the server shuts down
