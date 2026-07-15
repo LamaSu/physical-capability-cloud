@@ -40,15 +40,49 @@ Commits `0203dc6e` (build) + `5822a1ef` (review fixes). 29 tests green, tsc clea
 (feedback-loop guard) FIXED · #4/#5/#6 LOW FIXED · #1 HIGH was a false positive (the
 agent-package.json JSON was excluded from the code-only review diff but IS committed).
 
-### Phase 2 — bounded `logs` + server-side secret redaction + dedup + telemetry — IN PROGRESS
+### Phase 2 — bounded `logs` + server-side secret redaction + dedup + telemetry — BUILT, IN REVIEW
 
-Scope: an optional bounded `logs` array on `pcc_report`/`/api/feedback` (recent step
-summaries, not bodies); **server-side redaction** of secret-shaped strings on ingest
-(defense-in-depth over the agent-side "never send secrets"); dedup to collapse
-retry-loops; fold the orphaned `/api/feedback/agent-report` OTel/PostHog telemetry into
-`/api/feedback`. Rounds logged below.
+Commit `c4b86cf2`. 62 tests green (redaction 8, feedback +logs/redaction/dedup,
+agent-feedback 20 unaffected), tsc clean. Delivered:
+- `logs` array on `pcc_report`/`/api/feedback` — `[{step, method, path, status, note}]`,
+  bounded to 20 entries, each note ≤500 chars and secret-scrubbed.
+- `redaction.ts` — scrubs Bearer/`pcc_live_`/JWT/64-hex-private-key/vendor-key shapes
+  from `summary`/`detail`/`logs[].note`; never redacts a public 40-hex address.
+- dedup — collapse identical reports (principal+endpoint+errorCode+summary) in a 5-min
+  window; accepted 200 (agent won't retry) but not persisted/re-notified.
+- telemetry fold — PostHog `feedback_filed` event from `/api/feedback`.
 
-- _round 1: pending_
+**sol round 1** (`c4b86cf2` → fixes `5868961b`) — 6 findings, all valid, all fixed:
+#1 HIGH redaction skipped structured fields (endpoint/logs.path/errorCode → query-strip
++ redact); #2 HIGH scrubber gaps (pcc keys w/ `_-`, bare 64-hex, `sk-proj-`); #3 HIGH
+failed-write → permanent dedup loss (mark key only after append); #4 MED weak dedup key
+(SHA-256 over a trusted ip principal + full fields); #5 MED NaN window → dedup-forever
+(validated); #6 LOW redact-after-truncate (redact before clamp). 66 tests green.
+
+**sol round 2** (fixes `87418838`) — 4 findings, all valid, all fixed: #1 HIGH more
+fields bypassed the scrubber (method now HTTP-verb-validated; traceId/email/wallet
+redacted); #2 MED dedup prefers an authed principal over shared NAT IP; #3 LOW 0X
+uppercase hex; #4 LOW pre-redaction size cap (DoS bound on the public route). 68 green.
+
+**sol rounds 3–6** — the adversarial loop converged on the public sink:
+- r3 (5): hex `_`-adjacency lookarounds; method HTTP-verb allowlist; path pre-cap before
+  split; email drop-if-redaction-alters; namespace-tagged dedup principal.
+- r4 (3, 0 HIGH): fixed an r3 over-correction (blanket boundary removal → over-redaction)
+  with precise `(?<![A-Za-z0-9])` lookarounds; added CONNECT/TRACE; email length-before-trim.
+- r5 (1): email length check before trim.
+- r6 (1, cosmetic): flipped r5 → trim first, cap the NORMALIZED email; "no other
+  correctness issues." Applied the cleaner version and STOPPED per stop-at-done.
+
+**Converged.** Findings/round: 6 → 4 → 5 → 3 → 1 → 1(cosmetic). HIGH: 2 → 1 → 1 → 0 → 0 → 0.
+Commits `c4b86cf2` (build) → `5868961b` → `87418838` → `3b13e3f0` → `18b99a84` → `6fde1516`
+→ `58f924db`. Phase 2 DONE.
+
+_(Fable declined the Phase 1 + Phase 2 designs — hard classifier block on the security
+vocab — so Opus designed + built per the fallback directive; sol did the 8 review rounds
+total across both phases.)_
+
+_(Fable declined the Phase 1 + Phase 2 designs — hard classifier block on the security
+vocab — so Opus designed + built per the fallback directive; sol does the review rounds.)_
 
 ### Phase 3 — admin/observability view + deprecate agent-report — NOT STARTED
 
