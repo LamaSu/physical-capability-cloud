@@ -282,15 +282,14 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const severityRaw = String(b.severity ?? "").trim().toLowerCase();
     const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
 
-    // Reject an over-long email BEFORE validating — truncating first could turn an
-    // invalid 300-char string into a valid-looking, different, unusable address (r4 #3).
-    // Check the RAW length before trimming so whitespace padding can't bypass the cap
-    // (review r5).
-    const emailField = typeof b.email === "string" ? b.email : "";
-    if (emailField.length > 256) {
+    // Normalize (trim) FIRST, then cap the normalized address at 256 and validate it
+    // (review r6): harmless surrounding whitespace shouldn't reject a valid email, and
+    // an invalid over-long string is rejected, not truncated into a different valid-
+    // looking one (r4 #3). The Fastify body-size limit bounds the raw payload.
+    const emailRaw = (typeof b.email === "string" ? b.email.trim() : "") || null;
+    if (emailRaw && emailRaw.length > 256) {
       return reply.code(400).send({ error: "bad_request", message: "Email too long." });
     }
-    const emailRaw = emailField.trim() || null;
     if (emailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }

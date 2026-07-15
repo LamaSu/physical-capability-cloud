@@ -277,10 +277,14 @@ describe("POST /api/feedback (public)", () => {
     expect(items.find((i) => i.summary === "secret email").email).toBeNull();
   });
 
-  it("rejects an over-long email even when whitespace-padded (review r5)", async () => {
-    const padded = " ".repeat(300) + "a@b.com"; // trims short, but raw length > 256
-    const res = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "padded email", email: padded } });
-    expect(res.statusCode).toBe(400); // caught by the raw-length check before trim
+  it("caps the NORMALIZED email at 256, accepting harmless whitespace (review r6)", async () => {
+    // surrounding whitespace trims away → a valid short email, accepted + normalized
+    const padded = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "padded email", email: "   dev@example.com   " } });
+    expect(padded.statusCode).toBe(201);
+    expect((await adminItems()).items.find((i) => i.summary === "padded email").email).toBe("dev@example.com");
+    // a genuinely over-256 address is rejected
+    const long = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "long email", email: "a".repeat(250) + "@example.com" } });
+    expect(long.statusCode).toBe(400);
   });
 
   it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
