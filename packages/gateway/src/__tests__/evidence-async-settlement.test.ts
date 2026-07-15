@@ -471,4 +471,67 @@ describe("evidence async → settlement (§2.4 package-anchored /complete)", () 
     const unknown = await app.inject({ method: "GET", url: `/api/evidence/sha256:${"a".repeat(64)}` });
     expect(unknown.statusCode).toBe(404);
   });
+
+  // ── B4 (round-5 M1): direct settlement_hold guard tests ──────────────────────
+  // A job in the terminal `settlement_hold` state (paid-job-flow parks it there when settlement fails
+  // with the escrow funded but no resolution) is excluded from the /complete atomic claim and is
+  // evidence-uncollectable. The guard existed but had no direct test. Seed the state directly — inducing
+  // the fail-then-hold path needs a specific mocked-settlement failure, orthogonal to the guard.
+  it("B4: a settlement_hold job → /complete → 409 (the atomic claim excludes settlement_hold)", async () => {
+    const jobId = freshJobId();
+    const principal = nacl.sign.keyPair();
+    seedJob(jobId, principal.publicKey);
+    getStore().repos.jobs.update(jobId, { status: "settlement_hold" });
+    const res = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(res.statusCode).toBe(409);
+    // The held job is NOT re-claimed → status unchanged (never flipped to 'completing').
+    expect(getStore().repos.jobs.findById(jobId)?.status).toBe("settlement_hold");
+  });
+
+  it("B4: concurrent /complete on a settlement_hold job → BOTH 409 (the hold guard is race-safe)", async () => {
+    const jobId = freshJobId();
+    const principal = nacl.sign.keyPair();
+    seedJob(jobId, principal.publicKey);
+    getStore().repos.jobs.update(jobId, { status: "settlement_hold" });
+    const [a, b] = await Promise.all([
+      app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} }),
+      app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} }),
+    ]);
+    // The atomic claim excludes settlement_hold, so neither call can win it — both 409, no double-run.
+    expect(a.statusCode).toBe(409);
+    expect(b.statusCode).toBe(409);
+    expect(getStore().repos.jobs.findById(jobId)?.status).toBe("settlement_hold");
+  });
+
+  it("B4: an open-session job that goes to settlement_hold → a new checkpoint AND finalize are rejected", async () => {
+    const jobId = freshJobId();
+    const principal = nacl.sign.keyPair();
+    seedJob(jobId, principal.publicKey);
+    const del = issueDelegation(principal, jobId);
+    const beginRes = await app.inject({
+      method: "POST",
+      url: `/api/jobs/${jobId}/evidence/begin`,
+      payload: { sessionKeyAuthorization: del.authorization },
+    });
+    expect(beginRes.statusCode).toBe(201);
+    const sessionId: string = beginRes.json().sessionId;
+    // Accept ONE non-terminal checkpoint so the session stays OPEN (execution_started never terminalizes).
+    const now = Math.floor(Date.now() / 1000);
+    const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ a: 1 }], checkpointType: "execution_started", sessionPrivateKey: del.sessionPrivateKey });
+    expect((await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c1.body })).statusCode).toBe(201);
+
+    // The job goes to settlement_hold out-of-band while its session is still open.
+    getStore().repos.jobs.update(jobId, { status: "settlement_hold" });
+
+    // A NEW checkpoint is rejected by the item-1 job-lifecycle gate (settlement_hold is uncollectable).
+    const c2 = signCheckpoint({ sessionId, seq: 2, createdAt: now, prevCheckpointHash: c1.checkpointHash, events: [{ b: 2 }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+    const cpRes = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c2.body });
+    expect(cpRes.statusCode).toBe(409);
+    expect(cpRes.json().error).toBe("job_not_evidence_collectable");
+
+    // And a NEW finalize is rejected by the same lifecycle gate (no package exists yet).
+    const finRes = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/finalize`, payload: {} });
+    expect(finRes.statusCode).toBe(409);
+    expect(finRes.json().error).toBe("job_not_evidence_collectable");
+  });
 });
