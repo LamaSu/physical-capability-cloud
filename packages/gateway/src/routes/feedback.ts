@@ -284,11 +284,13 @@ export async function feedbackRoutes(app: FastifyInstance) {
 
     // Reject an over-long email BEFORE validating — truncating first could turn an
     // invalid 300-char string into a valid-looking, different, unusable address (r4 #3).
-    const emailInput = typeof b.email === "string" ? b.email.trim() : "";
-    if (emailInput.length > 256) {
+    // Check the RAW length before trimming so whitespace padding can't bypass the cap
+    // (review r5).
+    const emailField = typeof b.email === "string" ? b.email : "";
+    if (emailField.length > 256) {
       return reply.code(400).send({ error: "bad_request", message: "Email too long." });
     }
-    const emailRaw = emailInput || null;
+    const emailRaw = emailField.trim() || null;
     if (emailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }

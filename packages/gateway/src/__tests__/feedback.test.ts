@@ -277,6 +277,12 @@ describe("POST /api/feedback (public)", () => {
     expect(items.find((i) => i.summary === "secret email").email).toBeNull();
   });
 
+  it("rejects an over-long email even when whitespace-padded (review r5)", async () => {
+    const padded = " ".repeat(300) + "a@b.com"; // trims short, but raw length > 256
+    const res = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "padded email", email: padded } });
+    expect(res.statusCode).toBe(400); // caught by the raw-length check before trim
+  });
+
   it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
     // A realistic key: preceded by a separator (so \b matches), body crosses the
     // 500-char clamp. Redact-before-clamp catches the whole key; clamp-first would
