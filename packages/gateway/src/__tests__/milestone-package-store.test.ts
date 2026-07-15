@@ -296,6 +296,45 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("terminal_success");
   });
 
+  // ── Round-6 A2: complete whole-chain body↔receipt field binding ──────────────────────
+  it("round-6 A2: a non-terminal body whose OWN jobId is wrong → errored (bodies are fetched by sessionId, not jobId)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]);
+    // Corrupt the first (non-terminal) body's jobId only. It still belongs to SESSION_ID (so
+    // findAllBySession still returns it), still recomputes to its own checkpointHash (jobId is NOT
+    // one of the 6 canonical checkpoint keys), and its receipt is untouched — so ONLY the new
+    // body.jobId binding catches the mismatch (the receipt.jobId check does not cover the body).
+    store.db
+      .update(schema.checkpointBodies)
+      .set({ jobId: "job-someone-else" })
+      .where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-1`))
+      .run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored");
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
+  it("round-6 A2: a receipt that CLAIMS a wrong previousAcceptedHash (internally consistent) → errored", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]);
+    // Make receipt seq-2 internally CONSISTENT (column == body, so the per-row assertRowIntegrity
+    // passes) but chain-WRONG: its previousAcceptedHash no longer equals receipt seq-1's checkpointHash.
+    // The body chain stays continuous (bodies untouched), so ONLY the new receipt.previousAcceptedHash
+    // binding (and the body-prev==receipt-prev binding) catches it — exactly the round-6 finding that a
+    // receipt can claim a different prior hash while the body chain looks internally continuous.
+    const wrongPrev = `sha256:${"ab".repeat(32)}`;
+    const row = store.repos.gatewayReceipts.findById(`grcpt-${SESSION_ID}-2`)!;
+    const body = { ...(row.body as Record<string, unknown>), previousAcceptedHash: wrongPrev };
+    store.db
+      .update(schema.gatewayReceipts)
+      .set({ previousAcceptedHash: wrongPrev, body })
+      .where(eq(schema.gatewayReceipts.receiptId, `grcpt-${SESSION_ID}-2`))
+      .run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored");
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
   it("round-6 A3: finalize on an OPEN session (never terminalized) -> rejected terminal_state_missing", () => {
     openSession(); // session open, no terminal checkpoint accepted (here: no receipts at all)
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });

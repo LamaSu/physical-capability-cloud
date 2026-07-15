@@ -342,9 +342,24 @@ export class MilestonePackageStore {
         body.seq !== i + 1 ||
         receipt.seq !== i + 1 ||
         receipt.jobId !== jobId ||
+        // A2 (round-6): bind the BODY's own jobId. Bodies are fetched by sessionId, NOT jobId, so a
+        // mis-keyed body would otherwise slip past — the receipt.jobId check above does not cover it.
+        body.jobId !== jobId ||
+        // A2 defense-in-depth: session binding. Both chains are fetched by findAllBySession(sessionId),
+        // so these hold by construction today — kept explicit so a future query change cannot silently
+        // drop the invariant.
+        body.sessionId !== sessionId ||
+        receipt.sessionId !== sessionId ||
         recomputed !== body.checkpointHash ||
         body.checkpointHash !== receipt.checkpointHash ||
-        (body.prevCheckpointHash ?? null) !== expectedPrev
+        (body.prevCheckpointHash ?? null) !== expectedPrev ||
+        // A2 (round-6, MOST MATERIAL): the RECEIPT's own previousAcceptedHash must ALSO chain to the
+        // previous receipt's hash, and must agree with the body's prev. Without this a receipt could
+        // CLAIM a different prior accepted hash while the body chain stays internally continuous, and
+        // finalize would still succeed. The per-row assertRowIntegrity (body==columns) does NOT catch
+        // this — it is a CROSS-receipt inconsistency the finalizer must reject itself.
+        (receipt.previousAcceptedHash ?? null) !== expectedPrev ||
+        (body.prevCheckpointHash ?? null) !== (receipt.previousAcceptedHash ?? null)
       ) {
         return {
           status: "errored",
