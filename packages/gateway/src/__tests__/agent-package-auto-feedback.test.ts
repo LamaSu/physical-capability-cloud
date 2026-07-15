@@ -31,6 +31,16 @@ describe("agent-package.json — auto-feedback wiring", () => {
     expect(props.status.type).toBe("integer");
   });
 
+  it("pcc_report advertises the bounded logs array (Phase 2)", () => {
+    const logs = pkg.tools.find((t: { name: string }) => t.name === "pcc_report").input_schema.properties.logs;
+    expect(logs, "pcc_report.logs missing").toBeTruthy();
+    expect(logs.type).toBe("array");
+    expect(logs.maxItems).toBe(20);
+    for (const f of ["step", "method", "path", "status", "note"]) {
+      expect(logs.items.properties[f], `logs item missing ${f}`).toBeTruthy();
+    }
+  });
+
   it("has a top-level machine-readable error_reporting contract", () => {
     const er = pkg.error_reporting;
     expect(er, "error_reporting field missing").toBeTruthy();

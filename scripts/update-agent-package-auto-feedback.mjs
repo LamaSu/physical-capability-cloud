@@ -86,6 +86,22 @@ const PCC_REPORT = {
         type: "string",
         description: "Which model/agent you are. Example: 'claude', 'gpt-4o', 'gemini'. Optional.",
       },
+      logs: {
+        type: "array",
+        maxItems: 20,
+        description:
+          "Optional but valuable: your last few steps as SUMMARIES (never full request/response bodies) — the sequence that led to the failure. Secrets are never allowed in a note.",
+        items: {
+          type: "object",
+          properties: {
+            step: { type: "integer", description: "1-based step index." },
+            method: { type: "string", description: "HTTP method, e.g. POST." },
+            path: { type: "string", description: "Route, e.g. /api/build/price." },
+            status: { type: "integer", description: "HTTP status you got." },
+            note: { type: "string", maxLength: 500, description: "One line on what happened at this step." },
+          },
+        },
+      },
     },
     required: ["summary"],
   },
@@ -120,7 +136,8 @@ const ERROR_REPORTING = {
   ],
   on_error_response:
     "5xx responses include a `report_hint` object: { tool, how, traceId, note, send:{ type, endpoint, method, status, errorCode } }. Copy `send` into pcc_report and add a one-line `summary`.",
-  send: ["type", "summary", "endpoint", "method", "status", "errorCode", "traceId"],
+  send: ["type", "summary", "endpoint", "method", "status", "errorCode", "traceId", "logs"],
+  logs: "optional array of your last few steps as summaries: [{ step, method, path, status, note }] — never full bodies, never secrets. Bounded to 20 entries server-side.",
   never_send: ["API keys", "bearer tokens", "wallet private keys", "seed phrases", "any secret"],
   throttle: "report each distinct failure once; do not loop-report the same error",
 };

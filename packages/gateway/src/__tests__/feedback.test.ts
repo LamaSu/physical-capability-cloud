@@ -31,6 +31,7 @@ let tmpDir: string;
 let feedbackFile: string;
 let feedbackRoutes: typeof import("../routes/feedback.js").feedbackRoutes;
 let resetRateLimit: typeof import("../routes/feedback.js").__resetFeedbackRateLimit;
+let resetDedup: typeof import("../routes/feedback.js").__resetFeedbackDedup;
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "pcc-feedback-test-"));
@@ -43,6 +44,7 @@ beforeAll(async () => {
   const mod = await import("../routes/feedback.js");
   feedbackRoutes = mod.feedbackRoutes;
   resetRateLimit = mod.__resetFeedbackRateLimit;
+  resetDedup = mod.__resetFeedbackDedup;
 });
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -57,6 +59,7 @@ let app: FastifyInstance;
 beforeEach(async () => {
   rmSync(feedbackFile, { force: true }); // fresh storage per test
   resetRateLimit();
+  resetDedup();
   app = await buildApp();
 });
 
@@ -145,6 +148,62 @@ describe("POST /api/feedback (public)", () => {
     expect(byStatus["string status here"]).toBe(503);
     expect(byStatus["bogus status here"]).toBeNull();
     expect(byStatus["fractional status here"]).toBeNull(); // not silently truncated to 503
+  });
+
+  it("persists a bounded, secret-redacted logs array (Phase 2)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "failed at the contract step",
+        logs: [
+          { step: 1, method: "POST", path: "/api/build/options", status: 200 },
+          { step: 2, method: "POST", path: "/api/build/contract", status: 500, note: "leaked pcc_live_ABCDEFGH123 here" },
+          "junk-not-an-object",
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const { items } = await adminItems();
+    expect(items[0].logs).toHaveLength(2); // the junk entry is dropped
+    expect(items[0].logs[1]).toMatchObject({ step: 2, method: "POST", path: "/api/build/contract", status: 500 });
+    expect(items[0].logs[1].note).not.toContain("pcc_live_ABCDEFGH123"); // note is redacted
+    expect(items[0].logs[1].note).toContain("redacted");
+  });
+
+  it("caps the logs array at 20 entries", async () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ step: i, note: `step ${i}` }));
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "many steps", logs: many } });
+    const { items } = await adminItems();
+    expect(items[0].logs).toHaveLength(20);
+  });
+
+  it("redacts secrets from summary + detail before persisting (Phase 2)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: { summary: "my key pcc_live_SUPERSECRET1 failed", detail: "sent Authorization: Bearer eyabc.DEF.ghijklmnop123456" },
+    });
+    const { items } = await adminItems();
+    expect(items[0].summary).not.toContain("pcc_live_SUPERSECRET1");
+    expect(items[0].summary).toContain("pcc_live_redacted");
+    expect(items[0].detail).toContain("Bearer [redacted]");
+  });
+
+  it("dedups a retry-looping agent's identical reports within the window (Phase 2)", async () => {
+    const payload = { summary: "same failure", endpoint: "/api/build/contract", errorCode: "TIER_MISMATCH", traceId: "tr_loop" };
+    const first = await app.inject({ method: "POST", url: "/api/feedback", payload });
+    const second = await app.inject({ method: "POST", url: "/api/feedback", payload });
+    expect(first.statusCode).toBe(201);
+    expect(first.json().submitted).toBe(true);
+    expect(second.statusCode).toBe(200); // not an error → the agent won't retry
+    expect(second.json().deduped).toBe(true);
+    expect((await adminItems()).total).toBe(1); // only one persisted
+
+    // a genuinely different report is NOT deduped
+    const third = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...payload, summary: "a different failure" } });
+    expect(third.statusCode).toBe(201);
+    expect((await adminItems()).total).toBe(2);
   });
 
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {

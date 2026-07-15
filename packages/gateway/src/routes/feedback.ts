@@ -18,6 +18,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { redactSecrets, redactOrNull } from "../redaction.js";
+import { trackServerEvent } from "../services/posthog-service.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -42,6 +44,28 @@ function rateLimited(ip: string): boolean {
 export function __resetFeedbackRateLimit(): void {
   hits.clear();
 }
+
+// Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
+// with an identical (principal, endpoint, errorCode, summary-prefix) within a window,
+// so the volume + Discord aren't flooded and the team sees one report per real issue.
+// Finer-grained than the rate limit (which is a blunt per-IP cap).
+const DEDUP_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_DEDUP_WINDOW_MS ?? "300000", 10); // 5 min
+const recentReports = new Map<string, number>();
+function isDuplicate(key: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of recentReports) if (now - t > DEDUP_WINDOW_MS) recentReports.delete(k);
+  if (recentReports.has(key)) return true;
+  recentReports.set(key, now);
+  return false;
+}
+/** Reset the in-memory dedup window. Test-only export. */
+export function __resetFeedbackDedup(): void {
+  recentReports.clear();
+}
+
+// Bounds for the optional `logs` array (recent step SUMMARIES, not bodies).
+const MAX_LOG_ENTRIES = 20;
+const LOG_NOTE_MAX = 500;
 
 function append(file: string, rec: unknown): void {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -107,6 +131,39 @@ function clampHttpStatus(v: unknown): number | null {
   return Number.isInteger(n) && n >= 100 && n < 600 ? n : null;
 }
 
+interface LogEntry {
+  step?: number;
+  method?: string;
+  path?: string;
+  status?: number;
+  note?: string;
+}
+
+// Bound + sanitize the optional `logs` array: the agent's last few steps as SUMMARIES
+// (method/path/status + a short note), never full bodies. Caps entry count + field
+// sizes, coerces status, drops junk, and REDACTS secret-shaped strings from each note.
+// Returns null when there is nothing usable, so the field simply doesn't persist.
+function clampLogs(v: unknown): LogEntry[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: LogEntry[] = [];
+  for (const raw of v.slice(0, MAX_LOG_ENTRIES)) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    const entry: LogEntry = {};
+    if (Number.isInteger(Number(e.step))) entry.step = Number(e.step);
+    const method = clampStr(e.method, 16);
+    if (method) entry.method = method;
+    const path = clampStr(e.path ?? e.endpoint, FIELD_MAX);
+    if (path) entry.path = path;
+    const status = clampHttpStatus(e.status);
+    if (status !== null) entry.status = status;
+    const note = clampStr(e.note, LOG_NOTE_MAX);
+    if (note) entry.note = redactSecrets(note);
+    if (Object.keys(entry).length > 0) out.push(entry);
+  }
+  return out.length > 0 ? out : null;
+}
+
 // Discord webhook for live feedback notifications — preserved from the prior
 // /api/feedback so the team keeps getting alerts (the dashboard modal +
 // install.html both rely on it). Best-effort; no-op if the env var is unset.
@@ -169,12 +226,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
     //   agent:        { type, summary, detail, endpoint, traceId, severity, agentId }
     //   dashboard:    { type, message, page, walletAddress, email }
     //   agent-report: { trace_id, last_endpoint, last_error_code, agent_kind }
-    const summary = clampStr(b.summary ?? b.message, SUMMARY_MAX);
-    if (!summary) {
+    const summaryRaw = clampStr(b.summary ?? b.message, SUMMARY_MAX);
+    if (!summaryRaw) {
       return reply
         .code(400)
         .send({ error: "bad_request", message: "`summary` (or `message`) is required." });
     }
+    // Scrub secret-shaped strings from all agent-supplied free text before it is
+    // persisted to the public sink (Phase 2 defense-in-depth; redaction.ts).
+    const summary = redactSecrets(summaryRaw);
 
     const typeRaw = String(b.type ?? "").trim().toLowerCase();
     const type = FEEDBACK_TYPES.has(typeRaw) ? typeRaw : "bug";
@@ -191,7 +251,10 @@ export async function feedbackRoutes(app: FastifyInstance) {
       kind: "feedback",
       type,
       summary,
-      detail: clampStr(b.detail, DETAIL_MAX),
+      detail: redactOrNull(clampStr(b.detail, DETAIL_MAX)),
+      // Phase 2: the agent's last few steps (method/path/status + a redacted note),
+      // bounded + summarized — the "logs" half of "feedback and logs".
+      logs: clampLogs(b.logs),
       endpoint: clampStr(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
       traceId: clampStr(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
       severity,
@@ -211,9 +274,40 @@ export async function feedbackRoutes(app: FastifyInstance) {
       userAgent: (req.headers["user-agent"] as string | undefined) ?? null,
     };
 
+    // Dedup: collapse a retry-looping agent's repeated reports of the SAME failure
+    // (same principal + endpoint + errorCode + summary prefix) within the window. A
+    // duplicate is accepted (200, not an error, so the agent doesn't retry) but not
+    // persisted or re-notified.
+    const dedupKey = `${rec.traceId ?? rec.ip}|${rec.endpoint ?? ""}|${rec.errorCode ?? ""}|${rec.summary.slice(0, 64)}`;
+    if (isDuplicate(dedupKey)) {
+      return reply.code(200).send({
+        status: "ok",
+        submitted: false,
+        deduped: true,
+        message: "Thanks — a matching report was already recorded moments ago.",
+      });
+    }
+
     append(FEEDBACK_FILE, rec);
     // Live-notify the team via Discord webhook (best-effort, non-blocking).
     notifyDiscord(rec).catch(() => {});
+    // Observability event (folds in the value of the orphaned /api/feedback/agent-report
+    // route). Best-effort — never let telemetry break the response.
+    try {
+      trackServerEvent("feedback_filed", {
+        feedback_id: rec.id,
+        type: rec.type,
+        endpoint: rec.endpoint,
+        http_status: rec.httpStatus,
+        error_code: rec.errorCode,
+        trace_id: rec.traceId,
+        agent_kind: rec.agentId,
+        severity: rec.severity,
+        log_count: rec.logs?.length ?? 0,
+      });
+    } catch {
+      /* best-effort telemetry */
+    }
 
     return reply.code(201).send({
       status: "ok",
