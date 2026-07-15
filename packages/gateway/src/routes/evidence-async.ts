@@ -533,6 +533,7 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       db,
       repo: repos.gatewayReceipts,
       checkpointBodies: repos.checkpointBodies,
+      evidenceSessions: repos.evidenceSessions, // round-6 A3: evidenceSessions is now a required dep
     });
     const tip = repos.gatewayReceipts.lastAcceptedForSession(sessionId);
     // Respond with the PERSISTED session window (on idempotent re-begin, the original).

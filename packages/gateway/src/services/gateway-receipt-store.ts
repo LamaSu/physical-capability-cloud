@@ -209,12 +209,14 @@ export interface GatewayReceiptStoreDeps {
   /** Ed25519 signer. Defaults to the process-default gateway receipt signer. */
   signer?: GatewayReceiptSigner;
   /**
-   * Evidence-session repo (OPTIONAL). When provided, record() transitions the session to a terminal
+   * Evidence-session repo (REQUIRED — round-6 A3). record() transitions the session to a terminal
    * state IN THE SAME transaction as an accepted terminal checkpoint (round-6 P1-2), so a subsequent
-   * checkpoint is rejected at the route's `status !== "open"` gate. Omitted by test seeders that do
-   * not exercise the lifecycle — the transition is then simply skipped.
+   * checkpoint is rejected at the route's `status !== "open"` gate AND finalize can REQUIRE a terminal
+   * state (a package can never be minted from a never-terminalized session). Making this mandatory
+   * moves the money-path invariant into the SERVICE rather than a single route composition. Tests that
+   * do not exercise the session lifecycle pass a no-op `{ setStatus() {} }`.
    */
-  evidenceSessions?: { setStatus(sessionId: string, status: string): unknown };
+  evidenceSessions: { setStatus(sessionId: string, status: string): unknown };
 }
 
 export class GatewayReceiptStore {
@@ -223,7 +225,7 @@ export class GatewayReceiptStore {
   private readonly checkpointBodies: ICheckpointBodyRepository;
   private readonly sequenceStore: SessionSequenceStore;
   private readonly signer: GatewayReceiptSigner;
-  private readonly evidenceSessions?: { setStatus(sessionId: string, status: string): unknown };
+  private readonly evidenceSessions: { setStatus(sessionId: string, status: string): unknown };
 
   constructor(deps: GatewayReceiptStoreDeps) {
     this.db = deps.db;
@@ -438,13 +440,11 @@ export class GatewayReceiptStore {
         // (execution_completed / fault_report), close the session IN THIS SAME transaction so a
         // subsequent checkpoint is rejected at the route's `status !== "open"` gate. There is no
         // await between the receipt/body inserts and this write ⇒ genuinely atomic (a crash cannot
-        // leave a receipted terminal checkpoint with an `open` session). Optional dep: seeders that
-        // omit evidenceSessions skip the transition (their sessions stay `open`, which finalize
-        // still accepts).
-        const terminalStatus = this.evidenceSessions
-          ? TERMINAL_SESSION_STATUS[input.checkpointType]
-          : undefined;
-        if (terminalStatus) this.evidenceSessions!.setStatus(input.sessionId, terminalStatus);
+        // leave a receipted terminal checkpoint with an `open` session). evidenceSessions is a
+        // REQUIRED dep (round-6 A3), so the transition always fires for a terminal checkpoint — the
+        // invariant no longer depends on the caller remembering to wire it.
+        const terminalStatus = TERMINAL_SESSION_STATUS[input.checkpointType];
+        if (terminalStatus) this.evidenceSessions.setStatus(input.sessionId, terminalStatus);
         return row;
       });
     } catch (err) {

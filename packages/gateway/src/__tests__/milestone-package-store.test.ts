@@ -93,6 +93,7 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
+      evidenceSessions: store.repos.evidenceSessions, // round-6 A3: reproduce the LIVE terminal transition
       signer,
     });
     let prev: string | null = null;
@@ -201,13 +202,15 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     }
   });
 
-  it("finalize past the evidence deadline -> rejected evidence_deadline_passed (session stays open)", () => {
+  it("finalize past the evidence deadline -> rejected evidence_deadline_passed (session already terminal_success)", () => {
     openSession(); // deadline = NOW + 86400
     seedChain([[{ a: 1 }]]);
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 86_401 });
     expect(r.status).toBe("rejected");
     if (r.status === "rejected") expect(r.reason).toBe("evidence_deadline_passed");
-    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+    // Round-6 A3: the terminal checkpoint transitioned the session during seeding (the live path), so
+    // it is terminal_success here; the deadline rejection does not un-transition it.
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("terminal_success");
   });
 
   // ── Round-5 payloads-out: the package binds ONLY commitments, NEVER payloads ─────────
@@ -288,14 +291,20 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("errored");
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
-    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+    // Round-6 A3: seeding drove the terminal checkpoint, so the session is terminal_success; the
+    // whole-chain integrity failure (errored) is detected AFTER the terminal-state gate passes.
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("terminal_success");
   });
 
-  it("finalize with zero accepted checkpoints -> rejected no_checkpoints", () => {
-    openSession(); // session open, but no receipts recorded
+  it("round-6 A3: finalize on an OPEN session (never terminalized) -> rejected terminal_state_missing", () => {
+    openSession(); // session open, no terminal checkpoint accepted (here: no receipts at all)
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("rejected");
-    if (r.status === "rejected") expect(r.reason).toBe("no_checkpoints");
+    // A3 makes the terminal-state gate authoritative: an open session fails BEFORE the chain scan, so
+    // the old `no_checkpoints` reason is now unreachable for an open session (it never reached
+    // terminal_success, so no success package can be minted). no_checkpoints stays as defense-in-depth
+    // for a terminal session whose durable receipts were lost.
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_state_missing");
   });
 
   it("finalize for a (job, milestone) with no session -> rejected session_not_found", () => {
@@ -335,6 +344,7 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
+      evidenceSessions: store.repos.evidenceSessions, // round-6 A3: reproduce the LIVE terminal transition
       signer,
     });
     const hashes: string[] = [];
@@ -396,23 +406,29 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
   // the last checkpoint's type (a legitimate fixture control — finalize's contract now
   // depends on it). A non-terminal / fault last checkpoint must NOT finalize a success.
 
-  it("S6-2: a single execution_started checkpoint → rejected terminal_checkpoint_missing", () => {
+  it("round-6 A3: a single non-terminal (execution_started) checkpoint → rejected terminal_state_missing", () => {
     openSession();
     seedChain([[{ a: 1 }]], "execution_started"); // the only (last) checkpoint is non-terminal
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("rejected");
-    if (r.status === "rejected") expect(r.reason).toBe("terminal_checkpoint_missing");
-    // Fail closed: no package minted, session stays open.
+    // Round-6 A3: a non-terminal-ending chain never transitions the session, so finalize now fails at
+    // the terminal-state gate (terminal_state_missing) BEFORE the terminal-completion scan would have
+    // returned terminal_checkpoint_missing. Same security property (a non-terminal chain is NOT a
+    // success package), enforced earlier and at the session level.
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_state_missing");
+    // Fail closed: no package minted, session stays open (never terminalized).
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
     expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
   });
 
-  it("S6-2: a chain whose LAST checkpoint is workflow_step_completed → rejected terminal_checkpoint_missing", () => {
+  it("round-6 A3: a chain whose LAST checkpoint is non-terminal (workflow_step_completed) → rejected terminal_state_missing", () => {
     openSession();
     seedChain([[{ a: 1 }], [{ b: 2 }]], "workflow_step_completed"); // last is non-terminal
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("rejected");
-    if (r.status === "rejected") expect(r.reason).toBe("terminal_checkpoint_missing");
+    // A3: the session never transitioned (no terminal checkpoint), so the terminal-state gate fires
+    // first — terminal_state_missing rather than the (now defense-in-depth) terminal_checkpoint_missing.
+    if (r.status === "rejected") expect(r.reason).toBe("terminal_state_missing");
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
   });
 
@@ -436,7 +452,9 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     if (r.status === "rejected") expect(r.reason).toBe("terminal_fault");
     // A terminal fault is a DISTINCT outcome from a never-completed chain; not a success finalize.
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
-    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+    // Round-6 A3: the fault_report transitioned the session to terminal_fault (the live route path),
+    // and finalize returns terminal_fault straight from that state.
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("terminal_fault");
   });
 
   it("S6-2: terminal checkpoint body missing despite a receipt → errored (integrity, fail closed)", () => {
@@ -452,8 +470,9 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
     expect(r.status).toBe("errored");
     if (r.status === "errored") expect(r.error.message).toContain("body/receipt count mismatch");
-    // Fail closed: no package, session unchanged.
+    // Fail closed: no package minted. Round-6 A3: seeding drove the terminal checkpoint, so the
+    // session is terminal_success; the body/receipt count mismatch (errored) is caught after the gate.
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
-    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("open");
+    expect(store.repos.evidenceSessions.findByJobMilestone(JOB, MI)?.status).toBe("terminal_success");
   });
 });

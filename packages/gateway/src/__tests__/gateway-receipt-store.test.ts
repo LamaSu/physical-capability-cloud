@@ -73,6 +73,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
   });
@@ -223,6 +224,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       // Never reached: the receipt insert throws FIRST inside the txn (real body repo is fine here).
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
 
@@ -275,6 +277,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seedSeq,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
     let prev: string | null = null;
@@ -295,6 +298,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
     return { svc, sequenceStore };
@@ -472,6 +476,7 @@ describe("GatewayReceiptStore — H1 DB-authoritative idempotency / equivocation
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
   });
@@ -575,6 +580,7 @@ describe("GatewayReceiptStore — R-14b defensive input validation", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
   });
@@ -639,6 +645,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
   });
@@ -660,6 +667,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: throwingBodies,
       sequenceStore,
+      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
       signer,
     });
 

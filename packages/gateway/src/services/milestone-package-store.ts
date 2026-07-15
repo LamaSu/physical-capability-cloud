@@ -165,8 +165,11 @@ export type FinalizeRejectReason =
   | "evidence_deadline_passed"
   | "no_checkpoints"
   | "payload_commitment_mismatch"
+  // Round-6 A3: a NEW finalization requires a terminal session state (the live route sets it on the
+  // accepted terminal checkpoint). A still-`open` session ⇒ no terminal checkpoint was ever accepted.
+  | "terminal_state_missing"
   // Frozen §8.1-#1 terminal-completion requirement (the Wave-3 route maps these → 422):
-  | "terminal_checkpoint_missing" // last accepted checkpoint is not a completion type
+  | "terminal_checkpoint_missing" // last accepted checkpoint is not a completion type (defense-in-depth; the A3 terminal-state gate catches an open session first)
   | "terminal_fault" // last accepted checkpoint is a terminal FAULT (completed-but-failed)
   | "post_terminal_checkpoint"; // S6-2b: a terminal checkpoint appears BEFORE the last (chain continued past a terminal)
 
@@ -228,28 +231,38 @@ export class MilestonePackageStore {
   finalize(input: FinalizeMilestoneInput): FinalizeMilestoneResult {
     const { jobId, milestoneIndex } = input;
 
-    // B (clause 1): load the session for (job, milestone); require open|finalized.
+    // B (clause 1): load the session for (job, milestone).
     const session = this.evidenceSessions.findByJobMilestone(jobId, milestoneIndex);
     if (!session) return { status: "rejected", reason: "session_not_found" };
-    if (
-      session.status !== "open" &&
-      session.status !== "terminal_success" &&
-      session.status !== "terminal_fault" &&
-      session.status !== "finalized"
-    ) {
-      // Not a finalizable session state — fail closed. (open: seeder path with no terminal
-      // transition; terminal_success/terminal_fault: the route path after the P1-2 transition on the
-      // terminal checkpoint; finalized: idempotent re-finalize.)
-      return { status: "rejected", reason: "session_not_found" };
-    }
     const sessionId = session.sessionId;
 
-    // B (clause 2): idempotent — a package already exists → return it from the row.
-    // (Permissionless triggers MUST be idempotent; PK fmp-<jobId>-<mi>.) This runs
-    // BEFORE the deadline check so a re-finalize after the deadline still returns the
-    // package that was validly minted at the first finalize.
+    // B (clause 2): idempotent — a package already exists → return it from the row, REGARDLESS of the
+    // session's later state (permissionless triggers MUST be idempotent; PK fmp-<jobId>-<mi>). Runs
+    // FIRST so a re-finalize on a settled/held/finalized job still returns the package validly minted
+    // at the first finalize, and BEFORE the deadline check so a post-deadline re-finalize still
+    // returns it. A minted package only ever coexists with a `finalized` session (set atomically with
+    // the insert), so "finalized is ONLY for the idempotent lookup" (round-6 A3) falls out of this
+    // ordering — a `finalized` session with no package row is an anomaly and fails the gate below.
     const existingPkg = this.milestonePackages.findByJobMilestone(jobId, milestoneIndex);
     if (existingPkg) return idempotentFromRow(existingPkg);
+
+    // B (clause 1b) — round-6 A3: a NEW finalization REQUIRES a terminal session state. The live
+    // checkpoint route transitions the session to terminal_success/terminal_fault IN THE SAME
+    // transaction as the accepted terminal checkpoint (GatewayReceiptStore.record, now a REQUIRED
+    // dep), so a still-`open` session means NO terminal checkpoint was ever accepted. Enforcing it
+    // HERE makes the money-path invariant a SERVICE property, not one that depends on the route
+    // composition or a test-only bypass:
+    //   • terminal_success       → proceed to assemble the success package (below);
+    //   • terminal_fault         → a completed-but-FAILED run: return the fault, never a success package;
+    //   • open / any other state → terminal_state_missing (no terminal checkpoint was accepted).
+    // This preempts the downstream terminal-completion scan for an open session; that scan stays as
+    // defense-in-depth for a (corrupt) terminal session whose durable last body is not a completion.
+    if (session.status === "terminal_fault") {
+      return { status: "rejected", reason: "terminal_fault" };
+    }
+    if (session.status !== "terminal_success") {
+      return { status: "rejected", reason: "terminal_state_missing" };
+    }
 
     // B-4 (clause 3): deadline — enforced against the finalize receivedAt (`now`).
     if (input.now > session.evidenceSubmissionDeadline) {
