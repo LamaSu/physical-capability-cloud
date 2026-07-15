@@ -534,4 +534,28 @@ describe("evidence async → settlement (§2.4 package-anchored /complete)", () 
     expect(finRes.statusCode).toBe(409);
     expect(finRes.json().error).toBe("job_not_evidence_collectable");
   });
+
+  it("B4: concurrent /complete on a CLAIMABLE tier-1 job → exactly one wins + enters settlement_hold; the other → 409", async () => {
+    const jobId = freshJobId();
+    const principal = nacl.sign.keyPair();
+    // A tier-1 job with NO verified device evidence: with the settlement gate CLOSED, the settlement
+    // path resolves to a HOLD (required-verifier-unavailable), so the WINNING /complete deterministically
+    // parks the job in settlement_hold — the claimable→hold concurrency case (not a pre-held job). The
+    // atomic completion claim is fully synchronous BEFORE any settlement await, so exactly one wins.
+    seedJob(jobId, principal.publicKey, { contractTerms: { assuranceTier: 1 } });
+
+    const [a, b] = await Promise.all([
+      app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} }),
+      app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} }),
+    ]);
+    // Exactly one winner (200, status "hold"); the loser loses the claim → 409 (no double-run).
+    const codes = [a.statusCode, b.statusCode].sort((x, y) => x - y);
+    expect(codes).toEqual([200, 409]);
+    const winner = a.statusCode === 200 ? a : b;
+    expect(winner.json().status).toBe("hold");
+    // The job is parked in settlement_hold; no second settlement ran, and it cannot be re-claimed.
+    expect(getStore().repos.jobs.findById(jobId)?.status).toBe("settlement_hold");
+    const third = await app.inject({ method: "PUT", url: `/api/jobs/${jobId}/complete`, payload: {} });
+    expect(third.statusCode).toBe(409);
+  });
 });
