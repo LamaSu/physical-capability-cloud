@@ -102,6 +102,39 @@ describe("mcpAppLifecycleTransition — strict lifecycle ordering", () => {
     expect(d.accept).toBe(false);
   });
 
+  it("REJECTS an INCOMPLETE tool-input when params has no `arguments` object (D1)", () => {
+    // params is an object but carries no arguments — the OLD check accepted this;
+    // the streaming tool-input is not complete until params.arguments is an object.
+    const noArgs = mcpAppLifecycleTransition(
+      "waiting_for_tool_input",
+      { jsonrpc: "2.0", method: "ui/notifications/tool-input", params: {} },
+      INIT_ID,
+      PV,
+    );
+    expect(noArgs.accept).toBe(false);
+    // a non-object arguments (string / array) is likewise incomplete
+    for (const bad of ["", 3, [], null]) {
+      const d = mcpAppLifecycleTransition(
+        "waiting_for_tool_input",
+        { jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: bad } },
+        INIT_ID,
+        PV,
+      );
+      expect(d.accept, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("ACCEPTS a tool-input with an EMPTY arguments object (complete)", () => {
+    const d = mcpAppLifecycleTransition(
+      "waiting_for_tool_input",
+      { jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } },
+      INIT_ID,
+      PV,
+    );
+    expect(d.accept).toBe(true);
+    expect(d.next).toBe("waiting_for_tool_result");
+  });
+
   it("ACCEPTS a tool-result from `waiting_for_tool_result` → emits `tool_result`", () => {
     const d = mcpAppLifecycleTransition("waiting_for_tool_result", toolResultMsg(), INIT_ID, PV);
     expect(d.accept).toBe(true);

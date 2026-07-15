@@ -208,7 +208,7 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
         {
           kind: "actions",
           actions: [
-            { id: "a1", label: "Cancel job", kind: "patch", path: "/api/jobs/j1/status", confirm: "inline", intentText: "pcc: cancel", operation_id: "job.cancel", arguments: { jobId: "j1" } },
+            { id: "a1", label: "Get quote", kind: "post", path: "/api/build/price", confirm: "inline", intentText: "pcc: quote", operation_id: "capability.request_quote", arguments: { type: "fdm", selections: {} } },
             { id: "a2", label: "Release funds", kind: "post", path: "/api/x", confirm: "inline", intentText: "pcc: release", operation_id: "escrow.release_milestone", arguments: {} },
             { id: "a3", label: "Raw write", kind: "post", path: "/api/x", confirm: "inline", intentText: "pcc: raw" },
           ],
@@ -218,17 +218,17 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
   ]);
 
   it("a REGISTERED-operation button stays live and, on click, calls the bridge with (operationId, arguments)", () => {
-    const spy = vi.fn().mockResolvedValue({ structuredContent: { job: { status: "cancelled" } } });
+    const spy = vi.fn().mockResolvedValue({ structuredContent: { pricing: {} } });
     bootKitWithManifest(manifest, spy);
 
-    const btn = buttonByLabel("Cancel job");
+    const btn = buttonByLabel("Get quote");
     expect(btn).toBeTruthy();
     expect(btn!.disabled).toBe(false);
     expect(btn!.className).toContain("pcc-host-op-enabled");
 
     btn!.click();
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith("job.cancel", { jobId: "j1" });
+    expect(spy).toHaveBeenCalledWith("capability.request_quote", { type: "fdm", selections: {} });
   });
 
   it("an UNREGISTERED-operation button is disabled (inert) — default-DENY on the client", () => {
@@ -267,8 +267,64 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
     // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
     new Function(kitSource)();
 
-    const btn = buttonByLabel("Cancel job");
+    const btn = buttonByLabel("Get quote");
     expect(btn).toBeTruthy();
     expect(btn!.disabled).toBe(true);
+  });
+});
+
+// ── D. callHostTool timeout / max-pending cap / unmount cleanup (re-audit #2) ──
+
+describe("[bridge] callHostTool timeout, max-pending cap, and unmount cleanup", () => {
+  it("rejects a never-answered call after the per-call timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const { win } = makeWin();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const callHostTool = connectMcpAppView(win as any, () => false);
+      const p = callHostTool("pcc.op.capability.request_quote", { type: "fdm", selections: {} });
+      const rejects = expect(p).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(29_000);
+      // still pending just before the 30s deadline
+      let settled = false;
+      void p.then(() => { settled = true; }, () => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000); // cross the 30s deadline
+      await rejects;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects new calls once the max-pending cap (32) is reached", async () => {
+    vi.useFakeTimers();
+    try {
+      const { win } = makeWin();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const callHostTool = connectMcpAppView(win as any, () => false);
+      const inflight: Promise<unknown>[] = [];
+      for (let i = 0; i < 32; i++) {
+        inflight.push(callHostTool("pcc.op.capability.request_quote", {}).catch(() => undefined));
+      }
+      await expect(callHostTool("pcc.op.capability.request_quote", {})).rejects.toThrow(/too many pending/);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (callHostTool as any).dispose(); // clear the 32 pending timers
+      await Promise.allSettled(inflight);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispose() rejects every still-pending call (view unmount)", async () => {
+    const { win } = makeWin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const callHostTool = connectMcpAppView(win as any, () => false);
+    const p1 = callHostTool("pcc.op.capability.request_quote", {});
+    const p2 = callHostTool("pcc.op.job.cancel", {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (callHostTool as any).dispose();
+    await expect(p1).rejects.toThrow(/unmounted/);
+    await expect(p2).rejects.toThrow(/unmounted/);
   });
 });

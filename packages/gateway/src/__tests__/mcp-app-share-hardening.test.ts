@@ -22,6 +22,7 @@ import {
   _countLegacyAliasesForTests,
   _resetPublicLookupLimiterForTests,
 } from "../routes/artifacts.js";
+import { resolvePublicShareSlug } from "../mcp/mcp-app-view.js";
 
 let app: FastifyInstance;
 
@@ -154,6 +155,27 @@ describe("D13 · rotate legacy weak slugs + expiring aliases", () => {
     expect(second.rotated).toBe(0);
     expect(second.skippedStrong).toBeGreaterThanOrEqual(1);
     expect(_countLegacyAliasesForTests()).toBe(1); // no duplicate alias
+  });
+
+  it("is ATOMIC per artifact: a failing alias insert rolls back the slug rotation", () => {
+    const oldSlug = "atomic-check-1a2b3c";
+    seed(oldSlug, "Atomic", "public");
+    expect(isWeakLegacySlug(oldSlug)).toBe(true);
+
+    // Inject an alias sink that throws AFTER the slug update runs inside the txn.
+    expect(() =>
+      rotateLegacyShareSlugs({
+        aliasWriter: () => {
+          throw new Error("alias sink down");
+        },
+      }),
+    ).toThrow("alias sink down");
+
+    // Rollback: the artifact still lives at its OLD slug (never half-rotated) and
+    // NO alias was written — the old share link is intact, not stranded.
+    expect(getPublicArtifactForRender(oldSlug)?.slug).toBe(oldSlug);
+    expect(isWeakLegacySlug(getPublicArtifactForRender(oldSlug)!.slug)).toBe(true);
+    expect(_countLegacyAliasesForTests()).toBe(0);
   });
 
   it("rotates ONLY active public|unlisted weak slugs — leaves private / retired / strong", () => {
@@ -299,5 +321,61 @@ describe("D13 · rate limiter (lookup-before-throttle, per-caller)", () => {
       remoteAddress: "203.0.113.99",
     });
     expect(other.statusCode).toBe(200);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scope 4 (MCP resource resolver) — the public-share `resources/read` resolver
+// now actually CONSULTS the limiter (re-audit #2: it used to record a miss but
+// never throttle). Lookup-before-throttle; per-caller keys.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("D13 · MCP share resolver consults the failed-lookup limiter", () => {
+  const VALID = "valid-share-0011223344556677889900aa";
+
+  it("repeated MISSES from one session key get throttled after the budget", () => {
+    seed(VALID, "Valid", "public");
+    let last = resolvePublicShareSlug("miss-a-000000000000000000000000", "sessKeyA");
+    expect(last.found).toBe(false);
+    expect(last.throttled).toBe(false);
+    // Drive the same key over the failed-lookup budget.
+    for (let i = 0; i < 40 && !last.throttled; i++) {
+      last = resolvePublicShareSlug(`miss-a-${i}`, "sessKeyA");
+    }
+    expect(last.found).toBe(false);
+    expect(last.throttled).toBe(true);
+    // The throttled response differs from the plain not-found body (limiter acts).
+    expect(last.html).toContain("Too many lookups");
+  });
+
+  it("a VALID link is served (lookup-first) even for a session key that is already throttled", () => {
+    seed(VALID, "Valid", "public");
+    // Throttle keyA on misses…
+    let last = resolvePublicShareSlug("x-000000000000000000000000", "sessKeyA");
+    for (let i = 0; i < 40 && !last.throttled; i++) last = resolvePublicShareSlug(`x-${i}`, "sessKeyA");
+    expect(last.throttled).toBe(true);
+    // …yet the SAME throttled key still gets its valid link (never suppressed).
+    const valid = resolvePublicShareSlug(VALID, "sessKeyA");
+    expect(valid.found).toBe(true);
+    expect(valid.throttled).toBe(false);
+    expect(valid.html).toContain("pcc-manifest");
+  });
+
+  it("one caller's misses NEVER suppress another caller's valid link (per-key)", () => {
+    seed(VALID, "Valid", "public");
+    let last = resolvePublicShareSlug("y-000000000000000000000000", "attackerKey");
+    for (let i = 0; i < 40 && !last.throttled; i++) last = resolvePublicShareSlug(`y-${i}`, "attackerKey");
+    expect(last.throttled).toBe(true);
+    // A different caller's valid request is unaffected.
+    const other = resolvePublicShareSlug(VALID, "innocentKey");
+    expect(other.found).toBe(true);
+    expect(other.throttled).toBe(false);
+  });
+
+  it("a read with NO session identity is never throttled (no shared bucket to abuse)", () => {
+    let res = resolvePublicShareSlug("z-000000000000000000000000", null);
+    for (let i = 0; i < 40; i++) res = resolvePublicShareSlug(`z-${i}`, null);
+    expect(res.found).toBe(false);
+    expect(res.throttled).toBe(false);
   });
 });
