@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { CdpConfig, CdpNetwork, SpendPermission } from "./types.js";
+import type { UserOwnedWalletRegistry } from "./custody.js";
 
 export interface IssueSpendPermissionParams {
   /** Funded smart account that authorizes spend. */
@@ -31,12 +32,20 @@ export class CdpSpendPermissionService {
   private readonly cfg: CdpConfig;
   private readonly network: CdpNetwork;
   private readonly store = new Map<string, SpendPermission>();
+  private readonly userOwned?: UserOwnedWalletRegistry;
   private cdpClient: import("@coinbase/cdp-sdk").CdpClient | undefined;
 
-  constructor(cfg: CdpConfig = {}) {
+  constructor(
+    cfg: CdpConfig = {},
+    deps: { userOwnedRegistry?: UserOwnedWalletRegistry } = {},
+  ) {
     this.cfg = cfg;
     this.mock = cfg.mock ?? !cfg.apiKeyId;
     this.network = cfg.network ?? "base-sepolia";
+    // Optional shared registry. When present, issuing a permission FROM a user-owned account is
+    // refused (a spend permission is signed by the account owner, which PCC is not). When absent,
+    // behavior is unchanged — fully backward-compatible.
+    this.userOwned = deps.userOwnedRegistry;
   }
 
   get isMock(): boolean {
@@ -56,6 +65,10 @@ export class CdpSpendPermissionService {
   }
 
   async issue(params: IssueSpendPermissionParams): Promise<SpendPermission> {
+    // A spend permission is SIGNED by the account owner. PCC cannot sign for a user-owned
+    // participant wallet, so refuse rather than emit a cryptic SDK error or silently substitute
+    // a server signer. (No-op when no shared registry is wired.)
+    this.userOwned?.assertNotUserOwned(params.account, "issue a spend permission");
     const now = new Date();
     const expiresAt =
       params.expiresAt ?? new Date(now.getTime() + 30 * 24 * 3600 * 1000).toISOString();

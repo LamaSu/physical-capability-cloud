@@ -1,5 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type { CdpConfig, CdpNetwork, CdpWallet } from "./types.js";
+import {
+  UserOwnedWalletRegistry,
+  type UserOwnedWalletRecord,
+  validateAddressShape,
+  assertServerManaged,
+  assertServerSignable as assertWalletServerSignable,
+  assertNoOwnerRotation as assertWalletNoOwnerRotation,
+} from "./custody.js";
+
+export interface RegisterUserOwnedWalletParams {
+  /** The externally-created (client-side) user-owned wallet address. Stored as-is; no key. */
+  address: string;
+  /** Optional non-secret reference to the user's auth identity (embedded-wallet user id, etc.). */
+  authProviderRef?: string;
+}
 
 /**
  * CdpWalletClient — creates/reads CDP smart wallets (self-custodial, server-managed).
@@ -14,16 +29,29 @@ export class CdpWalletClient {
   private readonly network: CdpNetwork;
   private readonly mock: boolean;
   private readonly cfg: CdpConfig;
+  private readonly userOwned: UserOwnedWalletRegistry;
   private cdpClient: import("@coinbase/cdp-sdk").CdpClient | undefined;
 
-  constructor(cfg: CdpConfig = {}) {
+  constructor(
+    cfg: CdpConfig = {},
+    deps: { userOwnedRegistry?: UserOwnedWalletRegistry } = {},
+  ) {
     this.cfg = cfg;
     this.network = cfg.network ?? "base-sepolia";
     this.mock = cfg.mock ?? !cfg.apiKeyId;
+    // Own a registry by default; accept a shared one so CdpSpendPermissionService (and other
+    // signing paths) see the same user-owned set and can never substitute a server signer.
+    this.userOwned = deps.userOwnedRegistry ?? new UserOwnedWalletRegistry();
   }
 
   get isMock(): boolean {
     return this.mock;
+  }
+
+  /** The user-owned registry. Pass it to CdpSpendPermissionService (or any signing path) so a
+   *  server-managed signer can never be substituted for a user-owned participant wallet. */
+  get userOwnedRegistry(): UserOwnedWalletRegistry {
+    return this.userOwned;
   }
 
   private async cdp(): Promise<import("@coinbase/cdp-sdk").CdpClient> {
@@ -49,6 +77,9 @@ export class CdpWalletClient {
     opts: { custodyMode?: "server-test-only" | "treasury" } = {},
   ): Promise<CdpWallet> {
     const custodyMode = opts.custodyMode ?? "server-test-only";
+    // Never mint a user-owned wallet here — server-managed creation controls the owner key.
+    // (Runtime guard for untyped JS callers; the param type already forbids "user-owned".)
+    assertServerManaged(custodyMode);
     // A server-managed wallet can never be genuinely user-owned. "server-test-only" must
     // stay on Base Sepolia — refuse to mint one on mainnet, where a participant wallet has
     // to be user-owned (embedded flow) and a PCC-controlled wallet has to be "treasury".
@@ -80,6 +111,83 @@ export class CdpWalletClient {
       custodyMode,
       createdAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Record an externally-created (CLIENT-SIDE — CDP embedded/user-auth or passkey) wallet the
+   * END USER controls, by ADDRESS ONLY. This is the ONLY production path to a "user-owned"
+   * participant wallet: createWallet() cannot mint one (it would control the owner key, making
+   * the wallet NOT user-owned). PCC holds no owner key/secret for the address and — by the
+   * custody guards — can never sign, rotate, or server-substitute for it; it may only read the
+   * balance and receive onramped USDC. The returned CdpWallet and the stored record have NO key
+   * field, so attaching signing material here is structurally impossible.
+   *
+   * Async for surface parity with createWallet()/getBalance() and to allow a future real-mode
+   * check (e.g. confirming the address is a deployed/known smart account) without a breaking change.
+   */
+  async registerUserOwnedWallet(params: RegisterUserOwnedWalletParams): Promise<CdpWallet> {
+    const address = validateAddressShape(params.address);
+    const createdAt = new Date().toISOString();
+    const record: UserOwnedWalletRecord = {
+      address,
+      network: this.network,
+      ...(params.authProviderRef !== undefined ? { authProviderRef: params.authProviderRef } : {}),
+      createdAt,
+    };
+    this.userOwned.register(record);
+    return {
+      address,
+      network: this.network,
+      // CDP embedded/user-auth and passkey participant wallets are ERC-4337 smart accounts; the
+      // human funding path (sponsored user-op calling MilestoneEscrow.fund) requires a smart account.
+      smartAccount: true,
+      custodyMode: "user-owned",
+      ...(params.authProviderRef !== undefined ? { authProviderRef: params.authProviderRef } : {}),
+      createdAt,
+    };
+  }
+
+  /**
+   * The server-signing choke point. Throws CustodyViolationError if the target is a user-owned
+   * wallet — either by its object custody type (CdpWallet) or because its address is registered
+   * as user-owned. Every server-side signing attempt must route through here first. Reads and
+   * receives are not signing and never call this.
+   */
+  assertCanSign(target: CdpWallet | `0x${string}`, op = "sign"): void {
+    if (typeof target === "string") {
+      this.userOwned.assertNotUserOwned(target, op);
+      return;
+    }
+    assertWalletServerSignable(target, op);
+    this.userOwned.assertNotUserOwned(target.address, op); // belt-and-suspenders on the address
+  }
+
+  /**
+   * Throws for a user-owned wallet — PCC holds no owner key, so there is no rotation path. No
+   * rotation method exists on this client; this guard refuses any future one for a user-owned target.
+   */
+  assertNoOwnerRotation(target: CdpWallet | `0x${string}`, op = "rotate the owner of"): void {
+    if (typeof target === "string") {
+      this.userOwned.assertNotUserOwned(target, op);
+      return;
+    }
+    assertWalletNoOwnerRotation(target, op);
+    this.userOwned.assertNotUserOwned(target.address, op);
+  }
+
+  /** Is this address a registered user-owned participant wallet? */
+  isUserOwned(address: string): boolean {
+    return this.userOwned.has(address);
+  }
+
+  /** The user-owned record for an address (address + network + non-secret authProviderRef), or undefined. */
+  getUserOwnedWallet(address: string): UserOwnedWalletRecord | undefined {
+    return this.userOwned.get(address);
+  }
+
+  /** All registered user-owned wallet records. Holds no keys. */
+  listUserOwnedWallets(): UserOwnedWalletRecord[] {
+    return this.userOwned.list();
   }
 
   /** USDC balance for an address on the configured network. */
