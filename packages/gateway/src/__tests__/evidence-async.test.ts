@@ -752,6 +752,47 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       expect(r1.statusCode).toBe(409);
       expect(r1.json().error).toBe("job_not_evidence_collectable");
     });
+
+    // ── A1 (round-6): exact-retry idempotency SURVIVES the terminal-state transition ──────
+    // Regression from item-1: accepting a terminal checkpoint flips the session to terminal_*, so an
+    // EXACT retransmission (lost-response retry) used to 409 session_not_open BEFORE reaching
+    // record()'s DB-authoritative idempotency. The route now resolves the committed receipt first.
+    it("A1: exact retransmission of a TERMINAL checkpoint → 200 idempotent (NOT 409 session_not_open)", async () => {
+      const { jobId, del, sessionId } = await begin();
+      const now = Math.floor(Date.now() / 1000);
+      const url = `/api/jobs/${jobId}/evidence/checkpoints`;
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      const r1 = await app.inject({ method: "POST", url, payload: c1.body });
+      expect(r1.statusCode).toBe(201);
+      // The terminal checkpoint closed the session.
+      expect(getStore().repos.evidenceSessions.findById(sessionId)?.status).toBe("terminal_success");
+      // Lost-response retry of the EXACT terminal checkpoint → record()'s idempotent path, not the
+      // session-status gate. No GET-recovery helper needed — a direct POST replay recovers.
+      const retry = await app.inject({ method: "POST", url, payload: c1.body });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json().idempotent).toBe(true);
+      // No second receipt row was written, and the session was NOT re-transitioned.
+      expect(getStore().repos.gatewayReceipts.findAllBySession(sessionId)).toHaveLength(1);
+      expect(getStore().repos.evidenceSessions.findById(sessionId)?.status).toBe("terminal_success");
+    });
+
+    it("A1: different content at the committed TERMINAL seq → 409 equivocation (NOT session_not_open)", async () => {
+      const { jobId, del, sessionId } = await begin();
+      const now = Math.floor(Date.now() / 1000);
+      const url = `/api/jobs/${jobId}/evidence/checkpoints`;
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      expect((await app.inject({ method: "POST", url, payload: c1.body })).statusCode).toBe(201);
+      expect(getStore().repos.evidenceSessions.findById(sessionId)?.status).toBe("terminal_success");
+      // A DIFFERENT terminal checkpoint at the committed seq 1 (different createdAt → different hash)
+      // must be caught as equivocation by record() — the terminal session status must NOT short-circuit
+      // to session_not_open and hide the fork.
+      const fork = signCheckpoint({ sessionId, seq: 1, createdAt: now + 1, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      const equiv = await app.inject({ method: "POST", url, payload: fork.body });
+      expect(equiv.statusCode).toBe(409);
+      expect(equiv.json().error).toBe("equivocation");
+      // The committed receipt is untouched — exactly one row remains.
+      expect(getStore().repos.gatewayReceipts.findAllBySession(sessionId)).toHaveLength(1);
+    });
   });
 
   // ─── finalize ────────────────────────────────────────────────────────────

@@ -595,26 +595,39 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
     const signatureHex = body.signature;
     const prevCheckpointHash = (body.prevCheckpointHash ?? null) as string | null;
 
-    // (a) resolve the OPEN session for (sessionId, jobId).
+    // (a) resolve the session for (sessionId, jobId).
     const session = repos.evidenceSessions.findById(sessionId);
     if (!session || session.jobId !== jobId) {
       return reply.status(404).send({ error: "session_not_found" });
     }
-    if (session.status !== "open") {
-      return reply.status(409).send({ error: "session_not_open", status: session.status });
+    const job = repos.jobs.findById(jobId);
+
+    // (a′) A1 (round-6): resolve any COMMITTED receipt at (sessionId, seq) BEFORE the session and
+    // job lifecycle gates. An exact retransmission of an already-committed checkpoint (a lost-response
+    // retry) is effectively a read/re-issue: it must reach record()'s DB-authoritative idempotency
+    // path — 200 idempotent for the exact replay, 409 equivocation for different content at that
+    // committed seq — EVEN AFTER the terminal checkpoint flipped the session to terminal_* (or the
+    // job advanced out-of-band). Only a GENUINELY NEW acceptance (no committed row at this seq) is
+    // lifecycle-gated. record() never mutates lifecycle on its idempotent/conflict paths, so a replay
+    // cannot re-transition anything, and the submitted checkpoint is still FULLY verified below — a
+    // forged "replay" fails signature/delegation verification, not this gate.
+    const committedReceipt = repos.gatewayReceipts.findById(`grcpt-${sessionId}-${seq}`);
+    if (!committedReceipt) {
+      // NEW acceptance → enforce the session gate (reject a new checkpoint once the run ended)…
+      if (session.status !== "open") {
+        return reply.status(409).send({ error: "session_not_open", status: session.status });
+      }
+      // …and the job-lifecycle gate (round-6 P1-2a): a settled / completed / held / cancelled /
+      // failed / completing job (or one already `evidence_finalized`) must NOT accept a NEW
+      // checkpoint, even if its session is somehow still `open` — a job advanced out-of-band.
+      if (job && EVIDENCE_UNCOLLECTABLE_STATUSES.has(job.status)) {
+        return reply
+          .status(409)
+          .send({ error: "job_not_evidence_collectable", status: job.status });
+      }
     }
 
     // Registered signer (parent pubkey) — the delegation authenticity anchor.
-    const job = repos.jobs.findById(jobId);
-    // Lifecycle (round-6 P1-2a): a settled / completed / held / cancelled / failed / completing job
-    // (or one already `evidence_finalized`) must NOT accept new checkpoints, even if its session is
-    // somehow still `open`. The session-status gate above catches the normal case; this catches a
-    // job whose lifecycle advanced out-of-band.
-    if (job && EVIDENCE_UNCOLLECTABLE_STATUSES.has(job.status)) {
-      return reply
-        .status(409)
-        .send({ error: "job_not_evidence_collectable", status: job.status });
-    }
     const parentPublicKey = registeredParentPublicKeyBytes(
       job ? repos.kernels.findById(job.kernelId) : null,
     );
