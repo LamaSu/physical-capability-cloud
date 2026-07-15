@@ -13,7 +13,12 @@
  */
 export const REGISTERED_OPERATION_IDS = [
   "capability.request_quote",
-  "job.cancel",
+  // job.cancel is DEFINED + retained in operation-policy.ts but NOT registered
+  // (re-audit #2 blocker 1: public wildcard-key provisioning lets a caller
+  // self-assert any operatorId, defeating job.cancel's ownership check). It
+  // re-enters this list only when the authority-model PR lands. Keeping it out
+  // here keeps the client-side allowlist in lock-step with the live registry
+  // (the load-time drift guard in operation-policy.ts enforces the match).
 ] as const;
 
 export type RegisteredOperationId = (typeof REGISTERED_OPERATION_IDS)[number];

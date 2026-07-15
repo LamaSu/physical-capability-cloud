@@ -126,12 +126,25 @@ export interface LegacySlugRotationSummary {
  * re-run skips it (isWeakLegacySlug → false); the alias insert is conflict-safe.
  * Private/retired artifacts are never enumerable share targets, so they are left
  * as-is. Operates on the same store the routes use (call initStore() first).
+ *
+ * Each artifact's slug rotation + alias insert run in ONE DB transaction, so a
+ * failure between them can never strand a rotated slug without its alias
+ * (re-audit #2). A mid-run failure leaves already-processed artifacts fully
+ * rotated and the failing one fully rolled back; a re-run then completes the rest.
  */
 export function rotateLegacyShareSlugs(
-  opts: { ttlMs?: number; now?: Date } = {},
+  opts: {
+    ttlMs?: number;
+    now?: Date;
+    /** Alias-write sink, injectable for tests / alternate sinks. Defaults to the
+     *  built-in expiring-hashed-alias writer. Runs INSIDE the per-artifact
+     *  transaction, so if it throws the slug rotation rolls back (atomicity). */
+    aliasWriter?: (oldSlug: string, artifactId: string, now: Date, ttlMs: number) => void;
+  } = {},
 ): LegacySlugRotationSummary {
   const ttlMs = opts.ttlMs ?? LEGACY_ALIAS_TTL_MS;
   const now = opts.now ?? new Date();
+  const aliasWriter = opts.aliasWriter ?? writeLegacyAlias;
   const summary: LegacySlugRotationSummary = {
     scanned: 0,
     rotated: 0,
@@ -151,8 +164,14 @@ export function rotateLegacyShareSlugs(
     const newSlug = uniqueSlug(a.name); // fresh ≥96-bit slug, human prefix kept
     a.slug = newSlug;
     a.updatedAt = now.toISOString();
-    saveArtifact(a); // updates both the slug column and data.slug
-    writeLegacyAlias(oldSlug, a.id, now, ttlMs);
+    // Atomic per-artifact (re-audit #2): the slug rotation + the alias insert commit
+    // together or not at all. A crash/throw BETWEEN them would otherwise strand a
+    // rotated slug with NO alias — the old share link would 404 with no recovery.
+    // One DB transaction guarantees an artifact is never left half-rotated.
+    db().transaction(() => {
+      saveArtifact(a); // updates both the slug column and data.slug
+      aliasWriter(oldSlug, a.id, now, ttlMs);
+    });
     summary.rotated++;
     summary.aliasesWritten++;
     summary.rotated_ids.push({ id: a.id, newSlug });

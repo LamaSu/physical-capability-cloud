@@ -10,8 +10,11 @@
  *      extra.authInfo.token → handler), which is the crux the whole PR rests on,
  *      and proves two concurrent sessions with different credentials don't leak.
  *
- * Registered ops under test: capability.request_quote (approval none) and
- * job.cancel (approval standard). NO financial op is registered (asserted).
+ * Registered op under test: capability.request_quote (approval none, read-only).
+ * job.cancel is DEFINED + retained (exported jobCancelPolicy) but NOT registered
+ * (re-audit #2 blocker 1) — its retained logic is exercised DIRECTLY here so it
+ * stays covered for re-registration, while the transport proves it is unreachable.
+ * NO financial op is registered (asserted).
  */
 
 import Fastify, { type FastifyInstance } from "fastify";
@@ -23,6 +26,11 @@ import {
   getOperationPolicy,
   registeredOperationIds,
   buildApprovalDescription,
+  typedOperationTools,
+  typedOperationToolFor,
+  requestQuotePolicy,
+  jobCancelPolicy,
+  type OpPrincipal,
 } from "../mcp/operation-policy.js";
 
 // External side-effect services mocked (mirrors tenant-isolation.test.ts) so the
@@ -142,12 +150,17 @@ const JOB_CANCEL = "pcc.op.job.cancel";
 // ── Registry shape ───────────────────────────────────────────────────────────
 
 describe("operation registry (default-DENY; financial class defined, none registered)", () => {
-  it("registers exactly capability.request_quote + job.cancel", () => {
-    expect(registeredOperationIds().sort()).toEqual(["capability.request_quote", "job.cancel"]);
+  it("registers EXACTLY capability.request_quote — job.cancel is unregistered", () => {
+    expect(registeredOperationIds().sort()).toEqual(["capability.request_quote"]);
+    // job.cancel is retained-but-unregistered (re-audit #2 blocker 1).
+    expect(getOperationPolicy("job.cancel")).toBeNull();
+    // The only registered op is read-only — NO state-changing op is registered.
+    const registered = registeredOperationIds().map((id) => getOperationPolicy(id));
+    expect(registered.every((p) => p !== null && p.stateChanging === false)).toBe(true);
   });
 
-  it("does NOT register escrow, job.retry, or any financial operation", () => {
-    for (const id of ["escrow.release_milestone", "escrow.open_dispute", "job.retry"]) {
+  it("does NOT register escrow, job.retry, job.cancel, or any financial operation", () => {
+    for (const id of ["escrow.release_milestone", "escrow.open_dispute", "job.retry", "job.cancel"]) {
       expect(getOperationPolicy(id)).toBeNull();
     }
     const financial = registeredOperationIds()
@@ -184,6 +197,98 @@ describe("operation registry (default-DENY; financial class defined, none regist
   });
 });
 
+// ── tools/list annotations + visibility, driven by stateChanging (blocker 2) ──
+
+describe("typed-op tool annotations + model-visibility", () => {
+  it("a READ-ONLY op (request_quote) is model-visible + readOnlyHint (no _meta.ui.visibility)", () => {
+    const tool = typedOperationToolFor(requestQuotePolicy);
+    expect(tool.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    // model-visible → no app-only visibility hint
+    expect((tool as { _meta?: { ui?: { visibility?: unknown } } })._meta?.ui?.visibility).toBeUndefined();
+  });
+
+  it("a STATE-CHANGING op (job.cancel) is app-only + destructive (auto, even while unregistered)", () => {
+    const tool = typedOperationToolFor(jobCancelPolicy);
+    expect(tool.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    });
+    // hidden from the model — invoked only through the approved MCP-App component
+    expect((tool as { _meta: { ui: { visibility: string[] } } })._meta.ui.visibility).toEqual(["app"]);
+  });
+
+  it("typedOperationTools() exposes ONLY request_quote, and it is NOT app-only", () => {
+    const tools = typedOperationTools();
+    expect(tools.map((t) => t.name)).toEqual(["pcc.op.capability.request_quote"]);
+    const only = tools[0];
+    expect(only.annotations?.readOnlyHint).toBe(true);
+    expect((only as { _meta?: { ui?: { visibility?: unknown } } })._meta?.ui?.visibility).toBeUndefined();
+  });
+});
+
+// ── job.cancel is UNREGISTERED (unreachable) but its retained logic still works ─
+
+describe("job.cancel — unregistered + unreachable over the dispatcher", () => {
+  let s: Seeded;
+  beforeEach(() => { s = seed(); });
+  afterEach(() => { closeStore(); vi.clearAllMocks(); });
+
+  it("dispatching pcc.op.job.cancel is default-DENIED (Unknown operation)", async () => {
+    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toContain("Unknown operation");
+    // the job is untouched — the op never runs
+    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("queued");
+  });
+});
+
+// The retained jobCancelPolicy is exercised DIRECTLY (validate → authorize → invoke),
+// the same pipeline handleTypedOperation runs, so re-registration later is safe. The
+// principal is CONSTRUCTED here (the handler derives it from the token — never args).
+describe("[retained] jobCancelPolicy logic (direct — kept for re-registration)", () => {
+  let s: Seeded;
+  const principalFor = (operatorId: string): OpPrincipal => ({ operatorId, apiKeyId: "k-test" });
+  beforeEach(() => { s = seed(); });
+  afterEach(() => { closeStore(); vi.clearAllMocks(); });
+
+  it("validateArguments keeps ONLY jobId and drops any actor/tenant/owner/status arg", () => {
+    expect(jobCancelPolicy.validateArguments({ jobId: "j1" })).toEqual({ jobId: "j1" });
+    // a manifest that also lies about the operator / drives an arbitrary status has
+    // every extra field stripped — only jobId survives (status is fixed in invoke).
+    expect(
+      jobCancelPolicy.validateArguments({ jobId: "j1", operatorId: ALICE, owner: ALICE, tenantId: "x", status: "completed" }),
+    ).toEqual({ jobId: "j1" });
+    expect(jobCancelPolicy.validateArguments({})).toBeNull();
+    expect(jobCancelPolicy.validateArguments({ jobId: "" })).toBeNull();
+  });
+
+  it("authorize enforces ownership from the PRINCIPAL (owner ok; non-owner 403)", async () => {
+    await expect(jobCancelPolicy.authorize(principalFor(ALICE), { jobId: s.aliceJob1 })).resolves.toEqual({ ok: true });
+    const denied = await jobCancelPolicy.authorize(principalFor(BOB), { jobId: s.aliceJob1 });
+    expect(denied).toMatchObject({ ok: false, status: 403 });
+  });
+
+  it("authorize enforces the state guard (terminal → 409) and unknown job (→ 404)", async () => {
+    expect(await jobCancelPolicy.authorize(principalFor(ALICE), { jobId: s.doneJob })).toMatchObject({ ok: false, status: 409 });
+    expect(await jobCancelPolicy.authorize(principalFor(ALICE), { jobId: "job-nope" })).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it("authorize fails closed with no principal (401)", async () => {
+    expect(await jobCancelPolicy.authorize(principalFor(""), { jobId: s.aliceJob1 })).toMatchObject({ ok: false, status: 401 });
+  });
+
+  it("invoke cancels an owned job and FIXES status to 'cancelled'", async () => {
+    const res = await jobCancelPolicy.invoke(principalFor(ALICE), { jobId: s.aliceJob1 });
+    expect(res.ok).toBe(true);
+    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("cancelled");
+  });
+});
+
 // ── Happy path + argument validation (off-transport) ─────────────────────────
 
 describe("typed operations — happy path + argument validation", () => {
@@ -208,70 +313,10 @@ describe("typed operations — happy path + argument validation", () => {
     expect(res.isError).toBe(true);
   });
 
-  it("job.cancel cancels an OWNED, cancellable job (real owner check, principal from token)", async () => {
-    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
-    expect(res.isError).not.toBe(true);
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("cancelled");
-  });
-
-  it("job.cancel rejects missing jobId (fail closed)", async () => {
-    const res = await call(JOB_CANCEL, {}, s.aliceToken);
-    expect(res.isError).toBe(true);
-    expect(res.content?.[0]?.text).toContain("Invalid arguments");
-  });
-
-  it("job.cancel enforces a state guard: a terminal (completed) job cannot be cancelled", async () => {
-    const res = await call(JOB_CANCEL, { jobId: s.doneJob }, s.aliceToken);
-    expect(res.isError).toBe(true);
-    expect(res.content?.[0]?.text).toContain("Cannot cancel");
-    expect(getRepos().jobs.findById(s.doneJob)?.status).toBe("completed");
-  });
-
-  it("job.cancel returns 404-style isError for an unknown job", async () => {
-    const res = await call(JOB_CANCEL, { jobId: "job-nope" }, s.aliceToken);
-    expect(res.isError).toBe(true);
-    expect(res.content?.[0]?.text).toContain("Job not found");
-  });
-
   it("an unregistered pcc.op.* tool is default-DENIED (unknown operation)", async () => {
     const res = await call("pcc.op.escrow.release_milestone", { address: "0x1", milestoneIndex: 0 }, s.aliceToken);
     expect(res.isError).toBe(true);
     expect(res.content?.[0]?.text).toContain("Unknown operation");
-  });
-});
-
-// ── Adversarial caveat 3: a tool argument cannot override the principal ───────
-
-describe("[adversarial] a tool argument cannot override the derived principal", () => {
-  let s: Seeded;
-  beforeEach(() => { s = seed(); });
-  afterEach(() => { closeStore(); vi.clearAllMocks(); });
-
-  it("body-supplied operator/tenant/owner ids are stripped — authz uses the TOKEN's operator", async () => {
-    // Bob's token, but the args LIE that the caller is Alice and even name the
-    // job's real owner. The stripping projection drops every id; the principal
-    // stays Bob → Bob may not cancel Alice's job → 403.
-    const res = await call(
-      JOB_CANCEL,
-      { jobId: s.aliceJob1, operatorId: ALICE, operator: ALICE, tenantId: "alpha", owner: ALICE },
-      s.bobToken,
-    );
-    expect(res.isError).toBe(true);
-    expect(res.content?.[0]?.text).toContain("your own jobs");
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("queued"); // untouched
-  });
-
-  it("job.cancel ignores a manifest-supplied status — it is fixed to 'cancelled'", async () => {
-    // A hostile arg tries to drive an arbitrary transition; only jobId survives.
-    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1, status: "completed" }, s.aliceToken);
-    expect(res.isError).not.toBe(true);
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("cancelled");
-  });
-
-  it("a non-owner token is denied even when the args claim ownership of the kernel", async () => {
-    const res = await call(JOB_CANCEL, { jobId: s.bobJob, operatorId: BOB }, s.aliceToken);
-    expect(res.isError).toBe(true);
-    expect(getRepos().jobs.findById(s.bobJob)?.status).toBe("queued");
   });
 });
 
@@ -282,30 +327,21 @@ describe("[adversarial] missing/invalid/revoked/expired credentials fail closed"
   beforeEach(() => { s = seed(); });
   afterEach(() => { closeStore(); vi.clearAllMocks(); });
 
-  it("anonymous (no token) cannot invoke a typed op", async () => {
-    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, undefined);
-    expect(res.isError).toBe(true);
-    expect(res.content?.[0]?.text).toContain("Authentication required");
-    // The silent-skip bug (route's `if (operatorId)`) is NOT reproduced: the job
-    // stays queued because an anonymous caller is refused, not allowed through.
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("queued");
-  });
-
-  it("anonymous cannot even price (request_quote requires an authenticated principal)", async () => {
+  it("anonymous (no token) cannot invoke a typed op (request_quote requires a principal)", async () => {
     const res = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, undefined);
     expect(res.isError).toBe(true);
     expect(res.content?.[0]?.text).toContain("Authentication required");
   });
 
   it("a malformed (non-pcc_) token fails closed", async () => {
-    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, "not-a-pcc-key");
+    const res = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, "not-a-pcc-key");
     expect(res.isError).toBe(true);
     expect(res.content?.[0]?.text).toContain("Authentication required");
   });
 
   it("a well-formed but unknown token (never provisioned) fails closed", async () => {
     const { rawKey } = generateApiKey(); // valid shape, never inserted
-    const res = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, rawKey);
+    const res = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, rawKey);
     expect(res.isError).toBe(true);
     expect(res.content?.[0]?.text).toContain("Authentication required");
   });
@@ -316,7 +352,7 @@ describe("[adversarial] missing/invalid/revoked/expired credentials fail closed"
     const before = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, rawKey);
     expect(before.isError).not.toBe(true);
     getRepos().apiKeys.revoke(record!.id);
-    const after = await call(JOB_CANCEL, { jobId: s.aliceJob1 }, rawKey);
+    const after = await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, rawKey);
     expect(after.isError).toBe(true);
     expect(after.content?.[0]?.text).toContain("Authentication required");
   });
@@ -354,15 +390,14 @@ describe("[adversarial] the bearer is never forwarded to a proxy destination, no
   it("a typed op makes NO outbound fetch (unlike the raw proxy relay)", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken);
-    await call(JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("no error or result text ever contains the raw credential", async () => {
     const results = await Promise.all([
-      call(JOB_CANCEL, { jobId: s.bobJob }, s.aliceToken), // 403
-      call(JOB_CANCEL, { jobId: "nope" }, s.aliceToken), // 404
-      call(JOB_CANCEL, { jobId: s.aliceJob1 }, "bad-token"), // auth-required
+      call(REQUEST_QUOTE, { type: "fdm" }, s.aliceToken), // Invalid arguments
+      call("pcc.op.job.cancel", { jobId: s.aliceJob1 }, s.aliceToken), // Unknown operation
+      call(REQUEST_QUOTE, { type: "fdm", selections: {} }, "bad-token"), // auth-required
       call(REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken), // ok
     ]);
     for (const r of results) {
@@ -376,8 +411,8 @@ describe("[adversarial] the bearer is never forwarded to a proxy destination, no
     const seen: string[] = [];
     const errSpy = vi.spyOn(console, "error").mockImplementation((...a) => { seen.push(a.join(" ")); });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation((...a) => { seen.push(a.join(" ")); });
-    await call(JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
-    await call(JOB_CANCEL, { jobId: s.aliceJob1 }, "bad-token");
+    await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken);
+    await call(REQUEST_QUOTE, { type: "fdm", selections: {} }, "bad-token");
     errSpy.mockRestore();
     warnSpy.mockRestore();
     for (const line of seen) {
@@ -456,7 +491,8 @@ describe("[adversarial] end-to-end /mcp — the bearer reaches the handler; sess
     });
     const names = res.json().result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain("pcc.op.capability.request_quote");
-    expect(names).toContain("pcc.op.job.cancel");
+    // job.cancel is unregistered → never advertised (re-audit #2 blocker 1).
+    expect(names).not.toContain("pcc.op.job.cancel");
     expect(names).toContain("render_pcc_dashboard"); // raw surface intact
   });
 
@@ -475,54 +511,55 @@ describe("[adversarial] end-to-end /mcp — the bearer reaches the handler; sess
     // outbound tools/call sender into the actual served boot script.
     expect(html).toContain("__PCC_HOST_OPERATIONS__");
     expect(html).toContain("capability.request_quote");
-    expect(html).toContain("job.cancel");
+    // job.cancel is unregistered → the injected allowlist must NOT contain it.
+    expect(html).not.toContain("job.cancel");
     expect(html).toContain("callOperation");
     expect(html).toContain("tools/call");
   });
 
   it("the forwarded Authorization header reaches the handler → an authed op succeeds", async () => {
     const session = await initSession();
-    const res = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
+    const res = await callTool(session, REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken);
     expect(res.isError).not.toBe(true);
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("cancelled");
+    expect(res.structuredContent?.pricing).toBeDefined();
   });
 
   it("with NO Authorization header the same op fails closed (anonymous cannot invoke)", async () => {
     const session = await initSession();
-    const res = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob1 }, undefined);
+    const res = await callTool(session, REQUEST_QUOTE, { type: "fdm", selections: {} }, undefined);
     expect(res.isError).toBe(true);
     expect(res.content?.[0]?.text).toContain("Authentication required");
-    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("queued");
   });
 
-  it("TWO concurrent sessions with different credentials do not cross-contaminate principal state", async () => {
+  it("job.cancel is NOT reachable over the wire — a tools/call is default-DENIED", async () => {
+    const session = await initSession();
+    const res = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toContain("Unknown operation");
+    expect(getRepos().jobs.findById(s.aliceJob1)?.status).toBe("queued"); // untouched
+  });
+
+  it("the principal is per-REQUEST, not bound to the session: two tokens, one session", async () => {
+    const session = await initSession();
+    // Same transport session, alternating credentials — each request derives its
+    // OWN principal (a stored session principal would leak across these).
+    const asAlice = await callTool(session, REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken);
+    expect(asAlice.isError).not.toBe(true);
+    const asBob = await callTool(session, REQUEST_QUOTE, { type: "fdm", selections: {} }, s.bobToken);
+    expect(asBob.isError).not.toBe(true);
+    // An anonymous request in the SAME session still fails closed (no leaked principal).
+    const anon = await callTool(session, REQUEST_QUOTE, { type: "fdm", selections: {} }, undefined);
+    expect(anon.isError).toBe(true);
+    expect(anon.content?.[0]?.text).toContain("Authentication required");
+  });
+
+  it("TWO concurrent sessions with different credentials both operate without cross-contamination", async () => {
     const sessionA = await initSession();
     const sessionB = await initSession();
     expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
-
-    // Session A carries Alice's key → may cancel Alice's job.
-    const a = await callTool(sessionA, JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
+    const a = await callTool(sessionA, REQUEST_QUOTE, { type: "fdm", selections: {} }, s.aliceToken);
+    const b = await callTool(sessionB, REQUEST_QUOTE, { type: "fdm", selections: {} }, s.bobToken);
     expect(a.isError).not.toBe(true);
-
-    // Session B carries Bob's key → must be DENIED Alice's other job. If any
-    // principal state leaked from session A, this would wrongly succeed.
-    const b = await callTool(sessionB, JOB_CANCEL, { jobId: s.aliceJob2 }, s.bobToken);
-    expect(b.isError).toBe(true);
-    expect(b.content?.[0]?.text).toContain("your own jobs");
-    expect(getRepos().jobs.findById(s.aliceJob2)?.status).toBe("queued");
-  });
-
-  it("the principal is per-REQUEST, not bound to the session: same session, different tokens", async () => {
-    const session = await initSession();
-    // Same transport session, first request as Bob → cancels Bob's job.
-    const asBob = await callTool(session, JOB_CANCEL, { jobId: s.bobJob }, s.bobToken);
-    expect(asBob.isError).not.toBe(true);
-    // Same session, next request as Alice → cancels Alice's job (a stored
-    // session principal would have mis-authorized one of these).
-    const asAlice = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob1 }, s.aliceToken);
-    expect(asAlice.isError).not.toBe(true);
-    // And a cross request in the same session is still denied.
-    const crossed = await callTool(session, JOB_CANCEL, { jobId: s.aliceJob2 }, s.bobToken);
-    expect(crossed.isError).toBe(true);
+    expect(b.isError).not.toBe(true);
   });
 });
