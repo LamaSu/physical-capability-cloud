@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { buildReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -210,10 +211,28 @@ export async function createGateway(port = 3200) {
     if (statusCode >= 500) {
       Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
     }
-    return reply.status(statusCode).send({
+    const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
       message: statusCode >= 500 ? "Internal Server Error" : error.message,
+    };
+    // Auto-feedback (agent DX): on a 5xx, tell the agent — AT the failure site —
+    // exactly how to report it, pre-filled with its journey trace. buildReportHint
+    // returns null for client-fixable 4xx, so those are NOT decorated. Cold agents
+    // have no key; /api/feedback is public. Additive only. This covers thrown 5xx
+    // (the "unexplained 500" where an agent is most stuck); explicitly-sent 5xx are
+    // a follow-up onSend decorator. See ai/research/agent-feedback-auto-design.md.
+    const reportHint = buildReportHint({
+      url: request.url,
+      method: request.method,
+      statusCode,
+      errorCode: error.code,
+      traceId:
+        (request as unknown as { traceId?: string }).traceId ??
+        (request.headers["x-pcc-trace-id"] as string | undefined) ??
+        null,
     });
+    if (reportHint) body.report_hint = reportHint;
+    return reply.status(statusCode).send(body);
   });
 
   // Close the DB, IPFS node, and batch settlement when the server shuts down

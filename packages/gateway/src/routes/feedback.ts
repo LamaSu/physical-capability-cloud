@@ -97,6 +97,14 @@ function clampStr(v: unknown, max: number): string | null {
   return t.length > max ? t.slice(0, max) : t;
 }
 
+// Coerce an HTTP status (number or numeric string, e.g. from a report_hint send{}
+// block) to a valid 100..599 int, else null. Named httpStatus so it never collides
+// with the record's own workflow `status` field.
+function clampHttpStatus(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 100 && n < 600 ? Math.trunc(n) : null;
+}
+
 // Discord webhook for live feedback notifications — preserved from the prior
 // /api/feedback so the team keeps getting alerts (the dashboard modal +
 // install.html both rely on it). Best-effort; no-op if the env var is unset.
@@ -187,6 +195,10 @@ export async function feedbackRoutes(app: FastifyInstance) {
       severity,
       agentId: clampStr(b.agentId ?? b.agent_kind, FIELD_MAX),
       errorCode: clampStr(b.errorCode ?? b.last_error_code, FIELD_MAX),
+      // Auto-feedback: the HTTP method + status the agent hit (from a report_hint
+      // send{} block). Lets the team see "500 on POST /api/build/contract" directly.
+      method: clampStr(b.method, 16),
+      httpStatus: clampHttpStatus(b.status ?? b.httpStatus),
       // Legacy dashboard fields ride along (no migration).
       page: clampStr(b.page, FIELD_MAX),
       email,

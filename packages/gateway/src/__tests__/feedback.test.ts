@@ -110,6 +110,41 @@ describe("POST /api/feedback (public)", () => {
     expect(items[0].createdAt).toBeTruthy();
   });
 
+  it("persists the report_hint send{} fields — method + httpStatus (auto-feedback)", async () => {
+    // Exactly what an agent copies from a 5xx `report_hint.send` block + a summary.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        type: "bug",
+        summary: "500 on the contract build step",
+        endpoint: "/api/build/contract",
+        method: "POST",
+        status: 500,
+        errorCode: "TIER_MISMATCH",
+        traceId: "tr_deadbeef",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const { items } = await adminItems();
+    expect(items[0]).toMatchObject({
+      endpoint: "/api/build/contract",
+      method: "POST",
+      httpStatus: 500, // send.status → httpStatus (never collides with the workflow `status`)
+      errorCode: "TIER_MISMATCH",
+    });
+    expect(items[0].status).toBe("new"); // workflow status is unaffected by the HTTP status
+  });
+
+  it("coerces a string HTTP status and nulls an out-of-range one", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "string status here", status: "503" } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "bogus status here", status: 99999 } });
+    const { items } = await adminItems();
+    const byStatus = Object.fromEntries(items.map((i) => [i.summary, i.httpStatus]));
+    expect(byStatus["string status here"]).toBe(503);
+    expect(byStatus["bogus status here"]).toBeNull();
+  });
+
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {
     const res = await app.inject({
       method: "POST",
