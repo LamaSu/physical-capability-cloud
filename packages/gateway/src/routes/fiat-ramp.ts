@@ -60,6 +60,23 @@ function getStripeCredits(): StripeCreditService {
   return stripeCredits;
 }
 
+// ── Legacy Stripe prepaid-credits + unsigned provider webhooks: RETIRED (audit PR2) ──
+// Retired because (1) NOTHING consumes the credits — deductCredits is never called
+// outside tests; the real billing rail is x402 / on-chain USDC — and (2) the provider
+// webhooks verify NO provider signature, so any AUTHENTICATED PCC caller could POST a
+// forged event and mint credits / advance a funding session. Being behind an API key is
+// NOT provider authentication. Funding is moving to direct USDC into a user-controlled
+// wallet (the onramp flow), so this path is being removed rather than hardened.
+// Default: 410 Gone. PCC_LEGACY_FIAT_WEBHOOKS=true re-enables the legacy, UNSIGNED,
+// in-memory, dev/testnet-ONLY behavior — never enable in production (it is still unsigned).
+function legacyFiatCreditsEnabled(): boolean {
+  return process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true";
+}
+const RETIRED_FIAT_CREDITS_MSG =
+  "Retired: the Stripe prepaid-credits path and the unsigned provider webhooks are " +
+  "removed. Fund jobs directly in USDC via the onramp flow. (Legacy dev-only behavior " +
+  "is available behind PCC_LEGACY_FIAT_WEBHOOKS=true; never enable in production.)";
+
 function getYellowcard(): { client: YellowcardClient; offramp: YellowcardOfframp; onramp: YellowcardOnramp } {
   if (!ycClient) {
     const mock = !process.env.YELLOWCARD_API_KEY;
@@ -371,6 +388,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   app.post<{
     Body: { amountUsd: number };
   }>("/api/fiat-ramp/stripe/credits/deposit", async (req, reply) => {
+    if (!legacyFiatCreditsEnabled()) {
+      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
+    }
     // IDOR fix: derive userId from session, not body (red team #10).
     // Previously anyone could fund any other user's credit balance on their behalf
     // (or more dangerously, trigger a deposit session with stolen userId).
@@ -399,6 +419,9 @@ export async function fiatRampRoutes(app: FastifyInstance) {
   app.get<{
     Params: { userId: string };
   }>("/api/fiat-ramp/stripe/credits/:userId", async (req, reply) => {
+    if (!legacyFiatCreditsEnabled()) {
+      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
+    }
     const credits = getStripeCredits();
     const balance = credits.getBalance(req.params.userId);
     if (!balance) {
@@ -658,7 +681,12 @@ export async function fiatRampRoutes(app: FastifyInstance) {
 
   // ── Webhooks ──────────────────────────────────────────────────────
 
-  app.post("/api/fiat-ramp/webhook/stripe", async (req) => {
+  app.post("/api/fiat-ramp/webhook/stripe", async (req, reply) => {
+    // RETIRED (audit PR2): unsigned webhook — any authenticated caller could forge a
+    // Stripe event and mint credits. 410 unless the legacy dev-only flag is set.
+    if (!legacyFiatCreditsEnabled()) {
+      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
+    }
     const body = req.body as { type?: string; data?: { object?: Record<string, unknown> } } | undefined;
     if (!body?.type || !body?.data?.object) {
       return { received: false };
@@ -677,7 +705,13 @@ export async function fiatRampRoutes(app: FastifyInstance) {
     return { received: true };
   });
 
-  app.post("/api/fiat-ramp/webhook/yellowcard", async (req) => {
+  app.post("/api/fiat-ramp/webhook/yellowcard", async (req, reply) => {
+    // RETIRED (audit PR2): unsigned webhook. Yellow Card also stays disabled until its
+    // inbound X-YC-Signature (base64 HMAC-SHA256 of the raw body, per the Yellow Card
+    // docs) is verified against a real signed sample. 410 unless the legacy flag is set.
+    if (!legacyFiatCreditsEnabled()) {
+      return reply.status(410).send({ error: "gone", message: RETIRED_FIAT_CREDITS_MSG });
+    }
     const body = req.body as { event?: string; data?: Record<string, unknown> } | undefined;
     if (!body?.event || !body?.data) {
       return { received: false };
