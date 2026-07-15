@@ -70,7 +70,12 @@ function getStripeCredits(): StripeCreditService {
 // Default: 410 Gone. PCC_LEGACY_FIAT_WEBHOOKS=true re-enables the legacy, UNSIGNED,
 // in-memory, dev/testnet-ONLY behavior — never enable in production (it is still unsigned).
 function legacyFiatCreditsEnabled(): boolean {
-  return process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true";
+  // Never in production. The fiatRampRoutes startup guard hard-fails boot if the flag is
+  // set under NODE_ENV=production; this is the matching per-request floor (defense in depth).
+  return (
+    process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true" &&
+    process.env.NODE_ENV !== "production"
+  );
 }
 const RETIRED_FIAT_CREDITS_MSG =
   "Retired: the Stripe prepaid-credits path and the unsigned provider webhooks are " +
@@ -135,6 +140,20 @@ function getCdp(): {
 // ---------------------------------------------------------------------------
 
 export async function fiatRampRoutes(app: FastifyInstance) {
+  // Production must NEVER re-enable the retired unsigned webhooks / prepaid-credits path.
+  // The dev-only escape hatch is ENFORCED here (not merely documented): fail startup if
+  // PCC_LEGACY_FIAT_WEBHOOKS is set under NODE_ENV=production.
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.PCC_LEGACY_FIAT_WEBHOOKS === "true"
+  ) {
+    throw new Error(
+      "PCC_LEGACY_FIAT_WEBHOOKS=true is forbidden in production: the legacy Stripe " +
+        "prepaid-credits path and the unsigned provider webhooks are retired and must " +
+        "never be re-enabled in prod (they verify no provider signature). Unset it.",
+    );
+  }
+
   // ── Status ────────────────────────────────────────────────────────
 
   app.get("/api/fiat-ramp/status", async () => {

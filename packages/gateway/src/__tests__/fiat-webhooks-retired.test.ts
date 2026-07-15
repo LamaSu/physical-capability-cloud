@@ -95,4 +95,18 @@ describe("legacy fiat webhooks + credits are RETIRED (audit PR2)", () => {
     expect(r.statusCode).toBe(404); // live handler → "no balance", not the 410-retired guard
     delete process.env.PCC_LEGACY_FIAT_WEBHOOKS;
   });
+
+  // ── the escape hatch is enforced, not just documented: prod boot fails if it's set ──
+  it("FAILS STARTUP under NODE_ENV=production when the legacy flag is set", async () => {
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    process.env.PCC_LEGACY_FIAT_WEBHOOKS = "true";
+    const bad = Fastify();
+    bad.register(fiatRampRoutes);
+    await expect(bad.ready()).rejects.toThrow(/forbidden in production/);
+    await bad.close().catch(() => {});
+    if (prevEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevEnv;
+    delete process.env.PCC_LEGACY_FIAT_WEBHOOKS;
+  });
 });
