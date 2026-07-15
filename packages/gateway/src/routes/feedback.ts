@@ -18,7 +18,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { redactSecrets, redactOrNull } from "../redaction.js";
+import { createHash } from "node:crypto";
+import { redactSecrets } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
@@ -49,14 +50,23 @@ export function __resetFeedbackRateLimit(): void {
 // with an identical (principal, endpoint, errorCode, summary-prefix) within a window,
 // so the volume + Discord aren't flooded and the team sees one report per real issue.
 // Finer-grained than the rate limit (which is a blunt per-IP cap).
-const DEDUP_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_DEDUP_WINDOW_MS ?? "300000", 10); // 5 min
+// Guard a bad env override: a NaN/negative window would make the expiry check
+// always-false, so keys would never expire and reports would dedup forever (review #5).
+const DEDUP_WINDOW_MS = (() => {
+  const n = Number.parseInt(process.env.PCC_FEEDBACK_DEDUP_WINDOW_MS ?? "300000", 10);
+  return Number.isFinite(n) && n > 0 ? n : 300000; // 5 min default
+})();
 const recentReports = new Map<string, number>();
-function isDuplicate(key: string): boolean {
+// PEEK — prune expired keys and report whether this one is present, WITHOUT recording
+// it. The key is marked only after a successful append (markSeen), so a failed write
+// can't permanently dedup a report that never persisted (review #3).
+function seenRecently(key: string): boolean {
   const now = Date.now();
   for (const [k, t] of recentReports) if (now - t > DEDUP_WINDOW_MS) recentReports.delete(k);
-  if (recentReports.has(key)) return true;
-  recentReports.set(key, now);
-  return false;
+  return recentReports.has(key);
+}
+function markSeen(key: string): void {
+  recentReports.set(key, Date.now());
 }
 /** Reset the in-memory dedup window. Test-only export. */
 export function __resetFeedbackDedup(): void {
@@ -131,6 +141,19 @@ function clampHttpStatus(v: unknown): number | null {
   return Number.isInteger(n) && n >= 100 && n < 600 ? n : null;
 }
 
+// Redact secrets from a free-text field, THEN clamp — redact BEFORE truncation so a
+// secret that would straddle the size limit is still fully matched (review #6).
+function redactClamp(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  return clampStr(redactSecrets(v), max);
+}
+// Path-like fields (endpoint / logs[].path / page): drop any query string first —
+// that's where a `?api_key=…` would hide — then redact + clamp (review #1).
+function pathClamp(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  return redactClamp(v.split("?")[0], max);
+}
+
 interface LogEntry {
   step?: number;
   method?: string;
@@ -151,14 +174,14 @@ function clampLogs(v: unknown): LogEntry[] | null {
     const e = raw as Record<string, unknown>;
     const entry: LogEntry = {};
     if (Number.isInteger(Number(e.step))) entry.step = Number(e.step);
-    const method = clampStr(e.method, 16);
+    const method = clampStr(e.method, 16); // HTTP method — no secrets
     if (method) entry.method = method;
-    const path = clampStr(e.path ?? e.endpoint, FIELD_MAX);
+    const path = pathClamp(e.path ?? e.endpoint, FIELD_MAX); // strip query + redact
     if (path) entry.path = path;
     const status = clampHttpStatus(e.status);
     if (status !== null) entry.status = status;
-    const note = clampStr(e.note, LOG_NOTE_MAX);
-    if (note) entry.note = redactSecrets(note);
+    const note = redactClamp(e.note, LOG_NOTE_MAX); // redact before clamp
+    if (note) entry.note = note;
     if (Object.keys(entry).length > 0) out.push(entry);
   }
   return out.length > 0 ? out : null;
@@ -226,15 +249,14 @@ export async function feedbackRoutes(app: FastifyInstance) {
     //   agent:        { type, summary, detail, endpoint, traceId, severity, agentId }
     //   dashboard:    { type, message, page, walletAddress, email }
     //   agent-report: { trace_id, last_endpoint, last_error_code, agent_kind }
-    const summaryRaw = clampStr(b.summary ?? b.message, SUMMARY_MAX);
-    if (!summaryRaw) {
+    // Scrub secret-shaped strings from all agent-supplied free text before it is
+    // persisted to the public sink (Phase 2 defense-in-depth; redact BEFORE clamp).
+    const summary = redactClamp(b.summary ?? b.message, SUMMARY_MAX);
+    if (!summary) {
       return reply
         .code(400)
         .send({ error: "bad_request", message: "`summary` (or `message`) is required." });
     }
-    // Scrub secret-shaped strings from all agent-supplied free text before it is
-    // persisted to the public sink (Phase 2 defense-in-depth; redaction.ts).
-    const summary = redactSecrets(summaryRaw);
 
     const typeRaw = String(b.type ?? "").trim().toLowerCase();
     const type = FEEDBACK_TYPES.has(typeRaw) ? typeRaw : "bug";
@@ -251,21 +273,22 @@ export async function feedbackRoutes(app: FastifyInstance) {
       kind: "feedback",
       type,
       summary,
-      detail: redactOrNull(clampStr(b.detail, DETAIL_MAX)),
+      detail: redactClamp(b.detail, DETAIL_MAX),
       // Phase 2: the agent's last few steps (method/path/status + a redacted note),
       // bounded + summarized — the "logs" half of "feedback and logs".
       logs: clampLogs(b.logs),
-      endpoint: clampStr(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
+      // Path-like: strip any query string (where a ?api_key=… hides) + redact (#1).
+      endpoint: pathClamp(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
       traceId: clampStr(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
       severity,
-      agentId: clampStr(b.agentId ?? b.agent_kind, FIELD_MAX),
-      errorCode: clampStr(b.errorCode ?? b.last_error_code, FIELD_MAX),
+      agentId: redactClamp(b.agentId ?? b.agent_kind, FIELD_MAX),
+      errorCode: redactClamp(b.errorCode ?? b.last_error_code, FIELD_MAX),
       // Auto-feedback: the HTTP method + status the agent hit (from a report_hint
       // send{} block). Lets the team see "500 on POST /api/build/contract" directly.
       method: clampStr(b.method, 16),
       httpStatus: clampHttpStatus(b.status ?? b.httpStatus),
       // Legacy dashboard fields ride along (no migration).
-      page: clampStr(b.page, FIELD_MAX),
+      page: pathClamp(b.page, FIELD_MAX),
       email,
       walletAddress: clampStr(b.walletAddress, 128),
       status: "new",
@@ -275,11 +298,14 @@ export async function feedbackRoutes(app: FastifyInstance) {
     };
 
     // Dedup: collapse a retry-looping agent's repeated reports of the SAME failure
-    // (same principal + endpoint + errorCode + summary prefix) within the window. A
-    // duplicate is accepted (200, not an error, so the agent doesn't retry) but not
-    // persisted or re-notified.
-    const dedupKey = `${rec.traceId ?? rec.ip}|${rec.endpoint ?? ""}|${rec.errorCode ?? ""}|${rec.summary.slice(0, 64)}`;
-    if (isDuplicate(dedupKey)) {
+    // within the window. Accepted (200, not an error, so the agent doesn't retry) but
+    // not persisted or re-notified. Key = SHA-256 over a serialized tuple with a
+    // TRUSTED principal (req.ip, not the spoofable agent traceId) + the FULL endpoint,
+    // errorCode, and summary; JSON.stringify avoids `|`-delimiter collisions (#4).
+    const dedupKey = createHash("sha256")
+      .update(JSON.stringify([req.ip, rec.endpoint ?? "", rec.errorCode ?? "", rec.summary]))
+      .digest("hex");
+    if (seenRecently(dedupKey)) {
       return reply.code(200).send({
         status: "ok",
         submitted: false,
@@ -289,6 +315,9 @@ export async function feedbackRoutes(app: FastifyInstance) {
     }
 
     append(FEEDBACK_FILE, rec);
+    // Mark the key only AFTER a successful append — a failed write must not
+    // permanently dedup a report that never persisted (#3).
+    markSeen(dedupKey);
     // Live-notify the team via Discord webhook (best-effort, non-blocking).
     notifyDiscord(rec).catch(() => {});
     // Observability event (folds in the value of the orphaned /api/feedback/agent-report

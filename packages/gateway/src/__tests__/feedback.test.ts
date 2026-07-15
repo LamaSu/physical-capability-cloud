@@ -206,6 +206,44 @@ describe("POST /api/feedback (public)", () => {
     expect((await adminItems()).total).toBe(2);
   });
 
+  it("strips query strings + redacts structured fields — no key leak (Phase 2, review #1)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "auth failed",
+        endpoint: "/api/x?api_key=pcc_live_LEAKED12345",
+        errorCode: "pcc_live_LEAKED67890",
+        logs: [{ step: 1, path: "/api/y?token=pcc_live_INPATH999", note: "ok" }],
+      },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.endpoint).toBe("/api/x"); // query dropped
+    expect(rec.logs[0].path).toBe("/api/y"); // logs path query dropped
+    expect(rec.errorCode).not.toContain("LEAKED67890"); // errorCode redacted
+    // nothing anywhere in the persisted record leaks a key
+    expect(JSON.stringify(rec)).not.toMatch(/LEAKED12345|LEAKED67890|INPATH999/);
+  });
+
+  it("dedups on the trusted principal (ip), not the spoofable traceId (review #4)", async () => {
+    const base = { summary: "same failure body", endpoint: "/api/x", errorCode: "E1" };
+    const first = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...base, traceId: "tr_aaa" } });
+    const second = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...base, traceId: "tr_bbb" } });
+    expect(first.json().submitted).toBe(true);
+    expect(second.json().deduped).toBe(true); // different traceId still collapses
+    expect((await adminItems()).total).toBe(1);
+  });
+
+  it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
+    // A realistic key: preceded by a separator (so \b matches), body crosses the
+    // 500-char clamp. Redact-before-clamp catches the whole key; clamp-first would
+    // leave a "pcc_live_ZZZ" fragment (too short to re-match).
+    const note = "X".repeat(487) + " pcc_live_ZZZQQQXYZ99";
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "boundary", logs: [{ note }] } });
+    const stored = (await adminItems()).items[0].logs[0].note;
+    expect(stored).not.toContain("ZZZ"); // no surviving secret fragment at the boundary
+  });
+
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {
     const res = await app.inject({
       method: "POST",

@@ -17,14 +17,17 @@ const REDACTED = "[redacted]";
 const PATTERNS: Array<[RegExp, string]> = [
   // Authorization: Bearer <token>
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer " + REDACTED],
-  // PCC API keys — pcc_live_… / pcc_test_… (keep the prefix, drop the secret)
-  [/\bpcc_(live|test)_[A-Za-z0-9]{6,}/gi, "pcc_$1_" + REDACTED.slice(1, -1)],
+  // PCC API keys — pcc_live_… / pcc_test_… . The secret body may contain _ or - .
+  [/\bpcc_(live|test)_[A-Za-z0-9_-]{6,}/gi, "pcc_$1_redacted"],
   // JSON Web Tokens (header.payload.signature; header is base64 of `{"…`)
   [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, "[redacted-jwt]"],
-  // Private-key / 64-hex secrets (0x + 64 hex). A 40-hex ADDRESS is public → NOT matched.
-  [/\b0x[0-9a-fA-F]{64,}\b/g, "0x" + REDACTED],
-  // Common vendor key shapes (OpenAI sk-, GitHub ghp_/gho_, Slack xox*, AWS AKIA)
-  [/\b(?:sk-[A-Za-z0-9]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "[redacted-key]"],
+  // 64-hex secret (private key / secret), WITH OR WITHOUT the 0x prefix. A 40-hex
+  // address (public) is shorter and is NOT matched. Over-redacts a 64-hex sha256
+  // hash — acceptable: better to lose a hash than leak a key.
+  [/\b(?:0x)?[0-9a-fA-F]{64,}\b/g, "[redacted-hex]"],
+  // Vendor key shapes: OpenAI sk- (incl. modern sk-proj-… with separators), GitHub
+  // ghp_/gho_, Slack xox*, AWS AKIA.
+  [/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "[redacted-key]"],
 ];
 
 /** Replace secret-shaped substrings with a marker. Idempotent on already-clean text. */

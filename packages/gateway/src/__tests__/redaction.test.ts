@@ -23,17 +23,27 @@ describe("redactSecrets", () => {
     expect(redactSecrets(`token=${jwt}`)).not.toContain("eyJhbGciOiJI");
   });
 
-  it("redacts a 64-hex private key but NOT a 40-hex public wallet address", () => {
+  it("redacts a 64-hex private key WITH OR WITHOUT 0x, but NOT a 40-hex address (review #2)", () => {
     const pk = "0x" + "a".repeat(64);
+    const bare = "c".repeat(64); // private key pasted without the 0x prefix
     const addr = "0x" + "b".repeat(40);
-    const out = redactSecrets(`pk=${pk} addr=${addr}`);
-    expect(out).toContain("0x[redacted]");
+    const out = redactSecrets(`pk=${pk} bare=${bare} addr=${addr}`);
+    expect(out).toContain("[redacted-hex]");
     expect(out).not.toContain(pk);
-    expect(out).toContain(addr); // public address must survive
+    expect(out).not.toContain(bare); // unprefixed key must also be caught
+    expect(out).toContain(addr); // public address (40 hex) must survive
   });
 
-  it("redacts common vendor key shapes (sk-, ghp_, AKIA)", () => {
+  it("fully redacts a PCC key containing separators (review #2)", () => {
+    // the secret body may contain _ or - — must not leave a trailing fragment.
+    const out = redactSecrets("key pcc_live_abc_def-ghi123456 here");
+    expect(out).toBe("key pcc_live_redacted here");
+  });
+
+  it("redacts common + modern vendor key shapes incl. sk-proj- (review #2)", () => {
     expect(redactSecrets("sk-" + "a".repeat(24))).toContain("[redacted-key]");
+    expect(redactSecrets("sk-proj-" + "a".repeat(24))).toContain("[redacted-key]"); // modern OpenAI
+    expect(redactSecrets("sk-proj-" + "a".repeat(24))).not.toContain("aaaa");
     expect(redactSecrets("ghp_" + "b".repeat(30))).toContain("[redacted-key]");
     expect(redactSecrets("AKIAABCDEFGHIJKLMNOP")).toContain("[redacted-key]");
   });
