@@ -80,6 +80,20 @@ describe("EvidenceSessionRepository", () => {
     expect(store.repos.evidenceSessions.findById("sess-1")?.status).toBe("finalized");
   });
 
+  it("transitionIfOpen: CAS open→terminal succeeds only from open (round-7 acceptance-guard primitive)", () => {
+    store.repos.evidenceSessions.insert(makeRow()); // status "open"
+    const won = store.repos.evidenceSessions.transitionIfOpen("sess-1", "terminal_success");
+    expect(won?.status).toBe("terminal_success");
+    expect(store.repos.evidenceSessions.findById("sess-1")?.status).toBe("terminal_success");
+    // A second transition (session no longer open) updates NO row and leaves the status untouched —
+    // this is what makes a post-terminal acceptance and a concurrent second terminal lose the race.
+    const lost = store.repos.evidenceSessions.transitionIfOpen("sess-1", "terminal_fault");
+    expect(lost).toBeUndefined();
+    expect(store.repos.evidenceSessions.findById("sess-1")?.status).toBe("terminal_success");
+    // Unknown session → undefined (no row matches the WHERE).
+    expect(store.repos.evidenceSessions.transitionIfOpen("nope", "terminal_success")).toBeUndefined();
+  });
+
   it("enforces UNIQUE(job_id, milestone_index): a second session for the same (job, milestone) is rejected", () => {
     store.repos.evidenceSessions.insert(makeRow({ sessionId: "sess-1" }));
     // A DIFFERENT sessionId for the SAME (job, milestone) must violate the unique

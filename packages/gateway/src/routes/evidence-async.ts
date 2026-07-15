@@ -63,7 +63,7 @@ import {
   EvidenceSessionStore,
   computeWindow,
 } from "../services/evidence-session-store.js";
-import { GatewayReceiptStore } from "../services/gateway-receipt-store.js";
+import { GatewayReceiptStore, makeEvidenceAcceptanceGuard } from "../services/gateway-receipt-store.js";
 import { MilestonePackageStore } from "../services/milestone-package-store.js";
 import {
   registeredSignerInputFromColumns,
@@ -533,7 +533,11 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       db,
       repo: repos.gatewayReceipts,
       checkpointBodies: repos.checkpointBodies,
-      evidenceSessions: repos.evidenceSessions, // round-6 A3: evidenceSessions is now a required dep
+      acceptanceGuard: makeEvidenceAcceptanceGuard({
+        sessions: repos.evidenceSessions,
+        jobs: repos.jobs,
+        uncollectableJobStatuses: EVIDENCE_UNCOLLECTABLE_STATUSES,
+      }), // round-7: transaction-bound acceptance precondition
     });
     const tip = repos.gatewayReceipts.lastAcceptedForSession(sessionId);
     // Respond with the PERSISTED session window (on idempotent re-begin, the original).
@@ -688,7 +692,11 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       db,
       repo: repos.gatewayReceipts,
       checkpointBodies: repos.checkpointBodies,
-      evidenceSessions: repos.evidenceSessions, // round-6 P1-2: atomic terminal-state transition on accept
+      acceptanceGuard: makeEvidenceAcceptanceGuard({
+        sessions: repos.evidenceSessions,
+        jobs: repos.jobs,
+        uncollectableJobStatuses: EVIDENCE_UNCOLLECTABLE_STATUSES,
+      }), // round-7: session-open + job-collectable + terminal CAS, atomic with the receipt commit
     });
     const result = receipts.record({
       jobId,

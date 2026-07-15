@@ -25,7 +25,9 @@ import { SessionSequenceStore } from "../services/session-sequence-store.js";
 import { GatewayReceiptSigner } from "../services/gateway-receipt-signer.js";
 import {
   GatewayReceiptStore,
+  makeEvidenceAcceptanceGuard,
   type CheckpointReceiptInput,
+  type CheckpointAcceptanceGuard,
 } from "../services/gateway-receipt-store.js";
 import { generateEd25519Keypair } from "../auth/ed25519.js";
 
@@ -59,22 +61,13 @@ function input(
 }
 
 /**
- * A stateful evidence-session fake for the receipt-store unit tests (round-6 P1-2). It RECORDS the
- * requested transition and returns the row-shaped `{ status }` the store checks — modelling a working
- * repository, NOT a no-op that silently drops the write. `statusOf` lets a test assert the transition
- * was actually requested. The P1-2 rollback tests use deliberately-failing inline fakes instead.
+ * A pass-through acceptance guard for the receipt-store unit tests that do not exercise the lifecycle
+ * (round-7). record() calls the guard inside its txn; a pass-through returns `{ ok: true }` so the
+ * receipt/body commit. The round-7 rollback tests below pass deliberately-rejecting/throwing guards, and
+ * the guard-logic tests exercise makeEvidenceAcceptanceGuard directly.
  */
-function makeSessionsFake() {
-  const statuses = new Map<string, string>();
-  return {
-    setStatus(sessionId: string, status: string) {
-      statuses.set(sessionId, status);
-      return { status };
-    },
-    statusOf(sessionId: string): string | undefined {
-      return statuses.get(sessionId);
-    },
-  };
+function passGuard(): CheckpointAcceptanceGuard {
+  return { claimForCheckpoint: () => ({ ok: true as const }) };
 }
 
 describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
@@ -92,7 +85,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
   });
@@ -243,7 +236,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       // Never reached: the receipt insert throws FIRST inside the txn (real body repo is fine here).
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
 
@@ -296,7 +289,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seedSeq,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
     let prev: string | null = null;
@@ -317,7 +310,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
     return { svc, sequenceStore };
@@ -495,7 +488,7 @@ describe("GatewayReceiptStore — H1 DB-authoritative idempotency / equivocation
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
   });
@@ -599,7 +592,7 @@ describe("GatewayReceiptStore — R-14b defensive input validation", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
   });
@@ -664,7 +657,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
   });
@@ -686,7 +679,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: throwingBodies,
       sequenceStore,
-      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
+      acceptanceGuard: passGuard(), // round-7: pass-through acceptance guard (no lifecycle exercised)
       signer,
     });
 
@@ -702,59 +695,94 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
     expect(sequenceStore.hasSession("sess-1")).toBe(false);
   });
 
-  // ── P1-2 (re-audit): the terminal-state transition is a CHECKED, rollback-coupled service invariant ──
-  function svcWith(sessions: { setStatus(id: string, s: string): { status: string } | undefined }) {
+  // ── P1-2 + round-7 (re-audit): the acceptance precondition is enforced INSIDE the receipt txn ──
+  function svcWith(guard: CheckpointAcceptanceGuard) {
     return new GatewayReceiptStore({
       db: store.db,
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: sessions,
+      acceptanceGuard: guard,
       signer,
     });
   }
 
-  it("P1-2: a terminal checkpoint whose session transition returns NO row → errored, receipt+body rolled back, no advance", () => {
-    const r = svcWith({ setStatus: () => undefined }).record(
+  it("round-7: a new acceptance whose guard REJECTS the precondition → errored, receipt+body rolled back, no advance", () => {
+    const r = svcWith({ claimForCheckpoint: () => undefined }).record(
       input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
     );
     expect(r.status).toBe("errored");
-    if (r.status === "errored") expect(r.error.message).toContain("terminal session transition failed");
+    if (r.status === "errored") expect(r.error.message).toContain("acceptance precondition failed");
     expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
     expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
     expect(sequenceStore.hasSession("sess-1")).toBe(false);
   });
 
-  it("P1-2: a terminal checkpoint whose setStatus THROWS → errored, receipt+body rolled back", () => {
-    const r = svcWith({
-      setStatus: () => {
-        throw new Error("simulated session write failure");
-      },
-    }).record(input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "fault_report" }));
+  it("round-7: the guard rejects a NONTERMINAL acceptance too (session no longer open) → errored, rolled back", () => {
+    const r = svcWith({ claimForCheckpoint: () => undefined }).record(
+      input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "workflow_step_completed" }),
+    );
     expect(r.status).toBe("errored");
-    if (r.status === "errored") expect(r.error.message).toContain("simulated session write failure");
     expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
     expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
   });
 
-  it("P1-2: a terminal checkpoint whose setStatus reports the WRONG resulting status → errored, rolled back", () => {
-    const r = svcWith({ setStatus: () => ({ status: "open" }) }).record(
-      input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
-    );
+  it("round-7: a guard that THROWS → errored, receipt+body rolled back", () => {
+    const r = svcWith({
+      claimForCheckpoint: () => {
+        throw new Error("simulated guard failure");
+      },
+    }).record(input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "fault_report" }));
     expect(r.status).toBe("errored");
-    if (r.status === "errored") expect(r.error.message).toContain("terminal session transition failed");
+    if (r.status === "errored") expect(r.error.message).toContain("simulated guard failure");
     expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
   });
 
-  it("P1-2: a terminal checkpoint with a WORKING session repo → receipt + body commit AND the transition is recorded", () => {
-    const sessions = makeSessionsFake();
-    const r = svcWith(sessions).record(
+  it("round-7: a guard that ACCEPTS → receipt + body commit", () => {
+    const r = svcWith(passGuard()).record(
       input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
     );
     expect(r.status).toBe("accepted");
     expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeDefined();
     expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeDefined();
-    expect(sessions.statusOf("sess-1")).toBe("terminal_success"); // execution_completed → terminal_success
+  });
+
+  // makeEvidenceAcceptanceGuard logic (fake session/job repos — no store setup needed).
+  it("round-7 guard: session no longer open → undefined (post-terminal / post-finalize acceptance blocked)", () => {
+    const guard = makeEvidenceAcceptanceGuard({
+      sessions: { findById: () => ({ status: "terminal_success" }), transitionIfOpen: () => undefined },
+      jobs: { findById: () => undefined },
+      uncollectableJobStatuses: new Set(),
+    });
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_success" })).toBeUndefined();
+  });
+
+  it("round-7 guard: job no longer evidence-collectable (settlement_hold) → undefined", () => {
+    const guard = makeEvidenceAcceptanceGuard({
+      sessions: { findById: () => ({ status: "open" }), transitionIfOpen: () => ({ status: "terminal_success" }) },
+      jobs: { findById: () => ({ status: "settlement_hold" }) },
+      uncollectableJobStatuses: new Set(["settlement_hold"]),
+    });
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
+  });
+
+  it("round-7 guard: open session + collectable job → nonterminal ok; terminal CASes open→terminal; a 2nd terminal loses", () => {
+    let sessionStatus = "open";
+    const guard = makeEvidenceAcceptanceGuard({
+      sessions: {
+        findById: () => ({ status: sessionStatus }),
+        transitionIfOpen: (_id, to) =>
+          sessionStatus === "open" ? ((sessionStatus = to), { status: to }) : undefined,
+      },
+      jobs: { findById: () => ({ status: "executing" }) },
+      uncollectableJobStatuses: new Set(["settlement_hold", "settled"]),
+    });
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toEqual({ ok: true });
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_success" })).toEqual({ ok: true });
+    expect(sessionStatus).toBe("terminal_success"); // the CAS transitioned it
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_fault" })).toBeUndefined(); // 2nd terminal loses the CAS
   });
 
   it("accept persists the receipt AND its checkpoint body atomically; exact replay → idempotent (no 2nd row)", () => {

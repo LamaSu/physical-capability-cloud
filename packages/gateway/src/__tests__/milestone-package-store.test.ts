@@ -93,7 +93,9 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
-      evidenceSessions: store.repos.evidenceSessions, // round-6 A3: reproduce the LIVE terminal transition
+      // Pass-through guard (round-7): the seeder builds the durable fixture; the terminal SESSION state
+      // is set directly (seedChain sets it from the last type; the >1000 R-14c seed sets it below).
+      acceptanceGuard: { claimForCheckpoint: () => ({ ok: true as const }) },
       signer,
     });
     let prev: string | null = null;
@@ -135,6 +137,12 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       prev = checkpointHash;
       hashes.push(checkpointHash);
     });
+    // Reflect the terminal SESSION state the live route would produce (the round-7 acceptance guard CASes
+    // open→terminal on the LAST accepted checkpoint): a completion → terminal_success, a fault →
+    // terminal_fault, a nonterminal last → stays open. Set directly since the pass-through guard did not.
+    const lastType = typesOverride ? typesOverride[n - 1] : terminalType;
+    if (lastType === "execution_completed") store.repos.evidenceSessions.setStatus(SESSION_ID, "terminal_success");
+    else if (lastType === "fault_report") store.repos.evidenceSessions.setStatus(SESSION_ID, "terminal_fault");
     return hashes;
   }
 
@@ -412,7 +420,9 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seq,
-      evidenceSessions: store.repos.evidenceSessions, // round-6 A3: reproduce the LIVE terminal transition
+      // Pass-through guard (round-7): the seeder builds the durable fixture; the terminal SESSION state
+      // is set directly (seedChain sets it from the last type; the >1000 R-14c seed sets it below).
+      acceptanceGuard: { claimForCheckpoint: () => ({ ok: true as const }) },
       signer,
     });
     const hashes: string[] = [];
@@ -449,6 +459,9 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       hashes.push(checkpointHash);
     }
     expect(hashes).toHaveLength(N);
+    // The >1000 chain ends in execution_completed; reflect the terminal session state the live guard
+    // would CAS (the pass-through seed guard did not) so finalize passes the round-6 A3 terminal-state gate.
+    store.repos.evidenceSessions.setStatus(SESSION_ID, "terminal_success");
 
     // The OLD capped path (findBySession up to MAX_LIMIT=1000) truncates; the R-14c
     // uncapped path returns all N. (Pre-R-14c finalize even ERRORED on such a chain —

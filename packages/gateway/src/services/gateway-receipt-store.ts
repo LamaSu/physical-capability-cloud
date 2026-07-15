@@ -193,6 +193,50 @@ const TERMINAL_SESSION_STATUS: Readonly<Record<string, string>> = {
   fault_report: "terminal_fault",
 };
 
+/**
+ * Transaction-bound checkpoint acceptance guard (round-7 re-audit). Called by record() INSIDE its
+ * receipt/body transaction for a genuinely NEW acceptance, so the lifecycle precondition is enforced
+ * ATOMICALLY with the commit — not merely checked by the route before the txn (which is stale under a
+ * future handler `await` or across instances). It re-verifies the session is still `open` and the job is
+ * still evidence-collectable, and for a terminal checkpoint compare-and-sets open→terminal. Returns
+ * `undefined` if the precondition no longer holds → record() throws and rolls back the receipt + body.
+ * (SQLite serializes write txns, so a competing terminal transition cannot be overwritten.)
+ */
+export interface CheckpointAcceptanceGuard {
+  claimForCheckpoint(input: {
+    sessionId: string;
+    jobId: string;
+    terminalStatus: string | undefined;
+  }): { ok: true } | undefined;
+}
+
+/** The production acceptance guard, backed by the evidence-session + job repos + the uncollectable set. */
+export function makeEvidenceAcceptanceGuard(deps: {
+  sessions: {
+    findById(sessionId: string): { status: string } | undefined;
+    transitionIfOpen(sessionId: string, toStatus: string): { status: string } | undefined;
+  };
+  jobs: { findById(jobId: string): { status: string } | undefined };
+  uncollectableJobStatuses: ReadonlySet<string>;
+}): CheckpointAcceptanceGuard {
+  return {
+    claimForCheckpoint({ sessionId, jobId, terminalStatus }) {
+      // The session must still be open at acceptance time.
+      const session = deps.sessions.findById(sessionId);
+      if (!session || session.status !== "open") return undefined;
+      // The job must still be evidence-collectable (not settled / held / cancelled / failed / …).
+      const job = deps.jobs.findById(jobId);
+      if (job && deps.uncollectableJobStatuses.has(job.status)) return undefined;
+      // A terminal checkpoint transitions open→terminal atomically (CAS); a lost CAS ⇒ precondition failed.
+      if (terminalStatus) {
+        const transitioned = deps.sessions.transitionIfOpen(sessionId, terminalStatus);
+        if (!transitioned || transitioned.status !== terminalStatus) return undefined;
+      }
+      return { ok: true };
+    },
+  };
+}
+
 export interface GatewayReceiptStoreDeps {
   /** The store's drizzle DB — owns `.transaction()`. Must be the SAME connection the repos write through. */
   db: StoreDB;
@@ -209,15 +253,15 @@ export interface GatewayReceiptStoreDeps {
   /** Ed25519 signer. Defaults to the process-default gateway receipt signer. */
   signer?: GatewayReceiptSigner;
   /**
-   * Evidence-session repo (REQUIRED — round-6 A3/P1-2). record() transitions the session to a terminal
-   * state IN THE SAME transaction as an accepted terminal checkpoint, and (P1-2 re-audit) VERIFIES the
-   * write durably took effect — the returned row MUST report the terminal status, else the whole txn
-   * rolls back. This makes the money-path invariant a SERVICE guarantee, not an assumption about one
-   * caller's composition: a receipt + body can NEVER commit unless the terminal session state was
-   * actually persisted. Tests pass a stateful fake that returns the transitioned row (or a deliberately
-   * failing one to prove rollback); a no-op that silently drops the write now FAILS the transition check.
+   * Transaction-bound acceptance guard (REQUIRED — round-6 A3/P1-2 + round-7). record() calls it INSIDE
+   * its receipt/body transaction for every new acceptance: the session must still be `open`, the job
+   * still evidence-collectable, and a terminal checkpoint transitions open→terminal (CAS) — all atomic
+   * with the commit. If the precondition no longer holds the guard returns undefined and record() rolls
+   * the receipt + body back. This makes the money-path lifecycle invariant a SERVICE guarantee (robust to
+   * a future handler await and to multi-instance racing), not a stale route-level pre-check. Tests pass a
+   * pass-through guard (or a rejecting one to prove rollback); production uses makeEvidenceAcceptanceGuard.
    */
-  evidenceSessions: { setStatus(sessionId: string, status: string): { status: string } | undefined };
+  acceptanceGuard: CheckpointAcceptanceGuard;
 }
 
 export class GatewayReceiptStore {
@@ -226,9 +270,7 @@ export class GatewayReceiptStore {
   private readonly checkpointBodies: ICheckpointBodyRepository;
   private readonly sequenceStore: SessionSequenceStore;
   private readonly signer: GatewayReceiptSigner;
-  private readonly evidenceSessions: {
-    setStatus(sessionId: string, status: string): { status: string } | undefined;
-  };
+  private readonly acceptanceGuard: CheckpointAcceptanceGuard;
 
   constructor(deps: GatewayReceiptStoreDeps) {
     this.db = deps.db;
@@ -236,7 +278,7 @@ export class GatewayReceiptStore {
     this.checkpointBodies = deps.checkpointBodies;
     this.sequenceStore = deps.sequenceStore ?? sessionSequenceStore;
     this.signer = deps.signer ?? getDefaultGatewayReceiptSigner();
-    this.evidenceSessions = deps.evidenceSessions;
+    this.acceptanceGuard = deps.acceptanceGuard;
   }
 
   /** The signer's public key (hex) — for out-of-band verification / key publication. */
@@ -439,24 +481,24 @@ export class GatewayReceiptStore {
         const row = this.repo.insert(insertRow);
         // Receipt inserted FIRST, body SECOND: a body-insert throw rolls the receipt back.
         this.checkpointBodies.insert(bodyRow);
-        // ATOMIC terminal-state transition (round-6 P1-2): if this accepted checkpoint ENDS the run
-        // (execution_completed / fault_report), close the session IN THIS SAME transaction so a
-        // subsequent checkpoint is rejected at the route's `status !== "open"` gate. There is no await
-        // between the receipt/body inserts and this write ⇒ genuinely atomic.
-        //   P1-2 (re-audit): the transition is now MANDATORY + CHECKED. The returned row must report the
-        //   terminal status; if it is missing or wrong, we THROW — drizzle rolls the receipt AND body
-        //   back (no split-brain: a receipted terminal checkpoint can never commit with a non-terminal /
-        //   missing session state). This makes the invariant a SERVICE guarantee: a no-op that silently
-        //   drops the write fails this check instead of passing on the caller supplying a real repo.
+        // TRANSACTION-BOUND ACCEPTANCE PRECONDITION (round-6 P1-2 + round-7 re-audit). A genuinely new
+        // acceptance re-checks the lifecycle INSIDE this transaction — not relying on the route's earlier
+        // (stale under a future await / across instances) pre-check: the session must still be `open`, the
+        // job still evidence-collectable, and a terminal checkpoint transitions open→terminal (CAS). The
+        // guard does this atomically with the receipt/body inserts; if the precondition no longer holds it
+        // returns undefined and we THROW — drizzle rolls the receipt AND body back (no split-brain, no
+        // post-terminal / post-hold acceptance). A SERVICE guarantee robust to concurrency.
         const terminalStatus = TERMINAL_SESSION_STATUS[input.checkpointType];
-        if (terminalStatus) {
-          const transitioned = this.evidenceSessions.setStatus(input.sessionId, terminalStatus);
-          if (!transitioned || transitioned.status !== terminalStatus) {
-            throw new Error(
-              `gateway receipt record: terminal session transition failed for ${input.sessionId} ` +
-                `(expected ${terminalStatus}, got ${transitioned?.status ?? "no session row"})`,
-            );
-          }
+        const claim = this.acceptanceGuard.claimForCheckpoint({
+          sessionId: input.sessionId,
+          jobId: input.jobId,
+          terminalStatus,
+        });
+        if (!claim) {
+          throw new Error(
+            `gateway receipt record: checkpoint acceptance precondition failed for ${input.sessionId} ` +
+              `(session not open / job not evidence-collectable / terminal transition lost the CAS)`,
+          );
         }
         return row;
       });

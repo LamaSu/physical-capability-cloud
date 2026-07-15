@@ -66,4 +66,16 @@ export class EvidenceSessionRepository implements IEvidenceSessionRepository {
       .returning()
       .get();
   }
+
+  // Round-7 (re-audit): compare-and-set open→toStatus. The WHERE clause makes the transition atomic and
+  // conditional on `open`, so a concurrent terminal transition (or a finalize) cannot be overwritten and
+  // a post-terminal acceptance cannot re-open the session. Returns the row iff it transitioned.
+  transitionIfOpen(sessionId: string, toStatus: string) {
+    return this.db
+      .update(evidenceSessions)
+      .set({ status: toStatus })
+      .where(and(eq(evidenceSessions.sessionId, sessionId), eq(evidenceSessions.status, "open")))
+      .returning()
+      .get();
+  }
 }
