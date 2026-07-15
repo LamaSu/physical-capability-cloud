@@ -62,8 +62,8 @@ import {
 } from "@pcc/spec";
 import {
   getPublicArtifactForRender,
-  publicLookupThrottled,
   notePublicLookupFailure,
+  hashLookupKey,
 } from "../routes/artifacts.js";
 import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
 
@@ -1378,30 +1378,30 @@ export function registerMcpAppResources(server: McpServer): void {
       const raw = variables.slug;
       const slug = Array.isArray(raw) ? raw[0] : raw;
       const slugStr = typeof slug === "string" ? slug : String(slug ?? "");
-      // Anti-enumeration rate limit (directive 13). There is no per-caller IP at
-      // the MCP resource layer — key on the host session id when present, else a
-      // shared bucket. A throttled caller gets the SAME not-found view (no
-      // existence oracle) and no store lookup.
+      // Resolve FIRST (R4 PR4 / D13): a known-valid public|unlisted share link —
+      // an exact live slug OR a live legacy alias — is ALWAYS served, never
+      // suppressed by the limiter. getPublicArtifactForRender re-applies the
+      // active + public|unlisted gate, so an alias can never expose a private one.
+      const artifact = slugStr.length ? getPublicArtifactForRender(slugStr) : undefined;
+      if (artifact) {
+        const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
+        return uiResourceContents(
+          uri.toString(),
+          buildMcpAppDashboardHtmlForManifest(artifact.manifest, title),
+        );
+      }
+      // Miss — missing / retired / private / malformed / expired-alias ALL collapse
+      // to the SAME not-found view (no existence oracle). Record it against a
+      // per-SESSION hashed key; there is NO shared "mcp:anon" bucket (which would
+      // let one session's misses gate another's). A read with no session identity
+      // is simply not throttled — safe, since the lookup already ran and every
+      // miss is identical anyway.
       const sessionId =
         extra && typeof extra === "object" && extra !== null && "sessionId" in extra
           ? String((extra as { sessionId?: unknown }).sessionId ?? "")
           : "";
-      const rateKey = "mcp:" + (sessionId || "anon");
-      if (publicLookupThrottled(rateKey)) {
-        return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
-      }
-      const artifact = slugStr.length ? getPublicArtifactForRender(slugStr) : undefined;
-      if (!artifact) {
-        // Missing / retired / private ALL collapse to the SAME not-found view —
-        // the response never reveals whether a private artifact exists.
-        notePublicLookupFailure(rateKey);
-        return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
-      }
-      const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
-      return uiResourceContents(
-        uri.toString(),
-        buildMcpAppDashboardHtmlForManifest(artifact.manifest, title),
-      );
+      if (sessionId) notePublicLookupFailure(hashLookupKey("mcp-session", sessionId));
+      return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
     },
   );
 }
