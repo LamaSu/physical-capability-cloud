@@ -252,12 +252,18 @@ async function proxyToolCall(
   rawArguments: JsonObject,
   token: string | undefined,
   signal: AbortSignal,
+  readOnlySurface = false,
 ) {
   const proxyRequest = buildProxyRequest(tool, rawArguments);
   if ("error" in proxyRequest) return errorResult(proxyRequest.error);
 
   const headers = new Headers({ accept: "application/json" });
   if (token) headers.set("authorization", `Bearer ${token}`);
+  // The read-only /mcp/apps surface marks EVERY proxied call passive: a route
+  // that would otherwise record a side effect on a plain GET (e.g. the artifact
+  // recall's loadCount/updatedAt bump) MUST skip it. Defense-in-depth for the
+  // whole surface, not just get_dashboard — an accepted read never mutates.
+  if (readOnlySurface) headers.set("x-pcc-mcp-readonly", "1");
   if (proxyRequest.body !== undefined) {
     headers.set("content-type", "application/json");
   }
@@ -384,6 +390,7 @@ export async function dispatchToolCall(
   args: JsonObject,
   token: string | undefined,
   signal: AbortSignal,
+  readOnlySurface = false,
 ) {
   if (name === RENDER_DASHBOARD_TOOL_NAME) {
     return handleRenderDashboardTool(args);
@@ -398,8 +405,46 @@ export async function dispatchToolCall(
   if (!tool) {
     return errorResult(`Unknown PCC tool: ${name}`);
   }
-  return proxyToolCall(tool, args, token, signal);
+  return proxyToolCall(tool, args, token, signal, readOnlySurface);
 }
+
+/**
+ * The reviewed read-only app-surface proxy allowlist — EXPLICIT and
+ * effect-classified. A `GET` method proves only the transport verb, NOT the
+ * absence of server-side effects: GET `/api/artifacts/:id` recall bumps
+ * loadCount + updatedAt, and other GET tools do chain/IPFS reads (external
+ * network), poll/lease, or trigger snapshots. "read-only" is an EFFECT property,
+ * not a transport one, so the app surface admits a raw proxy tool ONLY if it is
+ * named in this set (GET remains required as belt-and-suspenders).
+ *
+ * Each entry was individually reviewed to be a passive local read: no
+ * counter/timestamp writes, no lazy inserts/initialisation, no lease/heartbeat/
+ * queue/trigger effects, no token consumption, no external-network or on-chain
+ * reads, no analytics/"last viewed" mutation. `get_dashboard`'s recall counter is
+ * suppressed FOR THIS SURFACE via the `x-pcc-mcp-readonly` passive header that the
+ * read-only dispatch sets (see proxyToolCall) and the recall route honours.
+ *
+ * Adding a tool here REQUIRES an individual effect review. The exact-set snapshot
+ * test in mcp-apps-readonly-surface.test.ts fails if this set changes, so a newly
+ * added GET proxy tool can NEVER enter the app surface automatically — it must be
+ * reviewed and added here with justification.
+ */
+export const READONLY_APP_PROXY_TOOLS: ReadonlySet<string> = new Set([
+  // Dashboard recall + discovery (the gen-UI core).
+  "get_dashboard", //      GET /api/artifacts/{idOrSlug} — passive via x-pcc-mcp-readonly
+  "search_dashboards", //  GET /api/artifacts
+  // Kernel discovery — KernelFacade DB reads, no default reputation enrichment.
+  "list_kernels", //       GET /api/kernels
+  "get_kernel", //         GET /api/kernels/{kernelId}
+  "get_kernel_devices", // GET /api/kernels/{kernelId}/devices
+  "get_kernel_jobs", //    GET /api/kernels/{kernelId}/jobs
+  // Job status — JobFacade DB reads.
+  "list_jobs", //          GET /api/jobs
+  "get_job", //            GET /api/jobs/{jobId}
+  // Capability discovery — static type/template reads.
+  "list_capability_types", // GET /api/capabilities/types
+  "search_capabilities", //   GET /api/capabilities/templates
+]);
 
 /**
  * The read-only app-surface allowlist — the SINGLE predicate enforced IDENTICALLY
@@ -413,11 +458,12 @@ export async function dispatchToolCall(
  *   2. a REGISTERED typed operation with `stateChanging === false` (today only
  *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
  *      state-changing op such as job.cancel → denied even once it registers).
- *   3. a raw proxy tool whose endpoint method is GET — read-only discovery/recall
- *      (this is what admits get_dashboard + search_dashboards, both GET).
+ *   3. a raw proxy tool that is BOTH GET AND in the reviewed, effect-classified
+ *      READONLY_APP_PROXY_TOOLS set above (GET alone is insufficient).
  * Excluded by falling through to false: every POST/PATCH/PUT/DELETE proxy tool
- * (save/fork/update_dashboard, escrow fund/release/dispute, …), any unregistered
- * or state-changing typed op, and any unknown name (method absent/unknown → deny).
+ * (save/fork/update_dashboard, escrow fund/release/dispute, …), every GET proxy
+ * tool NOT in the reviewed set (chain/IPFS reads, polls, snapshots, …), any
+ * unregistered or state-changing typed op, and any unknown name.
  */
 export function isReadOnlyAppTool(
   name: string,
@@ -429,7 +475,11 @@ export function isReadOnlyAppTool(
     return policy !== null && policy.stateChanging === false;
   }
   const tool = toolsByName.get(name);
-  return tool !== undefined && tool.endpoint.method === "GET";
+  return (
+    tool !== undefined &&
+    tool.endpoint.method === "GET" &&
+    READONLY_APP_PROXY_TOOLS.has(name)
+  );
 }
 
 /** A mounted Streamable-HTTP MCP surface. `readOnly` gates BOTH tools/list and
@@ -520,6 +570,7 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
       args,
       extra.authInfo?.token,
       extra.signal,
+      surface.readOnly,
     );
   });
 

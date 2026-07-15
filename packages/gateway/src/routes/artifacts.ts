@@ -678,9 +678,16 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
       const caller = resolveCaller(req);
 
       if (a && a.status !== "retired" && canRead(a, caller)) {
-        a.loadCount += 1;
-        a.updatedAt = new Date().toISOString();
-        saveArtifact(a);
+        // Passive read for the read-only MCP app surface (/mcp/apps): a recall
+        // proxied from there carries x-pcc-mcp-readonly and MUST have zero write
+        // effect (auditor: "read-only is an effect classification, not GET").
+        // The full surface + web recall still record the load — loadCount /
+        // updatedAt feed popularity ranking (computePopularity).
+        if (req.headers["x-pcc-mcp-readonly"] !== "1") {
+          a.loadCount += 1;
+          a.updatedAt = new Date().toISOString();
+          saveArtifact(a);
+        }
         return a;
       }
 
