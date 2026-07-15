@@ -335,6 +335,35 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
     expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
   });
 
+  it("round-6 A2: a MIDDLE checkpoint body deleted (receipt still present) → errored (fail closed)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]);
+    store.db.delete(schema.checkpointBodies).where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-2`)).run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored"); // body/receipt count mismatch
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
+  it("round-6 A2: a MIDDLE gateway receipt deleted (body still present) → errored (accepted chain incomplete)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]);
+    store.db.delete(schema.gatewayReceipts).where(eq(schema.gatewayReceipts.receiptId, `grcpt-${SESSION_ID}-2`)).run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored"); // receiptRows.length !== tip.lastSeq → incomplete chain
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
+  it("round-6 A2: a body RE-HOMED to another session (wrong sessionId) → errored (cannot re-attribute a body)", () => {
+    openSession();
+    seedChain([[{ a: 1 }], [{ b: 2 }], [{ c: 3 }]]);
+    // Move body 2 to a different session — findAllBySession(SESSION_ID) no longer returns it, so the
+    // body/receipt counts diverge and finalize fails closed (a body can't be silently re-attributed).
+    store.db.update(schema.checkpointBodies).set({ sessionId: "evs-other-session-0" }).where(eq(schema.checkpointBodies.id, `ckpt-${SESSION_ID}-2`)).run();
+    const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
+    expect(r.status).toBe("errored");
+    expect(store.repos.milestonePackages.findByJobMilestone(JOB, MI)).toBeUndefined();
+  });
+
   it("round-6 A3: finalize on an OPEN session (never terminalized) -> rejected terminal_state_missing", () => {
     openSession(); // session open, no terminal checkpoint accepted (here: no receipts at all)
     const r = pkgStore().finalize({ jobId: JOB, milestoneIndex: MI, now: NOW + 100 });
