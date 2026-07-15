@@ -10,7 +10,7 @@
  * GET  /api/evidence/:jobId          — Evidence bundle details for a job
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
 import { canonicalize } from "@pcc/spec";
@@ -41,6 +41,34 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
     message: result.error.message,
     ...(result.error.details ? { details: result.error.details } : {}),
   });
+}
+
+/**
+ * Round-6 A4 — privileged-caller gate for the LOW-LEVEL settlement primitives
+ * (POST /api/settlement/submit + /api/settlement/release). These accept
+ * caller-supplied settlement operations / oracle attestations and do NOT consult
+ * Step-6 evidence session/package state, so an ORDINARY provisioned agent (any
+ * valid /api/* API key, scopes ["*"]) must not be able to invoke them — only an
+ * internal/privileged caller (the keeper/oracle operator) holding the shared
+ * SETTLEMENT_ADMIN_TOKEN. Presented as `X-Settlement-Admin-Token`.
+ *
+ * FAILS CLOSED: if the token is unset the routes reject everything — a
+ * money-path-safe default. This does NOT disable automated settlement: the keeper
+ * releases via the release ACTIVITY (activities/escrow.ts) directly, not through
+ * this manual HTTP route (which the SettlementFacade supersedes). Mirrors the
+ * adminOk pattern in routes/waitlist.ts + routes/feedback.ts.
+ */
+function settlementAuthOk(req: FastifyRequest, reply: FastifyReply): boolean {
+  const token = process.env.SETTLEMENT_ADMIN_TOKEN;
+  if (!token || req.headers["x-settlement-admin-token"] !== token) {
+    reply.code(403).send({
+      error: "forbidden",
+      message:
+        "Low-level settlement APIs require the internal settlement token (X-Settlement-Admin-Token).",
+    });
+    return false;
+  }
+  return true;
 }
 
 export async function settlementRoutes(app: FastifyInstance) {
@@ -82,6 +110,8 @@ export async function settlementRoutes(app: FastifyInstance) {
       usdcValue?: string;
     };
   }>("/api/settlement/submit", async (req, reply) => {
+    // Round-6 A4: privileged-caller gate BEFORE any processing (even the batch-enabled check).
+    if (!settlementAuthOk(req, reply)) return;
     if (!isBatchEnabled()) {
       return reply.status(503).send({
         error: "batch_disabled",
@@ -155,6 +185,10 @@ export async function settlementRoutes(app: FastifyInstance) {
       attestation: OracleAttestation;
     };
   }>("/api/settlement/release", async (req, reply) => {
+    // Round-6 A4: privileged-caller gate — an ordinary provisioned agent must not invoke this
+    // low-level release primitive (it accepts a caller-supplied attestation without consulting
+    // Step-6 package state). The automated keeper uses the release ACTIVITY directly, not this route.
+    if (!settlementAuthOk(req, reply)) return;
     const body = req.body as {
       jobId?: string;
       milestoneIndex?: number;
