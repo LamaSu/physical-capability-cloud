@@ -8,15 +8,19 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   CallToolRequestSchema,
+  ErrorCode,
   isInitializeRequest,
   ListToolsRequestSchema,
+  McpError,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   buildRenderDashboardTool,
   enrichOnRampToolResult,
   handleRenderDashboardTool,
+  isMcpAppSurfaceAvailable,
   isOnRampUiTool,
+  MCP_APP_SURFACE_UNAVAILABLE_MESSAGE,
   onRampToolOutputSchema,
   onRampToolUiMeta,
   primeMcpAppAssets,
@@ -397,7 +401,63 @@ export async function dispatchToolCall(
   return proxyToolCall(tool, args, token, signal);
 }
 
-function createMcpServer(pack: AgentPackage): McpServer {
+/**
+ * The read-only app-surface allowlist — the SINGLE predicate enforced IDENTICALLY
+ * at BOTH `tools/list` (advertise only these) AND CallTool dispatch (a call to a
+ * non-allowlisted name errors, never proxies), so the surface cannot be bypassed
+ * by calling an un-advertised tool. Default-DENY: anything not positively matched
+ * below is excluded.
+ *
+ * Allowed:
+ *   1. render_pcc_dashboard — pure client-side manifest render (no server effect).
+ *   2. a REGISTERED typed operation with `stateChanging === false` (today only
+ *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
+ *      state-changing op such as job.cancel → denied even once it registers).
+ *   3. a raw proxy tool whose endpoint method is GET — read-only discovery/recall
+ *      (this is what admits get_dashboard + search_dashboards, both GET).
+ * Excluded by falling through to false: every POST/PATCH/PUT/DELETE proxy tool
+ * (save/fork/update_dashboard, escrow fund/release/dispute, …), any unregistered
+ * or state-changing typed op, and any unknown name (method absent/unknown → deny).
+ */
+export function isReadOnlyAppTool(
+  name: string,
+  toolsByName: Map<string, AgentPackageTool>,
+): boolean {
+  if (name === RENDER_DASHBOARD_TOOL_NAME) return true;
+  if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
+    const policy = getOperationPolicyByToolName(name);
+    return policy !== null && policy.stateChanging === false;
+  }
+  const tool = toolsByName.get(name);
+  return tool !== undefined && tool.endpoint.method === "GET";
+}
+
+/** A mounted Streamable-HTTP MCP surface. `readOnly` gates BOTH tools/list and
+ * CallTool dispatch to the isReadOnlyAppTool allowlist AND applies the prod domain
+ * gate; the full surface leaves the tool set + dispatch exactly as they were. */
+interface McpSurface {
+  mountPath: string;
+  readOnly: boolean;
+}
+
+/** The existing full agent/dev surface — every proxy tool + render + typed ops. */
+const FULL_MCP_SURFACE: McpSurface = { mountPath: "/mcp", readOnly: false };
+/** The read-only gen-UI surface — the isReadOnlyAppTool allowlist only. */
+const READONLY_APP_SURFACE: McpSurface = { mountPath: "/mcp/apps", readOnly: true };
+
+/** The `/mcp/apps` prod domain gate as a guard message (null = surface available). */
+function appSurfaceGuardMessage(): string | null {
+  return isMcpAppSurfaceAvailable() ? null : MCP_APP_SURFACE_UNAVAILABLE_MESSAGE;
+}
+
+/** Throw the JSON-RPC error the read-only app surface returns when it is disabled
+ * (prod + placeholder domain) — used on tools/list + CallTool for that surface. */
+function assertAppSurfaceAvailable(): void {
+  const message = appSurfaceGuardMessage();
+  if (message) throw new McpError(ErrorCode.InvalidRequest, message);
+}
+
+function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
     {
@@ -418,16 +478,22 @@ function createMcpServer(pack: AgentPackage): McpServer {
     },
   );
 
-  server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.server.setRequestHandler(ListToolsRequestSchema, async () => {
     // Raw proxy tools + the UI render tool + the dedicated typed-operation tools
     // (pcc.op.*). The typed tools are additive: they never replace or shadow a
     // raw tool, and only they route through the server-authorized policy handler.
-    tools: [
+    const tools = [
       ...pack.tools.map(toMcpTool),
       buildRenderDashboardTool(),
       ...typedOperationTools(),
-    ],
-  }));
+    ];
+    if (!surface.readOnly) return { tools };
+    // Read-only app surface: fail-closed prod domain gate FIRST, then advertise
+    // ONLY the isReadOnlyAppTool allowlist — the SAME predicate the dispatcher
+    // enforces below, so the advertised set and the callable set cannot diverge.
+    assertAppSurfaceAvailable();
+    return { tools: tools.filter((tool) => isReadOnlyAppTool(tool.name, toolsByName)) };
+  });
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // Coerce arguments exactly as the pre-#257 handler did (`?? {}`); the SDK
@@ -436,6 +502,18 @@ function createMcpServer(pack: AgentPackage): McpServer {
     // the restored contract (unknown tool → isError result, never a thrown
     // protocol error — directive 8) is unit-testable off-transport.
     const args = request.params.arguments ?? {};
+    if (surface.readOnly) {
+      // Fail-closed prod domain gate, then the SAME allowlist tools/list uses. A
+      // non-allowlisted (mutating) name returns a tool-level isError and NEVER
+      // reaches dispatchToolCall — so it can never proxy to the upstream write,
+      // even if the caller guessed an un-advertised tool name.
+      assertAppSurfaceAvailable();
+      if (!isReadOnlyAppTool(request.params.name, toolsByName)) {
+        return errorResult(
+          `Tool not available on the read-only PCC app surface: ${request.params.name}`,
+        );
+      }
+    }
     return dispatchToolCall(
       toolsByName,
       request.params.name,
@@ -445,7 +523,12 @@ function createMcpServer(pack: AgentPackage): McpServer {
     );
   });
 
-  registerMcpAppResources(server);
+  // The full surface registers the UI resources unchanged; the read-only app
+  // surface additionally gates every ui:// read behind the prod domain check.
+  registerMcpAppResources(
+    server,
+    surface.readOnly ? { surfaceGuard: appSurfaceGuardMessage } : undefined,
+  );
 
   return server;
 }
@@ -500,8 +583,17 @@ function sendJsonRpcError(
   );
 }
 
-/** Public Streamable HTTP MCP transport. Register before the gateway API auth gate. */
-export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * Register ONE Streamable HTTP MCP surface at `surface.mountPath`. Both the full
+ * agent/dev surface (`/mcp`) and the read-only gen-UI surface (`/mcp/apps`) share
+ * this plumbing; they differ only in the `surface` config, which createMcpServer
+ * uses to gate tools/list + CallTool + the ui:// reads. Keeping ONE registrar (vs
+ * duplicating the session boilerplate) means the two surfaces cannot drift.
+ */
+async function registerStreamableMcpSurface(
+  app: FastifyInstance,
+  surface: McpSurface,
+): Promise<void> {
   // Fail fast at BOOT if a mandatory MCP-App asset (pcc-ui.js / manifest.schema.json)
   // or the agent package is missing from the runtime image, rather than throwing
   // inside tools/list / resources/read at request time (directive 6). server.ts
@@ -511,8 +603,6 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
   loadAgentPackage();
 
   const sessions = new Map<string, McpSession>();
-
-  registerMcpAppHttpRoute(app);
 
   const closeSessions = async (entries: McpSession[]): Promise<void> => {
     await Promise.allSettled(entries.map(({ server }) => server.close()));
@@ -539,12 +629,12 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     await closeSessions([oldest[1]]);
   };
 
-  app.options("/mcp", async (_request, reply) => {
+  app.options(surface.mountPath, async (_request, reply) => {
     setCorsHeaders(reply);
     return reply.status(204).send();
   });
 
-  app.post<{ Body: unknown }>("/mcp", async (request, reply) => {
+  app.post<{ Body: unknown }>(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -556,7 +646,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     if (!session && !sessionId && isInitializeRequest(request.body)) {
       await reserveSessionSlot();
       const pack = loadAgentPackage();
-      const server = createMcpServer(pack);
+      const server = createMcpServer(pack, surface);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         enableJsonResponse: true,
@@ -602,7 +692,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get("/mcp", async (request, reply) => {
+  app.get(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -629,7 +719,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.delete("/mcp", async (request, reply) => {
+  app.delete(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -661,4 +751,22 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     sessions.clear();
     await closeSessions(activeSessions);
   });
+}
+
+/** Public Streamable HTTP MCP transport (the FULL agent/dev surface) at /mcp.
+ * Register before the gateway API auth gate. Behavior is unchanged from before
+ * the read-only surface was added — every proxy tool + render + typed ops. */
+export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+  // The plain-HTTP mirror of the render view is a fixed, surface-independent path,
+  // registered ONCE here so the second /mcp/apps mount never double-registers it.
+  registerMcpAppHttpRoute(app);
+  await registerStreamableMcpSurface(app, FULL_MCP_SURFACE);
+}
+
+/** Public, server-enforced READ-ONLY Streamable HTTP MCP surface at /mcp/apps —
+ * exposes ONLY the isReadOnlyAppTool allowlist, enforced at BOTH tools/list and
+ * CallTool dispatch, plus the prod domain gate (gates 5/6). Register before the
+ * gateway API auth gate, like /mcp. The full /mcp surface is left untouched. */
+export async function appsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
+  await registerStreamableMcpSurface(app, READONLY_APP_SURFACE);
 }

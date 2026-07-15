@@ -65,7 +65,7 @@ import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
-import { httpMcpRoutes } from "./mcp/http-mcp-server.js";
+import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
 import { initSigningKey } from "./signing-key.js";
@@ -396,8 +396,13 @@ export async function createGateway(port = 3200) {
   await app.register(wellKnownRoutes);
   // AEO/API/MCP/NLWeb discovery (public, before the API auth gate)
   await app.register(wellKnownAeoRoutes);
-  // Streamable HTTP MCP transport (public, before the API auth gate)
+  // Streamable HTTP MCP transport — the FULL agent/dev surface (public, before
+  // the API auth gate)
   await app.register(httpMcpRoutes);
+  // Server-enforced READ-ONLY MCP surface at /mcp/apps — only read-only tools are
+  // advertised AND dispatchable (the read-only gen-UI launch surface; public,
+  // before the API auth gate)
+  await app.register(appsHttpMcpRoutes);
   // Second MCP surface — read-only PCC documentation as resources + a
   // search_docs tool (public, before the API auth gate; docs are public)
   await app.register(docsHttpMcpRoutes);
