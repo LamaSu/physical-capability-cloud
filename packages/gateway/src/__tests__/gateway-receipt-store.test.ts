@@ -58,6 +58,25 @@ function input(
   };
 }
 
+/**
+ * A stateful evidence-session fake for the receipt-store unit tests (round-6 P1-2). It RECORDS the
+ * requested transition and returns the row-shaped `{ status }` the store checks — modelling a working
+ * repository, NOT a no-op that silently drops the write. `statusOf` lets a test assert the transition
+ * was actually requested. The P1-2 rollback tests use deliberately-failing inline fakes instead.
+ */
+function makeSessionsFake() {
+  const statuses = new Map<string, string>();
+  return {
+    setStatus(sessionId: string, status: string) {
+      statuses.set(sessionId, status);
+      return { status };
+    },
+    statusOf(sessionId: string): string | undefined {
+      return statuses.get(sessionId);
+    },
+  };
+}
+
 describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
   let store: Store;
   let sequenceStore: SessionSequenceStore;
@@ -73,7 +92,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
   });
@@ -224,7 +243,7 @@ describe("GatewayReceiptStore (§8.3 transactional invariant)", () => {
       // Never reached: the receipt insert throws FIRST inside the txn (real body repo is fine here).
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
 
@@ -277,7 +296,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore: seedSeq,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
     let prev: string | null = null;
@@ -298,7 +317,7 @@ describe("GatewayReceiptStore — rehydrate-on-first-touch (§1)", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
     return { svc, sequenceStore };
@@ -476,7 +495,7 @@ describe("GatewayReceiptStore — H1 DB-authoritative idempotency / equivocation
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
   });
@@ -580,7 +599,7 @@ describe("GatewayReceiptStore — R-14b defensive input validation", () => {
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
   });
@@ -645,7 +664,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: store.repos.checkpointBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
   });
@@ -667,7 +686,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
       repo: store.repos.gatewayReceipts,
       checkpointBodies: throwingBodies,
       sequenceStore,
-      evidenceSessions: { setStatus() {} }, // round-6 A3: receipt-store unit test — no lifecycle exercised
+      evidenceSessions: makeSessionsFake(), // round-6 A3/P1-2: stateful session fake (records + returns the transition)
       signer,
     });
 
@@ -681,6 +700,61 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
     expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
     // The in-memory accepted chain did NOT advance.
     expect(sequenceStore.hasSession("sess-1")).toBe(false);
+  });
+
+  // ── P1-2 (re-audit): the terminal-state transition is a CHECKED, rollback-coupled service invariant ──
+  function svcWith(sessions: { setStatus(id: string, s: string): { status: string } | undefined }) {
+    return new GatewayReceiptStore({
+      db: store.db,
+      repo: store.repos.gatewayReceipts,
+      checkpointBodies: store.repos.checkpointBodies,
+      sequenceStore,
+      evidenceSessions: sessions,
+      signer,
+    });
+  }
+
+  it("P1-2: a terminal checkpoint whose session transition returns NO row → errored, receipt+body rolled back, no advance", () => {
+    const r = svcWith({ setStatus: () => undefined }).record(
+      input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
+    );
+    expect(r.status).toBe("errored");
+    if (r.status === "errored") expect(r.error.message).toContain("terminal session transition failed");
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
+    expect(sequenceStore.hasSession("sess-1")).toBe(false);
+  });
+
+  it("P1-2: a terminal checkpoint whose setStatus THROWS → errored, receipt+body rolled back", () => {
+    const r = svcWith({
+      setStatus: () => {
+        throw new Error("simulated session write failure");
+      },
+    }).record(input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "fault_report" }));
+    expect(r.status).toBe("errored");
+    if (r.status === "errored") expect(r.error.message).toContain("simulated session write failure");
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeUndefined();
+  });
+
+  it("P1-2: a terminal checkpoint whose setStatus reports the WRONG resulting status → errored, rolled back", () => {
+    const r = svcWith({ setStatus: () => ({ status: "open" }) }).record(
+      input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
+    );
+    expect(r.status).toBe("errored");
+    if (r.status === "errored") expect(r.error.message).toContain("terminal session transition failed");
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeUndefined();
+  });
+
+  it("P1-2: a terminal checkpoint with a WORKING session repo → receipt + body commit AND the transition is recorded", () => {
+    const sessions = makeSessionsFake();
+    const r = svcWith(sessions).record(
+      input({ seq: 1, checkpointHash: "ht", prevCheckpointHash: null, checkpointType: "execution_completed" }),
+    );
+    expect(r.status).toBe("accepted");
+    expect(store.repos.gatewayReceipts.findById("grcpt-sess-1-1")).toBeDefined();
+    expect(store.repos.checkpointBodies.findBySessionSeq("sess-1", 1)).toBeDefined();
+    expect(sessions.statusOf("sess-1")).toBe("terminal_success"); // execution_completed → terminal_success
   });
 
   it("accept persists the receipt AND its checkpoint body atomically; exact replay → idempotent (no 2nd row)", () => {

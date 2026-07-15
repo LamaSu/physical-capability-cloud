@@ -209,14 +209,15 @@ export interface GatewayReceiptStoreDeps {
   /** Ed25519 signer. Defaults to the process-default gateway receipt signer. */
   signer?: GatewayReceiptSigner;
   /**
-   * Evidence-session repo (REQUIRED — round-6 A3). record() transitions the session to a terminal
-   * state IN THE SAME transaction as an accepted terminal checkpoint (round-6 P1-2), so a subsequent
-   * checkpoint is rejected at the route's `status !== "open"` gate AND finalize can REQUIRE a terminal
-   * state (a package can never be minted from a never-terminalized session). Making this mandatory
-   * moves the money-path invariant into the SERVICE rather than a single route composition. Tests that
-   * do not exercise the session lifecycle pass a no-op `{ setStatus() {} }`.
+   * Evidence-session repo (REQUIRED — round-6 A3/P1-2). record() transitions the session to a terminal
+   * state IN THE SAME transaction as an accepted terminal checkpoint, and (P1-2 re-audit) VERIFIES the
+   * write durably took effect — the returned row MUST report the terminal status, else the whole txn
+   * rolls back. This makes the money-path invariant a SERVICE guarantee, not an assumption about one
+   * caller's composition: a receipt + body can NEVER commit unless the terminal session state was
+   * actually persisted. Tests pass a stateful fake that returns the transitioned row (or a deliberately
+   * failing one to prove rollback); a no-op that silently drops the write now FAILS the transition check.
    */
-  evidenceSessions: { setStatus(sessionId: string, status: string): unknown };
+  evidenceSessions: { setStatus(sessionId: string, status: string): { status: string } | undefined };
 }
 
 export class GatewayReceiptStore {
@@ -225,7 +226,9 @@ export class GatewayReceiptStore {
   private readonly checkpointBodies: ICheckpointBodyRepository;
   private readonly sequenceStore: SessionSequenceStore;
   private readonly signer: GatewayReceiptSigner;
-  private readonly evidenceSessions: { setStatus(sessionId: string, status: string): unknown };
+  private readonly evidenceSessions: {
+    setStatus(sessionId: string, status: string): { status: string } | undefined;
+  };
 
   constructor(deps: GatewayReceiptStoreDeps) {
     this.db = deps.db;
@@ -438,13 +441,23 @@ export class GatewayReceiptStore {
         this.checkpointBodies.insert(bodyRow);
         // ATOMIC terminal-state transition (round-6 P1-2): if this accepted checkpoint ENDS the run
         // (execution_completed / fault_report), close the session IN THIS SAME transaction so a
-        // subsequent checkpoint is rejected at the route's `status !== "open"` gate. There is no
-        // await between the receipt/body inserts and this write ⇒ genuinely atomic (a crash cannot
-        // leave a receipted terminal checkpoint with an `open` session). evidenceSessions is a
-        // REQUIRED dep (round-6 A3), so the transition always fires for a terminal checkpoint — the
-        // invariant no longer depends on the caller remembering to wire it.
+        // subsequent checkpoint is rejected at the route's `status !== "open"` gate. There is no await
+        // between the receipt/body inserts and this write ⇒ genuinely atomic.
+        //   P1-2 (re-audit): the transition is now MANDATORY + CHECKED. The returned row must report the
+        //   terminal status; if it is missing or wrong, we THROW — drizzle rolls the receipt AND body
+        //   back (no split-brain: a receipted terminal checkpoint can never commit with a non-terminal /
+        //   missing session state). This makes the invariant a SERVICE guarantee: a no-op that silently
+        //   drops the write fails this check instead of passing on the caller supplying a real repo.
         const terminalStatus = TERMINAL_SESSION_STATUS[input.checkpointType];
-        if (terminalStatus) this.evidenceSessions.setStatus(input.sessionId, terminalStatus);
+        if (terminalStatus) {
+          const transitioned = this.evidenceSessions.setStatus(input.sessionId, terminalStatus);
+          if (!transitioned || transitioned.status !== terminalStatus) {
+            throw new Error(
+              `gateway receipt record: terminal session transition failed for ${input.sessionId} ` +
+                `(expected ${terminalStatus}, got ${transitioned?.status ?? "no session row"})`,
+            );
+          }
+        }
         return row;
       });
     } catch (err) {
