@@ -793,6 +793,73 @@ describe("evidence-async endpoints (§8.5 step 6)", () => {
       // The committed receipt is untouched — exactly one row remains.
       expect(getStore().repos.gatewayReceipts.findAllBySession(sessionId)).toHaveLength(1);
     });
+
+    // ── P1-1 (round-6 re-audit): a committed replay is verified at receipt.acceptedAt, not retry time ──
+    it("P1-1: exact terminal replay AFTER delegation expiry → 200 idempotent (verified at acceptedAt)", async () => {
+      const { jobId, del, sessionId } = await begin(); // delegation ttl 300s
+      const now = Math.floor(Date.now() / 1000);
+      const url = `/api/jobs/${jobId}/evidence/checkpoints`;
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      expect((await app.inject({ method: "POST", url, payload: c1.body })).statusCode).toBe(201); // acceptedAt ~= now
+      // Advance the gateway clock PAST the delegation window (300s). Without the fix the replay would
+      // be re-verified at this expired retry time → 403; with the fix it verifies at acceptedAt → 200.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((now + 100_000) * 1000);
+      const retry = await app.inject({ method: "POST", url, payload: c1.body });
+      vi.useRealTimers();
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json().idempotent).toBe(true);
+      expect(getStore().repos.gatewayReceipts.findAllBySession(sessionId)).toHaveLength(1);
+    });
+
+    it("P1-1: a genuinely NEW checkpoint first submitted AFTER expiry → 403 (new acceptances stay expiry-gated)", async () => {
+      const { jobId, del, sessionId } = await begin();
+      const now = Math.floor(Date.now() / 1000);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((now + 100_000) * 1000);
+      // No committed receipt at seq 1 → verified at request-entry (now, expired) → rejected.
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ a: 1 }], checkpointType: "execution_started", sessionPrivateKey: del.sessionPrivateKey });
+      const res = await app.inject({ method: "POST", url: `/api/jobs/${jobId}/evidence/checkpoints`, payload: c1.body });
+      vi.useRealTimers();
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("checkpoint_verification_failed");
+    });
+
+    it("P1-1: DIFFERENT content at the committed seq AFTER expiry → 409 equivocation (not masked as 403)", async () => {
+      const { jobId, del, sessionId } = await begin();
+      const now = Math.floor(Date.now() / 1000);
+      const url = `/api/jobs/${jobId}/evidence/checkpoints`;
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      expect((await app.inject({ method: "POST", url, payload: c1.body })).statusCode).toBe(201);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((now + 100_000) * 1000);
+      // A committed receipt exists → verified at acceptedAt (valid) → record() detects the fork; the
+      // equivocation must NOT be masked by a spurious 403-expired.
+      const fork = signCheckpoint({ sessionId, seq: 1, createdAt: now + 1, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      const equiv = await app.inject({ method: "POST", url, payload: fork.body });
+      vi.useRealTimers();
+      expect(equiv.statusCode).toBe(409);
+      expect(equiv.json().error).toBe("equivocation");
+    });
+
+    it("P1-1: exact terminal replay after the session was REVOKED post-acceptance → 200 idempotent", async () => {
+      const { jobId, del, sessionId } = await begin(); // delegation still valid through now+300
+      const now = Math.floor(Date.now() / 1000);
+      const url = `/api/jobs/${jobId}/evidence/checkpoints`;
+      const c1 = signCheckpoint({ sessionId, seq: 1, createdAt: now, prevCheckpointHash: null, events: [{ done: true }], checkpointType: "execution_completed", sessionPrivateKey: del.sessionPrivateKey });
+      expect((await app.inject({ method: "POST", url, payload: c1.body })).statusCode).toBe(201); // acceptedAt ~= now
+      // Revoke the delegation AFTER acceptance (revokedAt = now+50, i.e. AFTER the receipt's acceptedAt).
+      sessionRevocationStore.revoke(del.sessionKey.sessionId, now + 50);
+      // Retry at now+100 (delegation still un-expired, but the revocation is now in effect). Without the
+      // fix the replay is re-checked at retry time → session_revoked → 403; with the fix it is checked at
+      // acceptedAt (before the revocation) → 200 idempotent. The checkpoint was VALID when receipted.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime((now + 100) * 1000);
+      const retry = await app.inject({ method: "POST", url, payload: c1.body });
+      vi.useRealTimers();
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json().idempotent).toBe(true);
+    });
   });
 
   // ─── finalize ────────────────────────────────────────────────────────────

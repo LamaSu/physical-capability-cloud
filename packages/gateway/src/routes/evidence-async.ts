@@ -653,6 +653,13 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       checkpointContent({ sessionId, seq, createdAt, prevCheckpointHash, eventsRoot, checkpointType }),
     );
     const checkpointHash = `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+    // P1-1 (round-6 re-audit): a committed checkpoint's validity is FIXED at the time the gateway
+    // RECEIPTED it (§8.4-A) — later aggregation needs no live key. So an EXACT replay must be verified
+    // against the receipt's trusted `acceptedAt`, NOT the retry-time clock: otherwise a lost-response
+    // retry after the delegation expired (or the session was revoked post-acceptance) would fail
+    // verification even though the checkpoint was valid when accepted. A genuinely NEW acceptance (no
+    // committed row at this seq) is still verified at request-entry time (`effectiveEvidenceTime`).
+    const verificationTime = committedReceipt ? committedReceipt.acceptedAt : effectiveEvidenceTime;
     const verify = verifyCheckpoint({
       sessionKey,
       parentPublicKey,
@@ -660,7 +667,7 @@ export async function evidenceAsyncRoutes(app: FastifyInstance): Promise<void> {
       canonicalBytes: new TextEncoder().encode(canonical),
       signatureHex,
       checkpointType,
-      effectiveEvidenceTime,
+      effectiveEvidenceTime: verificationTime,
       revocations: sessionRevocationStore.list(),
     });
     if (!verify.ok) {
