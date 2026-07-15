@@ -104,11 +104,14 @@ export interface FinalMilestonePackage {
   packageId: string; // "fmp-<jobId>-<milestoneIndex>"
   jobId: string;
   milestoneIndex: number;
-  sessionId: string;
+  /** The deterministic evidence session id (evs-<jobId>-<milestoneIndex>). Round-6 B5: renamed from
+   *  `sessionId` to reconcile with the step-10 spec; distinct from `delegationSessionId` below. */
+  evidenceSessionId: string;
   /** Accepted checkpoint hashes in seq order — equals the gateway's own accepted set. */
   acceptedCheckpointHashes: string[];
-  /** Provenance: the receipts attesting each hash (seq order). */
-  receiptIds: string[];
+  /** Provenance: the gateway receipts attesting each hash (seq order). Round-6 B5: renamed from
+   *  `receiptIds` to reconcile with the step-10 spec. */
+  gatewayReceiptIds: string[];
   /** MerkleRoot(acceptedCheckpointHashes) (§3.3, §8.4-B-2). */
   evidenceRoot: string;
   /** The receipted hash of the terminal completion checkpoint (the last accepted checkpoint). */
@@ -404,9 +407,9 @@ export class MilestonePackageStore {
       packageId,
       jobId,
       milestoneIndex,
-      sessionId,
+      evidenceSessionId: sessionId, // round-6 B5: renamed field (value is still the evidence session id)
       acceptedCheckpointHashes,
-      receiptIds,
+      gatewayReceiptIds: receiptIds, // round-6 B5: renamed field (value is still the gateway receipt ids)
       evidenceRoot,
       terminalCheckpointHash: lastReceipt.checkpointHash,
       delegationSessionId: session.delegationSessionId ?? null,

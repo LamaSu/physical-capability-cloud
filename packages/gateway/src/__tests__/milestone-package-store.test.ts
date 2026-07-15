@@ -162,7 +162,7 @@ describe("MilestonePackageStore.finalize (§2.3 / §8.4-B)", () => {
       // packageHash is the canonical-sha256 of the returned package (content-addressed).
       expect(r.packageHash).toBe(canonicalSha256(r.package));
       expect(r.package.packageId).toBe(`fmp-${JOB}-${MI}`);
-      expect(r.package.receiptIds).toHaveLength(3);
+      expect(r.package.gatewayReceiptIds).toHaveLength(3);
       // provenance = first/last accepted receipt times.
       expect(r.package.evidenceTimeProvenance.kind).toBe("gateway-receipt-points");
       expect(r.package.evidenceTimeProvenance.firstAcceptedAt).toBe(NOW + 0);
