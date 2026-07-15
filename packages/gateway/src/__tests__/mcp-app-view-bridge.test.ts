@@ -143,7 +143,9 @@ describe("[bridge] runDashboardViewBoot wires window.__PCC_HOST_BRIDGE__.callOpe
     const { win, posted, deliver } = makeWin();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     runDashboardViewBoot(win as any, STUB_KIT);
+    // Strict lifecycle: init result -> tool-input -> tool-result mounts + wires the bridge.
     deliver({ jsonrpc: "2.0", id: posted[0].id, result: { protocolVersion: "2026-01-26" } });
+    deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } });
     deliver(toolResult({ manifest: manifestFor("Ops", [{ windows: [{ kind: "note", text: "hi" }] }]) }));
 
     const bridge = (win as { __PCC_HOST_BRIDGE__?: { callOperation?: (id: string, a: unknown) => Promise<unknown> } })
