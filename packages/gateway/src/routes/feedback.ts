@@ -155,17 +155,22 @@ function redactClamp(v: unknown, max: number): string | null {
   return clampStr(redactSecrets(bounded), max);
 }
 // Path-like fields (endpoint / logs[].path / page): drop any query string first —
-// that's where a `?api_key=…` would hide — then redact + clamp (review #1).
+// that's where a `?api_key=…` would hide — then redact + clamp (review #1). The input
+// is bounded to PRE_REDACT_MAX BEFORE scanning for the separator so a huge value isn't
+// fully scanned/split on this public route (review r3 #3).
 function pathClamp(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
-  return redactClamp(v.split("?")[0], max);
+  const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
+  const q = bounded.indexOf("?");
+  return redactClamp(q >= 0 ? bounded.slice(0, q) : bounded, max);
 }
-// HTTP method (top-level or a logs step). A real method is short uppercase alpha; a
-// value that isn't one (e.g. a secret with separators/digits) is dropped rather than
-// persisted unredacted (review #1 — method fields bypassed the scrubber).
+// The HTTP methods PCC uses. `method` is the verb the agent hit — always one of these;
+// anything else (incl. a pure-alpha secret like "PASSWORD") is dropped, not persisted.
+const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 function clampMethod(v: unknown): string | null {
   const m = clampStr(v, 16);
-  return m && /^[A-Za-z]{2,10}$/.test(m) ? m.toUpperCase() : null;
+  const upper = m ? m.toUpperCase() : null;
+  return upper && HTTP_METHODS.has(upper) ? upper : null;
 }
 
 interface LogEntry {
@@ -277,10 +282,14 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const severityRaw = String(b.severity ?? "").trim().toLowerCase();
     const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
 
-    const email = redactClamp(b.email, 256);
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // Validate the ORIGINAL address, then drop it if redaction would alter it: a
+    // secret-shaped local part (e.g. <64hex>@x.com) must not be stored as a mangled,
+    // reply-unusable "[redacted-hex]@x.com" that still passes the validator (r3 #4).
+    const emailRaw = clampStr(b.email, 256);
+    if (emailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }
+    const email = emailRaw && redactSecrets(emailRaw) === emailRaw ? emailRaw : null;
 
     const rec = {
       id: rid("fb"),
@@ -319,10 +328,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
     // avoids `|`-delimiter collisions (review #4). Prefer an authenticated principal
     // (apiKeyId/userId) so users behind one NAT/proxy IP don't cross-suppress each
     // other; fall back to IP for cold, unauthenticated agents (review #2).
-    const principal =
-      (req as unknown as { apiKeyId?: string }).apiKeyId ??
-      (req as unknown as { userId?: string }).userId ??
-      req.ip;
+    const apiKeyId = (req as unknown as { apiKeyId?: string }).apiKeyId;
+    const userId = (req as unknown as { userId?: string }).userId;
+    // Tag the principal by namespace so an apiKeyId and a userId with the same string
+    // value (or an empty/initialized id) can't collapse into one dedup identity (r3 #5).
+    const principal: [string, string] = apiKeyId
+      ? ["apiKey", apiKeyId]
+      : userId
+        ? ["user", userId]
+        : ["ip", req.ip];
     const dedupKey = createHash("sha256")
       .update(JSON.stringify([principal, rec.endpoint ?? "", rec.errorCode ?? "", rec.summary]))
       .digest("hex");

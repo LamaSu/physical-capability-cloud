@@ -55,6 +55,15 @@ describe("redactSecrets", () => {
     expect(redactSecrets(prose)).toBe(prose); // 0xdeadbeef is 8 hex — not a key
   });
 
+  it("redacts a key adjacent to underscores / word chars — not shielded by \\b (review r3 #1)", () => {
+    const hex = "0x" + "f".repeat(64);
+    const out = redactSecrets(`trace_${hex}_suffix`);
+    expect(out).not.toContain("f".repeat(64)); // \b would have missed this; lookarounds catch it
+    expect(out).toContain("[redacted-hex]");
+    // pcc key embedded right after an underscore
+    expect(redactSecrets("prefix_pcc_live_SECRETBODY99")).not.toContain("SECRETBODY99");
+  });
+
   it("is idempotent on already-redacted text", () => {
     const once = redactSecrets("pcc_live_SECRETSECRET");
     expect(redactSecrets(once)).toBe(once);

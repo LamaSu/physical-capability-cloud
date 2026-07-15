@@ -254,15 +254,24 @@ describe("POST /api/feedback (public)", () => {
     expect(JSON.stringify(rec)).toContain("[redacted-hex]");
   });
 
-  it("keeps a real HTTP method (normalized) + a public wallet address", async () => {
-    await app.inject({
-      method: "POST",
-      url: "/api/feedback",
-      payload: { summary: "normal report", method: "post", walletAddress: "0x" + "b".repeat(40) },
-    });
-    const rec = (await adminItems()).items[0];
-    expect(rec.method).toBe("POST"); // validated + upper-cased
-    expect(rec.walletAddress).toBe("0x" + "b".repeat(40)); // public 40-hex address survives
+  it("keeps a real HTTP verb (normalized) but drops a pure-alpha non-verb (review r3 #2)", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "ok", method: "post", walletAddress: "0x" + "b".repeat(40) } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "not a verb", method: "PASSWORD" } });
+    const items = (await adminItems()).items;
+    const ok = items.find((i) => i.summary === "ok");
+    const bad = items.find((i) => i.summary === "not a verb");
+    expect(ok.method).toBe("POST"); // allowlisted verb, upper-cased
+    expect(ok.walletAddress).toBe("0x" + "b".repeat(40)); // public address survives
+    expect(bad.method).toBeNull(); // "PASSWORD" is alpha but not a verb → dropped
+  });
+
+  it("drops an email whose local part is a secret shape, keeps a normal one (review r3 #4)", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "real email", email: "dev@example.com" } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "secret email", email: "a".repeat(64) + "@x.com" } });
+    const items = (await adminItems()).items;
+    expect(items.find((i) => i.summary === "real email").email).toBe("dev@example.com");
+    // a <64hex>@x.com must not be stored as a mangled "[redacted-hex]@x.com"
+    expect(items.find((i) => i.summary === "secret email").email).toBeNull();
   });
 
   it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
