@@ -52,8 +52,12 @@ export interface CdpWallet {
   smartAccount: boolean;
   /** Who controls the signing key. The server-managed createWallet() only mints
    *  "server-test-only" (Base Sepolia) or "treasury"; "user-owned" requires the
-   *  embedded/user-auth flow (P1). */
+   *  embedded/user-auth flow (P1) and is recorded via registerUserOwnedWallet(). */
   custodyMode: WalletCustodyMode;
+  /** Non-secret reference to the user's auth identity (e.g. CDP embedded-wallet user id).
+   *  Present only for "user-owned" wallets. This is an identifier, NOT signing material —
+   *  PCC still holds no key and cannot sign for the address. */
+  authProviderRef?: string;
   createdAt: string;
 }
 
