@@ -11,10 +11,15 @@
  * effect. The registry itself IS the D10 allowlist: an operation not registered
  * here cannot be invoked (there is no fall-through to the raw 256-tool proxy).
  *
- * Scope (user decision 2026-07-14): register ONLY `capability.request_quote`
- * (approval `none`) and `job.cancel` (approval `standard`). The `financial`
- * approval CLASS is defined and unit-tested but NO financial operation is
- * registered — escrow is deferred to a dedicated money-path PR.
+ * Scope (re-audit #2 hardening, 2026-07-14): register ONLY the read-only
+ * `capability.request_quote` (approval `none`). `job.cancel` (approval
+ * `standard`, state-changing) is DEFINED + retained (exported below) but NOT
+ * registered — its ownership check is sound only once VERIFIED operator identity
+ * exists, and today `/api/auth/provision` issues a public wildcard key against a
+ * caller-asserted operatorId (re-audit blocker 1). It re-registers when the
+ * authority-model PR lands. The `financial` approval CLASS is defined and
+ * unit-tested but NO financial operation is registered — escrow is deferred to a
+ * dedicated money-path PR.
  *
  * Auth model (design: ai/research/pcc-genui-r4pr2-design.md §1/§3c): the host
  * connector carries the user's PCC bearer on the `/mcp` connection; the handler
@@ -84,6 +89,17 @@ export interface DashboardOperationPolicy<
   /** The dedicated `pcc.op.<operationId>` MCP tool a host calls. */
   toolName: string;
   approval: ApprovalClass;
+  /**
+   * Whether invoking this operation CHANGES SERVER STATE. Drives the tools/list
+   * exposure (typedOperationToolFor): a state-changing op is HIDDEN from the model
+   * (`_meta.ui.visibility: ["app"]`) and annotated `readOnlyHint:false,
+   * destructiveHint:true, openWorldHint:false` — it is reachable ONLY through the
+   * host-mediated, user-approved MCP-App component, never model-callable. A
+   * read-only op (a pure pricing calc) stays model-visible with `readOnlyHint:true,
+   * destructiveHint:false`. So `job.cancel`, when re-registered later, is
+   * automatically app-only + destructive without any tools/list change.
+   */
+  stateChanging: boolean;
   /** MCP tool description (shown in tools/list). */
   description: string;
   /** JSON Schema for the pcc.op.* tool's arguments. */
@@ -153,10 +169,12 @@ interface RequestQuoteArgs extends Record<string, unknown> {
   capabilityId?: string;
 }
 
-const requestQuotePolicy: DashboardOperationPolicy<RequestQuoteArgs> = {
+export const requestQuotePolicy: DashboardOperationPolicy<RequestQuoteArgs> = {
   operationId: "capability.request_quote",
   toolName: `${TYPED_OP_TOOL_PREFIX}capability.request_quote`,
   approval: "none",
+  // Pure pricing calculation — no funds move, nothing is created. Model-visible.
+  stateChanging: false,
   description:
     "Price a configured PCC capability (typed operation). Returns the itemized " +
     "quote for the given capability type + selections. Pure calculation — no " +
@@ -253,10 +271,13 @@ interface JobCancelArgs extends Record<string, unknown> {
   jobId: string;
 }
 
-const jobCancelPolicy: DashboardOperationPolicy<JobCancelArgs> = {
+export const jobCancelPolicy: DashboardOperationPolicy<JobCancelArgs> = {
   operationId: "job.cancel",
   toolName: `${TYPED_OP_TOOL_PREFIX}job.cancel`,
   approval: "standard",
+  // Mutates a job's status → state-changing. Retained but NOT registered (see the
+  // registry note below); when re-registered it is auto app-only + destructive.
+  stateChanging: true,
   description:
     "Cancel one of YOUR PCC jobs (typed operation). The target status is fixed " +
     "to 'cancelled' by the server; the caller supplies only the jobId. The " +
@@ -351,7 +372,13 @@ function register(policy: DashboardOperationPolicy<never>): void {
 }
 
 register(requestQuotePolicy as unknown as DashboardOperationPolicy<never>);
-register(jobCancelPolicy as unknown as DashboardOperationPolicy<never>);
+// job.cancel is intentionally NOT registered (re-audit #2 blocker 1). `/api/auth/
+// provision` is public and issues a wildcard key against a caller-asserted
+// operatorId, so an attacker could provision a key claiming a victim's operatorId
+// and job.cancel would authorize on `kernel.operatorAddress === principal.operatorId`.
+// The policy code is retained (exported jobCancelPolicy) so it re-registers as-is
+// once verified identity + scopes exist. Until then the ONLY registered typed op is
+// the read-only capability.request_quote, which has no ownership dependency.
 // The `financial` approval class is DEFINED above and exercised by unit tests via
 // buildApprovalDescription, but NO financial operation is registered here — money
 // paths (escrow release/dispute) ship in a separate, independently-reviewed PR.
@@ -394,18 +421,37 @@ export function registeredOperationIds(): string[] {
   return [...REGISTRY.keys()];
 }
 
-/** The MCP `Tool` definitions for the registered typed operations, advertised on
- *  tools/list ALONGSIDE (never replacing) the raw proxy tools. */
-export function typedOperationTools(): Tool[] {
-  return [...REGISTRY.values()].map((policy) => ({
+/**
+ * The MCP `Tool` for one typed operation, with visibility + annotations DRIVEN by
+ * `policy.stateChanging` (re-audit #2 blocker 2):
+ *   - state-changing → `_meta.ui.visibility: ["app"]` (hidden from the model —
+ *     invoked ONLY through the host-mediated, user-approved MCP-App component) plus
+ *     `annotations: { readOnlyHint:false, destructiveHint:true, openWorldHint:false }`.
+ *   - read-only → model-visible (no `_meta.ui.visibility`), `readOnlyHint:true,
+ *     destructiveHint:false, openWorldHint:false`.
+ * Exported so both shapes are unit-testable even while `job.cancel` is unregistered.
+ */
+export function typedOperationToolFor(policy: DashboardOperationPolicy): Tool {
+  const tool: Tool = {
     name: policy.toolName,
     description: policy.description,
     inputSchema: policy.inputSchema as unknown as Tool["inputSchema"],
     annotations: {
-      // request_quote is read-only; job.cancel mutates but is not "destructive"
-      // in the DELETE sense (it is a reversible status transition).
-      readOnlyHint: policy.approval === "none",
-      destructiveHint: false,
+      readOnlyHint: !policy.stateChanging,
+      destructiveHint: policy.stateChanging,
+      openWorldHint: false,
     },
-  }));
+  };
+  if (policy.stateChanging) {
+    // Hide a state-changing op from the MODEL: the host surfaces it only inside the
+    // approved MCP-App component, never as a directly model-callable tool.
+    tool._meta = { ui: { visibility: ["app"] } };
+  }
+  return tool;
+}
+
+/** The MCP `Tool` definitions for the registered typed operations, advertised on
+ *  tools/list ALONGSIDE (never replacing) the raw proxy tools. */
+export function typedOperationTools(): Tool[] {
+  return [...REGISTRY.values()].map(typedOperationToolFor);
 }

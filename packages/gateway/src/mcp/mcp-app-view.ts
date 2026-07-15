@@ -63,6 +63,7 @@ import {
 import {
   getPublicArtifactForRender,
   notePublicLookupFailure,
+  publicLookupThrottled,
   hashLookupKey,
 } from "../routes/artifacts.js";
 import { REGISTERED_OPERATION_IDS } from "./operation-ids.js";
@@ -932,8 +933,16 @@ export function mcpAppLifecycleTransition(
 
   if (state === "waiting_for_tool_input") {
     if (isToolInput) {
-      // "complete" tool-input carries a params object (the tool-call arguments).
-      if (!m.params || typeof m.params !== "object") return reject("incomplete tool-input");
+      // A COMPLETE tool-input carries `params.arguments` as an OBJECT (the
+      // tool-call arguments — an empty object is valid). A bare `params` object
+      // with no (or a non-object) `arguments` is an INCOMPLETE streaming
+      // tool-input and must NOT advance the lifecycle (re-audit #2, D1).
+      var params = m.params;
+      if (!params || typeof params !== "object") return reject("incomplete tool-input");
+      var callArgs = (params as Record<string, unknown>)["arguments"];
+      if (!callArgs || typeof callArgs !== "object" || Array.isArray(callArgs)) {
+        return reject("incomplete tool-input");
+      }
       return { accept: true, next: "waiting_for_tool_result", emit: "none", reason: "tool-input accepted" };
     }
     return reject("expected tool-input"); // a tool-result here = result before tool-input
@@ -949,6 +958,15 @@ export function mcpAppLifecycleTransition(
   // "rendered" (terminal): a repeated / out-of-order lifecycle message is refused.
   return reject("lifecycle already complete");
 }
+
+/** The outbound tool-caller `connectMcpAppView` returns: call it to invoke a host
+ *  tool (resolves on the matching-id response; rejects on a JSON-RPC error, a
+ *  per-call timeout, or view unmount), and `.dispose()` to reject every still-
+ *  pending call at teardown (re-audit #2). Assignable wherever a plain
+ *  `(name, args) => Promise<unknown>` is expected. */
+export type HostToolCaller = ((name: string, args: unknown) => Promise<unknown>) & {
+  dispose: () => void;
+};
 
 /**
  * The ONE MCP Apps lifecycle client, shared by every view (directive 15). It
@@ -978,12 +996,29 @@ export function mcpAppLifecycleTransition(
 export function connectMcpAppView(
   win: ViewWindow,
   onToolResult: (source: unknown, parent: unknown, data: unknown) => boolean,
-): (name: string, args: unknown) => Promise<unknown> {
+): HostToolCaller {
   var INIT_ID = 1;
   var PROTOCOL_VERSION = "2026-01-26";
   var state: McpAppLifecycleState = "waiting_for_initialize_result";
   var nextCallId = 2;
-  var pending: Record<string, { resolve: (v: unknown) => void; reject: (e: unknown) => void }> = {};
+  // Per-call timeout + a cap on concurrent outstanding calls + unmount cleanup, so a
+  // host that never answers cannot leak pending promises or timers (re-audit #2).
+  var CALL_TIMEOUT_MS = 30000;
+  var MAX_PENDING = 32;
+  var pending: Record<string, {
+    resolve: (v: unknown) => void;
+    reject: (e: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = {};
+  // Settle (resolve/reject) one pending call by id and clear its timeout. A missing
+  // id is a no-op (already settled by a response, a timeout, or unmount).
+  function settlePending(id: string, err: unknown, value: unknown): void {
+    var entry = pending[id];
+    if (!entry) return;
+    delete pending[id];
+    clearTimeout(entry.timer);
+    if (err) entry.reject(err); else entry.resolve(value);
+  }
   win.addEventListener("message", function (event: ViewMessageEvent) {
     var source = event ? event.source : undefined;
     var data = event ? event.data : undefined;
@@ -998,13 +1033,15 @@ export function connectMcpAppView(
     // in `pending`, and INIT_ID (1) is never there, so this never eats a lifecycle
     // message. An unsolicited id is ignored.
     if (msg.id !== undefined && msg.id !== null && pending[String(msg.id)]) {
-      var entry = pending[String(msg.id)];
-      delete pending[String(msg.id)];
       if (msg.error) {
         var em = msg.error as { message?: unknown };
-        entry.reject(new Error(em && typeof em.message === "string" ? em.message : "operation failed"));
+        settlePending(
+          String(msg.id),
+          new Error(em && typeof em.message === "string" ? em.message : "operation failed"),
+          undefined,
+        );
       } else {
-        entry.resolve(msg.result);
+        settlePending(String(msg.id), null, msg.result);
       }
       return;
     }
@@ -1037,16 +1074,48 @@ export function connectMcpAppView(
     },
     "*",
   );
-  return function callHostTool(name: string, args: unknown): Promise<unknown> {
+  // Reject every still-pending call and clear its timer. Called on view teardown
+  // (pagehide/beforeunload) and exposed as `.dispose()` for explicit cleanup.
+  function disposeAllPending(): void {
+    for (var key in pending) {
+      if (Object.prototype.hasOwnProperty.call(pending, key)) {
+        var e = pending[key];
+        clearTimeout(e.timer);
+        e.reject(new Error("view unmounted"));
+      }
+    }
+    pending = {};
+  }
+  win.addEventListener("pagehide", disposeAllPending);
+  win.addEventListener("beforeunload", disposeAllPending);
+
+  var callHostTool = function (name: string, args: unknown): Promise<unknown> {
     return new Promise(function (resolve, reject) {
+      // Cap concurrent outstanding calls — a never-answering host must not let the
+      // pending map (and its timers) grow without bound.
+      var outstanding = 0;
+      for (var k in pending) {
+        if (Object.prototype.hasOwnProperty.call(pending, k)) outstanding++;
+      }
+      if (outstanding >= MAX_PENDING) {
+        reject(new Error("too many pending operations"));
+        return;
+      }
       var id = nextCallId++;
-      pending[String(id)] = { resolve: resolve, reject: reject };
+      // Per-call timeout: a host that never answers rejects the promise (and drops
+      // the pending entry) instead of hanging forever.
+      var timer = setTimeout(function () {
+        settlePending(String(id), new Error("operation timed out"), undefined);
+      }, CALL_TIMEOUT_MS);
+      pending[String(id)] = { resolve: resolve, reject: reject, timer: timer };
       win.parent.postMessage(
         { jsonrpc: "2.0", id: id, method: "tools/call", params: { name: name, arguments: args || {} } },
         "*",
       );
     });
   };
+  (callHostTool as HostToolCaller).dispose = disposeAllPending;
+  return callHostTool as HostToolCaller;
 }
 
 /** Boot the single-manifest view (render + saved): project the host's tool-result
@@ -1307,6 +1376,67 @@ export function renderSavedDashboardHtml(slug: string): string {
   return buildMcpAppDashboardHtmlForManifest(artifact.manifest, title);
 }
 
+/** The MCP App document returned once a caller has exceeded the failed-lookup
+ * budget (anti-enumeration). Fires ONLY after a burst of MISSES from the same
+ * caller key — a valid link is always served BEFORE this check — and is identical
+ * for every miss reason, so it is not an existence oracle. */
+function buildDashboardThrottledHtml(nonce: string = cspNonce()): string {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
+<title>Too many lookups - PCC</title></head>
+<body><main id="pcc-root"><h1>Too many lookups</h1>
+<p>Too many dashboard lookups from here. Please slow down and try again shortly.</p></main></body>
+</html>`;
+}
+
+/** Outcome of resolving a public-share slug for the `ui://pcc/dashboard/{slug}`
+ *  resource read. `found` = a live public|unlisted artifact was served. */
+export interface PublicShareResolution {
+  html: string;
+  found: boolean;
+  throttled: boolean;
+}
+
+/**
+ * Resolve one public-share slug read, consulting the failed-lookup limiter
+ * (re-audit #2 — the resolver previously RECORDED a miss but never checked
+ * `publicLookupThrottled`, so the limiter throttled nothing on this surface).
+ *
+ * Lookup-BEFORE-throttle: a known-valid public|unlisted link is ALWAYS served,
+ * never suppressed by accumulated misses (this caller's OR another's). Only on a
+ * MISS is the per-caller key recorded and the limiter consulted; every miss reason
+ * (missing/retired/private/malformed/expired-alias) returns an identical response,
+ * so throttling never reveals whether a slug exists. `sessionKey` is the already-
+ * hashed per-caller key (or null — a read with no session identity is never
+ * throttled, since there is no shared bucket to abuse).
+ */
+export function resolvePublicShareSlug(
+  slugStr: string,
+  sessionKey: string | null,
+): PublicShareResolution {
+  const artifact = slugStr.length ? getPublicArtifactForRender(slugStr) : undefined;
+  if (artifact) {
+    const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
+    return {
+      html: buildMcpAppDashboardHtmlForManifest(artifact.manifest, title),
+      found: true,
+      throttled: false,
+    };
+  }
+  let throttled = false;
+  if (sessionKey) {
+    notePublicLookupFailure(sessionKey);
+    throttled = publicLookupThrottled(sessionKey);
+  }
+  return {
+    html: throttled ? buildDashboardThrottledHtml() : buildDashboardNotFoundHtml(slugStr),
+    found: false,
+    throttled,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Resource registration — render, saved, gallery (fixed) + the {slug} share
 // template. All are registered on the McpServer so the `resources` capability is
@@ -1378,30 +1508,18 @@ export function registerMcpAppResources(server: McpServer): void {
       const raw = variables.slug;
       const slug = Array.isArray(raw) ? raw[0] : raw;
       const slugStr = typeof slug === "string" ? slug : String(slug ?? "");
-      // Resolve FIRST (R4 PR4 / D13): a known-valid public|unlisted share link —
-      // an exact live slug OR a live legacy alias — is ALWAYS served, never
-      // suppressed by the limiter. getPublicArtifactForRender re-applies the
-      // active + public|unlisted gate, so an alias can never expose a private one.
-      const artifact = slugStr.length ? getPublicArtifactForRender(slugStr) : undefined;
-      if (artifact) {
-        const title = artifact.manifest.title || artifact.name || "PCC Dashboard";
-        return uiResourceContents(
-          uri.toString(),
-          buildMcpAppDashboardHtmlForManifest(artifact.manifest, title),
-        );
-      }
-      // Miss — missing / retired / private / malformed / expired-alias ALL collapse
-      // to the SAME not-found view (no existence oracle). Record it against a
-      // per-SESSION hashed key; there is NO shared "mcp:anon" bucket (which would
+      // Per-SESSION hashed key; there is NO shared "mcp:anon" bucket (which would
       // let one session's misses gate another's). A read with no session identity
-      // is simply not throttled — safe, since the lookup already ran and every
-      // miss is identical anyway.
+      // is simply not throttled. resolvePublicShareSlug does lookup-BEFORE-throttle
+      // (a valid link is always served) and now actually CONSULTS the limiter on a
+      // miss (re-audit #2 — it previously only recorded, never throttled).
       const sessionId =
         extra && typeof extra === "object" && extra !== null && "sessionId" in extra
           ? String((extra as { sessionId?: unknown }).sessionId ?? "")
           : "";
-      if (sessionId) notePublicLookupFailure(hashLookupKey("mcp-session", sessionId));
-      return uiResourceContents(uri.toString(), buildDashboardNotFoundHtml(slugStr));
+      const sessionKey = sessionId ? hashLookupKey("mcp-session", sessionId) : null;
+      const resolution = resolvePublicShareSlug(slugStr, sessionKey);
+      return uiResourceContents(uri.toString(), resolution.html);
     },
   );
 }
