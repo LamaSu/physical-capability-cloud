@@ -104,6 +104,10 @@ class FakeGateway {
   dropCheckpointResponseOnce = false;
   /** Throw once BEFORE the checkpoint is processed (S6-4 timeout-before-commit simulation). */
   dropCheckpointBeforeCommitOnce = false;
+  /** B3(b): throw once on the GET receipt lookup (a transient recovery-GET failure). */
+  failReceiptGetOnce = false;
+  /** B3(i): reject every begin with 422 (expired-delegation) — proves recovery does NOT need begin. */
+  rejectBeginExpired = false;
 
   constructor() {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -120,6 +124,10 @@ class FakeGateway {
       this.calls.push({ path, body });
       // GET receipt (S6-4 recovery) — before the POST dispatch.
       if (method === "GET" && path.includes("/receipts/")) {
+        if (this.failReceiptGetOnce) {
+          this.failReceiptGetOnce = false;
+          throw new Error("simulated transient receipt GET failure");
+        }
         const gr = this.getReceipt(path);
         return { ok: gr.status >= 200 && gr.status < 300, status: gr.status, json: async () => gr.body } as Response;
       }
@@ -150,6 +158,11 @@ class FakeGateway {
   }
 
   private begin(jobId: string, body: any): { status: number; body: unknown } {
+    if (this.rejectBeginExpired) {
+      // The delegation has expired (S6-3): begin refuses to re-open the authority window. Recovery of
+      // an ALREADY-COMMITTED receipt must therefore NOT depend on begin — it uses the read-only GET.
+      return { status: 422, body: { error: "delegation_expired" } };
+    }
     const auth = body.sessionKeyAuthorization as SessionKeyAuthorization;
     if (this.parentPublicKeyHex) {
       const ok = nacl.sign.detached.verify(
@@ -549,6 +562,67 @@ describe("CheckpointClient — uncertain-commit recovery (S6-4)", () => {
     const seq1 = gw.checkpointCalls().filter((c) => c.seq === 1);
     expect(seq1).toHaveLength(2);
     expect(seq1[0].createdAt).toBe(seq1[1].createdAt); // exact-retry: createdAt NOT regenerated
+  });
+
+  it("B3(b): a committed receipt whose recovery-GET fails transiently ONCE is still recovered (retry, not a false 'absent')", async () => {
+    const gw = new FakeGateway();
+    const client = mkClient(gw, "job-transient-get");
+    await client.begin();
+    gw.dropCheckpointResponseOnce = true; // server COMMITS, client never sees the response
+    gw.failReceiptGetOnce = true; // the FIRST recovery GET throws (transient) — must RETRY, not begin/resubmit
+    const r1 = await client.submitCheckpoint({ type: "execution_started", events: { a: 1 } });
+    expect(r1.seq).toBe(1);
+    // Recovered via the RETRIED read-only GET — exactly one checkpoint POST at seq 1, no re-POST.
+    expect(gw.checkpointCalls().filter((c) => c.seq === 1)).toHaveLength(1);
+    // The chain advanced correctly — a next checkpoint is accepted at seq 2.
+    const r2 = await client.submitCheckpoint({ type: "execution_completed", events: { b: 2 } });
+    expect(r2.seq).toBe(2);
+  });
+
+  it("B3(i): recovery uses the read-only GET even when begin() would 422 (expired delegation) — the committed receipt is not lost", async () => {
+    const gw = new FakeGateway();
+    const client = mkClient(gw, "job-begin-expired");
+    await client.begin();
+    const beginsBefore = gw.beginCalls().length;
+    gw.dropCheckpointResponseOnce = true; // server COMMITS, response lost
+    gw.rejectBeginExpired = true; // begin would now 422 — recovery must NOT depend on it
+    const r1 = await client.submitCheckpoint({ type: "execution_started", events: { a: 1 } });
+    expect(r1.seq).toBe(1);
+    // Recovered purely via the authority-free read-only GET — NO additional begin was needed.
+    expect(gw.beginCalls().length).toBe(beginsBefore);
+    expect(gw.checkpointCalls().filter((c) => c.seq === 1)).toHaveLength(1);
+  });
+
+  it("B3(c): finalize works after a device RESTART with NO begin() — the evidence sessionId is derived", async () => {
+    const gw = new FakeGateway();
+    // Client A: begin + submit a terminal checkpoint (the fake commits the session + receipt).
+    const kp = nacl.sign.keyPair();
+    const auth = makeAuth({ sessionKeypair: kp, jobId: "job-restart", actions: ["execution_completed"] });
+    const clientA = new CheckpointClient({
+      gatewayUrl: "https://gw.test",
+      apiKey: "k",
+      jobId: "job-restart",
+      sessionKeyAuthorization: auth,
+      sessionPrivateKey: kp.secretKey,
+      fetchImpl: gw.fetchImpl,
+    });
+    await clientA.begin();
+    await clientA.submitCheckpoint({ type: "execution_completed", events: { done: true } });
+
+    // Client B: a FRESH process — new client, same jobId/milestone, and it NEVER calls begin().
+    const clientB = new CheckpointClient({
+      gatewayUrl: "https://gw.test",
+      apiKey: "k",
+      jobId: "job-restart",
+      sessionKeyAuthorization: auth,
+      sessionPrivateKey: kp.secretKey,
+      fetchImpl: gw.fetchImpl,
+    });
+    expect(clientB.sessionId).toBeNull();
+    // Must NOT throw begin_not_called; it derives evs-<jobId>-<milestoneIndex> and finalizes.
+    const res = await clientB.finalize();
+    expect(res.packageHash).toBe("sha256:package-hash-placeholder");
+    expect(gw.finalizeCalls()).toHaveLength(1);
   });
 });
 

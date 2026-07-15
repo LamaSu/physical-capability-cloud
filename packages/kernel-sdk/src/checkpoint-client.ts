@@ -131,6 +131,30 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/** Await `ms` — the backoff between B3 read-only receipt-lookup retries. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * B3: bounded read-only receipt-lookup retries on an UNCERTAIN result BEFORE any authority-dependent
+ * begin()/resubmit. A committed-just-before-expiry receipt whose recovery GET hits ONE transient
+ * error must not be misread as "absent" — begin (post-expiry) would reject and the committed proof
+ * would be lost. Recovery is a rare off-path, so the retry budget is small and bounded.
+ */
+const RECEIPT_LOOKUP_RETRIES = 2;
+const RECEIPT_LOOKUP_BACKOFF_MS = 50;
+
+/**
+ * B3: the outcome of the read-only receipt lookup (`tryFetchReceipt`). A clean 404
+ * `receipt_not_found` is ABSENT (the checkpoint is genuinely not committed); a network error / 5xx /
+ * status 0 is UNCERTAIN (retry before authority-dependent recovery) — NEVER conflated with absent.
+ */
+type ReceiptLookup =
+  | { kind: "found"; receipt: GatewayReceipt }
+  | { kind: "absent" }
+  | { kind: "uncertain" };
+
 export class CheckpointClient {
   private readonly gatewayUrl: string;
   private readonly apiKey: string;
@@ -334,17 +358,22 @@ export class CheckpointClient {
     err: unknown,
   ): Promise<GatewayReceipt> {
     const pending = this.pending!;
-    // S6-4b: retrieving an ALREADY-COMMITTED receipt must NOT require live execution authority.
-    // begin() now rejects a delegation past expiresAt (S6-3), and the long-job boundary is
-    // EXACTLY where the final checkpoint can commit just before expiry and its response be lost —
-    // so try the READ-ONLY receipt lookup FIRST. A committed receipt is proof regardless of
-    // whether the delegation is still live; only SUBMITTING new work needs live authority.
-    const recovered = await this.tryFetchReceipt(pending.seq);
-    if (recovered) {
+    // S6-4b / B3(b): retrieving an ALREADY-COMMITTED receipt must NOT require live execution authority.
+    // begin() rejects a delegation past expiresAt (S6-3), and the long-job boundary is EXACTLY where
+    // the final checkpoint can commit just before expiry and its response be lost — so try the
+    // READ-ONLY receipt lookup FIRST, and RETRY it on an UNCERTAIN result (a transient GET error) a
+    // bounded number of times BEFORE the authority-dependent begin()/resubmit. A committed receipt is
+    // proof regardless of whether the delegation is still live.
+    let lookup = await this.tryFetchReceipt(pending.seq);
+    for (let attempt = 0; lookup.kind === "uncertain" && attempt < RECEIPT_LOOKUP_RETRIES; attempt++) {
+      await sleep(RECEIPT_LOOKUP_BACKOFF_MS);
+      lookup = await this.tryFetchReceipt(pending.seq);
+    }
+    if (lookup.kind === "found") {
       // acceptReceipt re-verifies the signature AND that it attests OUR exact checkpoint — a
       // receipt for a different checkpoint at our seq → broken (genuine fork), never a false accept.
       return this.acceptReceipt(
-        recovered,
+        lookup.receipt,
         canonicalize(pending.content),
         pending.seq,
         pending.events,
@@ -352,7 +381,18 @@ export class CheckpointClient {
         { recovered: true },
       );
     }
-    // No committed receipt at our seq → our checkpoint was NOT accepted. RESUBMITTING requires
+    if (lookup.kind === "uncertain") {
+      // STILL uncertain after retries → surface it honestly rather than authoring NEW work (resubmit
+      // / begin) under a possibly-committed state. Money-path-safe: a committed receipt is never
+      // overwritten, and a lost one is reported — never silently reissued under a forked hash.
+      this.broken = { reason: "uncertain_commit", statusCode: 0 };
+      throw new CheckpointSubmissionError(
+        "uncertain_commit",
+        0,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    // lookup.kind === "absent": the checkpoint was DEFINITIVELY not committed. RESUBMITTING requires
     // live authority: begin() re-reads the tip and legitimately 422s if the delegation has expired
     // (authoring NEW work under dead authority is forbidden — distinct from retrieving old proof).
     if (!allowResync) {
@@ -423,28 +463,32 @@ export class CheckpointClient {
   }
 
   /**
-   * Read-only receipt lookup for the S6-4b uncertain-recovery path. Returns null when the gateway
-   * has NO committed receipt at `seq` (a clean absent → our checkpoint was not accepted) instead
-   * of throwing, so recovery can distinguish "committed, retrieve it" from "not committed,
-   * resubmit". A transient error also returns null → the caller falls through to begin()/resubmit,
-   * which surfaces the uncertainty honestly. Crucially this needs NO live authority, so it works
-   * after the delegation has expired — the exact long-job boundary the async split exists for.
+   * Read-only receipt lookup for the S6-4b/B3 uncertain-recovery path. Returns a DISCRIMINATED result:
+   * `found` (committed — retrieve it), `absent` (a clean 404 `receipt_not_found` → genuinely not
+   * committed, safe to resubmit), or `uncertain` (network error / 5xx / status 0 → we cannot tell).
+   * `uncertain` is NEVER conflated with `absent`: the caller RETRIES `uncertain` before any
+   * authority-dependent action (begin()/resubmit), so a committed-just-before-expiry receipt whose GET
+   * hit one transient error is not lost. Needs NO live authority, so it works after the delegation has
+   * expired — the exact long-job boundary the async split exists for.
    *
-   * NOTE (memory-only pending): the exact pending bytes live in `this.pending` (process memory).
-   * A device-process restart between commit and recovery loses automatic receipt-recovery here.
-   * Persisting `pending` to durable device storage is a follow-up; finalization no longer depends
-   * on it (payloads are revealed independently — round-5 payloads-out).
+   * NOTE (memory-only pending): the exact pending bytes live in `this.pending` (process memory). A
+   * device-process restart between commit and recovery loses AUTOMATIC receipt-recovery here;
+   * finalization no longer depends on it (payloads-out — payloads are revealed independently).
    */
-  private async tryFetchReceipt(seq: number): Promise<GatewayReceipt | null> {
+  private async tryFetchReceipt(seq: number): Promise<ReceiptLookup> {
     try {
       const { status, body } = await this.get(
         `/api/jobs/${this.jobId}/evidence/sessions/${this.sessionId}/receipts/${seq}`,
       );
-      const b = body as { receipt?: GatewayReceipt } | undefined;
-      if (status === 200 && b?.receipt) return b.receipt;
-      return null;
+      const b = body as { receipt?: GatewayReceipt; error?: string } | undefined;
+      if (status === 200 && b?.receipt) return { kind: "found", receipt: b.receipt };
+      // A clean 404 `receipt_not_found` ⇒ the checkpoint is genuinely NOT committed (ABSENT). Any
+      // OTHER status (5xx, 0, an unexpected 404 reason) ⇒ we cannot conclude — UNCERTAIN, not absent.
+      if (status === 404 && b?.error === "receipt_not_found") return { kind: "absent" };
+      return { kind: "uncertain" };
     } catch {
-      return null;
+      // Network error / timeout / abort ⇒ UNCERTAIN (a transient failure, not proof of absence).
+      return { kind: "uncertain" };
     }
   }
 
@@ -514,7 +558,12 @@ export class CheckpointClient {
    * recomputes everything from its own store, so this needs no session signature.
    */
   async finalize(payloads?: RevealedPayload[]): Promise<FinalizeMilestoneResponse> {
-    if (!this.sessionId) throw new CheckpointSubmissionError("begin_not_called", 0);
+    // B3(c): usable after a device restart WITHOUT begin() this process. The evidence sessionId is
+    // DETERMINISTIC — evs-<jobId>-<milestoneIndex> — so derive it when begin() has not set it (the
+    // gateway derives the SAME id, so reveal/finalize address the right session). After a restart
+    // payloadsBySeq is empty (memory-only), which is fine: payloads are revealed independently
+    // (round-5 payloads-out), so finalize needs none and the finalize POST binds only milestoneIndex.
+    const sessionId = this.sessionId ?? `evs-${this.jobId}-${this.milestoneIndex}`;
     // S6-5: revelation is a SEPARATE, verified step from finalization. Reveal every kept
     // payload (the gateway checks each against its receipted eventsRoot), THEN finalize with
     // NO payloads — the gateway includes all durably-revealed payloads itself, so a
@@ -528,7 +577,7 @@ export class CheckpointClient {
     for (const p of revealed) {
       const { status, body } = await this.post(
         `/api/jobs/${this.jobId}/evidence/checkpoints/${p.seq}/reveal`,
-        { sessionId: this.sessionId, events: p.events },
+        { sessionId, events: p.events },
       );
       if (status !== 200) {
         const b = body as { error?: string } | undefined;
