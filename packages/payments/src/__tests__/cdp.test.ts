@@ -15,6 +15,23 @@ describe("CDP funded-key on-ramp (mock mode)", () => {
     expect(w.network).toBe("base-sepolia");
   });
 
+  it("createWallet defaults to custodyMode 'server-test-only' (never mislabels a server wallet)", async () => {
+    const w = await new CdpWalletClient().createWallet();
+    expect(w.custodyMode).toBe("server-test-only");
+  });
+
+  it("REFUSES a server-test-only wallet on mainnet (server-managed wallets are Base Sepolia only)", async () => {
+    const c = new CdpWalletClient({ network: "base" });
+    await expect(c.createWallet({ custodyMode: "server-test-only" })).rejects.toThrow(/Base Sepolia only/);
+    await expect(c.createWallet()).rejects.toThrow(/Base Sepolia only/); // default is server-test-only
+  });
+
+  it("ALLOWS a deliberately PCC-controlled 'treasury' wallet on mainnet", async () => {
+    const w = await new CdpWalletClient({ network: "base" }).createWallet({ custodyMode: "treasury" });
+    expect(w.custodyMode).toBe("treasury");
+    expect(w.network).toBe("base");
+  });
+
   it("createSession returns a fundable onramp URL for the destination address", async () => {
     const c = new CdpOnrampClient();
     const dest = "0x1111111111111111111111111111111111111111" as const;

@@ -38,13 +38,33 @@ export class CdpWalletClient {
     return this.cdpClient;
   }
 
-  /** Create a new CDP smart wallet on Base (fresh owner EOA + ERC-4337 smart account). */
-  async createWallet(): Promise<CdpWallet> {
+  /**
+   * Create a SERVER-MANAGED CDP smart wallet (fresh CDP owner EOA + ERC-4337 smart
+   * account). PCC (via the Wallet Secret) controls the owner key, so this is NOT a
+   * user-controlled wallet — the param type forbids minting "user-owned" here (that
+   * requires the embedded/user-auth flow, P1). "server-test-only" is Base Sepolia +
+   * faucet ONLY; "treasury" is deliberately PCC-controlled and may run on mainnet.
+   */
+  async createWallet(
+    opts: { custodyMode?: "server-test-only" | "treasury" } = {},
+  ): Promise<CdpWallet> {
+    const custodyMode = opts.custodyMode ?? "server-test-only";
+    // A server-managed wallet can never be genuinely user-owned. "server-test-only" must
+    // stay on Base Sepolia — refuse to mint one on mainnet, where a participant wallet has
+    // to be user-owned (embedded flow) and a PCC-controlled wallet has to be "treasury".
+    if (custodyMode === "server-test-only" && this.network !== "base-sepolia") {
+      throw new Error(
+        `Refusing to create a server-test-only wallet on ${this.network}: server-managed ` +
+          `wallets are Base Sepolia only. A mainnet participant wallet must be user-owned ` +
+          `(embedded/user-auth flow); a PCC-controlled mainnet wallet must be "treasury".`,
+      );
+    }
     if (this.mock) {
       return {
         address: mockAddress(),
         network: this.network,
         smartAccount: true,
+        custodyMode,
         createdAt: new Date().toISOString(),
       };
     }
@@ -57,6 +77,7 @@ export class CdpWalletClient {
       address: smart.address as `0x${string}`,
       network: this.network,
       smartAccount: true,
+      custodyMode,
       createdAt: new Date().toISOString(),
     };
   }

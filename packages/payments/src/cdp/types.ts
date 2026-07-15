@@ -27,11 +27,33 @@ export interface CdpConfig {
   mock?: boolean;
 }
 
+/**
+ * Custody classification — makes "who controls the signing key" explicit and
+ * un-mislabelable (audit H-12 / user-controlled-wallet foundation, Option A):
+ *   - "user-owned":       the END USER controls signing (CDP embedded / user-auth wallet,
+ *                         or an external passkey-owned smart account). PCC holds NO owner
+ *                         key and CANNOT sign arbitrary transactions. The ONLY production
+ *                         participant (operator/requester) wallet. Created via the
+ *                         embedded/user-auth flow, NOT the server-managed createWallet().
+ *   - "server-test-only": a server-managed (API-key + Wallet-Secret) wallet — PCC can sign
+ *                         arbitrarily, so it is NOT user-controlled. Permitted ONLY on Base
+ *                         Sepolia with faucet funds; must never be a mainnet participant
+ *                         wallet and must never be surfaced to a user as "your wallet".
+ *   - "treasury":         a deliberately PCC-controlled wallet (protocol treasury, gas
+ *                         sponsorship, faucet automation, protocol-owned contracts). Server-
+ *                         managed by design; never the default operator/requester wallet.
+ */
+export type WalletCustodyMode = "user-owned" | "server-test-only" | "treasury";
+
 export interface CdpWallet {
   address: `0x${string}`;
   network: CdpNetwork;
   /** Smart account (ERC-4337) — gasless USDC on Base via the CDP paymaster. */
   smartAccount: boolean;
+  /** Who controls the signing key. The server-managed createWallet() only mints
+   *  "server-test-only" (Base Sepolia) or "treasury"; "user-owned" requires the
+   *  embedded/user-auth flow (P1). */
+  custodyMode: WalletCustodyMode;
   createdAt: string;
 }
 
