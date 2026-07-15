@@ -10,6 +10,7 @@
  * GET  /api/evidence/:jobId          — Evidence bundle details for a job
  */
 
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 import type { Result } from "@pcc/spec";
@@ -60,7 +61,9 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
  */
 function settlementAuthOk(req: FastifyRequest, reply: FastifyReply): boolean {
   const token = process.env.SETTLEMENT_ADMIN_TOKEN;
-  if (!token || req.headers["x-settlement-admin-token"] !== token) {
+  const presented = req.headers["x-settlement-admin-token"];
+  // Round-6 A4 (re-audit): constant-time comparison — no early-exit timing side-channel on the token.
+  if (!token || typeof presented !== "string" || !constantTimeEqual(presented, token)) {
     reply.code(403).send({
       error: "forbidden",
       message:
@@ -69,6 +72,18 @@ function settlementAuthOk(req: FastifyRequest, reply: FastifyReply): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * Constant-time string compare (round-6 A4 re-audit). Lengths are compared first (timingSafeEqual
+ * requires equal-length buffers); the token is high-entropy, so leaking its length does not
+ * materially aid a guess, while the byte comparison itself does not short-circuit on the first mismatch.
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 export async function settlementRoutes(app: FastifyInstance) {
@@ -333,6 +348,9 @@ export async function settlementRoutes(app: FastifyInstance) {
   // ── Flush (manual epoch settlement) ───────────────────────────────
 
   app.post("/api/settlement/flush", async (req, reply) => {
+    // Round-6 A4 (re-audit): /flush is another manual settlement-triggering endpoint (epoch settlement)
+    // — gate it with the same privileged-caller token as /submit + /release.
+    if (!settlementAuthOk(req, reply)) return;
     if (!isBatchEnabled()) {
       return reply.status(503).send({
         error: "batch_disabled",

@@ -617,6 +617,29 @@ describe("Settlement Routes", () => {
       expect(res.statusCode).toBe(403);
       expect(res.json().error).toBe("forbidden");
     });
+
+    it("A4: submit WITH the correct settlement token passes the gate (reaches the batch-disabled 503)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/submit",
+        headers: { "x-settlement-admin-token": SETTLEMENT_TOKEN },
+        payload: {
+          intentId: "i1",
+          agentId: "a1",
+          escrowAddress: "0xDeAdBeEf00000000000000000000000000000001",
+          operation: { type: "release" },
+        },
+      });
+      // Past the gate; batch settlement is disabled in tests → 503 (NOT 403). Proves the token opens it.
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toBe("batch_disabled");
+    });
+
+    it("A4: flush WITHOUT the settlement token → 403 (the epoch-settlement flush endpoint is gated too)", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/settlement/flush", payload: {} });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("forbidden");
+    });
   });
 
   // ── GET /api/settlement/:jobId ─────────────────────────────────────────
