@@ -107,9 +107,33 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
     expect(names).not.toContain("job.cancel");
     expect(names).not.toContain("pcc.op.job.cancel");
 
-    // Comprehensive invariant: EVERY advertised tool is read-only, and NONE is
-    // destructive — a guard that catches any future non-GET tool sneaking in.
-    expect(tools.length).toBeGreaterThan(50);
+    // GET alone no longer admits — a GET proxy tool NOT in the reviewed
+    // allowlist is EXCLUDED (on-chain reads, polls/leases, IPFS fetches deny).
+    expect(names).not.toContain("get_escrow_events"); // GET, on-chain RPC read
+    expect(names).not.toContain("operator_poll_jobs"); // GET, poll/lease effect
+    expect(names).not.toContain("retrieve_ipfs"); // GET, external IPFS fetch
+
+    // EXACT reviewed surface = the effect-classified READONLY_APP_PROXY_TOOLS +
+    // render + the read-only typed op. A snapshot: a newly-added GET proxy tool
+    // can NOT enter the app surface automatically — it must be individually
+    // reviewed into READONLY_APP_PROXY_TOOLS, which changes this expected set.
+    const EXPECTED_APP_SURFACE = [
+      "get_dashboard",
+      "get_job",
+      "get_kernel",
+      "get_kernel_devices",
+      "get_kernel_jobs",
+      "list_capability_types",
+      "list_jobs",
+      "list_kernels",
+      "pcc.op.capability.request_quote",
+      "render_pcc_dashboard",
+      "search_capabilities",
+      "search_dashboards",
+    ];
+    expect([...names].sort()).toEqual(EXPECTED_APP_SURFACE);
+
+    // Comprehensive invariant: EVERY advertised tool is read-only, none destructive.
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint, `${tool.name} readOnlyHint`).toBe(true);
       expect(tool.annotations?.destructiveHint, `${tool.name} destructiveHint`).not.toBe(true);
