@@ -166,7 +166,7 @@ function pathClamp(v: unknown, max: number): string | null {
 }
 // The HTTP methods PCC uses. `method` is the verb the agent hit — always one of these;
 // anything else (incl. a pure-alpha secret like "PASSWORD") is dropped, not persisted.
-const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"]);
 function clampMethod(v: unknown): string | null {
   const m = clampStr(v, 16);
   const upper = m ? m.toUpperCase() : null;
@@ -282,13 +282,19 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const severityRaw = String(b.severity ?? "").trim().toLowerCase();
     const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
 
-    // Validate the ORIGINAL address, then drop it if redaction would alter it: a
-    // secret-shaped local part (e.g. <64hex>@x.com) must not be stored as a mangled,
-    // reply-unusable "[redacted-hex]@x.com" that still passes the validator (r3 #4).
-    const emailRaw = clampStr(b.email, 256);
+    // Reject an over-long email BEFORE validating — truncating first could turn an
+    // invalid 300-char string into a valid-looking, different, unusable address (r4 #3).
+    const emailInput = typeof b.email === "string" ? b.email.trim() : "";
+    if (emailInput.length > 256) {
+      return reply.code(400).send({ error: "bad_request", message: "Email too long." });
+    }
+    const emailRaw = emailInput || null;
     if (emailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }
+    // Validate the ORIGINAL address, then drop it if redaction would alter it: a
+    // secret-shaped local part must not be stored as a mangled "[redacted-hex]@x.com"
+    // that still passes the validator (r3 #4).
     const email = emailRaw && redactSecrets(emailRaw) === emailRaw ? emailRaw : null;
 
     const rec = {

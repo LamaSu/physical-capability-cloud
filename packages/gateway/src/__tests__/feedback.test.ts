@@ -263,6 +263,9 @@ describe("POST /api/feedback (public)", () => {
     expect(ok.method).toBe("POST"); // allowlisted verb, upper-cased
     expect(ok.walletAddress).toBe("0x" + "b".repeat(40)); // public address survives
     expect(bad.method).toBeNull(); // "PASSWORD" is alpha but not a verb → dropped
+    // standard-but-uncommon verbs are still accepted (review r4 #2)
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "connect verb", method: "connect" } });
+    expect((await adminItems()).items.find((i) => i.summary === "connect verb").method).toBe("CONNECT");
   });
 
   it("drops an email whose local part is a secret shape, keeps a normal one (review r3 #4)", async () => {

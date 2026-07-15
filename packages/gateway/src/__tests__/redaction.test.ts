@@ -64,6 +64,15 @@ describe("redactSecrets", () => {
     expect(redactSecrets("prefix_pcc_live_SECRETBODY99")).not.toContain("SECRETBODY99");
   });
 
+  it("does NOT over-redact a key prefix embedded in an ordinary word (review r4 #1)", () => {
+    // "task-scheduler-abcdefghijklmnop" contains "sk-<16+>" — must survive (the alnum
+    // neighbor blocks it) while a real key with a separator neighbor is still caught.
+    const innocent = "restart the task-scheduler-abcdefghijklmnop service";
+    expect(redactSecrets(innocent)).toBe(innocent);
+    expect(redactSecrets("key: sk-" + "a".repeat(20))).toContain("[redacted-key]");
+    expect(redactSecrets("_sk-" + "a".repeat(20))).toContain("[redacted-key]"); // underscore-adjacent caught
+  });
+
   it("is idempotent on already-redacted text", () => {
     const once = redactSecrets("pcc_live_SECRETSECRET");
     expect(redactSecrets(once)).toBe(once);
