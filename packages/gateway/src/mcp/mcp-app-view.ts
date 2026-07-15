@@ -55,6 +55,7 @@ import type { FastifyInstance } from "fastify";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   DashboardManifestSchema,
   containsApiKey,
@@ -238,6 +239,25 @@ export function resolveMcpAppDomain(): string {
       `Set a UNIQUE https origin before prod release (D14 per-view storage isolation, release criterion #9).`,
   );
   return MCP_APP_DOMAIN_PLACEHOLDER;
+}
+
+/** The error a disabled read-only MCP-App surface returns (gates 5/6). */
+export const MCP_APP_SURFACE_UNAVAILABLE_MESSAGE =
+  "MCP App surface unavailable — PCC_MCP_APP_DOMAIN not configured";
+
+/**
+ * Whether the read-only MCP-App surface (`/mcp/apps`) may serve (gates 5/6,
+ * reconciled with the #262 hotfix). The gateway ALWAYS boots — a missing/invalid
+ * PCC_MCP_APP_DOMAIN degrades resolveMcpAppDomain() to the reserved `.invalid`
+ * placeholder rather than crashing (#262 stands). This is a FEATURE-level gate:
+ * in production, the app surface (its tools/list + ui:// resource reads) is
+ * DISABLED while the domain is the placeholder, because a non-storage-isolated
+ * MCP App view (no unique per-view origin → D14) must not reach production. In
+ * non-prod the placeholder is fine and the surface works.
+ */
+export function isMcpAppSurfaceAvailable(): boolean {
+  if (process.env.NODE_ENV !== "production") return true;
+  return resolveMcpAppDomain() !== MCP_APP_DOMAIN_PLACEHOLDER;
 }
 
 /** MCP Apps (SEP-1865) resource-content CSP metadata. A compliant host builds
@@ -1448,9 +1468,32 @@ function uiResourceContents(uri: string, html: string) {
   return { contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: html, _meta: mcpAppUiResourceMeta() }] };
 }
 
+/** Options for registerMcpAppResources. */
+export interface McpAppResourceOptions {
+  /**
+   * When provided, each ui:// resource read first calls this guard; a non-null
+   * return message makes the read throw that message as a JSON-RPC error (the
+   * `/mcp/apps` prod domain gate — gates 5/6). Omitted on the full `/mcp` surface,
+   * so its reads behave exactly as before (#262 stands — the gateway never
+   * crashes; only the FEATURE degrades).
+   */
+  surfaceGuard?: () => string | null;
+}
+
+/** Throw the JSON-RPC error a disabled surface returns, if the guard trips. */
+function assertResourceSurfaceAvailable(options?: McpAppResourceOptions): void {
+  const message = options?.surfaceGuard?.();
+  if (message) throw new McpError(ErrorCode.InvalidRequest, message);
+}
+
 /** Register the three fixed UI resources (render, saved, gallery) + the per-slug
- * public share template. One entry point so http-mcp-server wires them together. */
-export function registerMcpAppResources(server: McpServer): void {
+ * public share template. One entry point so http-mcp-server wires them together.
+ * `options.surfaceGuard`, when set (the read-only `/mcp/apps` surface), gates every
+ * resource read behind the prod domain check; absent (full `/mcp`) → unchanged. */
+export function registerMcpAppResources(
+  server: McpServer,
+  options?: McpAppResourceOptions,
+): void {
   server.registerResource(
     "pcc-dashboard-render",
     MCP_APP_RENDER_URI,
@@ -1461,7 +1504,10 @@ export function registerMcpAppResources(server: McpServer): void {
         "delivered in the tool result's structuredContent, using the shipped On-Ramp pcc-ui kit.",
       mimeType: MCP_APP_MIME_TYPE,
     },
-    async () => uiResourceContents(MCP_APP_RENDER_URI, buildMcpAppDashboardHtml()),
+    async () => {
+      assertResourceSurfaceAvailable(options);
+      return uiResourceContents(MCP_APP_RENDER_URI, buildMcpAppDashboardHtml());
+    },
   );
 
   server.registerResource(
@@ -1474,7 +1520,10 @@ export function registerMcpAppResources(server: McpServer): void {
         "delivered in the AUTHENTICATED tool result's structuredContent (never a second anonymous lookup).",
       mimeType: MCP_APP_MIME_TYPE,
     },
-    async () => uiResourceContents(MCP_APP_SAVED_URI, buildMcpAppDashboardHtml()),
+    async () => {
+      assertResourceSurfaceAvailable(options);
+      return uiResourceContents(MCP_APP_SAVED_URI, buildMcpAppDashboardHtml());
+    },
   );
 
   server.registerResource(
@@ -1487,7 +1536,10 @@ export function registerMcpAppResources(server: McpServer): void {
         "tool result's structuredContent.",
       mimeType: MCP_APP_MIME_TYPE,
     },
-    async () => uiResourceContents(MCP_APP_GALLERY_URI, buildMcpAppGalleryHtml()),
+    async () => {
+      assertResourceSurfaceAvailable(options);
+      return uiResourceContents(MCP_APP_GALLERY_URI, buildMcpAppGalleryHtml());
+    },
   );
 
   // Optional public/unlisted SHARE template — self-contained, boots immediately,
@@ -1505,6 +1557,7 @@ export function registerMcpAppResources(server: McpServer): void {
       mimeType: MCP_APP_MIME_TYPE,
     },
     async (uri, variables, extra) => {
+      assertResourceSurfaceAvailable(options);
       const raw = variables.slug;
       const slug = Array.isArray(raw) ? raw[0] : raw;
       const slugStr = typeof slug === "string" ? slug : String(slug ?? "");
