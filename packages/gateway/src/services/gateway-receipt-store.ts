@@ -213,7 +213,7 @@ export interface CheckpointAcceptanceGuard {
 /** The production acceptance guard, backed by the evidence-session + job repos + the uncollectable set. */
 export function makeEvidenceAcceptanceGuard(deps: {
   sessions: {
-    findById(sessionId: string): { status: string } | undefined;
+    findById(sessionId: string): { status: string; jobId: string } | undefined;
     transitionIfOpen(sessionId: string, toStatus: string): { status: string } | undefined;
   };
   jobs: { findById(jobId: string): { status: string } | undefined };
@@ -221,12 +221,14 @@ export function makeEvidenceAcceptanceGuard(deps: {
 }): CheckpointAcceptanceGuard {
   return {
     claimForCheckpoint({ sessionId, jobId, terminalStatus }) {
-      // The session must still be open at acceptance time.
+      // The session must exist, still be open at acceptance time, AND actually belong to this job
+      // (a session minted for a different job must not authorize a checkpoint here). Fail closed.
       const session = deps.sessions.findById(sessionId);
-      if (!session || session.status !== "open") return undefined;
-      // The job must still be evidence-collectable (not settled / held / cancelled / failed / …).
+      if (!session || session.status !== "open" || session.jobId !== jobId) return undefined;
+      // The job must EXIST and still be evidence-collectable (not settled / held / cancelled / failed /
+      // …). A MISSING job fails closed — acceptance is never granted without a live, collectable job.
       const job = deps.jobs.findById(jobId);
-      if (job && deps.uncollectableJobStatuses.has(job.status)) return undefined;
+      if (!job || deps.uncollectableJobStatuses.has(job.status)) return undefined;
       // A terminal checkpoint transitions open→terminal atomically (CAS); a lost CAS ⇒ precondition failed.
       if (terminalStatus) {
         const transitioned = deps.sessions.transitionIfOpen(sessionId, terminalStatus);

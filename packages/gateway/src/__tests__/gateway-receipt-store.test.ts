@@ -751,8 +751,29 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
   // makeEvidenceAcceptanceGuard logic (fake session/job repos — no store setup needed).
   it("round-7 guard: session no longer open → undefined (post-terminal / post-finalize acceptance blocked)", () => {
     const guard = makeEvidenceAcceptanceGuard({
-      sessions: { findById: () => ({ status: "terminal_success" }), transitionIfOpen: () => undefined },
+      sessions: { findById: () => ({ status: "terminal_success", jobId: "j" }), transitionIfOpen: () => undefined },
+      jobs: { findById: () => ({ status: "executing" }) },
+      uncollectableJobStatuses: new Set(),
+    });
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_success" })).toBeUndefined();
+  });
+
+  it("round-7 guard: a MISSING job → undefined (fail closed — never accept without a live job)", () => {
+    const guard = makeEvidenceAcceptanceGuard({
+      sessions: { findById: () => ({ status: "open", jobId: "j" }), transitionIfOpen: () => ({ status: "terminal_success" }) },
       jobs: { findById: () => undefined },
+      uncollectableJobStatuses: new Set(),
+    });
+    // Both a nonterminal and a terminal acceptance must be refused, and the terminal CAS must NOT fire.
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_success" })).toBeUndefined();
+  });
+
+  it("round-7 guard: a session that belongs to ANOTHER job → undefined (session.jobId must match)", () => {
+    const guard = makeEvidenceAcceptanceGuard({
+      sessions: { findById: () => ({ status: "open", jobId: "other-job" }), transitionIfOpen: () => ({ status: "terminal_success" }) },
+      jobs: { findById: () => ({ status: "executing" }) },
       uncollectableJobStatuses: new Set(),
     });
     expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
@@ -761,18 +782,18 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
 
   it("round-7 guard: job no longer evidence-collectable (settlement_hold) → undefined", () => {
     const guard = makeEvidenceAcceptanceGuard({
-      sessions: { findById: () => ({ status: "open" }), transitionIfOpen: () => ({ status: "terminal_success" }) },
+      sessions: { findById: () => ({ status: "open", jobId: "j" }), transitionIfOpen: () => ({ status: "terminal_success" }) },
       jobs: { findById: () => ({ status: "settlement_hold" }) },
       uncollectableJobStatuses: new Set(["settlement_hold"]),
     });
     expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toBeUndefined();
   });
 
-  it("round-7 guard: open session + collectable job → nonterminal ok; terminal CASes open→terminal; a 2nd terminal loses", () => {
+  it("round-7 guard: open matching session + collectable job → nonterminal ok; terminal CASes open→terminal; a 2nd terminal loses", () => {
     let sessionStatus = "open";
     const guard = makeEvidenceAcceptanceGuard({
       sessions: {
-        findById: () => ({ status: sessionStatus }),
+        findById: () => ({ status: sessionStatus, jobId: "j" }),
         transitionIfOpen: (_id, to) =>
           sessionStatus === "open" ? ((sessionStatus = to), { status: to }) : undefined,
       },
@@ -782,7 +803,7 @@ describe("GatewayReceiptStore — S6-1 receipt/body atomicity (§8.1-#3)", () =>
     expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: undefined })).toEqual({ ok: true });
     expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_success" })).toEqual({ ok: true });
     expect(sessionStatus).toBe("terminal_success"); // the CAS transitioned it
-    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_fault" })).toBeUndefined(); // 2nd terminal loses the CAS
+    expect(guard.claimForCheckpoint({ sessionId: "s", jobId: "j", terminalStatus: "terminal_fault" })).toBeUndefined(); // 2nd terminal → session no longer open
   });
 
   it("accept persists the receipt AND its checkpoint body atomically; exact replay → idempotent (no 2nd row)", () => {
