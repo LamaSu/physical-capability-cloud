@@ -18,9 +18,9 @@ beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "pcc-fb-obs-"));
   process.env.PCC_DB_PATH = join(tmpDir, "pcc.sqlite");
   process.env.WAITLIST_ADMIN_TOKEN = "t";
-  process.env.PCC_FUNNEL_ENABLED = "true"; // observability views are inert otherwise
+  delete process.env.PCC_FUNNEL_ENABLED; // OFF — the feedback/errors views must work anyway
   delete process.env.PCC_OBSERVABILITY_ADMINS; // → allowed outside production
-  delete process.env.NODE_ENV; // ensure not "production" so the guard permits
+  delete process.env.NODE_ENV; // ensure not "production" so the admin guard permits
   delete process.env.DISCORD_WEBHOOK_URL;
 
   const db = await import("../db.js");
@@ -91,6 +91,14 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     expect(errors.statusCode).toBe(200);
     const hist = errors.json().by_error_code as Array<{ error_code: string; count: number }>;
     expect(hist.find((h) => h.error_code === "TIER_MISMATCH")?.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("funnel/journey views stay gated on PCC_FUNNEL_ENABLED (journey recording is opt-in)", async () => {
+    // The feedback + errors views worked above with the flag OFF; the funnel view needs
+    // per-request journey recording, so it must still 404 until PCC_FUNNEL_ENABLED=true.
+    const funnel = await app.inject({ method: "GET", url: "/api/admin/observability/funnel", headers: { "x-admin-token": "t" } });
+    expect(funnel.statusCode).toBe(404);
+    expect(funnel.json().error).toBe("not_enabled");
   });
 
   it("also still lands in the durable admin feedback export", async () => {

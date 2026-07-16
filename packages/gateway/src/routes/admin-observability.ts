@@ -49,12 +49,27 @@ function isObservabilityAdmin(req: FastifyRequest): boolean {
   return !!operatorId && allow.includes(operatorId);
 }
 
-/** Common guard. Returns true if the request may proceed; else sends the error. */
-function guard(req: FastifyRequest, reply: import("fastify").FastifyReply): boolean {
-  if (!funnelEnabled()) {
+/**
+ * Common guard. Returns true if the request may proceed; else sends the error.
+ *
+ * `requireFunnel` — the FUNNEL + JOURNEY views need per-request journey recording
+ * (the PCC_FUNNEL_ENABLED onResponse hook), so they stay gated on it. The FEEDBACK +
+ * ERRORS views read the `agent.report` audit event that POST /api/feedback emits
+ * regardless of that flag, so they are enabled by DEFAULT (requireFunnel=false) and
+ * protected by the admin gate alone — no need to turn on journey recording just to
+ * read agent feedback. SECURITY: the admin gate fails closed in production (no
+ * PCC_OBSERVABILITY_ADMINS ⇒ 403); ensure NODE_ENV=production in prod so the
+ * no-allowlist path denies. Set PCC_OBSERVABILITY_ADMINS to grant specific operators.
+ */
+function guard(
+  req: FastifyRequest,
+  reply: import("fastify").FastifyReply,
+  requireFunnel = true,
+): boolean {
+  if (requireFunnel && !funnelEnabled()) {
     reply.status(404).send({
       error: "not_enabled",
-      message: "Observability views are disabled. Set PCC_FUNNEL_ENABLED=true.",
+      message: "This view needs journey recording. Set PCC_FUNNEL_ENABLED=true.",
     });
     return false;
   }
@@ -118,7 +133,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { since?: string } }>(
     "/api/admin/observability/errors",
     async (req, reply) => {
-      if (!guard(req, reply)) return;
+      if (!guard(req, reply, false)) return; // reads agent.report → no funnel flag needed
       // Histogram of last_error_code surfaced in agent reports (what actually
       // tripped agents up). Complement with auditService.stats() (24h event mix).
       const reports = auditService.query({
@@ -148,7 +163,7 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { since?: string; limit?: string } }>(
     "/api/admin/observability/feedback",
     async (req, reply) => {
-      if (!guard(req, reply)) return;
+      if (!guard(req, reply, false)) return; // reads agent.report → no funnel flag needed
       const limit = Math.min(Number.parseInt(req.query.limit ?? "100", 10) || 100, 1000);
       const rows = auditService
         .query({ eventType: REPORT_EVENT, since: req.query.since, limit })
