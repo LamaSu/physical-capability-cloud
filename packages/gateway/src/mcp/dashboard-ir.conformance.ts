@@ -96,6 +96,22 @@ ok("null-proto manifest is SAFE (accepted)", dashboardManifestToIr(Object.assign
 bad("title too long", { csd: "x", title: "x".repeat(9999), sections: [] });
 bad("too many sections", { csd: "x", title: "t", sections: Array.from({ length: 99 }, () => ({ windows: [] })) });
 
+// ── R6: confirm enum, reserved-route completeness, poll-amplification cap, own-key depth ──
+ok("action confirm:\"inline\" (real enum) ACCEPTED", dashboardManifestToIr(one({ kind: "actions", actions: [{ id: "a", label: "Approve", confirm: "inline", intentText: "pcc: approve", operation_id: "job.cancel" }] })).ok === true);
+bad("action confirm:true (boolean, not enum)", one({ kind: "actions", actions: [{ label: "X", confirm: true }] }));
+bad("receipt→/api/evidence/lit-status (Lit status leak)", one({ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }));
+bad("receipt→/api/evidence/archive (reserved)", one({ kind: "receipt", binding: { path: "/api/evidence/archive" } }));
+bad("metric→/api/settlement/submit (reserved POST)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/submit" } }));
+bad("metric→/api/settlement/flush (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/flush" } }));
+bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/release" } }));
+bad("metric→/api/jobs/submit (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit" } }));
+bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 250 } }));
+ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 5000 } })).ok === true);
+bad("bound-window budget (>64 binds)", { csd: "x", title: "t", sections: [{ windows: Array.from({ length: 65 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1" } })) }] });
+{ const w: any = { kind: "note" }; Object.defineProperty(w, "text", { value: "hi", enumerable: false, configurable: true }); bad("non-enumerable allowed-name own key", one(w)); }
+{ const secs: any = [{ windows: [] }]; secs.evil = 1; bad("extra own key on sections array", { csd: "x", title: "t", sections: secs }); }
+{ const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: q } })); }
+
 // ── validator parity (mirrors adapter) ──
 const okTitle = { type: "heading", id: "n1", props: { level: 1, text: "x" }, untrusted: true };
 const mkDoc = (root: any) => ({ ir: "pcc-dashboard-ir/v1", title: okTitle, root });
@@ -124,6 +140,14 @@ vbad("container without children array", { type: "root", id: "n2" });
 vbad("illegal child under root (field-label)", { type: "root", id: "n2", children: [{ type: "field-label", id: "n3", props: { label: "x" }, untrusted: true }] });
 vbad("illegal child under section (badge)", rootWith({ type: "badge", id: "n4", props: { text: "a", tone: "neutral" }, untrusted: true }));
 vbad("non-nN id", { type: "root", id: "root", children: [] });
+vbad("root too many sections (>24)", { type: "root", id: "n2", children: Array.from({ length: 25 }, (_, i) => ({ type: "section", id: "n" + (100 + i), children: [] })) });
+vbad("grid empty (min 1 badge)", rootWith({ type: "grid", id: "n4", props: { kind: "actions-readonly" }, children: [] }));
+vbad("list limit out of range (0)", rootWith({ type: "list", id: "n4", props: { rowTitle: "id", rowMeta: [], limit: 0 }, bind: { path: "/api/jobs" } }));
+vbad("list limit non-integer", rootWith({ type: "list", id: "n4", props: { rowTitle: "id", rowMeta: [], limit: 1.5 }, bind: { path: "/api/jobs" } }));
+vbad("approval-notice wrong text", rootWith({ type: "approval-notice", id: "n4", props: { notice: "Approve now!" } }));
+vbad("section heading not H2", { type: "root", id: "n2", children: [{ type: "section", id: "n3", children: [{ type: "heading", id: "n4", props: { level: 1, text: "x" }, untrusted: true }] }] });
+vbad("section heading not first", { type: "root", id: "n2", children: [{ type: "section", id: "n3", children: [{ type: "text", id: "n4", props: { text: "a" }, untrusted: true }, { type: "heading", id: "n5", props: { level: 2, text: "x" }, untrusted: true }] }] });
+vbad("stat label too long (>400)", rootWith({ type: "stat", id: "n4", props: { label: "x".repeat(401) }, untrusted: true, bind: { path: "/api/jobs/j1", select: "s" } }));
 ok("validateIr REJECT: doc.title not H1 (level 2)", validateIr({ ir: "pcc-dashboard-ir/v1", title: { type: "heading", id: "n1", props: { level: 2, text: "x" }, untrusted: true }, root: { type: "root", id: "n2", children: [] } }).ok === false);
 ok("validateIr REJECT: doc.title not a heading", validateIr({ ir: "pcc-dashboard-ir/v1", title: { type: "text", id: "n1", props: { text: "x" }, untrusted: true }, root: { type: "root", id: "n2", children: [] } }).ok === false);
 

@@ -38,7 +38,10 @@ const LIM = {
   sections: 24, windowsPerSection: 32, nodesTotal: 2000, depth: 8, inputDepth: 16,
   str: 2000, listRows: 200, fields: 64, metaItems: 12, queryKeys: 16,
   path: 512, select: 256, title: 400,
+  pollMinMs: 5000, pollMaxMs: 3_600_000, boundWindowsTotal: 64, // poll-amplification cap (sol R5)
 } as const;
+// The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
+const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
 
 // ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
 // Deny-by-default. Each RegExp is a specific verified read endpoint. A `:seg` is one
@@ -49,10 +52,17 @@ const PATH_GRAMMAR = /^\/api\/[A-Za-z0-9._~\-/]+$/; // root-relative /api; no sc
 const SSE_GRAMMAR = /^\/sse\/[A-Za-z0-9._~\-/]+$/;
 const SELECT_GRAMMAR = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/;
 const OP_ID_GRAMMAR = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/; // typed op id (discarded in B, still grammared)
-// Exact collection/status/reserved paths that a detail `:seg` template must never match.
+// Exact collection/status/POST siblings a detail `:seg` template would otherwise
+// swallow (enumerated from src/routes; sol R4/R5). The GET siblings are the real
+// semantic leaks (e.g. /api/evidence/lit-status returns Lit service status, not a
+// receipt); the POST siblings are harmless GET-404s reserved for cleanliness.
+// REVIEW THIS AGAINST src/routes ON ANY ROUTE CHANGE — a missed word is a leak.
 const RESERVED_EXACT: ReadonlySet<string> = new Set([
   "/api/capabilities/types", "/api/capabilities/templates", "/api/capabilities/search",
-  "/api/settlement/status", "/api/settlement/epochs",
+  "/api/settlement/status", "/api/settlement/epochs", "/api/settlement/flush",
+  "/api/settlement/submit", "/api/settlement/release",
+  "/api/evidence/lit-status", "/api/evidence/archive",
+  "/api/jobs/submit",
   "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
 ]);
 type BindSchema = "receipt";
@@ -102,26 +112,39 @@ function strictStr(v: unknown, max = LIM.str): string | null {
   return typeof v === "string" && v.length > 0 && v.length <= max ? v : null;
 }
 /** Own-key allowlist over ALL own keys (enumerable + non-enumerable + symbol).
- * Any symbol own key, or any string own key outside `allowed`, fails. */
+ * Rejects: any symbol own key, any string own key outside `allowed`, and any
+ * NON-ENUMERABLE own key even with an allowed name (a hidden data-shaped prop). */
 function onlyKeys(o: object, allowed: readonly string[]): boolean {
   const set = new Set(allowed);
   for (const k of Reflect.ownKeys(o)) {
     if (typeof k === "symbol") return false;
     if (!set.has(k)) return false;
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    if (!d || !d.enumerable) return false;
   }
   return true;
 }
+const INDEX_KEY = /^(0|[1-9][0-9]*)$/;
 /** Recursively require plain objects/arrays/finite scalars and reject prototype /
- * symbol own keys ANYWHERE (over Reflect.ownKeys, not just enumerable). */
+ * symbol / non-enumerable / non-index own keys ANYWHERE (over Reflect.ownKeys). */
 function deepClean(v: unknown, depth = 0): boolean {
   if (depth > LIM.inputDepth) return false;
   const t = typeof v;
   if (v === null || t === "string" || t === "boolean") return true;
   if (t === "number") return Number.isFinite(v as number);
-  if (Array.isArray(v)) { for (const e of v) if (!deepClean(e, depth + 1)) return false; return true; }
+  if (Array.isArray(v)) {
+    for (const k of Reflect.ownKeys(v)) { // reject symbol / extra / non-index own keys on the array itself
+      if (typeof k === "symbol") return false;
+      if (k !== "length" && !INDEX_KEY.test(k)) return false;
+    }
+    for (const e of v) if (!deepClean(e, depth + 1)) return false;
+    return true;
+  }
   if (!isPlain(v)) return false;
   for (const k of Reflect.ownKeys(v)) {
     if (typeof k === "symbol" || PROTO_KEYS.has(k)) return false;
+    const d = Object.getOwnPropertyDescriptor(v, k);
+    if (!d || !d.enumerable) return false;
     if (!deepClean((v as Record<string, unknown>)[k], depth + 1)) return false;
   }
   return true;
@@ -160,7 +183,8 @@ function isOpDescriptor(v: unknown): boolean {
   if (v.id !== undefined && strictStr(v.id, LIM.title) === null) return false;
   if (v.label !== undefined && strictStr(v.label, LIM.title) === null) return false;
   if (v.intentText !== undefined && strictStr(v.intentText, LIM.str) === null) return false;
-  if (v.confirm !== undefined && typeof v.confirm !== "boolean") return false;
+  // Real Action.confirm is the enum "inline"|"approval" (spec/ui-artifact.ts), NOT boolean.
+  if (v.confirm !== undefined && v.confirm !== "inline" && v.confirm !== "approval") return false;
   if (v.arguments !== undefined && !isPlain(v.arguments)) return false; // deepClean already ran
   return true;
 }
@@ -183,7 +207,7 @@ function bindMatchesPolicy(bind: IrBind, key: string): string | null {
       if (!(t === "string" && (v as string).length <= LIM.str) && t !== "boolean" && !(t === "number" && Number.isFinite(v))) return "query value type";
     }
   }
-  if (bind.pollMs !== undefined && (typeof bind.pollMs !== "number" || !Number.isFinite(bind.pollMs) || bind.pollMs < 250 || bind.pollMs > 3_600_000)) return "bind.pollMs range";
+  if (bind.pollMs !== undefined && (typeof bind.pollMs !== "number" || !Number.isFinite(bind.pollMs) || bind.pollMs < LIM.pollMinMs || bind.pollMs > LIM.pollMaxMs)) return "bind.pollMs range";
   if (bind.sse !== undefined) {
     if (!policy.sse) return `${key} may not stream`;
     if (!isReadPath(bind.sse, SSE_GRAMMAR) || !policy.sse.some((re) => re.test(bind.sse as string))) return "bind.sse outside allowlist";
@@ -211,6 +235,8 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
 
   let count = 0;
   const budget = (): boolean => ++count <= LIM.nodesTotal;
+  let bindCount = 0;
+  const bindBudget = (): boolean => ++bindCount <= LIM.boundWindowsTotal; // aggregate poll-amplification cap
   const nextId = (() => { let n = 0; return () => `n${++n}`; })();
 
   const sectionNodes: IrNode[] = [];
@@ -225,7 +251,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
       if (!budget()) return { ok: false, reason: "node budget" };
       children.push({ type: "heading", id: nextId(), props: { level: 2, text: h }, untrusted: true });
     }
-    for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget); if (!r.ok) return r; children.push(r.node); }
+    for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
     if (!budget()) return { ok: false, reason: "node budget" };
     sectionNodes.push({ type: "section", id: nextId(), children });
   }
@@ -237,12 +263,13 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
 
 type MapResult = { ok: true; node: IrNode } | { ok: false; reason: string };
 
-function mapWindow(w: unknown, nextId: () => string, budget: () => boolean): MapResult {
+function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bindBudget: () => boolean): MapResult {
   if (!budget()) return { ok: false, reason: "node budget" };
   if (!isPlain(w)) return { ok: false, reason: "window not plain object" };
   const kind = w.kind;
   if (typeof kind !== "string") return { ok: false, reason: "window.kind missing" };
   const id = nextId();
+  const chargeBind = (): boolean => bindBudget(); // every window that emits a live bind charges the poll budget
   switch (kind) {
     case "note":
       if (!onlyKeys(w, ["kind", "text"])) return { ok: false, reason: "note extra key" };
@@ -254,18 +281,22 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean): Map
       { const label = strictStr(w.label, LIM.title); if (label === null) return { ok: false, reason: "metric.label" };
         if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
         const b = mapBind(w.binding, "metric", w.select); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind, untrusted: true } }; }
     case "capability":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
       { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         return { ok: true, node: { type: "card", id, props: { kind: "capability" }, bind: b.bind } }; }
     case "receipt":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
       { const b = mapBind(w.binding, "receipt"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         return { ok: true, node: { type: "receipt", id, bind: b.bind } }; }
     case "list":
       if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
       { const b = mapBind(w.binding, "list"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         const item = w.item;
         if (!isPlain(item) || !onlyKeys(item, ["title", "meta", "statusFrom"])) return { ok: false, reason: "list.item" };
         if (!isSelector(item.title)) return { ok: false, reason: "list.item.title selector" };
@@ -281,6 +312,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean): Map
     case "run":
       if (!onlyKeys(w, ["kind", "binding", "statusFrom", "latestFrom"])) return { ok: false, reason: "run extra key" };
       { const b = mapBind(w.binding, "run"); if (!b.ok) return b;
+        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         if (!isSelector(w.statusFrom) || !isSelector(w.latestFrom)) return { ok: false, reason: "run selectors" };
         return { ok: true, node: { type: "card", id, props: { kind: "run", statusFrom: w.statusFrom, latestFrom: w.latestFrom }, bind: b.bind } }; }
     case "form":
@@ -296,7 +328,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean): Map
       if (w.deny !== undefined && !isOpDescriptor(w.deny)) return { ok: false, reason: "approval.deny grammar" };
       if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "approval.binding shape" };
       // Static notice, NO bind — live approval state is the C+D out-of-band surface.
-      return { ok: true, node: { type: "approval-notice", id, props: { notice: "This action is confirmed only on the authenticated PCC surface." } } };
+      return { ok: true, node: { type: "approval-notice", id, props: { notice: APPROVAL_NOTICE } } };
     case "chain":
       if (!onlyKeys(w, ["kind", "composeRef", "execute"])) return { ok: false, reason: "chain extra key" };
       if (!isPlain(w.composeRef)) return { ok: false, reason: "chain.composeRef shape" };
@@ -363,29 +395,31 @@ function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: fa
 }
 
 // ── Independent whole-tree validator — MIRRORS every adapter guarantee ─────────────
-type PropT = "string" | "number" | "boolean" | "string[]" | "level" | "tone" | "card-kind" | "grid-kind" | "plan-kind" | "selector";
+type PropT = "s400" | "s2000" | "number" | "limit" | "boolean" | "string[]" | "level" | "tone" | "card-kind" | "grid-kind" | "plan-kind" | "selector";
 type PropSpec = Record<string, PropT>;
-interface NodeSpec { props?: PropSpec; required?: readonly string[]; optional?: readonly string[]; bindKey?: string; needsBind?: boolean; noBind?: boolean; prose?: boolean; parentOf?: readonly IrNodeType[]; childless?: boolean }
+interface NodeSpec { props?: PropSpec; required?: readonly string[]; optional?: readonly string[]; bindKey?: string; needsBind?: boolean; noBind?: boolean; prose?: boolean; parentOf?: readonly IrNodeType[]; childless?: boolean; minChildren?: number; maxChildren?: number }
 const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
-  root: { noBind: true, parentOf: ["section"] },
+  root: { noBind: true, parentOf: ["section"], maxChildren: LIM.sections },
   section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
-  heading: { props: { level: "level", text: "string" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
-  text: { props: { text: "string" }, required: ["text"], noBind: true, prose: true, childless: true },
-  stat: { props: { label: "string" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
+  heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
+  text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
+  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
   card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
   receipt: { bindKey: "receipt", needsBind: true, childless: true },
-  list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "number" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
-  badge: { props: { text: "string", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
-  grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"] },
-  "approval-notice": { props: { notice: "string" }, required: ["notice"], noBind: true, childless: true },
+  list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
+  badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
+  grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
+  "approval-notice": { props: { notice: "s2000" }, required: ["notice"], noBind: true, childless: true },
   plan: { props: { kind: "plan-kind" }, required: ["kind"], noBind: true, childless: true },
-  "form-summary": { noBind: true, parentOf: ["field-label"] },
-  "field-label": { props: { label: "string" }, required: ["label"], noBind: true, prose: true, childless: true },
+  "form-summary": { noBind: true, parentOf: ["field-label"], maxChildren: LIM.fields },
+  "field-label": { props: { label: "s400" }, required: ["label"], noBind: true, prose: true, childless: true },
 };
 function propType(v: unknown, t: PropT): boolean {
   switch (t) {
-    case "string": return typeof v === "string" && v.length > 0 && v.length <= LIM.str;
+    case "s400": return typeof v === "string" && v.length > 0 && v.length <= LIM.title;
+    case "s2000": return typeof v === "string" && v.length > 0 && v.length <= LIM.str;
     case "number": return typeof v === "number" && Number.isFinite(v);
+    case "limit": return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= LIM.listRows;
     case "boolean": return typeof v === "boolean";
     case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x) => isSelector(x));
     case "level": return v === 1 || v === 2 || v === 3;
@@ -404,6 +438,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
   if (!isPlain(doc.root) || (doc.root as Record<string, unknown>).type !== "root") return { ok: false, reason: "doc.root not root" };
   const ids = new Set<string>();
   let count = 0;
+  let bindCount = 0;
   const walk = (n: unknown, depth: number): string | null => {
     if (depth > LIM.depth) return "depth";
     if (++count > LIM.nodesTotal) return "node count";
@@ -419,6 +454,8 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       for (const [k, v] of Object.entries(n.props)) if (!propType(v, (spec.props as PropSpec)[k])) return `prop ${k} wrong type on ${n.type}`;
     }
     for (const req of spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
+    // approval-notice text is the ONE fixed PCC sentence — never manifest prose
+    if (n.type === "approval-notice" && (n.props as any)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
     // card kind ⇒ exact companion props
     if (n.type === "card") {
       const k = (n.props as any)?.kind;
@@ -431,6 +468,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
       const bk = n.type === "card" ? ((n.props as any).kind === "run" ? "run" : "capability") : spec.bindKey;
       const reason = bindMatchesPolicy(n.bind as IrBind, bk); if (reason) return `bind: ${reason}`;
+      if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
     // prose provenance
     if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
@@ -439,8 +477,17 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     if (spec.childless) { if (n.children !== undefined) return `${n.type} may not have children`; }
     else {
       if (!Array.isArray(n.children)) return `${n.type} requires children array`;
-      for (const c of n.children) {
+      if (spec.minChildren !== undefined && n.children.length < spec.minChildren) return `${n.type} too few children`;
+      if (spec.maxChildren !== undefined && n.children.length > spec.maxChildren) return `${n.type} too many children`;
+      let windowKids = 0;
+      for (let i = 0; i < n.children.length; i++) {
+        const c = n.children[i];
         if (!isPlain(c) || !spec.parentOf || !spec.parentOf.includes((c as Record<string, unknown>).type as IrNodeType)) return `illegal child under ${n.type}`;
+        if (n.type === "section") { // ≤1 heading, only at index 0, H2; the rest are windows (≤ cap)
+          const ct = (c as Record<string, unknown>).type;
+          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as any).props?.level !== 2) return "section heading must be H2"; }
+          else if (++windowKids > LIM.windowsPerSection) return "too many windows in section";
+        }
         const e = walk(c, depth + 1); if (e) return e;
       }
     }

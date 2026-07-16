@@ -59,9 +59,26 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     expect(dashboardManifestToIr(projected).ok).toBe(false); // adapter is the backstop
   });
 
-  it("binding.query nested-object value survives projection → adapter REJECTS", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", binding: { path: "/api/jobs/j1", query: { filter: { nested: "x" } } } }]));
-    // Either the projector or the adapter must refuse a non-scalar query value.
+  it("binding.query nested-object value survives projection → adapter REJECTS (attributed: has select)", () => {
+    // `select` present so the rejection is due to the non-scalar query value, not missing select.
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: { filter: { nested: "x" } } } }]));
+    expect(projected === null || ir?.ok === false).toBe(true);
+  });
+
+  it("real schema-valid action (confirm:\"inline\") survives projection and renders as a badge", () => {
+    // projAction strips the raw-HTTP kind/path; the adapter's isOpDescriptor must accept confirm:"inline".
+    const { ir } = chain(raw([{ kind: "actions", actions: [{ id: "a", label: "Refresh", kind: "post", path: "/api/x", confirm: "inline", intentText: "pcc: refresh", operation_id: "job.cancel" }] }]));
+    expect(ir?.ok).toBe(true);
+    if (ir?.ok) { const has = (n: any): boolean => n.type === "badge" || (n.children || []).some(has); expect(has(ir.doc.root)).toBe(true); }
+  });
+
+  it("collision route /api/evidence/lit-status as a receipt is REJECTED (Lit status ≠ receipt)", () => {
+    const { projected, ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }]));
+    expect(projected === null || ir?.ok === false).toBe(true);
+  });
+
+  it("collision route /api/settlement/status as a metric is REJECTED (attributed: has select)", () => {
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -98,8 +115,8 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
-  it("metric bound to a financial-leak route (stripe/credits) is REJECTED", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
+  it("metric bound to a financial-leak route (stripe/credits) is REJECTED (attributed: has select)", () => {
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", select: "u", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
