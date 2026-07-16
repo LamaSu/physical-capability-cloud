@@ -125,9 +125,23 @@ const SUMMARY_MAX = 5000; // keeps the prior /api/feedback message ceiling
 const DETAIL_MAX = 20000;
 const FIELD_MAX = 2000;
 
+// Drop terminal control chars (C0 except TAB/LF, DEL, C1) from agent text so it
+// can't do escape-sequence injection in any consumer (daily report, logs, a TUI).
+function stripControl(s: string): string {
+  let out = "";
+  for (let k = 0; k < s.length; k++) {
+    const cc = s.charCodeAt(k);
+    if (cc === 9 || cc === 10 || (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159))) out += s[k];
+  }
+  return out;
+}
+
 function clampStr(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
-  const t = v.trim();
+  // Strip C0/C1 control chars incl. ESC (0x1B) so agent-supplied text can't do
+  // terminal-escape injection in any consumer — the daily report, logs, a TUI (r-p3 #2).
+  // Keep \t and \n (harmless + useful in multi-line detail).
+  const t = stripControl(v).trim();
   if (!t) return null;
   return t.length > max ? t.slice(0, max) : t;
 }

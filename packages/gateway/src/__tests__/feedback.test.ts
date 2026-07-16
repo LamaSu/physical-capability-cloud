@@ -325,6 +325,21 @@ describe("POST /api/feedback (public)", () => {
     }
   });
 
+  it("strips terminal control chars (ANSI escapes) from stored text (review r-p3 #2)", async () => {
+    const ESC = String.fromCharCode(27); // \x1b — start of an ANSI escape
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: { summary: `boom ${ESC}[31mRED${ESC}[0m done`, detail: "line1\nline2\ttabbed" },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.summary.includes(ESC)).toBe(false); // the ESC byte is gone → no escape injection
+    expect(rec.summary).toContain("RED"); // visible text is kept
+    expect(rec.summary).toContain("[31m"); // the now-inert "[31m" text remains (harmless without ESC)
+    expect(rec.detail).toContain("\n"); // TAB + LF preserved (useful in multi-line detail)
+    expect(rec.detail).toContain("\t");
+  });
+
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {
     const res = await app.inject({
       method: "POST",

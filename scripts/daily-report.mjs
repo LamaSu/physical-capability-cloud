@@ -75,13 +75,28 @@ const TO = todayISO();
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
+// Strip terminal control chars from a value before printing it — agent-supplied
+// feedback text (even server-scrubbed) shouldn't be able to inject escape sequences
+// into an operator's console. Char-code based (keeps TAB/LF, drops C0/DEL/C1).
+function stripCtl(v) {
+  const s = String(v ?? "");
+  let out = "";
+  for (let k = 0; k < s.length; k++) {
+    const cc = s.charCodeAt(k);
+    if (cc === 9 || cc === 10 || (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159))) out += s[k];
+  }
+  return out;
+}
+
 async function getJSON(path) {
-  // Auth: the /api/analytics/* endpoints need a PCC key (they were 401'ing because
-  // none was sent); /api/admin/feedback needs the admin token. Send whichever env
-  // vars are present — harmless to send both.
+  // Route-specific auth: only the admin route gets the admin token; only the analytics
+  // routes get the API key — don't hand every endpoint both credentials (r-p3 #3).
   const headers = {};
-  if (process.env.PCC_API_KEY) headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
-  if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
+  if (path.startsWith("/api/admin/")) {
+    if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
+  } else if (process.env.PCC_API_KEY) {
+    headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
+  }
   try {
     const res = await fetch(`${BASE}${path}`, { headers });
     if (!res.ok) return { __error: `HTTP ${res.status}` };
@@ -98,13 +113,14 @@ async function getJSON(path) {
 export function summarizeFeedback(feedback, fromISO, toISO) {
   const items = Array.isArray(feedback?.items) ? feedback.items : [];
   const from = Date.parse(`${fromISO}T00:00:00Z`);
-  const to = Date.parse(`${toISO}T23:59:59Z`);
+  // Exclusive next-day bound so the last 999ms of the final day aren't dropped (r-p3 #4).
+  const to = Date.parse(`${toISO}T00:00:00Z`) + 86_400_000;
   const inWindow = items.filter((i) => {
     const t = Date.parse(i?.createdAt ?? "");
-    return Number.isFinite(t) && t >= from && t <= to;
+    return Number.isFinite(t) && t >= from && t < to;
   });
   const tally = (key) => {
-    const m = {};
+    const m = Object.create(null); // prototype-safe: user keys like "__proto__" can't corrupt it (r-p3 #5)
     for (const i of inWindow) {
       const k = i?.[key] || "(none)";
       m[k] = (m[k] ?? 0) + 1;
@@ -114,7 +130,9 @@ export function summarizeFeedback(feedback, fromISO, toISO) {
   return {
     error: feedback?.__error ?? null,
     total: inWindow.length,
-    all_time: items.length,
+    // all-time count from the response's `total` when present (survives any future
+    // server-side pagination of `items`); else the item count (r-p3 #1).
+    all_time: Number.isFinite(feedback?.total) ? feedback.total : items.length,
     by_type: tally("type"),
     by_severity: tally("severity").filter((r) => r.key !== "(none)"),
     top_endpoints: tally("endpoint").filter((r) => r.key !== "(none)").slice(0, 10),
@@ -332,18 +350,19 @@ async function main() {
   } else {
     console.log(`  ${pad("Reports in range", 22)} ${c.bold}${num(feedback.total)}${c.reset}  ${c.gray}(${num(feedback.all_time)} all-time, ${num(feedback.with_logs)} with logs)${c.reset}`);
     const maxT = Math.max(...feedback.by_type.map((r) => r.count), 1);
-    for (const r of feedback.by_type) console.log(`    ${pad(r.key, 12)} ${bar(r.count, maxT, 16)} ${num(r.count)}`);
+    for (const r of feedback.by_type) console.log(`    ${pad(stripCtl(r.key), 12)} ${bar(r.count, maxT, 16)} ${num(r.count)}`);
     if (feedback.top_error_codes.length) {
       console.log(`  ${c.dim}top error codes:${c.reset}`);
-      for (const r of feedback.top_error_codes.slice(0, 5)) console.log(`    ${pad(r.key, 22)} ${num(r.count)}`);
+      for (const r of feedback.top_error_codes.slice(0, 5)) console.log(`    ${pad(stripCtl(r.key), 22)} ${num(r.count)}`);
     }
     if (feedback.top_endpoints.length) {
       console.log(`  ${c.dim}top endpoints:${c.reset}`);
-      for (const r of feedback.top_endpoints.slice(0, 5)) console.log(`    ${pad(r.key, 40)} ${num(r.count)}`);
+      for (const r of feedback.top_endpoints.slice(0, 5)) console.log(`    ${pad(stripCtl(r.key), 40)} ${num(r.count)}`);
     }
     console.log(`  ${c.dim}recent:${c.reset}`);
     for (const r of feedback.recent.slice(0, 5)) {
-      console.log(`    ${c.gray}${(r.createdAt ?? "").slice(5, 16)}${c.reset} [${r.type}${r.severity ? "/" + r.severity : ""}] ${r.endpoint ?? "—"} ${r.errorCode ? c.yellow + r.errorCode + c.reset : ""} — ${String(r.summary ?? "").slice(0, 60)}`);
+      const sev = r.severity ? "/" + stripCtl(r.severity) : "";
+      console.log(`    ${c.gray}${stripCtl((r.createdAt ?? "").slice(5, 16))}${c.reset} [${stripCtl(r.type)}${sev}] ${stripCtl(r.endpoint ?? "—")} ${r.errorCode ? c.yellow + stripCtl(r.errorCode) + c.reset : ""} — ${stripCtl(String(r.summary ?? "").slice(0, 60))}`);
     }
   }
   console.log();
