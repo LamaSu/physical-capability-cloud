@@ -118,7 +118,13 @@ PR / the assistant's handoff. No prod writes were made pre-deploy (nothing new t
 
 - **Durable JSONL** — `${dirname(PCC_DB_PATH)}/feedback.jsonl` (prod: `/app/data/feedback.jsonl`, on the volume).
 - **`GET /api/admin/feedback`** (`X-Admin-Token`) — full parsed export.
-- **Troubleshooting view** — `GET /api/admin/observability/{feedback,errors,journey/:traceId}` (via the `agent.report` audit event; needs `PCC_FUNNEL_ENABLED=true`).
+- **Troubleshooting view** — `GET /api/admin/observability/{feedback,errors}` are ON BY
+  DEFAULT (they read the `agent.report` audit event; no `PCC_FUNNEL_ENABLED` needed).
+  `funnel` + `journey/:traceId` still need `PCC_FUNNEL_ENABLED=true` (per-request journey
+  recording — opt-in for perf). **Access control (fails closed):** set
+  `PCC_OBSERVABILITY_ADMINS=<operatorId,…>` to grant operators; with no allowlist the
+  views 403 in prod. A dev bypass requires BOTH `NODE_ENV=development` AND
+  `PCC_OBSERVABILITY_DEV_OPEN=true` — a leaked var or missing `NODE_ENV` can't expose data.
 - **Daily report** — `node scripts/daily-report.mjs` → AGENT FEEDBACK section (console + `ai/reports/*.json` + HTML viewer).
 - **Live** — Discord webhook per report; PostHog `feedback_filed` event.
 
