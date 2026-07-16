@@ -19,8 +19,8 @@ beforeAll(async () => {
   process.env.PCC_DB_PATH = join(tmpDir, "pcc.sqlite");
   process.env.WAITLIST_ADMIN_TOKEN = "t";
   delete process.env.PCC_FUNNEL_ENABLED; // OFF — the feedback/errors views must work anyway
-  delete process.env.PCC_OBSERVABILITY_ADMINS; // → allowed outside production
-  delete process.env.NODE_ENV; // ensure not "production" so the admin guard permits
+  delete process.env.PCC_OBSERVABILITY_ADMINS; // no allowlist → gate fails closed unless...
+  process.env.PCC_OBSERVABILITY_DEV_OPEN = "true"; // ...the EXPLICIT dev opt-in (not NODE_ENV)
   delete process.env.DISCORD_WEBHOOK_URL;
 
   const db = await import("../db.js");
@@ -99,6 +99,18 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     const funnel = await app.inject({ method: "GET", url: "/api/admin/observability/funnel", headers: { "x-admin-token": "t" } });
     expect(funnel.statusCode).toBe(404);
     expect(funnel.json().error).toBe("not_enabled");
+  });
+
+  it("fails closed with no allowlist + no dev opt-in, regardless of NODE_ENV (review r-obs #1)", async () => {
+    delete process.env.PCC_OBSERVABILITY_DEV_OPEN;
+    process.env.NODE_ENV = ""; // a missing/misspelled NODE_ENV must NOT open the views
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/admin/observability/feedback", headers: { "x-admin-token": "t" } });
+      expect(res.statusCode).toBe(403);
+    } finally {
+      process.env.PCC_OBSERVABILITY_DEV_OPEN = "true"; // restore for the remaining tests
+      delete process.env.NODE_ENV;
+    }
   });
 
   it("also still lands in the durable admin feedback export", async () => {

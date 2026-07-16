@@ -42,11 +42,11 @@ function isObservabilityAdmin(req: FastifyRequest): boolean {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (allow.length === 0) {
-    // No allowlist configured → permit only outside production.
-    return process.env.NODE_ENV !== "production";
-  }
-  return !!operatorId && allow.includes(operatorId);
+  if (allow.length > 0) return !!operatorId && allow.includes(operatorId);
+  // No allowlist → FAIL CLOSED. A development bypass is an EXPLICIT opt-in, never
+  // inferred from NODE_ENV — a missing or misspelled NODE_ENV in prod must NOT expose
+  // these views (review r-obs #1, esp. now that feedback/errors are enabled by default).
+  return process.env.PCC_OBSERVABILITY_DEV_OPEN === "true";
 }
 
 /**
