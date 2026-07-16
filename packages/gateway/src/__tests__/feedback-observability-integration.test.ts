@@ -20,7 +20,8 @@ beforeAll(async () => {
   process.env.WAITLIST_ADMIN_TOKEN = "t";
   delete process.env.PCC_FUNNEL_ENABLED; // OFF — the feedback/errors views must work anyway
   delete process.env.PCC_OBSERVABILITY_ADMINS; // no allowlist → gate fails closed unless...
-  process.env.PCC_OBSERVABILITY_DEV_OPEN = "true"; // ...the EXPLICIT dev opt-in (not NODE_ENV)
+  process.env.NODE_ENV = "development"; // ...an EXPLICIT dev env + ...
+  process.env.PCC_OBSERVABILITY_DEV_OPEN = "true"; // ...an EXPLICIT opt-in (both required)
   delete process.env.DISCORD_WEBHOOK_URL;
 
   const db = await import("../db.js");
@@ -101,15 +102,20 @@ describe("feedback → observability view (Phase 3 reconciliation)", () => {
     expect(funnel.json().error).toBe("not_enabled");
   });
 
-  it("fails closed with no allowlist + no dev opt-in, regardless of NODE_ENV (review r-obs #1)", async () => {
-    delete process.env.PCC_OBSERVABILITY_DEV_OPEN;
-    process.env.NODE_ENV = ""; // a missing/misspelled NODE_ENV must NOT open the views
+  it("fails closed without an allowlist: leaked dev opt-in or missing NODE_ENV can't open it (review r-obs #1 + confirm)", async () => {
+    const url = "/api/admin/observability/feedback";
     try {
-      const res = await app.inject({ method: "GET", url: "/api/admin/observability/feedback", headers: { "x-admin-token": "t" } });
-      expect(res.statusCode).toBe(403);
+      // (a) missing/misspelled NODE_ENV + no opt-in → denied
+      process.env.NODE_ENV = "";
+      delete process.env.PCC_OBSERVABILITY_DEV_OPEN;
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(403);
+      // (b) a LEAKED opt-in in production → still denied (dev bypass needs NODE_ENV=development)
+      process.env.NODE_ENV = "production";
+      process.env.PCC_OBSERVABILITY_DEV_OPEN = "true";
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(403);
     } finally {
-      process.env.PCC_OBSERVABILITY_DEV_OPEN = "true"; // restore for the remaining tests
-      delete process.env.NODE_ENV;
+      process.env.NODE_ENV = "development"; // restore the dev-open combo for the remaining tests
+      process.env.PCC_OBSERVABILITY_DEV_OPEN = "true";
     }
   });
 
