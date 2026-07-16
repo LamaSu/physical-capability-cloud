@@ -18,8 +18,9 @@
  * route is dynamically imported AFTER the env is set.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { auditService } from "../services/audit-service.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -295,6 +296,33 @@ describe("POST /api/feedback (public)", () => {
     await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "boundary", logs: [{ note }] } });
     const stored = (await adminItems()).items[0].logs[0].note;
     expect(stored).not.toContain("ZZZ"); // no surviving secret fragment at the boundary
+  });
+
+  it("emits the agent.report audit event the observability views read (Phase 3)", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => undefined) as never);
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/api/feedback",
+        payload: { type: "bug", summary: "observability wiring test", endpoint: "/api/build/contract", errorCode: "E42", traceId: "tr_obs1", agentId: "claude" },
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const ev = spy.mock.calls[0][0] as { eventType: string; resourceType: string; resourceId: string; metadata: Record<string, unknown> };
+      expect(ev.eventType).toBe("agent.report"); // the exact event admin-observability queries
+      expect(ev.resourceType).toBe("agent_report");
+      expect(ev.resourceId).toMatch(/^fb-/);
+      // metadata field names must match admin-observability.ts's readers
+      expect(ev.metadata).toMatchObject({
+        trace_id: "tr_obs1",
+        summary: "observability wiring test",
+        last_endpoint: "/api/build/contract",
+        last_error_code: "E42",
+        agent_kind: "claude",
+        confused_about: "bug",
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {

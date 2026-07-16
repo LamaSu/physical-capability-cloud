@@ -16,7 +16,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,13 +76,56 @@ const TO = todayISO();
 // ---------------------------------------------------------------------------
 
 async function getJSON(path) {
+  // Auth: the /api/analytics/* endpoints need a PCC key (they were 401'ing because
+  // none was sent); /api/admin/feedback needs the admin token. Send whichever env
+  // vars are present — harmless to send both.
+  const headers = {};
+  if (process.env.PCC_API_KEY) headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
+  if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
   try {
-    const res = await fetch(`${BASE}${path}`);
+    const res = await fetch(`${BASE}${path}`, { headers });
     if (!res.ok) return { __error: `HTTP ${res.status}` };
     return await res.json();
   } catch (err) {
     return { __error: err.message };
   }
+}
+
+/**
+ * Summarize the feedback sink (GET /api/admin/feedback → {total, items}) for the
+ * report window. Pure + exported so it can be unit-checked without running the report.
+ */
+export function summarizeFeedback(feedback, fromISO, toISO) {
+  const items = Array.isArray(feedback?.items) ? feedback.items : [];
+  const from = Date.parse(`${fromISO}T00:00:00Z`);
+  const to = Date.parse(`${toISO}T23:59:59Z`);
+  const inWindow = items.filter((i) => {
+    const t = Date.parse(i?.createdAt ?? "");
+    return Number.isFinite(t) && t >= from && t <= to;
+  });
+  const tally = (key) => {
+    const m = {};
+    for (const i of inWindow) {
+      const k = i?.[key] || "(none)";
+      m[k] = (m[k] ?? 0) + 1;
+    }
+    return Object.entries(m).map(([k, count]) => ({ key: k, count })).sort((a, b) => b.count - a.count);
+  };
+  return {
+    error: feedback?.__error ?? null,
+    total: inWindow.length,
+    all_time: items.length,
+    by_type: tally("type"),
+    by_severity: tally("severity").filter((r) => r.key !== "(none)"),
+    top_endpoints: tally("endpoint").filter((r) => r.key !== "(none)").slice(0, 10),
+    top_error_codes: tally("errorCode").filter((r) => r.key !== "(none)").slice(0, 10),
+    with_logs: inWindow.filter((i) => Array.isArray(i?.logs) && i.logs.length > 0).length,
+    recent: inWindow
+      .slice()
+      .sort((a, b) => Date.parse(b?.createdAt ?? "") - Date.parse(a?.createdAt ?? ""))
+      .slice(0, 10)
+      .map((i) => ({ id: i.id, type: i.type, severity: i.severity, endpoint: i.endpoint, errorCode: i.errorCode, httpStatus: i.httpStatus, summary: i.summary, logs: i.logs?.length ?? 0, createdAt: i.createdAt })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +168,7 @@ async function main() {
   console.log();
 
   // Fetch everything in parallel
-  const [overview, errors, traffic, pages, events, security, devices, geo] = await Promise.all([
+  const [overview, errors, traffic, pages, events, security, devices, geo, feedbackRaw] = await Promise.all([
     getJSON(`/api/analytics/overview?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/errors?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/traffic?from=${FROM}&to=${TO}`),
@@ -134,7 +177,9 @@ async function main() {
     getJSON(`/api/analytics/security?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/devices?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/geography?from=${FROM}&to=${TO}`),
+    getJSON(`/api/admin/feedback`), // durable agent+human feedback sink (JSONL)
   ]);
+  const feedback = summarizeFeedback(feedbackRaw, FROM, TO);
 
   // Load previous snapshot for comparison
   let prev = null;
@@ -277,11 +322,37 @@ async function main() {
   console.log("  Verdict: " + verdict);
   console.log();
 
+  // ── SECTION: Agent + human feedback (pcc_report) ────────────────────────
+  console.log(c.bold + "AGENT FEEDBACK (pcc_report)" + c.reset);
+  console.log(line());
+  if (feedback.error) {
+    console.log(`  ${c.red}unavailable: ${feedback.error}${c.reset}  (set WAITLIST_ADMIN_TOKEN)`);
+  } else if (feedback.total === 0) {
+    console.log(`  ${c.gray}no feedback in range${c.reset}  (${num(feedback.all_time)} all-time)`);
+  } else {
+    console.log(`  ${pad("Reports in range", 22)} ${c.bold}${num(feedback.total)}${c.reset}  ${c.gray}(${num(feedback.all_time)} all-time, ${num(feedback.with_logs)} with logs)${c.reset}`);
+    const maxT = Math.max(...feedback.by_type.map((r) => r.count), 1);
+    for (const r of feedback.by_type) console.log(`    ${pad(r.key, 12)} ${bar(r.count, maxT, 16)} ${num(r.count)}`);
+    if (feedback.top_error_codes.length) {
+      console.log(`  ${c.dim}top error codes:${c.reset}`);
+      for (const r of feedback.top_error_codes.slice(0, 5)) console.log(`    ${pad(r.key, 22)} ${num(r.count)}`);
+    }
+    if (feedback.top_endpoints.length) {
+      console.log(`  ${c.dim}top endpoints:${c.reset}`);
+      for (const r of feedback.top_endpoints.slice(0, 5)) console.log(`    ${pad(r.key, 40)} ${num(r.count)}`);
+    }
+    console.log(`  ${c.dim}recent:${c.reset}`);
+    for (const r of feedback.recent.slice(0, 5)) {
+      console.log(`    ${c.gray}${(r.createdAt ?? "").slice(5, 16)}${c.reset} [${r.type}${r.severity ? "/" + r.severity : ""}] ${r.endpoint ?? "—"} ${r.errorCode ? c.yellow + r.errorCode + c.reset : ""} — ${String(r.summary ?? "").slice(0, 60)}`);
+    }
+  }
+  console.log();
+
   // ── Save snapshot ───────────────────────────────────────────────────────
   const snapshot = {
     generatedAt: new Date().toISOString(),
     range: { from: FROM, to: TO },
-    overview, errors, traffic, pages, events, security, devices, geo,
+    overview, errors, traffic, pages, events, security, devices, geo, feedback,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(snapshot, null, 2));
 
@@ -461,6 +532,18 @@ function render(i) {
     }
   }
 
+  // Agent feedback (pcc_report)
+  if (d.feedback && d.feedback.total > 0) {
+    html += '<h2>Agent Feedback (pcc_report) — ' + num(d.feedback.total) + ' in range, ' + num(d.feedback.with_logs) + ' with logs</h2><div class="panel">';
+    (d.feedback.by_type || []).forEach(t => {
+      html += '<div class="row"><span class="name">' + esc(t.key) + '</span><span class="count">' + num(t.count) + '</span></div>';
+    });
+    (d.feedback.recent || []).slice(0, 8).forEach(r => {
+      html += '<div class="row"><span class="name">[' + esc(r.type) + (r.severity ? '/' + esc(r.severity) : '') + '] ' + esc(r.endpoint || '—') + ' ' + esc(r.errorCode || '') + ' — ' + esc((r.summary || '').slice(0, 80)) + '</span><span class="count">' + esc((r.createdAt || '').slice(5, 16)) + '</span></div>';
+    });
+    html += '</div>';
+  }
+
   // Top events
   if ((d.events?.events || []).length > 0) {
     const maxE = d.events.events[0].count || 1;
@@ -524,7 +607,12 @@ render(0);
 </html>`;
 }
 
-main().catch((err) => {
-  console.error(c.red + "Error:" + c.reset, err);
-  process.exit(1);
-});
+// Only run the report when executed directly — so `summarizeFeedback` can be imported
+// (e.g. by a test) without triggering the whole fetch+render.
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
+if (isMain) {
+  main().catch((err) => {
+    console.error(c.red + "Error:" + c.reset, err);
+    process.exit(1);
+  });
+}

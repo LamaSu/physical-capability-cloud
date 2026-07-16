@@ -21,6 +21,7 @@ import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { redactSecrets } from "../redaction.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -362,8 +363,39 @@ export async function feedbackRoutes(app: FastifyInstance) {
     markSeen(dedupKey);
     // Live-notify the team via Discord webhook (best-effort, non-blocking).
     notifyDiscord(rec).catch(() => {});
-    // Observability event (folds in the value of the orphaned /api/feedback/agent-report
-    // route). Best-effort — never let telemetry break the response.
+    // Observability (folds in the value of the deprecated /api/feedback/agent-report
+    // route). Best-effort — never let it break the response.
+    //  1) The `agent.report` audit event the admin-observability views read, so the
+    //     feedback-stream + error-histogram + per-agent journey light up with the new
+    //     reports (metadata shape mirrors what admin-observability.ts expects).
+    try {
+      auditService.log({
+        eventType: "agent.report",
+        actor:
+          (req as unknown as { operatorId?: string }).operatorId ??
+          (req as unknown as { apiKeyId?: string }).apiKeyId ??
+          `anonymous:${req.ip}`,
+        resourceType: "agent_report",
+        resourceId: rec.id,
+        action: "create",
+        metadata: {
+          trace_id: rec.traceId,
+          summary: rec.summary,
+          agent_kind: rec.agentId,
+          last_endpoint: rec.endpoint,
+          last_error_code: rec.errorCode,
+          confused_about: rec.type,
+          http_status: rec.httpStatus,
+          severity: rec.severity,
+          log_count: rec.logs?.length ?? 0,
+        },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"] as string | undefined,
+      });
+    } catch {
+      /* best-effort observability */
+    }
+    //  2) A PostHog event for aggregate dashboards.
     try {
       trackServerEvent("feedback_filed", {
         feedback_id: rec.id,

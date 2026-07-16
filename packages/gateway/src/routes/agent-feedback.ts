@@ -1,6 +1,13 @@
 /**
  * Agent friction reports — agent-onboarding observability piece 3.
  *
+ * @deprecated Superseded by POST /api/feedback (routes/feedback.ts), which the
+ * `pcc_report` tool now targets. That route is durable (JSONL on the volume),
+ * admin-readable (GET /api/admin/feedback), AND emits the same `agent.report` audit
+ * event this route did — so the admin-observability views read the new reports too.
+ * This route stays registered for back-compat with any old caller; new callers should
+ * use POST /api/feedback. Remove once no traffic remains.
+ *
  * POST /api/feedback/agent-report
  *
  * The `pcc_report` tool entry in agent-package.json points here. When an
