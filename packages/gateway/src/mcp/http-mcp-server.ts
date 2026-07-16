@@ -35,8 +35,12 @@ import {
   TYPED_OP_TOOL_PREFIX,
   type OpPrincipal,
 } from "./operation-policy.js";
+import { resolveMcpApiBase, mcpApiBaseUnavailableMessage } from "./mcp-api-base.js";
 
-const PCC_API_BASE_URL = "https://capability.network";
+// Branding only (server-card icon) — NOT the proxy data plane. The upstream API
+// origin the proxy forwards to is resolved per-request via resolveMcpApiBase()
+// (validated, environment-local, fail-closed); see mcp-api-base.ts.
+const PCC_PUBLIC_ORIGIN = "https://capability.network";
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
 const MCP_MAX_SESSIONS = 100;
 const MCP_INSTRUCTIONS =
@@ -180,6 +184,7 @@ function encodeQueryValue(value: unknown): string[] {
 function buildProxyRequest(
   tool: AgentPackageTool,
   rawArguments: JsonObject,
+  base: string,
 ): { url: URL; body?: string } | { error: string } {
   const args = { ...rawArguments };
   let endpointPath = tool.endpoint.path;
@@ -208,8 +213,8 @@ function buildProxyRequest(
     delete args[name];
   }
 
-  const url = new URL(endpointPath, PCC_API_BASE_URL);
-  if (url.origin !== PCC_API_BASE_URL) {
+  const url = new URL(endpointPath, base);
+  if (url.origin !== base) {
     return { error: `PCC tool endpoint escaped the configured API origin: ${endpointPath}` };
   }
   if (tool.endpoint.method === "GET" || tool.endpoint.method === "DELETE") {
@@ -254,7 +259,12 @@ async function proxyToolCall(
   signal: AbortSignal,
   readOnlySurface = false,
 ) {
-  const proxyRequest = buildProxyRequest(tool, rawArguments);
+  // Fail closed: never fall back to production. resolveMcpApiBase() validates +
+  // environment-isolates the upstream origin; an unavailable base disables the
+  // proxy rather than silently forwarding the caller's bearer to prod.
+  const baseResolution = resolveMcpApiBase();
+  if ("error" in baseResolution) return errorResult(baseResolution.error);
+  const proxyRequest = buildProxyRequest(tool, rawArguments, baseResolution.origin);
   if ("error" in proxyRequest) return errorResult(proxyRequest.error);
 
   const headers = new Headers({ accept: "application/json" });
@@ -315,7 +325,7 @@ async function proxyToolCall(
  * (see docs-mcp-server.ts) — same asset apps/dashboard/public/pcc-icon.svg
  * that /.well-known/mcp/server-card.json's `logo`/`icon` fields already
  * reference. Kept as one constant so a future icon swap only edits one line. */
-export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
+export const PCC_MCP_ICON_URL = `${PCC_PUBLIC_ORIGIN}/pcc-icon.svg`;
 
 /**
  * Dispatch a validated tools/call to its handler. Exported as a pure function so
@@ -507,6 +517,16 @@ function assertAppSurfaceAvailable(): void {
   if (message) throw new McpError(ErrorCode.InvalidRequest, message);
 }
 
+/** Fail closed the WHOLE MCP feature (both /mcp and /mcp/apps, tools/list AND
+ * CallTool) when the upstream API base is unavailable — missing/invalid, or a
+ * non-production deployment pointed at production. There is NO production
+ * fallback; the gateway stays healthy but the proxy surfaces are disabled until
+ * PCC_API_BASE_URL is correctly configured. See mcp-api-base.ts. */
+function assertMcpApiBaseAvailable(): void {
+  const message = mcpApiBaseUnavailableMessage();
+  if (message) throw new McpError(ErrorCode.InvalidRequest, message);
+}
+
 function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
@@ -529,6 +549,10 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
   );
 
   server.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Fail closed for BOTH /mcp and /mcp/apps if the upstream proxy base is
+    // unavailable (missing/invalid, or a non-prod deployment aimed at prod) — the
+    // proxy must never silently target production.
+    assertMcpApiBaseAvailable();
     // Raw proxy tools + the UI render tool + the dedicated typed-operation tools
     // (pcc.op.*). The typed tools are additive: they never replace or shadow a
     // raw tool, and only they route through the server-authorized policy handler.
@@ -546,6 +570,9 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
   });
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    // Fail closed for BOTH surfaces if the upstream proxy base is unavailable —
+    // before any dispatch, so a proxy call can never target production.
+    assertMcpApiBaseAvailable();
     // Coerce arguments exactly as the pre-#257 handler did (`?? {}`); the SDK
     // schema has already guaranteed `arguments` is an object-or-undefined. All
     // tool-not-found / handler routing lives in the exported dispatchToolCall so

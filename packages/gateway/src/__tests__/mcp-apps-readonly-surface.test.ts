@@ -1,6 +1,11 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { appsHttpMcpRoutes, httpMcpRoutes } from "../mcp/http-mcp-server.js";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  appsHttpMcpRoutes,
+  dispatchToolCall,
+  httpMcpRoutes,
+  type AgentPackageTool,
+} from "../mcp/http-mcp-server.js";
 
 // The server-enforced READ-ONLY /mcp/apps surface (the read-only gen-UI launch
 // piece). These tests assert the read-only guarantee at BOTH tools/list AND the
@@ -205,14 +210,24 @@ describe("read-only /mcp/apps surface (non-prod: surface active)", () => {
 });
 
 describe("read-only /mcp/apps prod domain gate (gates 5/6)", () => {
-  const OLD_ENV = process.env.NODE_ENV;
-  const OLD_DOMAIN = process.env.PCC_MCP_APP_DOMAIN;
+  const OLD: Record<string, string | undefined> = {
+    NODE_ENV: process.env.NODE_ENV,
+    PCC_MCP_APP_DOMAIN: process.env.PCC_MCP_APP_DOMAIN,
+    PCC_API_BASE_URL: process.env.PCC_API_BASE_URL,
+    PCC_DEPLOYMENT_ENV: process.env.PCC_DEPLOYMENT_ENV,
+  };
 
+  // The proxy base gate runs BEFORE the domain gate; give it a valid, isolated
+  // base so these tests exercise the DOMAIN gate specifically (not the base gate).
+  beforeEach(() => {
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    process.env.PCC_API_BASE_URL = "https://pcc-gateway-staging.up.railway.app";
+  });
   afterEach(() => {
-    if (OLD_ENV === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = OLD_ENV;
-    if (OLD_DOMAIN === undefined) delete process.env.PCC_MCP_APP_DOMAIN;
-    else process.env.PCC_MCP_APP_DOMAIN = OLD_DOMAIN;
+    for (const [k, v] of Object.entries(OLD)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
 
   it("prod + placeholder domain → tools/list AND ui:// reads return a clear error", async () => {
@@ -257,6 +272,105 @@ describe("read-only /mcp/apps prod domain gate (gates 5/6)", () => {
       }
     } finally {
       await app.close();
+    }
+  });
+});
+
+// ── MCP proxy environment isolation (the data-plane base gate) ────────────────
+describe("MCP proxy environment isolation (base gate)", () => {
+  const KEYS = [
+    "NODE_ENV", "PCC_API_BASE_URL", "PCC_DEPLOYMENT_ENV", "PCC_MCP_APP_DOMAIN", "RAILWAY_ENVIRONMENT_NAME",
+  ] as const;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = {};
+    for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const getTool = (name: string, path: string): AgentPackageTool =>
+    ({ name, description: "", input_schema: {}, endpoint: { method: "GET", path } }) as AgentPackageTool;
+
+  it("missing deployed base DISABLES both /mcp and /mcp/apps tools/list (fail closed, no prod fallback)", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    // PCC_API_BASE_URL intentionally unset → deployed + no base → proxy disabled.
+
+    const app = Fastify({ logger: false });
+    await app.register(httpMcpRoutes);
+    await app.register(appsHttpMcpRoutes);
+    await app.ready();
+    try {
+      for (const path of ["/mcp", "/mcp/apps"]) {
+        const session = await initSession(app, path); // initialize is not gated
+        const list = await rpc(app, path, session, { id: 2, method: "tools/list", params: {} });
+        expect(list.body.result, `${path} tools/list should be disabled`).toBeUndefined();
+        // The BASE gate fires first (before the app-surface domain gate).
+        expect(list.body.error.message).toMatch(/PCC_API_BASE_URL is not set|MCP proxy is disabled/i);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("forwards the bearer ONLY to the configured origin; full + read-only surfaces use the SAME base", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    process.env.PCC_API_BASE_URL = "https://pcc-gateway-staging.up.railway.app";
+
+    const tools = new Map([["list_kernels", getTool("list_kernels", "/api/kernels")]]);
+    const seen: { origin: string; auth: string | null; readonly: string | null }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const headers = new Headers(init?.headers as HeadersInit);
+      seen.push({
+        origin: new URL(String(input)).origin,
+        auth: headers.get("authorization"),
+        readonly: headers.get("x-pcc-mcp-readonly"),
+      });
+      return new Response(JSON.stringify({ kernels: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    try {
+      const ctrl = new AbortController();
+      await dispatchToolCall(tools, "list_kernels", {}, "test-bearer", ctrl.signal, false); // full surface
+      await dispatchToolCall(tools, "list_kernels", {}, "test-bearer", ctrl.signal, true); //  read-only surface
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(seen.length).toBe(2);
+    for (const s of seen) {
+      expect(s.origin).toBe("https://pcc-gateway-staging.up.railway.app"); // same env-local base
+      expect(s.auth).toBe("Bearer test-bearer"); // bearer forwarded
+    }
+    expect(seen.some((s) => s.origin === "https://capability.network")).toBe(false); // never prod
+    expect(seen[1].readonly).toBe("1"); // read-only surface marks the call passive
+  });
+
+  it("an endpoint path cannot escape the configured origin (never reaches the network)", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    process.env.PCC_API_BASE_URL = "https://pcc-gateway-staging.up.railway.app";
+
+    // Protocol-relative path resolves to a FOREIGN origin against the base.
+    const evil = new Map([["escaper", getTool("escaper", "//evil.example/api/kernels")]]);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    try {
+      const ctrl = new AbortController();
+      const res = (await dispatchToolCall(evil, "escaper", {}, "t", ctrl.signal, false)) as {
+        isError?: boolean; content: { text: string }[];
+      };
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toMatch(/escaped the configured API origin/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
     }
   });
 });
