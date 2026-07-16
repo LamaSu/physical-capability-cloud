@@ -18,8 +18,9 @@
  * route is dynamically imported AFTER the env is set.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { auditService } from "../services/audit-service.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ let tmpDir: string;
 let feedbackFile: string;
 let feedbackRoutes: typeof import("../routes/feedback.js").feedbackRoutes;
 let resetRateLimit: typeof import("../routes/feedback.js").__resetFeedbackRateLimit;
+let resetDedup: typeof import("../routes/feedback.js").__resetFeedbackDedup;
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "pcc-feedback-test-"));
@@ -43,6 +45,7 @@ beforeAll(async () => {
   const mod = await import("../routes/feedback.js");
   feedbackRoutes = mod.feedbackRoutes;
   resetRateLimit = mod.__resetFeedbackRateLimit;
+  resetDedup = mod.__resetFeedbackDedup;
 });
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -57,6 +60,7 @@ let app: FastifyInstance;
 beforeEach(async () => {
   rmSync(feedbackFile, { force: true }); // fresh storage per test
   resetRateLimit();
+  resetDedup();
   app = await buildApp();
 });
 
@@ -108,6 +112,232 @@ describe("POST /api/feedback (public)", () => {
     });
     expect(items[0].id).toBe(body.id);
     expect(items[0].createdAt).toBeTruthy();
+  });
+
+  it("persists the report_hint send{} fields — method + httpStatus (auto-feedback)", async () => {
+    // Exactly what an agent copies from a 5xx `report_hint.send` block + a summary.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        type: "bug",
+        summary: "500 on the contract build step",
+        endpoint: "/api/build/contract",
+        method: "POST",
+        status: 500,
+        errorCode: "TIER_MISMATCH",
+        traceId: "tr_deadbeef",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const { items } = await adminItems();
+    expect(items[0]).toMatchObject({
+      endpoint: "/api/build/contract",
+      method: "POST",
+      httpStatus: 500, // send.status → httpStatus (never collides with the workflow `status`)
+      errorCode: "TIER_MISMATCH",
+    });
+    expect(items[0].status).toBe("new"); // workflow status is unaffected by the HTTP status
+  });
+
+  it("coerces a string HTTP status, nulls out-of-range and fractional ones", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "string status here", status: "503" } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "bogus status here", status: 99999 } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "fractional status here", status: 503.9 } });
+    const { items } = await adminItems();
+    const byStatus = Object.fromEntries(items.map((i) => [i.summary, i.httpStatus]));
+    expect(byStatus["string status here"]).toBe(503);
+    expect(byStatus["bogus status here"]).toBeNull();
+    expect(byStatus["fractional status here"]).toBeNull(); // not silently truncated to 503
+  });
+
+  it("persists a bounded, secret-redacted logs array (Phase 2)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "failed at the contract step",
+        logs: [
+          { step: 1, method: "POST", path: "/api/build/options", status: 200 },
+          { step: 2, method: "POST", path: "/api/build/contract", status: 500, note: "leaked pcc_live_ABCDEFGH123 here" },
+          "junk-not-an-object",
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const { items } = await adminItems();
+    expect(items[0].logs).toHaveLength(2); // the junk entry is dropped
+    expect(items[0].logs[1]).toMatchObject({ step: 2, method: "POST", path: "/api/build/contract", status: 500 });
+    expect(items[0].logs[1].note).not.toContain("pcc_live_ABCDEFGH123"); // note is redacted
+    expect(items[0].logs[1].note).toContain("redacted");
+  });
+
+  it("caps the logs array at 20 entries", async () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ step: i, note: `step ${i}` }));
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "many steps", logs: many } });
+    const { items } = await adminItems();
+    expect(items[0].logs).toHaveLength(20);
+  });
+
+  it("redacts secrets from summary + detail before persisting (Phase 2)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: { summary: "my key pcc_live_SUPERSECRET1 failed", detail: "sent Authorization: Bearer eyabc.DEF.ghijklmnop123456" },
+    });
+    const { items } = await adminItems();
+    expect(items[0].summary).not.toContain("pcc_live_SUPERSECRET1");
+    expect(items[0].summary).toContain("pcc_live_redacted");
+    expect(items[0].detail).toContain("Bearer [redacted]");
+  });
+
+  it("dedups a retry-looping agent's identical reports within the window (Phase 2)", async () => {
+    const payload = { summary: "same failure", endpoint: "/api/build/contract", errorCode: "TIER_MISMATCH", traceId: "tr_loop" };
+    const first = await app.inject({ method: "POST", url: "/api/feedback", payload });
+    const second = await app.inject({ method: "POST", url: "/api/feedback", payload });
+    expect(first.statusCode).toBe(201);
+    expect(first.json().submitted).toBe(true);
+    expect(second.statusCode).toBe(200); // not an error → the agent won't retry
+    expect(second.json().deduped).toBe(true);
+    expect((await adminItems()).total).toBe(1); // only one persisted
+
+    // a genuinely different report is NOT deduped
+    const third = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...payload, summary: "a different failure" } });
+    expect(third.statusCode).toBe(201);
+    expect((await adminItems()).total).toBe(2);
+  });
+
+  it("strips query strings + redacts structured fields — no key leak (Phase 2, review #1)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "auth failed",
+        endpoint: "/api/x?api_key=pcc_live_LEAKED12345",
+        errorCode: "pcc_live_LEAKED67890",
+        logs: [{ step: 1, path: "/api/y?token=pcc_live_INPATH999", note: "ok" }],
+      },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.endpoint).toBe("/api/x"); // query dropped
+    expect(rec.logs[0].path).toBe("/api/y"); // logs path query dropped
+    expect(rec.errorCode).not.toContain("LEAKED67890"); // errorCode redacted
+    // nothing anywhere in the persisted record leaks a key
+    expect(JSON.stringify(rec)).not.toMatch(/LEAKED12345|LEAKED67890|INPATH999/);
+  });
+
+  it("dedups on the trusted principal (ip), not the spoofable traceId (review #4)", async () => {
+    const base = { summary: "same failure body", endpoint: "/api/x", errorCode: "E1" };
+    const first = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...base, traceId: "tr_aaa" } });
+    const second = await app.inject({ method: "POST", url: "/api/feedback", payload: { ...base, traceId: "tr_bbb" } });
+    expect(first.json().submitted).toBe(true);
+    expect(second.json().deduped).toBe(true); // different traceId still collapses
+    expect((await adminItems()).total).toBe(1);
+  });
+
+  it("validates method + redacts identifier fields, dropping stashed secrets (review r2 #1)", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: {
+        summary: "leak attempt in structured fields",
+        method: "pcc_live_NOTAVERB1", // not a real HTTP verb → dropped
+        traceId: "0x" + "a".repeat(64), // private key stashed in traceId → redacted
+        walletAddress: "0x" + "e".repeat(64), // private key in wallet field → redacted
+        logs: [{ method: "sk-secretkeyhere1234567", note: "x" }], // bad log method → dropped
+      },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.method).toBeNull(); // non-verb method dropped, not persisted
+    expect(rec.traceId).not.toContain("a".repeat(64)); // redacted
+    expect(rec.walletAddress).not.toContain("e".repeat(64)); // redacted
+    expect(rec.logs[0].method).toBeUndefined(); // bad log-step method dropped
+    expect(JSON.stringify(rec)).toContain("[redacted-hex]");
+  });
+
+  it("keeps a real HTTP verb (normalized) but drops a pure-alpha non-verb (review r3 #2)", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "ok", method: "post", walletAddress: "0x" + "b".repeat(40) } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "not a verb", method: "PASSWORD" } });
+    const items = (await adminItems()).items;
+    const ok = items.find((i) => i.summary === "ok");
+    const bad = items.find((i) => i.summary === "not a verb");
+    expect(ok.method).toBe("POST"); // allowlisted verb, upper-cased
+    expect(ok.walletAddress).toBe("0x" + "b".repeat(40)); // public address survives
+    expect(bad.method).toBeNull(); // "PASSWORD" is alpha but not a verb → dropped
+    // standard-but-uncommon verbs are still accepted (review r4 #2)
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "connect verb", method: "connect" } });
+    expect((await adminItems()).items.find((i) => i.summary === "connect verb").method).toBe("CONNECT");
+  });
+
+  it("drops an email whose local part is a secret shape, keeps a normal one (review r3 #4)", async () => {
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "real email", email: "dev@example.com" } });
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "secret email", email: "a".repeat(64) + "@x.com" } });
+    const items = (await adminItems()).items;
+    expect(items.find((i) => i.summary === "real email").email).toBe("dev@example.com");
+    // a <64hex>@x.com must not be stored as a mangled "[redacted-hex]@x.com"
+    expect(items.find((i) => i.summary === "secret email").email).toBeNull();
+  });
+
+  it("caps the NORMALIZED email at 256, accepting harmless whitespace (review r6)", async () => {
+    // surrounding whitespace trims away → a valid short email, accepted + normalized
+    const padded = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "padded email", email: "   dev@example.com   " } });
+    expect(padded.statusCode).toBe(201);
+    expect((await adminItems()).items.find((i) => i.summary === "padded email").email).toBe("dev@example.com");
+    // a genuinely over-256 address is rejected
+    const long = await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "long email", email: "a".repeat(250) + "@example.com" } });
+    expect(long.statusCode).toBe(400);
+  });
+
+  it("redacts a secret straddling the note size limit — redact-before-clamp (review #6)", async () => {
+    // A realistic key: preceded by a separator (so \b matches), body crosses the
+    // 500-char clamp. Redact-before-clamp catches the whole key; clamp-first would
+    // leave a "pcc_live_ZZZ" fragment (too short to re-match).
+    const note = "X".repeat(487) + " pcc_live_ZZZQQQXYZ99";
+    await app.inject({ method: "POST", url: "/api/feedback", payload: { summary: "boundary", logs: [{ note }] } });
+    const stored = (await adminItems()).items[0].logs[0].note;
+    expect(stored).not.toContain("ZZZ"); // no surviving secret fragment at the boundary
+  });
+
+  it("emits the agent.report audit event the observability views read (Phase 3)", async () => {
+    const spy = vi.spyOn(auditService, "log").mockImplementation((() => undefined) as never);
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/api/feedback",
+        payload: { type: "bug", summary: "observability wiring test", endpoint: "/api/build/contract", errorCode: "E42", traceId: "tr_obs1", agentId: "claude" },
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const ev = spy.mock.calls[0][0] as { eventType: string; resourceType: string; resourceId: string; metadata: Record<string, unknown> };
+      expect(ev.eventType).toBe("agent.report"); // the exact event admin-observability queries
+      expect(ev.resourceType).toBe("agent_report");
+      expect(ev.resourceId).toMatch(/^fb-/);
+      // metadata field names must match admin-observability.ts's readers
+      expect(ev.metadata).toMatchObject({
+        trace_id: "tr_obs1",
+        summary: "observability wiring test",
+        last_endpoint: "/api/build/contract",
+        last_error_code: "E42",
+        agent_kind: "claude",
+        confused_about: "bug",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("strips terminal control chars (ANSI escapes) from stored text (review r-p3 #2)", async () => {
+    const ESC = String.fromCharCode(27); // \x1b — start of an ANSI escape
+    await app.inject({
+      method: "POST",
+      url: "/api/feedback",
+      payload: { summary: `boom ${ESC}[31mRED${ESC}[0m done`, detail: "line1\nline2\ttabbed" },
+    });
+    const rec = (await adminItems()).items[0];
+    expect(rec.summary.includes(ESC)).toBe(false); // the ESC byte is gone → no escape injection
+    expect(rec.summary).toContain("RED"); // visible text is kept
+    expect(rec.summary).toContain("[31m"); // the now-inert "[31m" text remains (harmless without ESC)
+    expect(rec.detail).toContain("\n"); // TAB + LF preserved (useful in multi-line detail)
+    expect(rec.detail).toContain("\t");
   });
 
   it("accepts the legacy dashboard shape ({type, message, page})", async () => {

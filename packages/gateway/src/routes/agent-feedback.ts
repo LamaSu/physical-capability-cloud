@@ -1,12 +1,19 @@
 /**
  * Agent friction reports — agent-onboarding observability piece 3.
  *
+ * @deprecated Superseded by POST /api/feedback (routes/feedback.ts), which the
+ * `pcc_report` tool now targets. That route is durable (JSONL on the volume),
+ * admin-readable (GET /api/admin/feedback), AND emits the same `agent.report` audit
+ * event this route did — so the admin-observability views read the new reports too.
+ * This route stays registered for back-compat with any old caller; new callers should
+ * use POST /api/feedback. Remove once no traffic remains.
+ *
  * POST /api/feedback/agent-report
  *
- * The `pcc_report` tool entry in agent-package.json points here. When an
- * agent (LLM-driven) hits an error it cannot recover from, gets confused
- * by a route, or thinks a tool description is misleading, it calls this
- * route with a brief summary + (ideally) its `trace_id`.
+ * LEGACY callers only — the `pcc_report` tool now targets POST /api/feedback (see the
+ * @deprecated note above). Any remaining caller that hits this route with a brief
+ * summary + (ideally) its `trace_id` still works: it logs the same `agent.report`
+ * audit event that /api/feedback now emits.
  *
  * PUBLIC route. Stuck agents may not have provisioned a key yet.
  * Rate-limited by IP (default 30/hour, configurable) to limit spam.

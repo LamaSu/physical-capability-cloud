@@ -18,6 +18,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { redactSecrets } from "../redaction.js";
+import { trackServerEvent } from "../services/posthog-service.js";
+import { auditService } from "../services/audit-service.js";
 
 // Durable storage on the mounted volume (same dir as the gateway DB / WORKFLOW_DB).
 // Migrate to a table later if volume warrants it.
@@ -42,6 +46,37 @@ function rateLimited(ip: string): boolean {
 export function __resetFeedbackRateLimit(): void {
   hits.clear();
 }
+
+// Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
+// with an identical (principal, endpoint, errorCode, summary-prefix) within a window,
+// so the volume + Discord aren't flooded and the team sees one report per real issue.
+// Finer-grained than the rate limit (which is a blunt per-IP cap).
+// Guard a bad env override: a NaN/negative window would make the expiry check
+// always-false, so keys would never expire and reports would dedup forever (review #5).
+const DEDUP_WINDOW_MS = (() => {
+  const n = Number.parseInt(process.env.PCC_FEEDBACK_DEDUP_WINDOW_MS ?? "300000", 10);
+  return Number.isFinite(n) && n > 0 ? n : 300000; // 5 min default
+})();
+const recentReports = new Map<string, number>();
+// PEEK — prune expired keys and report whether this one is present, WITHOUT recording
+// it. The key is marked only after a successful append (markSeen), so a failed write
+// can't permanently dedup a report that never persisted (review #3).
+function seenRecently(key: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of recentReports) if (now - t > DEDUP_WINDOW_MS) recentReports.delete(k);
+  return recentReports.has(key);
+}
+function markSeen(key: string): void {
+  recentReports.set(key, Date.now());
+}
+/** Reset the in-memory dedup window. Test-only export. */
+export function __resetFeedbackDedup(): void {
+  recentReports.clear();
+}
+
+// Bounds for the optional `logs` array (recent step SUMMARIES, not bodies).
+const MAX_LOG_ENTRIES = 20;
+const LOG_NOTE_MAX = 500;
 
 function append(file: string, rec: unknown): void {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -90,11 +125,103 @@ const SUMMARY_MAX = 5000; // keeps the prior /api/feedback message ceiling
 const DETAIL_MAX = 20000;
 const FIELD_MAX = 2000;
 
+// Drop terminal control chars (C0 except TAB/LF, DEL, C1) from agent text so it
+// can't do escape-sequence injection in any consumer (daily report, logs, a TUI).
+function stripControl(s: string): string {
+  let out = "";
+  for (let k = 0; k < s.length; k++) {
+    const cc = s.charCodeAt(k);
+    if (cc === 9 || cc === 10 || (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159))) out += s[k];
+  }
+  return out;
+}
+
 function clampStr(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
-  const t = v.trim();
+  // Bound the raw input BEFORE scanning (r-p3-r2 #4) so stripControl/trim never walk an
+  // unbounded value on this public route. 64k is far above any field cap (detail=20k).
+  const bounded = v.length > 64_000 ? v.slice(0, 64_000) : v;
+  // Strip C0/C1 control chars incl. ESC (0x1B) so agent-supplied text can't do
+  // terminal-escape injection in any consumer — the daily report, logs, a TUI (r-p3 #2).
+  // Keep \t and \n (harmless + useful in multi-line detail).
+  const t = stripControl(bounded).trim();
   if (!t) return null;
   return t.length > max ? t.slice(0, max) : t;
+}
+
+// Coerce an HTTP status (number or numeric string, e.g. from a report_hint send{}
+// block) to a valid 100..599 int, else null. Named httpStatus so it never collides
+// with the record's own workflow `status` field.
+function clampHttpStatus(v: unknown): number | null {
+  const n = Number(v);
+  // Must be a whole HTTP status (100..599). Reject fractional values rather than
+  // silently truncating (503.9 -> null, not 503) — the field is documented integer.
+  return Number.isInteger(n) && n >= 100 && n < 600 ? n : null;
+}
+
+// Hard cap on the input handed to redaction — well above any legitimate field
+// (detail is 20000), so nothing real is lost, but it bounds the regex work on this
+// PUBLIC route so a pathologically huge body can't burn CPU/memory (review #4).
+const PRE_REDACT_MAX = 64_000;
+
+// Redact secrets from a free-text field, THEN clamp — redact BEFORE truncation so a
+// secret that would straddle the size limit is still fully matched (review #6). The
+// input is first bounded to PRE_REDACT_MAX so redaction never scans an unbounded value.
+function redactClamp(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
+  return clampStr(redactSecrets(bounded), max);
+}
+// Path-like fields (endpoint / logs[].path / page): drop any query string first —
+// that's where a `?api_key=…` would hide — then redact + clamp (review #1). The input
+// is bounded to PRE_REDACT_MAX BEFORE scanning for the separator so a huge value isn't
+// fully scanned/split on this public route (review r3 #3).
+function pathClamp(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
+  const q = bounded.indexOf("?");
+  return redactClamp(q >= 0 ? bounded.slice(0, q) : bounded, max);
+}
+// The HTTP methods PCC uses. `method` is the verb the agent hit — always one of these;
+// anything else (incl. a pure-alpha secret like "PASSWORD") is dropped, not persisted.
+const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"]);
+function clampMethod(v: unknown): string | null {
+  const m = clampStr(v, 16);
+  const upper = m ? m.toUpperCase() : null;
+  return upper && HTTP_METHODS.has(upper) ? upper : null;
+}
+
+interface LogEntry {
+  step?: number;
+  method?: string;
+  path?: string;
+  status?: number;
+  note?: string;
+}
+
+// Bound + sanitize the optional `logs` array: the agent's last few steps as SUMMARIES
+// (method/path/status + a short note), never full bodies. Caps entry count + field
+// sizes, coerces status, drops junk, and REDACTS secret-shaped strings from each note.
+// Returns null when there is nothing usable, so the field simply doesn't persist.
+function clampLogs(v: unknown): LogEntry[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: LogEntry[] = [];
+  for (const raw of v.slice(0, MAX_LOG_ENTRIES)) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    const entry: LogEntry = {};
+    if (Number.isInteger(Number(e.step))) entry.step = Number(e.step);
+    const method = clampMethod(e.method); // validated HTTP verb, or dropped
+    if (method) entry.method = method;
+    const path = pathClamp(e.path ?? e.endpoint, FIELD_MAX); // strip query + redact
+    if (path) entry.path = path;
+    const status = clampHttpStatus(e.status);
+    if (status !== null) entry.status = status;
+    const note = redactClamp(e.note, LOG_NOTE_MAX); // redact before clamp
+    if (note) entry.note = note;
+    if (Object.keys(entry).length > 0) out.push(entry);
+  }
+  return out.length > 0 ? out : null;
 }
 
 // Discord webhook for live feedback notifications — preserved from the prior
@@ -159,7 +286,9 @@ export async function feedbackRoutes(app: FastifyInstance) {
     //   agent:        { type, summary, detail, endpoint, traceId, severity, agentId }
     //   dashboard:    { type, message, page, walletAddress, email }
     //   agent-report: { trace_id, last_endpoint, last_error_code, agent_kind }
-    const summary = clampStr(b.summary ?? b.message, SUMMARY_MAX);
+    // Scrub secret-shaped strings from all agent-supplied free text before it is
+    // persisted to the public sink (Phase 2 defense-in-depth; redact BEFORE clamp).
+    const summary = redactClamp(b.summary ?? b.message, SUMMARY_MAX);
     if (!summary) {
       return reply
         .code(400)
@@ -171,35 +300,134 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const severityRaw = String(b.severity ?? "").trim().toLowerCase();
     const severity = SEVERITIES.has(severityRaw) ? severityRaw : null;
 
-    const email = clampStr(b.email, 256);
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // Normalize (trim) FIRST, then cap the normalized address at 256 and validate it
+    // (review r6): harmless surrounding whitespace shouldn't reject a valid email, and
+    // an invalid over-long string is rejected, not truncated into a different valid-
+    // looking one (r4 #3). The Fastify body-size limit bounds the raw payload.
+    const emailRaw = (typeof b.email === "string" ? b.email.trim() : "") || null;
+    if (emailRaw && emailRaw.length > 256) {
+      return reply.code(400).send({ error: "bad_request", message: "Email too long." });
+    }
+    if (emailRaw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid email format." });
     }
+    // Validate the ORIGINAL address, then drop it if redaction would alter it: a
+    // secret-shaped local part must not be stored as a mangled "[redacted-hex]@x.com"
+    // that still passes the validator (r3 #4).
+    const email = emailRaw && redactSecrets(emailRaw) === emailRaw ? emailRaw : null;
 
     const rec = {
       id: rid("fb"),
       kind: "feedback",
       type,
       summary,
-      detail: clampStr(b.detail, DETAIL_MAX),
-      endpoint: clampStr(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
-      traceId: clampStr(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
+      detail: redactClamp(b.detail, DETAIL_MAX),
+      // Phase 2: the agent's last few steps (method/path/status + a redacted note),
+      // bounded + summarized — the "logs" half of "feedback and logs".
+      logs: clampLogs(b.logs),
+      // Path-like: strip any query string (where a ?api_key=… hides) + redact (#1).
+      endpoint: pathClamp(b.endpoint ?? b.last_endpoint ?? b.page, FIELD_MAX),
+      traceId: redactClamp(b.traceId ?? b.trace_id ?? (req as unknown as { traceId?: string }).traceId, FIELD_MAX),
       severity,
-      agentId: clampStr(b.agentId ?? b.agent_kind, FIELD_MAX),
-      errorCode: clampStr(b.errorCode ?? b.last_error_code, FIELD_MAX),
+      agentId: redactClamp(b.agentId ?? b.agent_kind, FIELD_MAX),
+      errorCode: redactClamp(b.errorCode ?? b.last_error_code, FIELD_MAX),
+      // Auto-feedback: the HTTP method + status the agent hit (from a report_hint
+      // send{} block). Lets the team see "500 on POST /api/build/contract" directly.
+      method: clampMethod(b.method), // validated verb, never a stashed secret
+      httpStatus: clampHttpStatus(b.status ?? b.httpStatus),
       // Legacy dashboard fields ride along (no migration).
-      page: clampStr(b.page, FIELD_MAX),
+      page: pathClamp(b.page, FIELD_MAX),
       email,
-      walletAddress: clampStr(b.walletAddress, 128),
+      // A public 0x+40hex address survives; a 0x+64hex private key is redacted.
+      walletAddress: redactClamp(b.walletAddress, 128),
       status: "new",
       createdAt: new Date().toISOString(),
       ip: req.ip,
       userAgent: (req.headers["user-agent"] as string | undefined) ?? null,
     };
 
+    // Dedup: collapse a retry-looping agent's repeated reports of the SAME failure
+    // within the window. Accepted (200, not an error, so the agent doesn't retry) but
+    // not persisted or re-notified. Key = SHA-256 over a serialized tuple with a
+    // trusted principal + the FULL endpoint, errorCode, and summary; JSON.stringify
+    // avoids `|`-delimiter collisions (review #4). Prefer an authenticated principal
+    // (apiKeyId/userId) so users behind one NAT/proxy IP don't cross-suppress each
+    // other; fall back to IP for cold, unauthenticated agents (review #2).
+    const apiKeyId = (req as unknown as { apiKeyId?: string }).apiKeyId;
+    const userId = (req as unknown as { userId?: string }).userId;
+    // Tag the principal by namespace so an apiKeyId and a userId with the same string
+    // value (or an empty/initialized id) can't collapse into one dedup identity (r3 #5).
+    const principal: [string, string] = apiKeyId
+      ? ["apiKey", apiKeyId]
+      : userId
+        ? ["user", userId]
+        : ["ip", req.ip];
+    const dedupKey = createHash("sha256")
+      .update(JSON.stringify([principal, rec.endpoint ?? "", rec.errorCode ?? "", rec.summary]))
+      .digest("hex");
+    if (seenRecently(dedupKey)) {
+      return reply.code(200).send({
+        status: "ok",
+        submitted: false,
+        deduped: true,
+        message: "Thanks — a matching report was already recorded moments ago.",
+      });
+    }
+
     append(FEEDBACK_FILE, rec);
+    // Mark the key only AFTER a successful append — a failed write must not
+    // permanently dedup a report that never persisted (#3).
+    markSeen(dedupKey);
     // Live-notify the team via Discord webhook (best-effort, non-blocking).
     notifyDiscord(rec).catch(() => {});
+    // Observability (folds in the value of the deprecated /api/feedback/agent-report
+    // route). Best-effort — never let it break the response.
+    //  1) The `agent.report` audit event the admin-observability views read, so the
+    //     feedback-stream + error-histogram + per-agent journey light up with the new
+    //     reports (metadata shape mirrors what admin-observability.ts expects).
+    try {
+      auditService.log({
+        eventType: "agent.report",
+        actor:
+          (req as unknown as { operatorId?: string }).operatorId ??
+          (req as unknown as { apiKeyId?: string }).apiKeyId ??
+          `anonymous:${req.ip}`,
+        resourceType: "agent_report",
+        resourceId: rec.id,
+        action: "create",
+        metadata: {
+          trace_id: rec.traceId,
+          summary: rec.summary,
+          agent_kind: rec.agentId,
+          last_endpoint: rec.endpoint,
+          last_error_code: rec.errorCode,
+          confused_about: rec.type,
+          http_status: rec.httpStatus,
+          severity: rec.severity,
+          log_count: rec.logs?.length ?? 0,
+        },
+        ip: req.ip,
+        userAgent: req.headers["user-agent"] as string | undefined,
+      });
+    } catch {
+      /* best-effort observability */
+    }
+    //  2) A PostHog event for aggregate dashboards.
+    try {
+      trackServerEvent("feedback_filed", {
+        feedback_id: rec.id,
+        type: rec.type,
+        endpoint: rec.endpoint,
+        http_status: rec.httpStatus,
+        error_code: rec.errorCode,
+        trace_id: rec.traceId,
+        agent_kind: rec.agentId,
+        severity: rec.severity,
+        log_count: rec.logs?.length ?? 0,
+      });
+    } catch {
+      /* best-effort telemetry */
+    }
 
     return reply.code(201).send({
       status: "ok",

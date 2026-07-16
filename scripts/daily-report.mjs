@@ -16,7 +16,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -75,14 +75,71 @@ const TO = todayISO();
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
+// Sanitize a value for SINGLE-LINE console output: drop every Unicode control (Cc),
+// format (Cf), and line/paragraph separator (Zl/Zp) — incl. TAB/LF and U+2028/U+2029
+// — then collapse whitespace, so agent-supplied feedback can't inject escape sequences
+// or forge report rows (r-p3-r2 #1 / r3). Unicode-property regex (ASCII-safe source).
+function stripCtl(v) {
+  return String(v ?? "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
 async function getJSON(path) {
+  // Route-specific auth: admin token ONLY to /api/admin/*, API key ONLY to
+  // /api/analytics/*, nothing to any other path — don't leak credentials to endpoints
+  // that don't need them (r-p3 #3 / r2 #2).
+  const headers = {};
+  if (path.startsWith("/api/admin/")) {
+    if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
+  } else if (path.startsWith("/api/analytics/")) {
+    if (process.env.PCC_API_KEY) headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
+  }
   try {
-    const res = await fetch(`${BASE}${path}`);
+    const res = await fetch(`${BASE}${path}`, { headers });
     if (!res.ok) return { __error: `HTTP ${res.status}` };
     return await res.json();
   } catch (err) {
     return { __error: err.message };
   }
+}
+
+/**
+ * Summarize the feedback sink (GET /api/admin/feedback → {total, items}) for the
+ * report window. Pure + exported so it can be unit-checked without running the report.
+ */
+export function summarizeFeedback(feedback, fromISO, toISO) {
+  const items = Array.isArray(feedback?.items) ? feedback.items : [];
+  const from = Date.parse(`${fromISO}T00:00:00Z`);
+  // Exclusive next-day bound so the last 999ms of the final day aren't dropped (r-p3 #4).
+  const to = Date.parse(`${toISO}T00:00:00Z`) + 86_400_000;
+  const inWindow = items.filter((i) => {
+    const t = Date.parse(i?.createdAt ?? "");
+    return Number.isFinite(t) && t >= from && t < to;
+  });
+  const tally = (key) => {
+    const m = Object.create(null); // prototype-safe: user keys like "__proto__" can't corrupt it (r-p3 #5)
+    for (const i of inWindow) {
+      const k = i?.[key] || "(none)";
+      m[k] = (m[k] ?? 0) + 1;
+    }
+    return Object.entries(m).map(([k, count]) => ({ key: k, count })).sort((a, b) => b.count - a.count);
+  };
+  return {
+    error: feedback?.__error ?? null,
+    total: inWindow.length,
+    // all-time count from the response's `total` when it's a sane count (survives any
+    // future server-side pagination of `items`); else the item count (r-p3 #1 / r2 #3).
+    all_time: Number.isSafeInteger(feedback?.total) && feedback.total >= 0 ? feedback.total : items.length,
+    by_type: tally("type"),
+    by_severity: tally("severity").filter((r) => r.key !== "(none)"),
+    top_endpoints: tally("endpoint").filter((r) => r.key !== "(none)").slice(0, 10),
+    top_error_codes: tally("errorCode").filter((r) => r.key !== "(none)").slice(0, 10),
+    with_logs: inWindow.filter((i) => Array.isArray(i?.logs) && i.logs.length > 0).length,
+    recent: inWindow
+      .slice()
+      .sort((a, b) => Date.parse(b?.createdAt ?? "") - Date.parse(a?.createdAt ?? ""))
+      .slice(0, 10)
+      .map((i) => ({ id: i.id, type: i.type, severity: i.severity, endpoint: i.endpoint, errorCode: i.errorCode, httpStatus: i.httpStatus, summary: i.summary, logs: i.logs?.length ?? 0, createdAt: i.createdAt })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +182,7 @@ async function main() {
   console.log();
 
   // Fetch everything in parallel
-  const [overview, errors, traffic, pages, events, security, devices, geo] = await Promise.all([
+  const [overview, errors, traffic, pages, events, security, devices, geo, feedbackRaw] = await Promise.all([
     getJSON(`/api/analytics/overview?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/errors?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/traffic?from=${FROM}&to=${TO}`),
@@ -134,7 +191,9 @@ async function main() {
     getJSON(`/api/analytics/security?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/devices?from=${FROM}&to=${TO}`),
     getJSON(`/api/analytics/geography?from=${FROM}&to=${TO}`),
+    getJSON(`/api/admin/feedback`), // durable agent+human feedback sink (JSONL)
   ]);
+  const feedback = summarizeFeedback(feedbackRaw, FROM, TO);
 
   // Load previous snapshot for comparison
   let prev = null;
@@ -277,11 +336,38 @@ async function main() {
   console.log("  Verdict: " + verdict);
   console.log();
 
+  // ── SECTION: Agent + human feedback (pcc_report) ────────────────────────
+  console.log(c.bold + "AGENT FEEDBACK (pcc_report)" + c.reset);
+  console.log(line());
+  if (feedback.error) {
+    console.log(`  ${c.red}unavailable: ${feedback.error}${c.reset}  (set WAITLIST_ADMIN_TOKEN)`);
+  } else if (feedback.total === 0) {
+    console.log(`  ${c.gray}no feedback in range${c.reset}  (${num(feedback.all_time)} all-time)`);
+  } else {
+    console.log(`  ${pad("Reports in range", 22)} ${c.bold}${num(feedback.total)}${c.reset}  ${c.gray}(${num(feedback.all_time)} all-time, ${num(feedback.with_logs)} with logs)${c.reset}`);
+    const maxT = Math.max(...feedback.by_type.map((r) => r.count), 1);
+    for (const r of feedback.by_type) console.log(`    ${pad(stripCtl(r.key), 12)} ${bar(r.count, maxT, 16)} ${num(r.count)}`);
+    if (feedback.top_error_codes.length) {
+      console.log(`  ${c.dim}top error codes:${c.reset}`);
+      for (const r of feedback.top_error_codes.slice(0, 5)) console.log(`    ${pad(stripCtl(r.key), 22)} ${num(r.count)}`);
+    }
+    if (feedback.top_endpoints.length) {
+      console.log(`  ${c.dim}top endpoints:${c.reset}`);
+      for (const r of feedback.top_endpoints.slice(0, 5)) console.log(`    ${pad(stripCtl(r.key), 40)} ${num(r.count)}`);
+    }
+    console.log(`  ${c.dim}recent:${c.reset}`);
+    for (const r of feedback.recent.slice(0, 5)) {
+      const sev = r.severity ? "/" + stripCtl(r.severity) : "";
+      console.log(`    ${c.gray}${stripCtl((r.createdAt ?? "").slice(5, 16))}${c.reset} [${stripCtl(r.type)}${sev}] ${stripCtl(r.endpoint ?? "—")} ${r.errorCode ? c.yellow + stripCtl(r.errorCode) + c.reset : ""} — ${stripCtl(String(r.summary ?? "").slice(0, 60))}`);
+    }
+  }
+  console.log();
+
   // ── Save snapshot ───────────────────────────────────────────────────────
   const snapshot = {
     generatedAt: new Date().toISOString(),
     range: { from: FROM, to: TO },
-    overview, errors, traffic, pages, events, security, devices, geo,
+    overview, errors, traffic, pages, events, security, devices, geo, feedback,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(snapshot, null, 2));
 
@@ -461,6 +547,18 @@ function render(i) {
     }
   }
 
+  // Agent feedback (pcc_report)
+  if (d.feedback && d.feedback.total > 0) {
+    html += '<h2>Agent Feedback (pcc_report) — ' + num(d.feedback.total) + ' in range, ' + num(d.feedback.with_logs) + ' with logs</h2><div class="panel">';
+    (d.feedback.by_type || []).forEach(t => {
+      html += '<div class="row"><span class="name">' + esc(t.key) + '</span><span class="count">' + num(t.count) + '</span></div>';
+    });
+    (d.feedback.recent || []).slice(0, 8).forEach(r => {
+      html += '<div class="row"><span class="name">[' + esc(r.type) + (r.severity ? '/' + esc(r.severity) : '') + '] ' + esc(r.endpoint || '—') + ' ' + esc(r.errorCode || '') + ' — ' + esc((r.summary || '').slice(0, 80)) + '</span><span class="count">' + esc((r.createdAt || '').slice(5, 16)) + '</span></div>';
+    });
+    html += '</div>';
+  }
+
   // Top events
   if ((d.events?.events || []).length > 0) {
     const maxE = d.events.events[0].count || 1;
@@ -524,7 +622,12 @@ render(0);
 </html>`;
 }
 
-main().catch((err) => {
-  console.error(c.red + "Error:" + c.reset, err);
-  process.exit(1);
-});
+// Only run the report when executed directly — so `summarizeFeedback` can be imported
+// (e.g. by a test) without triggering the whole fetch+render.
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
+if (isMain) {
+  main().catch((err) => {
+    console.error(c.red + "Error:" + c.reset, err);
+    process.exit(1);
+  });
+}

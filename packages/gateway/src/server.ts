@@ -1,4 +1,5 @@
 import { initSentry, Sentry } from "./sentry.js";
+import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 // Must be called before any other imports so Sentry patches HTTP/fetch/Fastify
 initSentry();
 
@@ -210,9 +211,47 @@ export async function createGateway(port = 3200) {
     if (statusCode >= 500) {
       Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
     }
-    return reply.status(statusCode).send({
+    const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
       message: statusCode >= 500 ? "Internal Server Error" : error.message,
+    };
+    // Auto-feedback (agent DX): on a 5xx, tell the agent — AT the failure site —
+    // exactly how to report it, pre-filled with its journey trace. buildReportHint
+    // returns null for client-fixable 4xx, so those are NOT decorated. Cold agents
+    // have no key; /api/feedback is public. Additive only. This covers thrown 5xx
+    // (the "unexplained 500" where an agent is most stuck); explicitly-sent 5xx are
+    // a follow-up onSend decorator. See ai/research/agent-feedback-auto-design.md.
+    const reportHint = buildReportHint({
+      url: request.url,
+      method: request.method,
+      statusCode,
+      errorCode: error.code,
+      traceId:
+        (request as unknown as { traceId?: string }).traceId ??
+        (request.headers["x-pcc-trace-id"] as string | undefined) ??
+        null,
+    });
+    if (reportHint) body.report_hint = reportHint;
+    return reply.status(statusCode).send(body);
+  });
+
+  // Auto-feedback completeness: setErrorHandler only sees THROWN errors. Many routes
+  // return `reply.status(500).send(...)` explicitly, which never reach it — so this
+  // onSend hook decorates every JSON 5xx that isn't already carrying a report_hint,
+  // making the package's "any 5xx carries report_hint" contract actually true. The
+  // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
+  // itself. See ai/research/agent-feedback-auto-design.md.
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
+    return decorateWithReportHint(payload, {
+      statusCode: reply.statusCode,
+      contentType: String(reply.getHeader("content-type") ?? ""),
+      url: request.url,
+      method: request.method,
+      traceId:
+        (request as unknown as { traceId?: string }).traceId ??
+        (request.headers["x-pcc-trace-id"] as string | undefined) ??
+        null,
     });
   });
 
