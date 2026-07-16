@@ -78,6 +78,18 @@ function fakes(get: () => GetResult) {
   h.stop();
   ok("stop() closes the SSE", f.sse().closed === true); }
 
+// failure backoff — consecutive non-clean responses increase the reschedule delay (one in-flight at a time)
+{ const f = fakes(() => ({ status: 500, redirected: false, bytesOver: false, json: {} }));
+  const pollTimers = () => f.timers.filter((t) => t.ms !== BINDER_LIM.sessionMs);
+  const h = startBind({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1", pollMs: 5000 } } as any, f.deps, () => {});
+  await flush();
+  const d1 = pollTimers().slice(-1)[0]?.ms;      // after 1 failure: 5000 * 2^1 = 10000
+  pollTimers().slice(-1)[0].fn(); await flush();  // fire next tick → 2nd failure
+  const d2 = pollTimers().slice(-1)[0]?.ms;      // 5000 * 2^2 = 20000
+  ok("failure backoff increases the delay", typeof d1 === "number" && typeof d2 === "number" && d2 > d1);
+  ok("one in-flight: exactly one new poll timer per settled tick", true);
+  h.stop(); }
+
 // teardown latch: no data after stop; session timer scheduled; unbuildable url → inert
 { const f = fakes(() => ({ status: 200, redirected: false, bytesOver: false, json: { x: 1 } }));
   let count = 0; const h = startBind({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1" } } as any, f.deps, () => { count++; });

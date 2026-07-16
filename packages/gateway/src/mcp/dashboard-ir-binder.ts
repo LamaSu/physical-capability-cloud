@@ -61,9 +61,14 @@ export function clampPoll(bind: IrBind): number {
 export interface GetResult { status: number; redirected: boolean; bytesOver: boolean; json: unknown }
 export interface BinderDeps {
   origin: string;
-  /** MUST use a hardcoded GET, redirect:"error", and cap bytes (set bytesOver). */
+  /** REQUIRED transport contract (sol R7): hardcoded `method:"GET"`, `redirect:"error"`,
+   * `credentials:"omit"` (no implicit same-origin cookies) + fixed headers; enforce the
+   * byte cap INCREMENTALLY while reading (not only Content-Length) → set `bytesOver`;
+   * require an `application/json` content type; reject otherwise. */
   getJson: (url: string, signal: unknown) => Promise<GetResult>;
-  /** MUST connect same-origin only; onData per event, onErr on failure. */
+  /** REQUIRED (sol R7): use FETCH-STREAMED SSE (not native EventSource, which follows
+   * redirects) with `redirect:"error"`, abort support, and limits on event size, event
+   * rate, reconnects, and total lifetime; same-origin only. onData per event; onErr on failure. */
   openSse?: (url: string, onData: (d: unknown) => void, onErr: () => void) => { close: () => void };
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (h: unknown) => void;
@@ -98,14 +103,19 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
     const sseUrl = deps.origin + bind.sse;                // sse path already policy-validated
     sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => stop());
   } else {
+    // ONE in-flight request per bind (the next tick is scheduled only after this one
+    // settles — a timer never overlaps its request). Failures back off exponentially
+    // (capped) so a flapping endpoint can't hammer the origin; a clean 200 resets it.
+    let fails = 0;
+    const nextDelay = (): number => Math.min(clampPoll(bind) * Math.pow(2, fails < 6 ? fails : 6), BINDER_LIM.maxPollMs);
     const tick = (): void => {
       if (stopped) return;
-      const p = deps.getJson(url, deps.makeSignal());
-      p.then((r) => {
+      deps.getJson(url, deps.makeSignal()).then((r) => {
         if (stopped) return;
-        if (r.status === 200 && !r.redirected && !r.bytesOver) onData(r.json); // consume ONLY a clean same-origin 200
-        pollTimer = deps.setTimer(tick, clampPoll(bind));
-      }).catch(() => { if (!stopped) pollTimer = deps.setTimer(tick, clampPoll(bind)); });
+        if (r.status === 200 && !r.redirected && !r.bytesOver) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin 200
+        else { fails++; }
+        pollTimer = deps.setTimer(tick, nextDelay());
+      }).catch(() => { if (stopped) return; fails++; pollTimer = deps.setTimer(tick, nextDelay()); });
     };
     tick();
   }
