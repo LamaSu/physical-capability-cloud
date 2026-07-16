@@ -75,17 +75,12 @@ const TO = todayISO();
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
-// Sanitize a value for SINGLE-LINE console output — drop ALL control chars incl
-// TAB/LF (which would otherwise forge/disrupt report lines) so agent-supplied feedback
-// text can't inject escape sequences or fake rows (r-p3-r2 #1). Char-code based.
+// Sanitize a value for SINGLE-LINE console output: drop every Unicode control (Cc),
+// format (Cf), and line/paragraph separator (Zl/Zp) — incl. TAB/LF and U+2028/U+2029
+// — then collapse whitespace, so agent-supplied feedback can't inject escape sequences
+// or forge report rows (r-p3-r2 #1 / r3). Unicode-property regex (ASCII-safe source).
 function stripCtl(v) {
-  const s = String(v ?? "");
-  let out = "";
-  for (let k = 0; k < s.length; k++) {
-    const cc = s.charCodeAt(k);
-    if (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159)) out += s[k];
-  }
-  return out;
+  return String(v ?? "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
 async function getJSON(path) {
