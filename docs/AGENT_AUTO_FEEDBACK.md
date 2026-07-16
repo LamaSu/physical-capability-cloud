@@ -84,7 +84,43 @@ total across both phases.)_
 _(Fable declined the Phase 1 + Phase 2 designs — hard classifier block on the security
 vocab — so Opus designed + built per the fallback directive; sol does the review rounds.)_
 
-### Phase 3 — admin/observability view + deprecate agent-report — NOT STARTED
+### Phase 3 — analysis: troubleshooting view + daily report — DONE ✅
+
+Makes the feedback+logs analyzable in the existing surfaces.
+- `/api/feedback` emits the `agent.report` audit event the admin-observability views
+  read → the funnel/journey/error-histogram/feedback-stream views show the new reports
+  (metadata shape mirrors `admin-observability.ts`). Old `/api/feedback/agent-report`
+  is `@deprecated` (kept for back-compat).
+- `scripts/daily-report.mjs`: new AGENT FEEDBACK section (by type/severity, top
+  endpoints + error codes, #with-logs, recent) in the console report + saved JSON + HTML
+  viewer. `summarizeFeedback` exported/pure; `getJSON` now authenticates (fixes the 401s,
+  route-scoped). Terminal-escape injection hardened at ingest (`stripControl` in
+  `feedback.ts`) and on display (`stripCtl`).
+
+**Verification (local, DONE):**
+- `feedback.test.ts` — audit-event shape + control-char strip.
+- `feedback-observability-integration.test.ts` — **end-to-end vs a real store**: a
+  posted report shows in `/api/admin/observability/feedback` + the error histogram +
+  the durable `/api/admin/feedback` export.
+- `summarizeFeedback` unit-checked (window bound, `__proto__` key, all-time from total).
+
+**sol review** (3 rounds): r1 (6) redaction-of-structured-fields / terminal-injection /
+pagination / auth-scoping / boundary / proto-key; r2 (4) single-line stripCtl / explicit
+auth branch / safe-int total / raw-input cap; r3 (0 HIGH) Unicode-separator stripCtl —
+then converged (sol began oscillating on auth-scoping). Findings/round 6→4→3, HIGH 1→1→0.
+
+**Prod smoke — PENDING DEPLOY.** Prod runs `master` (old code: no `report_hint`,
+`pcc_report`→agent-report, no logs/audit-emit). The new behavior can only be smoke-tested
+on prod AFTER this PR merges + the manual deploy promotes it. Steps to run then are in the
+PR / the assistant's handoff. No prod writes were made pre-deploy (nothing new to verify).
+
+## Where feedback + logs land (for analysis)
+
+- **Durable JSONL** — `${dirname(PCC_DB_PATH)}/feedback.jsonl` (prod: `/app/data/feedback.jsonl`, on the volume).
+- **`GET /api/admin/feedback`** (`X-Admin-Token`) — full parsed export.
+- **Troubleshooting view** — `GET /api/admin/observability/{feedback,errors,journey/:traceId}` (via the `agent.report` audit event; needs `PCC_FUNNEL_ENABLED=true`).
+- **Daily report** — `node scripts/daily-report.mjs` → AGENT FEEDBACK section (console + `ai/reports/*.json` + HTML viewer).
+- **Live** — Discord webhook per report; PostHog `feedback_filed` event.
 
 ## Test surface
 
