@@ -75,27 +75,28 @@ const TO = todayISO();
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
-// Strip terminal control chars from a value before printing it — agent-supplied
-// feedback text (even server-scrubbed) shouldn't be able to inject escape sequences
-// into an operator's console. Char-code based (keeps TAB/LF, drops C0/DEL/C1).
+// Sanitize a value for SINGLE-LINE console output — drop ALL control chars incl
+// TAB/LF (which would otherwise forge/disrupt report lines) so agent-supplied feedback
+// text can't inject escape sequences or fake rows (r-p3-r2 #1). Char-code based.
 function stripCtl(v) {
   const s = String(v ?? "");
   let out = "";
   for (let k = 0; k < s.length; k++) {
     const cc = s.charCodeAt(k);
-    if (cc === 9 || cc === 10 || (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159))) out += s[k];
+    if (cc >= 32 && cc !== 127 && !(cc >= 128 && cc <= 159)) out += s[k];
   }
   return out;
 }
 
 async function getJSON(path) {
-  // Route-specific auth: only the admin route gets the admin token; only the analytics
-  // routes get the API key — don't hand every endpoint both credentials (r-p3 #3).
+  // Route-specific auth: admin token ONLY to /api/admin/*, API key ONLY to
+  // /api/analytics/*, nothing to any other path — don't leak credentials to endpoints
+  // that don't need them (r-p3 #3 / r2 #2).
   const headers = {};
   if (path.startsWith("/api/admin/")) {
     if (process.env.WAITLIST_ADMIN_TOKEN) headers["X-Admin-Token"] = process.env.WAITLIST_ADMIN_TOKEN;
-  } else if (process.env.PCC_API_KEY) {
-    headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
+  } else if (path.startsWith("/api/analytics/")) {
+    if (process.env.PCC_API_KEY) headers["Authorization"] = `Bearer ${process.env.PCC_API_KEY}`;
   }
   try {
     const res = await fetch(`${BASE}${path}`, { headers });
@@ -130,9 +131,9 @@ export function summarizeFeedback(feedback, fromISO, toISO) {
   return {
     error: feedback?.__error ?? null,
     total: inWindow.length,
-    // all-time count from the response's `total` when present (survives any future
-    // server-side pagination of `items`); else the item count (r-p3 #1).
-    all_time: Number.isFinite(feedback?.total) ? feedback.total : items.length,
+    // all-time count from the response's `total` when it's a sane count (survives any
+    // future server-side pagination of `items`); else the item count (r-p3 #1 / r2 #3).
+    all_time: Number.isSafeInteger(feedback?.total) && feedback.total >= 0 ? feedback.total : items.length,
     by_type: tally("type"),
     by_severity: tally("severity").filter((r) => r.key !== "(none)"),
     top_endpoints: tally("endpoint").filter((r) => r.key !== "(none)").slice(0, 10),

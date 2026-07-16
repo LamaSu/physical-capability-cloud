@@ -138,10 +138,13 @@ function stripControl(s: string): string {
 
 function clampStr(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
+  // Bound the raw input BEFORE scanning (r-p3-r2 #4) so stripControl/trim never walk an
+  // unbounded value on this public route. 64k is far above any field cap (detail=20k).
+  const bounded = v.length > 64_000 ? v.slice(0, 64_000) : v;
   // Strip C0/C1 control chars incl. ESC (0x1B) so agent-supplied text can't do
   // terminal-escape injection in any consumer — the daily report, logs, a TUI (r-p3 #2).
   // Keep \t and \n (harmless + useful in multi-line detail).
-  const t = stripControl(v).trim();
+  const t = stripControl(bounded).trim();
   if (!t) return null;
   return t.length > max ? t.slice(0, max) : t;
 }
