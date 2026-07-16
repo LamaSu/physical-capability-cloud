@@ -107,7 +107,21 @@ bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: 
 bad("metric→/api/jobs/submit (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit" } }));
 bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 250 } }));
 ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 5000 } })).ok === true);
-bad("bound-window budget (>64 binds)", { csd: "x", title: "t", sections: [{ windows: Array.from({ length: 65 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1" } })) }] });
+// 3 sections × 22 binds = 66 > 64 aggregate cap (each section ≤32, so the aggregate fires, not the per-section cap)
+bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", sections: Array.from({ length: 3 }, () => ({ windows: Array.from({ length: 22 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1" } })) })) });
+// direct validateIr aggregate (independent of the adapter): 66 bound stat nodes across 3 valid sections
+{ let idc = 0; const nid = () => "n" + ++idc; const H = { type: "heading", id: nid(), props: { level: 1, text: "t" }, untrusted: true };
+  const stat = () => ({ type: "stat", id: nid(), props: { label: "L" }, untrusted: true, bind: { path: "/api/jobs/j1", select: "u" } });
+  const sec = () => ({ type: "section", id: nid(), children: Array.from({ length: 22 }, stat) });
+  const doc66 = { ir: "pcc-dashboard-ir/v1", title: H, root: { type: "root", id: nid(), children: [sec(), sec(), sec()] } };
+  ok("validateIr REJECT: 66 bound nodes (aggregate cap, independent)", validateIr(doc66).ok === false); }
+// id-grammar collision defense (sol R6 blocker + the whole alpha-word class)
+bad("capability→graph-stats (semantic substitution, sol R6 blocker)", one({ kind: "capability", binding: { path: "/api/capabilities/graph-stats" } }));
+bad("capability→graph-search (reserved)", one({ kind: "capability", binding: { path: "/api/capabilities/graph-search" } }));
+bad("capability→pure-alpha id 'printer' (id-grammar rejects the class)", one({ kind: "capability", binding: { path: "/api/capabilities/printer" } }));
+bad("metric→jobs/submit-from-discovery (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit-from-discovery" } }));
+ok("capability→cap-1 (has digit) ACCEPTED", dashboardManifestToIr(one({ kind: "capability", binding: { path: "/api/capabilities/cap-1" } })).ok === true);
+ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
 { const w: any = { kind: "note" }; Object.defineProperty(w, "text", { value: "hi", enumerable: false, configurable: true }); bad("non-enumerable allowed-name own key", one(w)); }
 { const secs: any = [{ windows: [] }]; secs.evil = 1; bad("extra own key on sections array", { csd: "x", title: "t", sections: secs }); }
 { const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: q } })); }

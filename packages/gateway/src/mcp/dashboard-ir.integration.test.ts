@@ -77,6 +77,11 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
+  it("collision route /api/capabilities/graph-stats as a capability is REJECTED (id-grammar)", () => {
+    const { projected, ir } = chain(raw([{ kind: "capability", binding: { path: "/api/capabilities/graph-stats" } }]));
+    expect(projected === null || ir?.ok === false).toBe(true);
+  });
+
   it("collision route /api/settlement/status as a metric is REJECTED (attributed: has select)", () => {
     const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);

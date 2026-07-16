@@ -39,30 +39,45 @@ const LIM = {
   str: 2000, listRows: 200, fields: 64, metaItems: 12, queryKeys: 16,
   path: 512, select: 256, title: 400,
   pollMinMs: 5000, pollMaxMs: 3_600_000, boundWindowsTotal: 64, // poll-amplification cap (sol R5)
+  cleanNodes: 50_000, // deepClean traversal budget — >> any legit manifest/IR, kills wide-object DoS (sol R6)
 } as const;
 // The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
 const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
 
 // ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
-// Deny-by-default. Each RegExp is a specific verified read endpoint. A `:seg` is one
-// non-slash segment `[^/]+`; RESERVED_EXACT blocks the collection/status siblings that
-// a `:seg` template would otherwise swallow (e.g. /api/kernels/marketplace). This is
-// the security-critical surface — review against src/routes before widening.
+// Deny-by-default. Each RegExp is a specific verified read endpoint.
 const PATH_GRAMMAR = /^\/api\/[A-Za-z0-9._~\-/]+$/; // root-relative /api; no scheme/host/query/fragment/{}
 const SSE_GRAMMAR = /^\/sse\/[A-Za-z0-9._~\-/]+$/;
 const SELECT_GRAMMAR = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/;
 const OP_ID_GRAMMAR = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/; // typed op id (discarded in B, still grammared)
-// Exact collection/status/POST siblings a detail `:seg` template would otherwise
-// swallow (enumerated from src/routes; sol R4/R5). The GET siblings are the real
-// semantic leaks (e.g. /api/evidence/lit-status returns Lit service status, not a
-// receipt); the POST siblings are harmless GET-404s reserved for cleanliness.
-// REVIEW THIS AGAINST src/routes ON ANY ROUTE CHANGE — a missed word is a leak.
+
+// ── The collision defense (sol R3-R6): an ID_SEG is one path segment that is NOT a
+// bare lowercase-alpha(-hyphen) word. PCC resource ids carry a DIGIT / underscore /
+// uppercase / 0x-prefix (uuids, cap-1, kernel_x, 0x…); the collection/status/verb
+// route NAMES that collide with a detail template — types, status, graph-stats,
+// lit-status, submit, submit-from-discovery, … — are pure lowercase-alpha(-hyphen).
+// So a `:` template matcher REJECTS THAT WHOLE CLASS by construction, robust to new
+// sibling routes, instead of depending on a hand-maintained blocklist being complete.
+const ID_SEG = "(?![a-z]+(?:-[a-z]+)*(?:/|$))[A-Za-z0-9_~.-]+";
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Compile a route template; ":" marks an ID_SEG. e.g. "/api/jobs/:/status". */
+function route(template: string): RegExp {
+  return new RegExp("^" + template.split("/").map((s) => (s === ":" ? ID_SEG : escRe(s))).join("/") + "$");
+}
+/** Same, but ":" becomes a CAPTURE group (for sse↔path id correlation). */
+function routeCap(template: string): RegExp {
+  return new RegExp("^" + template.split("/").map((s) => (s === ":" ? "(" + ID_SEG + ")" : escRe(s))).join("/") + "$");
+}
+// Secondary explicit denylist: the id-grammar above catches every pure-alpha sibling;
+// this is belt-and-suspenders for any DIGIT-bearing reserved word the grammar can't
+// (none currently) + a documented record of the known collisions found by sol.
 const RESERVED_EXACT: ReadonlySet<string> = new Set([
   "/api/capabilities/types", "/api/capabilities/templates", "/api/capabilities/search",
+  "/api/capabilities/graph-stats", "/api/capabilities/graph-search",
   "/api/settlement/status", "/api/settlement/epochs", "/api/settlement/flush",
   "/api/settlement/submit", "/api/settlement/release",
-  "/api/evidence/lit-status", "/api/evidence/archive",
-  "/api/jobs/submit",
+  "/api/evidence/lit-status", "/api/evidence/archive", "/api/evidence/embed", "/api/evidence/search",
+  "/api/jobs/submit", "/api/jobs/submit-from-discovery",
   "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
 ]);
 type BindSchema = "receipt";
@@ -77,19 +92,19 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
   metric: {
     routes: [
-      /^\/api\/fiat-ramp\/cdp\/wallet\/[^/]+\/balance$/,
-      /^\/api\/jobs\/[^/]+$/, /^\/api\/jobs\/[^/]+\/status$/,
-      /^\/api\/escrow\/[^/]+$/, /^\/api\/settlement\/[^/]+$/, /^\/api\/kernels\/[^/]+$/,
+      route("/api/fiat-ramp/cdp/wallet/:/balance"),
+      route("/api/jobs/:"), route("/api/jobs/:/status"),
+      route("/api/escrow/:"), route("/api/settlement/:"), route("/api/kernels/:"),
     ],
     needsSelect: true,
   },
-  capability: { routes: [/^\/api\/capabilities\/[^/]+$/] }, // reserved (types/templates/search) blocked below
-  receipt: { routes: [/^\/api\/settlement\/[^/]+$/, /^\/api\/evidence\/[^/]+$/], schema: "receipt" },
-  list: { routes: [/^\/api\/jobs$/, /^\/api\/kernels$/, /^\/api\/capabilities$/, /^\/api\/escrow$/] },
+  capability: { routes: [route("/api/capabilities/:")] }, // ID_SEG excludes types/templates/search/graph-*
+  receipt: { routes: [route("/api/settlement/:"), route("/api/evidence/:")], schema: "receipt" },
+  list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
   run: {
-    routes: [/^\/api\/jobs\/[^/]+$/, /^\/api\/jobs\/[^/]+\/status$/],
-    sse: [/^\/sse\/stream\/job\/[^/]+$/],
-    correlate: { pathRe: /^\/api\/jobs\/([^/]+)(?:\/status)?$/, sseRe: /^\/sse\/stream\/job\/([^/]+)$/ },
+    routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
+    sse: [route("/sse/stream/job/:")],
+    correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
   },
   // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
 };
@@ -126,9 +141,12 @@ function onlyKeys(o: object, allowed: readonly string[]): boolean {
 }
 const INDEX_KEY = /^(0|[1-9][0-9]*)$/;
 /** Recursively require plain objects/arrays/finite scalars and reject prototype /
- * symbol / non-enumerable / non-index own keys ANYWHERE (over Reflect.ownKeys). */
-function deepClean(v: unknown, depth = 0): boolean {
+ * symbol / non-enumerable / non-index own keys ANYWHERE (over Reflect.ownKeys).
+ * BUDGETED: a shared node counter fails fast so a hostile wide/deep object cannot
+ * force full traversal before rejection (browser-side validateIr availability). */
+function deepClean(v: unknown, depth = 0, budget: { n: number } = { n: LIM.cleanNodes }): boolean {
   if (depth > LIM.inputDepth) return false;
+  if (--budget.n < 0) return false;
   const t = typeof v;
   if (v === null || t === "string" || t === "boolean") return true;
   if (t === "number") return Number.isFinite(v as number);
@@ -137,7 +155,7 @@ function deepClean(v: unknown, depth = 0): boolean {
       if (typeof k === "symbol") return false;
       if (k !== "length" && !INDEX_KEY.test(k)) return false;
     }
-    for (const e of v) if (!deepClean(e, depth + 1)) return false;
+    for (const e of v) if (!deepClean(e, depth + 1, budget)) return false;
     return true;
   }
   if (!isPlain(v)) return false;
@@ -145,7 +163,7 @@ function deepClean(v: unknown, depth = 0): boolean {
     if (typeof k === "symbol" || PROTO_KEYS.has(k)) return false;
     const d = Object.getOwnPropertyDescriptor(v, k);
     if (!d || !d.enumerable) return false;
-    if (!deepClean((v as Record<string, unknown>)[k], depth + 1)) return false;
+    if (!deepClean((v as Record<string, unknown>)[k], depth + 1, budget)) return false;
   }
   return true;
 }
