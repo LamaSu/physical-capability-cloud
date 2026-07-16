@@ -10,6 +10,7 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
+import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import {
   generateEd25519Keypair,
@@ -20,7 +21,9 @@ import {
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
 
-const KEY_PREFIX = "pcc_live_";
+// Canonical live prefix comes from @pcc/spec (single source of truth shared with
+// the manifest key-guard `containsApiKey` and sse-auth's query-string rejection).
+const KEY_PREFIX = PCC_API_KEY_LIVE_PREFIX;
 
 /** Hash a raw API key for storage/lookup */
 export function hashApiKey(rawKey: string): string {
@@ -36,15 +39,26 @@ export function generateApiKey(): { rawKey: string; keyHash: string; keyPrefix: 
 }
 
 /**
- * Resolve an API key from the Authorization header.
- * Returns the key record or null.
+ * Resolve a BARE PCC API-key token — the string that follows "Bearer ", e.g.
+ * the value an MCP Streamable-HTTP transport surfaces to a tool handler as
+ * `extra.authInfo.token` — into its active key record, or null.
+ *
+ * This is the same DB-backed validation `resolveApiKey` performs (hash →
+ * active-by-hash → expiry → usage bump), decoupled from `FastifyRequest` so a
+ * NON-HTTP caller (the MCP typed-operation handler, which runs in-process inside
+ * the gateway) can derive an authenticated principal WITHOUT a request object
+ * and WITHOUT round-tripping the token to the upstream API.
+ *
+ * Fails closed: a missing / malformed / expired / revoked / unknown token
+ * returns null (the caller then treats the operation as unauthenticated). The
+ * token is used only as a hash input — it is NEVER logged, echoed, or forwarded.
  */
-export function resolveApiKey(req: FastifyRequest) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer pcc_")) return null;
+export function resolveApiKeyFromToken(token: string | undefined | null) {
+  // Same prefix guard as resolveApiKey's "Bearer pcc_" check, applied to the
+  // bare token. Accepts both pcc_live_ and pcc_test_ (the guard is just "pcc_").
+  if (!token || !token.startsWith("pcc_")) return null;
 
-  const rawKey = authHeader.slice(7); // "Bearer " is 7 chars
-  const keyHash = hashApiKey(rawKey);
+  const keyHash = hashApiKey(token);
 
   const repo = getRepos().apiKeys;
   const keyRecord = repo.findActiveByHash(keyHash);
@@ -59,6 +73,20 @@ export function resolveApiKey(req: FastifyRequest) {
   try { repo.incrementUsage(keyRecord.id); } catch { /* non-fatal */ }
 
   return keyRecord;
+}
+
+/**
+ * Resolve an API key from the Authorization header.
+ * Returns the key record or null.
+ *
+ * Thin wrapper over resolveApiKeyFromToken: the header guard ("Bearer pcc_")
+ * and the 7-char "Bearer " slice are preserved exactly, so existing callers see
+ * identical behavior; the DB validation now lives in the token-based helper.
+ */
+export function resolveApiKey(req: FastifyRequest) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer pcc_")) return null;
+  return resolveApiKeyFromToken(authHeader.slice(7)); // "Bearer " is 7 chars
 }
 
 /**

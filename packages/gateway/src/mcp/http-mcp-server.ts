@@ -8,10 +8,33 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   CallToolRequestSchema,
+  ErrorCode,
   isInitializeRequest,
   ListToolsRequestSchema,
+  McpError,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  buildRenderDashboardTool,
+  enrichOnRampToolResult,
+  handleRenderDashboardTool,
+  isMcpAppSurfaceAvailable,
+  isOnRampUiTool,
+  MCP_APP_SURFACE_UNAVAILABLE_MESSAGE,
+  onRampToolOutputSchema,
+  onRampToolUiMeta,
+  primeMcpAppAssets,
+  registerMcpAppHttpRoute,
+  registerMcpAppResources,
+  RENDER_DASHBOARD_TOOL_NAME,
+} from "./mcp-app-view.js";
+import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
+import {
+  getOperationPolicyByToolName,
+  typedOperationTools,
+  TYPED_OP_TOOL_PREFIX,
+  type OpPrincipal,
+} from "./operation-policy.js";
 
 const PCC_API_BASE_URL = "https://capability.network";
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
@@ -122,7 +145,7 @@ function toolDescription(tool: AgentPackageTool): string {
 
 function toMcpTool(tool: AgentPackageTool): Tool {
   const method = tool.endpoint.method;
-  return {
+  const mcpTool: Tool = {
     name: tool.name,
     description: toolDescription(tool),
     inputSchema: tool.input_schema,
@@ -131,6 +154,17 @@ function toMcpTool(tool: AgentPackageTool): Tool {
       destructiveHint: method === "DELETE",
     },
   };
+  if (isOnRampUiTool(tool.name)) {
+    // MCP Apps: the 5 On-Ramp dashboard tools render UI. Declare the FIXED,
+    // predeclared ui:// resource on the tools/list definition (saved for the
+    // single-artifact tools, gallery for search — never a {slug} template) so a
+    // host can tell the tool is UI-bearing and prefetch the view before ever
+    // calling it, plus an outputSchema for the structuredContent the call
+    // returns (which the fixed view renders over the lifecycle).
+    mcpTool._meta = onRampToolUiMeta(tool.name);
+    mcpTool.outputSchema = onRampToolOutputSchema(tool.name) as unknown as Tool["outputSchema"];
+  }
+  return mcpTool;
 }
 
 function encodeQueryValue(value: unknown): string[] {
@@ -218,12 +252,18 @@ async function proxyToolCall(
   rawArguments: JsonObject,
   token: string | undefined,
   signal: AbortSignal,
+  readOnlySurface = false,
 ) {
   const proxyRequest = buildProxyRequest(tool, rawArguments);
   if ("error" in proxyRequest) return errorResult(proxyRequest.error);
 
   const headers = new Headers({ accept: "application/json" });
   if (token) headers.set("authorization", `Bearer ${token}`);
+  // The read-only /mcp/apps surface marks EVERY proxied call passive: a route
+  // that would otherwise record a side effect on a plain GET (e.g. the artifact
+  // recall's loadCount/updatedAt bump) MUST skip it. Defense-in-depth for the
+  // whole surface, not just get_dashboard — an accepted read never mutates.
+  if (readOnlySurface) headers.set("x-pcc-mcp-readonly", "1");
   if (proxyRequest.body !== undefined) {
     headers.set("content-type", "application/json");
   }
@@ -250,8 +290,17 @@ async function proxyToolCall(
       );
     }
 
+    // On-Ramp UI tools additionally carry `structuredContent` (the artifact's
+    // manifest, or projected search entries) + the canonical `_meta.ui.resourceUri`
+    // for the fixed saved/gallery view — IN ADDITION to the text below, so
+    // text-only consumers are intact and private artifacts render from THIS
+    // authenticated result (never a second anonymous lookup).
+    const text = resultText(payload);
+    if (isOnRampUiTool(tool.name)) {
+      return enrichOnRampToolResult(tool.name, payload, text);
+    }
     return {
-      content: [{ type: "text" as const, text: resultText(payload) }],
+      content: [{ type: "text" as const, text }],
     };
   } catch (error) {
     return errorResult(
@@ -262,24 +311,275 @@ async function proxyToolCall(
   }
 }
 
-function createMcpServer(pack: AgentPackage): McpServer {
+/** Served, verified-200 icon for the product surface AND the docs surface
+ * (see docs-mcp-server.ts) — same asset apps/dashboard/public/pcc-icon.svg
+ * that /.well-known/mcp/server-card.json's `logo`/`icon` fields already
+ * reference. Kept as one constant so a future icon swap only edits one line. */
+export const PCC_MCP_ICON_URL = `${PCC_API_BASE_URL}/pcc-icon.svg`;
+
+/**
+ * Dispatch a validated tools/call to its handler. Exported as a pure function so
+ * the unknown-tool + argument-coercion CONTRACT is unit-testable without standing
+ * up the Streamable HTTP transport.
+ *
+ * Restores the pre-#257 `/mcp` behavior existing clients depend on (audit
+ * directive 8): an unknown (or empty) tool name resolves to a tool-level
+ * `CallToolResult { isError: true }`, NEVER a thrown JSON-RPC protocol error
+ * (MethodNotFound). The caller passes `params.arguments ?? {}` exactly as before —
+ * no added `InvalidParams` throw. Non-object `arguments` are already rejected by
+ * the SDK's CallToolRequestSchema (`z.record(z.string(), z.unknown())`) BEFORE
+ * this runs, so no arg-type guard is needed or wanted here — a non-object simply
+ * cannot reach this function through the transport.
+ */
+/**
+ * Derive the authenticated principal for a typed operation IN-PROCESS from the
+ * forwarded bearer — the string the transport surfaces as `extra.authInfo.token`
+ * (see attachBearerAuth). This is a local key-DB hash lookup (resolveApiKeyFromToken);
+ * the token is NEVER forwarded to the upstream API for a typed op. Returns null
+ * (fail closed) for a missing / malformed / expired / revoked / unknown token —
+ * i.e. anonymous or invalid credentials cannot obtain a principal.
+ */
+function deriveOpPrincipal(token: string | undefined): OpPrincipal | null {
+  const record = resolveApiKeyFromToken(token);
+  if (!record || !record.operatorId) return null;
+  return { operatorId: record.operatorId, apiKeyId: record.id };
+}
+
+/**
+ * Handle a dedicated `pcc.op.*` typed operation. This path NEVER proxies to the
+ * upstream API — it derives the principal in-process and drives the facade
+ * directly — so the forwarded bearer is never sent to any proxy destination.
+ *
+ * Order (fail closed at each step): (1) resolve the operation policy by tool
+ * name (default-DENY — an unregistered tool is unknown); (2) validate + STRIP
+ * arguments to a fresh whitelisted object (a manifest-supplied actor/tenant/
+ * operator/owner id is dropped, never trusted); (3) derive the principal from
+ * the credential (missing/invalid ⇒ auth-required); (4) resource-authorize
+ * against the DERIVED principal; (5) invoke. Errors are tool-level isError
+ * results and never contain the credential.
+ */
+export async function handleTypedOperation(
+  toolName: string,
+  args: JsonObject,
+  token: string | undefined,
+) {
+  const policy = getOperationPolicyByToolName(toolName);
+  if (!policy) return errorResult(`Unknown operation: ${toolName}`);
+
+  const validated = policy.validateArguments(args);
+  if (!validated) return errorResult(`Invalid arguments for ${policy.operationId}`);
+
+  const principal = deriveOpPrincipal(token);
+  if (!principal) return errorResult("Authentication required");
+
+  const authz = await policy.authorize(principal, validated);
+  if (!authz.ok) return errorResult(authz.message);
+
+  const result = await policy.invoke(principal, validated);
+  if (!result.ok) return errorResult(result.message);
+
+  return {
+    structuredContent: result.data,
+    content: [{ type: "text" as const, text: resultText(result.data) }],
+  };
+}
+
+export async function dispatchToolCall(
+  toolsByName: Map<string, AgentPackageTool>,
+  name: string,
+  args: JsonObject,
+  token: string | undefined,
+  signal: AbortSignal,
+  readOnlySurface = false,
+) {
+  if (name === RENDER_DASHBOARD_TOOL_NAME) {
+    return handleRenderDashboardTool(args);
+  }
+  // Typed host-mediated operations (R4 PR2): the registry IS the allowlist and
+  // the handler derives the principal + authorizes in-process. Routed BEFORE the
+  // raw proxy lookup so a typed op never falls through to the pass-through relay.
+  if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
+    return handleTypedOperation(name, args, token);
+  }
+  const tool = toolsByName.get(name);
+  if (!tool) {
+    return errorResult(`Unknown PCC tool: ${name}`);
+  }
+  return proxyToolCall(tool, args, token, signal, readOnlySurface);
+}
+
+/**
+ * The reviewed read-only app-surface proxy allowlist — EXPLICIT and
+ * effect-classified. A `GET` method proves only the transport verb, NOT the
+ * absence of server-side effects: GET `/api/artifacts/:id` recall bumps
+ * loadCount + updatedAt, and other GET tools do chain/IPFS reads (external
+ * network), poll/lease, or trigger snapshots. "read-only" is an EFFECT property,
+ * not a transport one, so the app surface admits a raw proxy tool ONLY if it is
+ * named in this set (GET remains required as belt-and-suspenders).
+ *
+ * Each entry was individually reviewed to be a passive local read: no
+ * counter/timestamp writes, no lazy inserts/initialisation, no lease/heartbeat/
+ * queue/trigger effects, no token consumption, no external-network or on-chain
+ * reads, no analytics/"last viewed" mutation. `get_dashboard`'s recall counter is
+ * suppressed FOR THIS SURFACE via the `x-pcc-mcp-readonly` passive header that the
+ * read-only dispatch sets (see proxyToolCall) and the recall route honours.
+ *
+ * Adding a tool here REQUIRES an individual effect review. The exact-set snapshot
+ * test in mcp-apps-readonly-surface.test.ts fails if this set changes, so a newly
+ * added GET proxy tool can NEVER enter the app surface automatically — it must be
+ * reviewed and added here with justification.
+ */
+export const READONLY_APP_PROXY_TOOLS: ReadonlySet<string> = new Set([
+  // Dashboard recall + discovery (the gen-UI core).
+  "get_dashboard", //      GET /api/artifacts/{idOrSlug} — passive via x-pcc-mcp-readonly
+  "search_dashboards", //  GET /api/artifacts
+  // Kernel discovery — KernelFacade DB reads, no default reputation enrichment.
+  "list_kernels", //       GET /api/kernels
+  "get_kernel", //         GET /api/kernels/{kernelId}
+  "get_kernel_devices", // GET /api/kernels/{kernelId}/devices
+  "get_kernel_jobs", //    GET /api/kernels/{kernelId}/jobs
+  // Job status — JobFacade DB reads.
+  "list_jobs", //          GET /api/jobs
+  "get_job", //            GET /api/jobs/{jobId}
+  // Capability discovery — static type/template reads.
+  "list_capability_types", // GET /api/capabilities/types
+  "search_capabilities", //   GET /api/capabilities/templates
+]);
+
+/**
+ * The read-only app-surface allowlist — the SINGLE predicate enforced IDENTICALLY
+ * at BOTH `tools/list` (advertise only these) AND CallTool dispatch (a call to a
+ * non-allowlisted name errors, never proxies), so the surface cannot be bypassed
+ * by calling an un-advertised tool. Default-DENY: anything not positively matched
+ * below is excluded.
+ *
+ * Allowed:
+ *   1. render_pcc_dashboard — pure client-side manifest render (no server effect).
+ *   2. a REGISTERED typed operation with `stateChanging === false` (today only
+ *      pcc.op.capability.request_quote; an unregistered id → null → denied, and a
+ *      state-changing op such as job.cancel → denied even once it registers).
+ *   3. a raw proxy tool that is BOTH GET AND in the reviewed, effect-classified
+ *      READONLY_APP_PROXY_TOOLS set above (GET alone is insufficient).
+ * Excluded by falling through to false: every POST/PATCH/PUT/DELETE proxy tool
+ * (save/fork/update_dashboard, escrow fund/release/dispute, …), every GET proxy
+ * tool NOT in the reviewed set (chain/IPFS reads, polls, snapshots, …), any
+ * unregistered or state-changing typed op, and any unknown name.
+ */
+export function isReadOnlyAppTool(
+  name: string,
+  toolsByName: Map<string, AgentPackageTool>,
+): boolean {
+  if (name === RENDER_DASHBOARD_TOOL_NAME) return true;
+  if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
+    const policy = getOperationPolicyByToolName(name);
+    return policy !== null && policy.stateChanging === false;
+  }
+  const tool = toolsByName.get(name);
+  return (
+    tool !== undefined &&
+    tool.endpoint.method === "GET" &&
+    READONLY_APP_PROXY_TOOLS.has(name)
+  );
+}
+
+/** A mounted Streamable-HTTP MCP surface. `readOnly` gates BOTH tools/list and
+ * CallTool dispatch to the isReadOnlyAppTool allowlist AND applies the prod domain
+ * gate; the full surface leaves the tool set + dispatch exactly as they were. */
+interface McpSurface {
+  mountPath: string;
+  readOnly: boolean;
+}
+
+/** The existing full agent/dev surface — every proxy tool + render + typed ops. */
+const FULL_MCP_SURFACE: McpSurface = { mountPath: "/mcp", readOnly: false };
+/** The read-only gen-UI surface — the isReadOnlyAppTool allowlist only. */
+const READONLY_APP_SURFACE: McpSurface = { mountPath: "/mcp/apps", readOnly: true };
+
+/** The `/mcp/apps` prod domain gate as a guard message (null = surface available). */
+function appSurfaceGuardMessage(): string | null {
+  return isMcpAppSurfaceAvailable() ? null : MCP_APP_SURFACE_UNAVAILABLE_MESSAGE;
+}
+
+/** Throw the JSON-RPC error the read-only app surface returns when it is disabled
+ * (prod + placeholder domain) — used on tools/list + CallTool for that surface. */
+function assertAppSurfaceAvailable(): void {
+  const message = appSurfaceGuardMessage();
+  if (message) throw new McpError(ErrorCode.InvalidRequest, message);
+}
+
+function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
-    { name: "Physical Capability Cloud", version: pack.version },
-    { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS },
+    {
+      name: "Physical Capability Cloud",
+      // Registry-branding fields carried directly on Implementation (NOT
+      // under _meta — ImplementationSchema has no _meta key; title/
+      // description/icons are first-class fields), so a scanner reading the
+      // live `initialize` handshake sees name+icon+description without
+      // needing a second request to server-card.json.
+      title: "Physical Capability Cloud",
+      version: pack.version,
+      description: pack.description,
+      icons: [{ src: PCC_MCP_ICON_URL, mimeType: "image/svg+xml" }],
+    },
+    {
+      capabilities: { tools: {}, resources: {} },
+      instructions: MCP_INSTRUCTIONS,
+    },
   );
 
-  server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: pack.tools.map(toMcpTool),
-  }));
+  server.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Raw proxy tools + the UI render tool + the dedicated typed-operation tools
+    // (pcc.op.*). The typed tools are additive: they never replace or shadow a
+    // raw tool, and only they route through the server-authorized policy handler.
+    const tools = [
+      ...pack.tools.map(toMcpTool),
+      buildRenderDashboardTool(),
+      ...typedOperationTools(),
+    ];
+    if (!surface.readOnly) return { tools };
+    // Read-only app surface: fail-closed prod domain gate FIRST, then advertise
+    // ONLY the isReadOnlyAppTool allowlist — the SAME predicate the dispatcher
+    // enforces below, so the advertised set and the callable set cannot diverge.
+    assertAppSurfaceAvailable();
+    return { tools: tools.filter((tool) => isReadOnlyAppTool(tool.name, toolsByName)) };
+  });
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const tool = toolsByName.get(request.params.name);
-    if (!tool) return errorResult(`Unknown PCC tool: ${request.params.name}`);
-
+    // Coerce arguments exactly as the pre-#257 handler did (`?? {}`); the SDK
+    // schema has already guaranteed `arguments` is an object-or-undefined. All
+    // tool-not-found / handler routing lives in the exported dispatchToolCall so
+    // the restored contract (unknown tool → isError result, never a thrown
+    // protocol error — directive 8) is unit-testable off-transport.
     const args = request.params.arguments ?? {};
-    return proxyToolCall(tool, args, extra.authInfo?.token, extra.signal);
+    if (surface.readOnly) {
+      // Fail-closed prod domain gate, then the SAME allowlist tools/list uses. A
+      // non-allowlisted (mutating) name returns a tool-level isError and NEVER
+      // reaches dispatchToolCall — so it can never proxy to the upstream write,
+      // even if the caller guessed an un-advertised tool name.
+      assertAppSurfaceAvailable();
+      if (!isReadOnlyAppTool(request.params.name, toolsByName)) {
+        return errorResult(
+          `Tool not available on the read-only PCC app surface: ${request.params.name}`,
+        );
+      }
+    }
+    return dispatchToolCall(
+      toolsByName,
+      request.params.name,
+      args,
+      extra.authInfo?.token,
+      extra.signal,
+      surface.readOnly,
+    );
   });
+
+  // The full surface registers the UI resources unchanged; the read-only app
+  // surface additionally gates every ui:// read behind the prod domain check.
+  registerMcpAppResources(
+    server,
+    surface.readOnly ? { surfaceGuard: appSurfaceGuardMessage } : undefined,
+  );
 
   return server;
 }
@@ -334,8 +634,25 @@ function sendJsonRpcError(
   );
 }
 
-/** Public Streamable HTTP MCP transport. Register before the gateway API auth gate. */
-export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * Register ONE Streamable HTTP MCP surface at `surface.mountPath`. Both the full
+ * agent/dev surface (`/mcp`) and the read-only gen-UI surface (`/mcp/apps`) share
+ * this plumbing; they differ only in the `surface` config, which createMcpServer
+ * uses to gate tools/list + CallTool + the ui:// reads. Keeping ONE registrar (vs
+ * duplicating the session boilerplate) means the two surfaces cannot drift.
+ */
+async function registerStreamableMcpSurface(
+  app: FastifyInstance,
+  surface: McpSurface,
+): Promise<void> {
+  // Fail fast at BOOT if a mandatory MCP-App asset (pcc-ui.js / manifest.schema.json)
+  // or the agent package is missing from the runtime image, rather than throwing
+  // inside tools/list / resources/read at request time (directive 6). server.ts
+  // awaits this registration, so a throw here aborts startup with a clear message
+  // and the deploy /health smoke check catches it.
+  primeMcpAppAssets();
+  loadAgentPackage();
+
   const sessions = new Map<string, McpSession>();
 
   const closeSessions = async (entries: McpSession[]): Promise<void> => {
@@ -363,12 +680,12 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     await closeSessions([oldest[1]]);
   };
 
-  app.options("/mcp", async (_request, reply) => {
+  app.options(surface.mountPath, async (_request, reply) => {
     setCorsHeaders(reply);
     return reply.status(204).send();
   });
 
-  app.post<{ Body: unknown }>("/mcp", async (request, reply) => {
+  app.post<{ Body: unknown }>(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -380,7 +697,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     if (!session && !sessionId && isInitializeRequest(request.body)) {
       await reserveSessionSlot();
       const pack = loadAgentPackage();
-      const server = createMcpServer(pack);
+      const server = createMcpServer(pack, surface);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         enableJsonResponse: true,
@@ -426,7 +743,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get("/mcp", async (request, reply) => {
+  app.get(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -453,7 +770,7 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.delete("/mcp", async (request, reply) => {
+  app.delete(surface.mountPath, async (request, reply) => {
     setCorsHeaders(reply);
     attachBearerAuth(request);
     await pruneExpiredSessions();
@@ -485,4 +802,22 @@ export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
     sessions.clear();
     await closeSessions(activeSessions);
   });
+}
+
+/** Public Streamable HTTP MCP transport (the FULL agent/dev surface) at /mcp.
+ * Register before the gateway API auth gate. Behavior is unchanged from before
+ * the read-only surface was added — every proxy tool + render + typed ops. */
+export async function httpMcpRoutes(app: FastifyInstance): Promise<void> {
+  // The plain-HTTP mirror of the render view is a fixed, surface-independent path,
+  // registered ONCE here so the second /mcp/apps mount never double-registers it.
+  registerMcpAppHttpRoute(app);
+  await registerStreamableMcpSurface(app, FULL_MCP_SURFACE);
+}
+
+/** Public, server-enforced READ-ONLY Streamable HTTP MCP surface at /mcp/apps —
+ * exposes ONLY the isReadOnlyAppTool allowlist, enforced at BOTH tools/list and
+ * CallTool dispatch, plus the prod domain gate (gates 5/6). Register before the
+ * gateway API auth gate, like /mcp. The full /mcp surface is left untouched. */
+export async function appsHttpMcpRoutes(app: FastifyInstance): Promise<void> {
+  await registerStreamableMcpSurface(app, READONLY_APP_SURFACE);
 }

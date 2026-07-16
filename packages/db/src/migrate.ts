@@ -1967,6 +1967,18 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS ui_artifacts_owner_idx ON ui_artifacts(owner);
     CREATE INDEX IF NOT EXISTS ui_artifacts_visibility_idx ON ui_artifacts(visibility);
     CREATE INDEX IF NOT EXISTS ui_artifacts_status_idx ON ui_artifacts(status);
+
+    -- Expiring HASHED aliases for ROTATED legacy share slugs (R4 PR4 / D13).
+    -- slug_hash = sha256(old-slug); the old weak slug is never stored in plaintext.
+    -- An old link resolves via its hash ONLY while now < expires_at (and the target
+    -- artifact is still active + public|unlisted). Mirrors substrate.ts legacySlugAliases.
+    CREATE TABLE IF NOT EXISTS legacy_slug_aliases (
+      slug_hash    TEXT PRIMARY KEY,   -- sha256(old-slug) hex
+      artifact_id  TEXT NOT NULL,
+      expires_at   TEXT NOT NULL,      -- ISO-8601
+      created_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS legacy_slug_aliases_expires_idx ON legacy_slug_aliases(expires_at);
   `);
 
   // ══════════════════════════════════════════════════════════════════

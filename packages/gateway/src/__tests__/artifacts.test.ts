@@ -229,6 +229,27 @@ describe("GET /api/artifacts/:idOrSlug", () => {
     expect(bySlug.json().loadCount).toBe(2);
   });
 
+  it("is PASSIVE with x-pcc-mcp-readonly — recall records no load (effect-classified read-only)", async () => {
+    const created = (await save()).json();
+    expect(created.loadCount).toBe(0);
+
+    // The read-only /mcp/apps surface proxies get_dashboard with this header, so a
+    // recall from there serves the artifact but bumps NO loadCount/updatedAt.
+    const passive = await app.inject({
+      method: "GET",
+      url: `/api/artifacts/${created.id}`,
+      headers: { "x-pcc-mcp-readonly": "1" },
+    });
+    expect(passive.statusCode).toBe(200);
+    expect(passive.json().id).toBe(created.id);
+    expect(passive.json().loadCount).toBe(0); // NOT bumped
+    expect(passive.json().updatedAt).toBe(created.updatedAt); // store untouched
+
+    // The header is the ONLY difference — a normal recall still records the load.
+    const normal = await app.inject({ method: "GET", url: `/api/artifacts/${created.id}` });
+    expect(normal.json().loadCount).toBe(1);
+  });
+
   it("404s an unknown id/slug", async () => {
     const res = await app.inject({ method: "GET", url: "/api/artifacts/ua_nope" });
     expect(res.statusCode).toBe(404);
@@ -432,11 +453,19 @@ describe("GET /a/:slug — render shell", () => {
     expect(res.body).toContain("\\u003c/script");
   });
 
-  it("private dashboard: 403 HTML for a non-owner", async () => {
+  it("private dashboard: the SAME generic 404 as a missing slug for a non-owner (D13 — no oracle)", async () => {
+    // R4 PR4 / D13: the public share path never distinguishes private from missing
+    // (was a 403 "Private dashboard" leak). Both collapse to one generic not-found,
+    // byte-identical (the slug is not echoed in the body) — no existence oracle.
     const a = (await save({ visibility: "private" }, ALICE)).json();
-    const res = await app.inject({ method: "GET", url: `/a/${a.slug}`, headers: BOB });
-    expect(res.statusCode).toBe(403);
-    expect(res.headers["content-type"]).toContain("text/html");
+    const priv = await app.inject({ method: "GET", url: `/a/${a.slug}`, headers: BOB });
+    expect(priv.statusCode).toBe(404);
+    expect(priv.headers["content-type"]).toContain("text/html");
+    expect(priv.body).toContain("Dashboard not found");
+
+    const missing = await app.inject({ method: "GET", url: "/a/never-existed-slug", headers: BOB });
+    expect(missing.statusCode).toBe(404);
+    expect(priv.body).toBe(missing.body);
   });
 
   it("404 HTML for an unknown slug", async () => {

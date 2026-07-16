@@ -51,7 +51,9 @@
         "body": { "type": "object", "description": "Static body merged into the request." },
         "confirm": { "enum": ["inline", "approval"], "description": "'inline' = button confirm; 'approval' = the kit's Approval window. NO 'none'." },
         "idempotencyFrom": { "type": "string", "description": "Field id supplying an idempotencyKey (required on offer-posting actions)." },
-        "intentText": { "type": "string", "minLength": 1, "description": "Snapshot-mode chip text handed to the LLM (e.g. 'pcc: approve offer …')." }
+        "intentText": { "type": "string", "minLength": 1, "description": "Snapshot-mode chip text handed to the LLM (e.g. 'pcc: approve offer …')." },
+        "operation_id": { "type": "string", "minLength": 1, "description": "R4 PR2 — typed host-mediated operation id. In an MCP-App host view the click routes to the registered pcc.op.<operation_id> tool via tools/call (server-authorized); the raw kind/path is inert in host mode. Standalone rendering ignores this." },
+        "arguments": { "type": "object", "description": "Bounded arguments for the typed operation (host mode only)." }
       }
     },
     "ListItem": {

@@ -260,3 +260,20 @@ export const uiArtifacts = sqliteTable("ui_artifacts", {
   updatedAt: text("updated_at").notNull(),
   data: text("data", { mode: "json" }).notNull().$type<UiArtifact>(),
 });
+
+/**
+ * Expiring HASHED aliases from a ROTATED legacy share slug to its artifact
+ * (R4 PR4 / D13). When a weak (~24-bit) unlisted/public slug is rotated to a
+ * ≥96-bit one, an entry is written here so the OLD link keeps resolving for a
+ * bounded window (~30d) before it lapses. The old slug is NOT stored in
+ * plaintext — `slug_hash` is sha256(old-slug), so this table is not an
+ * enumerable list of retired slugs, and lookup is O(1) by primary key. The
+ * public resolver honours an alias ONLY while `now < expires_at` AND the target
+ * artifact is still active + public|unlisted (the alias never widens visibility).
+ */
+export const legacySlugAliases = sqliteTable("legacy_slug_aliases", {
+  slugHash: text("slug_hash").primaryKey(), // sha256(old-slug) hex — no plaintext slug stored
+  artifactId: text("artifact_id").notNull(),
+  expiresAt: text("expires_at").notNull(), // ISO-8601; alias resolves only while now < expires_at
+  createdAt: text("created_at").notNull(),
+});

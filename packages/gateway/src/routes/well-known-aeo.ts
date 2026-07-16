@@ -1,11 +1,21 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CapabilityDTO } from "../facades/index.js";
 import { getCapabilityFacade } from "../facades/index.js";
-import { loadAgentPackage } from "../mcp/http-mcp-server.js";
+import { loadAgentPackage, PCC_MCP_ICON_URL } from "../mcp/http-mcp-server.js";
+import { DOCS_MOUNT_PATH } from "../mcp/docs-mcp-server.js";
 import { getApiCapabilityTypes } from "./capabilities.js";
 
 const PUBLIC_BASE_URL = "https://capability.network";
 const NLWEB_VERSION = "0.55";
+const MCP_DOCS_URL = `${PUBLIC_BASE_URL}${DOCS_MOUNT_PATH}`;
+
+/**
+ * Registry-schema icon shape (MCP registry `icons` array convention: a list
+ * of {src, mimeType} objects) for PCC's one served, verified-200 icon.
+ * Shared by server-card.json and the MCP initialize handshake (see
+ * http-mcp-server.ts's PCC_MCP_ICON_URL) so both surfaces name the same URL.
+ */
+const PCC_MCP_ICONS = [{ src: PCC_MCP_ICON_URL, mimeType: "image/svg+xml" }];
 
 type AskBody = {
   query?: string | { text?: unknown };
@@ -18,6 +28,32 @@ function sendPublicJson(reply: FastifyReply, body: unknown) {
     .header("access-control-allow-origin", "*")
     .header("cache-control", "public, max-age=300")
     .send(body);
+}
+
+/**
+ * Route-level onSend hook that forces a bare "application/json" Content-Type
+ * (no charset parameter) for agent-readability scanners that are strict
+ * about it (ora's ARD/AI-Catalog validator among them).
+ *
+ * Verified against this repo's installed fastify@4.29.1 (lib/reply.js):
+ * Reply.send() unconditionally appends "; charset=utf-8" to ANY Content-Type
+ * containing the substring "json" that doesn't already declare a charset —
+ * this fires inside send() itself, before serialization and before ANY
+ * onSend hook runs, so neither calling reply.header()/reply.type() first NOR
+ * pre-stringifying the body avoids it. The one point that reliably runs
+ * AFTER that internal mutation — and wins — is a route-level onSend hook:
+ * Fastify guarantees route-level onSend hooks run after app-level ones, and
+ * onSendEnd() reads the final response headers only once the whole onSend
+ * chain has completed. Same technique mcp-app-view.ts's registerMcpAppHttpRoute
+ * already uses to override the app-wide CSP/X-Frame-Options for one route.
+ */
+async function forceBareJsonContentType(
+  _request: FastifyRequest,
+  reply: FastifyReply,
+  payload: unknown,
+) {
+  reply.header("content-type", "application/json");
+  return payload;
 }
 
 function capabilityDisplayName(capabilityType: string): string {
@@ -196,6 +232,10 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
   app.get(
     "/.well-known/ai-catalog.json",
     {
+      // Bare "application/json" — ora's ARD validator is charset-strict.
+      // See forceBareJsonContentType's doc comment for why this must be a
+      // route-level onSend hook rather than a header set before .send().
+      onSend: forceBareJsonContentType,
       schema: {
         tags: ["well-known", "discovery"],
         summary: "AI Catalog for PCC's live physical capabilities",
@@ -270,6 +310,8 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
   app.get(
     "/.well-known/agent-directory.json",
     {
+      // Bare "application/json" — see forceBareJsonContentType's doc comment.
+      onSend: forceBareJsonContentType,
       schema: {
         tags: ["well-known", "discovery"],
         summary: "PCC physical-capability agent directory",
@@ -338,6 +380,22 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         url: `${PUBLIC_BASE_URL}/mcp`,
         serverCard: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
         serverCardUrl: `${PUBLIC_BASE_URL}/.well-known/mcp/server-card.json`,
+        // Two real MCP surfaces: the product server (does things) and the
+        // read-only docs server (learn things) — see docs-mcp-server.ts.
+        servers: [
+          {
+            name: "product",
+            description:
+              "Discover, negotiate, and settle real-world physical capability through PCC's tool catalog.",
+            url: `${PUBLIC_BASE_URL}/mcp`,
+          },
+          {
+            name: "docs",
+            description:
+              "Read-only PCC documentation as MCP resources (agent guide, API reference, quickstarts) plus a search_docs tool.",
+            url: MCP_DOCS_URL,
+          },
+        ],
         configuration: {
           mcpServers: {
             pcc: configuration,
@@ -357,6 +415,31 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         ],
         documentation: `${PUBLIC_BASE_URL}/docs`,
       });
+    },
+  );
+
+  // Ed25519 public-key proof for HTTP domain authentication to the official
+  // MCP Registry (registry.modelcontextprotocol.io). PCC owns capability.network,
+  // so domain-based auth needs no interactive OAuth: the registry fetches this
+  // file and verifies a signature made with the matching private key (held
+  // off-repo). A dedicated route (not a static file) so the SPA catch-all can
+  // never shadow it with HTML. Public, pre-auth-gate.
+  app.get(
+    "/.well-known/mcp-registry-auth",
+    {
+      schema: {
+        tags: ["well-known", "discovery"],
+        summary: "MCP Registry domain-ownership proof",
+        description:
+          "Ed25519 public-key record so PCC can publish to the official MCP Registry via HTTP domain authentication.",
+      },
+    },
+    async (_request, reply) => {
+      return reply
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("access-control-allow-origin", "*")
+        .header("cache-control", "public, max-age=300")
+        .send("v=MCPv1; k=ed25519; p=cL5ml6MK4ndfBPt/0s3uX5CizJcGSsA5bSA0jF0n3zE=\n");
     },
   );
 
@@ -384,6 +467,19 @@ export async function wellKnownAeoRoutes(app: FastifyInstance) {
         version: agentPackage.version,
         serverUrl: `${PUBLIC_BASE_URL}/mcp`,
         logo: `${PUBLIC_BASE_URL}/pcc-icon.svg`,
+        // `icon` (singular, MCP-registry-conventional) + `icons` (the
+        // {src,mimeType} array shape some registries expect) alongside the
+        // pre-existing `logo` — covers field-name variants. Same served,
+        // verified-200 asset the /mcp initialize handshake's serverInfo.icons
+        // references (see http-mcp-server.ts's PCC_MCP_ICON_URL).
+        icon: PCC_MCP_ICON_URL,
+        icons: PCC_MCP_ICONS,
+        // Two real MCP surfaces — see the matching `servers` array on
+        // /.well-known/mcp above.
+        servers: [
+          { name: "product", url: `${PUBLIC_BASE_URL}/mcp` },
+          { name: "docs", url: MCP_DOCS_URL },
+        ],
         transport: {
           type: "streamable-http",
           url: `${PUBLIC_BASE_URL}/mcp`,

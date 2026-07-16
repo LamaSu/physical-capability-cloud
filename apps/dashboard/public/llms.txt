@@ -14,6 +14,7 @@ API call. Start by fetching the agent package, provision a key, then discover an
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
 - MCP server (Streamable HTTP): https://capability.network/mcp
+- MCP docs server (read-only — agent guide, API reference, quickstarts as resources, plus `search_docs`): https://capability.network/mcp/docs
 - AI Catalog: https://capability.network/.well-known/ai-catalog.json
 
 ## When to use PCC
@@ -36,6 +37,8 @@ natural-language discovery, `GET /api/capabilities/search?q=` for direct catalog
 (access/payment policy may apply), or public `GET /api/capabilities/types` to enumerate
 every type PCC currently advertises. The request-time AI Catalog is public at
 `GET /.well-known/ai-catalog.json`.
+
+Agents can compose an interactive dashboard for a physical task by calling the MCP tool `render_pcc_dashboard` with a DashboardManifest — it renders inline as an MCP App (`ui://pcc/dashboard`) in hosts that support MCP Apps, with a plain-text summary as a graceful fallback elsewhere.
 
 ## Self-onboarding (5 steps)
 
@@ -78,4 +81,17 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 - Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
 - Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
 - The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
+- A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
 - Full human + agent integration guide is served by the gateway; this file is the short index.
+
+## Registries
+
+Where PCC's MCP server is (or will be) listed. Bi-directional link-back: each
+listing below should point back to this file, and this file names the
+listing once it exists. Entries without a live listing yet are left as a
+marked placeholder rather than a guessed URL.
+
+- Anthropic MCP Registry (registry.modelcontextprotocol.io): <!-- add the registry.modelcontextprotocol.io/v0/servers/... URL after submission -->
+- Smithery (smithery.ai): <!-- add Smithery URL after submission -->
+- Glama (glama.ai/mcp/servers): <!-- add Glama URL after submission -->
+- mcp.so: <!-- add mcp.so URL after submission -->

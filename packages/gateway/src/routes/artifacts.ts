@@ -32,7 +32,7 @@
  * as runtime CSDs.
  */
 
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, randomBytes, createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -46,6 +46,149 @@ import {
 import { schema, eq } from "@pcc/store";
 import { getStore, initStore } from "../db.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
+
+// ---------------------------------------------------------------------------
+// Legacy share-slug rotation + expiring aliases (R4 PR4 / D13)
+//
+// Weak (~24-bit) legacy slugs are rotated to ≥96-bit ones (see uniqueSlug), and
+// an EXPIRING HASHED alias is written so the OLD link keeps resolving for a
+// bounded window. The alias key is sha256(old-slug) — the old slug itself is
+// never stored — and it never widens visibility (the resolver re-applies the
+// active + public|unlisted gate after dereferencing an alias).
+// ---------------------------------------------------------------------------
+
+/** ~30 days — the bounded window a rotated legacy link keeps resolving. */
+const LEGACY_ALIAS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** sha256(old-slug) hex — the alias primary key (no plaintext slug is stored). */
+function legacyAliasHash(slug: string): string {
+  return createHash("sha256").update(slug).digest("hex");
+}
+
+/** Write a one-time expiring alias old-slug → artifactId. Idempotent: an existing
+ * alias for the same hash is kept (a slug is rotated at most once). */
+function writeLegacyAlias(oldSlug: string, artifactId: string, now: Date, ttlMs: number): void {
+  db()
+    .insert(schema.legacySlugAliases)
+    .values({
+      slugHash: legacyAliasHash(oldSlug),
+      artifactId,
+      expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
+      createdAt: now.toISOString(),
+    })
+    .onConflictDoNothing()
+    .run();
+}
+
+/** Resolve a slug through a LIVE (unexpired) legacy alias to its artifact id, or
+ * undefined when there is no alias or it has lapsed. An expired alias resolves to
+ * nothing — the old link is gone, indistinguishable from a never-seen slug. */
+function resolveLiveAliasArtifactId(slug: string): string | undefined {
+  const row = db()
+    .select()
+    .from(schema.legacySlugAliases)
+    .where(eq(schema.legacySlugAliases.slugHash, legacyAliasHash(slug)))
+    .get();
+  if (!row) return undefined;
+  if (new Date(row.expiresAt).getTime() <= Date.now()) return undefined;
+  return row.artifactId;
+}
+
+/**
+ * A slug minted by the OLD scheme: human prefix + "-" + exactly 6 hex chars
+ * (~24 bits). Strong slugs carry a 24- or 32-hex suffix, so they never match;
+ * a slug with no hex suffix (never minted this way) never matches either. Only
+ * the final hyphen-delimited segment is inspected, so a hex-looking base word is
+ * irrelevant. This is the idempotency discriminator for the rotation below.
+ */
+export function isWeakLegacySlug(slug: string): boolean {
+  const m = /-([0-9a-f]+)$/.exec(slug);
+  return m !== null && m[1].length === 6;
+}
+
+export interface LegacySlugRotationSummary {
+  scanned: number;
+  rotated: number;
+  aliasesWritten: number;
+  /** Already-strong active public|unlisted slugs left untouched (idempotency). */
+  skippedStrong: number;
+  /** {id, newSlug} per rotated artifact. The OLD slug is deliberately NOT logged
+   * in plaintext — only its sha256 lives in the alias table. */
+  rotated_ids: Array<{ id: string; newSlug: string }>;
+}
+
+/**
+ * ONE-TIME, IDEMPOTENT migration: rotate every ACTIVE public|unlisted artifact
+ * whose slug is a weak (~24-bit) legacy slug to a fresh ≥96-bit slug, writing an
+ * expiring hashed alias so the old link keeps resolving for `ttlMs` (~30d).
+ *
+ * Idempotent by construction: a rotated artifact then carries a STRONG slug, so a
+ * re-run skips it (isWeakLegacySlug → false); the alias insert is conflict-safe.
+ * Private/retired artifacts are never enumerable share targets, so they are left
+ * as-is. Operates on the same store the routes use (call initStore() first).
+ *
+ * Each artifact's slug rotation + alias insert run in ONE DB transaction, so a
+ * failure between them can never strand a rotated slug without its alias
+ * (re-audit #2). A mid-run failure leaves already-processed artifacts fully
+ * rotated and the failing one fully rolled back; a re-run then completes the rest.
+ */
+export function rotateLegacyShareSlugs(
+  opts: {
+    ttlMs?: number;
+    now?: Date;
+    /** Alias-write sink, injectable for tests / alternate sinks. Defaults to the
+     *  built-in expiring-hashed-alias writer. Runs INSIDE the per-artifact
+     *  transaction, so if it throws the slug rotation rolls back (atomicity). */
+    aliasWriter?: (oldSlug: string, artifactId: string, now: Date, ttlMs: number) => void;
+  } = {},
+): LegacySlugRotationSummary {
+  const ttlMs = opts.ttlMs ?? LEGACY_ALIAS_TTL_MS;
+  const now = opts.now ?? new Date();
+  const aliasWriter = opts.aliasWriter ?? writeLegacyAlias;
+  const summary: LegacySlugRotationSummary = {
+    scanned: 0,
+    rotated: 0,
+    aliasesWritten: 0,
+    skippedStrong: 0,
+    rotated_ids: [],
+  };
+  for (const a of listArtifacts()) {
+    summary.scanned++;
+    if (a.status !== "active") continue;
+    if (a.visibility !== "public" && a.visibility !== "unlisted") continue;
+    if (!isWeakLegacySlug(a.slug)) {
+      summary.skippedStrong++;
+      continue;
+    }
+    const oldSlug = a.slug;
+    const newSlug = uniqueSlug(a.name); // fresh ≥96-bit slug, human prefix kept
+    a.slug = newSlug;
+    a.updatedAt = now.toISOString();
+    // Atomic per-artifact (re-audit #2): the slug rotation + the alias insert commit
+    // together or not at all. A crash/throw BETWEEN them would otherwise strand a
+    // rotated slug with NO alias — the old share link would 404 with no recovery.
+    // One DB transaction guarantees an artifact is never left half-rotated.
+    db().transaction(() => {
+      saveArtifact(a); // updates both the slug column and data.slug
+      aliasWriter(oldSlug, a.id, now, ttlMs);
+    });
+    summary.rotated++;
+    summary.aliasesWritten++;
+    summary.rotated_ids.push({ id: a.id, newSlug });
+  }
+  return summary;
+}
+
+/**
+ * Opaque per-caller key for the failed-lookup limiter: a truncated SHA-256 of the
+ * raw caller identity (IP or MCP session id, namespaced by `kind`). Hashing keeps
+ * plaintext IPs out of the in-memory map and gives each MCP session its OWN bucket
+ * — there is no shared global bucket that one caller's misses could use to gate
+ * another caller (R4 PR4 / D13).
+ */
+export function hashLookupKey(kind: string, raw: string): string {
+  return createHash("sha256").update(`${kind}|${raw}`).digest("hex").slice(0, 32);
+}
 
 // ---------------------------------------------------------------------------
 // Store access — see compose.ts / skills.ts for the lazy-init rationale.
@@ -123,19 +266,90 @@ function slugify(name: string): string {
   return base || "dashboard";
 }
 
-/** Short, unguessable-enough suffix so unlisted slugs aren't enumerable. */
-function shortId(len: number): string {
-  return randomUUID().replace(/-/g, "").slice(0, len);
+/**
+ * A crypto-random hex suffix so unlisted/public slugs are NOT enumerable
+ * (directive 13). `randomBytes` is a CSPRNG; `bytes` bytes → `bytes*8` bits of
+ * entropy → `bytes*2` hex chars.
+ *
+ * NEW links use SLUG_SUFFIX_BYTES = 12 → 96 random bits (the audit floor),
+ * replacing the old 6-hex-char / 24-bit suffix. EXISTING slugs are NOT rewritten
+ * — they are looked up by exact string, so short legacy slugs keep resolving;
+ * only newly-minted links get the wider suffix. No redirect/migration is needed
+ * (nothing changes the stored slug of an existing artifact).
+ */
+const SLUG_SUFFIX_BYTES = 12; // 96 bits
+const SLUG_SUFFIX_BYTES_FALLBACK = 16; // 128 bits, used only on the rare clash
+
+function randomSuffix(bytes: number): string {
+  return randomBytes(bytes).toString("hex");
 }
 
-/** Mint a slug not already taken (random suffix; retried on the rare clash). */
+/** Mint a slug not already taken (96-bit random suffix; widened on the rare clash). */
 function uniqueSlug(name: string): string {
   const base = slugify(name);
   for (let i = 0; i < 5; i++) {
-    const candidate = `${base}-${shortId(6)}`;
+    const candidate = `${base}-${randomSuffix(SLUG_SUFFIX_BYTES)}`;
     if (!getBySlug(candidate)) return candidate;
   }
-  return `${base}-${shortId(12)}`;
+  return `${base}-${randomSuffix(SLUG_SUFFIX_BYTES_FALLBACK)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Failed-lookup rate limiting (anti-enumeration, directive 13)
+//
+// A sliding-window counter of FAILED public lookups per caller key. The limit is
+// checked ONLY on the MISS path, AFTER the store lookup has run: a resolvable,
+// readable artifact is served BEFORE the limiter is ever consulted, so a
+// KNOWN-VALID link can never be suppressed by accumulated misses (this caller's
+// or, crucially, another caller's). Only a burst of MISSES (the enumeration
+// signature) trips the limit. This is defense-in-depth — the primary
+// anti-enumeration guarantee is the ≥96-bit slug entropy above.
+//
+// Keying (R4 PR4 / D13): every key is an OPAQUE hash (hashLookupKey) of the raw
+// caller identity — the HTTP routes hash `req.ip`, the MCP `resources/read` share
+// path hashes the host session id. There is NO shared global bucket: the previous
+// `mcp:anon` bucket was removed because it let one anonymous session's misses gate
+// another's. An MCP read with no session identity is simply not throttled — safe,
+// because the lookup still runs (valid links are always served) and every miss
+// returns the identical not-found (no existence oracle regardless).
+// ---------------------------------------------------------------------------
+
+const FAILED_LOOKUP_WINDOW_MS = 60_000;
+const FAILED_LOOKUP_MAX = 30; // failed public lookups per key per window
+const FAILED_LOOKUP_MAX_KEYS = 10_000; // memory bound on the tracking map
+const failedLookups = new Map<string, number[]>();
+
+function freshFailures(key: string, now: number): number[] {
+  const arr = failedLookups.get(key);
+  if (!arr) return [];
+  return arr.filter((t) => now - t < FAILED_LOOKUP_WINDOW_MS);
+}
+
+/** True when `key` has exceeded the failed-lookup budget in the current window
+ * (read-only; does not record). Callers should short-circuit to a generic
+ * response — never one that reveals whether a given artifact exists. */
+export function publicLookupThrottled(key: string): boolean {
+  return freshFailures(key, Date.now()).length >= FAILED_LOOKUP_MAX;
+}
+
+/** Record one FAILED (miss/forbidden) public lookup for `key`. */
+export function notePublicLookupFailure(key: string): void {
+  const now = Date.now();
+  const arr = freshFailures(key, now);
+  arr.push(now);
+  failedLookups.set(key, arr);
+  if (failedLookups.size > FAILED_LOOKUP_MAX_KEYS) {
+    for (const [k, v] of failedLookups) {
+      const fresh = v.filter((t) => now - t < FAILED_LOOKUP_WINDOW_MS);
+      if (fresh.length === 0) failedLookups.delete(k);
+      else failedLookups.set(k, fresh);
+    }
+  }
+}
+
+/** Test reset hook for the failed-lookup limiter. */
+export function _resetPublicLookupLimiterForTests(): void {
+  failedLookups.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +372,51 @@ function getBySlug(slug: string): UiArtifact | undefined {
 
 function getByIdOrSlug(idOrSlug: string): UiArtifact | undefined {
   return getById(idOrSlug) ?? getBySlug(idOrSlug);
+}
+
+/** Valid slug format — lowercase alnum with internal hyphens (exactly what
+ * slugify() mints). Rejects an id (`ua_…`, underscores), uppercase, spaces, or
+ * junk, so the public share surface accepts only a well-formed slug. Length cap
+ * accommodates the 96-bit suffix (base ≤40 + "-" + 24 hex = 65; 128-bit clash
+ * fallback = 73) with headroom, while still bounding the input. */
+function isValidSlugFormat(slug: string): boolean {
+  return slug.length <= 80 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug);
+}
+
+/**
+ * Resolve a well-formed slug to its artifact via an exact LIVE slug OR a LIVE
+ * (unexpired) legacy alias (sha256(old-slug) → id, R4 PR4 / D13), applying NO
+ * visibility/status gate — the caller applies its own. Format-validates first
+ * (SLUG ONLY, never an id), so malformed input, unknown slugs, and lapsed
+ * aliases all return undefined identically. A rotated weak legacy link keeps
+ * resolving through its alias until the alias expires.
+ */
+function resolveBySlugOrLiveAlias(slug: string): UiArtifact | undefined {
+  if (typeof slug !== "string" || !isValidSlugFormat(slug)) return undefined;
+  const direct = getBySlug(slug);
+  if (direct) return direct;
+  const id = resolveLiveAliasArtifactId(slug);
+  return id ? getById(id) : undefined;
+}
+
+/**
+ * Look up an artifact for the no-auth PUBLIC SHARE surface (the MCP-Apps
+ * `ui://pcc/dashboard/<slug>` resource read — see mcp/mcp-app-view.ts). Accepts
+ * a well-formed SLUG ONLY (never an id — a resource read must not double as an
+ * id oracle), resolving an exact live slug OR a live legacy alias, and returns
+ * the artifact ONLY if it exists, is active, and is publicly readable
+ * (public|unlisted) via `canRead(a, null)`. An alias NEVER widens visibility:
+ * the active + public|unlisted gate is re-applied after dereferencing. This is a
+ * PASSIVE read: it does NOT mutate loadCount/updatedAt (unlike GET
+ * /api/artifacts/:id, which is an explicit recall). Private artifacts are never
+ * exposed here; a host embeds the returned view with no PCC credential. Same
+ * process, same store as POST /api/artifacts, so a saved dashboard is the exact
+ * one rendered.
+ */
+export function getPublicArtifactForRender(slug: string): UiArtifact | undefined {
+  const a = resolveBySlugOrLiveAlias(slug);
+  if (!a || a.status === "retired") return undefined;
+  return canRead(a, null) ? a : undefined;
 }
 
 function saveArtifact(a: UiArtifact): void {
@@ -410,16 +669,39 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { idOrSlug: string } }>(
     "/api/artifacts/:idOrSlug",
     async (req, reply) => {
+      // Recall API — keeps id-or-slug lookup (owners recall by id) and its
+      // owner-gated 403/404 contract. The limiter is consulted AFTER the lookup:
+      // a readable artifact is served regardless of throttle state, so a valid
+      // recall is never suppressed by accumulated misses (R4 PR4 / D13).
+      const rateKey = hashLookupKey("ip", req.ip || "unknown");
       const a = getByIdOrSlug(req.params.idOrSlug);
-      if (!a || a.status === "retired") return notFound(reply, req.params.idOrSlug);
-
       const caller = resolveCaller(req);
-      if (!canRead(a, caller)) return forbidden(reply, "This artifact is private.");
 
-      a.loadCount += 1;
-      a.updatedAt = new Date().toISOString();
-      saveArtifact(a);
-      return a;
+      if (a && a.status !== "retired" && canRead(a, caller)) {
+        // Passive read for the read-only MCP app surface (/mcp/apps): a recall
+        // proxied from there carries x-pcc-mcp-readonly and MUST have zero write
+        // effect (auditor: "read-only is an effect classification, not GET").
+        // The full surface + web recall still record the load — loadCount /
+        // updatedAt feed popularity ranking (computePopularity).
+        if (req.headers["x-pcc-mcp-readonly"] !== "1") {
+          a.loadCount += 1;
+          a.updatedAt = new Date().toISOString();
+          saveArtifact(a);
+        }
+        return a;
+      }
+
+      // Miss (missing / retired / private-to-non-owner) — now subject to the
+      // per-caller (hashed-IP) limiter.
+      notePublicLookupFailure(rateKey);
+      if (publicLookupThrottled(rateKey)) {
+        return reply.status(429).send({
+          error: "rate_limited",
+          message: "Too many lookups. Please slow down and try again shortly.",
+        });
+      }
+      if (!a || a.status === "retired") return notFound(reply, req.params.idOrSlug);
+      return forbidden(reply, "This artifact is private.");
     },
   );
 
@@ -538,27 +820,38 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
   // ═════════════════════════════════════════════════════════════════
 
   app.get<{ Params: { slug: string } }>("/a/:slug", async (req, reply) => {
-    const a = getBySlug(req.params.slug) ?? getById(req.params.slug);
-    if (!a || a.status === "retired") {
-      return reply
-        .status(404)
-        .type("text/html; charset=utf-8")
-        .send(htmlMessage("Dashboard not found", "No dashboard exists at this link, or it has been retired."));
-    }
-
+    // Public SHARE surface (R4 PR4 / D13): SLUG-ONLY (no id fallback — a share
+    // link is not an id oracle), resolving an exact slug OR a live legacy alias.
+    const rateKey = hashLookupKey("ip", req.ip || "unknown");
+    const a = resolveBySlugOrLiveAlias(req.params.slug);
     const caller = resolveCaller(req);
-    if (!canRead(a, caller)) {
-      return reply
-        .status(403)
-        .type("text/html; charset=utf-8")
-        .send(htmlMessage("Private dashboard", "This dashboard is private. Ask its owner for access."));
+
+    if (a && a.status !== "retired" && canRead(a, caller)) {
+      // Known-valid + readable → serve BEFORE the limiter is consulted, so a valid
+      // link is never suppressed by accumulated misses (this caller's or another's).
+      a.loadCount += 1;
+      a.updatedAt = new Date().toISOString();
+      saveArtifact(a);
+      return reply.type("text/html; charset=utf-8").send(renderShell(a));
     }
 
-    a.loadCount += 1;
-    a.updatedAt = new Date().toISOString();
-    saveArtifact(a);
-
-    return reply.type("text/html; charset=utf-8").send(renderShell(a));
+    // Every non-serve reason — private (to a non-owner), retired, missing,
+    // malformed, or an expired alias — collapses to ONE generic not-found: no
+    // existence oracle, no 403-vs-404 leak. Only now is the per-caller limiter
+    // consulted; a throttled caller gets a generic 429 (returned identically for
+    // ALL miss reasons, so it never distinguishes a private slug from a missing
+    // one — throttling reveals no private existence).
+    notePublicLookupFailure(rateKey);
+    if (publicLookupThrottled(rateKey)) {
+      return reply
+        .status(429)
+        .type("text/html; charset=utf-8")
+        .send(htmlMessage("Too many requests", "Please slow down and try again shortly."));
+    }
+    return reply
+      .status(404)
+      .type("text/html; charset=utf-8")
+      .send(htmlMessage("Dashboard not found", "No dashboard exists at this link, or it is no longer available."));
   });
 }
 
@@ -569,9 +862,28 @@ export async function artifactsRoutes(app: FastifyInstance): Promise<void> {
 /** Clear the artifact store. Test reset hook. */
 export function _clearArtifactsForTests(): void {
   db().delete(schema.uiArtifacts).run();
+  db().delete(schema.legacySlugAliases).run();
 }
 
 /** Preload a fully-formed artifact into the store. Test helper. */
 export function _seedArtifactForTests(a: UiArtifact): void {
   saveArtifact(a);
+}
+
+/** Seed a legacy alias old-slug → artifactId with an explicit expiry. Test helper
+ * for the expiry path (a past `expiresAt` must resolve to nothing). */
+export function _seedLegacyAliasForTests(oldSlug: string, artifactId: string, expiresAt: string): void {
+  db()
+    .insert(schema.legacySlugAliases)
+    .values({ slugHash: legacyAliasHash(oldSlug), artifactId, expiresAt, createdAt: new Date().toISOString() })
+    .onConflictDoUpdate({
+      target: schema.legacySlugAliases.slugHash,
+      set: { artifactId, expiresAt },
+    })
+    .run();
+}
+
+/** Count stored legacy aliases. Test helper. */
+export function _countLegacyAliasesForTests(): number {
+  return db().select().from(schema.legacySlugAliases).all().length;
 }
