@@ -125,6 +125,7 @@ RUN set -e; \
       apps/dashboard/public/agent-package.json \
       apps/dashboard/public/ui-kit/v1/manifest.schema.json \
       apps/dashboard/public/ui-kit/v1/pcc-ui.js \
+      apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js \
       docs/AGENT_INTEGRATION.md \
       docs/quickstart/README.md; do \
       test -f "/app/$f" || { echo "[docker] MISSING MCP-App runtime asset: $f" >&2; exit 1; }; \
