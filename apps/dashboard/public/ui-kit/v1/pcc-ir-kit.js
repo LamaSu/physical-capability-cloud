@@ -782,11 +782,13 @@
   // src/mcp/dashboard-ir-browser-entry.ts
   var CAP = {
     docChars: 256 * 1024,
-    // bounded manifest preflight: total string chars
+    // bounded manifest preflight: total string + key chars
     maxNodes: 2e4,
-    // bounded manifest preflight: total nodes
+    // bounded manifest preflight: total DISTINCT nodes visited
     maxFanout: 4096,
     // bounded manifest preflight: per-container children
+    maxPending: 1e5,
+    // bounded manifest preflight: max enqueued (stack) references
     respBytes: 512 * 1024,
     // per-response byte cap (incremental)
     concurrent: 6,
@@ -836,21 +838,37 @@
     mount.replaceChildren(p);
   }
   function tooLarge(root) {
-    let nodes = 0, chars = 0;
+    const seen = /* @__PURE__ */ new WeakSet();
+    let nodes = 0, chars = 0, pending = 1;
     const stack = [root];
     while (stack.length) {
       const v = stack.pop();
+      pending--;
       if (++nodes > CAP.maxNodes) return true;
       if (typeof v === "string") {
         chars += v.length;
         if (chars > CAP.docChars) return true;
-      } else if (Array.isArray(v)) {
-        if (v.length > CAP.maxFanout) return true;
-        for (let i = 0; i < v.length; i++) stack.push(v[i]);
-      } else if (v && typeof v === "object") {
-        const ks = Object.keys(v);
-        if (ks.length > CAP.maxFanout) return true;
-        for (const k of ks) stack.push(v[k]);
+        continue;
+      }
+      if (!v || typeof v !== "object") continue;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      if (Array.isArray(v)) {
+        if (v.length > CAP.maxFanout || pending + v.length > CAP.maxPending) return true;
+        for (let i = 0; i < v.length; i++) {
+          stack.push(v[i]);
+          pending++;
+        }
+      } else {
+        let kn = 0;
+        for (const k in v) {
+          if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+          if (++kn > CAP.maxFanout || pending + 1 > CAP.maxPending) return true;
+          chars += k.length;
+          if (chars > CAP.docChars) return true;
+          stack.push(v[k]);
+          pending++;
+        }
       }
     }
     return false;
@@ -884,14 +902,6 @@
     const n = waiters.shift();
     if (n) n.wake();
     else inFlight--;
-  }
-  function makeSignal(gen) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
-    ctrl.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
-    if (gen.signal.aborted) ctrl.abort();
-    else gen.signal.addEventListener("abort", () => ctrl.abort(new DOMException("generation aborted", "AbortError")), { once: true });
-    return ctrl.signal;
   }
   function concat(chunks, total) {
     const out = new Uint8Array(total);
@@ -942,6 +952,7 @@
     return { status: 200, redirected: false, bytesOver: false, json };
   }
   var rendered = false;
+  var disposed = false;
   var boundHandles = [];
   var genController = null;
   var liveDoc = null;
@@ -966,19 +977,29 @@
     genController = gen;
     const deps = {
       origin,
+      // The signal is the GENERATION signal; per request we add a timeout + gen-link on a
+      // fresh controller and clean BOTH up when the request settles (no leaked timer/listener).
       getJson: async (url, sig) => {
         const s = sig;
         await acquire(s);
+        const ctrl = new AbortController();
+        const onGen = () => ctrl.abort(new DOMException("generation aborted", "AbortError"));
+        let timer = null;
         try {
-          return await realGetJson(url, s);
+          if (s.aborted) ctrl.abort();
+          else s.addEventListener("abort", onGen, { once: true });
+          timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
+          return await realGetJson(url, ctrl.signal);
         } finally {
+          if (timer !== null) clearTimeout(timer);
+          s.removeEventListener("abort", onGen);
           release();
         }
       },
       // NO openSse: SSE transport intentionally absent (run cards are unbound below).
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (h) => clearTimeout(h),
-      makeSignal: () => makeSignal(gen)
+      makeSignal: () => gen.signal
     };
     const { stats, lists, receipts } = collectBound(doc);
     const byClass = (cls) => Array.from(root.querySelectorAll("." + cls));
@@ -1017,7 +1038,7 @@
     }
   }
   function renderManifest(manifest) {
-    if (rendered) return;
+    if (disposed || rendered) return;
     const mount = document.getElementById(MOUNT_ID);
     if (!mount) return;
     if (tooLarge(manifest)) {
@@ -1049,13 +1070,17 @@
       const d = ev.data;
       if (!d || typeof d !== "object" || d.jsonrpc !== "2.0") return;
       if (d.method === "ui/resource-teardown" && "id" in d) {
-        stopBinds();
+        if (!disposed) {
+          disposed = true;
+          stopBinds();
+        }
         try {
           parent.postMessage({ jsonrpc: "2.0", id: d.id, result: {} }, "*");
         } catch {
         }
         return;
       }
+      if (disposed) return;
       if (state === "init" && d.id === CAP.initId && d.result && typeof d.result === "object") {
         if (d.result.protocolVersion !== CAP.protocol) return;
         state = "ready";
@@ -1070,6 +1095,7 @@
       }
     });
     document.addEventListener("visibilitychange", () => {
+      if (disposed) return;
       if (document.hidden) stopBinds();
       else if (liveDoc && liveRoot) {
         stopBinds();

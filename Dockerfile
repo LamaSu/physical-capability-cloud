@@ -109,6 +109,10 @@ RUN rm -rf .turbo node_modules/.cache && npx turbo build --force --filter='!@pcc
 # Build dashboard with vite only (skip tsc -b which OOMs on large workspace)
 RUN cd apps/dashboard && npx vite build
 
+# The committed Phase-B browser kit (pcc-ir-kit.js) MUST equal a fresh esbuild of the
+# audited TS — reviewed bytes == shipped bytes. Fail the image build on any drift.
+RUN pnpm --filter @pcc/gateway check:ir-kit && echo "[docker] pcc-ir-kit.js byte-equivalence OK"
+
 # Verify the build artifacts exist and the full import chain works
 RUN ls -la packages/gateway/dist/server.js && echo "[docker] gateway build output OK"
 # Test that better-sqlite3 native module loads from within the @pcc/store context

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
+import { buildMcpAppIrDashboardHtml, MCP_APP_RENDER_IR_URI } from "./mcp-app-view.js";
 
 const KIT = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
 const PROTOCOL = "2026-01-26";
@@ -26,7 +27,7 @@ const validManifest = {
   ] }],
 };
 
-interface Scene { w: any; posted: any[]; mount: any; deliver: (m: unknown) => void; close: () => void }
+interface Scene { w: any; posted: any[]; mount: any; deliver: (m: unknown) => void; dispatch: (m: unknown) => void; teardown: (id: number) => void; close: () => void }
 function boot(opts: { badSource?: boolean } = {}): Scene {
   const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p class="pcc-invalid">waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
   const w: any = dom.window;
@@ -38,12 +39,10 @@ function boot(opts: { badSource?: boolean } = {}): Scene {
   const src = () => (opts.badSource ? ({} as any) : w.parent);
   // init result (host → app), then the app is ready for a tool-result
   w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } }));
-  const deliver = (manifest: unknown) => {
-    // clone into the window realm (as real postMessage structured-clone does)
-    const cloned = manifest === undefined ? undefined : w.JSON.parse(w.JSON.stringify(manifest));
-    w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: cloned } } } }));
-  };
-  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, close: () => w.close() };
+  const dispatch = (manifest: unknown) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest } } } }));
+  const deliver = (manifest: unknown) => dispatch(manifest === undefined ? undefined : w.JSON.parse(w.JSON.stringify(manifest))); // window-realm clone (as postMessage does)
+  const teardown = (id: number) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", id, method: "ui/resource-teardown" } }));
+  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, dispatch, teardown, close: () => w.close() };
 }
 
 describe("pcc-ir-kit.js — static negative scan", () => {
@@ -108,5 +107,49 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
     expect(s.mount.innerHTML).toBe(first);
     expect(s.mount.textContent).not.toContain("SECOND");
     s.close();
+  });
+
+  it("teardown is TERMINAL — a tool-result after teardown does not render", () => {
+    const s = boot();
+    s.teardown(7);
+    expect(s.posted.some((m) => m && m.id === 7 && m.result !== undefined)).toBe(true); // acked
+    s.deliver(validManifest);
+    expect(s.mount.textContent).toContain("waiting");
+    s.close();
+  });
+
+  it("teardown is TERMINAL — a later visible visibilitychange does not restart binds", () => {
+    const s = boot(); s.deliver(validManifest);
+    expect(s.mount.textContent).toContain("Ops");
+    s.teardown(8);
+    Object.defineProperty(s.w.document, "hidden", { value: false, configurable: true });
+    expect(() => s.w.document.dispatchEvent(new s.w.Event("visibilitychange"))).not.toThrow();
+    s.close();
+  });
+
+  it("a CYCLIC / self-referential manifest stays inert without hanging (bounded preflight)", () => {
+    const s = boot();
+    // build the cyclic object in the window realm (JSON clone would throw, so dispatch raw)
+    const cyc = s.w.eval('(function(){var o={csd:"pcc://artifacts/dashboard/v1",title:"C",sections:[]};o.self=o;for(var i=0;i<5000;i++)o["k"+i]=o;return o;})()');
+    s.dispatch(cyc);
+    expect(s.mount.querySelector(".pcc-invalid")).not.toBeNull();
+    s.close();
+  });
+});
+
+describe("B-mode ui:// resource composition (server wiring)", () => {
+  it("exposes the distinct B resource URI", () => {
+    expect(MCP_APP_RENDER_IR_URI).toBe("ui://pcc/dashboard/render-ir");
+  });
+  it("HTML injects the fixed PCC origin, embeds the kit, and carries NO A-view bridge", () => {
+    const html = buildMcpAppIrDashboardHtml();
+    expect(html).toContain('window.__PCC_IR_ORIGIN__="https://capability.network"');
+    expect(html).toContain('id="pcc-ir-root"');
+    expect(html).toContain("Content-Security-Policy");
+    expect(html).toContain("connect-src");
+    expect(html).toContain("dashboardManifestToIr"); // the audited kit is embedded
+    expect(html).not.toContain("__PCC_HOST_OPERATIONS__");
+    expect(html).not.toContain("__PCC_HOST_BRIDGE__");
+    expect(html).not.toContain("tools/call");
   });
 });

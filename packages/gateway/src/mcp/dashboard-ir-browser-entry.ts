@@ -31,9 +31,10 @@ import { startBind } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
 
 const CAP = {
-  docChars: 256 * 1024,   // bounded manifest preflight: total string chars
-  maxNodes: 20_000,       // bounded manifest preflight: total nodes
+  docChars: 256 * 1024,   // bounded manifest preflight: total string + key chars
+  maxNodes: 20_000,       // bounded manifest preflight: total DISTINCT nodes visited
   maxFanout: 4096,        // bounded manifest preflight: per-container children
+  maxPending: 100_000,    // bounded manifest preflight: max enqueued (stack) references
   respBytes: 512 * 1024,  // per-response byte cap (incremental)
   concurrent: 6,          // global max in-flight binds
   reqTimeoutMs: 30_000,
@@ -75,16 +76,33 @@ function inert(mount: HTMLElement, msg: string): void {
 }
 
 /** Bounded preflight — reject an oversized/pathological manifest BEFORE any full
- * serialize/traverse (a hostile parent must not force a large alloc first). */
+ * serialize/traverse. Cycle- and shared-reference-safe (structured clone allows both):
+ * a WeakSet skips already-visited objects, `pending` caps enqueued work, per-container
+ * fanout is enforced WITHOUT materializing a key array (for-in + early break), and
+ * property-name characters count against the char budget. */
 function tooLarge(root: unknown): boolean {
-  let nodes = 0, chars = 0;
+  const seen = new WeakSet<object>();
+  let nodes = 0, chars = 0, pending = 1;
   const stack: unknown[] = [root];
   while (stack.length) {
-    const v = stack.pop();
+    const v = stack.pop(); pending--;
     if (++nodes > CAP.maxNodes) return true;
-    if (typeof v === "string") { chars += v.length; if (chars > CAP.docChars) return true; }
-    else if (Array.isArray(v)) { if (v.length > CAP.maxFanout) return true; for (let i = 0; i < v.length; i++) stack.push(v[i]); }
-    else if (v && typeof v === "object") { const ks = Object.keys(v as object); if (ks.length > CAP.maxFanout) return true; for (const k of ks) stack.push((v as Record<string, unknown>)[k]); }
+    if (typeof v === "string") { chars += v.length; if (chars > CAP.docChars) return true; continue; }
+    if (!v || typeof v !== "object") continue;
+    if (seen.has(v)) continue; // cycle / shared reference already accounted
+    seen.add(v);
+    if (Array.isArray(v)) {
+      if (v.length > CAP.maxFanout || pending + v.length > CAP.maxPending) return true;
+      for (let i = 0; i < v.length; i++) { stack.push(v[i]); pending++; }
+    } else {
+      let kn = 0;
+      for (const k in v) {
+        if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+        if (++kn > CAP.maxFanout || pending + 1 > CAP.maxPending) return true;
+        chars += k.length; if (chars > CAP.docChars) return true;
+        stack.push((v as Record<string, unknown>)[k]); pending++;
+      }
+    }
   }
   return false;
 }
@@ -105,18 +123,6 @@ function acquire(signal: AbortSignal): Promise<void> {
   });
 }
 function release(): void { const n = waiters.shift(); if (n) n.wake(); else inFlight--; }
-
-/** A per-bind AbortSignal linked to the current bind GENERATION + a request timeout
- * (no AbortSignal.timeout dependency). Aborting the generation aborts every in-flight
- * request derived from it. */
-function makeSignal(gen: AbortController): AbortSignal {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
-  ctrl.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
-  if (gen.signal.aborted) ctrl.abort();
-  else gen.signal.addEventListener("abort", () => ctrl.abort(new DOMException("generation aborted", "AbortError")), { once: true });
-  return ctrl.signal;
-}
 
 function concat(chunks: Uint8Array[], total: number): Uint8Array {
   const out = new Uint8Array(total); let off = 0;
@@ -151,6 +157,7 @@ async function realGetJson(url: string, signal: AbortSignal): Promise<GetResult>
 
 // ── render + bind ────────────────────────────────────────────────────────────────
 let rendered = false;
+let disposed = false; // TERMINAL: after ui/resource-teardown, no path renders/binds/reacts again
 let boundHandles: Array<{ stop: () => void }> = [];
 let genController: AbortController | null = null;
 let liveDoc: IrDoc | null = null;
@@ -172,11 +179,29 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   genController = gen;
   const deps: BinderDeps = {
     origin,
-    getJson: async (url: string, sig: unknown) => { const s = sig as AbortSignal; await acquire(s); try { return await realGetJson(url, s); } finally { release(); } },
+    // The signal is the GENERATION signal; per request we add a timeout + gen-link on a
+    // fresh controller and clean BOTH up when the request settles (no leaked timer/listener).
+    getJson: async (url: string, sig: unknown) => {
+      const s = sig as AbortSignal;
+      await acquire(s); // rejects if the generation already aborted / aborts while queued
+      const ctrl = new AbortController();
+      const onGen = () => ctrl.abort(new DOMException("generation aborted", "AbortError"));
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        if (s.aborted) ctrl.abort();
+        else s.addEventListener("abort", onGen, { once: true });
+        timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
+        return await realGetJson(url, ctrl.signal);
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+        s.removeEventListener("abort", onGen);
+        release();
+      }
+    },
     // NO openSse: SSE transport intentionally absent (run cards are unbound below).
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-    makeSignal: () => makeSignal(gen),
+    makeSignal: () => gen.signal,
   };
   const { stats, lists, receipts } = collectBound(doc);
   const byClass = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
@@ -196,7 +221,7 @@ function stopBinds(): void {
 }
 
 function renderManifest(manifest: unknown): void {
-  if (rendered) return; // render exactly once; a hostile host re-sending cannot re-render
+  if (disposed || rendered) return; // render exactly once; never after teardown
   const mount = document.getElementById(MOUNT_ID);
   if (!mount) return;
   if (tooLarge(manifest)) { rendered = true; inert(mount, "This dashboard is too large and was not rendered."); return; }
@@ -217,12 +242,13 @@ function boot(): void {
     if (ev.source !== parent) return; // host parent only
     const d = ev.data as Record<string, unknown> | null;
     if (!d || typeof d !== "object" || (d as { jsonrpc?: unknown }).jsonrpc !== "2.0") return;
-    // graceful teardown (a request with an id) — stop work + ack
+    // graceful teardown (a request with an id) — LATCH terminal, then stop + ack.
     if ((d as { method?: unknown }).method === "ui/resource-teardown" && "id" in d) {
-      stopBinds();
+      if (!disposed) { disposed = true; stopBinds(); }
       try { parent.postMessage({ jsonrpc: "2.0", id: (d as { id: unknown }).id, result: {} }, "*"); } catch { /* ignore */ }
       return;
     }
+    if (disposed) return; // terminal — ignore init results, tool-results, everything after teardown
     if (state === "init" && (d as { id?: unknown }).id === CAP.initId && (d as { result?: unknown }).result && typeof (d as { result: unknown }).result === "object") {
       if ((d as { result: { protocolVersion?: unknown } }).result.protocolVersion !== CAP.protocol) return;
       state = "ready";
@@ -237,6 +263,7 @@ function boot(): void {
     }
   });
   document.addEventListener("visibilitychange", () => {
+    if (disposed) return; // terminal — a visible event after teardown must not restart binds
     if (document.hidden) stopBinds();
     else if (liveDoc && liveRoot) { stopBinds(); startBinds(liveDoc, liveRoot); }
   });

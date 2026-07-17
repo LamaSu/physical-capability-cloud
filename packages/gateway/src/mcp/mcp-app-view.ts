@@ -1255,7 +1255,7 @@ function dashboardIrViewBootScript(): string {
 /** The Phase-B closed-IR MCP App view. Neutral "waiting" state; the inlined kit boots
  *  itself, does the read-only lifecycle, and renders the projected manifest the host
  *  delivers in the tool-result. Same CSP/nonce/strict-dynamic shell as the A view. */
-function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
+export function buildMcpAppIrDashboardHtml(nonce: string = cspNonce()): string {
   return `<!doctype html>
 <html lang="en">
 <head>
