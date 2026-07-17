@@ -27,14 +27,16 @@ const validManifest = {
   ] }],
 };
 
-interface Scene { w: any; posted: any[]; mount: any; deliver: (m: unknown) => void; dispatch: (m: unknown) => void; teardown: (id: number) => void; close: () => void }
+interface Scene { w: any; posted: any[]; mount: any; deliver: (m: unknown) => void; dispatch: (m: unknown) => void; teardown: (id: number) => void; fetches: () => number; close: () => void }
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 function boot(opts: { badSource?: boolean } = {}): Scene {
   const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p class="pcc-invalid">waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
   const w: any = dom.window;
   const posted: any[] = [];
+  let fetchCount = 0;
   w.parent.postMessage = (m: any) => posted.push(m);
   w.__PCC_IR_ORIGIN__ = "https://capability.network"; // server-injected fixed origin
-  w.fetch = () => Promise.reject(new Error("no fetch in test"));
+  w.fetch = () => { fetchCount++; return Promise.reject(new Error("no fetch in test")); };
   w.eval(KIT);
   const src = () => (opts.badSource ? ({} as any) : w.parent);
   // init result (host → app), then the app is ready for a tool-result
@@ -42,7 +44,7 @@ function boot(opts: { badSource?: boolean } = {}): Scene {
   const dispatch = (manifest: unknown) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest } } } }));
   const deliver = (manifest: unknown) => dispatch(manifest === undefined ? undefined : w.JSON.parse(w.JSON.stringify(manifest))); // window-realm clone (as postMessage does)
   const teardown = (id: number) => w.dispatchEvent(new w.MessageEvent("message", { source: src(), data: { jsonrpc: "2.0", id, method: "ui/resource-teardown" } }));
-  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, dispatch, teardown, close: () => w.close() };
+  return { w, posted, mount: w.document.getElementById("pcc-ir-root"), deliver, dispatch, teardown, fetches: () => fetchCount, close: () => w.close() };
 }
 
 describe("pcc-ir-kit.js — static negative scan", () => {
@@ -118,22 +120,43 @@ describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
     s.close();
   });
 
-  it("teardown is TERMINAL — a later visible visibilitychange does not restart binds", () => {
+  it("teardown is TERMINAL — a later visible visibilitychange starts NO new binds (fetch count frozen)", async () => {
     const s = boot(); s.deliver(validManifest);
+    await flush();
     expect(s.mount.textContent).toContain("Ops");
     s.teardown(8);
+    await flush();
+    const afterTeardown = s.fetches(); // binds stopped + generation aborted
     Object.defineProperty(s.w.document, "hidden", { value: false, configurable: true });
-    expect(() => s.w.document.dispatchEvent(new s.w.Event("visibilitychange"))).not.toThrow();
+    s.w.document.dispatchEvent(new s.w.Event("visibilitychange"));
+    await flush();
+    expect(s.fetches()).toBe(afterTeardown); // NO new bind/fetch after teardown
     s.close();
   });
 
-  it("a CYCLIC / self-referential manifest stays inert without hanging (bounded preflight)", () => {
-    const s = boot();
-    // build the cyclic object in the window realm (JSON clone would throw, so dispatch raw)
-    const cyc = s.w.eval('(function(){var o={csd:"pcc://artifacts/dashboard/v1",title:"C",sections:[]};o.self=o;for(var i=0;i<5000;i++)o["k"+i]=o;return o;})()');
-    s.dispatch(cyc);
-    expect(s.mount.querySelector(".pcc-invalid")).not.toBeNull();
-    s.close();
+  it("init result AFTER teardown is ignored (never becomes ready / renders)", () => {
+    const dom = new JSDOM('<!doctype html><html><body><main id="pcc-ir-root"><p class="pcc-invalid">waiting</p></main></body></html>', { url: "https://capability.network/", runScripts: "outside-only" });
+    const w: any = dom.window; w.parent.postMessage = () => {}; w.__PCC_IR_ORIGIN__ = "https://capability.network"; w.fetch = () => Promise.reject(new Error("x"));
+    w.eval(KIT);
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 42, method: "ui/resource-teardown" } })); // teardown before init
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } })); // late init
+    w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(w.JSON.stringify(validManifest)) } } } }));
+    expect(w.document.getElementById("pcc-ir-root").textContent).toContain("waiting");
+    w.close();
+  });
+
+  it("small cycle + shared-DAG manifests exercise the WeakSet (no explosion / no false-reject)", () => {
+    // A small SELF-CYCLE: without the WeakSet this loops forever; bounded fanout does NOT apply.
+    const s1 = boot();
+    s1.dispatch(s1.w.eval('(function(){var o={csd:"pcc://artifacts/dashboard/v1",title:"cyc",sections:[]};o.a=o;o.b={c:o};return o;})()'));
+    expect(s1.mount.querySelector(".pcc-invalid")).not.toBeNull(); // invalid (extra keys) but terminated
+    s1.close();
+    // A bounded SHARED-DAG: one node referenced by many parents. Without the WeakSet this is
+    // exponential; with it, it terminates and (being a valid-shaped manifest) renders.
+    const s2 = boot();
+    s2.dispatch(s2.w.eval('(function(){var shared={heading:"H",windows:[]};var secs=[];for(var i=0;i<50;i++)secs.push(shared);return {csd:"pcc://artifacts/dashboard/v1",title:"dag",sections:secs};})()'));
+    expect(s2.mount.textContent).toContain("dag"); // rendered (shared section reused, not exploded)
+    s2.close();
   });
 });
 
