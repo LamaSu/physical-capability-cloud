@@ -1,5 +1,6 @@
 /* GENERATED from packages/gateway/src/mcp/dashboard-ir-browser-entry.ts by
    scripts/build-dashboard-ir-kit.mjs — DO NOT EDIT. Regenerate with `pnpm build:ir-kit`. */
+"use strict";
 (() => {
   // src/mcp/dashboard-ir.ts
   var IR_NODE_TYPES = [
