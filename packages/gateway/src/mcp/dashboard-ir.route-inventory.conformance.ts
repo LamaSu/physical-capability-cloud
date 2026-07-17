@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { dashboardManifestToIr } from "./dashboard-ir.ts";
+import { dashboardManifestToIr } from "./dashboard-ir.js";
 
 const ROUTES = join(dirname(fileURLToPath(import.meta.url)), "..", "routes");
 // Detail templates in BIND_POLICY that take a `:seg` id, keyed by the window kind that binds them.

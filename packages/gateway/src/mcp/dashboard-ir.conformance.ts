@@ -4,7 +4,7 @@
  * The real projection→adapter chain is covered by dashboard-ir.integration.test.ts (vitest/CI).
  */
 import assert from "node:assert/strict";
-import { dashboardManifestToIr, validateIr, IR_NODE_TYPES } from "./dashboard-ir.ts";
+import { dashboardManifestToIr, validateIr, IR_NODE_TYPES } from "./dashboard-ir.js";
 const FROZEN = new Set<string>(IR_NODE_TYPES);
 let passed = 0;
 const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " — " + d : ""}`); passed++; console.log(`  ok   ${n}`); };

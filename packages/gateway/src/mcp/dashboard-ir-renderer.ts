@@ -19,7 +19,7 @@
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
-import type { IrDoc, IrNode, IrNodeType } from "./dashboard-ir.ts";
+import type { IrDoc, IrNode, IrNodeType } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.

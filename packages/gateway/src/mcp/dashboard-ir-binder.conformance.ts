@@ -3,7 +3,7 @@
  *   node --experimental-strip-types dashboard-ir-binder.conformance.ts
  */
 import assert from "node:assert/strict";
-import { bindUrl, channelFor, clampPoll, startBind, BINDER_LIM, type BinderDeps, type GetResult } from "./dashboard-ir-binder.ts";
+import { bindUrl, channelFor, clampPoll, startBind, BINDER_LIM, type BinderDeps, type GetResult } from "./dashboard-ir-binder.js";
 
 let passed = 0;
 const ok = (n: string, c: boolean) => { assert.ok(c, n); passed++; console.log(`  ok   ${n}`); };

@@ -3,8 +3,8 @@
  *   node --experimental-strip-types dashboard-ir-renderer.conformance.ts
  */
 import assert from "node:assert/strict";
-import { dashboardManifestToIr, validateIr } from "./dashboard-ir.ts";
-import { renderIrDoc, bindListRows, bindScalar, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.ts";
+import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
+import { renderIrDoc, bindListRows, bindScalar, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
 let passed = 0;
 const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " — " + d : ""}`); passed++; console.log(`  ok   ${n}`); };
