@@ -32,9 +32,8 @@ function boot(opts: { badSource?: boolean } = {}): Scene {
   const w: any = dom.window;
   const posted: any[] = [];
   w.parent.postMessage = (m: any) => posted.push(m);
+  w.__PCC_IR_ORIGIN__ = "https://capability.network"; // server-injected fixed origin
   w.fetch = () => Promise.reject(new Error("no fetch in test"));
-  w.AbortSignal = w.AbortSignal || {};
-  w.AbortSignal.timeout = () => ({});
   w.eval(KIT);
   const src = () => (opts.badSource ? ({} as any) : w.parent);
   // init result (host → app), then the app is ready for a tool-result
@@ -62,11 +61,18 @@ describe("pcc-ir-kit.js — static negative scan", () => {
 });
 
 describe("pcc-ir-kit.js — behavioral (jsdom, committed bytes)", () => {
-  it("initializes read-only and NEVER emits tools/call or resources/read", () => {
+  it("uses the ui/* read-only lifecycle and NEVER emits tools/call or resources/read", () => {
     const s = boot(); s.deliver(validManifest);
-    expect(s.posted.some((m) => m && m.method === "initialize")).toBe(true);
-    expect(s.posted.some((m) => m && m.method === "notifications/initialized")).toBe(true);
+    expect(s.posted.some((m) => m && m.method === "ui/initialize" && m.params?.appInfo?.name)).toBe(true);
+    expect(s.posted.some((m) => m && m.method === "ui/notifications/initialized")).toBe(true);
     expect(s.posted.some((m) => m && (m.method === "tools/call" || m.method === "resources/read"))).toBe(false);
+    s.close();
+  });
+
+  it("answers ui/resource-teardown with a JSON-RPC result", () => {
+    const s = boot(); s.deliver(validManifest);
+    s.w.dispatchEvent(new s.w.MessageEvent("message", { source: s.w.parent, data: { jsonrpc: "2.0", id: 99, method: "ui/resource-teardown" } }));
+    expect(s.posted.some((m) => m && m.id === 99 && m.result !== undefined)).toBe(true);
     s.close();
   });
   it("renders a valid projected manifest as inert text (no <b>/script/iframe)", () => {

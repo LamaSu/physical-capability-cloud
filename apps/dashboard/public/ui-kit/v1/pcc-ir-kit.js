@@ -781,18 +781,25 @@
 
   // src/mcp/dashboard-ir-browser-entry.ts
   var CAP = {
-    docBytes: 256 * 1024,
-    // outer serialized-size cap on the inbound manifest
+    docChars: 256 * 1024,
+    // bounded manifest preflight: total string chars
+    maxNodes: 2e4,
+    // bounded manifest preflight: total nodes
+    maxFanout: 4096,
+    // bounded manifest preflight: per-container children
     respBytes: 512 * 1024,
-    // per-response byte cap (enforced incrementally)
+    // per-response byte cap (incremental)
     concurrent: 6,
     // global max in-flight binds
-    sseEvents: 1e4,
-    // per-stream event cap
+    reqTimeoutMs: 3e4,
     protocol: "2026-01-26",
     initId: 1
   };
   var MOUNT_ID = "pcc-ir-root";
+  function pccApiOrigin() {
+    const o = window.__PCC_IR_ORIGIN__;
+    return typeof o === "string" && /^https:\/\/[a-z0-9.-]+$/i.test(o) ? o : null;
+  }
   function wrapEl(real) {
     const children = [];
     const w = {
@@ -828,7 +835,65 @@
     p.textContent = msg;
     mount.replaceChildren(p);
   }
-  function concatChunks(chunks, total) {
+  function tooLarge(root) {
+    let nodes = 0, chars = 0;
+    const stack = [root];
+    while (stack.length) {
+      const v = stack.pop();
+      if (++nodes > CAP.maxNodes) return true;
+      if (typeof v === "string") {
+        chars += v.length;
+        if (chars > CAP.docChars) return true;
+      } else if (Array.isArray(v)) {
+        if (v.length > CAP.maxFanout) return true;
+        for (let i = 0; i < v.length; i++) stack.push(v[i]);
+      } else if (v && typeof v === "object") {
+        const ks = Object.keys(v);
+        if (ks.length > CAP.maxFanout) return true;
+        for (const k of ks) stack.push(v[k]);
+      }
+    }
+    return false;
+  }
+  var inFlight = 0;
+  var waiters = [];
+  function acquire(signal) {
+    if (signal.aborted) return Promise.reject(new DOMException("aborted", "AbortError"));
+    if (inFlight < CAP.concurrent) {
+      inFlight++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const w = { wake: () => {
+      }, onAbort: () => {
+      } };
+      w.onAbort = () => {
+        const i = waiters.indexOf(w);
+        if (i >= 0) waiters.splice(i, 1);
+        reject(new DOMException("aborted", "AbortError"));
+      };
+      w.wake = () => {
+        signal.removeEventListener("abort", w.onAbort);
+        resolve();
+      };
+      signal.addEventListener("abort", w.onAbort, { once: true });
+      waiters.push(w);
+    });
+  }
+  function release() {
+    const n = waiters.shift();
+    if (n) n.wake();
+    else inFlight--;
+  }
+  function makeSignal(gen) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new DOMException("timeout", "TimeoutError")), CAP.reqTimeoutMs);
+    ctrl.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+    if (gen.signal.aborted) ctrl.abort();
+    else gen.signal.addEventListener("abort", () => ctrl.abort(new DOMException("generation aborted", "AbortError")), { once: true });
+    return ctrl.signal;
+  }
+  function concat(chunks, total) {
     const out = new Uint8Array(total);
     let off = 0;
     for (const c of chunks) {
@@ -838,17 +903,16 @@
     return out;
   }
   async function realGetJson(url, signal) {
-    const resp = await fetch(url, {
-      method: "GET",
-      redirect: "error",
-      credentials: "omit",
-      cache: "no-store",
-      headers: { accept: "application/json" },
-      signal
-    });
+    const resp = await fetch(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store", headers: { accept: "application/json" }, signal });
     const redirected = resp.redirected;
-    const ct = resp.headers.get("content-type") || "";
-    if (!/application\/json/i.test(ct)) return { status: resp.status, redirected, bytesOver: false, json: null };
+    const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (resp.status !== 200 || redirected || ct !== "application/json") {
+      try {
+        await resp.body?.cancel();
+      } catch {
+      }
+      return { status: resp.status, redirected, bytesOver: false, json: null };
+    }
     const reader = resp.body ? resp.body.getReader() : null;
     const chunks = [];
     let received = 0;
@@ -863,7 +927,7 @@
               await reader.cancel();
             } catch {
             }
-            return { status: resp.status, redirected, bytesOver: true, json: null };
+            return { status: 200, redirected: false, bytesOver: true, json: null };
           }
           chunks.push(value);
         }
@@ -871,86 +935,15 @@
     }
     let json = null;
     try {
-      json = JSON.parse(new TextDecoder().decode(concatChunks(chunks, received)));
+      json = JSON.parse(new TextDecoder().decode(concat(chunks, received)));
     } catch {
       json = null;
     }
-    return { status: resp.status, redirected, bytesOver: false, json };
+    return { status: 200, redirected: false, bytesOver: false, json };
   }
-  var inFlight = 0;
-  var waiters = [];
-  async function gatedGetJson(url, signal) {
-    if (inFlight >= CAP.concurrent) await new Promise((res) => waiters.push(res));
-    inFlight++;
-    try {
-      return await realGetJson(url, signal);
-    } finally {
-      inFlight--;
-      const n = waiters.shift();
-      if (n) n();
-    }
-  }
-  function openSse(url, onData, onErr) {
-    const ctrl = new AbortController();
-    let closed = false, events = 0, bytes = 0;
-    fetch(url, { method: "GET", redirect: "error", credentials: "omit", cache: "no-store", headers: { accept: "text/event-stream" }, signal: ctrl.signal }).then(async (resp) => {
-      if (!resp.ok || resp.redirected || !resp.body) {
-        onErr();
-        return;
-      }
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (; ; ) {
-        const { done, value } = await reader.read();
-        if (done || closed) break;
-        if (value) {
-          bytes += value.length;
-          if (bytes > CAP.respBytes) {
-            onErr();
-            return;
-          }
-          buf += dec.decode(value, { stream: true });
-        }
-        let idx;
-        while ((idx = buf.indexOf("\n\n")) !== -1) {
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          if (++events > CAP.sseEvents) {
-            onErr();
-            return;
-          }
-          let data = "";
-          for (const line of frame.split("\n")) if (line.indexOf("data:") === 0) data += line.slice(5).trim();
-          if (data) {
-            try {
-              onData(JSON.parse(data));
-            } catch {
-            }
-          }
-        }
-      }
-    }).catch(() => {
-      if (!closed) onErr();
-    });
-    return { close() {
-      closed = true;
-      try {
-        ctrl.abort();
-      } catch {
-      }
-    } };
-  }
-  var binderDeps = {
-    origin: location.origin,
-    getJson: gatedGetJson,
-    openSse,
-    setTimer: (fn, ms) => setTimeout(fn, ms),
-    clearTimer: (h) => clearTimeout(h),
-    makeSignal: () => AbortSignal.timeout(3e4)
-  };
   var rendered = false;
   var boundHandles = [];
+  var genController = null;
   var liveDoc = null;
   var liveRoot = null;
   function collectBound(doc) {
@@ -967,32 +960,48 @@
     return { stats, lists, receipts };
   }
   function startBinds(doc, root) {
+    const origin = pccApiOrigin();
+    if (!origin) return;
+    const gen = new AbortController();
+    genController = gen;
+    const deps = {
+      origin,
+      getJson: async (url, sig) => {
+        const s = sig;
+        await acquire(s);
+        try {
+          return await realGetJson(url, s);
+        } finally {
+          release();
+        }
+      },
+      // NO openSse: SSE transport intentionally absent (run cards are unbound below).
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h),
+      makeSignal: () => makeSignal(gen)
+    };
     const { stats, lists, receipts } = collectBound(doc);
     const byClass = (cls) => Array.from(root.querySelectorAll("." + cls));
     const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), receiptEls = byClass("pcc-receipt");
     const push = (h) => boundHandles.push(h);
     stats.forEach((node, i) => {
       const el2 = statEls[i];
-      if (!el2) return;
-      const slot = el2.querySelector(".pcc-value");
-      if (!slot) return;
-      push(startBind(node, binderDeps, (data) => {
+      const slot = el2?.querySelector(".pcc-value");
+      if (slot) push(startBind(node, deps, (data) => {
         slot.textContent = bindScalar(node, data);
       }));
     });
     receipts.forEach((node, i) => {
       const el2 = receiptEls[i];
-      if (!el2) return;
-      const slot = el2.querySelector(".pcc-value");
-      if (!slot) return;
-      push(startBind(node, binderDeps, (data) => {
+      const slot = el2?.querySelector(".pcc-value");
+      if (slot) push(startBind(node, deps, (data) => {
         slot.textContent = bindScalar(node, data);
       }));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];
       if (!el2) return;
-      push(startBind(node, binderDeps, (data) => {
+      push(startBind(node, deps, (data) => {
         const rows = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray(data.items) ? data.items : [];
         el2.replaceChildren();
         bindListRows(rdoc, wrapEl(el2), node, rows);
@@ -1002,18 +1011,16 @@
   function stopBinds() {
     for (const h of boundHandles) h.stop();
     boundHandles = [];
+    if (genController) {
+      genController.abort();
+      genController = null;
+    }
   }
   function renderManifest(manifest) {
     if (rendered) return;
     const mount = document.getElementById(MOUNT_ID);
     if (!mount) return;
-    let bytes = Infinity;
-    try {
-      bytes = JSON.stringify(manifest).length;
-    } catch {
-      bytes = Infinity;
-    }
-    if (bytes > CAP.docBytes) {
+    if (tooLarge(manifest)) {
       rendered = true;
       inert(mount, "This dashboard is too large and was not rendered.");
       return;
@@ -1041,10 +1048,18 @@
       if (ev.source !== parent) return;
       const d = ev.data;
       if (!d || typeof d !== "object" || d.jsonrpc !== "2.0") return;
+      if (d.method === "ui/resource-teardown" && "id" in d) {
+        stopBinds();
+        try {
+          parent.postMessage({ jsonrpc: "2.0", id: d.id, result: {} }, "*");
+        } catch {
+        }
+        return;
+      }
       if (state === "init" && d.id === CAP.initId && d.result && typeof d.result === "object") {
         if (d.result.protocolVersion !== CAP.protocol) return;
         state = "ready";
-        parent.postMessage({ jsonrpc: "2.0", method: "notifications/initialized" }, "*");
+        parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
         return;
       }
       if (state === "ready" && d.method === "ui/notifications/tool-result") {
@@ -1062,7 +1077,7 @@
       }
     });
     window.addEventListener("pagehide", stopBinds);
-    parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "initialize", params: { protocolVersion: CAP.protocol, capabilities: {} } }, "*");
+    parent.postMessage({ jsonrpc: "2.0", id: CAP.initId, method: "ui/initialize", params: { protocolVersion: CAP.protocol, appInfo: { name: "pcc-dashboard-ir", version: "1" }, appCapabilities: {} } }, "*");
   }
   if (typeof window !== "undefined" && typeof document !== "undefined") boot();
 })();

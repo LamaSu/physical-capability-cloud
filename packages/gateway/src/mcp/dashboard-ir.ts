@@ -123,7 +123,7 @@ function isPlain(v: unknown): v is Record<string, unknown> {
   const p = Object.getPrototypeOf(v);
   return p === Object.prototype || p === null;
 }
-function strictStr(v: unknown, max = LIM.str): string | null {
+function strictStr(v: unknown, max: number = LIM.str): string | null {
   return typeof v === "string" && v.length > 0 && v.length <= max ? v : null;
 }
 /** Own-key allowlist over ALL own keys (enumerable + non-enumerable + symbol).
@@ -485,7 +485,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
       if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
       const bk = n.type === "card" ? ((n.props as any).kind === "run" ? "run" : "capability") : spec.bindKey;
-      const reason = bindMatchesPolicy(n.bind as IrBind, bk); if (reason) return `bind: ${reason}`;
+      const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
     // prose provenance

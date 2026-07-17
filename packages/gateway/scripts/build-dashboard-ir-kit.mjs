@@ -36,24 +36,32 @@ const BUILD = {
   banner: { js: BANNER },
   metafile: true,
   write: false,
+  absWorkingDir: gatewayRoot, // pin cwd so relative-path rendering/resolution is deterministic
 };
 
 const check = process.argv.includes("--check");
 const result = await esbuild.build(BUILD);
-const js = result.outputFiles[0].text;
+const out = result.outputFiles[0];
+const bytes = Buffer.from(out.contents); // RAW bytes — the shipped artifact, not a decoded string
+const text = out.text;
 
 for (const id of FORBIDDEN) {
-  if (js.includes(id)) { console.error(`FAIL: forbidden identifier "${id}" present in the generated bundle.`); process.exit(2); }
+  if (text.includes(id)) { console.error(`FAIL: forbidden identifier "${id}" present in the generated bundle.`); process.exit(2); }
 }
+// Enforce the exact input allowlist from the metafile: only the entry + the 3 audited modules.
+const inputs = Object.keys(result.metafile.inputs).filter((p) => !p.includes("node_modules")).sort();
+const expected = ["dashboard-ir-binder.ts", "dashboard-ir-browser-entry.ts", "dashboard-ir-renderer.ts", "dashboard-ir.ts"];
+const got = inputs.map((p) => p.split(/[\\/]/).pop());
+if (JSON.stringify(got) !== JSON.stringify(expected)) { console.error(`FAIL: unexpected bundle inputs — expected ${expected.join(",")}, got ${got.join(",")}`); process.exit(3); }
 
 if (check) {
   let committed;
-  try { committed = readFileSync(outfile, "utf8"); }
+  try { committed = readFileSync(outfile); }
   catch { console.error(`FAIL check:ir-kit — committed bundle missing at ${outfile}. Run \`pnpm build:ir-kit\` and commit it.`); process.exit(1); }
-  if (committed !== js) { console.error("FAIL check:ir-kit — committed pcc-ir-kit.js differs from a fresh build of the audited TS. Run `pnpm build:ir-kit` and commit the result."); process.exit(1); }
-  console.log(`OK check:ir-kit — committed bundle is byte-identical to a fresh build (${js.length} bytes).`);
+  if (!committed.equals(bytes)) { console.error("FAIL check:ir-kit — committed pcc-ir-kit.js differs (byte-compare) from a fresh build of the audited TS. Run `pnpm build:ir-kit` and commit the result."); process.exit(1); }
+  console.log(`OK check:ir-kit — committed bundle is byte-identical to a fresh build (${bytes.length} bytes).`);
 } else {
   mkdirSync(dirname(outfile), { recursive: true });
-  writeFileSync(outfile, js);
-  console.log(`OK build:ir-kit — wrote ${outfile} (${js.length} bytes). Forbidden-identifier scan clean.`);
+  writeFileSync(outfile, bytes);
+  console.log(`OK build:ir-kit — wrote ${outfile} (${bytes.length} bytes). Forbidden scan + 4-file input allowlist clean.`);
 }

@@ -1247,7 +1247,10 @@ function pccIrKitSourceLiteral(): string {
  *  enclosing element), under 'strict-dynamic'. The kit does its OWN read-only host
  *  handshake + render. NO __PCC_HOST_BRIDGE__, NO __PCC_HOST_OPERATIONS__, no tools/call. */
 function dashboardIrViewBootScript(): string {
-  return `(function(){'use strict';var s=document.createElement('script');s.textContent=${pccIrKitSourceLiteral()};document.head.appendChild(s);})();`;
+  // The FIXED PCC API origin the kit binds against — server-authored (matches the CSP
+  // connect-src + MCP_APP_API_BASE_URL), never the manifest/parent/document origin.
+  const originLiteral = JSON.stringify(new URL(MCP_APP_API_BASE_URL).origin);
+  return `(function(){'use strict';window.__PCC_IR_ORIGIN__=${originLiteral};var s=document.createElement('script');s.textContent=${pccIrKitSourceLiteral()};document.head.appendChild(s);})();`;
 }
 /** The Phase-B closed-IR MCP App view. Neutral "waiting" state; the inlined kit boots
  *  itself, does the read-only lifecycle, and renders the projected manifest the host
