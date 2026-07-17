@@ -16,8 +16,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   buildRenderDashboardTool,
+  buildRenderIrDashboardTool,
   enrichOnRampToolResult,
   handleRenderDashboardTool,
+  handleRenderIrDashboardTool,
   isMcpAppSurfaceAvailable,
   isOnRampUiTool,
   MCP_APP_SURFACE_UNAVAILABLE_MESSAGE,
@@ -27,6 +29,7 @@ import {
   registerMcpAppHttpRoute,
   registerMcpAppResources,
   RENDER_DASHBOARD_TOOL_NAME,
+  RENDER_IR_DASHBOARD_TOOL_NAME,
 } from "./mcp-app-view.js";
 import { resolveApiKeyFromToken } from "../auth/api-key-auth.js";
 import {
@@ -405,6 +408,9 @@ export async function dispatchToolCall(
   if (name === RENDER_DASHBOARD_TOOL_NAME) {
     return handleRenderDashboardTool(args);
   }
+  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) {
+    return handleRenderIrDashboardTool(args);
+  }
   // Typed host-mediated operations (R4 PR2): the registry IS the allowlist and
   // the handler derives the principal + authorizes in-process. Routed BEFORE the
   // raw proxy lookup so a typed op never falls through to the pass-through relay.
@@ -480,6 +486,7 @@ export function isReadOnlyAppTool(
   toolsByName: Map<string, AgentPackageTool>,
 ): boolean {
   if (name === RENDER_DASHBOARD_TOOL_NAME) return true;
+  if (name === RENDER_IR_DASHBOARD_TOOL_NAME) return true; // read-only closed-IR render
   if (name.startsWith(TYPED_OP_TOOL_PREFIX)) {
     const policy = getOperationPolicyByToolName(name);
     return policy !== null && policy.stateChanging === false;
@@ -559,6 +566,7 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
     const tools = [
       ...pack.tools.map(toMcpTool),
       buildRenderDashboardTool(),
+      buildRenderIrDashboardTool(),
       ...typedOperationTools(),
     ];
     if (!surface.readOnly) return { tools };
