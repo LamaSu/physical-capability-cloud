@@ -82,13 +82,15 @@
   ]);
   var BIND_POLICY = {
     // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
+    // MONEY/SETTLEMENT-STATE routes (/api/settlement/:, /api/escrow/:) are intentionally
+    // ABSENT: a manifest-labelled metric scalar over settlement/escrow state could paint
+    // "Payment received: true" (a fake receipt) — PCC owns the framing of settlement data,
+    // so it is only ever shown through the fixed static settlement-record pointer (no metric).
     metric: {
       routes: [
         route("/api/fiat-ramp/cdp/wallet/:/balance"),
         route("/api/jobs/:"),
         route("/api/jobs/:/status"),
-        route("/api/escrow/:"),
-        route("/api/settlement/:"),
         route("/api/kernels/:")
       ],
       needsSelect: true
@@ -97,10 +99,12 @@
     // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
     capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
     // ID_SEG excludes types/templates/search/graph-*
-    // settlement RECORD (not a "receipt"): a fixed read-only pointer with an explicit
-    // "not proof of payment" frame. /api/evidence/: DROPPED — it returns a bundle
-    // COLLECTION, a different shape that must not masquerade as a settlement record.
-    receipt: { routes: [route("/api/settlement/:")], schema: "settlement-record-v1" },
+    // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
+    // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
+    // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+    // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
+    // assert a settlement that never occurred. The authoritative receipt is the out-of-band
+    // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
     list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
     // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
     // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
@@ -314,12 +318,8 @@
         }
       case "receipt":
         if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
-        {
-          const b = mapBind(w.binding, "receipt");
-          if (!b.ok) return b;
-          if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-          return { ok: true, node: { type: "receipt", id, bind: b.bind } };
-        }
+        if (w.binding !== void 0 && !isPlain(w.binding)) return { ok: false, reason: "receipt.binding shape" };
+        return { ok: true, node: { type: "receipt", id } };
       case "list":
         if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
         {
@@ -451,7 +451,8 @@
     text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
     stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
     card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
-    receipt: { bindKey: "receipt", needsBind: true, childless: true },
+    receipt: { noBind: true, childless: true },
+    // STATIC settlement-record pointer — no bind, no props, no children
     list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
     badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
     grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
@@ -620,39 +621,42 @@
     }),
     "run-summary-v1": Object.freeze({
       heading: "Run",
+      // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
+      // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
+      // keys (NOT a manifest selector); first present wins.
       fields: Object.freeze([
-        { label: "Status", key: "status" },
-        { label: "Progress", key: "progress" }
-      ])
-    }),
-    "settlement-record-v1": Object.freeze({
-      heading: "Settlement record (read-only)",
-      note: "Not proof of payment; verify on the authenticated PCC surface.",
-      fields: Object.freeze([
-        { label: "Job", key: "jobId" },
-        { label: "Status", key: "status" },
-        { label: "Evidence hash", key: "evidenceHash" },
-        { label: "Assurance tier", key: "assuranceTier" },
-        { label: "Settled at", key: "settledAt" }
+        { label: "Status", key: ["status", "job.status"] },
+        { label: "Progress", key: ["progress", "job.progress"] }
       ])
     })
   });
+  var SETTLEMENT_NOTICE = Object.freeze({
+    heading: "Settlement record (read-only)",
+    note: "Not proof of payment; verify on the authenticated PCC surface."
+  });
   function readField(data, f) {
+    const keys = Array.isArray(f.key) ? f.key : [f.key];
     if (f.list) {
-      const arr = readOwnPath(data, f.key);
-      if (!Array.isArray(arr)) return UNAVAILABLE;
-      const parts = [];
-      for (const x of arr) {
-        if (typeof x === "string" && x.length > 0) parts.push(x);
-        else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
-        else if (typeof x === "boolean") parts.push(String(x));
+      for (const k of keys) {
+        const arr = readOwnPath(data, k);
+        if (!Array.isArray(arr)) continue;
+        const parts = [];
+        for (const x of arr) {
+          if (typeof x === "string" && x.length > 0) parts.push(x);
+          else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+          else if (typeof x === "boolean") parts.push(String(x));
+        }
+        if (parts.length) return parts.join(", ");
       }
-      return parts.length ? parts.join(", ") : UNAVAILABLE;
+      return UNAVAILABLE;
     }
-    const v = readSelector(data, f.key);
-    if (v === "") return UNAVAILABLE;
-    if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-    return v;
+    for (const k of keys) {
+      const v = readSelector(data, k);
+      if (v === "") continue;
+      if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+      return v;
+    }
+    return UNAVAILABLE;
   }
   function bindSchemaCard(schema, data, slots) {
     const spec = SCHEMA_FIELDS[schema];
@@ -673,7 +677,7 @@
     for (const f of spec.fields) {
       const row = el(doc, CLS.row);
       row.appendChild(el(doc, CLS.field, f.label));
-      row.appendChild(el(doc, CLS.value, "", true));
+      row.appendChild(el(doc, CLS.value, UNAVAILABLE, true));
       e.appendChild(row);
     }
     return e;
@@ -703,8 +707,12 @@
       if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
       return el(d, rootCls);
     },
-    receipt: (d) => paintSchemaCard(d, CLS.receipt, "settlement-record-v1"),
-    // always the read-only settlement record
+    receipt: (d) => {
+      const e = el(d, CLS.receipt);
+      e.appendChild(el(d, CLS.heading, SETTLEMENT_NOTICE.heading));
+      e.appendChild(el(d, CLS.note, SETTLEMENT_NOTICE.note));
+      return e;
+    },
     list: (d) => {
       const e = el(d, CLS.list);
       return e;
@@ -1051,7 +1059,7 @@
       if (n.bind) {
         if (n.type === "stat") stats.push(n);
         else if (n.type === "list") lists.push(n);
-        else if (n.type === "card" || n.type === "receipt") schemaCards.push(n);
+        else if (n.type === "card") schemaCards.push(n);
       }
       if (n.children) for (const c of n.children) walk(c);
     };

@@ -81,8 +81,10 @@ function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RE
 // or (c) mint a privileged-looking "receipt" — the settlement record is always framed
 // read-only with an explicit "not proof of payment" warning.
 const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
-interface SchemaField { label: string; key: string; list?: boolean; bool?: boolean }
+interface SchemaField { label: string; key: string | readonly string[]; list?: boolean; bool?: boolean }
 interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
+// Only the DATA-BEARING cards have a schema (a public/known-shape GET). The settlement
+// record is NOT here — it is a static pointer (see SETTLEMENT_NOTICE + the receipt painter).
 export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.freeze({
   "capability-summary-v1": Object.freeze({
     heading: "Capability",
@@ -97,45 +99,54 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
   }),
   "run-summary-v1": Object.freeze({
     heading: "Run",
+    // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
+    // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
+    // keys (NOT a manifest selector); first present wins.
     fields: Object.freeze([
-      { label: "Status", key: "status" },
-      { label: "Progress", key: "progress" },
-    ]),
-  }),
-  "settlement-record-v1": Object.freeze({
-    heading: "Settlement record (read-only)",
-    note: "Not proof of payment; verify on the authenticated PCC surface.",
-    fields: Object.freeze([
-      { label: "Job", key: "jobId" },
-      { label: "Status", key: "status" },
-      { label: "Evidence hash", key: "evidenceHash" },
-      { label: "Assurance tier", key: "assuranceTier" },
-      { label: "Settled at", key: "settledAt" },
+      { label: "Status", key: ["status", "job.status"] },
+      { label: "Progress", key: ["progress", "job.progress"] },
     ]),
   }),
 }) as Readonly<Record<BindSchema, SchemaSpec>>;
 
-/** Read ONE fixed schema field from fetched data. Scalars via own-property selector;
- * `list` fields join a scalar array; `bool` fields normalize to Yes/No. Anything
- * missing / non-scalar → the honest unavailable marker (never a partial authoritative
- * card). The ONLY reader for schema-card values — no manifest selector reaches it. */
+// The settlement record is a STATIC pointer — fixed PCC text, no fetch, no data labels.
+// The endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+// completion time as `settledAt`, so any fetched "Settled at"/"Status" label under a
+// settlement heading would affirmatively assert a settlement that may never have occurred.
+// The authoritative receipt is the out-of-band Surface-B signed receipt; B only points.
+const SETTLEMENT_NOTICE = Object.freeze({
+  heading: "Settlement record (read-only)",
+  note: "Not proof of payment; verify on the authenticated PCC surface.",
+});
+
+/** Read ONE fixed schema field from fetched data. `key` is a fixed own-property selector
+ * (or an ordered list of KNOWN server shapes — first present wins); NEVER a manifest
+ * selector. `list` joins a scalar array; `bool` normalizes to Yes/No. Missing / non-scalar
+ * → the honest unavailable marker (never a partial authoritative card). */
 function readField(data: unknown, f: SchemaField): string {
+  const keys = Array.isArray(f.key) ? f.key : [f.key as string];
   if (f.list) {
-    const arr = readOwnPath(data, f.key);
-    if (!Array.isArray(arr)) return UNAVAILABLE;
-    const parts: string[] = [];
-    for (const x of arr) {
-      if (typeof x === "string" && x.length > 0) parts.push(x);
-      else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
-      else if (typeof x === "boolean") parts.push(String(x));
-      // non-scalar array elements are skipped (never stringified)
+    for (const k of keys) {
+      const arr = readOwnPath(data, k);
+      if (!Array.isArray(arr)) continue;
+      const parts: string[] = [];
+      for (const x of arr) {
+        if (typeof x === "string" && x.length > 0) parts.push(x);
+        else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+        else if (typeof x === "boolean") parts.push(String(x));
+        // non-scalar array elements are skipped (never stringified)
+      }
+      if (parts.length) return parts.join(", ");
     }
-    return parts.length ? parts.join(", ") : UNAVAILABLE;
+    return UNAVAILABLE;
   }
-  const v = readSelector(data, f.key);
-  if (v === "") return UNAVAILABLE;
-  if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
-  return v;
+  for (const k of keys) {
+    const v = readSelector(data, k);
+    if (v === "") continue;
+    if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+    return v;
+  }
+  return UNAVAILABLE;
 }
 
 /** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the
@@ -163,7 +174,10 @@ function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): R
   for (const f of spec.fields) {
     const row = el(doc, CLS.row);
     row.appendChild(el(doc, CLS.field, f.label));
-    row.appendChild(el(doc, CLS.value, "", true)); // value slot filled by bindSchemaCard (fetched, untrusted)
+    // Default to the unavailable marker: a card whose GET never lands (auth-gated route,
+    // network failure, teardown-before-fetch) honestly shows "—", never an empty partial.
+    // bindSchemaCard overwrites on a successful fetch.
+    row.appendChild(el(doc, CLS.value, UNAVAILABLE, true));
     e.appendChild(row);
   }
   return e;
@@ -185,7 +199,12 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
     if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
     return el(d, rootCls); // defensive: the adapter always tags a card bind with a schema now
   },
-  receipt: (d) => paintSchemaCard(d, CLS.receipt, "settlement-record-v1"), // always the read-only settlement record
+  receipt: (d) => { // STATIC settlement-record pointer — fixed PCC text only (no bind, no value slots, not collected)
+    const e = el(d, CLS.receipt);
+    e.appendChild(el(d, CLS.heading, SETTLEMENT_NOTICE.heading));
+    e.appendChild(el(d, CLS.note, SETTLEMENT_NOTICE.note));
+    return e;
+  },
   list: (d) => { const e = el(d, CLS.list); return e; }, // rows appended by bindList
   badge: (d, n) => { const e = el(d, CLS.badge, String(n.props?.text ?? ""), true); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
   grid: (d, n) => { const e = el(d, CLS.grid); paintChildren(d, n, e); return e; },

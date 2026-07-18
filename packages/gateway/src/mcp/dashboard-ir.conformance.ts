@@ -41,7 +41,7 @@ ok("form→form-summary, no field/button/form", nodes.some((n) => n.type === "fo
 ok("approval→approval-notice with NO bind", (() => { const a = nodes.find((n) => n.type === "approval-notice"); return a && !a.bind; })());
 ok("chain→plan(composition)", nodes.some((n) => n.type === "plan" && n.props?.kind === "composition"));
 ok("actions→1 badge, no button", nodes.filter((n) => n.type === "badge").length === 1 && !nodes.some((n) => n.type === "button"));
-ok("receipt bind schema=settlement-record-v1", nodes.find((n) => n.type === "receipt")?.bind?.schema === "settlement-record-v1");
+ok("receipt is a STATIC pointer — no bind (settlement fetched nothing)", nodes.some((n) => n.type === "receipt") && nodes.find((n) => n.type === "receipt")?.bind === undefined);
 ok("capability card bind schema=capability-summary-v1", nodes.find((n) => n.type === "card" && n.props?.kind === "capability")?.bind?.schema === "capability-summary-v1");
 ok("run card bind schema=run-summary-v1", nodes.find((n) => n.type === "card" && n.props?.kind === "run")?.bind?.schema === "run-summary-v1");
 ok("run card sse/path correlated + selectors", (() => { const c = nodes.find((n) => n.type === "card" && n.props?.kind === "run"); return c && c.bind?.sse === "/sse/stream/job/j1" && c.props?.statusFrom === "status"; })());
@@ -65,7 +65,12 @@ bad("metric to reserved /api/settlement/status", one({ kind: "metric", label: "L
 bad("metric to removed pool route", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/pool/p1" } }));
 bad("metric to reserved /api/kernels/marketplace", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/kernels/marketplace" } }));
 bad("capability reserved /types", one({ kind: "capability", binding: { path: "/api/capabilities/types" } }));
-bad("receipt to escrow (not receipt route)", one({ kind: "receipt", binding: { path: "/api/escrow/e1" } }));
+// receipt is a STATIC pointer now — it accepts + IGNORES any binding (like `approval`), so
+// no route can leak (nothing is fetched); only a malformed binding SHAPE is rejected.
+ok("receipt with any binding → ACCEPTED as static (binding ignored)", dashboardManifestToIr(one({ kind: "receipt", binding: { path: "/api/escrow/e1" } })).ok === true);
+bad("receipt with a non-object binding → REJECTED (shape)", one({ kind: "receipt", binding: "x" }));
+bad("metric to money route /api/settlement/:id (settlement not metric-bindable)", one({ kind: "metric", label: "Paid", select: "settled", binding: { path: "/api/settlement/job-004" } }));
+bad("metric to money route /api/escrow/:id (escrow not metric-bindable)", one({ kind: "metric", label: "Paid", select: "totalAmount", binding: { path: "/api/escrow/e1" } }));
 bad("list to /api/evidence (leak, not a list route)", one({ kind: "list", binding: { path: "/api/evidence" }, item: { title: "id" } }));
 bad("list to /api/marketplace/orders (leak)", one({ kind: "list", binding: { path: "/api/marketplace/orders" }, item: { title: "id" } }));
 bad("run sse/path IDENTITY MISMATCH", one({ kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j2" }, statusFrom: "s", latestFrom: "l" }));
@@ -101,8 +106,9 @@ bad("too many sections", { csd: "x", title: "t", sections: Array.from({ length: 
 // ── R6: confirm enum, reserved-route completeness, poll-amplification cap, own-key depth ──
 ok("action confirm:\"inline\" (real enum) ACCEPTED", dashboardManifestToIr(one({ kind: "actions", actions: [{ id: "a", label: "Approve", confirm: "inline", intentText: "pcc: approve", operation_id: "job.cancel" }] })).ok === true);
 bad("action confirm:true (boolean, not enum)", one({ kind: "actions", actions: [{ label: "X", confirm: true }] }));
-bad("receipt→/api/evidence/lit-status (Lit status leak)", one({ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }));
-bad("receipt→/api/evidence/archive (reserved)", one({ kind: "receipt", binding: { path: "/api/evidence/archive" } }));
+// (Former receipt→evidence "leak" cases: obsolete — a static receipt fetches nothing, so an
+// evidence/settlement binding cannot leak. It renders only the fixed read-only pointer.)
+ok("receipt with an evidence binding → STILL static (no fetch, no leak)", dashboardManifestToIr(one({ kind: "receipt", binding: { path: "/api/evidence/lit-status" } })).ok === true);
 bad("metric→/api/settlement/submit (reserved POST)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/submit" } }));
 bad("metric→/api/settlement/flush (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/flush" } }));
 bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/release" } }));
@@ -145,12 +151,12 @@ vbad("capability card carrying run props", rootWith({ type: "card", id: "n4", pr
 vbad("run card missing selectors", rootWith({ type: "card", id: "n4", props: { kind: "run" }, bind: { path: "/api/jobs/j1" } }));
 vbad("prose not untrusted", rootWith({ type: "text", id: "n4", props: { text: "a" } }));
 vbad("non-prose marked untrusted", rootWith({ type: "grid", id: "n4", props: { kind: "actions-readonly" }, children: [], untrusted: true }));
-vbad("receipt without bind", rootWith({ type: "receipt", id: "n4" }));
+vbad("receipt WITH a bind (static pointer may not bind)", rootWith({ type: "receipt", id: "n4", bind: { path: "/api/settlement/j1" } }));
 vbad("stat without bind", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true }));
 vbad("stat bind without select (needsSelect)", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/jobs/j1" } }));
 vbad("stat bind to reserved route", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/settlement/status", select: "u" } }));
 vbad("bind on noBind type (plan)", rootWith({ type: "plan", id: "n4", props: { kind: "composition" }, bind: { path: "/api/jobs/j1" } }));
-vbad("schema on non-receipt bind", rootWith({ type: "list", id: "n4", props: { rowTitle: "id", rowMeta: [] }, bind: { path: "/api/jobs", schema: "receipt" } }));
+vbad("schema on a type whose policy has none (list)", rootWith({ type: "list", id: "n4", props: { rowTitle: "id", rowMeta: [] }, bind: { path: "/api/jobs", schema: "capability-summary-v1" } }));
 vbad("childless leaf with children", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/jobs/j1", select: "s" }, children: [] }));
 vbad("container without children array", { type: "root", id: "n2" });
 vbad("illegal child under root (field-label)", { type: "root", id: "n2", children: [{ type: "field-label", id: "n3", props: { label: "x" }, untrusted: true }] });

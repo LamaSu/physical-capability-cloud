@@ -72,9 +72,11 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     if (ir?.ok) { const has = (n: any): boolean => n.type === "badge" || (n.children || []).some(has); expect(has(ir.doc.root)).toBe(true); }
   });
 
-  it("collision route /api/evidence/lit-status as a receipt is REJECTED (Lit status ≠ receipt)", () => {
-    const { projected, ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }]));
-    expect(projected === null || ir?.ok === false).toBe(true);
+  it("receipt with an evidence binding is a STATIC pointer — binding ignored, nothing fetched (no leak)", () => {
+    // Former "leak" case: a static settlement-record pointer fetches nothing, so an evidence
+    // (or any) binding cannot leak; it renders only the fixed read-only pointer.
+    const { ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/evidence/lit-status" } }]));
+    expect(ir?.ok).toBe(true);
   });
 
   it("collision route /api/capabilities/graph-stats as a capability is REJECTED (id-grammar)", () => {
@@ -112,12 +114,11 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
     expect(({} as any).polluted).toBeUndefined(); // no global prototype pollution
   });
 
-  // ── Semantic-privilege escalation: a privileged-LOOKING window cannot bind to a
-  //    non-canonical read path even though the path is a perfectly valid /api route.
-  it("receipt window bound to /api/escrow/:id is REJECTED (route allowlist)", () => {
-    const { projected, ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]));
-    // Projection accepts the binding shape; the adapter's per-kind route allowlist refuses it.
-    expect(projected === null || ir?.ok === false).toBe(true);
+  // ── The settlement record is a STATIC pointer: a receipt window accepts + IGNORES any
+  //    binding (like `approval`) and fetches nothing, so no route can leak through it.
+  it("receipt window with an escrow binding is ACCEPTED as a static pointer (binding ignored, no fetch)", () => {
+    const { ir } = chain(raw([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]));
+    expect(ir?.ok).toBe(true);
   });
 
   it("metric bound to a financial-leak route (stripe/credits) is REJECTED (attributed: has select)", () => {

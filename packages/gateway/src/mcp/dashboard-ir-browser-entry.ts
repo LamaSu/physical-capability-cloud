@@ -164,14 +164,15 @@ let liveDoc: IrDoc | null = null;
 let liveRoot: HTMLElement | null = null;
 
 function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCards: IrNode[] } {
-  // schemaCards = capability/run cards + settlement records — every fixed-schema card,
-  // in document order (aligned with the `.pcc-schema-card` query in startBinds).
+  // schemaCards = the data-bearing capability/run cards, in document order (aligned with the
+  // `.pcc-schema-card` query in startBinds). The settlement record is a STATIC pointer (no
+  // bind, no `.pcc-schema-card` class) → intentionally not collected here.
   const stats: IrNode[] = [], lists: IrNode[] = [], schemaCards: IrNode[] = [];
   const walk = (n: IrNode): void => {
     if (n.bind) {
       if (n.type === "stat") stats.push(n);
       else if (n.type === "list") lists.push(n);
-      else if (n.type === "card" || n.type === "receipt") schemaCards.push(n);
+      else if (n.type === "card") schemaCards.push(n);
     }
     if (n.children) for (const c of n.children) walk(c);
   };

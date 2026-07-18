@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
-import { renderIrDoc, bindListRows, bindScalar, bindSchemaCard, SCHEMA_FIELDS, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { renderIrDoc, bindListRows, bindScalar, bindSchemaCard, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
 let passed = 0;
 const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " — " + d : ""}`); passed++; console.log(`  ok   ${n}`); };
@@ -102,7 +102,26 @@ ok("run card FIXED heading painted", scTexts.includes("Run"));
 ok("run FIXED labels painted", scTexts.includes("Status") && scTexts.includes("Progress"));
 ok("settlement record FIXED read-only heading painted", scTexts.includes("Settlement record (read-only)"));
 ok("settlement record carries the FIXED 'not proof of payment' warning", scTexts.some((t) => t.includes("Not proof of payment")));
-ok("settlement FIXED labels painted", scTexts.includes("Job") && scTexts.includes("Evidence hash"));
+// The unbound data cards default to the honest "—" until a GET lands (finding 1a): after
+// paint (no fetch in this harness) every value slot reads "—", never an empty partial.
+ok("data-card value slots default to '—' (honest unavailable pre-fetch)", (() => {
+  const vals = flat(scMount).filter((n: any) => String(n.className).split(" ").includes("pcc-value"));
+  return vals.length > 0 && vals.every((n: any) => n.textContent === "—");
+})());
+
+// GATE R — the settlement record is STATIC: it renders EXACTLY the fixed heading + warning,
+// with NO value slots, so a manifest binding can never make it fetch or display any data.
+{
+  const rMount = makeEl("div");
+  const rR: any = dashboardManifestToIr({ csd: "x", title: "t", sections: [{ windows: [{ kind: "receipt", binding: { path: "/api/settlement/j1" } }] }] } as any);
+  bootIrView(doc, rMount, rR.doc, validateIr);
+  const receiptEl = flat(rMount).find((n: any) => String(n.className).split(" ").includes("pcc-receipt"));
+  const rValues = flat(rMount).filter((n: any) => String(n.className).split(" ").includes("pcc-value"));
+  const rt = texts(receiptEl);
+  ok("GATE-R settlement pointer has NO value slots (nothing is fetched)", rValues.length === 0);
+  ok("GATE-R settlement pointer text is EXACTLY the fixed heading + warning", rt.length === 2 && rt.includes("Settlement record (read-only)") && rt.some((x: string) => x.includes("Not proof of payment")));
+  ok("GATE-R settlement pointer never emits Paid/Verified (no fetched money field)", !/Paid|Verified/.test(rt.join(" ")));
+}
 
 const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" }));
 // GATE 1 — manifest selectors can NEVER relabel a field. The run window's statusFrom is
@@ -113,34 +132,27 @@ const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" 
   ok("GATE1 run Status ← fixed `status` (NOT manifest statusFrom→amount)", s[0].textContent === "running");
   ok("GATE1 run manifest-selected `amount` NEVER rendered", !s.some((x) => x.textContent.includes("999")));
 }
-// GATE 2 — off-schema response fields (paid/verified/HTML) are NEVER rendered.
+// GATE 1b — dual-shape: the /jobs/:id detail envelope nests status/progress under `job`; the
+// FIXED fallback key reads job.status/job.progress (a KNOWN server shape, not a manifest sel).
 {
-  const s = slots(5);
-  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed", evidenceHash: "0xabc", assuranceTier: 2, settledAt: "2026-07-17", paid: true, verified: true, evil: "<b>x</b>" }, s);
+  const s = slots(2);
+  bindSchemaCard("run-summary-v1", { job: { status: "queued", progress: 5 }, evidence: [] }, s);
+  ok("GATE1b run reads job.status/job.progress from the detail envelope", s[0].textContent === "queued" && s[1].textContent === "5");
+}
+// GATE 2 — off-schema response fields (paid/verified/HTML) are NEVER rendered on a data card.
+{
+  const s = slots(6);
+  bindSchemaCard("capability-summary-v1", { name: "FDM", type: "t", pricing: { baseCost: "1", currency: "USDC" }, assuranceTiers: [0], available: true, paid: true, verified: true, evil: "<b>x</b>" }, s);
   const all = s.map((x) => x.textContent).join("|");
-  ok("GATE2 settlement only fixed fields rendered", all === "j1|completed|0xabc|2|2026-07-17");
+  ok("GATE2 only the 6 fixed capability fields rendered", all === "FDM|t|1|USDC|0|Yes");
   ok("GATE2 off-schema paid/verified/HTML NEVER rendered", !all.includes("true") && !all.includes("<b>"));
 }
-// GATE 3 — `completed`/`settled` alone never mints Paid/Verified/Receipt; status shows as
-// a neutral value and the FIXED read-only frame owns the meaning.
+// GATE 3 — missing/malformed canonical fields → honest unavailable (—), not a partial card.
 {
-  const s = slots(5);
-  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed", settled: true, evidenceHash: "h", assuranceTier: 1, settledAt: "t" }, s);
-  const all = s.map((x) => x.textContent).join(" ");
-  ok("GATE3 status 'completed' shown as a neutral value", s[1].textContent === "completed");
-  ok("GATE3 never emits Paid/Verified/Receipt from status/settled", !/Paid|Verified|Receipt/.test(all));
-  ok("GATE3 read-only frame is a FIXED PCC label, not derived from data",
-    SCHEMA_FIELDS["settlement-record-v1"].heading === "Settlement record (read-only)" &&
-    SCHEMA_FIELDS["settlement-record-v1"].note === "Not proof of payment; verify on the authenticated PCC surface.");
-}
-// GATE 4 — missing/malformed canonical fields → honest unavailable (—), not a partial
-// authoritative card.
-{
-  const s = slots(5);
-  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed" }, s);
-  ok("GATE4 missing evidenceHash → unavailable marker", s[2].textContent === "—");
-  ok("GATE4 missing assuranceTier → unavailable marker", s[3].textContent === "—");
-  ok("GATE4 present fields still shown", s[0].textContent === "j1" && s[1].textContent === "completed");
+  const s = slots(2);
+  bindSchemaCard("run-summary-v1", { status: "running" }, s); // progress absent from both shapes
+  ok("GATE3 missing progress → unavailable marker", s[1].textContent === "—");
+  ok("GATE3 present status still shown", s[0].textContent === "running");
 }
 // GATE 5 — capability reads the KNOWN DTO shape (structured pricing, plural assuranceTiers
 // array joined, boolean normalized); off-schema fields never leak.

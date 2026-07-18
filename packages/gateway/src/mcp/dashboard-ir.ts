@@ -80,7 +80,7 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
   "/api/jobs/submit", "/api/jobs/submit-from-discovery",
   "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
 ]);
-export type BindSchema = "capability-summary-v1" | "run-summary-v1" | "settlement-record-v1";
+export type BindSchema = "capability-summary-v1" | "run-summary-v1";
 interface BindPolicy {
   routes: RegExp[];
   needsSelect?: boolean;
@@ -90,21 +90,26 @@ interface BindPolicy {
 }
 const BIND_POLICY: Record<string, BindPolicy> = {
   // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
+  // MONEY/SETTLEMENT-STATE routes (/api/settlement/:, /api/escrow/:) are intentionally
+  // ABSENT: a manifest-labelled metric scalar over settlement/escrow state could paint
+  // "Payment received: true" (a fake receipt) — PCC owns the framing of settlement data,
+  // so it is only ever shown through the fixed static settlement-record pointer (no metric).
   metric: {
     routes: [
       route("/api/fiat-ramp/cdp/wallet/:/balance"),
-      route("/api/jobs/:"), route("/api/jobs/:/status"),
-      route("/api/escrow/:"), route("/api/settlement/:"), route("/api/kernels/:"),
+      route("/api/jobs/:"), route("/api/jobs/:/status"), route("/api/kernels/:"),
     ],
     needsSelect: true,
   },
   // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
   // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
   capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
-  // settlement RECORD (not a "receipt"): a fixed read-only pointer with an explicit
-  // "not proof of payment" frame. /api/evidence/: DROPPED — it returns a bundle
-  // COLLECTION, a different shape that must not masquerade as a settlement record.
-  receipt: { routes: [route("/api/settlement/:")], schema: "settlement-record-v1" },
+  // NOTE: `receipt` has NO bind policy — the settlement record is a STATIC POINTER (no
+  // fetch). A public read GET cannot reach settlement (auth-gated) and, worse, the
+  // endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
+  // completion time as `settledAt` — so a fetched "Settled at" label would affirmatively
+  // assert a settlement that never occurred. The authoritative receipt is the out-of-band
+  // Surface-B signed receipt (VCR); B only points at it. (See the receipt case below.)
   list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
   // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
   // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
@@ -316,10 +321,15 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
         return { ok: true, node: { type: "card", id, props: { kind: "capability" }, bind: b.bind } }; }
     case "receipt":
+      // STATIC settlement-record POINTER — no live bind (accepts + ignores a binding, like
+      // `approval`). A public read GET can neither reach settlement (auth-gated) nor prove a
+      // job status is a settlement event; the endpoint even reports `settled` for a merely
+      // completed job and exposes the PHYSICAL completion time as `settledAt`. So B renders
+      // ONLY the fixed read-only heading + "not proof of payment" pointer to the
+      // authoritative out-of-band Surface-B signed receipt — no fetched, mislabellable data.
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "receipt extra key" };
-      { const b = mapBind(w.binding, "receipt"); if (!b.ok) return b;
-        if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "receipt", id, bind: b.bind } }; }
+      if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "receipt.binding shape" };
+      return { ok: true, node: { type: "receipt", id } };
     case "list":
       if (!onlyKeys(w, ["kind", "binding", "item", "limit"])) return { ok: false, reason: "list extra key" };
       { const b = mapBind(w.binding, "list"); if (!b.ok) return b;
@@ -432,7 +442,7 @@ const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
   text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
   stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
   card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
-  receipt: { bindKey: "receipt", needsBind: true, childless: true },
+  receipt: { noBind: true, childless: true }, // STATIC settlement-record pointer — no bind, no props, no children
   list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
   badge: { props: { text: "s400", tone: "tone" }, required: ["text", "tone"], noBind: true, prose: true, childless: true },
   grid: { props: { kind: "grid-kind" }, required: ["kind"], noBind: true, parentOf: ["badge"], minChildren: 1, maxChildren: LIM.fields },
