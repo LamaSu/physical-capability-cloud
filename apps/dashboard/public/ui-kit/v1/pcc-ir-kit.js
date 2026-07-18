@@ -87,9 +87,9 @@
     //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
     //    manifest could label it "Payment received");
     //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
-    // jobs/:id/status (status/progress) + kernels/:id (infra) expose no money amount / settlement
-    // timestamp. The metric-LABEL framing guard (isMoneyFramingLabel) is the second gate: a
-    // manifest may not assert payment/settlement framing over ANY scalar.
+    // jobs/:id/status + kernels/:id expose no money amount / settlement timestamp. The real
+    // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
+    // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
     metric: {
       routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
       needsSelect: true
@@ -197,25 +197,16 @@
     if (CRED_EXACT.has(n)) return true;
     return CRED_SUBSTR.some((t) => n.includes(t));
   }
-  var MONEY_FRAME_SUBSTR = [
-    "paid",
-    "payment",
-    "payout",
-    "settle",
-    "receipt",
-    "refund",
-    "escrow",
-    "invoice",
-    "remit",
-    "owed",
-    "balance",
-    "amountdue",
-    "amountpaid"
-  ];
-  function isMoneyFramingLabel(label) {
-    const n = label.toLowerCase().replace(/[_\-\s]/g, "");
-    return MONEY_FRAME_SUBSTR.some((t) => n.includes(t));
-  }
+  var METRIC_SELECT_LABEL = {
+    status: "Status",
+    progress: "Progress",
+    reputation: "Reputation",
+    uptimePercent: "Uptime",
+    capabilityCount: "Capabilities",
+    totalJobsCompleted: "Jobs completed",
+    activeJobCount: "Active jobs"
+  };
+  var isMetricSelector = (s) => typeof s === "string" && Object.prototype.hasOwnProperty.call(METRIC_SELECT_LABEL, s);
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
     if (v.operation_id !== void 0 && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
@@ -318,15 +309,14 @@
       case "metric":
         if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
         {
-          const label = strictStr(w.label, LIM.title);
-          if (label === null) return { ok: false, reason: "metric.label" };
-          if (isMoneyFramingLabel(label)) return { ok: false, reason: "metric.label asserts payment/settlement framing" };
-          if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
+          if (!isMetricSelector(w.select)) return { ok: false, reason: "metric.select not an allowlisted metric field" };
+          const label = METRIC_SELECT_LABEL[w.select];
           const b = mapBind(w.binding, "metric", w.select);
           if (!b.ok) return b;
           if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-          return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind, untrusted: true } };
+          return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind } };
         }
+      // PCC-owned label → NOT untrusted
       case "capability":
         if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
         {
@@ -468,7 +458,8 @@
     section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
     heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
     text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
-    stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
+    stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, childless: true },
+    // label is PCC-owned (not prose) — mirrored below
     card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
     receipt: { noBind: true, childless: true },
     // STATIC settlement-record pointer — no bind, no props, no children
@@ -546,6 +537,11 @@
         if (reason) return `bind: ${reason}`;
         if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget";
       } else if (spec.needsBind) return `${n.type} requires a bind`;
+      if (n.type === "stat") {
+        const sel = n.bind?.select;
+        if (typeof sel !== "string" || !hasOwn(METRIC_SELECT_LABEL, sel)) return "stat select not an allowlisted metric field";
+        if (n.props?.label !== METRIC_SELECT_LABEL[sel]) return "stat label is not the PCC-owned label for its selector";
+      }
       if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
       if (!spec.prose && n.untrusted !== void 0) return `non-prose ${n.type} marked untrusted`;
       if (spec.childless) {
@@ -716,7 +712,7 @@
     text: (d, n) => el(d, CLS.text, String(n.props?.text ?? ""), n.untrusted),
     stat: (d, n) => {
       const e = el(d, CLS.stat);
-      e.appendChild(el(d, CLS.heading, String(n.props?.label ?? ""), true));
+      e.appendChild(el(d, CLS.heading, String(n.props?.label ?? "")));
       e.appendChild(el(d, CLS.value, "", true));
       return e;
     },

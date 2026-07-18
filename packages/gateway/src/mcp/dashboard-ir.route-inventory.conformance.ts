@@ -26,7 +26,7 @@ const PREFIX_KIND: Record<string, string> = {
 };
 // A window of `kind` binding to `path` (metric/receipt/capability are the id-taking kinds).
 function windowFor(kind: string, path: string): any {
-  if (kind === "metric") return { kind, label: "L", select: "u", binding: { path } };
+  if (kind === "metric") return { kind, label: "L", select: "status", binding: { path } }; // "status" is an allowlisted metric selector
   return { kind, binding: { path } };
 }
 const manifest = (win: any) => ({ csd: "x", title: "t", sections: [{ windows: [win] }] });

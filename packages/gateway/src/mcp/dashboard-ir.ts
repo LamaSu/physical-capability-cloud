@@ -95,9 +95,9 @@ const BIND_POLICY: Record<string, BindPolicy> = {
   //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
   //    manifest could label it "Payment received");
   //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
-  // jobs/:id/status (status/progress) + kernels/:id (infra) expose no money amount / settlement
-  // timestamp. The metric-LABEL framing guard (isMoneyFramingLabel) is the second gate: a
-  // manifest may not assert payment/settlement framing over ANY scalar.
+  // jobs/:id/status + kernels/:id expose no money amount / settlement timestamp. The real
+  // gate is the METRIC_SELECT_LABEL allowlist (PCC-owned label per allowlisted selector) — a
+  // manifest can neither select a money/timestamp scalar NOR supply a payment/settlement label.
   metric: {
     routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
     needsSelect: true,
@@ -208,19 +208,25 @@ function isCredentialName(k: string): boolean {
   if (CRED_EXACT.has(n)) return true;
   return CRED_SUBSTR.some((t) => n.includes(t));
 }
-// Payment/settlement FRAMING detection for metric labels (sol finding 3). A metric renders a
-// manifest-supplied LABEL over a fetched scalar; PCC must not let a manifest assert that an
-// arbitrary scalar is a payment or a settlement ("Payment received", "Settled at", "Amount
-// paid"). Normalized (lowercase, separators stripped) substring match. Legit infra/execution
-// labels (Status, Progress, Queue depth, Reputation, Uptime, Devices) never match.
-const MONEY_FRAME_SUBSTR = [
-  "paid", "payment", "payout", "settle", "receipt", "refund",
-  "escrow", "invoice", "remit", "owed", "balance", "amountdue", "amountpaid",
-];
-function isMoneyFramingLabel(label: string): boolean {
-  const n = label.toLowerCase().replace(/[_\-\s]/g, "");
-  return MONEY_FRAME_SUBSTR.some((t) => n.includes(t));
-}
+// PCC-OWNED metric labels (sol finding 3 durable fix). A metric renders a scalar under a
+// LABEL; PCC must own that label so a manifest can never frame a scalar as a payment or a
+// settlement ("Payment received", "Funds received at", "Settled at"). Metric may bind ONLY
+// these selectors, each with a FIXED PCC label; the manifest's `label` is ACCEPTED but
+// IGNORED (the label is derived here). None of these is a money amount or a settlement/
+// heartbeat timestamp, so a manifest can neither assert money/settlement framing NOR select a
+// money/timestamp scalar (e.g. usdc, lastHeartbeat, updatedAt are not selectable). A closed
+// (selector → label) map beats a denylist (which leaks: "Disbursement time", "Credited at").
+// validateIr MIRRORS this exactly (stat.props.label must equal the map value for bind.select).
+const METRIC_SELECT_LABEL: Record<string, string> = {
+  status: "Status",
+  progress: "Progress",
+  reputation: "Reputation",
+  uptimePercent: "Uptime",
+  capabilityCount: "Capabilities",
+  totalJobsCompleted: "Jobs completed",
+  activeJobCount: "Active jobs",
+};
+const isMetricSelector = (s: unknown): s is string => typeof s === "string" && Object.prototype.hasOwnProperty.call(METRIC_SELECT_LABEL, s);
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
 function isOpDescriptor(v: unknown): boolean {
@@ -324,12 +330,14 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
     case "metric":
       // `format` intentionally NOT accepted (see file header). select is top-level + required.
       if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
-      { const label = strictStr(w.label, LIM.title); if (label === null) return { ok: false, reason: "metric.label" };
-        if (isMoneyFramingLabel(label)) return { ok: false, reason: "metric.label asserts payment/settlement framing" };
-        if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
+      { // The manifest `label` is ACCEPTED but IGNORED — PCC OWNS the metric label, derived
+        // from the allowlisted selector. Only known infra/execution selectors are bindable, so
+        // no money amount or settlement/heartbeat timestamp is even selectable. `format` NOT accepted.
+        if (!isMetricSelector(w.select)) return { ok: false, reason: "metric.select not an allowlisted metric field" };
+        const label = METRIC_SELECT_LABEL[w.select]; // PCC-owned; manifest w.label ignored
         const b = mapBind(w.binding, "metric", w.select); if (!b.ok) return b;
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind, untrusted: true } }; }
+        return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
     case "capability":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
       { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
@@ -455,7 +463,7 @@ const NODE_SCHEMA: Record<IrNodeType, NodeSpec> = {
   section: { noBind: true, parentOf: ["heading", "text", "stat", "card", "receipt", "list", "grid", "approval-notice", "plan", "form-summary"] },
   heading: { props: { level: "level", text: "s400" }, required: ["level", "text"], noBind: true, prose: true, childless: true },
   text: { props: { text: "s2000" }, required: ["text"], noBind: true, prose: true, childless: true },
-  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, prose: true, childless: true },
+  stat: { props: { label: "s400" }, required: ["label"], bindKey: "metric", needsBind: true, childless: true }, // label is PCC-owned (not prose) — mirrored below
   card: { props: { kind: "card-kind", statusFrom: "selector", latestFrom: "selector" }, required: ["kind"], optional: ["statusFrom", "latestFrom"], bindKey: "capability", needsBind: true, childless: true },
   receipt: { noBind: true, childless: true }, // STATIC settlement-record pointer — no bind, no props, no children
   list: { props: { rowTitle: "selector", rowMeta: "string[]", statusFrom: "selector", limit: "limit" }, required: ["rowTitle", "rowMeta"], optional: ["statusFrom", "limit"], bindKey: "list", needsBind: true, childless: true },
@@ -522,6 +530,14 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
+    // stat (metric) label is PCC-OWNED — must equal the fixed label for its ALLOWLISTED
+    // selector (mirror of the adapter; a directly-constructed IR cannot invent a label like
+    // "Payment received" or select a non-allowlisted / money / timestamp scalar).
+    if (n.type === "stat") {
+      const sel = (n.bind as { select?: unknown } | undefined)?.select;
+      if (typeof sel !== "string" || !hasOwn(METRIC_SELECT_LABEL, sel)) return "stat select not an allowlisted metric field";
+      if ((n.props as { label?: unknown } | undefined)?.label !== METRIC_SELECT_LABEL[sel]) return "stat label is not the PCC-owned label for its selector";
+    }
     // prose provenance
     if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
     if (!spec.prose && n.untrusted !== undefined) return `non-prose ${n.type} marked untrusted`;

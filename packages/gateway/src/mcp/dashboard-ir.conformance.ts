@@ -33,10 +33,10 @@ ok("validateIr passes", validateIr(doc).ok === true, JSON.stringify(validateIr(d
 ok("frozen catalog is exactly 14 types", FROZEN.size === 14 && !FROZEN.has("progress") && !FROZEN.has("divider"));
 ok("no actions/capability attrs", nodes.every((n) => !("actions" in n) && !("capability" in n)));
 ok("all types frozen", nodes.every((n) => FROZEN.has(n.type)));
-ok("all prose untrusted", nodes.filter((n) => ["text", "heading", "stat", "badge", "field-label"].includes(n.type)).every((n) => n.untrusted === true));
+ok("all prose untrusted", nodes.filter((n) => ["text", "heading", "badge", "field-label"].includes(n.type)).every((n) => n.untrusted === true));
 ok("doc.title untrusted H1", doc.title.type === "heading" && doc.title.props.level === 1 && doc.title.untrusted === true);
 ok("section heading untrusted", nodes.some((n) => n.type === "heading" && n.props?.text === "Section A" && n.untrusted));
-ok("metric stat: top-level select→bind.select, no format, bound, untrusted", (() => { const s = nodes.find((n) => n.type === "stat"); return s && s.bind?.select === "progress" && !("format" in (s.props || {})) && s.untrusted === true && s.bind?.path === "/api/jobs/j1/status"; })());
+ok("metric stat: top-level select→bind.select, no format, bound, PCC-owned label (not untrusted)", (() => { const s = nodes.find((n) => n.type === "stat"); return s && s.bind?.select === "progress" && !("format" in (s.props || {})) && s.untrusted === undefined && s.props?.label === "Progress" && s.bind?.path === "/api/jobs/j1/status"; })());
 ok("form→form-summary, no field/button/form", nodes.some((n) => n.type === "form-summary") && !nodes.some((n) => ["field", "button", "form"].includes(n.type)));
 ok("approval→approval-notice with NO bind", (() => { const a = nodes.find((n) => n.type === "approval-notice"); return a && !a.bind; })());
 ok("chain→plan(composition)", nodes.some((n) => n.type === "plan" && n.props?.kind === "composition"));
@@ -60,33 +60,37 @@ bad("section field 'title' (not heading)", { csd: "x", title: "t", sections: [{ 
 bad("metric WITHOUT select", one({ kind: "metric", label: "L", binding: { path: "/api/jobs/j1/status" } }));
 bad("metric WITH format (disallowed)", one({ kind: "metric", label: "L", select: "x", format: "usd", binding: { path: "/api/jobs/j1/status" } }));
 bad("metric select inside binding (disallowed)", one({ kind: "metric", label: "L", binding: { path: "/api/jobs/j1", select: "x" } }));
-bad("metric to DEAD /api/fiat-ramp/wallet/balance", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/fiat-ramp/wallet/balance" } }));
-bad("metric to reserved /api/settlement/status", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }));
-bad("metric to removed pool route", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/pool/p1" } }));
-bad("metric to reserved /api/kernels/marketplace", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/kernels/marketplace" } }));
+bad("metric to DEAD /api/fiat-ramp/wallet/balance", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/fiat-ramp/wallet/balance" } }));
+bad("metric to reserved /api/settlement/status", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/status" } }));
+bad("metric to removed pool route", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/pool/p1" } }));
+bad("metric to reserved /api/kernels/marketplace", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/kernels/marketplace" } }));
 bad("capability reserved /types", one({ kind: "capability", binding: { path: "/api/capabilities/types" } }));
 // receipt is a STATIC pointer now — it accepts + IGNORES any binding (like `approval`), so
 // no route can leak (nothing is fetched); only a malformed binding SHAPE is rejected.
 ok("receipt with any binding → ACCEPTED as static (binding ignored)", dashboardManifestToIr(one({ kind: "receipt", binding: { path: "/api/escrow/e1" } })).ok === true);
 bad("receipt with a non-object binding → REJECTED (shape)", one({ kind: "receipt", binding: "x" }));
-bad("metric to money route /api/settlement/:id (settlement not metric-bindable)", one({ kind: "metric", label: "Paid", select: "settled", binding: { path: "/api/settlement/job-004" } }));
-bad("metric to money route /api/escrow/:id (escrow not metric-bindable)", one({ kind: "metric", label: "Paid", select: "totalAmount", binding: { path: "/api/escrow/e1" } }));
-// sol re-audit finding 3: the framing bypass also worked through wallet-balance (arbitrary
-// address usdc) and the jobs/:id detail (updatedAt); both routes are now OUT of metric, and
-// the metric-LABEL guard rejects payment/settlement framing over ANY scalar.
-bad("metric to wallet balance (arbitrary-address usdc → 'Payment received')", one({ kind: "metric", label: "Funds", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } }));
-bad("metric to jobs/:id DETAIL (updatedAt → 'Settled at')", one({ kind: "metric", label: "Updated", select: "job.updatedAt", binding: { path: "/api/jobs/j1" } }));
-bad("metric LABEL 'Payment received' → REJECTED (framing guard)", one({ kind: "metric", label: "Payment received", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
-bad("metric LABEL 'Settled at' → REJECTED (framing guard)", one({ kind: "metric", label: "Settled at", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
-bad("metric LABEL 'Escrow balance' → REJECTED (framing guard, substr)", one({ kind: "metric", label: "Escrow balance", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
-ok("metric LABEL 'Progress' over jobs/:/status ACCEPTED (legit infra label)", dashboardManifestToIr(one({ kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } })).ok === true);
+// sol re-audit F3 DURABLE fix: PCC OWNS the metric label (derived from the ALLOWLISTED
+// selector); the manifest `label` is IGNORED and money/timestamp scalars are NOT selectable on
+// ANY route. This replaces the earlier (leaky) label denylist ("Funds received at" slipped it).
+bad("metric select 'settled' → REJECTED (not an allowlisted metric field)", one({ kind: "metric", label: "Paid", select: "settled", binding: { path: "/api/jobs/j1/status" } }));
+bad("metric select 'totalAmount' → REJECTED (money scalar not allowlisted)", one({ kind: "metric", label: "Paid", select: "totalAmount", binding: { path: "/api/kernels/k1" } }));
+bad("metric select 'usdc' → REJECTED (money scalar not allowlisted)", one({ kind: "metric", label: "Funds", select: "usdc", binding: { path: "/api/kernels/k1" } }));
+bad("metric select 'lastHeartbeat' → REJECTED (timestamp; sol's kernel 'Funds received at' vector)", one({ kind: "metric", label: "Funds received at", select: "lastHeartbeat", binding: { path: "/api/kernels/k1" } }));
+bad("metric select 'updatedAt' → REJECTED (settlement-time carrier not allowlisted)", one({ kind: "metric", label: "Settled at", select: "updatedAt", binding: { path: "/api/jobs/j1/status" } }));
+bad("metric to money route /api/settlement/:id (route not metric-bindable)", one({ kind: "metric", label: "x", select: "status", binding: { path: "/api/settlement/job-004" } }));
+bad("metric to wallet-balance route (not metric-bindable)", one({ kind: "metric", label: "x", select: "status", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } }));
+// the manifest label is IGNORED — a payment/settlement-framing label over an ALLOWLISTED
+// selector is ACCEPTED but rendered under the PCC-OWNED label (and the stat is NOT untrusted).
+ok("metric label 'Payment received' IGNORED → PCC label 'Progress', stat not untrusted", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "Payment received", select: "progress", binding: { path: "/api/jobs/j1/status" } })); if (!rr.ok) return false; const s = flat(rr.doc).find((n: any) => n.type === "stat"); return s?.props?.label === "Progress" && s?.untrusted === undefined; })());
+ok("metric label 'Funds received at' IGNORED → PCC label 'Reputation'", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "Funds received at", select: "reputation", binding: { path: "/api/kernels/k1" } })); if (!rr.ok) return false; return flat(rr.doc).find((n: any) => n.type === "stat")?.props?.label === "Reputation"; })());
+// (validateIr mirror of the PCC-owned-label invariant is asserted in the validateIr section below.)
 bad("list to /api/evidence (leak, not a list route)", one({ kind: "list", binding: { path: "/api/evidence" }, item: { title: "id" } }));
 bad("list to /api/marketplace/orders (leak)", one({ kind: "list", binding: { path: "/api/marketplace/orders" }, item: { title: "id" } }));
 bad("run sse/path IDENTITY MISMATCH", one({ kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j2" }, statusFrom: "s", latestFrom: "l" }));
 bad("sse outside allowlist", one({ kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/kernel/k1" }, statusFrom: "s", latestFrom: "l" }));
-bad("path not /api", one({ kind: "metric", label: "L", select: "u", binding: { path: "/etc/passwd" } }));
-bad("path with ..", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/../secret" } }));
-bad("path single-dot segment", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/." } }));
+bad("path not /api", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/etc/passwd" } }));
+bad("path with ..", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/../secret" } }));
+bad("path single-dot segment", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/." } }));
 bad("select proto segment", one({ kind: "metric", label: "L", select: "a.__proto__", binding: { path: "/api/jobs/j1/status" } }));
 bad("select brackets", one({ kind: "metric", label: "L", select: "a[0]", binding: { path: "/api/jobs/j1/status" } }));
 // normalized credential field names
@@ -102,9 +106,9 @@ bad("form.submit malformed shape", one({ kind: "form", schema: { properties: { a
 bad("action bad operation_id grammar", one({ kind: "actions", actions: [{ label: "L", operation_id: "DROP TABLE; --" }] }));
 bad("chain.execute malformed", one({ kind: "chain", composeRef: { id: "c" }, execute: { unknownField: 1 } }));
 bad("field-def with type:button", one({ kind: "form", schema: { properties: { x: { type: "button" } } }, submit: {} }));
-bad("query NaN", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: { n: NaN } } }));
+bad("query NaN", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: { n: NaN } } }));
 bad("__proto__ in manifest", JSON.parse('{"csd":"x","title":"x","sections":[],"__proto__":{"p":1}}'));
-bad("nested proto in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: JSON.parse('{"__proto__":{"p":1}}') } }));
+bad("nested proto in query", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: JSON.parse('{"__proto__":{"p":1}}') } }));
 bad("non-standard prototype manifest", Object.assign(Object.create({ polluted: 1 }), { csd: "x", title: "t", sections: [] }));
 ok("null-proto manifest is SAFE (accepted)", dashboardManifestToIr(Object.assign(Object.create(null), { csd: "x", title: "t", sections: [] })).ok === true);
 // symbol own key rejected (Reflect.ownKeys)
@@ -118,17 +122,17 @@ bad("action confirm:true (boolean, not enum)", one({ kind: "actions", actions: [
 // (Former receipt→evidence "leak" cases: obsolete — a static receipt fetches nothing, so an
 // evidence/settlement binding cannot leak. It renders only the fixed read-only pointer.)
 ok("receipt with an evidence binding → STILL static (no fetch, no leak)", dashboardManifestToIr(one({ kind: "receipt", binding: { path: "/api/evidence/lit-status" } })).ok === true);
-bad("metric→/api/settlement/submit (reserved POST)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/submit" } }));
-bad("metric→/api/settlement/flush (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/flush" } }));
-bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/release" } }));
-bad("metric→/api/jobs/submit (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit" } }));
-bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", pollMs: 250 } }));
-ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", pollMs: 5000 } })).ok === true);
+bad("metric→/api/settlement/submit (reserved POST)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/submit" } }));
+bad("metric→/api/settlement/flush (reserved)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/flush" } }));
+bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/release" } }));
+bad("metric→/api/jobs/submit (reserved)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/submit" } }));
+bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", pollMs: 250 } }));
+ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", pollMs: 5000 } })).ok === true);
 // 3 sections × 22 binds = 66 > 64 aggregate cap (each section ≤32, so the aggregate fires, not the per-section cap)
-bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", sections: Array.from({ length: 3 }, () => ({ windows: Array.from({ length: 22 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status" } })) })) });
+bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", sections: Array.from({ length: 3 }, () => ({ windows: Array.from({ length: 22 }, () => ({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status" } })) })) });
 // direct validateIr aggregate (independent of the adapter): 66 bound stat nodes across 3 valid sections
 { let idc = 0; const nid = () => "n" + ++idc; const H = { type: "heading", id: nid(), props: { level: 1, text: "t" }, untrusted: true };
-  const stat = () => ({ type: "stat", id: nid(), props: { label: "L" }, untrusted: true, bind: { path: "/api/jobs/j1", select: "u" } });
+  const stat = () => ({ type: "stat", id: nid(), props: { label: "Progress" }, bind: { path: "/api/jobs/j1/status", select: "progress" } });
   const sec = () => ({ type: "section", id: nid(), children: Array.from({ length: 22 }, stat) });
   const doc66 = { ir: "pcc-dashboard-ir/v1", title: H, root: { type: "root", id: nid(), children: [sec(), sec(), sec()] } };
   ok("validateIr REJECT: 66 bound nodes (aggregate cap, independent)", validateIr(doc66).ok === false); }
@@ -136,12 +140,12 @@ bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", 
 bad("capability→graph-stats (semantic substitution, sol R6 blocker)", one({ kind: "capability", binding: { path: "/api/capabilities/graph-stats" } }));
 bad("capability→graph-search (reserved)", one({ kind: "capability", binding: { path: "/api/capabilities/graph-search" } }));
 bad("capability→pure-alpha id 'printer' (id-grammar rejects the class)", one({ kind: "capability", binding: { path: "/api/capabilities/printer" } }));
-bad("metric→jobs/submit-from-discovery (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit-from-discovery" } }));
+bad("metric→jobs/submit-from-discovery (reserved)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/submit-from-discovery" } }));
 ok("capability→cap-1 (has digit) ACCEPTED", dashboardManifestToIr(one({ kind: "capability", binding: { path: "/api/capabilities/cap-1" } })).ok === true);
-ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
+ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
 { const w: any = { kind: "note" }; Object.defineProperty(w, "text", { value: "hi", enumerable: false, configurable: true }); bad("non-enumerable allowed-name own key", one(w)); }
 { const secs: any = [{ windows: [] }]; secs.evil = 1; bad("extra own key on sections array", { csd: "x", title: "t", sections: secs }); }
-{ const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: q } })); }
+{ const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: q } })); }
 
 // ── validator parity (mirrors adapter) ──
 const okTitle = { type: "heading", id: "n1", props: { level: 1, text: "x" }, untrusted: true };
@@ -161,12 +165,16 @@ vbad("run card missing selectors", rootWith({ type: "card", id: "n4", props: { k
 vbad("prose not untrusted", rootWith({ type: "text", id: "n4", props: { text: "a" } }));
 vbad("non-prose marked untrusted", rootWith({ type: "grid", id: "n4", props: { kind: "actions-readonly" }, children: [], untrusted: true }));
 vbad("receipt WITH a bind (static pointer may not bind)", rootWith({ type: "receipt", id: "n4", bind: { path: "/api/settlement/j1" } }));
-vbad("stat without bind", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true }));
-vbad("stat bind without select (needsSelect)", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/jobs/j1" } }));
-vbad("stat bind to reserved route", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/settlement/status", select: "u" } }));
+vbad("stat without bind", rootWith({ type: "stat", id: "n4", props: { label: "Progress" } }));
+vbad("stat bind without select (needsSelect)", rootWith({ type: "stat", id: "n4", props: { label: "Progress" }, bind: { path: "/api/jobs/j1/status" } }));
+vbad("stat bind to reserved route", rootWith({ type: "stat", id: "n4", props: { label: "Status" }, bind: { path: "/api/settlement/status", select: "status" } }));
+// PCC-owned metric label — validateIr MIRROR of the adapter (finding 2):
+vbad("stat with a NON-PCC label (validateIr mirror)", rootWith({ type: "stat", id: "n4", props: { label: "Payment received" }, bind: { path: "/api/jobs/j1/status", select: "progress" } }));
+vbad("stat selecting a NON-allowlisted field (validateIr mirror)", rootWith({ type: "stat", id: "n4", props: { label: "Uptime" }, bind: { path: "/api/kernels/k1", select: "lastHeartbeat" } }));
+vbad("stat marked untrusted (PCC label is not prose)", rootWith({ type: "stat", id: "n4", props: { label: "Progress" }, untrusted: true, bind: { path: "/api/jobs/j1/status", select: "progress" } }));
 vbad("bind on noBind type (plan)", rootWith({ type: "plan", id: "n4", props: { kind: "composition" }, bind: { path: "/api/jobs/j1" } }));
 vbad("schema on a type whose policy has none (list)", rootWith({ type: "list", id: "n4", props: { rowTitle: "id", rowMeta: [] }, bind: { path: "/api/jobs", schema: "capability-summary-v1" } }));
-vbad("childless leaf with children", rootWith({ type: "stat", id: "n4", props: { label: "x" }, untrusted: true, bind: { path: "/api/jobs/j1", select: "s" }, children: [] }));
+vbad("childless leaf with children", rootWith({ type: "stat", id: "n4", props: { label: "Progress" }, bind: { path: "/api/jobs/j1/status", select: "progress" }, children: [] }));
 vbad("container without children array", { type: "root", id: "n2" });
 vbad("illegal child under root (field-label)", { type: "root", id: "n2", children: [{ type: "field-label", id: "n3", props: { label: "x" }, untrusted: true }] });
 vbad("illegal child under section (badge)", rootWith({ type: "badge", id: "n4", props: { text: "a", tone: "neutral" }, untrusted: true }));

@@ -44,7 +44,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("metric bound to the DEAD /api/fiat-ramp/wallet/balance route is REJECTED", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "usdc", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -61,7 +61,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
 
   it("binding.query nested-object value survives projection → adapter REJECTS (attributed: has select)", () => {
     // `select` present so the rejection is due to the non-scalar query value, not missing select.
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: { filter: { nested: "x" } } } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: { filter: { nested: "x" } } } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -85,7 +85,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("collision route /api/settlement/status as a metric is REJECTED (attributed: has select)", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "progress", binding: { path: "/api/settlement/status" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -122,7 +122,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("metric bound to a financial-leak route (stripe/credits) is REJECTED (attributed: has select)", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", select: "u", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "Credits", select: "progress", binding: { path: "/api/fiat-ramp/stripe/credits/u1" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
