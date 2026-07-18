@@ -19,7 +19,7 @@
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
-import type { IrDoc, IrNode, IrNodeType } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, IrNodeType, BindSchema } from "./dashboard-ir.js";
 
 // Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
 // `document`/element are structurally compatible; tests pass a plain-object fake.
@@ -33,26 +33,33 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
   plan: "pcc-plan", "form-summary": "pcc-form", "field-label": "pcc-field",
   untrusted: "pcc-untrusted", invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
+  note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
 };
 
-/** own-property scalar read via a dotted selector (NO prototype traversal). Returns
- * "" for anything not a plain own scalar. The selector was already grammar-checked
- * by the adapter/validator; this re-guards proto segments defensively. */
-function readSelector(obj: unknown, sel: string): string {
+/** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
+ * an array). Returns the raw final value, or undefined for a proto segment / missing key
+ * / non-object step. The selector was already grammar-checked by the adapter/validator;
+ * this re-guards proto segments defensively. */
+function readOwnPath(obj: unknown, sel: string): unknown {
   let cur: unknown = obj;
-  const segs = sel.split(".");
-  for (const seg of segs) {
-    if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return "";
-    if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return "";
-    if (!Object.prototype.hasOwnProperty.call(cur, seg)) return "";
+  for (const seg of sel.split(".")) {
+    if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return undefined;
+    if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(cur, seg)) return undefined;
     cur = (cur as Record<string, unknown>)[seg];
   }
+  return cur;
+}
+/** Scalar coercion of an own-property read. "" for anything not a plain own scalar
+ * (arrays/objects/null included) — identical behavior to the prior selector reader. */
+function readSelector(obj: unknown, sel: string): string {
+  const cur = readOwnPath(obj, sel);
   if (typeof cur === "string") return cur;
   if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
   if (typeof cur === "boolean") return String(cur);
@@ -66,10 +73,100 @@ function el(doc: RDocument, cls: string, text?: string, untrusted?: boolean): RE
   return n;
 }
 
+// ── PCC-owned fixed schema profiles (hollow-node binding) ─────────────────────────
+// A manifest supplies a bind PATH only; PCC owns the HEADING, the FIELD SET, and the
+// exact source KEY of each value. Labels are painted BEFORE any fetch; only value slots
+// are dynamic, each read from ITS ONE fixed own-property key. A manifest can therefore
+// never (a) relabel a field, (b) surface an off-schema response field (paid/verified/…),
+// or (c) mint a privileged-looking "receipt" — the settlement record is always framed
+// read-only with an explicit "not proof of payment" warning.
+const UNAVAILABLE = "—"; // em dash — honest "not available", never a partial fake
+interface SchemaField { label: string; key: string; list?: boolean; bool?: boolean }
+interface SchemaSpec { heading: string; note?: string; fields: readonly SchemaField[] }
+export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.freeze({
+  "capability-summary-v1": Object.freeze({
+    heading: "Capability",
+    fields: Object.freeze([
+      { label: "Name", key: "name" },
+      { label: "Type", key: "type" },
+      { label: "Base cost", key: "pricing.baseCost" },
+      { label: "Currency", key: "pricing.currency" },
+      { label: "Assurance tiers", key: "assuranceTiers", list: true },
+      { label: "Available", key: "available", bool: true },
+    ]),
+  }),
+  "run-summary-v1": Object.freeze({
+    heading: "Run",
+    fields: Object.freeze([
+      { label: "Status", key: "status" },
+      { label: "Progress", key: "progress" },
+    ]),
+  }),
+  "settlement-record-v1": Object.freeze({
+    heading: "Settlement record (read-only)",
+    note: "Not proof of payment; verify on the authenticated PCC surface.",
+    fields: Object.freeze([
+      { label: "Job", key: "jobId" },
+      { label: "Status", key: "status" },
+      { label: "Evidence hash", key: "evidenceHash" },
+      { label: "Assurance tier", key: "assuranceTier" },
+      { label: "Settled at", key: "settledAt" },
+    ]),
+  }),
+}) as Readonly<Record<BindSchema, SchemaSpec>>;
+
+/** Read ONE fixed schema field from fetched data. Scalars via own-property selector;
+ * `list` fields join a scalar array; `bool` fields normalize to Yes/No. Anything
+ * missing / non-scalar → the honest unavailable marker (never a partial authoritative
+ * card). The ONLY reader for schema-card values — no manifest selector reaches it. */
+function readField(data: unknown, f: SchemaField): string {
+  if (f.list) {
+    const arr = readOwnPath(data, f.key);
+    if (!Array.isArray(arr)) return UNAVAILABLE;
+    const parts: string[] = [];
+    for (const x of arr) {
+      if (typeof x === "string" && x.length > 0) parts.push(x);
+      else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+      else if (typeof x === "boolean") parts.push(String(x));
+      // non-scalar array elements are skipped (never stringified)
+    }
+    return parts.length ? parts.join(", ") : UNAVAILABLE;
+  }
+  const v = readSelector(data, f.key);
+  if (v === "") return UNAVAILABLE;
+  if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+  return v;
+}
+
+/** Fill a fixed-schema card's value slots from fetched data (text-only). PCC owns the
+ * field set + order; slot[i] ← the i-th field's fixed key. Missing key → UNAVAILABLE. */
+export function bindSchemaCard(schema: BindSchema, data: unknown, slots: Array<{ textContent: string }>): void {
+  const spec = SCHEMA_FIELDS[schema];
+  if (!spec) return;
+  spec.fields.forEach((f, i) => { const slot = slots[i]; if (slot) slot.textContent = readField(data, f); });
+}
+
 // ── Frozen painter dispatch — exactly the 14 catalog types, immutable ─────────────
 type Painter = (doc: RDocument, node: IrNode) => RElement;
 function paintChildren(doc: RDocument, node: IrNode, into: RElement): void {
   if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
+}
+/** Paint a fixed-schema card: PCC-owned heading + (optional) read-only warning + one
+ * (label, empty value slot) row per field. Heading and labels are FIXED PCC text (never
+ * manifest prose → not marked untrusted); only the value slots (filled from the GET by
+ * bindSchemaCard) are untrusted. The label set/order is known at paint time. */
+function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): RElement {
+  const spec = SCHEMA_FIELDS[schema];
+  const e = el(doc, rootCls + " " + CLS.schemaCard);
+  e.appendChild(el(doc, CLS.heading, spec.heading));
+  if (spec.note) e.appendChild(el(doc, CLS.note, spec.note));
+  for (const f of spec.fields) {
+    const row = el(doc, CLS.row);
+    row.appendChild(el(doc, CLS.field, f.label));
+    row.appendChild(el(doc, CLS.value, "", true)); // value slot filled by bindSchemaCard (fetched, untrusted)
+    e.appendChild(row);
+  }
+  return e;
 }
 const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   root: (d, n) => { const e = el(d, CLS.root); paintChildren(d, n, e); return e; },
@@ -82,8 +179,13 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
     e.appendChild(el(d, CLS.value, "", true)); // value slot filled by bindStat (fetched, untrusted)
     return e;
   },
-  card: (d, n) => el(d, CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap")),
-  receipt: (d) => { const e = el(d, CLS.receipt); e.appendChild(el(d, CLS.value, "", true)); return e; },
+  card: (d, n) => {
+    const rootCls = CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap");
+    const schema = n.bind?.schema;
+    if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
+    return el(d, rootCls); // defensive: the adapter always tags a card bind with a schema now
+  },
+  receipt: (d) => paintSchemaCard(d, CLS.receipt, "settlement-record-v1"), // always the read-only settlement record
   list: (d) => { const e = el(d, CLS.list); return e; }, // rows appended by bindList
   badge: (d, n) => { const e = el(d, CLS.badge, String(n.props?.text ?? ""), true); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
   grid: (d, n) => { const e = el(d, CLS.grid); paintChildren(d, n, e); return e; },
@@ -128,8 +230,9 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
   }
 }
 
-/** Fill a stat/receipt value slot from a fetched object via the node's `select`
- * (stat) — own-property, text-only. Returns the string written (for tests). */
+/** Fill a STAT value slot from a fetched object via the node's `select` — own-property,
+ * text-only. Returns the string written (for tests). (Cards/receipts bind via the fixed
+ * PCC schema profiles in bindSchemaCard, NOT a manifest select.) */
 export function bindScalar(node: IrNode, data: unknown): string {
   const sel = node.bind?.select;
   if (!sel) return "";

@@ -41,7 +41,9 @@ ok("form→form-summary, no field/button/form", nodes.some((n) => n.type === "fo
 ok("approval→approval-notice with NO bind", (() => { const a = nodes.find((n) => n.type === "approval-notice"); return a && !a.bind; })());
 ok("chain→plan(composition)", nodes.some((n) => n.type === "plan" && n.props?.kind === "composition"));
 ok("actions→1 badge, no button", nodes.filter((n) => n.type === "badge").length === 1 && !nodes.some((n) => n.type === "button"));
-ok("receipt bind schema=receipt", nodes.find((n) => n.type === "receipt")?.bind?.schema === "receipt");
+ok("receipt bind schema=settlement-record-v1", nodes.find((n) => n.type === "receipt")?.bind?.schema === "settlement-record-v1");
+ok("capability card bind schema=capability-summary-v1", nodes.find((n) => n.type === "card" && n.props?.kind === "capability")?.bind?.schema === "capability-summary-v1");
+ok("run card bind schema=run-summary-v1", nodes.find((n) => n.type === "card" && n.props?.kind === "run")?.bind?.schema === "run-summary-v1");
 ok("run card sse/path correlated + selectors", (() => { const c = nodes.find((n) => n.type === "card" && n.props?.kind === "run"); return c && c.bind?.sse === "/sse/stream/job/j1" && c.props?.statusFrom === "status"; })());
 ok("note text raw-preserved", nodes.find((n) => n.type === "text")?.props?.text === "hello <b>world</b>");
 

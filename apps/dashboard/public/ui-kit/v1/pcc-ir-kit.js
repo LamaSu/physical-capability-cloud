@@ -93,14 +93,23 @@
       ],
       needsSelect: true
     },
-    capability: { routes: [route("/api/capabilities/:")] },
+    // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
+    // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
+    capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" },
     // ID_SEG excludes types/templates/search/graph-*
-    receipt: { routes: [route("/api/settlement/:"), route("/api/evidence/:")], schema: "receipt" },
+    // settlement RECORD (not a "receipt"): a fixed read-only pointer with an explicit
+    // "not proof of payment" frame. /api/evidence/: DROPPED — it returns a bundle
+    // COLLECTION, a different shape that must not masquerade as a settlement record.
+    receipt: { routes: [route("/api/settlement/:")], schema: "settlement-record-v1" },
     list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+    // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
+    // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
+    // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
     run: {
       routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
       sse: [route("/sse/stream/job/:")],
-      correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") }
+      correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
+      schema: "run-summary-v1"
     }
     // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
   };
@@ -568,17 +577,23 @@
     invalid: "pcc-invalid",
     value: "pcc-value",
     row: "pcc-row",
-    meta: "pcc-meta"
+    meta: "pcc-meta",
+    note: "pcc-note",
+    schemaCard: "pcc-schema-card",
+    field: "pcc-fieldlabel"
   };
-  function readSelector(obj, sel) {
+  function readOwnPath(obj, sel) {
     let cur = obj;
-    const segs = sel.split(".");
-    for (const seg of segs) {
-      if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return "";
-      if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return "";
-      if (!Object.prototype.hasOwnProperty.call(cur, seg)) return "";
+    for (const seg of sel.split(".")) {
+      if (seg === "__proto__" || seg === "constructor" || seg === "prototype") return void 0;
+      if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return void 0;
+      if (!Object.prototype.hasOwnProperty.call(cur, seg)) return void 0;
       cur = cur[seg];
     }
+    return cur;
+  }
+  function readSelector(obj, sel) {
+    const cur = readOwnPath(obj, sel);
     if (typeof cur === "string") return cur;
     if (typeof cur === "number" && Number.isFinite(cur)) return String(cur);
     if (typeof cur === "boolean") return String(cur);
@@ -590,8 +605,78 @@
     if (text !== void 0) n.textContent = text;
     return n;
   }
+  var UNAVAILABLE = "\u2014";
+  var SCHEMA_FIELDS = Object.freeze({
+    "capability-summary-v1": Object.freeze({
+      heading: "Capability",
+      fields: Object.freeze([
+        { label: "Name", key: "name" },
+        { label: "Type", key: "type" },
+        { label: "Base cost", key: "pricing.baseCost" },
+        { label: "Currency", key: "pricing.currency" },
+        { label: "Assurance tiers", key: "assuranceTiers", list: true },
+        { label: "Available", key: "available", bool: true }
+      ])
+    }),
+    "run-summary-v1": Object.freeze({
+      heading: "Run",
+      fields: Object.freeze([
+        { label: "Status", key: "status" },
+        { label: "Progress", key: "progress" }
+      ])
+    }),
+    "settlement-record-v1": Object.freeze({
+      heading: "Settlement record (read-only)",
+      note: "Not proof of payment; verify on the authenticated PCC surface.",
+      fields: Object.freeze([
+        { label: "Job", key: "jobId" },
+        { label: "Status", key: "status" },
+        { label: "Evidence hash", key: "evidenceHash" },
+        { label: "Assurance tier", key: "assuranceTier" },
+        { label: "Settled at", key: "settledAt" }
+      ])
+    })
+  });
+  function readField(data, f) {
+    if (f.list) {
+      const arr = readOwnPath(data, f.key);
+      if (!Array.isArray(arr)) return UNAVAILABLE;
+      const parts = [];
+      for (const x of arr) {
+        if (typeof x === "string" && x.length > 0) parts.push(x);
+        else if (typeof x === "number" && Number.isFinite(x)) parts.push(String(x));
+        else if (typeof x === "boolean") parts.push(String(x));
+      }
+      return parts.length ? parts.join(", ") : UNAVAILABLE;
+    }
+    const v = readSelector(data, f.key);
+    if (v === "") return UNAVAILABLE;
+    if (f.bool) return v === "true" ? "Yes" : v === "false" ? "No" : v;
+    return v;
+  }
+  function bindSchemaCard(schema, data, slots) {
+    const spec = SCHEMA_FIELDS[schema];
+    if (!spec) return;
+    spec.fields.forEach((f, i) => {
+      const slot = slots[i];
+      if (slot) slot.textContent = readField(data, f);
+    });
+  }
   function paintChildren(doc, node, into) {
     if (node.children) for (const c of node.children) into.appendChild(paintNode(doc, c));
+  }
+  function paintSchemaCard(doc, rootCls, schema) {
+    const spec = SCHEMA_FIELDS[schema];
+    const e = el(doc, rootCls + " " + CLS.schemaCard);
+    e.appendChild(el(doc, CLS.heading, spec.heading));
+    if (spec.note) e.appendChild(el(doc, CLS.note, spec.note));
+    for (const f of spec.fields) {
+      const row = el(doc, CLS.row);
+      row.appendChild(el(doc, CLS.field, f.label));
+      row.appendChild(el(doc, CLS.value, "", true));
+      e.appendChild(row);
+    }
+    return e;
   }
   var PAINTERS = Object.freeze({
     root: (d, n) => {
@@ -612,12 +697,14 @@
       e.appendChild(el(d, CLS.value, "", true));
       return e;
     },
-    card: (d, n) => el(d, CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap")),
-    receipt: (d) => {
-      const e = el(d, CLS.receipt);
-      e.appendChild(el(d, CLS.value, "", true));
-      return e;
+    card: (d, n) => {
+      const rootCls = CLS.card + (n.props?.kind === "run" ? " pcc-card-run" : " pcc-card-cap");
+      const schema = n.bind?.schema;
+      if (schema === "capability-summary-v1" || schema === "run-summary-v1") return paintSchemaCard(d, rootCls, schema);
+      return el(d, rootCls);
     },
+    receipt: (d) => paintSchemaCard(d, CLS.receipt, "settlement-record-v1"),
+    // always the read-only settlement record
     list: (d) => {
       const e = el(d, CLS.list);
       return e;
@@ -959,17 +1046,17 @@
   var liveDoc = null;
   var liveRoot = null;
   function collectBound(doc) {
-    const stats = [], lists = [], receipts = [];
+    const stats = [], lists = [], schemaCards = [];
     const walk = (n) => {
       if (n.bind) {
         if (n.type === "stat") stats.push(n);
         else if (n.type === "list") lists.push(n);
-        else if (n.type === "receipt") receipts.push(n);
+        else if (n.type === "card" || n.type === "receipt") schemaCards.push(n);
       }
       if (n.children) for (const c of n.children) walk(c);
     };
     walk(doc.root);
-    return { stats, lists, receipts };
+    return { stats, lists, schemaCards };
   }
   function startBinds(doc, root) {
     const origin = pccApiOrigin();
@@ -997,14 +1084,14 @@
           release();
         }
       },
-      // NO openSse: SSE transport intentionally absent (run cards are unbound below).
+      // NO openSse: SSE transport intentionally absent — run cards bind via GET poll only.
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (h) => clearTimeout(h),
       makeSignal: () => gen.signal
     };
-    const { stats, lists, receipts } = collectBound(doc);
+    const { stats, lists, schemaCards } = collectBound(doc);
     const byClass = (cls) => Array.from(root.querySelectorAll("." + cls));
-    const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), receiptEls = byClass("pcc-receipt");
+    const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
     const push = (h) => boundHandles.push(h);
     stats.forEach((node, i) => {
       const el2 = statEls[i];
@@ -1013,12 +1100,13 @@
         slot.textContent = bindScalar(node, data);
       }));
     });
-    receipts.forEach((node, i) => {
-      const el2 = receiptEls[i];
-      const slot = el2?.querySelector(".pcc-value");
-      if (slot) push(startBind(node, deps, (data) => {
-        slot.textContent = bindScalar(node, data);
-      }));
+    schemaCards.forEach((node, i) => {
+      const el2 = schemaEls[i];
+      if (!el2) return;
+      const schema = node.bind?.schema;
+      if (!schema) return;
+      const slots = Array.from(el2.querySelectorAll(".pcc-value"));
+      push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
     });
     lists.forEach((node, i) => {
       const el2 = listEls[i];

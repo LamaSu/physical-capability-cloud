@@ -80,7 +80,7 @@ const RESERVED_EXACT: ReadonlySet<string> = new Set([
   "/api/jobs/submit", "/api/jobs/submit-from-discovery",
   "/api/kernels/marketplace", "/api/kernels/register", "/api/escrow/chain",
 ]);
-type BindSchema = "receipt";
+export type BindSchema = "capability-summary-v1" | "run-summary-v1" | "settlement-record-v1";
 interface BindPolicy {
   routes: RegExp[];
   needsSelect?: boolean;
@@ -98,13 +98,22 @@ const BIND_POLICY: Record<string, BindPolicy> = {
     ],
     needsSelect: true,
   },
-  capability: { routes: [route("/api/capabilities/:")] }, // ID_SEG excludes types/templates/search/graph-*
-  receipt: { routes: [route("/api/settlement/:"), route("/api/evidence/:")], schema: "receipt" },
+  // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
+  // rendered from the KNOWN CapabilityDTO schema — the manifest supplies NO selectors.
+  capability: { routes: [route("/api/capabilities/:")], schema: "capability-summary-v1" }, // ID_SEG excludes types/templates/search/graph-*
+  // settlement RECORD (not a "receipt"): a fixed read-only pointer with an explicit
+  // "not proof of payment" frame. /api/evidence/: DROPPED — it returns a bundle
+  // COLLECTION, a different shape that must not masquerade as a settlement record.
+  receipt: { routes: [route("/api/settlement/:")], schema: "settlement-record-v1" },
   list: { routes: [route("/api/jobs"), route("/api/kernels"), route("/api/capabilities"), route("/api/escrow")] },
+  // run card: a fixed PCC-owned SUMMARY (status/progress) read from the KNOWN job
+  // schema. The manifest's statusFrom/latestFrom are validated but IGNORED at render
+  // (they may never relabel an arbitrary field as "Status" — PCC owns the meaning).
   run: {
     routes: [route("/api/jobs/:"), route("/api/jobs/:/status")],
     sse: [route("/sse/stream/job/:")],
     correlate: { pathRe: new RegExp("^/api/jobs/(" + ID_SEG + ")(?:/status)?$"), sseRe: routeCap("/sse/stream/job/:") },
+    schema: "run-summary-v1",
   },
   // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
 };

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
-import { renderIrDoc, bindListRows, bindScalar, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
+import { renderIrDoc, bindListRows, bindScalar, bindSchemaCard, SCHEMA_FIELDS, bootIrView, type RElement, type RDocument } from "./dashboard-ir-renderer.js";
 
 let passed = 0;
 const ok = (n: string, c: boolean, d?: string) => { assert.ok(c, `${n}${d ? " — " + d : ""}`); passed++; console.log(`  ok   ${n}`); };
@@ -80,5 +80,77 @@ ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 ok("bindScalar reads declared select", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "usdc" } } as any, { usdc: "42.5" }) === "42.5");
 ok("bindScalar proto segment → empty (no traversal)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "__proto__" } } as any, {}) === "");
 ok("bindScalar drops nested-object value (scalar only)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "a" } } as any, { a: { nested: 1 } }) === "");
+
+// ── Fixed PCC-owned schema cards (hollow-node binding) ────────────────────────────
+// The manifest supplies a bind PATH only; PCC owns headings, labels, and each value's
+// FIXED source key. Adversarial gates below prove the manifest can never relabel a
+// field, surface an off-schema response field, or mint a privileged-looking receipt.
+const scMan: any = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "S", windows: [
+  { kind: "capability", binding: { path: "/api/capabilities/cap-1" } },
+  { kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j1" }, statusFrom: "amount", latestFrom: "x" },
+  { kind: "receipt", binding: { path: "/api/settlement/j1" } },
+] }] };
+const scR = dashboardManifestToIr(scMan);
+ok("schema-card manifest → IR", scR.ok);
+if (!scR.ok) throw new Error("stop");
+const scMount = makeEl("div");
+ok("schema-card doc paints", bootIrView(doc, scMount, scR.doc, validateIr) === true);
+const scTexts = texts(scMount);
+ok("capability card FIXED heading painted", scTexts.includes("Capability"));
+ok("capability FIXED labels painted", scTexts.includes("Name") && scTexts.includes("Assurance tiers") && scTexts.includes("Available"));
+ok("run card FIXED heading painted", scTexts.includes("Run"));
+ok("run FIXED labels painted", scTexts.includes("Status") && scTexts.includes("Progress"));
+ok("settlement record FIXED read-only heading painted", scTexts.includes("Settlement record (read-only)"));
+ok("settlement record carries the FIXED 'not proof of payment' warning", scTexts.some((t) => t.includes("Not proof of payment")));
+ok("settlement FIXED labels painted", scTexts.includes("Job") && scTexts.includes("Evidence hash"));
+
+const slots = (n: number) => Array.from({ length: n }, () => ({ textContent: "" }));
+// GATE 1 — manifest selectors can NEVER relabel a field. The run window's statusFrom is
+// "amount"; the render reads the FIXED `status` key, never the manifest-selected `amount`.
+{
+  const s = slots(2);
+  bindSchemaCard("run-summary-v1", { status: "running", progress: 40, amount: 999 }, s);
+  ok("GATE1 run Status ← fixed `status` (NOT manifest statusFrom→amount)", s[0].textContent === "running");
+  ok("GATE1 run manifest-selected `amount` NEVER rendered", !s.some((x) => x.textContent.includes("999")));
+}
+// GATE 2 — off-schema response fields (paid/verified/HTML) are NEVER rendered.
+{
+  const s = slots(5);
+  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed", evidenceHash: "0xabc", assuranceTier: 2, settledAt: "2026-07-17", paid: true, verified: true, evil: "<b>x</b>" }, s);
+  const all = s.map((x) => x.textContent).join("|");
+  ok("GATE2 settlement only fixed fields rendered", all === "j1|completed|0xabc|2|2026-07-17");
+  ok("GATE2 off-schema paid/verified/HTML NEVER rendered", !all.includes("true") && !all.includes("<b>"));
+}
+// GATE 3 — `completed`/`settled` alone never mints Paid/Verified/Receipt; status shows as
+// a neutral value and the FIXED read-only frame owns the meaning.
+{
+  const s = slots(5);
+  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed", settled: true, evidenceHash: "h", assuranceTier: 1, settledAt: "t" }, s);
+  const all = s.map((x) => x.textContent).join(" ");
+  ok("GATE3 status 'completed' shown as a neutral value", s[1].textContent === "completed");
+  ok("GATE3 never emits Paid/Verified/Receipt from status/settled", !/Paid|Verified|Receipt/.test(all));
+  ok("GATE3 read-only frame is a FIXED PCC label, not derived from data",
+    SCHEMA_FIELDS["settlement-record-v1"].heading === "Settlement record (read-only)" &&
+    SCHEMA_FIELDS["settlement-record-v1"].note === "Not proof of payment; verify on the authenticated PCC surface.");
+}
+// GATE 4 — missing/malformed canonical fields → honest unavailable (—), not a partial
+// authoritative card.
+{
+  const s = slots(5);
+  bindSchemaCard("settlement-record-v1", { jobId: "j1", status: "completed" }, s);
+  ok("GATE4 missing evidenceHash → unavailable marker", s[2].textContent === "—");
+  ok("GATE4 missing assuranceTier → unavailable marker", s[3].textContent === "—");
+  ok("GATE4 present fields still shown", s[0].textContent === "j1" && s[1].textContent === "completed");
+}
+// GATE 5 — capability reads the KNOWN DTO shape (structured pricing, plural assuranceTiers
+// array joined, boolean normalized); off-schema fields never leak.
+{
+  const s = slots(6);
+  bindSchemaCard("capability-summary-v1", { name: "FDM", type: "3d-printing", pricing: { baseCost: "2.00", currency: "USDC" }, assuranceTiers: [0, 1, 2], available: true, secret: "LEAK" }, s);
+  ok("GATE5 name/type/pricing.baseCost/currency read from fixed keys", s[0].textContent === "FDM" && s[1].textContent === "3d-printing" && s[2].textContent === "2.00" && s[3].textContent === "USDC");
+  ok("GATE5 assuranceTiers array joined", s[4].textContent === "0, 1, 2");
+  ok("GATE5 boolean available normalized to Yes", s[5].textContent === "Yes");
+  ok("GATE5 off-schema `secret` NEVER rendered", !s.some((x) => x.textContent.includes("LEAK")));
+}
 
 console.log(`\n[dashboard-ir-renderer conformance] PASS — ${passed} checks`);

@@ -14,7 +14,7 @@
  *  - a bounded size preflight before adapt/validate (no unbounded serialize);
  *  - GET-only fetch (credentials:"omit", redirect:"error", exact application/json,
  *    non-clean bodies cancelled, incremental 512KB cap) — SSE is NOT used (run cards
- *    are unbound, so the audited SSE policy is unreachable here);
+ *    bind via GET poll, so the audited SSE policy is unreachable here);
  *  - a global 6-way concurrency gate with cancellation-aware, permit-reserving waiters;
  *  - per-render bind GENERATION with an AbortController: visibility-hide / teardown /
  *    pagehide abort in-flight GETs and drop queued waiters, so visibility churn cannot
@@ -25,7 +25,7 @@
  */
 import { dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
 import type { IrDoc, IrNode } from "./dashboard-ir.js";
-import { bootIrView, bindScalar, bindListRows } from "./dashboard-ir-renderer.js";
+import { bootIrView, bindScalar, bindListRows, bindSchemaCard } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 import { startBind } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
@@ -163,14 +163,20 @@ let genController: AbortController | null = null;
 let liveDoc: IrDoc | null = null;
 let liveRoot: HTMLElement | null = null;
 
-function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; receipts: IrNode[] } {
-  const stats: IrNode[] = [], lists: IrNode[] = [], receipts: IrNode[] = [];
+function collectBound(doc: IrDoc): { stats: IrNode[]; lists: IrNode[]; schemaCards: IrNode[] } {
+  // schemaCards = capability/run cards + settlement records — every fixed-schema card,
+  // in document order (aligned with the `.pcc-schema-card` query in startBinds).
+  const stats: IrNode[] = [], lists: IrNode[] = [], schemaCards: IrNode[] = [];
   const walk = (n: IrNode): void => {
-    if (n.bind) { if (n.type === "stat") stats.push(n); else if (n.type === "list") lists.push(n); else if (n.type === "receipt") receipts.push(n); }
+    if (n.bind) {
+      if (n.type === "stat") stats.push(n);
+      else if (n.type === "list") lists.push(n);
+      else if (n.type === "card" || n.type === "receipt") schemaCards.push(n);
+    }
     if (n.children) for (const c of n.children) walk(c);
   };
   walk(doc.root);
-  return { stats, lists, receipts };
+  return { stats, lists, schemaCards };
 }
 function startBinds(doc: IrDoc, root: HTMLElement): void {
   const origin = pccApiOrigin();
@@ -198,17 +204,25 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
         release();
       }
     },
-    // NO openSse: SSE transport intentionally absent (run cards are unbound below).
+    // NO openSse: SSE transport intentionally absent — run cards bind via GET poll only.
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     makeSignal: () => gen.signal,
   };
-  const { stats, lists, receipts } = collectBound(doc);
+  const { stats, lists, schemaCards } = collectBound(doc);
   const byClass = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
-  const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), receiptEls = byClass("pcc-receipt");
+  const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
   const push = (h: { stop: () => void }) => boundHandles.push(h);
   stats.forEach((node, i) => { const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (slot) push(startBind(node, deps, (data) => { slot.textContent = bindScalar(node, data); })); });
-  receipts.forEach((node, i) => { const el = receiptEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (slot) push(startBind(node, deps, (data) => { slot.textContent = bindScalar(node, data); })); });
+  // Fixed-schema cards (capability/run/settlement): PCC owns the labels; each value slot
+  // ← its ONE fixed key via bindSchemaCard. The manifest supplies NO selector here, so it
+  // can neither relabel a field nor surface an off-schema response field.
+  schemaCards.forEach((node, i) => {
+    const el = schemaEls[i]; if (!el) return;
+    const schema = node.bind?.schema; if (!schema) return;
+    const slots = Array.from(el.querySelectorAll<HTMLElement>(".pcc-value"));
+    push(startBind(node, deps, (data) => bindSchemaCard(schema, data, slots)));
+  });
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; push(startBind(node, deps, (data) => {
     const rows = Array.isArray(data) ? data : (data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items) ? (data as { items: unknown[] }).items : []);
     el.replaceChildren(); bindListRows(rdoc, wrapEl(el) as unknown as RElement, node, rows);

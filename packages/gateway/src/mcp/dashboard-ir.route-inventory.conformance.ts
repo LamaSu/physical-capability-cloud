@@ -16,8 +16,11 @@ import { dashboardManifestToIr } from "./dashboard-ir.js";
 
 const ROUTES = join(dirname(fileURLToPath(import.meta.url)), "..", "routes");
 // Detail templates in BIND_POLICY that take a `:seg` id, keyed by the window kind that binds them.
+// NOTE: evidence is intentionally ABSENT — the settlement-record profile dropped
+// /api/evidence/: entirely (it returns a bundle COLLECTION, not a settlement record).
+// Its total unbindability is proven by the explicit negative control below.
 const PREFIX_KIND: Record<string, string> = {
-  capabilities: "capability", settlement: "receipt", evidence: "receipt",
+  capabilities: "capability", settlement: "receipt",
   jobs: "metric", kernels: "metric", escrow: "metric",
 };
 // A window of `kind` binding to `path` (metric/receipt/capability are the id-taking kinds).
@@ -70,6 +73,14 @@ const controls: Array<[string, string]> = [
 for (const [kind, path] of controls) {
   const r = dashboardManifestToIr(manifest(windowFor(kind, path)));
   assert.ok(r.ok, `positive control should accept ${kind} → ${path}: ${JSON.stringify(r)}`);
+  passed++;
+}
+// Negative control: evidence is fully dropped from the settlement-record profile — even a
+// detail-id-shaped evidence path must be REJECTED (an evidence bundle collection must never
+// masquerade as a settlement record). Proves sol's drop, independent of the sibling scan.
+{
+  const r = dashboardManifestToIr(manifest(windowFor("receipt", "/api/evidence/job-1")));
+  assert.ok(!r.ok, "receipt must REJECT /api/evidence/:id (dropped from the settlement-record profile)");
   passed++;
 }
 console.log(`  ok   every static sibling rejected; ${controls.length} id-shaped controls accepted`);

@@ -80,6 +80,12 @@ describe("Phase-B promotion — real manifest → tool handler → projection �
     expect(mount.textContent).toContain("Refresh");      // action → neutral badge
     expect(mount.textContent).toContain("Amount");       // form field-label
     expect(mount.textContent).toContain("authenticated PCC surface"); // approval → fixed notice
+    // fixed PCC-owned schema cards paint their labels + framing (values fill on GET, stubbed here)
+    expect(mount.textContent).toContain("Capability");                    // capability card FIXED heading
+    expect(mount.textContent).toContain("Assurance tiers");               // capability FIXED label
+    expect(mount.textContent).toContain("Progress");                      // run card FIXED label
+    expect(mount.textContent).toContain("Settlement record (read-only)"); // receipt → read-only settlement record
+    expect(mount.textContent).toContain("Not proof of payment");          // FIXED money-path warning
     // no live controls / bridge ever emitted
     expect(mount.querySelector("button")).toBeNull();
     expect(mount.querySelector("form")).toBeNull();
