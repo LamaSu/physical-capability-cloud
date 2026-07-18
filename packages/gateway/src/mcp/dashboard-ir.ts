@@ -90,15 +90,16 @@ interface BindPolicy {
 }
 const BIND_POLICY: Record<string, BindPolicy> = {
   // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
-  // MONEY/SETTLEMENT-STATE routes (/api/settlement/:, /api/escrow/:) are intentionally
-  // ABSENT: a manifest-labelled metric scalar over settlement/escrow state could paint
-  // "Payment received: true" (a fake receipt) — PCC owns the framing of settlement data,
-  // so it is only ever shown through the fixed static settlement-record pointer (no metric).
+  // Only NON-money, non-settlement-timestamp scalar routes are allowed. REMOVED:
+  //  - /api/settlement/:, /api/escrow/: (settlement/payment STATE → "Payment received");
+  //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
+  //    manifest could label it "Payment received");
+  //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
+  // jobs/:id/status (status/progress) + kernels/:id (infra) expose no money amount / settlement
+  // timestamp. The metric-LABEL framing guard (isMoneyFramingLabel) is the second gate: a
+  // manifest may not assert payment/settlement framing over ANY scalar.
   metric: {
-    routes: [
-      route("/api/fiat-ramp/cdp/wallet/:/balance"),
-      route("/api/jobs/:"), route("/api/jobs/:/status"), route("/api/kernels/:"),
-    ],
+    routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
     needsSelect: true,
   },
   // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
@@ -207,6 +208,19 @@ function isCredentialName(k: string): boolean {
   if (CRED_EXACT.has(n)) return true;
   return CRED_SUBSTR.some((t) => n.includes(t));
 }
+// Payment/settlement FRAMING detection for metric labels (sol finding 3). A metric renders a
+// manifest-supplied LABEL over a fetched scalar; PCC must not let a manifest assert that an
+// arbitrary scalar is a payment or a settlement ("Payment received", "Settled at", "Amount
+// paid"). Normalized (lowercase, separators stripped) substring match. Legit infra/execution
+// labels (Status, Progress, Queue depth, Reputation, Uptime, Devices) never match.
+const MONEY_FRAME_SUBSTR = [
+  "paid", "payment", "payout", "settle", "receipt", "refund",
+  "escrow", "invoice", "remit", "owed", "balance", "amountdue", "amountpaid",
+];
+function isMoneyFramingLabel(label: string): boolean {
+  const n = label.toLowerCase().replace(/[_\-\s]/g, "");
+  return MONEY_FRAME_SUBSTR.some((t) => n.includes(t));
+}
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
 function isOpDescriptor(v: unknown): boolean {
@@ -311,6 +325,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       // `format` intentionally NOT accepted (see file header). select is top-level + required.
       if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
       { const label = strictStr(w.label, LIM.title); if (label === null) return { ok: false, reason: "metric.label" };
+        if (isMoneyFramingLabel(label)) return { ok: false, reason: "metric.label asserts payment/settlement framing" };
         if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
         const b = mapBind(w.binding, "metric", w.select); if (!b.ok) return b;
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };

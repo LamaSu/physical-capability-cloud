@@ -29,7 +29,7 @@ const classes = (n: any): string[] => flat(n).flatMap((x) => String(x.className)
 // Build a valid IR from a valid manifest.
 const manifest: any = { csd: "pcc://artifacts/dashboard/v1", title: "Ops", sections: [{ heading: "Sec A", windows: [
   { kind: "note", text: "hello <b>not-html</b>" },
-  { kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } },
+  { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
   { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId"], statusFrom: "status" }, limit: 3 },
   { kind: "approval", binding: { path: "/api/escrow/e1" }, approve: { operation_id: "job.cancel" } },
   { kind: "actions", actions: [{ id: "a", label: "Refresh", operation_id: "job.cancel" }] },
@@ -45,7 +45,7 @@ const nodes = flat(mount);
 ok("title heading text rendered via textContent", texts(mount).includes("Ops"));
 ok("section heading rendered", texts(mount).includes("Sec A"));
 ok("note text is INERT (verbatim, not parsed)", texts(mount).includes("hello <b>not-html</b>"));
-ok("stat label rendered, value slot empty until bound", texts(mount).includes("Balance"));
+ok("stat label rendered, value slot empty until bound", texts(mount).includes("Progress"));
 ok("approval static notice rendered", texts(mount).some((t) => t.includes("authenticated PCC surface")));
 ok("action label → badge text", texts(mount).includes("Refresh"));
 ok("untrusted prose carries pcc-untrusted class", classes(mount).includes("pcc-untrusted"));

@@ -14,7 +14,7 @@ const projected: any = {
   csd: "pcc://artifacts/dashboard/v1", title: "Ops",
   sections: [{ heading: "Section A", windows: [
     { kind: "note", text: "hello <b>world</b>" },
-    { kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } },
+    { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
     { kind: "capability", binding: { path: "/api/capabilities/cap-1" } },
     { kind: "receipt", binding: { path: "/api/settlement/j1" } },
     { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId", "status"], statusFrom: "status" }, limit: 5 },
@@ -36,7 +36,7 @@ ok("all types frozen", nodes.every((n) => FROZEN.has(n.type)));
 ok("all prose untrusted", nodes.filter((n) => ["text", "heading", "stat", "badge", "field-label"].includes(n.type)).every((n) => n.untrusted === true));
 ok("doc.title untrusted H1", doc.title.type === "heading" && doc.title.props.level === 1 && doc.title.untrusted === true);
 ok("section heading untrusted", nodes.some((n) => n.type === "heading" && n.props?.text === "Section A" && n.untrusted));
-ok("metric stat: top-level select→bind.select, no format, bound, untrusted", (() => { const s = nodes.find((n) => n.type === "stat"); return s && s.bind?.select === "usdc" && !("format" in (s.props || {})) && s.untrusted === true && s.bind?.path === "/api/fiat-ramp/cdp/wallet/0xabc/balance"; })());
+ok("metric stat: top-level select→bind.select, no format, bound, untrusted", (() => { const s = nodes.find((n) => n.type === "stat"); return s && s.bind?.select === "progress" && !("format" in (s.props || {})) && s.untrusted === true && s.bind?.path === "/api/jobs/j1/status"; })());
 ok("form→form-summary, no field/button/form", nodes.some((n) => n.type === "form-summary") && !nodes.some((n) => ["field", "button", "form"].includes(n.type)));
 ok("approval→approval-notice with NO bind", (() => { const a = nodes.find((n) => n.type === "approval-notice"); return a && !a.bind; })());
 ok("chain→plan(composition)", nodes.some((n) => n.type === "plan" && n.props?.kind === "composition"));
@@ -57,8 +57,8 @@ bad("unknown kind", one({ kind: "evil" }));
 bad("extra key in window", one({ kind: "note", text: "a", evil: 1 }));
 bad("section field 'title' (not heading)", { csd: "x", title: "t", sections: [{ title: "T", windows: [] }] });
 // metric select is mandatory + top-level; format is disallowed; select-in-binding disallowed
-bad("metric WITHOUT select", one({ kind: "metric", label: "L", binding: { path: "/api/jobs/j1" } }));
-bad("metric WITH format (disallowed)", one({ kind: "metric", label: "L", select: "x", format: "usd", binding: { path: "/api/jobs/j1" } }));
+bad("metric WITHOUT select", one({ kind: "metric", label: "L", binding: { path: "/api/jobs/j1/status" } }));
+bad("metric WITH format (disallowed)", one({ kind: "metric", label: "L", select: "x", format: "usd", binding: { path: "/api/jobs/j1/status" } }));
 bad("metric select inside binding (disallowed)", one({ kind: "metric", label: "L", binding: { path: "/api/jobs/j1", select: "x" } }));
 bad("metric to DEAD /api/fiat-ramp/wallet/balance", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/fiat-ramp/wallet/balance" } }));
 bad("metric to reserved /api/settlement/status", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/status" } }));
@@ -71,6 +71,15 @@ ok("receipt with any binding → ACCEPTED as static (binding ignored)", dashboar
 bad("receipt with a non-object binding → REJECTED (shape)", one({ kind: "receipt", binding: "x" }));
 bad("metric to money route /api/settlement/:id (settlement not metric-bindable)", one({ kind: "metric", label: "Paid", select: "settled", binding: { path: "/api/settlement/job-004" } }));
 bad("metric to money route /api/escrow/:id (escrow not metric-bindable)", one({ kind: "metric", label: "Paid", select: "totalAmount", binding: { path: "/api/escrow/e1" } }));
+// sol re-audit finding 3: the framing bypass also worked through wallet-balance (arbitrary
+// address usdc) and the jobs/:id detail (updatedAt); both routes are now OUT of metric, and
+// the metric-LABEL guard rejects payment/settlement framing over ANY scalar.
+bad("metric to wallet balance (arbitrary-address usdc → 'Payment received')", one({ kind: "metric", label: "Funds", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } }));
+bad("metric to jobs/:id DETAIL (updatedAt → 'Settled at')", one({ kind: "metric", label: "Updated", select: "job.updatedAt", binding: { path: "/api/jobs/j1" } }));
+bad("metric LABEL 'Payment received' → REJECTED (framing guard)", one({ kind: "metric", label: "Payment received", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
+bad("metric LABEL 'Settled at' → REJECTED (framing guard)", one({ kind: "metric", label: "Settled at", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
+bad("metric LABEL 'Escrow balance' → REJECTED (framing guard, substr)", one({ kind: "metric", label: "Escrow balance", select: "progress", binding: { path: "/api/jobs/j1/status" } }));
+ok("metric LABEL 'Progress' over jobs/:/status ACCEPTED (legit infra label)", dashboardManifestToIr(one({ kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } })).ok === true);
 bad("list to /api/evidence (leak, not a list route)", one({ kind: "list", binding: { path: "/api/evidence" }, item: { title: "id" } }));
 bad("list to /api/marketplace/orders (leak)", one({ kind: "list", binding: { path: "/api/marketplace/orders" }, item: { title: "id" } }));
 bad("run sse/path IDENTITY MISMATCH", one({ kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j2" }, statusFrom: "s", latestFrom: "l" }));
@@ -78,8 +87,8 @@ bad("sse outside allowlist", one({ kind: "run", binding: { path: "/api/jobs/j1",
 bad("path not /api", one({ kind: "metric", label: "L", select: "u", binding: { path: "/etc/passwd" } }));
 bad("path with ..", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/../secret" } }));
 bad("path single-dot segment", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/." } }));
-bad("select proto segment", one({ kind: "metric", label: "L", select: "a.__proto__", binding: { path: "/api/jobs/j1" } }));
-bad("select brackets", one({ kind: "metric", label: "L", select: "a[0]", binding: { path: "/api/jobs/j1" } }));
+bad("select proto segment", one({ kind: "metric", label: "L", select: "a.__proto__", binding: { path: "/api/jobs/j1/status" } }));
+bad("select brackets", one({ kind: "metric", label: "L", select: "a[0]", binding: { path: "/api/jobs/j1/status" } }));
 // normalized credential field names
 bad("credential field token", one({ kind: "form", schema: { properties: { token: {} } }, submit: {} }));
 bad("credential field api_key (normalized)", one({ kind: "form", schema: { properties: { api_key: {} } }, submit: {} }));
@@ -93,9 +102,9 @@ bad("form.submit malformed shape", one({ kind: "form", schema: { properties: { a
 bad("action bad operation_id grammar", one({ kind: "actions", actions: [{ label: "L", operation_id: "DROP TABLE; --" }] }));
 bad("chain.execute malformed", one({ kind: "chain", composeRef: { id: "c" }, execute: { unknownField: 1 } }));
 bad("field-def with type:button", one({ kind: "form", schema: { properties: { x: { type: "button" } } }, submit: {} }));
-bad("query NaN", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: { n: NaN } } }));
+bad("query NaN", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: { n: NaN } } }));
 bad("__proto__ in manifest", JSON.parse('{"csd":"x","title":"x","sections":[],"__proto__":{"p":1}}'));
-bad("nested proto in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: JSON.parse('{"__proto__":{"p":1}}') } }));
+bad("nested proto in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: JSON.parse('{"__proto__":{"p":1}}') } }));
 bad("non-standard prototype manifest", Object.assign(Object.create({ polluted: 1 }), { csd: "x", title: "t", sections: [] }));
 ok("null-proto manifest is SAFE (accepted)", dashboardManifestToIr(Object.assign(Object.create(null), { csd: "x", title: "t", sections: [] })).ok === true);
 // symbol own key rejected (Reflect.ownKeys)
@@ -113,10 +122,10 @@ bad("metric→/api/settlement/submit (reserved POST)", one({ kind: "metric", lab
 bad("metric→/api/settlement/flush (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/flush" } }));
 bad("metric→/api/settlement/release (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/settlement/release" } }));
 bad("metric→/api/jobs/submit (reserved)", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/submit" } }));
-bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 250 } }));
-ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", pollMs: 5000 } })).ok === true);
+bad("pollMs below 5000ms floor", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", pollMs: 250 } }));
+ok("pollMs at 5000ms floor ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", pollMs: 5000 } })).ok === true);
 // 3 sections × 22 binds = 66 > 64 aggregate cap (each section ≤32, so the aggregate fires, not the per-section cap)
-bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", sections: Array.from({ length: 3 }, () => ({ windows: Array.from({ length: 22 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1" } })) })) });
+bad("bound-window budget (66 binds across 3 sections)", { csd: "x", title: "t", sections: Array.from({ length: 3 }, () => ({ windows: Array.from({ length: 22 }, () => ({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status" } })) })) });
 // direct validateIr aggregate (independent of the adapter): 66 bound stat nodes across 3 valid sections
 { let idc = 0; const nid = () => "n" + ++idc; const H = { type: "heading", id: nid(), props: { level: 1, text: "t" }, untrusted: true };
   const stat = () => ({ type: "stat", id: nid(), props: { label: "L" }, untrusted: true, bind: { path: "/api/jobs/j1", select: "u" } });
@@ -132,7 +141,7 @@ ok("capability→cap-1 (has digit) ACCEPTED", dashboardManifestToIr(one({ kind: 
 ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
 { const w: any = { kind: "note" }; Object.defineProperty(w, "text", { value: "hi", enumerable: false, configurable: true }); bad("non-enumerable allowed-name own key", one(w)); }
 { const secs: any = [{ windows: [] }]; secs.evil = 1; bad("extra own key on sections array", { csd: "x", title: "t", sections: secs }); }
-{ const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: q } })); }
+{ const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: q } })); }
 
 // ── validator parity (mirrors adapter) ──
 const okTitle = { type: "heading", id: "n1", props: { level: 1, text: "x" }, untrusted: true };

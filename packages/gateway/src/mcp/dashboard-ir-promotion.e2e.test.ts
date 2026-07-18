@@ -25,7 +25,7 @@ const rawManifest = {
     heading: "Live",
     windows: [
       { kind: "note", text: "Board status <b>x</b>" },
-      { kind: "metric", label: "Balance", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" }, select: "usdc" },
+      { kind: "metric", label: "Reputation", binding: { path: "/api/kernels/k1" }, select: "reputation" },
       { kind: "capability", binding: { path: "/api/capabilities/cap-1" } },
       { kind: "receipt", binding: { path: "/api/settlement/j1" } },
       { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId"], statusFrom: "status" }, limit: 5 },
@@ -76,7 +76,7 @@ describe("Phase-B promotion — real manifest → tool handler → projection �
     expect(mount.textContent).toContain("Ops Board");   // title
     expect(mount.textContent).toContain("Live");         // section heading
     expect(mount.textContent).toContain("Board status <b>x</b>"); // note, inert
-    expect(mount.textContent).toContain("Balance");      // metric label
+    expect(mount.textContent).toContain("Reputation");   // metric label
     expect(mount.textContent).toContain("Refresh");      // action → neutral badge
     expect(mount.textContent).toContain("Amount");       // form field-label
     expect(mount.textContent).toContain("authenticated PCC surface"); // approval → fixed notice

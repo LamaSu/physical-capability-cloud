@@ -82,17 +82,16 @@
   ]);
   var BIND_POLICY = {
     // metric: object-returning read + a REQUIRED scalar `select` (else the whole object shows).
-    // MONEY/SETTLEMENT-STATE routes (/api/settlement/:, /api/escrow/:) are intentionally
-    // ABSENT: a manifest-labelled metric scalar over settlement/escrow state could paint
-    // "Payment received: true" (a fake receipt) — PCC owns the framing of settlement data,
-    // so it is only ever shown through the fixed static settlement-record pointer (no metric).
+    // Only NON-money, non-settlement-timestamp scalar routes are allowed. REMOVED:
+    //  - /api/settlement/:, /api/escrow/: (settlement/payment STATE → "Payment received");
+    //  - /api/fiat-ramp/.../wallet/:/balance (an ARBITRARY address's usdc, no ownership → a
+    //    manifest could label it "Payment received");
+    //  - /api/jobs/:id detail (exposes updatedAt/completedAt-derived + escrow amounts → "Settled at").
+    // jobs/:id/status (status/progress) + kernels/:id (infra) expose no money amount / settlement
+    // timestamp. The metric-LABEL framing guard (isMoneyFramingLabel) is the second gate: a
+    // manifest may not assert payment/settlement framing over ANY scalar.
     metric: {
-      routes: [
-        route("/api/fiat-ramp/cdp/wallet/:/balance"),
-        route("/api/jobs/:"),
-        route("/api/jobs/:/status"),
-        route("/api/kernels/:")
-      ],
+      routes: [route("/api/jobs/:/status"), route("/api/kernels/:")],
       needsSelect: true
     },
     // capability card: a fixed PCC-owned SUMMARY (name/type/price/tiers/availability),
@@ -198,6 +197,25 @@
     if (CRED_EXACT.has(n)) return true;
     return CRED_SUBSTR.some((t) => n.includes(t));
   }
+  var MONEY_FRAME_SUBSTR = [
+    "paid",
+    "payment",
+    "payout",
+    "settle",
+    "receipt",
+    "refund",
+    "escrow",
+    "invoice",
+    "remit",
+    "owed",
+    "balance",
+    "amountdue",
+    "amountpaid"
+  ];
+  function isMoneyFramingLabel(label) {
+    const n = label.toLowerCase().replace(/[_\-\s]/g, "");
+    return MONEY_FRAME_SUBSTR.some((t) => n.includes(t));
+  }
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
     if (v.operation_id !== void 0 && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
@@ -302,6 +320,7 @@
         {
           const label = strictStr(w.label, LIM.title);
           if (label === null) return { ok: false, reason: "metric.label" };
+          if (isMoneyFramingLabel(label)) return { ok: false, reason: "metric.label asserts payment/settlement framing" };
           if (!isSelector(w.select)) return { ok: false, reason: "metric.select grammar" };
           const b = mapBind(w.binding, "metric", w.select);
           if (!b.ok) return b;

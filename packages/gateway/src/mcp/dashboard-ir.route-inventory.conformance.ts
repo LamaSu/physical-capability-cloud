@@ -67,7 +67,7 @@ assert.equal(leaks.length, 0, `${leaks.length} route-collision leak(s)`);
 // test isn't vacuously rejecting everything).
 const controls: Array<[string, string]> = [
   ["capability", "/api/capabilities/cap-1"],
-  ["metric", "/api/jobs/job-1"],
+  ["metric", "/api/jobs/job-1/status"], // jobs/:id DETAIL removed from metric; /status is the allowed shape
   ["metric", "/api/kernels/kernel_1"],
 ];
 for (const [kind, path] of controls) {

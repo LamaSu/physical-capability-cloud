@@ -29,7 +29,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   it("happy path: valid artifact projects, adapts, and validates", () => {
     const { projected, ir } = chain(raw([
       { kind: "note", text: "Live ops board" },
-      { kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/cdp/wallet/0xabc/balance" } },
+      { kind: "metric", label: "Progress", select: "progress", binding: { path: "/api/jobs/j1/status" } },
       { kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", meta: ["kernelId", "status"], statusFrom: "status" } },
       { kind: "run", binding: { path: "/api/jobs/j1", sse: "/sse/stream/job/j1" }, statusFrom: "status", latestFrom: "latest" },
     ]));
@@ -44,7 +44,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
   });
 
   it("metric bound to the DEAD /api/fiat-ramp/wallet/balance route is REJECTED", () => {
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "Balance", select: "usdc", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "usdc", binding: { path: "/api/fiat-ramp/wallet/balance" } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
@@ -61,7 +61,7 @@ describe("dashboard-ir — real projection → adapter → validator", () => {
 
   it("binding.query nested-object value survives projection → adapter REJECTS (attributed: has select)", () => {
     // `select` present so the rejection is due to the non-scalar query value, not missing select.
-    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1", query: { filter: { nested: "x" } } } }]));
+    const { projected, ir } = chain(raw([{ kind: "metric", label: "L", select: "u", binding: { path: "/api/jobs/j1/status", query: { filter: { nested: "x" } } } }]));
     expect(projected === null || ir?.ok === false).toBe(true);
   });
 
