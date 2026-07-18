@@ -197,16 +197,35 @@
     if (CRED_EXACT.has(n)) return true;
     return CRED_SUBSTR.some((t) => n.includes(t));
   }
-  var METRIC_SELECT_LABEL = {
-    status: "Status",
-    progress: "Progress",
-    reputation: "Reputation",
-    uptimePercent: "Uptime",
-    capabilityCount: "Capabilities",
-    totalJobsCompleted: "Jobs completed",
-    activeJobCount: "Active jobs"
-  };
-  var isMetricSelector = (s) => typeof s === "string" && Object.prototype.hasOwnProperty.call(METRIC_SELECT_LABEL, s);
+  var METRIC_PROFILE = [
+    { route: route("/api/jobs/:/status"), fields: {
+      // top-level envelope
+      status: { label: "Status", source: "status" },
+      progress: { label: "Progress", source: "progress" }
+    } },
+    { route: route("/api/kernels/:"), fields: {
+      // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
+      status: { label: "Status", source: "kernel.status" },
+      reputation: { label: "Reputation", source: "kernel.reputation" },
+      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent" },
+      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount" },
+      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted" },
+      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount" }
+    } }
+  ];
+  function metricFieldForSelect(path, select) {
+    if (typeof select !== "string") return null;
+    for (const p of METRIC_PROFILE) if (p.route.test(path)) return hasOwn(p.fields, select) ? p.fields[select] : null;
+    return null;
+  }
+  function metricLabelForSource(path, source) {
+    if (typeof source !== "string") return null;
+    for (const p of METRIC_PROFILE) if (p.route.test(path)) {
+      for (const k of Object.keys(p.fields)) if (p.fields[k].source === source) return p.fields[k].label;
+      return null;
+    }
+    return null;
+  }
   function isOpDescriptor(v) {
     if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
     if (v.operation_id !== void 0 && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
@@ -309,12 +328,13 @@
       case "metric":
         if (!onlyKeys(w, ["kind", "label", "binding", "select"])) return { ok: false, reason: "metric extra key" };
         {
-          if (!isMetricSelector(w.select)) return { ok: false, reason: "metric.select not an allowlisted metric field" };
-          const label = METRIC_SELECT_LABEL[w.select];
-          const b = mapBind(w.binding, "metric", w.select);
+          const bpath = isPlain(w.binding) ? w.binding.path : void 0;
+          const field = typeof bpath === "string" ? metricFieldForSelect(bpath, w.select) : null;
+          if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
+          const b = mapBind(w.binding, "metric", field.source);
           if (!b.ok) return b;
           if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-          return { ok: true, node: { type: "stat", id, props: { label }, bind: b.bind } };
+          return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } };
         }
       // PCC-owned label → NOT untrusted
       case "capability":
@@ -538,9 +558,11 @@
         if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget";
       } else if (spec.needsBind) return `${n.type} requires a bind`;
       if (n.type === "stat") {
-        const sel = n.bind?.select;
-        if (typeof sel !== "string" || !hasOwn(METRIC_SELECT_LABEL, sel)) return "stat select not an allowlisted metric field";
-        if (n.props?.label !== METRIC_SELECT_LABEL[sel]) return "stat label is not the PCC-owned label for its selector";
+        const src = n.bind?.select;
+        const bpath = n.bind?.path;
+        const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
+        if (expected === null) return "stat (route, source) not an allowlisted metric field";
+        if (n.props?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
       }
       if (spec.prose && n.untrusted !== true) return `prose ${n.type} not untrusted`;
       if (!spec.prose && n.untrusted !== void 0) return `non-prose ${n.type} marked untrusted`;
@@ -713,7 +735,7 @@
     stat: (d, n) => {
       const e = el(d, CLS.stat);
       e.appendChild(el(d, CLS.heading, String(n.props?.label ?? "")));
-      e.appendChild(el(d, CLS.value, "", true));
+      e.appendChild(el(d, CLS.value, UNAVAILABLE, true));
       return e;
     },
     card: (d, n) => {
@@ -1120,7 +1142,8 @@
       const el2 = statEls[i];
       const slot = el2?.querySelector(".pcc-value");
       if (slot) push(startBind(node, deps, (data) => {
-        slot.textContent = bindScalar(node, data);
+        const v = bindScalar(node, data);
+        slot.textContent = v !== "" ? v : "\u2014";
       }));
     });
     schemaCards.forEach((node, i) => {

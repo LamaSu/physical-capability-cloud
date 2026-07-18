@@ -190,7 +190,7 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   stat: (d, n) => {
     const e = el(d, CLS.stat);
     e.appendChild(el(d, CLS.heading, String(n.props?.label ?? ""))); // PCC-owned metric label (trusted)
-    e.appendChild(el(d, CLS.value, "", true)); // value slot filled by bindScalar (fetched, untrusted)
+    e.appendChild(el(d, CLS.value, UNAVAILABLE, true)); // default "—" until a clean GET lands; bindScalar overwrites (fetched, untrusted)
     return e;
   },
   card: (d, n) => {

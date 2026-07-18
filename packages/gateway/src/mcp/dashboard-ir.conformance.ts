@@ -83,6 +83,11 @@ bad("metric to wallet-balance route (not metric-bindable)", one({ kind: "metric"
 // selector is ACCEPTED but rendered under the PCC-OWNED label (and the stat is NOT untrusted).
 ok("metric label 'Payment received' IGNORED → PCC label 'Progress', stat not untrusted", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "Payment received", select: "progress", binding: { path: "/api/jobs/j1/status" } })); if (!rr.ok) return false; const s = flat(rr.doc).find((n: any) => n.type === "stat"); return s?.props?.label === "Progress" && s?.untrusted === undefined; })());
 ok("metric label 'Funds received at' IGNORED → PCC label 'Reputation'", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "Funds received at", select: "reputation", binding: { path: "/api/kernels/k1" } })); if (!rr.ok) return false; return flat(rr.doc).find((n: any) => n.type === "stat")?.props?.label === "Reputation"; })());
+// envelope correctness (sol NO-GO(1)): the kernels detail route returns { kernel: … }, so the
+// LOGICAL selector "reputation" is rewritten to the REAL source "kernel.reputation" — else the
+// metric would bind but stay inert. jobs/:/status is top-level, so its source == the selector.
+ok("kernels metric bind.select is the ENVELOPE source 'kernel.reputation' (not inert)", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "x", select: "reputation", binding: { path: "/api/kernels/k1" } })); if (!rr.ok) return false; return flat(rr.doc).find((n: any) => n.type === "stat")?.bind?.select === "kernel.reputation"; })());
+ok("jobs metric bind.select is top-level 'progress' (no envelope)", (() => { const rr = dashboardManifestToIr(one({ kind: "metric", label: "x", select: "progress", binding: { path: "/api/jobs/j1/status" } })); if (!rr.ok) return false; return flat(rr.doc).find((n: any) => n.type === "stat")?.bind?.select === "progress"; })());
 // (validateIr mirror of the PCC-owned-label invariant is asserted in the validateIr section below.)
 bad("list to /api/evidence (leak, not a list route)", one({ kind: "list", binding: { path: "/api/evidence" }, item: { title: "id" } }));
 bad("list to /api/marketplace/orders (leak)", one({ kind: "list", binding: { path: "/api/marketplace/orders" }, item: { title: "id" } }));
@@ -142,7 +147,7 @@ bad("capability→graph-search (reserved)", one({ kind: "capability", binding: {
 bad("capability→pure-alpha id 'printer' (id-grammar rejects the class)", one({ kind: "capability", binding: { path: "/api/capabilities/printer" } }));
 bad("metric→jobs/submit-from-discovery (reserved)", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/submit-from-discovery" } }));
 ok("capability→cap-1 (has digit) ACCEPTED", dashboardManifestToIr(one({ kind: "capability", binding: { path: "/api/capabilities/cap-1" } })).ok === true);
-ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
+ok("metric→kernels/kernel_printshop_alpha (underscore id) ACCEPTED", dashboardManifestToIr(one({ kind: "metric", label: "L", select: "status", binding: { path: "/api/kernels/kernel_printshop_alpha" } })).ok === true);
 { const w: any = { kind: "note" }; Object.defineProperty(w, "text", { value: "hi", enumerable: false, configurable: true }); bad("non-enumerable allowed-name own key", one(w)); }
 { const secs: any = [{ windows: [] }]; secs.evil = 1; bad("extra own key on sections array", { csd: "x", title: "t", sections: secs }); }
 { const q: any = {}; Object.defineProperty(q, "n", { value: 1, enumerable: false, configurable: true }); bad("non-enumerable key in query", one({ kind: "metric", label: "L", select: "progress", binding: { path: "/api/jobs/j1/status", query: q } })); }

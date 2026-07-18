@@ -80,6 +80,9 @@ ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 ok("bindScalar reads declared select", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "usdc" } } as any, { usdc: "42.5" }) === "42.5");
 ok("bindScalar proto segment → empty (no traversal)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "__proto__" } } as any, {}) === "");
 ok("bindScalar drops nested-object value (scalar only)", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/x", select: "a" } } as any, { a: { nested: 1 } }) === "");
+// envelope source read (sol NO-GO(1) fix): a kernels stat's bind.select is "kernel.reputation",
+// which reads INTO the { kernel: … } envelope — so the metric actually populates, not inert.
+ok("bindScalar reads the kernel envelope source 'kernel.reputation'", bindScalar({ type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as any, { kernel: { reputation: 850 } }) === "850");
 
 // ── Fixed PCC-owned schema cards (hollow-node binding) ────────────────────────────
 // The manifest supplies a bind PATH only; PCC owns headings, labels, and each value's

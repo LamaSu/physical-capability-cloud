@@ -214,7 +214,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   const byClass = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
   const statEls = byClass("pcc-stat"), listEls = byClass("pcc-list"), schemaEls = byClass("pcc-schema-card");
   const push = (h: { stop: () => void }) => boundHandles.push(h);
-  stats.forEach((node, i) => { const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (slot) push(startBind(node, deps, (data) => { slot.textContent = bindScalar(node, data); })); });
+  stats.forEach((node, i) => { const el = statEls[i]; const slot = el?.querySelector<HTMLElement>(".pcc-value"); if (slot) push(startBind(node, deps, (data) => { const v = bindScalar(node, data); slot.textContent = v !== "" ? v : "—"; })); }); // "—" on a miss
   // Fixed-schema cards (capability/run/settlement): PCC owns the labels; each value slot
   // ← its ONE fixed key via bindSchemaCard. The manifest supplies NO selector here, so it
   // can neither relabel a field nor surface an off-schema response field.
