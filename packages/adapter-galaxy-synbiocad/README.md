@@ -66,24 +66,36 @@ Dataset inputs accept an existing history id (`"hda-..."`), a URL, or inline con
 (`{src:"inline", content, ext}`) — inline/URL refs are staged via `/api/tools/fetch`
 before the run.
 
-> **Honest status:** the REST transport is implemented to the documented Galaxy API
-> and unit-tested against a `fetch` mock. It has **not** yet been exercised against a
-> live Galaxy server (needs `GALAXY_URL` + API key). Mock mode is fully working and
-> is what CI runs.
+> **Honest status:** live-verified against `galaxy-synbiocad.org` (v21.09, 350 tools) —
+> `health()`, `listTools()`, and short-id → toolshed tool_id resolution all work. The
+> **authenticated job-execution** path is implemented-to-spec + mock-tested but not yet
+> run end-to-end against a live server (needs a Galaxy API key; anonymous writes → 403).
+> Mock mode is fully working and is what CI runs.
 
-## Registering the kernel
+## Deploy & register with a PCC gateway
 
-```ts
-import { registerKernel } from "@pcc/kernel-sdk";
+Two turnkey scripts. The gateway touchstone POSTs `{jobId, dryRun:true, ...}` to your
+endpoint and requires a 2xx — `serve.mjs` answers that (and runs real jobs):
 
-const { handler } = kernel.createEphemeralHandler(); // dev only; prod uses operator keys
-// serve `handler` at endpointURL, then:
-await registerKernel("https://capability.network", kernel.manifest, { apiKey: PCC_KEY });
+```bash
+# 1. serve the kernel's job handler on a port
+PORT=8790 node scripts/serve.mjs
+
+# 2. expose it on a public HTTPS URL (quick tunnel, or a real host)
+cloudflared tunnel --url http://localhost:8790     # -> https://<name>.trycloudflare.com
+
+# 3. register + self-verify (builder self-auth via X-Agent-Id)
+GATEWAY_URL=https://pcc-gateway-staging.up.railway.app \
+PCC_API_KEY=pcc_live_... \
+ENDPOINT_URL=https://<name>.trycloudflare.com/ \
+  node scripts/register-kernel.mjs
 ```
 
-For production settlement, wire your operator-owned Ed25519 principal key via
-`kernel.createHandler({ principalKey, principalPrivateKey })` (the same key you bind
-with `registerKernel`'s `signingKey` option).
+Get `PCC_API_KEY` from `POST <gateway>/api/auth/provision` (public). The gateway's kernel
+registry is in-memory (self-clears on restart), so staging registration is low-stakes. For
+production settlement, swap `createEphemeralHandler()` for
+`kernel.createHandler({ principalKey, principalPrivateKey })` with an operator-owned Ed25519
+key — the same one you bind via `registerKernel`'s `signingKey` option.
 
 ## Regenerating the catalog
 
