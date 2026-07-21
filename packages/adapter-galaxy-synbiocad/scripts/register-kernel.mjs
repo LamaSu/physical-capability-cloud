@@ -22,6 +22,9 @@ const GATEWAY = process.env.GATEWAY_URL;
 const KEY = process.env.PCC_API_KEY;
 const ENDPOINT = process.env.ENDPOINT_URL;
 const KERNEL_ID = process.env.KERNEL_ID ?? "galaxy-synbiocad-demo";
+// For builder self-verify to pass, BUILDER_AGENT_ID must match your gateway
+// operator identity — i.e. the `operator_id` returned by /api/auth/provision
+// (typically your email). Verified end-to-end against pcc-gateway-staging.
 const AGENT = process.env.BUILDER_AGENT_ID ?? "eip155:84532:0xGalaxySynBioCadDemo";
 
 if (!GATEWAY || !KEY || !ENDPOINT) {
@@ -52,6 +55,7 @@ const vres = await fetch(`${GATEWAY}/api/kernels/${encodeURIComponent(KERNEL_ID)
     Authorization: `Bearer ${KEY}`,
     "X-Agent-Id": AGENT, // builder self-auth
   },
+  body: JSON.stringify({}), // Fastify rejects an empty body when content-type is JSON
 });
 console.log("verify:", vres.status, await vres.text());
 
