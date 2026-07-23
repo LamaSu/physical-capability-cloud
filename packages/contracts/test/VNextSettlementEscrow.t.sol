@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {VNextSettlementEscrow, O5Verdict} from "../src/VNextSettlementEscrow.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
-import {PayoutEntry, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
+import {PayoutEntry, FeeSchedule, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {EASAttestation} from "../src/interfaces/IEAS.sol";
 
 /// @dev Configurable adversarial USDC mock. `transfer` (money-out) and `transferFrom` (funding) modes
@@ -149,7 +149,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function _unitId(VNextSettlementEscrow e) internal view returns (bytes32) {
-        return VNextSettlementLib.computeSettlementUnitId(block.chainid, address(e), JOB, 0, keccak256("step-0"));
+        return VNextSettlementLib.computeSettlementUnitId(block.chainid, address(e), e.jobIdHash(), 0, keccak256("step-0"));
     }
 
     function _fund(VNextSettlementEscrow e, VNextSettlementEscrow.UnitConfig[] memory cfgs) internal {
@@ -468,5 +468,141 @@ contract VNextSettlementEscrowTest is Test {
             feeScheduleHash: bytes32(0),
             settlementUnitId: id
         });
+    }
+
+    // ── gate-2: production-shaped max-aggregate funding gas + calldata-bound fit ───────────────────
+    function test_gas_maxAggregateFunding_fits() public {
+        VNextSettlementEscrow e = _newEscrow(keccak256("job-max"));
+        uint256 UNITS = VNextSettlementLib.MAX_SETTLEMENT_UNITS; // 16
+        uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT; // 16
+        uint256 legAmt = 1e6;
+        uint256 n = legAmt * LEGS;
+        VNextSettlementEscrow.UnitConfig[] memory cfgs = new VNextSettlementEscrow.UnitConfig[](UNITS);
+        for (uint256 u; u < UNITS; ++u) {
+            PayoutEntry[] memory po = new PayoutEntry[](LEGS);
+            for (uint256 j; j < LEGS; ++j) {
+                po[j] = PayoutEntry({recipient: address(uint160(0x100000 + u * LEGS + j + 1)), amount: legAmt});
+            }
+            cfgs[u] = VNextSettlementEscrow.UnitConfig({
+                milestoneIndex: u,
+                stepId: keccak256(abi.encode("step", u)),
+                requiredTier: 1,
+                requestedTier: 1,
+                g: n,
+                f: 0,
+                n: n,
+                feeBps: 0,
+                feeRecipient: address(0),
+                disputeWindow: 1 days,
+                reclaimAt: block.timestamp + 30 days,
+                payouts: po
+            });
+        }
+        // calldata bound (M-01): the max accepted config MUST fit the frozen MAX_CONFIG_BYTES.
+        bytes memory cd = abi.encodeCall(VNextSettlementEscrow.fund, (cfgs));
+        emit log_named_uint("max-config fund() calldata bytes", cd.length);
+        assertLe(cd.length, VNextSettlementLib.MAX_CONFIG_BYTES, "max config must fit MAX_CONFIG_BYTES");
+        // gas of the full 256-entry funding tx.
+        vm.prank(payer);
+        uint256 g0 = gasleft();
+        e.fund(cfgs);
+        emit log_named_uint("max aggregate funding gas (256 entries)", g0 - gasleft());
+        assertEq(e.unitCount(), UNITS);
+    }
+
+    // ── gate-2: worst-case single-unit release (16 legs, all safe-fail -> 16 claims) ──────────────
+    function test_gas_worstCaseRelease() public {
+        VNextSettlementEscrow e = _newEscrow(keccak256("job-wc"));
+        uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT;
+        uint256 legAmt = 1e6;
+        uint256 n = legAmt * LEGS;
+        PayoutEntry[] memory po = new PayoutEntry[](LEGS);
+        for (uint256 j; j < LEGS; ++j) po[j] = PayoutEntry({recipient: address(uint160(0x200000 + j + 1)), amount: legAmt});
+        VNextSettlementEscrow.UnitConfig[] memory cfgs = new VNextSettlementEscrow.UnitConfig[](1);
+        cfgs[0] = VNextSettlementEscrow.UnitConfig({
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            requiredTier: 1,
+            requestedTier: 1,
+            g: n,
+            f: 0,
+            n: n,
+            feeBps: 0,
+            feeRecipient: address(0),
+            disputeWindow: 1 days,
+            reclaimAt: block.timestamp + 30 days,
+            payouts: po
+        });
+        _fund(e, cfgs);
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.NORMAL); // all 16 legs discharge (worst-case realistic release)
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        uint256 g0 = gasleft();
+        e.resolveDispute(id, true);
+        emit log_named_uint("worst-case 16-leg release gas", g0 - gasleft());
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+    }
+
+    // ── gate-1: byte-exact golden vectors for the oracle/evidence ethers/viem mirror (M2) ─────────
+    // Canonical fixed inputs: chainId=8453 (Base), escrow=0x…E5C0F, jobIdHash=keccak("golden-job"),
+    // milestoneIndex=3, stepId=keccak("golden-step"), G/F/N=1000000/23500/976500, feeBps=235.
+    function test_emit_goldenVectors() public {
+        uint256 cid = 8453;
+        address ESC = address(0xE5C0F);
+        bytes32 jobIdHash = keccak256("golden-job");
+        uint256 mi = 3;
+        bytes32 stepId = keccak256("golden-step");
+
+        bytes32 unitId = VNextSettlementLib.computeSettlementUnitId(cid, ESC, jobIdHash, mi, stepId);
+        emit log_named_bytes32("settlementUnitId", unitId);
+
+        FeeSchedule memory fs = FeeSchedule({
+            domainVersion: 1,
+            chainId: cid,
+            escrow: ESC,
+            settlementUnitId: unitId,
+            feeBasis: 0,
+            g: 1_000_000,
+            f: 23_500,
+            n: 976_500,
+            feeBps: 235,
+            denominator: 10_000,
+            roundingRule: 0,
+            feeRecipient: address(0xFEE0),
+            feeSplitConfigHash: bytes32(0)
+        });
+        emit log_named_bytes32("feeScheduleHash", VNextSettlementLib.computeFeeScheduleHash(fs));
+
+        PayoutEntry[] memory po = new PayoutEntry[](2);
+        po[0] = PayoutEntry({recipient: address(0xAAA1), amount: 500_000});
+        po[1] = PayoutEntry({recipient: address(0xBBB2), amount: 476_500});
+        emit log_named_bytes32("payoutConfigHash", VNextSettlementLib.computePayoutConfigHash(unitId, po));
+
+        emit log_named_bytes32(
+            "claimId_PRINCIPAL_leg0", VNextSettlementLib.computeClaimId(cid, ESC, unitId, 0, ClaimClass.PRINCIPAL)
+        );
+        emit log_named_bytes32(
+            "claimId_FEE", VNextSettlementLib.computeClaimId(cid, ESC, unitId, type(uint256).max, ClaimClass.FEE)
+        );
+
+        O5Verdict memory v = O5Verdict({
+            jobIdHash: jobIdHash,
+            milestoneIndex: mi,
+            stepId: stepId,
+            evidenceBundleHash: keccak256("golden-bundle"),
+            achievedTier: 2,
+            requestedTier: 2,
+            decision: 1,
+            verdictHash: keccak256("golden-verdict"),
+            feeBps: 235,
+            feeRecipient: address(0xFEE0),
+            feeScheduleHash: VNextSettlementLib.computeFeeScheduleHash(fs),
+            settlementUnitId: unitId
+        });
+        bytes memory o5 = abi.encode(v);
+        emit log_named_uint("o5Verdict_encoded_bytes", o5.length);
+        emit log_named_bytes32("o5Verdict_keccak", keccak256(o5));
     }
 }
