@@ -1,4 +1,7 @@
 {
+  "../../vendor/lingbot-map": {
+    "rev": "2225e635e425372bbff3a69646a848eef62ed9bd"
+  },
   "lib\\forge-std": {
     "tag": {
       "name": "v1.15.0",
