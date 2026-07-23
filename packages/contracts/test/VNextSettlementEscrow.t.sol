@@ -137,6 +137,8 @@ contract VNextSettlementEscrowTest is Test {
     address recip1 = address(0xBEEF01);
     address recip2 = address(0xBEEF02);
     address feeDest = address(0xFEE1);
+    address operator = address(0x0FE7A); // the funder-designated evidence committer (§B)
+    bytes32 constant PKG = keccak256("evidence-package-v1");
     bytes32 constant O5_SCHEMA = keccak256("test.o5.schema");
     bytes32 constant JOB = keccak256("job-1");
     bytes32 constant TERMS = keccak256("terms-1");
@@ -180,6 +182,7 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
+            evidenceCommitter: operator,
             payouts: po
         });
     }
@@ -191,6 +194,24 @@ contract VNextSettlementEscrowTest is Test {
     function _fund(VNextSettlementEscrow e, VNextSettlementEscrow.UnitConfig[] memory cfgs) internal {
         vm.prank(payer);
         e.fund(cfgs);
+    }
+
+    // ── §B evidence-commit helpers ────────────────────────────────────────────────────────────────
+    /// @dev The canonical commitment the escrow stores, recomputed here from the unit's own frozen fields.
+    function _commitment(VNextSettlementEscrow e, bytes32 id, bytes32 packageDigest) internal view returns (bytes32) {
+        return VNextSettlementLib.computeEvidenceCommitment(
+            block.chainid,
+            address(e),
+            id,
+            e.compositionSchemaVersionOf(id),
+            VNextSettlementLib.EVIDENCE_PACKAGE_FORMAT_V1,
+            packageDigest
+        );
+    }
+
+    function _commit(VNextSettlementEscrow e, bytes32 id, bytes32 packageDigest) internal {
+        vm.prank(operator);
+        e.submitEvidence(id, packageDigest);
     }
 
     // ── funding ───────────────────────────────────────────────────────────────────────────────────
@@ -428,7 +449,8 @@ contract VNextSettlementEscrowTest is Test {
             jobIdHash: JOB,
             milestoneIndex: 0,
             stepId: keccak256("step-0"),
-            evidenceBundleHash: keccak256("bundle"),
+            // §B: the O5 field carries the escrow's domain-separated commitment over the committed package
+            evidenceBundleHash: _commitment(e, id, PKG),
             achievedTier: achieved,
             requestedTier: 1,
             decision: decision,
@@ -465,6 +487,7 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
+        _commit(e, id, PKG); // §B: commit the package BEFORE the verdict exists
         eas.set(_o5Attestation(e, id, 1, 1)); // decision=SETTLE(1), achieved>=required
         e.releaseFromEvidence(id, keccak256("uid-1"));
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
@@ -544,6 +567,7 @@ contract VNextSettlementEscrowTest is Test {
                 reclaimAt: block.timestamp + 30 days,
                 compositionSchemaVersion: 0,
                 compositionRoot: bytes32(0),
+                evidenceCommitter: operator,
                 payouts: po
             });
         }
@@ -582,6 +606,7 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
+            evidenceCommitter: operator,
             payouts: po
         });
         _fund(e, cfgs);
@@ -727,6 +752,7 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
         eas.set(_o5Attestation(e, id, 1, 1)); // an otherwise-valid attestation already exists
         attester.setEnabled(false); // cohort disabled AFTER the mint — must neutralize it at payment time
         vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
@@ -767,6 +793,7 @@ contract VNextSettlementEscrowTest is Test {
         c[0].compositionRoot = root;
         _fund(e, c);
         bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
         EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.compositionRoot = root; // matches the frozen unit root
@@ -782,7 +809,8 @@ contract VNextSettlementEscrowTest is Test {
     ///      max-config fit is asserted in test_gas_maxAggregateFunding_fits; this pins the constant itself
     ///      so a future UnitConfig field cannot silently leave slack (or, worse, make the max unfundable).
     function test_MaxConfigBytes_IsTheExactCanonicalEnvelope() public pure {
-        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 24_644, "16 units x 16 legs max fund() calldata");
+        // 24,644 B at rev-3, + 512 B for §B's per-unit `evidenceCommitter` (16 units x 32 B).
+        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 25_156, "16 units x 16 legs max fund() calldata");
     }
 
     /// @dev L-02: a non-zero `o5TypeHash` deployment pin must equal the bound cohort's live type hash.
@@ -816,4 +844,326 @@ contract VNextSettlementEscrowTest is Test {
         vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
         e.releaseFromEvidence(id, keccak256("uid-1"));
     }
+
+    // ══ §B — on-chain evidence binding ═════════════════════════════════════════════════════════════
+
+    // ── funding-time binding of the committer ─────────────────────────────────────────────────────
+    function test_Fund_FreezesEvidenceCommitter_AndStartsUncommitted() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        assertEq(e.evidenceCommitterOf(id), operator, "committer frozen at funding");
+        assertFalse(e.evidenceCommittedOf(id), "nothing committed yet");
+        vm.expectRevert(VNextSettlementEscrow.EvidenceNotCommitted.selector);
+        e.evidenceBundleHashOf(id); // the default value is never readable as a commitment
+    }
+
+    function test_Fund_RejectsZeroEvidenceCommitter() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].evidenceCommitter = address(0);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.fund(c);
+    }
+
+    function test_Fund_RejectsExcludedEvidenceCommitter() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].evidenceCommitter = address(usdc); // the token can never be a caller
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.fund(c);
+    }
+
+    // ── submitEvidence: authority, window, one-shot ───────────────────────────────────────────────
+    function test_SubmitEvidence_StoresDomainSeparatedCommitment() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        bytes32 expected = _commitment(e, id, PKG);
+        vm.expectEmit(true, false, false, true, address(e));
+        emit VNextSettlementEscrow.EvidenceCommitted(id, PKG, expected);
+        _commit(e, id, PKG);
+        assertTrue(e.evidenceCommittedOf(id));
+        assertEq(e.evidenceBundleHashOf(id), expected, "stored value is the domain-separated commitment");
+        assertTrue(expected != PKG, "the raw package digest is never what is stored");
+    }
+
+    function test_SubmitEvidence_OnlyCommitter() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
+        e.submitEvidence(id, PKG); // the test contract is not the committer
+        vm.prank(payer); // not even the payer, unless it designated itself
+        vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
+        e.submitEvidence(id, PKG);
+    }
+
+    function test_SubmitEvidence_RejectsSecondCommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.EvidenceAlreadyCommitted.selector);
+        e.submitEvidence(id, keccak256("a-second-package")); // no re-pointing to shop for a payable verdict
+        assertEq(e.evidenceBundleHashOf(id), _commitment(e, id, PKG), "first commit stands");
+    }
+
+    function test_SubmitEvidence_RejectsZeroDigest() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.ZeroEvidenceDigest.selector);
+        e.submitEvidence(id, bytes32(0));
+    }
+
+    function test_SubmitEvidence_RejectsAfterReclaimAt() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        vm.warp(block.timestamp + 30 days); // == reclaimAt
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.TooLateForEvidence.selector);
+        e.submitEvidence(id, PKG);
+    }
+
+    function test_SubmitEvidence_RejectsDuringLiveDispute() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.LiveDispute.selector);
+        e.submitEvidence(id, PKG);
+    }
+
+    function test_SubmitEvidence_RejectsWhenNotActive() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        eas.set(_o5Attestation(e, id, 1, 1));
+        e.releaseFromEvidence(id, keccak256("uid-1")); // unit is now SETTLED_RELEASED
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.submitEvidence(id, keccak256("late-package"));
+    }
+
+    function test_SubmitEvidence_RejectsUnknownUnit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.UnitNotFound.selector);
+        e.submitEvidence(keccak256("not-a-unit"), PKG);
+    }
+
+    // ── release binding ───────────────────────────────────────────────────────────────────────────
+    function test_EvidenceRelease_RevertsWithNoCommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        eas.set(_o5Attestation(e, id, 1, 1)); // an otherwise-perfect verdict, but nothing was committed
+        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev The zero/default hash must never satisfy release — this is why `evidenceCommitted` is separate.
+    function test_EvidenceRelease_ZeroBundleHashCannotSatisfyAnUncommittedUnit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.evidenceBundleHash = bytes32(0); // matches the unit's untouched storage slot
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+    }
+
+    function test_EvidenceRelease_RevertsOnDigestMismatch() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.evidenceBundleHash = _commitment(e, id, keccak256("a-different-package")); // verdict over another package
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev Domain separation: the SAME package digest committed on a different unit yields a different
+    ///      commitment, so a verdict minted for unit A can never satisfy unit B.
+    function test_EvidenceCommitment_DoesNotReplayAcrossUnits() public {
+        VNextSettlementEscrow e1 = _newEscrow(JOB);
+        VNextSettlementEscrow e2 = _newEscrow(keccak256("job-other"));
+        _fund(e1, _oneUnitConfig(1000e6, 0, 0, 1));
+        _fund(e2, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id1 = _unitId(e1);
+        bytes32 id2 = _unitId(e2);
+        _commit(e1, id1, PKG);
+        _commit(e2, id2, PKG); // identical package digest
+        assertTrue(e1.evidenceBundleHashOf(id1) != e2.evidenceBundleHashOf(id2), "escrow/unit domain-separated");
+
+        // and a different composition schema version also moves the commitment
+        assertTrue(
+            VNextSettlementLib.computeEvidenceCommitment(block.chainid, address(e1), id1, 0, 1, PKG)
+                != VNextSettlementLib.computeEvidenceCommitment(block.chainid, address(e1), id1, 1, 1, PKG),
+            "schema version is bound"
+        );
+        assertTrue(
+            VNextSettlementLib.computeEvidenceCommitment(block.chainid, address(e1), id1, 0, 1, PKG)
+                != VNextSettlementLib.computeEvidenceCommitment(block.chainid, address(e1), id1, 0, 2, PKG),
+            "package format is bound"
+        );
+        assertTrue(
+            VNextSettlementLib.computeEvidenceCommitment(block.chainid, address(e1), id1, 0, 1, PKG)
+                != VNextSettlementLib.computeEvidenceCommitment(block.chainid + 1, address(e1), id1, 0, 1, PKG),
+            "chainId is bound"
+        );
+    }
+
+    /// @dev ONE VERDICT PER UNIT: after a settle, a second otherwise-valid verdict (fresh uid, same
+    ///      committed package, same tier) cannot settle the unit again.
+    function test_OneVerdictPerUnit_SecondValidVerdictCannotSettle() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        eas.set(_o5Attestation(e, id, 1, 1));
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+
+        EASAttestation memory a2 = _o5Attestation(e, id, 1, 1);
+        a2.uid = keccak256("uid-2"); // a brand-new, fully valid attestation over the same committed package
+        eas.set(a2);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.releaseFromEvidence(id, keccak256("uid-2"));
+        assertEq(usdc.balanceOf(feeDest), 23_500000, "paid exactly once");
+        assertEq(usdc.balanceOf(address(e)), 0);
+    }
+
+    /// @dev The consume-once is the UNIT's state transition, and it holds even in the partially-settled
+    ///      RELEASE_ALLOCATED case (payouts stuck as claims): neither a replay of the same uid nor a fresh
+    ///      verdict can allocate a second release. (`_easUidUsed` sits behind this state guard as
+    ///      defense-in-depth — an attestation is bound to exactly one unit, so the state guard is what
+    ///      actually fires.)
+    function test_OneVerdictPerUnit_ReleaseAllocatedCannotBeReReleased() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // stay in RELEASE_ALLOCATED (claims outstanding)
+        eas.set(_o5Attestation(e, id, 1, 1));
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        assertEq(e.liabilityOf(id), 1000e6, "still owed once, not twice");
+
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1")); // same uid
+
+        EASAttestation memory a2 = _o5Attestation(e, id, 1, 1);
+        a2.uid = keccak256("uid-2");
+        eas.set(a2);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.releaseFromEvidence(id, keccak256("uid-2")); // fresh uid, same committed package
+        assertEq(e.liabilityOf(id), 1000e6, "no second allocation");
+    }
+
+    // ── refund/reclaim independence (fail-closed) ─────────────────────────────────────────────────
+    /// @dev The refund path must never depend on the committer OR the attester: no commit at all still
+    ///      refunds the payer in full at `reclaimAt`.
+    function test_Reclaim_WorksWithNoCommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        assertFalse(e.evidenceCommittedOf(id));
+        attester.setEnabled(false); // and the whole cohort is dead
+        vm.warp(block.timestamp + 31 days);
+        uint256 before = usdc.balanceOf(payer);
+        e.reclaimAfterDeadline(id); // permissionless
+        assertEq(usdc.balanceOf(payer), before + 1000e6, "full G back to the payer");
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+    }
+
+    /// @dev A WRONG commit (a package no verdict will ever match) also fails closed to a full refund.
+    function test_Reclaim_WorksWithWrongCommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, keccak256("wrong-package"));
+        eas.set(_o5Attestation(e, id, 1, 1)); // verdict over the RIGHT package -> unpayable against this commit
+        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        vm.warp(block.timestamp + 31 days);
+        uint256 before = usdc.balanceOf(payer);
+        e.reclaimAfterDeadline(id);
+        assertEq(usdc.balanceOf(payer), before + 1000e6);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+    }
+
+    /// @dev Dispute-driven refund is likewise independent of any commit.
+    function test_DisputeRefund_WorksWithNoCommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        uint256 before = usdc.balanceOf(payer);
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        e.resolveDispute(id, false);
+        assertEq(usdc.balanceOf(payer), before + 1000e6);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+    }
+
+    /// @dev A committed package does not weaken the payer's dispute/refund rights either.
+    function test_DisputeRefund_WorksAfterACommit() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        uint256 before = usdc.balanceOf(payer);
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        e.resolveDispute(id, false);
+        assertEq(usdc.balanceOf(payer), before + 1000e6);
+    }
+
+    // ── golden vector for the oracle's off-chain mirror ───────────────────────────────────────────
+    function test_emit_evidenceCommitmentGolden() public pure {
+        // canonical fixed inputs (same shape as the gate-1 goldens): chainId 8453, escrow 0x…E5C0F
+        uint256 cid = 8453;
+        address ESC = address(0xE5C0F);
+        bytes32 unitId = VNextSettlementLib.computeSettlementUnitId(cid, ESC, keccak256("golden-job"), 3, keccak256("golden-step"));
+        bytes32 pkg = keccak256("golden-evidence-package");
+        bytes32 commitment = VNextSettlementLib.computeEvidenceCommitment(
+            cid, ESC, unitId, 1, VNextSettlementLib.EVIDENCE_PACKAGE_FORMAT_V1, pkg
+        );
+        console2.log("== evidence-commitment golden (mirror these off-chain) ==");
+        console2.log("chainId", cid);
+        console2.log("escrow", ESC);
+        console2.log("compositionSchemaVersion", uint256(1));
+        console2.log("packageFormat", uint256(VNextSettlementLib.EVIDENCE_PACKAGE_FORMAT_V1));
+        console2.logBytes32(VNextSettlementLib.EVIDENCE_COMMITMENT_DOMAIN);
+        console2.logBytes32(unitId);
+        console2.logBytes32(pkg);
+        console2.logBytes32(commitment);
+        // pinned literal, computed with `cast abi-encode` + `cast keccak` (NOT by this library)
+        assertEq(commitment, GOLDEN_EVIDENCE_COMMITMENT, "evidence-commitment golden");
+    }
+
+    /// @dev computed OUTSIDE this contract with `cast abi-encode` + `cast keccak` over the §B 7-word form
+    ///      {domain, 8453, 0x…E5C0F, unitId, schemaVersion 1, format 1, keccak("golden-evidence-package")}.
+    bytes32 constant GOLDEN_EVIDENCE_COMMITMENT = 0xba4753b572b0d79518e05c88932d213125d0634a2c2fbbd7e74d7d52578eb7aa;
 }

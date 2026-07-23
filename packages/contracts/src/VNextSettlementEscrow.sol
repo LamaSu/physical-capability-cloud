@@ -120,8 +120,13 @@ contract VNextSettlementEscrow {
         uint256 liability; // the unit's sole current liability bucket (§3)
         uint256 remainingClaimCount; // set at allocation; SETTLED_* only when 0 (§7)
         uint256 nextApprovalNonce; // buyer-approval single-use nonce (§10.10)
+        // ── one packed slot: 2 + 20 + 1 = 23 bytes ────────────────────────────────────────────────
         uint16 compositionSchemaVersion; // rev-3 §C2: frozen at funding (0 = non-composed)
+        address evidenceCommitter; // §B: the ONLY caller of submitEvidence, frozen at funding
+        bool evidenceCommitted; // §B: separate from the hash so a zero/default hash NEVER satisfies release
+        // ──────────────────────────────────────────────────────────────────────────────────────────
         bytes32 compositionRoot; // rev-3 §C2/§C3: frozen root, oracle echoes it → equality-checked at release
+        bytes32 evidenceBundleHash; // §B: the domain-separated commitment, oracle echoes it → checked at release
         Dispute dispute;
     }
 
@@ -160,6 +165,15 @@ contract VNextSettlementEscrow {
         uint256 reclaimAt; // absolute timestamp; must be in the future
         uint16 compositionSchemaVersion; // rev-3 §C2 (0 = non-composed)
         bytes32 compositionRoot; // rev-3 §C2/§C3 (echoed into O5, equality-checked at release)
+        // §B BINDING RULE: the evidence committer is chosen by the FUNDER, at funding, and frozen — the
+        // payer is the only caller of fund(), so the committer is always funder-designated (the payer
+        // itself, or an operator it trusts). No third party can ever commit, and therefore no third party
+        // can strand a good job by racing in a wrong package digest (the one-shot commit is anti-grief).
+        // It is an authority, never a money destination: it is checked against the same exclusion set as a
+        // payout recipient (non-zero, not this escrow, not the token, not the factory) because none of
+        // those can be a legitimate caller. Tier-0 units never use it; a value is still required so the
+        // field can never be left at a default that silently means "anyone".
+        address evidenceCommitter;
         PayoutEntry[] payouts; // Σ amount == n; each nonzero; allowed recipients only
     }
 
@@ -198,6 +212,9 @@ contract VNextSettlementEscrow {
     event DisputeOpened(bytes32 indexed unitId, uint256 nonce, uint256 effectiveDisputeExpiry);
     event DisputeResolved(bytes32 indexed unitId, bool operatorWins);
     event EvidenceReleased(bytes32 indexed unitId, bytes32 indexed easUid);
+    /// @param packageDigest the raw evidence-package digest the committer supplied.
+    /// @param commitment    the domain-separated form actually stored + checked at release (§B).
+    event EvidenceCommitted(bytes32 indexed unitId, bytes32 packageDigest, bytes32 commitment);
     event BuyerApproved(bytes32 indexed unitId, uint256 approvalNonce);
     event ClaimDestinationRotated(
         bytes32 indexed claimId, address previousDestination, address newDestination, uint256 nonce
@@ -269,6 +286,12 @@ contract VNextSettlementEscrow {
     error TierRequestMismatch();
     error TierOutOfRange();
     error TypeHashMismatch();
+    // §B on-chain evidence binding
+    error OnlyEvidenceCommitter();
+    error ZeroEvidenceDigest();
+    error EvidenceAlreadyCommitted();
+    error EvidenceNotCommitted();
+    error EvidenceBundleMismatch();
 
     modifier nonReentrant() {
         _enterGuard();
@@ -415,6 +438,9 @@ contract VNextSettlementEscrow {
             // internal structure; the escrow only equality-checks it against the O5 echo at release).
             u.compositionSchemaVersion = c.compositionSchemaVersion;
             u.compositionRoot = c.compositionRoot;
+            // §B: freeze the funder-designated evidence committer (see UnitConfig for the binding rule).
+            _requireAllowedRecipient(c.evidenceCommitter);
+            u.evidenceCommitter = c.evidenceCommitter;
             u.state = UnitState.FUNDED_ACTIVE;
             u.reclaimAt = c.reclaimAt;
             u.disputeWindow = c.disputeWindow;
@@ -531,6 +557,62 @@ contract VNextSettlementEscrow {
     /// @notice rev-3 §C2: the funding-frozen composition schema version (0 = non-composed).
     function compositionSchemaVersionOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint16) {
         return _units[unitId].compositionSchemaVersion;
+    }
+
+    /// @notice §B: the funding-frozen evidence committer — the only address `submitEvidence` accepts.
+    function evidenceCommitterOf(bytes32 unitId) external view onlyExisting(unitId) returns (address) {
+        return _units[unitId].evidenceCommitter;
+    }
+
+    /// @notice §B: whether an evidence package has been committed for this unit.
+    function evidenceCommittedOf(bytes32 unitId) external view onlyExisting(unitId) returns (bool) {
+        return _units[unitId].evidenceCommitted;
+    }
+
+    /// @notice §B: the committed evidence commitment the O5 verdict must echo.
+    /// @dev    REVERTS with `EvidenceNotCommitted` when nothing is committed rather than returning zero —
+    ///         the default value must never be readable as a valid commitment by any consumer (that is the
+    ///         same reason `evidenceCommitted` is a separate flag). The oracle attester STATICCALLs this
+    ///         before minting, so an uncommitted unit fails closed instead of burning its verdict slot.
+    function evidenceBundleHashOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
+        Unit storage u = _units[unitId];
+        if (!u.evidenceCommitted) revert EvidenceNotCommitted();
+        return u.evidenceBundleHash;
+    }
+
+    // ── §B on-chain evidence binding ──────────────────────────────────────────────────────────────
+
+    /// @notice Commit the evidence package this unit will be settled against (§B). One shot, by the
+    ///         funding-frozen committer only, while the unit is still live and undisputed.
+    /// @dev    The stored value is the DOMAIN-SEPARATED commitment, not `packageDigest` itself, so the same
+    ///         package hash committed for another chain/escrow/unit/schema-version/format can never satisfy
+    ///         this unit's release (`VNextSettlementLib.computeEvidenceCommitment`). One-shot + the release
+    ///         check together mean the committer selects the package BEFORE any verdict exists, and can
+    ///         never re-point a funded unit at a second package to shop for a payable verdict.
+    ///         This function is on the RELEASE path only: refund/reclaim never reads any of these fields, so
+    ///         a missing, late, or wrong commit simply fails closed to the payer's refund at `reclaimAt`.
+    function submitEvidence(bytes32 unitId, bytes32 packageDigest) external nonReentrant onlyExisting(unitId) {
+        Unit storage u = _units[unitId];
+        if (msg.sender != u.evidenceCommitter) revert OnlyEvidenceCommitter();
+        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
+        if (block.timestamp >= u.reclaimAt) revert TooLateForEvidence();
+        if (u.dispute.opened) revert LiveDispute();
+        if (packageDigest == bytes32(0)) revert ZeroEvidenceDigest();
+        if (u.evidenceCommitted) revert EvidenceAlreadyCommitted();
+
+        // The unit's FROZEN chainId (== block.chainid at funding; the release path re-checks that they
+        // still agree via `_assertRuntimeDomain`), mirroring how `settlementUnitId` itself was derived.
+        bytes32 commitment = VNextSettlementLib.computeEvidenceCommitment(
+            u.feeSchedule.chainId,
+            address(this),
+            unitId,
+            u.compositionSchemaVersion,
+            VNextSettlementLib.EVIDENCE_PACKAGE_FORMAT_V1,
+            packageDigest
+        );
+        u.evidenceBundleHash = commitment;
+        u.evidenceCommitted = true;
+        emit EvidenceCommitted(unitId, packageDigest, commitment);
     }
 
     function milestoneIndexOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
@@ -857,6 +939,15 @@ contract VNextSettlementEscrow {
         // be enabled — a one-way disable neutralizes an otherwise-valid pre-minted attestation here.
         if (v.oracleAuthEpoch != oracleAuthEpoch) revert OracleCohortMismatch();
         if (v.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
+
+        // §B on-chain evidence binding: the verdict must be over the package this unit committed to, and a
+        // unit with nothing committed can never release on evidence. The `evidenceCommitted` flag is checked
+        // separately from the hash so a zero/default `evidenceBundleHash` on BOTH sides can never match.
+        // With `requiredTier == requestedTier` frozen at funding (§E) and the EAS uid + unit state both
+        // consumed once, exactly one verdict — the one over the committed package, at the required tier —
+        // is ever payable for a unit.
+        if (!u.evidenceCommitted || v.evidenceBundleHash != u.evidenceBundleHash) revert EvidenceBundleMismatch();
+
         if (!IOracleAttester(authorizedOracle).enabled()) revert OracleCohortDisabled();
 
         _allocateRelease(

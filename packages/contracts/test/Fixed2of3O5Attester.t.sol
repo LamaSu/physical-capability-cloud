@@ -9,17 +9,31 @@ import {O5Verdict, O5_DECISION_SETTLE} from "../src/O5Types.sol";
 import {AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 
-/// @dev Settlement-escrow READ double for the M-01 anti-brick pre-check: exposes the same
-///      `compositionRootOf(bytes32)` surface {VNextSettlementEscrow} does, with a settable per-unit root and
-///      a switch to model an escrow whose unit does not exist (reverting getter).
+/// @dev Settlement-escrow READ double for the M-01 anti-brick pre-check: mirrors the two binding getters
+///      {VNextSettlementEscrow} exposes — a settable per-unit composition root, and a committed evidence
+///      commitment that REVERTS while uncommitted (exactly as the real escrow's `evidenceBundleHashOf`
+///      does) — plus a switch to model a unit that was never funded.
 contract MockEscrowBinding {
     mapping(bytes32 => bytes32) public root;
+    mapping(bytes32 => bytes32) internal _bundle;
+    mapping(bytes32 => bool) public committed;
     bool public reverts;
 
     error UnitNotFound();
+    error EvidenceNotCommitted();
 
     function setRoot(bytes32 unitId, bytes32 r) external {
         root[unitId] = r;
+    }
+
+    function setEvidence(bytes32 unitId, bytes32 commitment) external {
+        _bundle[unitId] = commitment;
+        committed[unitId] = true;
+    }
+
+    function clearEvidence(bytes32 unitId) external {
+        delete _bundle[unitId];
+        committed[unitId] = false;
     }
 
     function setReverts(bool r) external {
@@ -29,6 +43,12 @@ contract MockEscrowBinding {
     function compositionRootOf(bytes32 unitId) external view returns (bytes32) {
         if (reverts) revert UnitNotFound();
         return root[unitId];
+    }
+
+    function evidenceBundleHashOf(bytes32 unitId) external view returns (bytes32) {
+        if (reverts) revert UnitNotFound();
+        if (!committed[unitId]) revert EvidenceNotCommitted();
+        return _bundle[unitId];
     }
 }
 
@@ -83,6 +103,7 @@ contract Fixed2of3O5AttesterTest is Test {
     uint256 constant MI = 3;
     bytes32 constant STEP = keccak256("attester-step");
     bytes32 constant ROOT = keccak256("cr"); // the escrow's funding-frozen composition root
+    bytes32 constant BUNDLE = keccak256("committed-evidence-commitment"); // the escrow's committed §B value
 
     // secp256k1 group order (for the high-s malleability construction).
     uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
@@ -95,8 +116,9 @@ contract Fixed2of3O5AttesterTest is Test {
             vm.addr(pk1), vm.addr(pk2), vm.addr(pk3), address(mockEas), O5_SCHEMA, COHORT, REVOKER
         );
         single = new SingleSignerO5Attester(vm.addr(pkS), address(mockEas), O5_SCHEMA, COHORT, REVOKER);
-        // the escrow froze ROOT for this unit at funding; the quorum must echo exactly that.
+        // the escrow froze ROOT at funding and the committer committed BUNDLE; the quorum must echo both.
         escrowBinding.setRoot(_suid(), ROOT);
+        escrowBinding.setEvidence(_suid(), BUNDLE);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
@@ -110,7 +132,7 @@ contract Fixed2of3O5AttesterTest is Test {
             jobIdHash: JOB,
             milestoneIndex: MI,
             stepId: STEP,
-            evidenceBundleHash: keccak256("eb"),
+            evidenceBundleHash: BUNDLE,
             achievedTier: 2,
             requestedTier: 2,
             decision: O5_DECISION_SETTLE,
@@ -332,6 +354,36 @@ contract Fixed2of3O5AttesterTest is Test {
         bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
         assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
         assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev §B twin of the above: a verdict over a package the escrow did NOT commit to must not consume
+    ///      the slot either — the escrow would reject it with EvidenceBundleMismatch at release.
+    function test_WrongEvidenceBundle_Reverts_AndLeavesUnitMintable() public {
+        O5Verdict memory wrong = _verdict();
+        wrong.evidenceBundleHash = keccak256("a-package-the-escrow-never-committed");
+        bytes[] memory wrongSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(wrong));
+        vm.expectRevert(O5AttesterBase.EvidenceBundleMismatch.selector);
+        attester.attestO5(wrong, ESCROW, wrongSigs);
+        assertFalse(attester.usedUnit(wrong.settlementUnitId), "wrong-bundle verdict must not consume the unit");
+
+        O5Verdict memory good = _verdict();
+        attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev §B commit-before-verdict: nothing committed on the escrow ⇒ no mint, nothing consumed.
+    function test_UncommittedEvidence_Reverts_NothingConsumed() public {
+        escrowBinding.clearEvidence(_suid());
+        O5Verdict memory v = _verdict();
+        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        vm.expectRevert(O5AttesterBase.EscrowBindingUnreadable.selector);
+        attester.attestO5(v, ESCROW, sigs);
+        assertFalse(attester.usedUnit(v.settlementUnitId));
+
+        // once the committer commits, the same quorum mints
+        escrowBinding.setEvidence(_suid(), BUNDLE);
+        attester.attestO5(v, ESCROW, sigs);
+        assertTrue(attester.usedUnit(v.settlementUnitId));
     }
 
     /// @dev Fail-closed when the escrow's unit does not exist (getter reverts) — nothing is consumed.

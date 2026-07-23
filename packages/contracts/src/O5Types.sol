@@ -18,7 +18,10 @@ struct O5Verdict {
     bytes32 jobIdHash; // 1
     uint256 milestoneIndex; // 2
     bytes32 stepId; // 3
-    bytes32 evidenceBundleHash; // 4
+    // 4 — §B: the escrow's DOMAIN-SEPARATED evidence commitment (NOT the raw package digest):
+    // `VNextSettlementLib.computeEvidenceCommitment`, readable from the escrow as
+    // `evidenceBundleHashOf(settlementUnitId)`. Equality-checked against the unit's committed value.
+    bytes32 evidenceBundleHash;
     uint8 achievedTier; // 5
     uint8 requestedTier; // 6
     uint8 decision; // 7  (SETTLE == O5_DECISION_SETTLE)

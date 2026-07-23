@@ -8,8 +8,11 @@ import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
 
 /// @notice The minimal settlement-escrow READ surface this attester binds a verdict to before it consumes
 ///         a unit's one-verdict slot. Implemented by {VNextSettlementEscrow}; only ever STATICCALLed.
+///         Both getters revert for a unit that does not exist, and `evidenceBundleHashOf` also reverts when
+///         nothing has been committed — so "unreadable" is the correct fail-closed answer in both cases.
 interface IEscrowSettlementBinding {
     function compositionRootOf(bytes32 unitId) external view returns (bytes32);
+    function evidenceBundleHashOf(bytes32 unitId) external view returns (bytes32);
 }
 
 /**
@@ -76,6 +79,7 @@ abstract contract O5AttesterBase is IOracleAttester {
     error RevokerIsSigner();
     error EscrowBindingUnreadable();
     error CompositionRootMismatch();
+    error EvidenceBundleMismatch();
 
     constructor(address eas_, bytes32 o5SchemaUid_, uint64 cohortId_, address revoker_) {
         if (eas_ == address(0) || revoker_ == address(0)) revert ZeroAddress();
@@ -125,13 +129,23 @@ abstract contract O5AttesterBase is IOracleAttester {
         // M-of-N quorum over the canonical digest (concrete rule). Reverts unless the quorum is met.
         _verifySignatures(_digest(v), signatures);
 
-        // M-01 anti-brick pre-check (§C3): bind the verdict to the escrow's OWN funding-frozen composition
-        // root before the slot is consumed. Without this, a verdict carrying a stale root mints, burns this
-        // unit's single verdict slot, and is then rejected by the escrow with CompositionRootMismatch —
-        // leaving evidence settlement for that unit permanently unavailable (refund-only). Ordered AFTER the
-        // quorum check (only an authenticated call reaches out of this contract) and BEFORE the `usedUnit`
-        // effect (a mismatch, or an unreadable/unfunded escrow, consumes nothing and can be re-attempted).
-        if (_escrowCompositionRoot(escrow, v.settlementUnitId) != v.compositionRoot) revert CompositionRootMismatch();
+        // M-01 anti-brick pre-check: bind the verdict to the escrow's OWN frozen state before the slot is
+        // consumed. Both fields below are re-checked by the escrow at release and cannot be derived here, so
+        // without this a verdict carrying a stale composition root (§C3) or a bundle hash that is not the
+        // committed one (§B) would mint, burn this unit's single verdict slot, and then be rejected by the
+        // escrow — leaving evidence settlement for that unit permanently unavailable (refund-only).
+        // Ordered AFTER the quorum check (only an authenticated call reaches out of this contract) and
+        // BEFORE the `usedUnit` effect, so a mismatch — or an escrow that is unfunded / has not yet
+        // committed its evidence package — consumes nothing and can simply be re-attempted. This is also
+        // what enforces §B's commit-before-verdict rule on the oracle side.
+        if (
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.compositionRootOf.selector, v.settlementUnitId)
+                != v.compositionRoot
+        ) revert CompositionRootMismatch();
+        if (
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.evidenceBundleHashOf.selector, v.settlementUnitId)
+                != v.evidenceBundleHash
+        ) revert EvidenceBundleMismatch();
 
         // One settle-verdict per unit. EFFECT before the external attest (checks-effects-interactions).
         if (usedUnit[v.settlementUnitId]) revert UnitAlreadyAttested();
@@ -155,14 +169,15 @@ abstract contract O5AttesterBase is IOracleAttester {
     }
 
     // ── Escrow binding read (M-01) ─────────────────────────────────────────────────────────────────
-    /// @dev Read the escrow's funding-frozen composition root. STATICCALL only: the escrow cannot write
-    ///      state, emit, or re-enter through it, so this adds a read — not a reentrancy surface — and no
-    ///      state of this contract is touched. The return buffer is capped at one word so a hostile escrow
-    ///      cannot returndata-bomb the oracle's transaction. FAIL-CLOSED: no code at `escrow`, a missing
-    ///      getter, a reverting getter (e.g. the unit is not funded), or any return length other than 32
-    ///      all revert here — i.e. before `usedUnit` is consumed, so nothing is burned.
-    function _escrowCompositionRoot(address escrow, bytes32 unitId) private view returns (bytes32 root) {
-        bytes memory cd = abi.encodeCall(IEscrowSettlementBinding.compositionRootOf, (unitId));
+    /// @dev Read one `bytes32`-returning, `bytes32`-taking binding getter off the settling escrow.
+    ///      STATICCALL only: the escrow cannot write state, emit, or re-enter through it, so this adds a
+    ///      read — not a reentrancy surface — and no state of this contract is touched. The return buffer is
+    ///      capped at one word so a hostile escrow cannot returndata-bomb the oracle's transaction.
+    ///      FAIL-CLOSED: no code at `escrow`, a missing getter, a reverting getter (unit not funded, or no
+    ///      evidence committed yet), or any return length other than 32 all revert here — i.e. before
+    ///      `usedUnit` is consumed, so nothing is burned and the call can be retried once the escrow is ready.
+    function _escrowBindingWord(address escrow, bytes4 selector, bytes32 unitId) private view returns (bytes32 word) {
+        bytes memory cd = abi.encodeWithSelector(selector, unitId);
         bool ok;
         uint256 len;
         assembly ("memory-safe") {
@@ -170,7 +185,7 @@ abstract contract O5AttesterBase is IOracleAttester {
             let out := mload(0x40)
             ok := staticcall(gas(), escrow, add(cd, 0x20), mload(cd), out, 0x20)
             len := returndatasize()
-            root := mload(out)
+            word := mload(out)
         }
         if (!ok || len != 32) revert EscrowBindingUnreadable();
     }

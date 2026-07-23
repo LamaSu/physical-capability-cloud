@@ -75,6 +75,9 @@ library VNextSettlementLib {
     uint8 internal constant FEE_BASIS_GROSS = 0;
     uint8 internal constant ROUNDING_FLOOR = 0;
     bytes32 internal constant SETTLEMENT_UNIT_DOMAIN = keccak256("PCC:vnext:settlement-unit:v1");
+    // §B on-chain evidence binding: the domain tag + the package-format label of the committed digest.
+    bytes32 internal constant EVIDENCE_COMMITMENT_DOMAIN = keccak256("PCC:vnext:evidence-commitment:v1");
+    uint8 internal constant EVIDENCE_PACKAGE_FORMAT_V1 = 1;
 
     // ── FROZEN limits (§6) ──────────────────────────────────────────────────
     uint256 internal constant MAX_PAYOUT_LEGS_PER_UNIT = 16;
@@ -82,13 +85,14 @@ library VNextSettlementLib {
     uint256 internal constant MAX_SETTLEMENT_UNITS = 16;
     uint256 internal constant MAX_TOTAL_LEGS_PER_JOB = 256; // counts PAYOUT entries only (16x16); a release may add +1 fee claim
     // §6 funding-calldata DoS bound (feeds no hash/golden/parity value). L-01: pinned to the EXACT canonical
-    // envelope, not a round number — the 16-unit x 16-leg maximum `fund()` calldata (selector included)
-    // measures 24,644 B, asserted every run by `test_gas_maxAggregateFunding_fits`. rev-3 added two static
-    // UnitConfig words per unit (compositionSchemaVersion + compositionRoot = 64 B/unit), which is why this
-    // supersedes the frozen §6 24,576 bound: at 24,576 the maximum ACCEPTED config would be unfundable. Any
-    // future UnitConfig field must re-measure and re-pin this to the new exact value. The real griefing caps
-    // remain MAX_SETTLEMENT_UNITS / MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB.
-    uint256 internal constant MAX_CONFIG_BYTES = 24_644;
+    // envelope, not a round number — the 16-unit x 16-leg maximum `fund()` calldata (selector included),
+    // asserted every run by `test_gas_maxAggregateFunding_fits`. It supersedes the frozen §6 24,576 bound
+    // because at 24,576 the maximum ACCEPTED config would be unfundable. Derivation, re-measured per field:
+    //   rev-3 (compositionSchemaVersion + compositionRoot, +64 B/unit) .................. 24,644 B
+    //   §B    (+ evidenceCommitter, +32 B/unit x 16 units = +512 B) ..................... 25,156 B  <- current
+    // Any future UnitConfig field must re-measure and re-pin this. The real griefing caps remain
+    // MAX_SETTLEMENT_UNITS / MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB.
+    uint256 internal constant MAX_CONFIG_BYTES = 25_156;
 
     // Reserved claim leg indices (§2/§7): PRINCIPAL uses the payout entry index; FEE/REFUND use these sentinels.
     uint256 internal constant FEE_LEG_INDEX = type(uint256).max;
@@ -105,6 +109,36 @@ library VNextSettlementLib {
         bytes32 stepId
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(SETTLEMENT_UNIT_DOMAIN, chainId, escrow, jobIdHash, milestoneIndex, stepId));
+    }
+
+    /// @notice §B canonical evidence commitment — the ONE domain-separated form of a committed evidence
+    ///         package. The raw `packageDigest` is never stored or compared on its own: the same package
+    ///         hash committed under a different chain, escrow, unit, composition schema version, or package
+    ///         format yields a different commitment, so a digest can never be replayed across units.
+    /// @dev    The oracle mirrors this EXACTLY and echoes the result as `O5Verdict.evidenceBundleHash`
+    ///         (i.e. the O5 field carries this commitment, not the raw package digest). Byte-exact ABI
+    ///         `abi.encode` of 7 static words {domain, chainId, escrow, settlementUnitId, schemaVersion,
+    ///         packageFormat, packageDigest}, in this order — changing a field, type, or position is a
+    ///         cross-lane re-pin. Golden vector: `test_emit_evidenceCommitmentGolden`.
+    function computeEvidenceCommitment(
+        uint256 chainId,
+        address escrow,
+        bytes32 settlementUnitId,
+        uint16 compositionSchemaVersion,
+        uint8 packageFormat,
+        bytes32 packageDigest
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EVIDENCE_COMMITMENT_DOMAIN,
+                chainId,
+                escrow,
+                settlementUnitId,
+                compositionSchemaVersion,
+                packageFormat,
+                packageDigest
+            )
+        );
     }
 
     /// @notice §2 `feeScheduleHash` — 13-field ABI-standard keccak (#382 authoritative).
