@@ -7,7 +7,9 @@ import {O5Verdict, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.so
 import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {PayoutEntry, FeeSchedule, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
-import {EASAttestation} from "../src/interfaces/IEAS.sol";
+import {EASAttestation, AttestationRequest} from "../src/interfaces/IEAS.sol";
+import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
+import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
 
 /// @dev Configurable adversarial USDC mock. `transfer` (money-out) and `transferFrom` (funding) modes
 ///      are set per test to drive the tryTransferExact classifier + the funding delta check.
@@ -91,6 +93,34 @@ contract MockEAS {
 
     function getAttestation(bytes32) external view returns (EASAttestation memory) {
         return _att;
+    }
+}
+
+/// @dev A read+write EAS double: records what an attester mints and serves it back by uid, so the real
+///      cohort attester and the real escrow can be exercised end-to-end through one registry.
+contract MockReadWriteEAS {
+    mapping(bytes32 => EASAttestation) internal _atts;
+    uint256 public n;
+
+    function attest(AttestationRequest calldata r) external payable returns (bytes32 uid) {
+        uid = keccak256(abi.encode(r.schema, r.data.recipient, r.data.data, n));
+        n += 1;
+        _atts[uid] = EASAttestation({
+            uid: uid,
+            schema: r.schema,
+            time: uint64(block.timestamp),
+            expirationTime: r.data.expirationTime,
+            revocationTime: 0,
+            refUID: r.data.refUID,
+            recipient: r.data.recipient,
+            attester: msg.sender,
+            revocable: r.data.revocable,
+            data: r.data.data
+        });
+    }
+
+    function getAttestation(bytes32 uid) external view returns (EASAttestation memory) {
+        return _atts[uid];
     }
 }
 
@@ -571,10 +601,14 @@ contract VNextSettlementEscrowTest is Test {
                 payouts: po
             });
         }
-        // calldata bound (M-01): the max accepted config MUST fit the frozen MAX_CONFIG_BYTES.
+        // L-01 calldata bound. This config is 16 units x 16 legs == MAX_TOTAL_LEGS_PER_JOB, i.e. the largest
+        // config the contract SEMANTICALLY ACCEPTS, so it must fit — a bound below it is a funding DoS on a
+        // legal input. Asserted as an EXACT equality too, so adding a UnitConfig field without re-pinning
+        // MAX_CONFIG_BYTES (either direction) fails here rather than in production.
         bytes memory cd = abi.encodeCall(VNextSettlementEscrow.fund, (cfgs));
         emit log_named_uint("max-config fund() calldata bytes", cd.length);
         assertLe(cd.length, VNextSettlementLib.MAX_CONFIG_BYTES, "max config must fit MAX_CONFIG_BYTES");
+        assertEq(cd.length, VNextSettlementLib.MAX_CONFIG_BYTES, "MAX_CONFIG_BYTES is the exact 16x16 envelope");
         // gas of the full 256-entry funding tx.
         vm.prank(payer);
         uint256 g0 = gasleft();
@@ -1138,6 +1172,114 @@ contract VNextSettlementEscrowTest is Test {
         vm.prank(arbiter);
         e.resolveDispute(id, false);
         assertEq(usdc.balanceOf(payer), before + 1000e6);
+    }
+
+    // ── end-to-end across the REAL attester + the REAL escrow ─────────────────────────────────────
+    // The attester-side unit tests drive a mock escrow, which by construction cannot catch drift between
+    // `IEscrowSettlementBinding` and this escrow's actual getters. This exercises the whole money path
+    // through both real contracts: fund -> commit -> 2-of-3 quorum mint -> release.
+    uint256 constant sk1 = 0x51;
+    uint256 constant sk2 = 0x52;
+    uint256 constant sk3 = 0x53;
+    uint64 constant REAL_COHORT = 9;
+
+    function _ascendingSigs(bytes32 digest) internal pure returns (bytes[] memory sigs) {
+        sigs = new bytes[](2);
+        (uint256 lo, uint256 hi) = vm.addr(sk1) < vm.addr(sk2) ? (sk1, sk2) : (sk2, sk1);
+        (uint8 v0, bytes32 r0, bytes32 s0) = vm.sign(lo, digest);
+        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(hi, digest);
+        sigs[0] = abi.encodePacked(r0, s0, v0);
+        sigs[1] = abi.encodePacked(r1, s1, v1);
+    }
+
+    function test_EndToEnd_RealAttesterMint_ThenRealEscrowRelease() public {
+        MockReadWriteEAS rwEas = new MockReadWriteEAS();
+        Fixed2of3O5Attester real = new Fixed2of3O5Attester(
+            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), address(rwEas), O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
+        );
+        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
+            address(usdc), address(rwEas), address(real), O5_SCHEMA, real.o5TypeHash()
+        );
+        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
+
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        bytes32 root = keccak256("e2e-composition-root");
+        c[0].compositionSchemaVersion = 1;
+        c[0].compositionRoot = root;
+        _fund(e, c);
+        bytes32 id = _unitId(e);
+        assertEq(e.oracleAuthEpoch(), REAL_COHORT, "escrow pinned the real cohort at funding");
+        _commit(e, id, PKG);
+
+        // Every verdict field the attester pre-checks is read straight off the escrow — exactly what the
+        // off-chain oracle does. If a getter's name, argument, or return width drifted, this would fail.
+        O5Verdict memory v = O5Verdict({
+            jobIdHash: JOB,
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            evidenceBundleHash: e.evidenceBundleHashOf(id),
+            achievedTier: e.requiredTierOf(id),
+            requestedTier: e.requiredTierOf(id),
+            decision: O5_DECISION_SETTLE,
+            verdictHash: keccak256("e2e-verdict"),
+            feeBps: e.feeBpsOf(id),
+            feeRecipient: e.feeRecipientOf(id),
+            feeScheduleHash: e.feeScheduleHashOf(id),
+            settlementUnitId: id,
+            oracleAuthEpoch: REAL_COHORT,
+            compositionRoot: e.compositionRootOf(id)
+        });
+        bytes32 uid = real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
+        assertTrue(real.usedUnit(id), "the unit's one verdict slot is now consumed");
+
+        e.releaseFromEvidence(id, uid);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(feeDest), 23_500000);
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), 1000e6 - 23_500000);
+        assertEq(usdc.balanceOf(address(e)), 0);
+        assertEq(e.totalLiability(), 0);
+    }
+
+    /// @dev The same end-to-end path, but the oracle mirrors a STALE fee schedule: the mint must fail
+    ///      without consuming the slot, and the corrected verdict must then mint AND release.
+    function test_EndToEnd_StaleFeeMirror_DoesNotBrickTheUnit() public {
+        MockReadWriteEAS rwEas = new MockReadWriteEAS();
+        Fixed2of3O5Attester real = new Fixed2of3O5Attester(
+            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), address(rwEas), O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
+        );
+        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
+            address(usdc), address(rwEas), address(real), O5_SCHEMA, real.o5TypeHash()
+        );
+        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+
+        O5Verdict memory v = O5Verdict({
+            jobIdHash: JOB,
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            evidenceBundleHash: e.evidenceBundleHashOf(id),
+            achievedTier: 1,
+            requestedTier: 1,
+            decision: O5_DECISION_SETTLE,
+            verdictHash: keccak256("e2e-verdict"),
+            feeBps: e.feeBpsOf(id),
+            feeRecipient: e.feeRecipientOf(id),
+            feeScheduleHash: keccak256("stale-fee-schedule-hash"),
+            settlementUnitId: id,
+            oracleAuthEpoch: REAL_COHORT,
+            compositionRoot: bytes32(0)
+        });
+        bytes[] memory staleSigs = _ascendingSigs(real.digestOf(v));
+        vm.expectRevert(O5AttesterBase.FeeHashMismatch.selector); // the attester's pre-check, not the escrow's
+        real.attestO5(v, address(e), staleSigs);
+        assertFalse(real.usedUnit(id), "the unit must still be mintable");
+
+        v.feeScheduleHash = e.feeScheduleHashOf(id); // oracle refreshes its mirror
+        bytes32 uid = real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
+        e.releaseFromEvidence(id, uid);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "settles after correction");
     }
 
     // ── golden vector for the oracle's off-chain mirror ───────────────────────────────────────────

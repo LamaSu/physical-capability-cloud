@@ -7,12 +7,15 @@ import {IEAS, AttestationRequest, AttestationRequestData} from "../interfaces/IE
 import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
 
 /// @notice The minimal settlement-escrow READ surface this attester binds a verdict to before it consumes
-///         a unit's one-verdict slot. Implemented by {VNextSettlementEscrow}; only ever STATICCALLed.
-///         Both getters revert for a unit that does not exist, and `evidenceBundleHashOf` also reverts when
-///         nothing has been committed — so "unreadable" is the correct fail-closed answer in both cases.
+///         a unit's one-verdict slot. Implemented by {VNextSettlementEscrow}; only ever STATICCALLed. Every
+///         getter here reads a value FROZEN AT FUNDING and returns exactly one word. They all revert for a
+///         unit that does not exist, and `evidenceBundleHashOf` also reverts when nothing has been committed
+///         — "unreadable" is the correct fail-closed answer in each of those cases.
 interface IEscrowSettlementBinding {
     function compositionRootOf(bytes32 unitId) external view returns (bytes32);
     function evidenceBundleHashOf(bytes32 unitId) external view returns (bytes32);
+    function feeScheduleHashOf(bytes32 unitId) external view returns (bytes32);
+    function requiredTierOf(bytes32 unitId) external view returns (uint8);
 }
 
 /**
@@ -78,8 +81,15 @@ abstract contract O5AttesterBase is IOracleAttester {
     error BadSignature();
     error RevokerIsSigner();
     error EscrowBindingUnreadable();
+    // The M-01 pre-check errors deliberately mirror the escrow's release-check names one-for-one, so a
+    // trace shows exactly which release check the verdict would have failed.
     error CompositionRootMismatch();
     error EvidenceBundleMismatch();
+    error FeeHashMismatch();
+    error TierOutOfRange();
+    error Tier0NotEvidence();
+    error TierNotMet();
+    error RequestedTierMismatch();
 
     constructor(address eas_, bytes32 o5SchemaUid_, uint64 cohortId_, address revoker_) {
         if (eas_ == address(0) || revoker_ == address(0)) revert ZeroAddress();
@@ -129,23 +139,45 @@ abstract contract O5AttesterBase is IOracleAttester {
         // M-of-N quorum over the canonical digest (concrete rule). Reverts unless the quorum is met.
         _verifySignatures(_digest(v), signatures);
 
-        // M-01 anti-brick pre-check: bind the verdict to the escrow's OWN frozen state before the slot is
-        // consumed. Both fields below are re-checked by the escrow at release and cannot be derived here, so
-        // without this a verdict carrying a stale composition root (§C3) or a bundle hash that is not the
-        // committed one (§B) would mint, burn this unit's single verdict slot, and then be rejected by the
-        // escrow — leaving evidence settlement for that unit permanently unavailable (refund-only).
-        // Ordered AFTER the quorum check (only an authenticated call reaches out of this contract) and
-        // BEFORE the `usedUnit` effect, so a mismatch — or an escrow that is unfunded / has not yet
-        // committed its evidence package — consumes nothing and can simply be re-attempted. This is also
-        // what enforces §B's commit-before-verdict rule on the oracle side.
+        // ── M-01 anti-brick pre-check ─────────────────────────────────────────────────────────────
+        // Bind the verdict to the escrow's OWN state before the slot is consumed. Ordered AFTER the quorum
+        // check (only an authenticated call reaches out of this contract) and BEFORE the `usedUnit` effect,
+        // so any mismatch — or an escrow that is unfunded / has not yet committed its package — consumes
+        // nothing and can simply be re-attempted with a corrected verdict. It also enforces §B's
+        // commit-before-verdict rule on the oracle side.
+        //
+        // SCOPE RULE — pre-check exactly the fields that are (a) re-checked by the escrow at release,
+        // (b) FROZEN AT FUNDING, and (c) not already derivable here:
+        //  * frozen  ⇒ a mismatch is a CORRECTABLE oracle-input error, and burning the one verdict slot on
+        //              it strands evidence settlement for the unit forever (refund-only). Guard these.
+        //  * mutable ⇒ deliberately NOT pre-checked (`dispute.opened`, `reclaimAt`, cohort `enabled()`).
+        //              Those states are terminal-to-refund anyway, so a slot burned against them costs
+        //              nothing, and a read of them here would be stale by release time regardless.
+        //  * derivable ⇒ jobIdHash / milestoneIndex / stepId / settlementUnitId are already bound by the
+        //              `computeSettlementUnitId` equality above; `oracleAuthEpoch` by the cohort check.
+        //              `decision` is the oracle's own verdict, not escrow state.
+        bytes32 unitId = v.settlementUnitId;
+        if (_escrowBindingWord(escrow, IEscrowSettlementBinding.compositionRootOf.selector, unitId) != v.compositionRoot)
+        {
+            revert CompositionRootMismatch(); // §C3
+        }
         if (
-            _escrowBindingWord(escrow, IEscrowSettlementBinding.compositionRootOf.selector, v.settlementUnitId)
-                != v.compositionRoot
-        ) revert CompositionRootMismatch();
-        if (
-            _escrowBindingWord(escrow, IEscrowSettlementBinding.evidenceBundleHashOf.selector, v.settlementUnitId)
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.evidenceBundleHashOf.selector, unitId)
                 != v.evidenceBundleHash
-        ) revert EvidenceBundleMismatch();
+        ) revert EvidenceBundleMismatch(); // §B (this getter reverts while uncommitted ⇒ commit-before-verdict)
+        if (
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.feeScheduleHashOf.selector, unitId)
+                != v.feeScheduleHash
+        ) revert FeeHashMismatch(); // a stale 13-field fee mirror is the most likely correctable mismatch
+        // Frozen tier fields. `requiredTier` is a uint8 in 0..3 (bounded at funding) and `requiredTier ==
+        // requestedTier` was frozen there too, so the escrow's three tier checks all reduce to this one read.
+        // The range check first also rejects a non-canonical word from a hostile escrow (fail-closed).
+        bytes32 tierWord = _escrowBindingWord(escrow, IEscrowSettlementBinding.requiredTierOf.selector, unitId);
+        if (uint256(tierWord) > 3) revert TierOutOfRange();
+        uint8 requiredTier = uint8(uint256(tierWord));
+        if (requiredTier < 1) revert Tier0NotEvidence(); // a tier-0 unit can NEVER settle on evidence
+        if (v.achievedTier < requiredTier) revert TierNotMet();
+        if (v.requestedTier != requiredTier) revert RequestedTierMismatch();
 
         // One settle-verdict per unit. EFFECT before the external attest (checks-effects-interactions).
         if (usedUnit[v.settlementUnitId]) revert UnitAlreadyAttested();

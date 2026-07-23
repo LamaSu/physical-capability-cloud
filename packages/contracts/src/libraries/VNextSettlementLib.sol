@@ -84,14 +84,23 @@ library VNextSettlementLib {
     uint256 internal constant MAX_FEE_LEGS_PER_UNIT = 1;
     uint256 internal constant MAX_SETTLEMENT_UNITS = 16;
     uint256 internal constant MAX_TOTAL_LEGS_PER_JOB = 256; // counts PAYOUT entries only (16x16); a release may add +1 fee claim
-    // §6 funding-calldata DoS bound (feeds no hash/golden/parity value). L-01: pinned to the EXACT canonical
-    // envelope, not a round number — the 16-unit x 16-leg maximum `fund()` calldata (selector included),
-    // asserted every run by `test_gas_maxAggregateFunding_fits`. It supersedes the frozen §6 24,576 bound
-    // because at 24,576 the maximum ACCEPTED config would be unfundable. Derivation, re-measured per field:
-    //   rev-3 (compositionSchemaVersion + compositionRoot, +64 B/unit) .................. 24,644 B
-    //   §B    (+ evidenceCommitter, +32 B/unit x 16 units = +512 B) ..................... 25,156 B  <- current
-    // Any future UnitConfig field must re-measure and re-pin this. The real griefing caps remain
-    // MAX_SETTLEMENT_UNITS / MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB.
+    // §6 funding-calldata DoS bound (feeds no hash/golden/parity value). L-01: this MUST be >= the calldata
+    // size of the largest config the contract SEMANTICALLY ACCEPTS, or that config reverts `ConfigTooLarge`
+    // and the bound becomes a funding DoS on a legal input. MAX_TOTAL_LEGS_PER_JOB (256) == 16 units x 16
+    // legs, so the 16x16 config IS accepted and IS the envelope. Full derivation (ABI encoding of
+    // `fund(UnitConfig[])`, selector included) — re-derive and re-pin on ANY UnitConfig field change:
+    //     4                       selector
+    //   + 32                      offset to the UnitConfig[] argument
+    //   + 32                      array length
+    //   + 16 x 32   =   512       one head offset per UnitConfig element
+    //   + 16 x (480 + 1056)       per unit: 480 B static head (15 words = 14 fields + the payouts offset)
+    //                             + 1056 B payouts tail (32 B length + 16 legs x 64 B per PayoutEntry)
+    //   ------------------------
+    //   = 4 + 576 + 24,576  =  25,156 B
+    // History: 24,644 B at rev-3 (13 head words), + 512 B when §B added `evidenceCommitter` (14th word).
+    // `test_gas_maxAggregateFunding_fits` builds the true 16x16 maximum and asserts BOTH that it fits and
+    // that it equals this constant exactly, so drift in either direction fails the suite. The real griefing
+    // caps remain MAX_SETTLEMENT_UNITS / MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB.
     uint256 internal constant MAX_CONFIG_BYTES = 25_156;
 
     // Reserved claim leg indices (§2/§7): PRINCIPAL uses the payout entry index; FEE/REFUND use these sentinels.

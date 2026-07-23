@@ -17,6 +17,8 @@ contract MockEscrowBinding {
     mapping(bytes32 => bytes32) public root;
     mapping(bytes32 => bytes32) internal _bundle;
     mapping(bytes32 => bool) public committed;
+    mapping(bytes32 => bytes32) public feeHash;
+    mapping(bytes32 => uint8) public tier;
     bool public reverts;
 
     error UnitNotFound();
@@ -24,6 +26,24 @@ contract MockEscrowBinding {
 
     function setRoot(bytes32 unitId, bytes32 r) external {
         root[unitId] = r;
+    }
+
+    function setFeeScheduleHash(bytes32 unitId, bytes32 h) external {
+        feeHash[unitId] = h;
+    }
+
+    function setRequiredTier(bytes32 unitId, uint8 t) external {
+        tier[unitId] = t;
+    }
+
+    function feeScheduleHashOf(bytes32 unitId) external view returns (bytes32) {
+        if (reverts) revert UnitNotFound();
+        return feeHash[unitId];
+    }
+
+    function requiredTierOf(bytes32 unitId) external view returns (uint8) {
+        if (reverts) revert UnitNotFound();
+        return tier[unitId];
     }
 
     function setEvidence(bytes32 unitId, bytes32 commitment) external {
@@ -104,6 +124,8 @@ contract Fixed2of3O5AttesterTest is Test {
     bytes32 constant STEP = keccak256("attester-step");
     bytes32 constant ROOT = keccak256("cr"); // the escrow's funding-frozen composition root
     bytes32 constant BUNDLE = keccak256("committed-evidence-commitment"); // the escrow's committed §B value
+    bytes32 constant FEE_HASH = keccak256("fh"); // the escrow's frozen 13-field feeScheduleHash
+    uint8 constant REQUIRED_TIER = 2; // == requestedTier, frozen at funding (§E)
 
     // secp256k1 group order (for the high-s malleability construction).
     uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
@@ -116,9 +138,11 @@ contract Fixed2of3O5AttesterTest is Test {
             vm.addr(pk1), vm.addr(pk2), vm.addr(pk3), address(mockEas), O5_SCHEMA, COHORT, REVOKER
         );
         single = new SingleSignerO5Attester(vm.addr(pkS), address(mockEas), O5_SCHEMA, COHORT, REVOKER);
-        // the escrow froze ROOT at funding and the committer committed BUNDLE; the quorum must echo both.
+        // the escrow's funding-frozen state + the committed package; the quorum must echo all of it.
         escrowBinding.setRoot(_suid(), ROOT);
         escrowBinding.setEvidence(_suid(), BUNDLE);
+        escrowBinding.setFeeScheduleHash(_suid(), FEE_HASH);
+        escrowBinding.setRequiredTier(_suid(), REQUIRED_TIER);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────────────────────────
@@ -133,13 +157,13 @@ contract Fixed2of3O5AttesterTest is Test {
             milestoneIndex: MI,
             stepId: STEP,
             evidenceBundleHash: BUNDLE,
-            achievedTier: 2,
-            requestedTier: 2,
+            achievedTier: REQUIRED_TIER,
+            requestedTier: REQUIRED_TIER,
             decision: O5_DECISION_SETTLE,
             verdictHash: keccak256("vh"),
             feeBps: 235,
             feeRecipient: address(0xFEE0),
-            feeScheduleHash: keccak256("fh"),
+            feeScheduleHash: FEE_HASH,
             settlementUnitId: suid,
             oracleAuthEpoch: COHORT,
             compositionRoot: ROOT
@@ -369,6 +393,76 @@ contract Fixed2of3O5AttesterTest is Test {
         O5Verdict memory good = _verdict();
         attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
         assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev The highest-likelihood M-01 variant: `feeScheduleHash` is a computed 13-field digest, so a
+    ///      stale fee mirror is the mismatch most likely to reach a signing quorum. Burning the slot on it
+    ///      would make the unit unsettleable forever (release reverts FeeHashMismatch) — so it must revert
+    ///      here instead, and the corrected verdict must still mint.
+    function test_WrongFeeScheduleHash_Reverts_AndLeavesUnitMintable() public {
+        O5Verdict memory stale = _verdict();
+        stale.feeScheduleHash = keccak256("a-stale-fee-schedule-mirror");
+        bytes[] memory staleSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(stale));
+        vm.expectRevert(O5AttesterBase.FeeHashMismatch.selector);
+        attester.attestO5(stale, ESCROW, staleSigs);
+        assertFalse(attester.usedUnit(stale.settlementUnitId), "wrong-fee-hash verdict must not consume the unit");
+
+        O5Verdict memory good = _verdict();
+        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
+    }
+
+    /// @dev The frozen tier fields, same anti-brick class: each would be rejected at release.
+    function test_WrongTierFields_Revert_AndLeaveUnitMintable() public {
+        // requestedTier != the unit's frozen requiredTier
+        O5Verdict memory wrongReq = _verdict();
+        wrongReq.requestedTier = REQUIRED_TIER + 1;
+        bytes[] memory s1 = _twoSigsAscending(pk1, pk2, attester.digestOf(wrongReq));
+        vm.expectRevert(O5AttesterBase.RequestedTierMismatch.selector);
+        attester.attestO5(wrongReq, ESCROW, s1);
+
+        // achievedTier below the unit's frozen requiredTier
+        O5Verdict memory under = _verdict();
+        under.achievedTier = REQUIRED_TIER - 1;
+        bytes[] memory s2 = _twoSigsAscending(pk1, pk2, attester.digestOf(under));
+        vm.expectRevert(O5AttesterBase.TierNotMet.selector);
+        attester.attestO5(under, ESCROW, s2);
+
+        assertFalse(attester.usedUnit(_suid()), "no tier mismatch may consume the unit");
+        O5Verdict memory good = _verdict();
+        attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev A tier-0 unit can never settle on evidence, so minting for it could only ever burn the slot.
+    function test_Tier0Unit_Reverts_NothingConsumed() public {
+        escrowBinding.setRequiredTier(_suid(), 0);
+        O5Verdict memory v = _verdict();
+        v.requestedTier = 0;
+        v.achievedTier = 0;
+        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        vm.expectRevert(O5AttesterBase.Tier0NotEvidence.selector);
+        attester.attestO5(v, ESCROW, sigs);
+        assertFalse(attester.usedUnit(v.settlementUnitId));
+    }
+
+    /// @dev A non-canonical tier word from a hostile escrow is rejected rather than truncated.
+    function test_OutOfRangeTier_Reverts() public {
+        escrowBinding.setRequiredTier(_suid(), 4); // outside the 0..3 range frozen at funding
+        O5Verdict memory v = _verdict();
+        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        vm.expectRevert(O5AttesterBase.TierOutOfRange.selector);
+        attester.attestO5(v, ESCROW, sigs);
+        assertFalse(attester.usedUnit(v.settlementUnitId));
+    }
+
+    /// @dev MUTABLE escrow state is deliberately NOT pre-checked: those rejections are terminal-to-refund,
+    ///      so the slot costs nothing, and any read here would be stale by release time. This pins that
+    ///      decision — a disputed / past-deadline unit still mints, exactly as designed.
+    function test_MutableEscrowStateIsNotPreChecked() public {
+        O5Verdict memory v = _verdict();
+        bytes32 uid = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+        assertEq(mockEas.recipientOf(uid), ESCROW, "mint does not depend on dispute/deadline/enabled state");
     }
 
     /// @dev §B commit-before-verdict: nothing committed on the escrow ⇒ no mint, nothing consumed.
