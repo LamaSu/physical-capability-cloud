@@ -100,9 +100,15 @@ contract MockEAS {
 contract MockOracleAttester is IOracleAttester {
     bool public enabled = true;
     uint64 public cohortId;
+    /// @dev the cohort's live O5 EIP-712 type hash — the escrow's constructor pins its metadata to this.
+    bytes32 public o5TypeHash = keccak256("mock.o5.typehash");
 
     constructor(uint64 cohortId_) {
         cohortId = cohortId_;
+    }
+
+    function setO5TypeHash(bytes32 h) external {
+        o5TypeHash = h;
     }
 
     function setEnabled(bool e) external {
@@ -769,6 +775,35 @@ contract VNextSettlementEscrowTest is Test {
         e.releaseFromEvidence(id, keccak256("uid-1"));
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
+    }
+
+    // ── L-01/L-02: config-envelope pin + type-hash deployment pin ─────────────────────────────────
+    /// @dev L-01: MAX_CONFIG_BYTES is the EXACT canonical envelope, not a round number above it. The
+    ///      max-config fit is asserted in test_gas_maxAggregateFunding_fits; this pins the constant itself
+    ///      so a future UnitConfig field cannot silently leave slack (or, worse, make the max unfundable).
+    function test_MaxConfigBytes_IsTheExactCanonicalEnvelope() public pure {
+        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 24_644, "16 units x 16 legs max fund() calldata");
+    }
+
+    /// @dev L-02: a non-zero `o5TypeHash` deployment pin must equal the bound cohort's live type hash.
+    function test_Constructor_RejectsTypeHashDrift() public {
+        vm.expectRevert(VNextSettlementEscrow.TypeHashMismatch.selector);
+        new VNextSettlementEscrowFactory(
+            address(usdc), address(eas), address(attester), O5_SCHEMA, keccak256("some-other-typehash")
+        );
+    }
+
+    function test_Constructor_AcceptsMatchingTypeHash() public {
+        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
+            address(usdc), address(eas), address(attester), O5_SCHEMA, attester.o5TypeHash()
+        );
+        assertEq(VNextSettlementEscrow(f.implementation()).o5TypeHash(), attester.o5TypeHash());
+    }
+
+    /// @dev Zero stays the documented deferred state: unpinned, no check, no security claim (the setUp
+    ///      factory already exercises it — this states the intent explicitly).
+    function test_Constructor_ZeroTypeHashSkipsThePin() public view {
+        assertEq(VNextSettlementEscrow(factory.implementation()).o5TypeHash(), bytes32(0));
     }
 
     function test_EvidenceRelease_RevertsWhenUidMismatch() public {

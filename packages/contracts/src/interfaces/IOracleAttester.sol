@@ -25,6 +25,12 @@ interface IOracleAttester {
     /// @notice This attester's immutable cohort label — pinned into the escrow's `oracleAuthEpoch` at fund.
     function cohortId() external view returns (uint64);
 
+    /// @notice The cohort's LIVE O5 EIP-712 type hash (L-02). The escrow's `o5TypeHash` immutable is a
+    ///         DEPLOYMENT pin, not a runtime security check; when it is non-zero the escrow's constructor
+    ///         requires it to equal this value, so the published pin can never drift from the type hash the
+    ///         cohort actually signs under.
+    function o5TypeHash() external view returns (bytes32);
+
     /// @notice Mint the O5 EAS attestation for `escrow` from a valid cohort quorum over `v`. Reverts unless
     ///         the quorum, cohort, and one-verdict-per-unit invariants all hold. Returns the EAS uid.
     function attestO5(O5Verdict calldata v, address escrow, bytes[] calldata signatures)

@@ -31,6 +31,12 @@ contract Fixed2of3O5Attester is O5AttesterBase {
     ) O5AttesterBase(eas_, o5SchemaUid_, cohortId_, revoker_) {
         if (signer0_ == address(0) || signer1_ == address(0) || signer2_ == address(0)) revert ZeroSigner();
         if (signer0_ == signer1_ || signer0_ == signer2_ || signer1_ == signer2_) revert DuplicateSigner();
+        // L-03 separation of duties: the kill-switch holder must not also be a signing key. A single
+        // compromised key that is BOTH a signer and the revoker can permanently `disable()` the cohort,
+        // forcing every honest unit to refund (an availability attack) — the §A.1 "separately custodied
+        // revoker" property must hold by construction, not by deployment discipline. (Zero addresses are
+        // already rejected: signers above, `revoker_` in {O5AttesterBase}'s constructor.)
+        if (revoker_ == signer0_ || revoker_ == signer1_ || revoker_ == signer2_) revert RevokerIsSigner();
         signer0 = signer0_;
         signer1 = signer1_;
         signer2 = signer2_;

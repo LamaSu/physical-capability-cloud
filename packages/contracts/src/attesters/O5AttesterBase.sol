@@ -6,6 +6,12 @@ import {IOracleAttester} from "../interfaces/IOracleAttester.sol";
 import {IEAS, AttestationRequest, AttestationRequestData} from "../interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
 
+/// @notice The minimal settlement-escrow READ surface this attester binds a verdict to before it consumes
+///         a unit's one-verdict slot. Implemented by {VNextSettlementEscrow}; only ever STATICCALLed.
+interface IEscrowSettlementBinding {
+    function compositionRootOf(bytes32 unitId) external view returns (bytes32);
+}
+
 /**
  * @title O5AttesterBase
  * @notice Shared money-path logic for a cohort-scoped O5 verdict attester (addendum §A). A concrete
@@ -21,6 +27,9 @@ import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
  *         - `disable()` is ONE-WAY: it neutralizes future mints, and (because the escrow re-checks
  *           `enabled` at release) also neutralizes already-minted attestations for the cohort.
  *         - One O5 per `settlementUnitId` (consume-once) is enforced in-contract.
+ *         - Because that slot is consumable exactly once, every field the ESCROW will re-check at release
+ *           and that this contract cannot derive itself is read back from the escrow BEFORE the slot is
+ *           consumed (M-01 anti-brick pre-check) — a verdict the escrow would reject can never burn the slot.
  * @dev    The escrow only READS `enabled` / `cohortId`; it never calls `attestO5`. Refund/reclaim in the
  *         escrow never call this contract, so a controller fault can freeze RELEASE but never REFUND.
  */
@@ -64,6 +73,9 @@ abstract contract O5AttesterBase is IOracleAttester {
     error BadSignatureLength();
     error BadSignatureV();
     error BadSignature();
+    error RevokerIsSigner();
+    error EscrowBindingUnreadable();
+    error CompositionRootMismatch();
 
     constructor(address eas_, bytes32 o5SchemaUid_, uint64 cohortId_, address revoker_) {
         if (eas_ == address(0) || revoker_ == address(0)) revert ZeroAddress();
@@ -87,6 +99,15 @@ abstract contract O5AttesterBase is IOracleAttester {
     }
 
     /// @inheritdoc IOracleAttester
+    /// @dev L-02: the cohort's LIVE O5 EIP-712 type hash. The escrow carries a `o5TypeHash` deployment pin
+    ///      and, when that pin is non-zero, requires it to equal this value at construction — so an
+    ///      off-chain signer mirroring the escrow's published pin can never sign a digest under a type hash
+    ///      this cohort does not use. Exposed (not private) precisely so that check can exist.
+    function o5TypeHash() external pure returns (bytes32) {
+        return O5_TYPEHASH;
+    }
+
+    /// @inheritdoc IOracleAttester
     function attestO5(O5Verdict calldata v, address escrow, bytes[] calldata signatures)
         external
         returns (bytes32 uid)
@@ -103,6 +124,14 @@ abstract contract O5AttesterBase is IOracleAttester {
 
         // M-of-N quorum over the canonical digest (concrete rule). Reverts unless the quorum is met.
         _verifySignatures(_digest(v), signatures);
+
+        // M-01 anti-brick pre-check (§C3): bind the verdict to the escrow's OWN funding-frozen composition
+        // root before the slot is consumed. Without this, a verdict carrying a stale root mints, burns this
+        // unit's single verdict slot, and is then rejected by the escrow with CompositionRootMismatch —
+        // leaving evidence settlement for that unit permanently unavailable (refund-only). Ordered AFTER the
+        // quorum check (only an authenticated call reaches out of this contract) and BEFORE the `usedUnit`
+        // effect (a mismatch, or an unreadable/unfunded escrow, consumes nothing and can be re-attempted).
+        if (_escrowCompositionRoot(escrow, v.settlementUnitId) != v.compositionRoot) revert CompositionRootMismatch();
 
         // One settle-verdict per unit. EFFECT before the external attest (checks-effects-interactions).
         if (usedUnit[v.settlementUnitId]) revert UnitAlreadyAttested();
@@ -123,6 +152,27 @@ abstract contract O5AttesterBase is IOracleAttester {
             })
         );
         emit O5Attested(v.settlementUnitId, uid, escrow);
+    }
+
+    // ── Escrow binding read (M-01) ─────────────────────────────────────────────────────────────────
+    /// @dev Read the escrow's funding-frozen composition root. STATICCALL only: the escrow cannot write
+    ///      state, emit, or re-enter through it, so this adds a read — not a reentrancy surface — and no
+    ///      state of this contract is touched. The return buffer is capped at one word so a hostile escrow
+    ///      cannot returndata-bomb the oracle's transaction. FAIL-CLOSED: no code at `escrow`, a missing
+    ///      getter, a reverting getter (e.g. the unit is not funded), or any return length other than 32
+    ///      all revert here — i.e. before `usedUnit` is consumed, so nothing is burned.
+    function _escrowCompositionRoot(address escrow, bytes32 unitId) private view returns (bytes32 root) {
+        bytes memory cd = abi.encodeCall(IEscrowSettlementBinding.compositionRootOf, (unitId));
+        bool ok;
+        uint256 len;
+        assembly ("memory-safe") {
+            // scratch after the free-memory pointer; read back immediately, never retained
+            let out := mload(0x40)
+            ok := staticcall(gas(), escrow, add(cd, 0x20), mload(cd), out, 0x20)
+            len := returndatasize()
+            root := mload(out)
+        }
+        if (!ok || len != 32) revert EscrowBindingUnreadable();
     }
 
     // ── EIP-712 helpers ────────────────────────────────────────────────────────────────────────────

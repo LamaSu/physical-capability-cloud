@@ -48,6 +48,12 @@ contract VNextSettlementEscrow {
     /// @dev O5/v3 schema UID + attestation EIP-712 type hash are JOINT-DEFERRED (E6, deploy-gate §8);
     ///      pinned byte-exact across escrow+oracle+evidence when O5 opens. Zero until then.
     bytes32 public immutable o5SchemaUid;
+    /// @dev L-02 — NOT a runtime security check. The release predicate's trust root is
+    ///      `attestation.attester == authorizedOracle`; the quorum digest's type hash lives INSIDE the
+    ///      attester. This immutable is DEPLOYMENT METADATA published for the off-chain signer/mirror. To
+    ///      stop that published value from drifting away from the cohort's real one, the constructor pins
+    ///      it: when non-zero it MUST equal `IOracleAttester(oracle).o5TypeHash()`. Zero = the documented
+    ///      deferred state (unpinned, no check, and no security claim is made for it).
     bytes32 public immutable o5TypeHash;
 
     uint256 public constant CONTRACT_VERSION = 1;
@@ -262,6 +268,7 @@ contract VNextSettlementEscrow {
     error CompositionRootMismatch();
     error TierRequestMismatch();
     error TierOutOfRange();
+    error TypeHashMismatch();
 
     modifier nonReentrant() {
         _enterGuard();
@@ -293,6 +300,11 @@ contract VNextSettlementEscrow {
         EAS = eas;
         authorizedOracle = oracle;
         o5SchemaUid = schemaUid;
+        // L-02: pin the published type-hash metadata to the bound cohort's live value when it is set.
+        // Deploy-time only (constructor code, not runtime bytecode) and fail-closed: a mismatch — or an
+        // `oracle` that does not expose the getter — aborts the deployment rather than shipping an escrow
+        // whose published pin disagrees with the attester the money path actually trusts.
+        if (typeHash != bytes32(0) && IOracleAttester(oracle).o5TypeHash() != typeHash) revert TypeHashMismatch();
         o5TypeHash = typeHash;
         factory = msg.sender;
         initialized = true; // lock the implementation; only fresh clones (initialized=false) can init
@@ -506,6 +518,19 @@ contract VNextSettlementEscrow {
 
     function payoutConfigHashOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
         return _units[unitId].payoutConfigHash;
+    }
+
+    /// @notice rev-3 §C2/§C3 read surface (M-01): the funding-frozen composition commitment. The oracle
+    ///         attester STATICCALLs this to bind its verdict to the SAME root the escrow will check at
+    ///         release — without it a stale-root verdict would consume the unit's one-verdict slot and
+    ///         permanently strand evidence settlement for that unit.
+    function compositionRootOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
+        return _units[unitId].compositionRoot;
+    }
+
+    /// @notice rev-3 §C2: the funding-frozen composition schema version (0 = non-composed).
+    function compositionSchemaVersionOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint16) {
+        return _units[unitId].compositionSchemaVersion;
     }
 
     function milestoneIndexOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
