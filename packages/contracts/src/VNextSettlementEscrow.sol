@@ -12,28 +12,16 @@ import {
     ClaimClass,
     AuthorizationType
 } from "./libraries/VNextSettlementLib.sol";
+import {O5Verdict, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "./O5Types.sol";
+import {IOracleAttester} from "./interfaces/IOracleAttester.sol";
 
 /// @notice ERC-1271 smart-account signature validation interface.
 interface IERC1271 {
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4 magicValue);
 }
 
-/// @notice O5/v3 attestation payload (the agreed seam §0.3 field set) decoded from `EASAttestation.data`.
-///         The exact byte layout is the M2 oracle↔escrow golden-parity joint-pin — provisional until O5 opens.
-struct O5Verdict {
-    bytes32 jobIdHash;
-    uint256 milestoneIndex;
-    bytes32 stepId;
-    bytes32 evidenceBundleHash;
-    uint8 achievedTier;
-    uint8 requestedTier;
-    uint8 decision;
-    bytes32 verdictHash;
-    uint16 feeBps;
-    address feeRecipient;
-    bytes32 feeScheduleHash;
-    bytes32 settlementUnitId;
-}
+// `O5Verdict` (now 14 fields, rev-3), `O5_VERDICT_BYTES` (448), and `O5_DECISION_SETTLE` live in
+// ./O5Types.sol and are imported above, so the escrow and the cohort attester share one canonical struct.
 
 /**
  * @title VNextSettlementEscrow
@@ -77,15 +65,12 @@ contract VNextSettlementEscrow {
     );
     bytes4 private constant ERC1271_MAGIC = 0x1626ba7e;
     uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
-    /// @dev O5 verdict decision encoding for "settle" — joint-pinned with the oracle (M1/M2), provisional.
-    uint8 public constant O5_DECISION_SETTLE = 1;
     // §2 authorization-key issuer domains (per authority type, L-01).
     bytes32 private constant AUTHDOMAIN_EVIDENCE = keccak256("PCC:vnext:auth:evidence:v1");
     bytes32 private constant AUTHDOMAIN_DISPUTE = keccak256("PCC:vnext:auth:dispute:v1");
     bytes32 private constant AUTHDOMAIN_RECLAIM = keccak256("PCC:vnext:auth:reclaim:v1");
     bytes32 private constant AUTHDOMAIN_BUYER = keccak256("PCC:vnext:auth:buyer:v1");
-    /// @dev O5 verdict payload = 12 static fields = 384 bytes (M-01 length guard).
-    uint256 private constant O5_VERDICT_BYTES = 384;
+    // O5_VERDICT_BYTES (=448, rev-3: 14 static ABI words) is imported from ./O5Types.sol as the M-01 guard.
 
     // ── Per-clone (per-job) state ────────────────────────────────────────────────────────────────
     bool public initialized;
@@ -96,6 +81,7 @@ contract VNextSettlementEscrow {
     bytes32 public termsHash;
     uint256 public totalLiability; // Σ over units of unit.liability (single-bucket, §3)
     uint256 public totalPayoutLegs;
+    uint64 public oracleAuthEpoch; // rev-3 §A.2: the funded cohort id, pinned from the attester at fund()
 
     bytes32[] internal _unitIds;
     mapping(bytes32 => uint256) internal _unitIndexPlusOne; // existence + index (default 0 = absent)
@@ -128,6 +114,8 @@ contract VNextSettlementEscrow {
         uint256 liability; // the unit's sole current liability bucket (§3)
         uint256 remainingClaimCount; // set at allocation; SETTLED_* only when 0 (§7)
         uint256 nextApprovalNonce; // buyer-approval single-use nonce (§10.10)
+        uint16 compositionSchemaVersion; // rev-3 §C2: frozen at funding (0 = non-composed)
+        bytes32 compositionRoot; // rev-3 §C2/§C3: frozen root, oracle echoes it → equality-checked at release
         Dispute dispute;
     }
 
@@ -164,6 +152,8 @@ contract VNextSettlementEscrow {
         address feeRecipient;
         uint256 disputeWindow;
         uint256 reclaimAt; // absolute timestamp; must be in the future
+        uint16 compositionSchemaVersion; // rev-3 §C2 (0 = non-composed)
+        bytes32 compositionRoot; // rev-3 §C2/§C3 (echoed into O5, equality-checked at release)
         PayoutEntry[] payouts; // Σ amount == n; each nonzero; allowed recipients only
     }
 
@@ -190,6 +180,8 @@ contract VNextSettlementEscrow {
     event Initialized(address indexed payer, address indexed arbiter, bytes32 jobIdHash);
     event UnitFunded(bytes32 indexed unitId, uint256 g, uint256 f, uint256 n);
     event Funded(uint256 unitCount, uint256 totalGross, uint256 totalPayoutLegs);
+    event OracleCohortPinned(uint64 indexed cohort); // rev-3 §A.2
+
     event LegDischarged(bytes32 indexed unitId, uint256 legIndex, ClaimClass class, address recipient, uint256 amount);
     event ClaimCreated(
         bytes32 indexed claimId, bytes32 indexed unitId, uint256 legIndex, ClaimClass class, address recipient, uint256 amount
@@ -263,6 +255,13 @@ contract VNextSettlementEscrow {
     error ApprovalExpired();
     error BadSignature();
     error MalformedO5Data();
+    // rev-3 §A.2/§C3/§E hardenings
+    error InvalidOrDisabledCohort();
+    error OracleCohortMismatch();
+    error OracleCohortDisabled();
+    error CompositionRootMismatch();
+    error TierRequestMismatch();
+    error TierOutOfRange();
 
     modifier nonReentrant() {
         _enterGuard();
@@ -330,6 +329,14 @@ contract VNextSettlementEscrow {
         if (msg.data.length > VNextSettlementLib.MAX_CONFIG_BYTES) revert ConfigTooLarge();
         uint256 nConfigs = configs.length;
         if (nConfigs == 0 || nConfigs > VNextSettlementLib.MAX_SETTLEMENT_UNITS) revert BadUnitCount();
+
+        // rev-3 §A.2: pin this escrow to the oracle attester's cohort. Funding is rejected if the cohort is
+        // disabled (fail-closed); the pinned epoch is echoed by every O5 verdict and re-checked at release.
+        // enabled()/cohortId() are external view (STATICCALL) on the immutable, trusted attester.
+        if (!IOracleAttester(authorizedOracle).enabled()) revert InvalidOrDisabledCohort();
+        oracleAuthEpoch = IOracleAttester(authorizedOracle).cohortId();
+        emit OracleCohortPinned(oracleAuthEpoch);
+
         configurationSealed = true; // effects before the external token pull (nonReentrant-guarded)
 
         uint256 chainId = block.chainid;
@@ -339,6 +346,11 @@ contract VNextSettlementEscrow {
 
         for (uint256 i; i < nConfigs; ++i) {
             UnitConfig calldata c = configs[i];
+
+            // §E hardening: the evidence path settles at requiredTier and the stored requestedTier was dead —
+            // pin them equal and bound the tier range so exactly one verdict (at the required tier) is payable.
+            if (c.requiredTier != c.requestedTier) revert TierRequestMismatch();
+            if (c.requiredTier > 3) revert TierOutOfRange();
 
             bytes32 unitId =
                 VNextSettlementLib.computeSettlementUnitId(chainId, self, jobIdHash, c.milestoneIndex, c.stepId);
@@ -387,6 +399,10 @@ contract VNextSettlementEscrow {
             u.stepId = c.stepId;
             u.requiredTier = c.requiredTier;
             u.requestedTier = c.requestedTier;
+            // rev-3 §C2: freeze the composition commitment as-is (the composition lane owns the root's
+            // internal structure; the escrow only equality-checks it against the O5 echo at release).
+            u.compositionSchemaVersion = c.compositionSchemaVersion;
+            u.compositionRoot = c.compositionRoot;
             u.state = UnitState.FUNDED_ACTIVE;
             u.reclaimAt = c.reclaimAt;
             u.disputeWindow = c.disputeWindow;
@@ -780,6 +796,7 @@ contract VNextSettlementEscrow {
         // EAS-level checks (attester / schema / recipient / revocation / expiration — allocation-time rule §7).
         EASAttestation memory a = IEAS(EAS).getAttestation(easUid);
         if (a.uid == bytes32(0)) revert AttestationNotFound();
+        if (a.uid != easUid) revert AttestationNotFound(); // §E: bind the returned attestation to the requested uid
         if (a.schema != o5SchemaUid) revert WrongSchema();
         if (a.attester != authorizedOracle) revert WrongAttester();
         if (a.recipient != address(this)) revert WrongRecipient();
@@ -788,7 +805,7 @@ contract VNextSettlementEscrow {
         if (_easUidUsed[easUid]) revert AuthorizationUsed();
         _easUidUsed[easUid] = true;
 
-        // M-01: the agreed O5 field set is 12 static fields = 384 bytes; reject trailing bytes. The exact
+        // M-01: the rev-3 O5 field set is 14 static fields = 448 bytes; reject any other length. The exact
         // byte-order + final O5 schema UID/type hash are the M2 oracle-parity PRE-DEPLOY pin (§8); o5SchemaUid/
         // o5TypeHash are reserved immutables enforced there, not yet standalone security checks.
         if (a.data.length != O5_VERDICT_BYTES) revert MalformedO5Data();
@@ -808,6 +825,14 @@ contract VNextSettlementEscrow {
         if (v.achievedTier < u.requiredTier) revert TierNotMet();
         if (v.requestedTier != u.requiredTier) revert RequestedTierMismatch();
         if (v.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
+
+        // rev-3 §A.2/§C3: cohort-epoch binding + composition-root binding + kill-switch AT PAYMENT TIME.
+        // The epoch echo must match the funded cohort; the echoed root must equal the frozen unit root
+        // (so the oracle verdict cryptographically covers the composition root); and the cohort must still
+        // be enabled — a one-way disable neutralizes an otherwise-valid pre-minted attestation here.
+        if (v.oracleAuthEpoch != oracleAuthEpoch) revert OracleCohortMismatch();
+        if (v.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
+        if (!IOracleAttester(authorizedOracle).enabled()) revert OracleCohortDisabled();
 
         _allocateRelease(
             unitId, _authorizationKey(AuthorizationType.EVIDENCE, AUTHDOMAIN_EVIDENCE, authorizedOracle, easUid, unitId)

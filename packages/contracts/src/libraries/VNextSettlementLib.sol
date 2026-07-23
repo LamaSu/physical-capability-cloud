@@ -81,7 +81,11 @@ library VNextSettlementLib {
     uint256 internal constant MAX_FEE_LEGS_PER_UNIT = 1;
     uint256 internal constant MAX_SETTLEMENT_UNITS = 16;
     uint256 internal constant MAX_TOTAL_LEGS_PER_JOB = 256; // counts PAYOUT entries only (16x16); a release may add +1 fee claim
-    uint256 internal constant MAX_CONFIG_BYTES = 24576; // §6 funding-calldata bound
+    // §6 funding-calldata DoS bound (feeds no hash/golden/parity value). rev-3 adds two static UnitConfig
+    // words (compositionSchemaVersion + compositionRoot = 64 B/unit), so the 16-unit x 16-leg max config is
+    // 24644 B; the ceiling is raised above the prior 24576 to keep that max config fundable on-chain. The
+    // real griefing caps stay MAX_SETTLEMENT_UNITS / MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB.
+    uint256 internal constant MAX_CONFIG_BYTES = 26624;
 
     // Reserved claim leg indices (§2/§7): PRINCIPAL uses the payout entry index; FEE/REFUND use these sentinels.
     uint256 internal constant FEE_LEG_INDEX = type(uint256).max;

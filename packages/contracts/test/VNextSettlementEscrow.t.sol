@@ -2,7 +2,9 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
-import {VNextSettlementEscrow, O5Verdict} from "../src/VNextSettlementEscrow.sol";
+import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
+import {O5Verdict, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
+import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {PayoutEntry, FeeSchedule, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {EASAttestation} from "../src/interfaces/IEAS.sol";
@@ -92,12 +94,37 @@ contract MockEAS {
     }
 }
 
+/// @dev Minimal IOracleAttester the escrow reads at fund()/release(): a settable one-way kill-switch + a
+///      fixed cohort id. The escrow never calls attestO5 (evidence tests fake the attestation via MockEAS),
+///      so attestO5 is a no-op — the real quorum crypto is exercised in Fixed2of3O5Attester.t.sol.
+contract MockOracleAttester is IOracleAttester {
+    bool public enabled = true;
+    uint64 public cohortId;
+
+    constructor(uint64 cohortId_) {
+        cohortId = cohortId_;
+    }
+
+    function setEnabled(bool e) external {
+        enabled = e;
+    }
+
+    function disable() external {
+        enabled = false;
+    }
+
+    function attestO5(O5Verdict calldata, address, bytes[] calldata) external pure returns (bytes32) {
+        return bytes32(0);
+    }
+}
+
 contract VNextSettlementEscrowTest is Test {
     MockToken usdc;
     MockEAS eas;
+    MockOracleAttester attester;
     VNextSettlementEscrowFactory factory;
 
-    address oracle = address(0xACE1);
+    uint64 constant COHORT = 1; // the mock attester's cohort id, pinned into the escrow at fund()
     uint256 payerPk = 0xA11CE;
     address payer;
     address arbiter = address(0xAB12);
@@ -112,7 +139,8 @@ contract VNextSettlementEscrowTest is Test {
         payer = vm.addr(payerPk);
         usdc = new MockToken();
         eas = new MockEAS();
-        factory = new VNextSettlementEscrowFactory(address(usdc), address(eas), oracle, O5_SCHEMA, bytes32(0));
+        attester = new MockOracleAttester(COHORT);
+        factory = new VNextSettlementEscrowFactory(address(usdc), address(eas), address(attester), O5_SCHEMA, bytes32(0));
         usdc.mint(payer, 1_000_000e6);
     }
 
@@ -144,6 +172,8 @@ contract VNextSettlementEscrowTest is Test {
             feeRecipient: f > 0 ? feeDest : address(0),
             disputeWindow: 1 days,
             reclaimAt: block.timestamp + 30 days,
+            compositionSchemaVersion: 0,
+            compositionRoot: bytes32(0),
             payouts: po
         });
     }
@@ -383,12 +413,12 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     // ── evidence release (mock EAS) ───────────────────────────────────────────────────────────────
-    function _o5Attestation(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved)
+    function _o5FullVerdict(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved)
         internal
         view
-        returns (EASAttestation memory a)
+        returns (O5Verdict memory v)
     {
-        O5Verdict memory v = O5Verdict({
+        v = O5Verdict({
             jobIdHash: JOB,
             milestoneIndex: 0,
             stepId: keccak256("step-0"),
@@ -400,8 +430,17 @@ contract VNextSettlementEscrowTest is Test {
             feeBps: e.feeBpsOf(id),
             feeRecipient: e.feeRecipientOf(id),
             feeScheduleHash: e.feeScheduleHashOf(id),
-            settlementUnitId: id
+            settlementUnitId: id,
+            oracleAuthEpoch: COHORT,
+            compositionRoot: bytes32(0)
         });
+    }
+
+    function _o5Attestation(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved)
+        internal
+        view
+        returns (EASAttestation memory a)
+    {
         a = EASAttestation({
             uid: keccak256("uid-1"),
             schema: O5_SCHEMA,
@@ -410,9 +449,9 @@ contract VNextSettlementEscrowTest is Test {
             revocationTime: 0,
             refUID: bytes32(0),
             recipient: address(e),
-            attester: oracle,
+            attester: address(attester),
             revocable: true,
-            data: abi.encode(v)
+            data: abi.encode(_o5FullVerdict(e, id, decision, achieved))
         });
     }
 
@@ -466,7 +505,9 @@ contract VNextSettlementEscrowTest is Test {
             feeBps: 0,
             feeRecipient: address(0),
             feeScheduleHash: bytes32(0),
-            settlementUnitId: id
+            settlementUnitId: id,
+            oracleAuthEpoch: COHORT,
+            compositionRoot: bytes32(0)
         });
     }
 
@@ -495,6 +536,8 @@ contract VNextSettlementEscrowTest is Test {
                 feeRecipient: address(0),
                 disputeWindow: 1 days,
                 reclaimAt: block.timestamp + 30 days,
+                compositionSchemaVersion: 0,
+                compositionRoot: bytes32(0),
                 payouts: po
             });
         }
@@ -531,6 +574,8 @@ contract VNextSettlementEscrowTest is Test {
             feeRecipient: address(0),
             disputeWindow: 1 days,
             reclaimAt: block.timestamp + 30 days,
+            compositionSchemaVersion: 0,
+            compositionRoot: bytes32(0),
             payouts: po
         });
         _fund(e, cfgs);
@@ -599,10 +644,141 @@ contract VNextSettlementEscrowTest is Test {
             feeBps: 235,
             feeRecipient: address(0xFEE0),
             feeScheduleHash: VNextSettlementLib.computeFeeScheduleHash(fs),
-            settlementUnitId: unitId
+            settlementUnitId: unitId,
+            oracleAuthEpoch: 7,
+            compositionRoot: keccak256("golden-composition-root")
         });
         bytes memory o5 = abi.encode(v);
-        emit log_named_uint("o5Verdict_encoded_bytes", o5.length);
-        emit log_named_bytes32("o5Verdict_keccak", keccak256(o5));
+        emit log_named_uint("o5Verdict_encoded_bytes", o5.length); // rev-3: MUST be 448
+        emit log_named_bytes32("o5Verdict_keccak", keccak256(o5)); // the 448 golden the oracle re-runs parity on
+        assertEq(o5.length, 448, "rev-3 O5Verdict golden must be 448 bytes");
+        assertEq(o5.length, O5_VERDICT_BYTES, "golden length mirrors the imported constant");
+    }
+
+    // ── rev-3: O5 layout (448) + cohort/composition bindings ───────────────────────────────────────
+    function test_O5Verdict_encoding_is_448_and_roundtrips() public pure {
+        O5Verdict memory v = O5Verdict({
+            jobIdHash: keccak256("j"),
+            milestoneIndex: 5,
+            stepId: keccak256("s"),
+            evidenceBundleHash: keccak256("b"),
+            achievedTier: 2,
+            requestedTier: 2,
+            decision: O5_DECISION_SETTLE,
+            verdictHash: keccak256("vh"),
+            feeBps: 235,
+            feeRecipient: address(0xFEE0),
+            feeScheduleHash: keccak256("fh"),
+            settlementUnitId: keccak256("u"),
+            oracleAuthEpoch: 7,
+            compositionRoot: keccak256("cr")
+        });
+        bytes memory enc = abi.encode(v);
+        assertEq(enc.length, 448, "14 static ABI words == 448 bytes");
+        assertEq(enc.length, O5_VERDICT_BYTES, "constant mirrors layout");
+        assertEq(uint256(O5_DECISION_SETTLE), 1, "SETTLE == 1");
+
+        O5Verdict memory d = abi.decode(enc, (O5Verdict));
+        assertEq(d.jobIdHash, v.jobIdHash);
+        assertEq(d.milestoneIndex, v.milestoneIndex);
+        assertEq(d.stepId, v.stepId);
+        assertEq(d.evidenceBundleHash, v.evidenceBundleHash);
+        assertEq(d.achievedTier, v.achievedTier);
+        assertEq(d.requestedTier, v.requestedTier);
+        assertEq(d.decision, v.decision);
+        assertEq(d.verdictHash, v.verdictHash);
+        assertEq(d.feeBps, v.feeBps);
+        assertEq(d.feeRecipient, v.feeRecipient);
+        assertEq(d.feeScheduleHash, v.feeScheduleHash);
+        assertEq(d.settlementUnitId, v.settlementUnitId);
+        assertEq(d.oracleAuthEpoch, v.oracleAuthEpoch);
+        assertEq(d.compositionRoot, v.compositionRoot);
+    }
+
+    function test_Fund_PinsCohort_And_RejectsWhenDisabled() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        assertEq(e.oracleAuthEpoch(), COHORT, "fund pins the attester cohort id");
+
+        // a fresh escrow funded while the cohort is disabled must revert (fail-closed).
+        attester.setEnabled(false);
+        VNextSettlementEscrow e2 = _newEscrow(keccak256("job-2"));
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.InvalidOrDisabledCohort.selector);
+        e2.fund(_oneUnitConfig(1000e6, 0, 0, 1));
+    }
+
+    function test_Fund_RevertsWhenRequiredTierNeRequestedTier() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].requestedTier = 2; // != requiredTier (1)
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.TierRequestMismatch.selector);
+        e.fund(c);
+    }
+
+    function test_EvidenceRelease_RevertsWhenCohortDisabled() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        eas.set(_o5Attestation(e, id, 1, 1)); // an otherwise-valid attestation already exists
+        attester.setEnabled(false); // cohort disabled AFTER the mint — must neutralize it at payment time
+        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+    }
+
+    function test_EvidenceRelease_RevertsOnCohortEpochMismatch() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.oracleAuthEpoch = COHORT + 1; // wrong epoch
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.OracleCohortMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+    }
+
+    function test_EvidenceRelease_RevertsOnCompositionRootMismatch() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // unit.compositionRoot == 0
+        bytes32 id = _unitId(e);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.compositionRoot = keccak256("some-other-root"); // != frozen 0
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.CompositionRootMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+    }
+
+    function test_EvidenceRelease_CompositionHappyPath() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        bytes32 root = keccak256("composed-root");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        c[0].compositionSchemaVersion = 1;
+        c[0].compositionRoot = root;
+        _fund(e, c);
+        bytes32 id = _unitId(e);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.compositionRoot = root; // matches the frozen unit root
+        a.data = abi.encode(v);
+        eas.set(a);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(feeDest), 23_500000);
+    }
+
+    function test_EvidenceRelease_RevertsWhenUidMismatch() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        a.uid = keccak256("different-uid"); // getAttestation returns a uid != the requested easUid
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
     }
 }
