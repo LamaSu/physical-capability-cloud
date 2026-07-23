@@ -3,6 +3,9 @@ src = "src"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.24"
+# Read-only access to the committed golden vectors (evidence-lane Step-10 conformance
+# fixtures) consumed by test/Step10GoldenParity.t.sol — the M2 cross-language parity gate.
+fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 # EIP-170 (24,576 B runtime) fix: without the optimizer, MilestoneEscrow(V1/V2)
 # and PCCProtocol(V1/V2) exceed the contract-size limit and are undeployable.
 # runs=200 is the standard size/gas balance; verified all contracts fit (see PR).

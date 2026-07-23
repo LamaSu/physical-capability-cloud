@@ -1,0 +1,688 @@
+{
+  "_meta": {
+    "status": "DRAFT-CONFORMANCE-v0.2.5",
+    "warning": "Not accepted for deployment or minting. Subject to joint lane review.",
+    "artifactPolicy": "Committable test-only artifact (DRAFT-CONFORMANCE-v0.2.5, not accepted for deployment or minting).",
+    "spec": "step10-verdict-attestation-seam-contract.md (v0.2.5)",
+    "generatedBy": "_gen.mjs",
+    "nonProductionTestKey": {
+      "note": "Anvil/Hardhat account #0 — THROWAWAY dev key, never the real oracle key",
+      "address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "neverRealOracleKeyPrefix": "0x3e9cf724..."
+    },
+    "eip712Domain": {
+      "name": "PCC-OracleVerdict",
+      "version": "1",
+      "chainId": 84532,
+      "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+    },
+    "verifierSetId": "step10-conformance-verifier-set-v1",
+    "issuedAt": 1700000000,
+    "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+    "feeHashEncoding": {
+      "form": "13-field abi.encode (NOT encodePacked)",
+      "spec": "step10-verdict-attestation-seam-contract.md §17.1 (v0.2.5)",
+      "formula": "feeScheduleHash = keccak256(abi.encode(uint8 domainVersion, uint256 chainId, address escrow, bytes32 settlementUnitId, uint8 feeBasis, uint256 G, uint256 F, uint256 N, uint16 feeBps, uint256 denominator, uint8 roundingRule, address feeRecipient, bytes32 feeSplitConfigHash)) rendered \"0x\"+64hex",
+      "wordLayout": "each field right-aligned in its OWN 32-byte word (uintN left-padded big-endian; address = 12 zero bytes + 20-byte address; bytes32 as-is); 13 words = 416 bytes; then keccak_256",
+      "v1Constants": {
+        "domainVersion": 1,
+        "feeBasis": "GROSS(0)",
+        "denominator": 10000,
+        "roundingRule": "FLOOR(0)",
+        "feeSplitConfigHash": "bytes32(0)",
+        "MAX_FEE_BPS": 1000
+      },
+      "feeMath": "F == mulDiv(G, feeBps, 10000) floor (full-precision); N == G - F; N + F == G",
+      "canonicalTestValues": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x665f0efac78275664684c667420fe6a9d383bbb7cd551c50fe3a4550446b057f",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "25000",
+        "N": "975000",
+        "feeBps": 250,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "canonicalFeeScheduleHash": "0x79a6ad09193fae26c1758583ed5dcc0c0f26ccfee7effc3bf9ad42eff0e51578",
+      "canonicalWordBreakdown": [
+        {
+          "index": 1,
+          "field": "domainVersion",
+          "solidityType": "uint8",
+          "value": "1",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        {
+          "index": 2,
+          "field": "chainId",
+          "solidityType": "uint256",
+          "value": "84532",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000014a34"
+        },
+        {
+          "index": 3,
+          "field": "escrow",
+          "solidityType": "address",
+          "value": "0x000000000000000000000000000000000000e5c7",
+          "word": "0x000000000000000000000000000000000000000000000000000000000000e5c7"
+        },
+        {
+          "index": 4,
+          "field": "settlementUnitId",
+          "solidityType": "bytes32",
+          "value": "0x665f0efac78275664684c667420fe6a9d383bbb7cd551c50fe3a4550446b057f",
+          "word": "0x665f0efac78275664684c667420fe6a9d383bbb7cd551c50fe3a4550446b057f"
+        },
+        {
+          "index": 5,
+          "field": "feeBasis",
+          "solidityType": "uint8",
+          "value": "0",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "index": 6,
+          "field": "G",
+          "solidityType": "uint256",
+          "value": "1000000",
+          "word": "0x00000000000000000000000000000000000000000000000000000000000f4240"
+        },
+        {
+          "index": 7,
+          "field": "F",
+          "solidityType": "uint256",
+          "value": "25000",
+          "word": "0x00000000000000000000000000000000000000000000000000000000000061a8"
+        },
+        {
+          "index": 8,
+          "field": "N",
+          "solidityType": "uint256",
+          "value": "975000",
+          "word": "0x00000000000000000000000000000000000000000000000000000000000ee098"
+        },
+        {
+          "index": 9,
+          "field": "feeBps",
+          "solidityType": "uint16",
+          "value": "250",
+          "word": "0x00000000000000000000000000000000000000000000000000000000000000fa"
+        },
+        {
+          "index": 10,
+          "field": "denominator",
+          "solidityType": "uint256",
+          "value": "10000",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000002710"
+        },
+        {
+          "index": 11,
+          "field": "roundingRule",
+          "solidityType": "uint8",
+          "value": "0",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "index": 12,
+          "field": "feeRecipient",
+          "solidityType": "address",
+          "value": "0x000000000000000000000000000000000000Fee5",
+          "word": "0x000000000000000000000000000000000000000000000000000000000000fee5"
+        },
+        {
+          "index": 13,
+          "field": "feeSplitConfigHash",
+          "solidityType": "bytes32",
+          "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "word": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "zeroFeeTestValues": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x665f0efac78275664684c667420fe6a9d383bbb7cd551c50fe3a4550446b057f",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "0",
+        "N": "1000000",
+        "feeBps": 0,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "zeroFeeScheduleHash": "0x78c0fff06845a38ba27c995e61466b07e52ba237827623636000e85e48915bda",
+      "supersedes": "the v0.2.2 3-field keccak256(abi.encode(uint16 feeBps, address feeRecipient, bytes32 feeSplit)) = 0x0fb8ce11... form",
+      "note": "feeScheduleHash: Hex32 | null in the type; these v0.2.3 fixtures always commit a schedule (even zero-fee), so it is never null here. settlementUnitId mapping to (jobId,milestoneIndex,stepId) + on-chain getters/freeze lifecycle are escrow-lane action items (9de363c7)."
+    },
+    "file": "signed EIP-712 verdict vectors",
+    "count": 6,
+    "eip712TypeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+    "eip712DomainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  },
+  "vectors": [
+    {
+      "name": "settle-tier1",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-settle-t1-0001",
+        "milestoneIndex": 0,
+        "stepId": "0x822b0de932f821014dbc5a5e74e580c5357c6dbc20384ddcb19132e8b6198638",
+        "settlementUnitId": "0xd75b25a5fce55a15570128361b82a052a8ccd040e58110c4c2f3fd9dee6771a9",
+        "packageHash": "sha256:23251066c19e997126c867ff23f281ea603019cb771a70d1f10d602c95e1162a",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:58516f73a5f2f0fd769f7c9311fb5b2a6f63e0239dc74e6c4faaa80a85cd556b",
+          "sha256:d4e440f30e23867ea5eceee8137568ca04e39ce900f3e84202b7af1b939f1015"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": true,
+          "devicePrincipalVerified": false,
+          "deviceDistinctFromOperator": false,
+          "deviceHardwareBindingVerified": false,
+          "phaseDelegationVerified": true,
+          "sessionKeyVerified": true,
+          "contractWindowCompliant": true,
+          "liveGatewayReceiptsVerified": false,
+          "checkpointChainContinuous": true,
+          "evidenceTimeBound": "interval",
+          "independentWitnessVerified": false,
+          "physicalOutcomeVerified": false
+        },
+        "achievedTier": 1,
+        "requestedTier": 1,
+        "decision": "settle",
+        "contradiction": false,
+        "feeBps": 250,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeScheduleHash": "0x6a0ba2be37847b866e1a790d12762237da316b603c45a7b64f902c382b4da1d0",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":1,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":true,\"contractWindowCompliant\":true,\"deviceDistinctFromOperator\":false,\"deviceHardwareBindingVerified\":false,\"devicePrincipalVerified\":false,\"evidenceTimeBound\":\"interval\",\"independentWitnessVerified\":false,\"liveGatewayReceiptsVerified\":false,\"operatorPrincipalVerified\":true,\"phaseDelegationVerified\":true,\"physicalOutcomeVerified\":false,\"sessionKeyVerified\":true},\"claimsSchemaVersion\":1,\"contradiction\":false,\"decision\":\"settle\",\"evidenceFormatVersion\":1,\"feeBps\":250,\"feeRecipient\":\"0x000000000000000000000000000000000000Fee5\",\"feeScheduleHash\":\"0x6a0ba2be37847b866e1a790d12762237da316b603c45a7b64f902c382b4da1d0\",\"issuedAt\":1700000000,\"jobId\":\"job-settle-t1-0001\",\"milestoneIndex\":0,\"packageHash\":\"sha256:23251066c19e997126c867ff23f281ea603019cb771a70d1f10d602c95e1162a\",\"requestedTier\":1,\"revealedPayloadHashes\":[\"sha256:58516f73a5f2f0fd769f7c9311fb5b2a6f63e0239dc74e6c4faaa80a85cd556b\",\"sha256:d4e440f30e23867ea5eceee8137568ca04e39ce900f3e84202b7af1b939f1015\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0xd75b25a5fce55a15570128361b82a052a8ccd040e58110c4c2f3fd9dee6771a9\",\"stepId\":\"0x822b0de932f821014dbc5a5e74e580c5357c6dbc20384ddcb19132e8b6198638\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:96b62d1fac03d4a2d2a90cb25293891e316711dd0342d7c093e8914dd96a381c",
+      "verdictHashHex": "0x96b62d1fac03d4a2d2a90cb25293891e316711dd0342d7c093e8914dd96a381c",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0xd75b25a5fce55a15570128361b82a052a8ccd040e58110c4c2f3fd9dee6771a9",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "25000",
+        "N": "975000",
+        "feeBps": 250,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0xfd6922cf7dd6e36e8715aad732426b7e936cc96b804c09e00eae3ea5682f54ef",
+        "digest": "0xa26ce46e904fdb0207ebc1e242ca64b0e63354eb30ea7281c1898d8ad1f04ff9"
+      },
+      "signature": "0x1572429731550dc6c182781db45c2e48292f48a5d36a3c99aab45fc9877826617f32ea8d77fe2ed80d382d228e54287995b2d8e0c22d5a0076e9b6bae90fa0671b",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "settle-tier3",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-settle-t3-0002",
+        "milestoneIndex": 0,
+        "stepId": "0xbdb1c379f14a7b43ab14b201f4b67728db03f1b0988b60b4efb147626253cfbc",
+        "settlementUnitId": "0x69c2dce27ecf1c2687b0d9ee6466bbc93e3fddee929e77cd5016b7b5699eeea3",
+        "packageHash": "sha256:ff0ef3111d357bc5c6b3c08a1a09e4d4d226970811cb94d1f8570254a570a435",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:10b86fb5352b3bb45ee665dcb8da7ca66a5a7caefb7d2601b8999da5317d816d",
+          "sha256:692b7bc619a72c27551dc90dda3d935e9b6ec4a7f5eeb04576a8f8318801f188"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": true,
+          "devicePrincipalVerified": true,
+          "deviceDistinctFromOperator": true,
+          "deviceHardwareBindingVerified": true,
+          "phaseDelegationVerified": true,
+          "sessionKeyVerified": true,
+          "contractWindowCompliant": true,
+          "liveGatewayReceiptsVerified": true,
+          "checkpointChainContinuous": true,
+          "evidenceTimeBound": "point",
+          "independentWitnessVerified": true,
+          "physicalOutcomeVerified": true
+        },
+        "achievedTier": 3,
+        "requestedTier": 3,
+        "decision": "settle",
+        "contradiction": false,
+        "feeBps": 250,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeScheduleHash": "0x3c090b12ce5c3ea7d1e80a34fc8525127e61fc82dad1c6ad56779d12cf70072a",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":3,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":true,\"contractWindowCompliant\":true,\"deviceDistinctFromOperator\":true,\"deviceHardwareBindingVerified\":true,\"devicePrincipalVerified\":true,\"evidenceTimeBound\":\"point\",\"independentWitnessVerified\":true,\"liveGatewayReceiptsVerified\":true,\"operatorPrincipalVerified\":true,\"phaseDelegationVerified\":true,\"physicalOutcomeVerified\":true,\"sessionKeyVerified\":true},\"claimsSchemaVersion\":1,\"contradiction\":false,\"decision\":\"settle\",\"evidenceFormatVersion\":1,\"feeBps\":250,\"feeRecipient\":\"0x000000000000000000000000000000000000Fee5\",\"feeScheduleHash\":\"0x3c090b12ce5c3ea7d1e80a34fc8525127e61fc82dad1c6ad56779d12cf70072a\",\"issuedAt\":1700000000,\"jobId\":\"job-settle-t3-0002\",\"milestoneIndex\":0,\"packageHash\":\"sha256:ff0ef3111d357bc5c6b3c08a1a09e4d4d226970811cb94d1f8570254a570a435\",\"requestedTier\":3,\"revealedPayloadHashes\":[\"sha256:10b86fb5352b3bb45ee665dcb8da7ca66a5a7caefb7d2601b8999da5317d816d\",\"sha256:692b7bc619a72c27551dc90dda3d935e9b6ec4a7f5eeb04576a8f8318801f188\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0x69c2dce27ecf1c2687b0d9ee6466bbc93e3fddee929e77cd5016b7b5699eeea3\",\"stepId\":\"0xbdb1c379f14a7b43ab14b201f4b67728db03f1b0988b60b4efb147626253cfbc\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:d6f5f54c3637b34ed0f2a8c04240833db6db55f8950a03994e3802ec04e87b5d",
+      "verdictHashHex": "0xd6f5f54c3637b34ed0f2a8c04240833db6db55f8950a03994e3802ec04e87b5d",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x69c2dce27ecf1c2687b0d9ee6466bbc93e3fddee929e77cd5016b7b5699eeea3",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "25000",
+        "N": "975000",
+        "feeBps": 250,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0x04531570456a93b49dec30d85ed4ee783db5c22adc2c0f58b78587392861b132",
+        "digest": "0xff64bcbbb4bae19e00098204177b8d6a701b95cb05b73ac0530d38efecb5c322"
+      },
+      "signature": "0x1c5fa09b51882809aba87ce7529b57a56f5cc32b4c5443e31901f5b280de43900bf5cce64ea4eec217cefdcdb73c4fe37db3962e69303b877aaec648022c55f41c",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "buyer-approved-tier0",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-ba-0003",
+        "milestoneIndex": 0,
+        "stepId": "0x2edade70b66179ac50d5f5197aaab862c06a22f2281170014e94e8b18eea55b0",
+        "settlementUnitId": "0xea854130418128103a317c567c2fb3e3748e41fe28945015dc61ba7c45848b63",
+        "packageHash": "sha256:a10c377a0334898930e8e4aa597ebdaac6061602187ee4f0db2210936a4aace4",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:0bc65e8ddc5ed21b05f1c1fcfd328c8b98288f29210bc0b45b3f5b830b068db2",
+          "sha256:cf7dd0ab222594069d8a466bc85f1bf5f67d3038b48cfc986ac390a150d9a059"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": false,
+          "devicePrincipalVerified": false,
+          "deviceDistinctFromOperator": false,
+          "deviceHardwareBindingVerified": false,
+          "phaseDelegationVerified": false,
+          "sessionKeyVerified": false,
+          "contractWindowCompliant": false,
+          "liveGatewayReceiptsVerified": false,
+          "checkpointChainContinuous": false,
+          "evidenceTimeBound": "none",
+          "independentWitnessVerified": false,
+          "physicalOutcomeVerified": false
+        },
+        "achievedTier": 0,
+        "requestedTier": 0,
+        "decision": "buyer-approved",
+        "contradiction": false,
+        "feeBps": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "feeScheduleHash": "0x8c12344c1a390c3ff0879c254fe38060820a5e6c0f577414dcde26283179ce34",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":0,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":false,\"contractWindowCompliant\":false,\"deviceDistinctFromOperator\":false,\"deviceHardwareBindingVerified\":false,\"devicePrincipalVerified\":false,\"evidenceTimeBound\":\"none\",\"independentWitnessVerified\":false,\"liveGatewayReceiptsVerified\":false,\"operatorPrincipalVerified\":false,\"phaseDelegationVerified\":false,\"physicalOutcomeVerified\":false,\"sessionKeyVerified\":false},\"claimsSchemaVersion\":1,\"contradiction\":false,\"decision\":\"buyer-approved\",\"evidenceFormatVersion\":1,\"feeBps\":0,\"feeRecipient\":\"0x0000000000000000000000000000000000000000\",\"feeScheduleHash\":\"0x8c12344c1a390c3ff0879c254fe38060820a5e6c0f577414dcde26283179ce34\",\"issuedAt\":1700000000,\"jobId\":\"job-ba-0003\",\"milestoneIndex\":0,\"packageHash\":\"sha256:a10c377a0334898930e8e4aa597ebdaac6061602187ee4f0db2210936a4aace4\",\"requestedTier\":0,\"revealedPayloadHashes\":[\"sha256:0bc65e8ddc5ed21b05f1c1fcfd328c8b98288f29210bc0b45b3f5b830b068db2\",\"sha256:cf7dd0ab222594069d8a466bc85f1bf5f67d3038b48cfc986ac390a150d9a059\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0xea854130418128103a317c567c2fb3e3748e41fe28945015dc61ba7c45848b63\",\"stepId\":\"0x2edade70b66179ac50d5f5197aaab862c06a22f2281170014e94e8b18eea55b0\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:927e34f48b19716a92b41742d19771c04db0e4873d20348e8e62eeaa83de2e47",
+      "verdictHashHex": "0x927e34f48b19716a92b41742d19771c04db0e4873d20348e8e62eeaa83de2e47",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0xea854130418128103a317c567c2fb3e3748e41fe28945015dc61ba7c45848b63",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "0",
+        "N": "1000000",
+        "feeBps": 0,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0x41918ceb8bc343d20d007ad48ecf268749ba11d8bdf7f8aced83f83e8a86b07c",
+        "digest": "0x3e53765054274f87700b8d7134b3ebb135f5611553faf30d60ea95105af11050"
+      },
+      "signature": "0xa866bdc2deb185a42ea38d22edae169c9bf30b40c214e02b3676778fa948fda9238be93ecc467518c71e0af44707290cafb0d16f7c95a71893140b46eeb4336d1c",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "tier0-hold",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-t0hold-0004",
+        "milestoneIndex": 0,
+        "stepId": "0x8f13bd0668f94afac17ee6ff7acbb4eab1bcdb59b714162d69bdf4ff2abb8b36",
+        "settlementUnitId": "0x5b603bf2603a03bd6fe01af5b844ea08fa619fef5434907c97742cbb7d90a336",
+        "packageHash": "sha256:d1229c58493094ad295e87056fed8d36111c6f4a4f9b101af8b36240c9bdb039",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:005b91401600dc84861c2dd3a72990c2cbf2f4bc74b619bcd514da052838356e",
+          "sha256:7f2695f89ea974e639c9a06538f4ff190df45dba617517f2481a81528e80653c"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": false,
+          "devicePrincipalVerified": false,
+          "deviceDistinctFromOperator": false,
+          "deviceHardwareBindingVerified": false,
+          "phaseDelegationVerified": false,
+          "sessionKeyVerified": false,
+          "contractWindowCompliant": false,
+          "liveGatewayReceiptsVerified": false,
+          "checkpointChainContinuous": false,
+          "evidenceTimeBound": "none",
+          "independentWitnessVerified": false,
+          "physicalOutcomeVerified": false
+        },
+        "achievedTier": 0,
+        "requestedTier": 0,
+        "decision": "hold",
+        "contradiction": false,
+        "feeBps": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "feeScheduleHash": "0x62a770e9d82234bc1be27d971b9135b84df67ca6d904c4cb8a7ae49d729a0a3c",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":0,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":false,\"contractWindowCompliant\":false,\"deviceDistinctFromOperator\":false,\"deviceHardwareBindingVerified\":false,\"devicePrincipalVerified\":false,\"evidenceTimeBound\":\"none\",\"independentWitnessVerified\":false,\"liveGatewayReceiptsVerified\":false,\"operatorPrincipalVerified\":false,\"phaseDelegationVerified\":false,\"physicalOutcomeVerified\":false,\"sessionKeyVerified\":false},\"claimsSchemaVersion\":1,\"contradiction\":false,\"decision\":\"hold\",\"evidenceFormatVersion\":1,\"feeBps\":0,\"feeRecipient\":\"0x0000000000000000000000000000000000000000\",\"feeScheduleHash\":\"0x62a770e9d82234bc1be27d971b9135b84df67ca6d904c4cb8a7ae49d729a0a3c\",\"issuedAt\":1700000000,\"jobId\":\"job-t0hold-0004\",\"milestoneIndex\":0,\"packageHash\":\"sha256:d1229c58493094ad295e87056fed8d36111c6f4a4f9b101af8b36240c9bdb039\",\"requestedTier\":0,\"revealedPayloadHashes\":[\"sha256:005b91401600dc84861c2dd3a72990c2cbf2f4bc74b619bcd514da052838356e\",\"sha256:7f2695f89ea974e639c9a06538f4ff190df45dba617517f2481a81528e80653c\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0x5b603bf2603a03bd6fe01af5b844ea08fa619fef5434907c97742cbb7d90a336\",\"stepId\":\"0x8f13bd0668f94afac17ee6ff7acbb4eab1bcdb59b714162d69bdf4ff2abb8b36\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:c50679e69ffa93e8d84fa3051c4eb6061b320265f4f1dfac7c1b0e5d1e6a8f3f",
+      "verdictHashHex": "0xc50679e69ffa93e8d84fa3051c4eb6061b320265f4f1dfac7c1b0e5d1e6a8f3f",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x5b603bf2603a03bd6fe01af5b844ea08fa619fef5434907c97742cbb7d90a336",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "0",
+        "N": "1000000",
+        "feeBps": 0,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x0000000000000000000000000000000000000000",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0x265e7c75f4b03ea30b013e7458ccb579ba86a3726e6d3a5a0c443c73d5e4803a",
+        "digest": "0x3728c1351ab46bacd61f963522d5271c554ca661c1ed05ab4ca9b911b87ff3ed"
+      },
+      "signature": "0x24655660fff9dbb5c745ff28598bdef01ae2fd1d3d7544bbb9dfd584cf875ff649133036ee73de28f3a4b94411e377a66639048d79c61bc45172032530eaad1d1b",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "under-achieved-hold",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-uahold-0005",
+        "milestoneIndex": 0,
+        "stepId": "0xbc1be7a2e7d3b9ae8d62b7c9167699c59f2050a2ec9d4b19ef625e702118b604",
+        "settlementUnitId": "0x4465c9f24561e99e73b097f25e4d35bac000acbe86b9c698522fd74870a0bb50",
+        "packageHash": "sha256:3f7f0a6afa698b58561680223de18edfb5f7ef164f510ade817f4abd1dec17f7",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:391953da376d2225b676f93f4ee9b41a992dd1868d700d04988496ac7fbaa7c1",
+          "sha256:dc6b646a65796f93078963b045077e6e9e94d0d4e0b72bb24c9627e0f5645109"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": true,
+          "devicePrincipalVerified": false,
+          "deviceDistinctFromOperator": false,
+          "deviceHardwareBindingVerified": false,
+          "phaseDelegationVerified": true,
+          "sessionKeyVerified": true,
+          "contractWindowCompliant": true,
+          "liveGatewayReceiptsVerified": false,
+          "checkpointChainContinuous": true,
+          "evidenceTimeBound": "interval",
+          "independentWitnessVerified": false,
+          "physicalOutcomeVerified": false
+        },
+        "achievedTier": 1,
+        "requestedTier": 2,
+        "decision": "hold",
+        "contradiction": false,
+        "feeBps": 250,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeScheduleHash": "0x4c06836ed5de6f9a3bc37b5a5f80cc1d87b45c268b5e5f277d47a5c4f045803e",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":1,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":true,\"contractWindowCompliant\":true,\"deviceDistinctFromOperator\":false,\"deviceHardwareBindingVerified\":false,\"devicePrincipalVerified\":false,\"evidenceTimeBound\":\"interval\",\"independentWitnessVerified\":false,\"liveGatewayReceiptsVerified\":false,\"operatorPrincipalVerified\":true,\"phaseDelegationVerified\":true,\"physicalOutcomeVerified\":false,\"sessionKeyVerified\":true},\"claimsSchemaVersion\":1,\"contradiction\":false,\"decision\":\"hold\",\"evidenceFormatVersion\":1,\"feeBps\":250,\"feeRecipient\":\"0x000000000000000000000000000000000000Fee5\",\"feeScheduleHash\":\"0x4c06836ed5de6f9a3bc37b5a5f80cc1d87b45c268b5e5f277d47a5c4f045803e\",\"issuedAt\":1700000000,\"jobId\":\"job-uahold-0005\",\"milestoneIndex\":0,\"packageHash\":\"sha256:3f7f0a6afa698b58561680223de18edfb5f7ef164f510ade817f4abd1dec17f7\",\"requestedTier\":2,\"revealedPayloadHashes\":[\"sha256:391953da376d2225b676f93f4ee9b41a992dd1868d700d04988496ac7fbaa7c1\",\"sha256:dc6b646a65796f93078963b045077e6e9e94d0d4e0b72bb24c9627e0f5645109\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0x4465c9f24561e99e73b097f25e4d35bac000acbe86b9c698522fd74870a0bb50\",\"stepId\":\"0xbc1be7a2e7d3b9ae8d62b7c9167699c59f2050a2ec9d4b19ef625e702118b604\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:07e05ada57e110cb6c750d961e4875adafcbaf89c0ff11c95cc6a1517bbbf82f",
+      "verdictHashHex": "0x07e05ada57e110cb6c750d961e4875adafcbaf89c0ff11c95cc6a1517bbbf82f",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x4465c9f24561e99e73b097f25e4d35bac000acbe86b9c698522fd74870a0bb50",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "25000",
+        "N": "975000",
+        "feeBps": 250,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0x60a47af6a3a3148a7727c41dc086887383691040eaf447dea860146024399ef9",
+        "digest": "0x7aad4026382230fde34b47596b99c3f3c85f510fa7965b63d482305f7845427e"
+      },
+      "signature": "0x5536cd133060cf7a727e887f648129c6d81c6bdb69d699d21f6aac9b2ecfdf3950f0c1ada8586bfd8a8bc3ebbba63ea42246d42c21b872be2010506de0bfab501b",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "contradiction-reject",
+      "verdict": {
+        "verdictSchemaVersion": 1,
+        "claimsSchemaVersion": 1,
+        "assurancePolicyVersion": 1,
+        "verificationPolicyHash": "sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3",
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "evidenceFormatVersion": 1,
+        "settlementDomain": {
+          "chainId": 84532,
+          "factoryAddress": "0x000000000000000000000000000000000000FaC7",
+          "escrowAddress": "0x000000000000000000000000000000000000e5c7",
+          "easSchemaUid": "0x000000000000000000000000000000000000000000000000000000000000ea52"
+        },
+        "jobId": "job-reject-0006",
+        "milestoneIndex": 0,
+        "stepId": "0xa6f0f4c3081027ae77a77d773ea8d22fb80c97eb61833c9ed45812c1e28640bd",
+        "settlementUnitId": "0x08678e425829ce962af53d75e348d00ef4f4bb9a574b516c5909b4601add0c6c",
+        "packageHash": "sha256:c83b7a3b2386c5c4279610c2fdb8aa4e95507ada613a0b9966cb7ee97c52dc09",
+        "acceptedEnvelopeHash": null,
+        "revealedPayloadHashes": [
+          "sha256:5f603da986a48689ae8f63f24b766afa9e6207df0ad89e45a63ce20c043ba25d",
+          "sha256:7798cd7612be0b61393a1fdcadd262614eb7f10a43a3c8557e376ed5f1269d44"
+        ],
+        "claims": {
+          "operatorPrincipalVerified": true,
+          "devicePrincipalVerified": true,
+          "deviceDistinctFromOperator": true,
+          "deviceHardwareBindingVerified": true,
+          "phaseDelegationVerified": true,
+          "sessionKeyVerified": true,
+          "contractWindowCompliant": true,
+          "liveGatewayReceiptsVerified": true,
+          "checkpointChainContinuous": true,
+          "evidenceTimeBound": "point",
+          "independentWitnessVerified": true,
+          "physicalOutcomeVerified": true
+        },
+        "achievedTier": 3,
+        "requestedTier": 3,
+        "decision": "reject",
+        "contradiction": true,
+        "feeBps": 250,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeScheduleHash": "0x074dde9e61d47532622265355b6a127a49065bf06a540b86dafdc1b303d2fae6",
+        "issuedAt": 1700000000
+      },
+      "jcsBytes": "{\"acceptedEnvelopeHash\":null,\"achievedTier\":3,\"assurancePolicyVersion\":1,\"claims\":{\"checkpointChainContinuous\":true,\"contractWindowCompliant\":true,\"deviceDistinctFromOperator\":true,\"deviceHardwareBindingVerified\":true,\"devicePrincipalVerified\":true,\"evidenceTimeBound\":\"point\",\"independentWitnessVerified\":true,\"liveGatewayReceiptsVerified\":true,\"operatorPrincipalVerified\":true,\"phaseDelegationVerified\":true,\"physicalOutcomeVerified\":true,\"sessionKeyVerified\":true},\"claimsSchemaVersion\":1,\"contradiction\":true,\"decision\":\"reject\",\"evidenceFormatVersion\":1,\"feeBps\":250,\"feeRecipient\":\"0x000000000000000000000000000000000000Fee5\",\"feeScheduleHash\":\"0x074dde9e61d47532622265355b6a127a49065bf06a540b86dafdc1b303d2fae6\",\"issuedAt\":1700000000,\"jobId\":\"job-reject-0006\",\"milestoneIndex\":0,\"packageHash\":\"sha256:c83b7a3b2386c5c4279610c2fdb8aa4e95507ada613a0b9966cb7ee97c52dc09\",\"requestedTier\":3,\"revealedPayloadHashes\":[\"sha256:5f603da986a48689ae8f63f24b766afa9e6207df0ad89e45a63ce20c043ba25d\",\"sha256:7798cd7612be0b61393a1fdcadd262614eb7f10a43a3c8557e376ed5f1269d44\"],\"settlementDomain\":{\"chainId\":84532,\"easSchemaUid\":\"0x000000000000000000000000000000000000000000000000000000000000ea52\",\"escrowAddress\":\"0x000000000000000000000000000000000000e5c7\",\"factoryAddress\":\"0x000000000000000000000000000000000000FaC7\"},\"settlementUnitId\":\"0x08678e425829ce962af53d75e348d00ef4f4bb9a574b516c5909b4601add0c6c\",\"stepId\":\"0xa6f0f4c3081027ae77a77d773ea8d22fb80c97eb61833c9ed45812c1e28640bd\",\"verdictSchemaVersion\":1,\"verificationPolicyHash\":\"sha256:01c988e54b1a03c86028102a26adb6427062e0f7ff8a863d467644a80ff8fdc3\",\"verifierSetId\":\"step10-conformance-verifier-set-v1\"}",
+      "verdictHash": "sha256:ef7f7f535d7a165973ef0563426c60cb84dbef532956247942402487b538de80",
+      "verdictHashHex": "0xef7f7f535d7a165973ef0563426c60cb84dbef532956247942402487b538de80",
+      "feeSchedule": {
+        "domainVersion": 1,
+        "chainId": 84532,
+        "escrow": "0x000000000000000000000000000000000000e5c7",
+        "settlementUnitId": "0x08678e425829ce962af53d75e348d00ef4f4bb9a574b516c5909b4601add0c6c",
+        "feeBasis": 0,
+        "G": "1000000",
+        "F": "25000",
+        "N": "975000",
+        "feeBps": 250,
+        "denominator": 10000,
+        "roundingRule": 0,
+        "feeRecipient": "0x000000000000000000000000000000000000Fee5",
+        "feeSplitConfigHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "eip712": {
+        "typeString": "Step10Verdict(bytes32 verdictHash,uint16 verdictSchemaVersion,uint256 chainId,address escrowAddress,bytes32 verifierSetIdHash)",
+        "typeHash": "0x455c25aa577924c030c344f9647609ae787eec2c85077cbfb052f7ba1ca45629",
+        "domainTypeString": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        "domain": {
+          "name": "PCC-OracleVerdict",
+          "version": "1",
+          "chainId": 84532,
+          "verifyingContract": "0x000000000000000000000000000000000000e5c7"
+        },
+        "verifierSetId": "step10-conformance-verifier-set-v1",
+        "verifierSetIdHash": "0xf2618d9a2e49ff3d4f9fde9676370a6e5cbb2054635b12b4c1c19c231ebe3ec4",
+        "domainSeparator": "0xc7d6ec34d9263e8425ac48ed44be053ce00b5cfee98b4da6bb5f4c8a7dfae4ab",
+        "structHash": "0xc26b0e8ac83119770609a7f9ac9cca4c3dc715285690cfe0b226759b3259a681",
+        "digest": "0x023c71d1fb4fd7dde1837e5b7f5867c26c75a5efe286f6ef8f5514c414727bd6"
+      },
+      "signature": "0x910f3b5a868d9117b52fbf17f6d5b5943964218411dca2fba750dc154e21e0bd4bacab4ab4f214c22b076a22a659a32f1416f5568710f84e4ace79752378ff4e1c",
+      "recoveredSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "expectedSigner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    }
+  ]
+}
