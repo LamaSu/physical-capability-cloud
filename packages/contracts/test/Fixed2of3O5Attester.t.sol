@@ -361,6 +361,12 @@ contract Fixed2of3O5AttesterTest is Test {
         );
     }
 
+    /// @dev L-03 parity: the single-signer testnet cohort must reject a revoker == its signer too.
+    function test_Single_Constructor_RejectsRevokerAsSigner() public {
+        vm.expectRevert(O5AttesterBase.RevokerIsSigner.selector);
+        new SingleSignerO5Attester(vm.addr(pkS), address(mockEas), O5_SCHEMA, COHORT, vm.addr(pkS));
+    }
+
     // ── M-01: escrow composition-root pre-check (anti-brick) ─────────────────────────────────────────
     /// @dev THE M-01 regression: a verdict echoing a stale root must NOT consume the unit's one-verdict
     ///      slot, and the corrected verdict must still mint afterwards.
@@ -377,6 +383,25 @@ contract Fixed2of3O5AttesterTest is Test {
         O5Verdict memory good = _verdict();
         bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
         assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
+        assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev SETTLE-only guard: a non-SETTLE verdict — even with a VALID quorum — must revert WITHOUT
+    ///      consuming the unit's one-verdict slot, so a later real SETTLE verdict still mints for the same
+    ///      unit. Without the guard, a buggy/compromised signer set could brick the unit to refund-only.
+    function test_NonSettleVerdict_Reverts_AndLeavesUnitMintable() public {
+        O5Verdict memory bad = _verdict();
+        bad.decision = 2; // anything != O5_DECISION_SETTLE (hold/reject carry no on-chain attestation)
+        bytes[] memory badSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(bad)); // a genuine quorum
+
+        vm.expectRevert(O5AttesterBase.NotSettleVerdict.selector);
+        attester.attestO5(bad, ESCROW, badSigs);
+        assertFalse(attester.usedUnit(bad.settlementUnitId), "a non-SETTLE verdict must not consume the unit");
+
+        // the slot survived — the real SETTLE verdict still mints for the same unit.
+        O5Verdict memory good = _verdict();
+        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertEq(mockEas.recipientOf(uid), ESCROW, "the SETTLE verdict still mints for the same unit");
         assertTrue(attester.usedUnit(good.settlementUnitId));
     }
 

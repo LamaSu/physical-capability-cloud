@@ -18,6 +18,10 @@ contract SingleSignerO5Attester is O5AttesterBase {
         O5AttesterBase(eas_, o5SchemaUid_, cohortId_, revoker_)
     {
         if (signer_ == address(0)) revert ZeroSigner();
+        // L-03 separation of duties (parity with Fixed2of3O5Attester): the kill-switch holder must not also
+        // be the signing key, or one compromised key could both sign AND permanently disable the cohort.
+        // Low-value on testnet, but kept uniform. (revoker_ != 0 is already enforced in O5AttesterBase.)
+        if (revoker_ == signer_) revert RevokerIsSigner();
         signer = signer_;
     }
 

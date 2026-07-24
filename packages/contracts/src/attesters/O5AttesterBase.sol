@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {O5Verdict} from "../O5Types.sol";
+import {O5Verdict, O5_DECISION_SETTLE} from "../O5Types.sol";
 import {IOracleAttester} from "../interfaces/IOracleAttester.sol";
 import {IEAS, AttestationRequest, AttestationRequestData} from "../interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
@@ -76,6 +76,7 @@ abstract contract O5AttesterBase is IOracleAttester {
     error CohortIsDisabled();
     error CohortMismatch();
     error EscrowVerdictMismatch();
+    error NotSettleVerdict();
     error UnitAlreadyAttested();
     error WrongSignatureCount();
     error SignersNotSortedOrUnique();
@@ -143,6 +144,14 @@ abstract contract O5AttesterBase is IOracleAttester {
 
         // M-of-N quorum over the canonical digest (concrete rule). Reverts unless the quorum is met.
         _verifySignatures(_digest(v), signatures);
+
+        // SETTLE-only guard (anti-brick, decision counterpart of the M-01 escrow-read checks below). The O5
+        // rail is normatively EVIDENCE/SETTLE-only: hold/reject verdicts carry NO on-chain attestation. The
+        // escrow ALSO rejects a non-SETTLE verdict at release (`NotSettle`), so minting one here would only
+        // consume the unit's one-verdict slot and brick it to refund-only. Guard it BEFORE `usedUnit` is
+        // consumed — `decision` is the oracle's own policy field (not escrow state), so it is checked
+        // directly rather than read back. A non-SETTLE verdict burns nothing; a real SETTLE still mints.
+        if (v.decision != O5_DECISION_SETTLE) revert NotSettleVerdict();
 
         // ── M-01 anti-brick pre-check ─────────────────────────────────────────────────────────────
         // Bind the verdict to the escrow's OWN state before the slot is consumed. Ordered AFTER the quorum
