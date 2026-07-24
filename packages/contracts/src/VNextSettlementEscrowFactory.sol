@@ -54,10 +54,16 @@ contract VNextSettlementEscrowFactory {
         view
         returns (address)
     {
-        return Clones.predictDeterministicAddress(implementation, _salt(payer, arbiter, jobIdHash, termsHash), address(this));
+        return Clones.predictDeterministicAddress(
+            implementation, _salt(payer, arbiter, jobIdHash, termsHash), address(this)
+        );
     }
 
-    function _salt(address payer, address arbiter, bytes32 jobIdHash, bytes32 termsHash) private pure returns (bytes32) {
+    function _salt(address payer, address arbiter, bytes32 jobIdHash, bytes32 termsHash)
+        private
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(payer, arbiter, jobIdHash, termsHash));
     }
 }
