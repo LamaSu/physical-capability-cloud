@@ -49,11 +49,16 @@ const claimId = (leg, cls) => keccak256(enc(
 const claimPrincipal = claimId(0n, 0n); // PRINCIPAL=0, legIndex 0
 const claimFee = claimId((1n << 256n) - 1n, 1n); // FEE=1, legIndex 2^256-1
 
-// O5Verdict: Solidity `abi.encode(v)` over an all-STATIC 12-field struct == abi.encode(the 12 fields).
+// O5Verdict: Solidity `abi.encode(v)` over an all-STATIC 14-field struct == abi.encode(the 14 fields).
+// v1.1/rev-3 (escrow #453): field13 uint64 oracleAuthEpoch + field14 bytes32 compositionRoot appended
+// AFTER settlementUnitId (the 12 originals unchanged, same order). abi.encode length 384 -> 448.
+const oracleAuthEpoch = 7n;                            // golden sample (escrow #453)
+const compositionRoot = K('golden-composition-root');  // golden sample; typed H(SCHEMA_ID,root) is composition-owned — mirror echoes the frozen bytes32
 const o5Types = ['bytes32', 'uint256', 'bytes32', 'bytes32', 'uint8', 'uint8', 'uint8', 'bytes32',
-  'uint16', 'address', 'bytes32', 'bytes32'];
-const o5enc = enc(o5Types,
-  [jobIdHash, mi, stepId, bundleHash, 2n, 2n, 1n, verdictHash, feeBps, feeRecipient, feeScheduleHash, unitId]);
+  'uint16', 'address', 'bytes32', 'bytes32', 'uint64', 'bytes32'];
+const o5vals = [jobIdHash, mi, stepId, bundleHash, 2n, 2n, 1n, verdictHash, feeBps, feeRecipient, feeScheduleHash, unitId,
+  oracleAuthEpoch, compositionRoot];
+const o5enc = enc(o5Types, o5vals);
 const o5len = (o5enc.length - 2) / 2;
 const o5keccak = keccak256(o5enc);
 
@@ -64,7 +69,7 @@ const expected = {
   payoutConfigHash: '0x021b0725269574dabdce218dcc0ad26b792e1a7ab0208e8cbc52a75a1247bcaf',
   claimId_PRINCIPAL_leg0: '0x3995df0c1f8efea68e2b9f7ff59ef7274cc93fd3de62db59bd876a32d20fdc3f',
   claimId_FEE: '0x49b29be7b292412e367b10683c6f2cc17f1201794d2ca22783ce65abf0437be7',
-  o5Verdict_keccak: '0x8488b4c681b16881a64c994fed8903288cb07d117674be306c13242ea9b0339d',
+  o5Verdict_keccak: '0x8f3ae745b77d9ea76f472abb7b34de68fdf8365c652b1013913c5d444899edf7',
 };
 const got = {
   settlementUnitId: unitId,
@@ -82,9 +87,9 @@ for (const k of Object.keys(expected)) {
   ok = ok && pass;
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${k}\n        got  ${got[k]}` + (pass ? '' : `\n        want ${expected[k]}`));
 }
-const lenOk = o5len === 384;
+const lenOk = o5len === 448;
 ok = ok && lenOk;
-console.log(`${lenOk ? 'PASS' : 'FAIL'}  o5Verdict_encoded_length = ${o5len} bytes (expected 384)`);
+console.log(`${lenOk ? 'PASS' : 'FAIL'}  o5Verdict_encoded_length = ${o5len} bytes (expected 448)`);
 
 // field-mutation rejection: a single-field change MUST change the hash
 const mutFee = keccak256(enc(feeSchedTypes,
@@ -92,6 +97,16 @@ const mutFee = keccak256(enc(feeSchedTypes,
 const mutOk = mutFee.toLowerCase() !== feeScheduleHash.toLowerCase();
 ok = ok && mutOk;
 console.log(`${mutOk ? 'PASS' : 'FAIL'}  field-mutation rejection (feeBps 235->236 changes feeScheduleHash)`);
+
+// O5 field-mutation: the two NEW appended words must BIND into the keccak (not be silently ignored)
+const mutEpoch = keccak256(enc(o5Types, [...o5vals.slice(0, 12), 8n, compositionRoot])); // oracleAuthEpoch 7->8
+const epochOk = mutEpoch.toLowerCase() !== o5keccak.toLowerCase();
+ok = ok && epochOk;
+console.log(`${epochOk ? 'PASS' : 'FAIL'}  O5 field-mutation: oracleAuthEpoch 7->8 changes o5Verdict keccak`);
+const mutRoot = keccak256(enc(o5Types, [...o5vals.slice(0, 13), Z32])); // compositionRoot -> 0 (non-composed)
+const rootOk = mutRoot.toLowerCase() !== o5keccak.toLowerCase();
+ok = ok && rootOk;
+console.log(`${rootOk ? 'PASS' : 'FAIL'}  O5 field-mutation: compositionRoot nonzero vs 0 (non-composed) changes o5Verdict keccak`);
 
 console.log(`\n${ok ? 'GATE-1 EVIDENCE MIRROR: ALL BYTE-EXACT vs escrow golden vectors OK' : 'GATE-1 EVIDENCE MIRROR: DIVERGENCE -- pre-deploy blocker'}`);
 process.exit(ok ? 0 : 1);
