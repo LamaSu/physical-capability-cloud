@@ -528,19 +528,20 @@ contract Fixed2of3O5AttesterTest is Test {
     // `_domainSeparator` to build an expectation — so a hashing mistake shared by the on-chain code and an
     // off-chain mirror that copied it is caught here rather than at the money path.
     //
-    // Canonical pinning: chainId 8453 (Base), cohortId/salt 7, verifyingContract = the attester deployed by
-    // GOLDEN_DEPLOYER at nonce 0 (`cast compute-address 0x…00D0 --nonce 0`).
+    // Canonical pinning: chainId 8453 (Base), cohortId 7 (bound INSIDE the struct as oracleAuthEpoch — no
+    // longer a domain salt), verifyingContract = the attester deployed by GOLDEN_DEPLOYER at nonce 0
+    // (`cast compute-address 0x…00D0 --nonce 0`).
     address constant GOLDEN_DEPLOYER = address(0xD0);
     address constant GOLDEN_ATTESTER = 0xe61244BB1242d392fB53dF4979A62E955a9BC70d;
     uint256 constant GOLDEN_CHAINID = 8453;
     uint64 constant GOLDEN_COHORT = 7;
-    bytes32 constant GOLDEN_DOMAIN_TYPEHASH = 0xd87cd6ef79d4e2b95e15ce8abf732db51ec771f1ca2edccf22a46c729ac56472;
+    bytes32 constant GOLDEN_DOMAIN_TYPEHASH = 0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f;
     bytes32 constant GOLDEN_NAME_HASH = 0x8088a87b6ec5bea69f5197cba5c21ed8bd0517de908c2db45f3a57a009ab84cc;
     bytes32 constant GOLDEN_VERSION_HASH = 0xc89efdaa54c0f20c7adf612882df0950f5a951637e0307cdcb4c672f298b8bc6;
     bytes32 constant GOLDEN_O5_TYPEHASH = 0xb1655a362b95f8aff16b8e0d088e7316643950f91bd955d8dd5b98092b140872;
-    bytes32 constant GOLDEN_DOMAIN_SEPARATOR = 0xd1877915bc12dfdeacda5887c5eb3c6809ac3488e10dee437db1c7c5e5599827;
+    bytes32 constant GOLDEN_DOMAIN_SEPARATOR = 0x089f1b2121bfc0d8b7cc543917e0a6e76f5a3e06d18e8a52ed523be03c385a2a;
     bytes32 constant GOLDEN_STRUCT_HASH = 0x3a975d891d1770842ef8f7d8bddd98725d4043256efbf545539f780766f7074b;
-    bytes32 constant GOLDEN_DIGEST = 0xc07d03725e6445f57b8685ee8c6d13adebd3e37e8a1e143c4f8c6878051d6c16;
+    bytes32 constant GOLDEN_DIGEST = 0xc15b529ac9df1b28646b3ba79e3a9764ada83b7c02b7ed74e409f8569a144b67;
 
     function _goldenVerdict() internal pure returns (O5Verdict memory v) {
         v = O5Verdict({
@@ -571,9 +572,9 @@ contract Fixed2of3O5AttesterTest is Test {
 
         // the string preimages, asserted against externally-computed literals (catches a typo'd type string)
         assertEq(
-            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)"),
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
             GOLDEN_DOMAIN_TYPEHASH,
-            "EIP-712 domain type string"
+            "EIP-712 domain type string (no salt)"
         );
         assertEq(keccak256(bytes("PCC:O5Attester")), GOLDEN_NAME_HASH, "domain name");
         assertEq(keccak256(bytes("1")), GOLDEN_VERSION_HASH, "domain version");
@@ -591,7 +592,7 @@ contract Fixed2of3O5AttesterTest is Test {
 
         console2.log("== O5 EIP-712 golden (mirror these off-chain) ==");
         console2.log("chainId", GOLDEN_CHAINID);
-        console2.log("cohortId (domain salt)", uint256(GOLDEN_COHORT));
+        console2.log("cohortId (struct oracleAuthEpoch, not a domain salt)", uint256(GOLDEN_COHORT));
         console2.log("verifyingContract", GOLDEN_ATTESTER);
         console2.logBytes32(GOLDEN_DOMAIN_TYPEHASH);
         console2.logBytes32(GOLDEN_NAME_HASH);

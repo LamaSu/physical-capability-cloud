@@ -50,9 +50,14 @@ abstract contract O5AttesterBase is IOracleAttester {
     bool public enabled; // IOracleAttester.enabled — starts true, one-way to false
     mapping(bytes32 => bool) public usedUnit; // settlementUnitId => already attested (one verdict per unit)
 
-    // ── EIP-712 (domain binds chainId + this verifier + cohortId; struct binds every O5 field) ──────
+    // ── EIP-712 (domain binds chainId + this verifier; the struct binds every O5 field) ─────────────
+    // The domain has NO `salt`: a per-cohort attester is deployed at its own address, so `verifyingContract`
+    // already separates cohorts, and `oracleAuthEpoch` (checked == cohortId in attestO5) binds the cohort
+    // INSIDE the signed struct. `salt = bytes32(cohortId)` was therefore cryptographically redundant, and
+    // `salt` is EIP-712's least-supported domain field off-chain — dropping it removes a live mirroring
+    // hazard. The domain is now the standard 4-field EIP-712 domain.
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)");
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private constant EIP712_NAME_HASH = keccak256(bytes("PCC:O5Attester"));
     bytes32 private constant EIP712_VERSION_HASH = keccak256(bytes("1"));
     bytes32 private constant O5_TYPEHASH = keccak256(
@@ -229,14 +234,7 @@ abstract contract O5AttesterBase is IOracleAttester {
 
     function _domainSeparator() private view returns (bytes32) {
         return keccak256(
-            abi.encode(
-                EIP712_DOMAIN_TYPEHASH,
-                EIP712_NAME_HASH,
-                EIP712_VERSION_HASH,
-                block.chainid,
-                address(this),
-                bytes32(uint256(cohortId))
-            )
+            abi.encode(EIP712_DOMAIN_TYPEHASH, EIP712_NAME_HASH, EIP712_VERSION_HASH, block.chainid, address(this))
         );
     }
 
