@@ -18,6 +18,8 @@ contract MockEscrowBinding {
     mapping(bytes32 => bytes32) internal _bundle;
     mapping(bytes32 => bool) public committed;
     mapping(bytes32 => bytes32) public feeHash;
+    mapping(bytes32 => uint16) public feeBpsVal; // M-01: the raw frozen feeBps mirror
+    mapping(bytes32 => address) public feeRecipVal; // M-01: the raw frozen feeRecipient mirror
     mapping(bytes32 => uint8) public tier;
     bool public reverts;
 
@@ -32,6 +34,14 @@ contract MockEscrowBinding {
         feeHash[unitId] = h;
     }
 
+    function setFeeBps(bytes32 unitId, uint16 b) external {
+        feeBpsVal[unitId] = b;
+    }
+
+    function setFeeRecipient(bytes32 unitId, address a) external {
+        feeRecipVal[unitId] = a;
+    }
+
     function setRequiredTier(bytes32 unitId, uint8 t) external {
         tier[unitId] = t;
     }
@@ -39,6 +49,16 @@ contract MockEscrowBinding {
     function feeScheduleHashOf(bytes32 unitId) external view returns (bytes32) {
         if (reverts) revert UnitNotFound();
         return feeHash[unitId];
+    }
+
+    function feeBpsOf(bytes32 unitId) external view returns (uint16) {
+        if (reverts) revert UnitNotFound();
+        return feeBpsVal[unitId];
+    }
+
+    function feeRecipientOf(bytes32 unitId) external view returns (address) {
+        if (reverts) revert UnitNotFound();
+        return feeRecipVal[unitId];
     }
 
     function requiredTierOf(bytes32 unitId) external view returns (uint8) {
@@ -125,6 +145,8 @@ contract Fixed2of3O5AttesterTest is Test {
     bytes32 constant ROOT = keccak256("cr"); // the escrow's funding-frozen composition root
     bytes32 constant BUNDLE = keccak256("committed-evidence-commitment"); // the escrow's committed §B value
     bytes32 constant FEE_HASH = keccak256("fh"); // the escrow's frozen 13-field feeScheduleHash
+    uint16 constant FEE_BPS = 235; // the escrow's frozen raw feeBps mirror (M-01)
+    address constant FEE_RECIP = address(0xFEE0); // the escrow's frozen raw feeRecipient mirror (M-01)
     uint8 constant REQUIRED_TIER = 2; // == requestedTier, frozen at funding (§E)
 
     // secp256k1 group order (for the high-s malleability construction).
@@ -142,6 +164,8 @@ contract Fixed2of3O5AttesterTest is Test {
         escrowBinding.setRoot(_suid(), ROOT);
         escrowBinding.setEvidence(_suid(), BUNDLE);
         escrowBinding.setFeeScheduleHash(_suid(), FEE_HASH);
+        escrowBinding.setFeeBps(_suid(), FEE_BPS);
+        escrowBinding.setFeeRecipient(_suid(), FEE_RECIP);
         escrowBinding.setRequiredTier(_suid(), REQUIRED_TIER);
     }
 
@@ -161,8 +185,8 @@ contract Fixed2of3O5AttesterTest is Test {
             requestedTier: REQUIRED_TIER,
             decision: O5_DECISION_SETTLE,
             verdictHash: keccak256("vh"),
-            feeBps: 235,
-            feeRecipient: address(0xFEE0),
+            feeBps: FEE_BPS,
+            feeRecipient: FEE_RECIP,
             feeScheduleHash: FEE_HASH,
             settlementUnitId: suid,
             oracleAuthEpoch: COHORT,
@@ -435,6 +459,50 @@ contract Fixed2of3O5AttesterTest is Test {
         O5Verdict memory good = _verdict();
         bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
         assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
+    }
+
+    /// @dev M-01: a verdict echoing a false `feeBps` — even beside the CORRECT `feeScheduleHash` — must not
+    ///      consume the slot. The permanent attestation would otherwise record false economics that
+    ///      downstream indexers/receipts read raw, and the escrow re-checks the field at release, so burning
+    ///      the slot here would strand the unit. The corrected verdict must still mint.
+    function test_WrongFeeBps_Reverts_AndLeavesUnitMintable() public {
+        O5Verdict memory bad = _verdict();
+        bad.feeBps = FEE_BPS + 1; // != the escrow's frozen 235, though feeScheduleHash stays correct
+        bytes[] memory badSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(bad));
+        vm.expectRevert(O5AttesterBase.FeeBpsMismatch.selector);
+        attester.attestO5(bad, ESCROW, badSigs);
+        assertFalse(attester.usedUnit(bad.settlementUnitId), "wrong-feeBps verdict must not consume the unit");
+
+        O5Verdict memory good = _verdict();
+        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
+        assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev M-01 twin: a false `feeRecipient` (correct hash) must not consume the slot either.
+    function test_WrongFeeRecipient_Reverts_AndLeavesUnitMintable() public {
+        O5Verdict memory bad = _verdict();
+        bad.feeRecipient = address(0xBADD); // != the escrow's frozen 0xFEE0
+        bytes[] memory badSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(bad));
+        vm.expectRevert(O5AttesterBase.FeeRecipientMismatch.selector);
+        attester.attestO5(bad, ESCROW, badSigs);
+        assertFalse(attester.usedUnit(bad.settlementUnitId), "wrong-feeRecipient verdict must not consume the unit");
+
+        O5Verdict memory good = _verdict();
+        attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        assertTrue(attester.usedUnit(good.settlementUnitId));
+    }
+
+    /// @dev M-01: an `achievedTier` above the supported max (3) is only lower-bounded (`>= requiredTier`), so
+    ///      without the ceiling it would mint and be permanently attested. It must revert WITHOUT consuming
+    ///      the slot — it is the oracle's own field, checked directly (like `decision`), not read back.
+    function test_AchievedTierOutOfRange_Reverts_NothingConsumed() public {
+        O5Verdict memory bad = _verdict();
+        bad.achievedTier = 4; // outside 0..3, though still >= the unit's frozen requiredTier(2)
+        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(bad));
+        vm.expectRevert(O5AttesterBase.TierOutOfRange.selector);
+        attester.attestO5(bad, ESCROW, sigs);
+        assertFalse(attester.usedUnit(bad.settlementUnitId), "out-of-range achievedTier must not consume the unit");
     }
 
     /// @dev The frozen tier fields, same anti-brick class: each would be rejected at release.

@@ -15,6 +15,10 @@ interface IEscrowSettlementBinding {
     function compositionRootOf(bytes32 unitId) external view returns (bytes32);
     function evidenceBundleHashOf(bytes32 unitId) external view returns (bytes32);
     function feeScheduleHashOf(bytes32 unitId) external view returns (bytes32);
+    // M-01: the RAW fee fields the permanent attestation records. `feeScheduleHash` commits to these, but
+    // downstream indexers/receipts/composition read the raw words, so they are pre-checked in their own right.
+    function feeBpsOf(bytes32 unitId) external view returns (uint16);
+    function feeRecipientOf(bytes32 unitId) external view returns (address);
     function requiredTierOf(bytes32 unitId) external view returns (uint8);
 }
 
@@ -92,6 +96,8 @@ abstract contract O5AttesterBase is IOracleAttester {
     error CompositionRootMismatch();
     error EvidenceBundleMismatch();
     error FeeHashMismatch();
+    error FeeBpsMismatch();
+    error FeeRecipientMismatch();
     error TierOutOfRange();
     error Tier0NotEvidence();
     error TierNotMet();
@@ -183,6 +189,19 @@ abstract contract O5AttesterBase is IOracleAttester {
             _escrowBindingWord(escrow, IEscrowSettlementBinding.feeScheduleHashOf.selector, unitId)
                 != v.feeScheduleHash
         ) revert FeeHashMismatch(); // a stale 13-field fee mirror is the most likely correctable mismatch
+        // The RAW fee words the permanent attestation records (M-01). The hash above already binds them, but
+        // an oracle mirroring only the hash could sign a true `feeScheduleHash` beside a false `feeBps`/
+        // `feeRecipient`, minting an attestation whose economics downstream consumers read wrong. Both are
+        // FROZEN AT FUNDING ⇒ correctly pre-checkable, and the escrow re-checks both at release, so a mismatch
+        // here would burn the slot: guard them. `feeBpsOf`/`feeRecipientOf` return one left-padded word each.
+        if (
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.feeBpsOf.selector, unitId)
+                != bytes32(uint256(v.feeBps))
+        ) revert FeeBpsMismatch();
+        if (
+            _escrowBindingWord(escrow, IEscrowSettlementBinding.feeRecipientOf.selector, unitId)
+                != bytes32(uint256(uint160(v.feeRecipient)))
+        ) revert FeeRecipientMismatch();
         // Frozen tier fields. `requiredTier` is a uint8 in 0..3 (bounded at funding) and `requiredTier ==
         // requestedTier` was frozen there too, so the escrow's three tier checks all reduce to this one read.
         // The range check first also rejects a non-canonical word from a hostile escrow (fail-closed).
@@ -190,6 +209,10 @@ abstract contract O5AttesterBase is IOracleAttester {
         if (uint256(tierWord) > 3) revert TierOutOfRange();
         uint8 requiredTier = uint8(uint256(tierWord));
         if (requiredTier < 1) revert Tier0NotEvidence(); // a tier-0 unit can NEVER settle on evidence
+        // M-01: bound the ORACLE-asserted tier to the supported max (0..3) as well. `achievedTier` is only
+        // lower-bounded below (`>= requiredTier`), so without this an out-of-range tier would mint and be
+        // permanently attested. It is the oracle's own field (not escrow state), so it is checked directly.
+        if (v.achievedTier > 3) revert TierOutOfRange();
         if (v.achievedTier < requiredTier) revert TierNotMet();
         if (v.requestedTier != requiredTier) revert RequestedTierMismatch();
 

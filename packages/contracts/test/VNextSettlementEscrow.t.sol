@@ -554,6 +554,54 @@ contract VNextSettlementEscrowTest is Test {
         e.releaseFromEvidence(id, keccak256("uid-1"));
     }
 
+    /// @dev M-01: the release path binds the RAW `feeBps`, not just its 13-field hash. A verdict with the
+    ///      correct feeScheduleHash but a false feeBps (the false economics permanently recorded in the
+    ///      attestation) must not settle; the unit stays FUNDED_ACTIVE.
+    function test_EvidenceRelease_RejectsMismatchedFeeBps() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.feeBps = 900; // != the frozen 235, though feeScheduleHash stays correct
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.FeeBpsMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev M-01 twin: a false `feeRecipient` (correct hash) must not settle either.
+    function test_EvidenceRelease_RejectsMismatchedFeeRecipient() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.feeRecipient = address(0xBADD); // != the frozen feeDest
+        a.data = abi.encode(v);
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.FeeRecipientMismatch.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev M-01: the release path bounds the ORACLE-asserted `achievedTier` to the supported max (3). An
+    ///      out-of-range tier is only lower-bounded (`>= requiredTier`) elsewhere, so it must be rejected here.
+    function test_EvidenceRelease_RejectsAchievedTierAboveMax() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // requiredTier 1
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        EASAttestation memory a = _o5Attestation(e, id, 1, 4); // SETTLE, achievedTier 4 (> MAX_TIER)
+        eas.set(a);
+        vm.expectRevert(VNextSettlementEscrow.TierOutOfRange.selector);
+        e.releaseFromEvidence(id, keccak256("uid-1"));
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
     function _o5verdict(bytes32 id, uint8 decision, uint8 achieved, uint8 requested)
         internal
         pure

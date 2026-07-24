@@ -58,6 +58,11 @@ contract VNextSettlementEscrow {
 
     uint256 public constant CONTRACT_VERSION = 1;
 
+    /// @dev M-01 supported assurance-tier ceiling (tiers 0..3). Funding bounds `requiredTier` to this range;
+    ///      the evidence path bounds the ORACLE-asserted `achievedTier` to it too, so a verdict claiming an
+    ///      unsupported tier can neither settle nor be permanently mis-recorded.
+    uint8 internal constant MAX_TIER = 3;
+
     // ── EIP-712 + auth constants (2b-ii) ─────────────────────────────────────────────────────────
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -272,6 +277,8 @@ contract VNextSettlementEscrow {
     error TierNotMet();
     error RequestedTierMismatch();
     error FeeHashMismatch();
+    error FeeBpsMismatch();
+    error FeeRecipientMismatch();
     error NotTier0();
     error ApprovalBindingMismatch();
     error BadNonce();
@@ -935,9 +942,15 @@ contract VNextSettlementEscrow {
         // Evidence predicate (§9): settle-only, Tier>=1, tier fulfillment + request identity, fee commitment.
         if (v.decision != O5_DECISION_SETTLE) revert NotSettle();
         if (u.requiredTier < 1) revert Tier0NotEvidence();
+        if (v.achievedTier > MAX_TIER) revert TierOutOfRange(); // M-01: bound the oracle-asserted tier (0..3)
         if (v.achievedTier < u.requiredTier) revert TierNotMet();
         if (v.requestedTier != u.requiredTier) revert RequestedTierMismatch();
         if (v.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
+        // M-01: also bind the RAW fee fields carried in the permanent attestation, not just their 13-field
+        // hash — downstream receipts/indexers read these words directly, so a true-hash/false-economics
+        // verdict must be rejected here too (the attester pre-checks the same two fields before minting).
+        if (v.feeBps != u.feeSchedule.feeBps) revert FeeBpsMismatch();
+        if (v.feeRecipient != u.feeSchedule.feeRecipient) revert FeeRecipientMismatch();
 
         // rev-3 §A.2/§C3: cohort-epoch binding + composition-root binding + kill-switch AT PAYMENT TIME.
         // The epoch echo must match the funded cohort; the echoed root must equal the frozen unit root
