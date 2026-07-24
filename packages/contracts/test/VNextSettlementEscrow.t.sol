@@ -132,6 +132,9 @@ contract MockOracleAttester is IOracleAttester {
     uint64 public cohortId;
     /// @dev the cohort's live O5 EIP-712 type hash — the escrow's constructor pins its metadata to this.
     bytes32 public o5TypeHash = keccak256("mock.o5.typehash");
+    /// @dev the cohort's pinned O5 schema UID (M-02) — MUST equal the test's `O5_SCHEMA` so the escrow's
+    ///      symmetric schema pin passes at construction (the setUp factory pins O5_SCHEMA, non-zero).
+    bytes32 public o5SchemaUid = keccak256("test.o5.schema");
 
     constructor(uint64 cohortId_) {
         cohortId = cohortId_;
@@ -139,6 +142,10 @@ contract MockOracleAttester is IOracleAttester {
 
     function setO5TypeHash(bytes32 h) external {
         o5TypeHash = h;
+    }
+
+    function setO5SchemaUid(bytes32 s) external {
+        o5SchemaUid = s;
     }
 
     function setEnabled(bool e) external {
@@ -853,6 +860,23 @@ contract VNextSettlementEscrowTest is Test {
         new VNextSettlementEscrowFactory(
             address(usdc), address(eas), address(attester), O5_SCHEMA, keccak256("some-other-typehash")
         );
+    }
+
+    /// @dev M-02: a non-zero `o5SchemaUid` deployment pin must equal the bound cohort's live schema UID —
+    ///      symmetric with the type-hash pin, so a schema divergence can never ship (it would otherwise
+    ///      burn every unit's slot on mint and revert `WrongSchema` at release, turning the cohort
+    ///      refund-only). Here the pinned schema differs from the attester's while the type hash is zero,
+    ///      so ONLY the schema check fires.
+    function test_Constructor_RejectsSchemaUidDrift() public {
+        vm.expectRevert(VNextSettlementEscrow.SchemaUidMismatch.selector);
+        new VNextSettlementEscrowFactory(
+            address(usdc), address(eas), address(attester), keccak256("some-other-schema"), bytes32(0)
+        );
+    }
+
+    /// @dev The setUp factory already pins O5_SCHEMA == attester.o5SchemaUid(); state the accept-path intent.
+    function test_Constructor_AcceptsMatchingSchemaUid() public view {
+        assertEq(VNextSettlementEscrow(factory.implementation()).o5SchemaUid(), attester.o5SchemaUid());
     }
 
     function test_Constructor_AcceptsMatchingTypeHash() public {

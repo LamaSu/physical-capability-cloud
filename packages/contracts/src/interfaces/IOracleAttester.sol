@@ -31,6 +31,13 @@ interface IOracleAttester {
     ///         cohort actually signs under.
     function o5TypeHash() external view returns (bytes32);
 
+    /// @notice The cohort's pinned O5 v1.1 EAS schema UID (M-02). Symmetric with `o5TypeHash`: the escrow's
+    ///         `o5SchemaUid` immutable is a DEPLOYMENT pin, and when it is non-zero the escrow's constructor
+    ///         requires it to equal this value. Without the pin a one-char schema divergence would make
+    ///         every mint burn a unit's slot and every release revert `WrongSchema` — silently turning a
+    ///         whole cohort refund-only. Zero stays the documented deferred state (unpinned, no check).
+    function o5SchemaUid() external view returns (bytes32);
+
     /// @notice Mint the O5 EAS attestation for `escrow` from a valid cohort quorum over `v`. Reverts unless
     ///         the quorum, cohort, and one-verdict-per-unit invariants all hold. Returns the EAS uid.
     function attestO5(O5Verdict calldata v, address escrow, bytes[] calldata signatures)

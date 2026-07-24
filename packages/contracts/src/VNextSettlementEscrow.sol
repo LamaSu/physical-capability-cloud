@@ -286,6 +286,7 @@ contract VNextSettlementEscrow {
     error TierRequestMismatch();
     error TierOutOfRange();
     error TypeHashMismatch();
+    error SchemaUidMismatch();
     // §B on-chain evidence binding
     error OnlyEvidenceCommitter();
     error ZeroEvidenceDigest();
@@ -323,6 +324,11 @@ contract VNextSettlementEscrow {
         EAS = eas;
         authorizedOracle = oracle;
         o5SchemaUid = schemaUid;
+        // M-02: pin the published schema-UID metadata SYMMETRICALLY with the type-hash pin below. Without
+        // it a one-char schema divergence would make every mint burn a unit's one-verdict slot and every
+        // release revert `WrongSchema`, silently turning a whole cohort refund-only. Deploy-time only and
+        // fail-closed: a mismatch — or an `oracle` that does not expose the getter — aborts the deployment.
+        if (schemaUid != bytes32(0) && IOracleAttester(oracle).o5SchemaUid() != schemaUid) revert SchemaUidMismatch();
         // L-02: pin the published type-hash metadata to the bound cohort's live value when it is set.
         // Deploy-time only (constructor code, not runtime bytecode) and fail-closed: a mismatch — or an
         // `oracle` that does not expose the getter — aborts the deployment rather than shipping an escrow
