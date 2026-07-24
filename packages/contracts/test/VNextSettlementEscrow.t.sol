@@ -893,6 +893,74 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
 
+    // ── L-01: claim / dispute / one-shot read surfaces ────────────────────────────────────────────
+    /// @dev claimOf + remainingClaimCountOf expose the collateralized-claim state created when a payout
+    ///      push safe-fails during allocation; claimOf is existence-checked.
+    function test_L01_claimOf_and_remainingClaimCount() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // every push -> CLAIM
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        e.resolveDispute(id, true);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        assertEq(e.remainingClaimCountOf(id), 2, "two outstanding claims");
+
+        bytes32 claim0 = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        VNextSettlementEscrow.ClaimRecord memory c = e.claimOf(claim0);
+        assertTrue(c.exists);
+        assertEq(c.settlementUnitId, id);
+        assertEq(c.claimOwner, recip1);
+        assertEq(c.claimDestination, recip1);
+        assertEq(c.amount, 500e6);
+        assertEq(uint256(c.class), uint256(ClaimClass.PRINCIPAL));
+        assertEq(c.destinationNonce, 0);
+
+        vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
+        e.claimOf(keccak256("no-such-claim"));
+    }
+
+    /// @dev disputeOf surfaces the dispute record set by openDispute; existence-checked.
+    function test_L01_disputeOf() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        VNextSettlementEscrow.Dispute memory pre = e.disputeOf(id);
+        assertFalse(pre.opened, "no dispute before openDispute");
+        assertEq(pre.nonce, 0);
+
+        vm.prank(payer);
+        e.openDispute(id);
+        VNextSettlementEscrow.Dispute memory d = e.disputeOf(id);
+        assertTrue(d.opened);
+        assertFalse(d.resolved);
+        assertEq(d.nonce, 1);
+        assertEq(d.openedAt, block.timestamp);
+        assertEq(d.adjudicationDeadline, block.timestamp + 1 days);
+        assertEq(d.effectiveDisputeExpiry, block.timestamp + 1 days, "min(deadline, reclaimAt) = deadline");
+
+        vm.expectRevert(VNextSettlementEscrow.UnitNotFound.selector);
+        e.disputeOf(keccak256("no-such-unit"));
+    }
+
+    /// @dev easUidUsed flips false->true across an evidence release; authorizationUsed reads the §2
+    ///      single-use flag (false for a key that was never issued).
+    function test_L01_easUidUsed_and_authorizationUsed() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        bytes32 uid = keccak256("uid-1");
+        assertFalse(e.easUidUsed(uid), "uid unused before release");
+        assertFalse(e.authorizationUsed(keccak256("never-issued")), "an unissued auth key reads false");
+
+        eas.set(_o5Attestation(e, id, 1, 1));
+        e.releaseFromEvidence(id, uid);
+        assertTrue(e.easUidUsed(uid), "uid consumed after release");
+    }
+
     // ── L-01/L-02: config-envelope pin + type-hash deployment pin ─────────────────────────────────
     /// @dev L-01: MAX_CONFIG_BYTES is the EXACT canonical envelope, not a round number above it. The
     ///      max-config fit is asserted in test_gas_maxAggregateFunding_fits; this pins the constant itself

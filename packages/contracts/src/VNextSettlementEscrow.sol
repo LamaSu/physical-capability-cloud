@@ -678,6 +678,35 @@ contract VNextSettlementEscrow {
         return _unitIds[index];
     }
 
+    // ── L-01 claim / dispute / one-shot read surfaces (views only; no new authority or mutation) ────
+    /// @notice The full collateralized-claim record for `claimId`. Existence-checked, mirroring the
+    ///         `!c.exists → ClaimNotFound` guard `dischargeClaim` uses.
+    function claimOf(bytes32 claimId) external view returns (ClaimRecord memory) {
+        ClaimRecord storage c = _claims[claimId];
+        if (!c.exists) revert ClaimNotFound();
+        return c;
+    }
+
+    /// @notice The dispute record for a unit (opened/resolved/nonce/timing). Existence-checked.
+    function disputeOf(bytes32 unitId) external view onlyExisting(unitId) returns (Dispute memory) {
+        return _units[unitId].dispute;
+    }
+
+    /// @notice Outstanding collateralized claims for a unit; a unit reaches SETTLED_* only once this hits 0 (§7).
+    function remainingClaimCountOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
+        return _units[unitId].remainingClaimCount;
+    }
+
+    /// @notice Whether a §2 authorization key has already been consumed (release/refund/dispute single-use).
+    function authorizationUsed(bytes32 authKey) external view returns (bool) {
+        return _authorizationUsed[authKey];
+    }
+
+    /// @notice Whether an EAS uid has already been consumed by an evidence release (replay guard).
+    function easUidUsed(bytes32 uid) external view returns (bool) {
+        return _easUidUsed[uid];
+    }
+
     // ── Money-out machinery (INCREMENT 2b) ───────────────────────────────────────────────────────
     // Every money-out entry shares the reentrancy guard, gates on global solvency, routes
     // release/refund through a single internal allocator (distribution equality by construction),
