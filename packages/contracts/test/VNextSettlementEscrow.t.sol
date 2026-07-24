@@ -672,8 +672,10 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(e.unitCount(), UNITS);
     }
 
-    // ── gate-2: worst-case single-unit release (16 legs, all safe-fail -> 16 claims) ──────────────
-    function test_gas_worstCaseRelease() public {
+    // ── gate-2: all-16-legs-DISCHARGE release (realistic, but NOT the worst case — 0 claims created) ──
+    /// @dev This drives Mode.NORMAL, so every leg discharges and no claim is created. It is the realistic
+    ///      release, kept as a baseline; the TRUE worst case (all legs safe-fail -> claims) is below.
+    function test_gas_worstCaseRelease_allDischarge() public {
         VNextSettlementEscrow e = _newEscrow(keccak256("job-wc"));
         uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT;
         uint256 legAmt = 1e6;
@@ -700,14 +702,129 @@ contract VNextSettlementEscrowTest is Test {
         });
         _fund(e, cfgs);
         bytes32 id = _unitId(e);
-        usdc.setTransferMode(MockToken.Mode.NORMAL); // all 16 legs discharge (worst-case realistic release)
+        usdc.setTransferMode(MockToken.Mode.NORMAL); // all 16 legs discharge -> 0 claims (not the worst case)
         vm.prank(payer);
         e.openDispute(id);
         vm.prank(arbiter);
         uint256 g0 = gasleft();
         e.resolveDispute(id, true);
-        emit log_named_uint("worst-case 16-leg release gas", g0 - gasleft());
+        emit log_named_uint("all-discharge 16-leg release gas (0 claims)", g0 - gasleft());
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+    }
+
+    // ── gate-2: TRUE worst-case single-unit release (16 payout + 1 fee leg, all safe-fail -> 17 claims) ─
+    /// @dev The claim-heavy release IS the gas ceiling: every one of the 16 payout legs AND the fee leg
+    ///      safe-fails (the CLAIM branch of _tryTransferExact), so 17 claims are created, the unit stays
+    ///      RELEASE_ALLOCATED with liability == G, and remainingClaimCount == 17. The prior
+    ///      test_gas_worstCaseRelease used Mode.NORMAL (all discharge, 0 claims) and so understated the cost.
+    function test_gas_worstCaseRelease() public {
+        VNextSettlementEscrow e = _newEscrow(keccak256("job-wc17"));
+        uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT; // 16
+        // G = 16_000_000, feeBps = 250 -> F = floor(16e6 * 250 / 10000) = 400_000, N = 15_600_000 = 16 * 975_000.
+        uint256 g = 16_000_000;
+        uint16 feeBps = 250;
+        uint256 f = 400_000;
+        uint256 legAmt = 975_000; // 16 * 975_000 == 15_600_000 == N
+        PayoutEntry[] memory po = new PayoutEntry[](LEGS);
+        for (uint256 j; j < LEGS; ++j) {
+            po[j] = PayoutEntry({recipient: address(uint160(0x210000 + j + 1)), amount: legAmt});
+        }
+        VNextSettlementEscrow.UnitConfig[] memory cfgs = new VNextSettlementEscrow.UnitConfig[](1);
+        cfgs[0] = VNextSettlementEscrow.UnitConfig({
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            requiredTier: 1,
+            requestedTier: 1,
+            g: g,
+            f: f,
+            n: g - f,
+            feeBps: feeBps,
+            feeRecipient: feeDest,
+            disputeWindow: 1 days,
+            reclaimAt: block.timestamp + 30 days,
+            compositionSchemaVersion: 0,
+            compositionRoot: bytes32(0),
+            evidenceCommitter: operator,
+            payouts: po
+        });
+        _fund(e, cfgs);
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // every push (16 payouts + fee) safe-fails -> CLAIM
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        uint256 g0 = gasleft();
+        e.resolveDispute(id, true);
+        emit log_named_uint("TRUE worst-case release gas (17 claims created)", g0 - gasleft());
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "claims outstanding -> not settled");
+        assertEq(e.liabilityOf(id), g, "a CLAIM never discharges liability; still owes the full G");
+        assertEq(e.remainingClaimCountOf(id), 17, "16 payout legs + 1 fee leg = 17 claims");
+    }
+
+    // ── gate-2: audit edge cases (dispute-window-0 / payer-arbiter / final-claim-discharge) ────────
+    /// @dev disputeWindow == 0 -> the dispute expires in the block it opens: the arbiter is already too late
+    ///      (DisputeExpired) and the permissionless refundOnDisputeExpiry refunds the payer immediately.
+    function test_DisputeWindowZero_ImmediateRefundOnExpiry() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].disputeWindow = 0;
+        _fund(e, c);
+        bytes32 id = _unitId(e);
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        vm.expectRevert(VNextSettlementEscrow.DisputeExpired.selector);
+        e.resolveDispute(id, true); // effectiveDisputeExpiry == now -> already expired
+
+        e.refundOnDisputeExpiry(id); // permissionless, available in the same block
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+        assertEq(usdc.balanceOf(payer), payerBefore + 1000e6);
+    }
+
+    /// @dev The escrow permits arbiter == payer (not rejected at init) — a deployment-config choice. Such a
+    ///      payer can both open AND resolve its own dispute; pin that it works end to end.
+    function test_PayerAsArbiter_CanResolveOwnDispute() public {
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(payer, payer, JOB, TERMS));
+        assertEq(e.arbiter(), payer, "arbiter == payer is accepted at init");
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(payer); // the same address is also the arbiter
+        e.resolveDispute(id, true); // operator-win -> release
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(feeDest), 23_500000);
+    }
+
+    /// @dev Discharging the LAST outstanding claim (remainingClaimCount -> 0) transitions the unit to
+    ///      SETTLED_RELEASED. Two payout legs both safe-fail -> 2 claims; the second discharge settles it.
+    function test_FinalClaimDischarge_TransitionsToSettled() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // both pushes -> CLAIM
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.prank(arbiter);
+        e.resolveDispute(id, true);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
+        assertEq(e.remainingClaimCountOf(id), 2);
+
+        usdc.setTransferMode(MockToken.Mode.NORMAL); // now the claims can discharge
+        bytes32 claim0 = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        bytes32 claim1 = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 1, ClaimClass.PRINCIPAL);
+        e.dischargeClaim(claim0);
+        assertEq(e.remainingClaimCountOf(id), 1, "one claim left");
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "not settled until the last claim");
+
+        e.dischargeClaim(claim1); // the FINAL claim
+        assertEq(e.remainingClaimCountOf(id), 0);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "final discharge settles the unit");
+        assertEq(e.liabilityOf(id), 0);
+        assertEq(usdc.balanceOf(recip1), 500e6);
+        assertEq(usdc.balanceOf(recip2), 500e6);
     }
 
     // ── gate-1: byte-exact golden vectors for the oracle/evidence ethers/viem mirror (M2) ─────────
