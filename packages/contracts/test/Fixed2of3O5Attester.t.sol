@@ -106,13 +106,19 @@ contract MockEscrowBadReturn {
 ///      the schema / recipient / payload the attester minted. Mirrors the fields the real escrow reads.
 contract MockAttestEAS {
     uint256 public n;
+    bool public returnZeroUid; // L-02: model an EAS that returns a zero uid (misbehaving/misconfigured)
 
     mapping(bytes32 => bytes32) public schemaOf;
     mapping(bytes32 => address) public recipientOf;
     mapping(bytes32 => bytes) public dataOf;
     mapping(bytes32 => bool) public revocableOf;
 
+    function setReturnZeroUid(bool z) external {
+        returnZeroUid = z;
+    }
+
     function attest(AttestationRequest calldata r) external payable returns (bytes32 uid) {
+        if (returnZeroUid) return bytes32(0);
         uid = keccak256(abi.encode(r.schema, r.data.recipient, r.data.data, n));
         n += 1;
         schemaOf[uid] = r.schema;
@@ -613,6 +619,25 @@ contract Fixed2of3O5AttesterTest is Test {
         bytes[] memory sigs = _twoSigsAscending(pk1, pkX, attester.digestOf(v)); // pkX is not a cohort signer
         vm.expectRevert(O5AttesterBase.NotAuthorizedSigner.selector);
         attester.attestO5(v, ESCROW, sigs);
+    }
+
+    // ── L-02: reject a zero EAS uid ──────────────────────────────────────────────────────────────────
+    /// @dev A zero uid is never a real attestation. attestO5 sets `usedUnit` BEFORE the external mint, so a
+    ///      zero-uid return must revert (rolling back that effect) — otherwise a misbehaving/misconfigured
+    ///      EAS would burn the unit's one-verdict slot on a mint that recorded nothing. The unit stays
+    ///      mintable, and the same quorum mints once EAS returns a real uid.
+    function test_ZeroEasUid_Reverts_AndLeavesUnitMintable() public {
+        mockEas.setReturnZeroUid(true);
+        O5Verdict memory v = _verdict();
+        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        vm.expectRevert(O5AttesterBase.InvalidAttestationUid.selector);
+        attester.attestO5(v, ESCROW, sigs);
+        assertFalse(attester.usedUnit(v.settlementUnitId), "a zero-uid mint must roll back the consumed slot");
+
+        mockEas.setReturnZeroUid(false);
+        bytes32 uid = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+        assertTrue(attester.usedUnit(v.settlementUnitId), "the same quorum mints once EAS is healthy");
+        assertEq(mockEas.recipientOf(uid), ESCROW);
     }
 
     // ── L-02: independently-computed EIP-712 golden ─────────────────────────────────────────────────

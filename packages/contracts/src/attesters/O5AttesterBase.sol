@@ -91,6 +91,7 @@ abstract contract O5AttesterBase is IOracleAttester {
     error BadSignature();
     error RevokerIsSigner();
     error EscrowBindingUnreadable();
+    error InvalidAttestationUid();
     // The M-01 pre-check errors deliberately mirror the escrow's release-check names one-for-one, so a
     // trace shows exactly which release check the verdict would have failed.
     error CompositionRootMismatch();
@@ -234,6 +235,10 @@ abstract contract O5AttesterBase is IOracleAttester {
                 })
             })
         );
+        // L-02: a zero uid is never a real attestation. Reverting here rolls back the `usedUnit` effect set
+        // just above (checks-effects-interactions), so a misbehaving/misconfigured EAS cannot burn the unit's
+        // one-verdict slot on a mint that recorded nothing — the same quorum can retry once EAS is healthy.
+        if (uid == bytes32(0)) revert InvalidAttestationUid();
         emit O5Attested(v.settlementUnitId, uid, escrow);
     }
 
