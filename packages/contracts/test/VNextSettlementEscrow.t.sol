@@ -868,6 +868,37 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(VNextSettlementEscrow(factory.implementation()).o5TypeHash(), bytes32(0));
     }
 
+    // ── H-01: `arbiter` is bound into the CREATE2 salt (hostile-arbiter front-run) ────────────────
+    /// @dev predictEscrow must equal the address createEscrow actually deploys for matching args — the
+    ///      payer computes one address and funds exactly the clone that lands there.
+    function test_Factory_PredictMatchesCreate() public {
+        bytes32 job = keccak256("h01-predict-job");
+        address predicted = factory.predictEscrow(payer, arbiter, job, TERMS);
+        address created = factory.createEscrow(payer, arbiter, job, TERMS);
+        assertEq(created, predicted, "predictEscrow == the deployed clone for matching args");
+    }
+
+    /// @dev THE H-01 regression: changing ONLY the arbiter changes the address, so a permissionless
+    ///      front-run with a HOSTILE arbiter cannot occupy the address the payer computed and funds. The
+    ///      payer's intended-arbiter address stays free for them to create even after the hostile clone.
+    function test_Factory_ArbiterIsBoundIntoTheAddress() public {
+        bytes32 job = keccak256("h01-arbiter-job");
+        address hostileArbiter = address(0xB0B0);
+        address intended = factory.predictEscrow(payer, arbiter, job, TERMS);
+        address hostileAddr = factory.predictEscrow(payer, hostileArbiter, job, TERMS);
+        assertTrue(intended != hostileAddr, "a different arbiter must yield a different escrow address");
+
+        // Attacker front-runs with the hostile arbiter: their clone occupies its OWN address, not the payer's.
+        address deployedHostile = factory.createEscrow(payer, hostileArbiter, job, TERMS);
+        assertEq(deployedHostile, hostileAddr, "hostile-arbiter clone lands at its own committed address");
+        assertTrue(deployedHostile != intended, "front-run cannot occupy the payer's computed address");
+
+        // The payer's intended-arbiter address is still available, and its clone binds the intended arbiter.
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(payer, arbiter, job, TERMS));
+        assertEq(address(e), intended, "intended-arbiter address remains available after the front-run");
+        assertEq(e.arbiter(), arbiter, "the funded clone carries the arbiter the payer committed to");
+    }
+
     function test_EvidenceRelease_RevertsWhenUidMismatch() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
