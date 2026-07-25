@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IEAS, EASAttestation} from "./interfaces/IEAS.sol";
 import {SafeERC20} from "./libraries/SafeERC20.sol";
 import {
     VNextSettlementLib,
@@ -12,7 +11,7 @@ import {
     ClaimClass,
     AuthorizationType
 } from "./libraries/VNextSettlementLib.sol";
-import {O5Verdict, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "./O5Types.sol";
+import {O5Assertion, O5_DECISION_SETTLE} from "./O5Types.sol";
 import {IOracleAttester} from "./interfaces/IOracleAttester.sol";
 
 /// @notice ERC-1271 smart-account signature validation interface.
@@ -20,7 +19,7 @@ interface IERC1271 {
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4 magicValue);
 }
 
-// `O5Verdict` (now 14 fields, rev-3), `O5_VERDICT_BYTES` (448), and `O5_DECISION_SETTLE` live in
+// `O5Assertion` (the direct cohort assertion the money path reads) and `O5_DECISION_SETTLE` live in
 // ./O5Types.sol and are imported above, so the escrow and the cohort attester share one canonical struct.
 
 /**
@@ -42,11 +41,18 @@ contract VNextSettlementEscrow {
 
     // ── Implementation immutables (baked into impl bytecode; shared by every clone) ──────────────
     address public immutable USDC;
-    address public immutable EAS;
     address public immutable authorizedOracle;
     address public immutable factory;
+    /// @dev P0-6: there is NO `EAS` immutable. The escrow reads no attestation registry at all — money
+    ///      authorization comes from `IOracleAttester(authorizedOracle).assertionOf(unitId)`, which touches
+    ///      only the attester's own storage. EAS is now an async provenance mirror owned entirely by the
+    ///      attester, so the escrow has no reference to it and no code path that could acquire one.
     /// @dev O5/v3 schema UID + attestation EIP-712 type hash are JOINT-DEFERRED (E6, deploy-gate §8);
-    ///      pinned byte-exact across escrow+oracle+evidence when O5 opens. Zero until then.
+    ///      pinned byte-exact across escrow+oracle+evidence when O5 opens. Zero until then. Both are now
+    ///      PUBLISHED DEPLOYMENT METADATA ONLY (see the M-02/L-02 constructor pins): with the EAS read gone
+    ///      there is no runtime `WrongSchema` check, so `o5SchemaUid` names the schema the cohort's mirror
+    ///      writes under, and the constructor pin is what stops that published value from drifting away
+    ///      from the attester's real one.
     bytes32 public immutable o5SchemaUid;
     /// @dev L-02 — NOT a runtime security check. The release predicate's trust root is
     ///      `attestation.attester == authorizedOracle`; the quorum digest's type hash lives INSIDE the
@@ -81,7 +87,6 @@ contract VNextSettlementEscrow {
     bytes32 private constant AUTHDOMAIN_DISPUTE = keccak256("PCC:vnext:auth:dispute:v1");
     bytes32 private constant AUTHDOMAIN_RECLAIM = keccak256("PCC:vnext:auth:reclaim:v1");
     bytes32 private constant AUTHDOMAIN_BUYER = keccak256("PCC:vnext:auth:buyer:v1");
-    // O5_VERDICT_BYTES (=448, rev-3: 14 static ABI words) is imported from ./O5Types.sol as the M-01 guard.
 
     // ── Per-clone (per-job) state ────────────────────────────────────────────────────────────────
     bool public initialized;
@@ -101,7 +106,10 @@ contract VNextSettlementEscrow {
 
     mapping(bytes32 => ClaimRecord) internal _claims;
     mapping(bytes32 => bool) internal _authorizationUsed;
-    mapping(bytes32 => bool) internal _easUidUsed;
+    // P0-6: `_easUidUsed` is gone with the EAS read. Evidence replay is now triple-guarded WITHOUT it:
+    // the attester writes at most ONE assertion per settlementUnitId (consume-once at the source), the
+    // unit leaves FUNDED_ACTIVE on the first release, and the §2 authorization key — derived from the
+    // assertion id — is single-use in `_authorizationUsed`.
 
     uint256 private _status; // reentrancy guard: 1 = not entered, 2 = entered
 
@@ -216,7 +224,7 @@ contract VNextSettlementEscrow {
     event RefundAllocated(bytes32 indexed unitId, uint256 claimCount);
     event DisputeOpened(bytes32 indexed unitId, uint256 nonce, uint256 effectiveDisputeExpiry);
     event DisputeResolved(bytes32 indexed unitId, bool operatorWins);
-    event EvidenceReleased(bytes32 indexed unitId, bytes32 indexed easUid);
+    event EvidenceReleased(bytes32 indexed unitId, bytes32 indexed assertionId);
     /// @param packageDigest the raw evidence-package digest the committer supplied.
     /// @param commitment    the domain-separated form actually stored + checked at release (§B).
     event EvidenceCommitted(bytes32 indexed unitId, bytes32 packageDigest, bytes32 commitment);
@@ -265,12 +273,15 @@ contract VNextSettlementEscrow {
     error ClaimNotFound();
     error ClaimStillUnpayable();
     error TooLateForEvidence();
+    /// @dev P0-6: "no cohort assertion is bound to this unit" (an all-zero record ⇒ zero assertion id).
+    ///      Carries L-02's intent forward: a zero/absent identifier fails closed instead of reading as a
+    ///      default. The EAS-shaped siblings — `WrongSchema` / `WrongAttester` / `Revoked` / `Expired` /
+    ///      `MalformedO5Data` — are DELETED, not silently dropped: each is structurally subsumed by the
+    ///      direct read (see `releaseFromEvidence`), so keeping them would imply checks that no longer
+    ///      exist.
     error AttestationNotFound();
-    error WrongSchema();
-    error WrongAttester();
+    /// @dev The assertion is bound to a different escrow (the `attestation.recipient` check's successor).
     error WrongRecipient();
-    error Revoked();
-    error Expired();
     error IdentityMismatch();
     error NotSettle();
     error Tier0NotEvidence();
@@ -284,7 +295,6 @@ contract VNextSettlementEscrow {
     error BadNonce();
     error ApprovalExpired();
     error BadSignature();
-    error MalformedO5Data();
     // rev-3 §A.2/§C3/§E hardenings
     error InvalidOrDisabledCohort();
     error OracleCohortMismatch();
@@ -324,11 +334,11 @@ contract VNextSettlementEscrow {
         _;
     }
 
-    /// @param usdc canonical settlement asset (Base USDC). @param eas EAS registry.
-    /// @param oracle the authorized O5 attester. @param schemaUid / typeHash O5 pins (0 until O5 opens).
-    constructor(address usdc, address eas, address oracle, bytes32 schemaUid, bytes32 typeHash) {
+    /// @param usdc canonical settlement asset (Base USDC).
+    /// @param oracle the authorized O5 attester — the SOLE source of evidence-release authorization (P0-6).
+    /// @param schemaUid / typeHash O5 publication pins (0 until O5 opens); metadata, not runtime checks.
+    constructor(address usdc, address oracle, bytes32 schemaUid, bytes32 typeHash) {
         USDC = usdc;
-        EAS = eas;
         authorizedOracle = oracle;
         o5SchemaUid = schemaUid;
         // M-02: pin the published schema-UID metadata SYMMETRICALLY with the type-hash pin below. Without
@@ -702,10 +712,9 @@ contract VNextSettlementEscrow {
         return _authorizationUsed[authKey];
     }
 
-    /// @notice Whether an EAS uid has already been consumed by an evidence release (replay guard).
-    function easUidUsed(bytes32 uid) external view returns (bool) {
-        return _easUidUsed[uid];
-    }
+    // P0-6: `easUidUsed(bytes32)` is REMOVED with the EAS read path. The equivalent read surface is now
+    // `authorizationUsed(authKey)` above (the key is derived from the assertion id) and, at the source,
+    // `IOracleAttester(authorizedOracle).usedUnit(unitId)`.
 
     // ── Money-out machinery (INCREMENT 2b) ───────────────────────────────────────────────────────
     // Every money-out entry shares the reentrancy guard, gates on global solvency, routes
@@ -933,75 +942,92 @@ contract VNextSettlementEscrow {
 
     // ── Crypto authorities (INCREMENT 2b-ii) ─────────────────────────────────────────────────────
 
-    /// @notice Evidence release (FROZEN §9, sol H8/H3): verify the O5/v3 EAS attestation and, on a
-    ///         settle verdict for a Tier>=1 unit with matching identity + fee commitment, release.
-    ///         The O5 `data` byte layout is the M2 oracle-parity joint-pin (provisional until O5 opens).
-    function releaseFromEvidence(bytes32 unitId, bytes32 easUid) external nonReentrant onlyExisting(unitId) {
+    /// @notice Evidence release (FROZEN §9, sol H8/H3): read the DIRECT COHORT ASSERTION bound to this
+    ///         unit and, on a settle verdict for a Tier>=1 unit with matching identity + fee commitment,
+    ///         release. P0-6: this is the ONLY evidence-release path — the EAS-read path is deleted, not
+    ///         retained behind a flag, so there is exactly one release predicate to audit and no bypass.
+    /// @dev    The money path now makes exactly two STATICCALLs, both to the escrow's own immutable
+    ///         `authorizedOracle` (`assertionOf`, `enabled`). It reads no attestation registry and depends
+    ///         on no global write, so no external outage can strand a funded job on the release side.
+    ///
+    ///         Checks structurally SUBSUMED by reading the attester directly (each was an EAS artifact):
+    ///          * `attestation.attester == authorizedOracle` → the escrow CALLS `authorizedOracle`; "who
+    ///            asserted" is now the identity of the callee, not a field to compare.
+    ///          * `attestation.uid == requestedUid` → the record is KEYED by `settlementUnitId`, which is
+    ///            the argument, so it is bound to the requested unit by construction. The caller no longer
+    ///            selects which verdict to present at all.
+    ///          * `attestation.schema == o5SchemaUid` → there is no ABI blob to type; the record is a typed
+    ///            struct with one canonical shape.
+    ///          * `data.length == O5_VERDICT_BYTES` → same reason: nothing is decoded from bytes.
+    ///          * `revocationTime == 0` → O5 records were already minted non-revocable, and the assertion
+    ///            record is write-once by construction. The cohort kill-switch (`enabled`, re-checked
+    ///            below) remains the real revocation lever and is unchanged.
+    ///          * `expirationTime` → O5 mints always used "never expires"; the unit's own `reclaimAt`
+    ///            (checked above) is the real time bound and is unchanged.
+    ///         Everything else is preserved verbatim, in the same order, below.
+    function releaseFromEvidence(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
         Unit storage u = _units[unitId];
         if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
         if (block.timestamp >= u.reclaimAt) revert TooLateForEvidence();
         if (u.dispute.opened) revert LiveDispute(); // H7: any opened dispute blocks evidence release
 
-        // EAS-level checks (attester / schema / recipient / revocation / expiration — allocation-time rule §7).
-        EASAttestation memory a = IEAS(EAS).getAttestation(easUid);
-        if (a.uid == bytes32(0)) revert AttestationNotFound();
-        if (a.uid != easUid) revert AttestationNotFound(); // §E: bind the returned attestation to the requested uid
-        if (a.schema != o5SchemaUid) revert WrongSchema();
-        if (a.attester != authorizedOracle) revert WrongAttester();
-        if (a.recipient != address(this)) revert WrongRecipient();
-        if (a.revocationTime != 0) revert Revoked();
-        if (a.expirationTime != 0 && a.expirationTime <= block.timestamp) revert Expired();
-        if (_easUidUsed[easUid]) revert AuthorizationUsed();
-        _easUidUsed[easUid] = true;
+        // The one money-path read (replaces `IEAS.getAttestation`). Fail-closed: an un-asserted unit
+        // returns the all-zero record, whose zero `assertionId` is rejected on the next line (L-02).
+        O5Assertion memory a = IOracleAttester(authorizedOracle).assertionOf(unitId);
+        if (a.assertionId == bytes32(0)) revert AttestationNotFound();
+        if (a.escrow != address(this)) revert WrongRecipient(); // the `attestation.recipient` check
 
-        // M-01: the rev-3 O5 field set is 14 static fields = 448 bytes; reject any other length. The exact
-        // byte-order + final O5 schema UID/type hash are the M2 oracle-parity PRE-DEPLOY pin (§8); o5SchemaUid/
-        // o5TypeHash are reserved immutables enforced there, not yet standalone security checks.
-        if (a.data.length != O5_VERDICT_BYTES) revert MalformedO5Data();
-        O5Verdict memory v = abi.decode(a.data, (O5Verdict));
-
-        // H3: direct field-by-field identity vs the frozen record + recompute the unit id from frozen fields.
-        if (v.settlementUnitId != unitId || v.jobIdHash != jobIdHash) revert IdentityMismatch();
-        if (v.milestoneIndex != u.milestoneIndex || v.stepId != u.stepId) revert IdentityMismatch();
+        // H3 identity. The attester bound `computeSettlementUnitId(chainid, escrow, jobIdHash,
+        // milestoneIndex, stepId) == v.settlementUnitId` before writing, and this record is keyed by that
+        // same id; recomputing the id here from the escrow's OWN FROZEN fields and requiring equality
+        // therefore pins jobIdHash / milestoneIndex / stepId / escrow by collision resistance — the same
+        // guarantee the four field-by-field comparisons used to give, without carrying the fields.
         bytes32 recomputed = VNextSettlementLib.computeSettlementUnitId(
             u.feeSchedule.chainId, address(this), jobIdHash, u.milestoneIndex, u.stepId
         );
         if (recomputed != unitId) revert IdentityMismatch();
 
         // Evidence predicate (§9): settle-only, Tier>=1, tier fulfillment + request identity, fee commitment.
-        if (v.decision != O5_DECISION_SETTLE) revert NotSettle();
+        // The attester also pre-checks these (M-01 anti-brick) against the SAME frozen escrow state; they
+        // are re-checked here because this is the contract that moves the money and the fields it compares
+        // against are its own storage, not a value another contract reported.
+        if (a.decision != O5_DECISION_SETTLE) revert NotSettle();
         if (u.requiredTier < 1) revert Tier0NotEvidence();
-        if (v.achievedTier > MAX_TIER) revert TierOutOfRange(); // M-01: bound the oracle-asserted tier (0..3)
-        if (v.achievedTier < u.requiredTier) revert TierNotMet();
-        if (v.requestedTier != u.requiredTier) revert RequestedTierMismatch();
-        if (v.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
-        // M-01: also bind the RAW fee fields carried in the permanent attestation, not just their 13-field
+        if (a.achievedTier > MAX_TIER) revert TierOutOfRange(); // M-01: bound the oracle-asserted tier (0..3)
+        if (a.achievedTier < u.requiredTier) revert TierNotMet();
+        if (a.requestedTier != u.requiredTier) revert RequestedTierMismatch();
+        if (a.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
+        // M-01: also bind the RAW fee fields carried in the permanent assertion, not just their 13-field
         // hash — downstream receipts/indexers read these words directly, so a true-hash/false-economics
-        // verdict must be rejected here too (the attester pre-checks the same two fields before minting).
-        if (v.feeBps != u.feeSchedule.feeBps) revert FeeBpsMismatch();
-        if (v.feeRecipient != u.feeSchedule.feeRecipient) revert FeeRecipientMismatch();
+        // verdict must be rejected here too (the attester pre-checks the same two fields before asserting).
+        if (a.feeBps != u.feeSchedule.feeBps) revert FeeBpsMismatch();
+        if (a.feeRecipient != u.feeSchedule.feeRecipient) revert FeeRecipientMismatch();
 
         // rev-3 §A.2/§C3: cohort-epoch binding + composition-root binding + kill-switch AT PAYMENT TIME.
         // The epoch echo must match the funded cohort; the echoed root must equal the frozen unit root
         // (so the oracle verdict cryptographically covers the composition root); and the cohort must still
-        // be enabled — a one-way disable neutralizes an otherwise-valid pre-minted attestation here.
-        if (v.oracleAuthEpoch != oracleAuthEpoch) revert OracleCohortMismatch();
-        if (v.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
+        // be enabled — a one-way disable neutralizes an otherwise-valid pre-written assertion here.
+        if (a.oracleAuthEpoch != oracleAuthEpoch) revert OracleCohortMismatch();
+        if (a.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
 
         // §B on-chain evidence binding: the verdict must be over the package this unit committed to, and a
         // unit with nothing committed can never release on evidence. The `evidenceCommitted` flag is checked
         // separately from the hash so a zero/default `evidenceBundleHash` on BOTH sides can never match.
-        // With `requiredTier == requestedTier` frozen at funding (§E) and the EAS uid + unit state both
-        // consumed once, exactly one verdict — the one over the committed package, at the required tier —
-        // is ever payable for a unit.
-        if (!u.evidenceCommitted || v.evidenceBundleHash != u.evidenceBundleHash) revert EvidenceBundleMismatch();
+        // With `requiredTier == requestedTier` frozen at funding (§E), at most ONE assertion per unit at the
+        // source, and the unit state consumed once here, exactly one verdict — the one over the committed
+        // package, at the required tier — is ever payable for a unit.
+        if (!u.evidenceCommitted || a.evidenceBundleHash != u.evidenceBundleHash) revert EvidenceBundleMismatch();
 
         if (!IOracleAttester(authorizedOracle).enabled()) revert OracleCohortDisabled();
 
+        // §2 authorization key: `rawAuthorizationId` is the assertion id (the FULL signed verdict hash),
+        // taking over from the EAS uid. Single-use in `_authorizationUsed`, which is what carries the old
+        // `_easUidUsed` replay guard forward on the new rail.
         _allocateRelease(
-            unitId, _authorizationKey(AuthorizationType.EVIDENCE, AUTHDOMAIN_EVIDENCE, authorizedOracle, easUid, unitId)
+            unitId,
+            _authorizationKey(AuthorizationType.EVIDENCE, AUTHDOMAIN_EVIDENCE, authorizedOracle, a.assertionId, unitId)
         );
-        emit EvidenceReleased(unitId, easUid);
+        emit EvidenceReleased(unitId, a.assertionId);
     }
 
     /// @notice Tier-0 buyer approval (FROZEN §10.10, sol C5): a distinct authorization type. Only the

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {O5Verdict, O5_DECISION_SETTLE} from "../O5Types.sol";
+import {O5Verdict, O5Assertion, O5_DECISION_SETTLE} from "../O5Types.sol";
 import {IOracleAttester} from "../interfaces/IOracleAttester.sol";
 import {IEAS, AttestationRequest, AttestationRequestData} from "../interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
@@ -20,6 +20,11 @@ interface IEscrowSettlementBinding {
     function feeBpsOf(bytes32 unitId) external view returns (uint16);
     function feeRecipientOf(bytes32 unitId) external view returns (address);
     function requiredTierOf(bytes32 unitId) external view returns (uint8);
+    /// @dev P0-6 mirror only (NOT a money-path read): the escrow's authoritative settlement state for the
+    ///      unit, emitted as the "settlement receipt" leg of the `O5Mirrored` link. The real escrow returns
+    ///      the `UnitState` enum; declared `uint8` here because a selector depends only on name + inputs,
+    ///      and this interface must not import the settlement library just to name a return type.
+    function unitState(bytes32 unitId) external view returns (uint8);
 }
 
 /**
@@ -27,32 +32,56 @@ interface IEscrowSettlementBinding {
  * @notice Shared money-path logic for a cohort-scoped O5 verdict attester (addendum §A). A concrete
  *         cohort supplies only its M-of-N signer rule via {_verifySignatures}; everything else — the
  *         EIP-712 digest, the cohort/epoch binding, the escrow↔verdict binding, one-verdict-per-unit,
- *         the one-way kill-switch, and the EAS mint — is written and audited ONCE here.
+ *         the one-way kill-switch, and the assertion record — is written and audited ONCE here.
+ *
+ *         P0-6 (§13R.1 / adjudication §2): the money path writes a DIRECT COHORT ASSERTION into this
+ *         contract's own storage. It does NOT touch EAS. The four reasons are architectural, not gas:
+ *         synchronous EAS was (1) a mandatory global write dependency on the money path, (2) one shared
+ *         failure domain across every bound Tier-1..3 cohort, (3) an extra pre-settlement state
+ *         transition, and (4) an immutable dependency for jobs that were ALREADY funded — so an EAS
+ *         stall pushed every active Tier>=1 job toward refund. EAS is now an ASYNCHRONOUS provenance
+ *         mirror (`mirrorToEAS`): permissionless, replayable from the on-chain assertion, and reachable
+ *         from no money path in either contract. A long EAS outage therefore leaves a drainable queue
+ *         (every assertion whose `mirroredUid` is still zero), never a permanently unattested settlement.
  *
  *         Trust-root properties (§A.1 money-path invariants):
  *         - Signer set + threshold are IMMUTABLE by construction in each concrete (no upgrade/module/
  *           guard/rotation/re-enable) — a mutable Safe cannot be substituted behind the address.
  *         - EOA-only ECDSA recovery (no ERC-1271) with low-s + canonical-v malleability guards — a
  *           mutable smart-account signer cannot satisfy the quorum.
- *         - `disable()` is ONE-WAY: it neutralizes future mints, and (because the escrow re-checks
- *           `enabled` at release) also neutralizes already-minted attestations for the cohort.
- *         - One O5 per `settlementUnitId` (consume-once) is enforced in-contract.
+ *         - `disable()` is ONE-WAY: it neutralizes future assertions, and (because the escrow re-checks
+ *           `enabled` at release) also neutralizes already-written assertions for the cohort.
+ *         - One O5 per `settlementUnitId` (consume-once) is enforced in-contract, and the assertion
+ *           record IS that marker — it is written exactly once and never mutated afterwards.
  *         - Because that slot is consumable exactly once, every field the ESCROW will re-check at release
  *           and that this contract cannot derive itself is read back from the escrow BEFORE the slot is
  *           consumed (M-01 anti-brick pre-check) — a verdict the escrow would reject can never burn the slot.
- * @dev    The escrow only READS `enabled` / `cohortId`; it never calls `attestO5`. Refund/reclaim in the
- *         escrow never call this contract, so a controller fault can freeze RELEASE but never REFUND.
+ * @dev    The escrow only READS `enabled` / `cohortId` / `assertionOf`; it never calls `attestO5` or
+ *         `mirrorToEAS`. Refund/reclaim in the escrow never call this contract, so a controller fault can
+ *         freeze RELEASE but never REFUND.
  */
 abstract contract O5AttesterBase is IOracleAttester {
     // ── Immutable cohort config ────────────────────────────────────────────────────────────────────
-    address public immutable eas; // EAS registry this cohort mints into
-    bytes32 public immutable o5SchemaUid; // the pinned O5 v1.1 schema UID
+    /// @dev EAS registry the ASYNC MIRROR writes into. Never read or written by `attestO5`, and never
+    ///      reachable from the escrow's money path — that is the whole point of P0-6.
+    address public immutable eas;
+    bytes32 public immutable o5SchemaUid; // the pinned O5 v1.1 schema UID (mirror payload + escrow pin)
     uint64 public immutable cohortId; // this cohort's label (IOracleAttester.cohortId)
     address public immutable revoker; // kill-switch holder (separately custodied from signing keys)
 
     // ── One-way kill-switch + consume-once ─────────────────────────────────────────────────────────
     bool public enabled; // IOracleAttester.enabled — starts true, one-way to false
-    mapping(bytes32 => bool) public usedUnit; // settlementUnitId => already attested (one verdict per unit)
+
+    /// @dev settlementUnitId => the immutable cohort assertion. Write-once: `attestO5` is the only writer
+    ///      and refuses a unit that already has one, so no code path mutates a written record. This
+    ///      mapping IS the consume-once marker (`usedUnit` below is a view over it), which is why the
+    ///      money path costs one record write and no separate flag slot.
+    mapping(bytes32 => O5Assertion) internal _assertions;
+
+    /// @dev settlementUnitId => the EAS uid of the ASYNC provenance mirror; zero = not yet mirrored.
+    ///      The un-mirrored set is exactly the drainable queue after an EAS outage. Nothing on any money
+    ///      path reads this.
+    mapping(bytes32 => bytes32) public mirroredUid;
 
     // ── EIP-712 (domain binds chainId + this verifier; the struct binds every O5 field) ─────────────
     // The domain has NO `salt`: a per-cohort attester is deployed at its own address, so `verifyingContract`
@@ -70,7 +99,29 @@ abstract contract O5AttesterBase is IOracleAttester {
     /// @dev secp256k1 n/2 — reject high-s (malleable) signatures (EIP-2 canonical form).
     uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
-    event O5Attested(bytes32 indexed settlementUnitId, bytes32 indexed uid, address indexed escrow);
+    /// @notice A cohort assertion was written. `verdict` carries the FULL `abi.encode(O5Verdict)` payload
+    ///         (448 B) so the assertion is replayable into the EAS mirror from on-chain data alone — the
+    ///         record itself deliberately stores a digest rather than 14 words (§13R.1).
+    event O5Asserted(
+        bytes32 indexed settlementUnitId,
+        bytes32 indexed assertionId,
+        address indexed escrow,
+        uint64 cohort,
+        bytes verdict
+    );
+    /// @notice The async EAS provenance mirror completed for an assertion. Carries the full link
+    ///         {cohort, settlementUnitId, assertionId, verdictHash, settlement receipt}: `escrowUnitState`
+    ///         is the escrow's own authoritative settlement state for the unit at mirror time (the
+    ///         `UnitState` enum), read tolerantly — see `_tolerantUnitState`.
+    event O5Mirrored(
+        bytes32 indexed settlementUnitId,
+        bytes32 indexed assertionId,
+        bytes32 indexed easUid,
+        uint64 cohort,
+        address escrow,
+        bytes32 verdictHash,
+        uint256 escrowUnitState
+    );
     event CohortDisabled(uint64 indexed cohortId);
 
     error ZeroAddress();
@@ -92,6 +143,10 @@ abstract contract O5AttesterBase is IOracleAttester {
     error RevokerIsSigner();
     error EscrowBindingUnreadable();
     error InvalidAttestationUid();
+    error ZeroAssertionId();
+    error AssertionNotFound();
+    error AlreadyMirrored();
+    error VerdictDigestMismatch();
     // The M-01 pre-check errors deliberately mirror the escrow's release-check names one-for-one, so a
     // trace shows exactly which release check the verdict would have failed.
     error CompositionRootMismatch();
@@ -135,34 +190,54 @@ abstract contract O5AttesterBase is IOracleAttester {
     }
 
     /// @inheritdoc IOracleAttester
+    function assertionOf(bytes32 settlementUnitId) external view returns (O5Assertion memory) {
+        return _assertions[settlementUnitId];
+    }
+
+    /// @notice Whether this unit's one verdict slot has been consumed (one O5 per `settlementUnitId`).
+    /// @dev    Derived from the assertion record rather than a separate flag: the record is written
+    ///         exactly once, so `assertionId != 0` IS "already attested". Same semantics and same public
+    ///         ABI as the former storage mapping, one fewer money-path slot write.
+    function usedUnit(bytes32 settlementUnitId) external view returns (bool) {
+        return _assertions[settlementUnitId].assertionId != bytes32(0);
+    }
+
+    /// @inheritdoc IOracleAttester
     function attestO5(O5Verdict calldata v, address escrow, bytes[] calldata signatures)
         external
-        returns (bytes32 uid)
+        returns (bytes32 assertionId)
     {
         if (!enabled) revert CohortIsDisabled();
         if (v.oracleAuthEpoch != cohortId) revert CohortMismatch();
 
-        // Bind the EAS recipient (escrow) to the verdict. `settlementUnitId` already commits
+        // Bind the settling escrow to the verdict. `settlementUnitId` already commits
         // (chainId, escrow, jobIdHash, milestoneIndex, stepId); recomputing it and requiring equality
-        // guarantees the minted attestation's recipient is exactly the escrow the quorum signed for.
+        // guarantees the assertion's bound escrow is exactly the escrow the quorum signed for. This is
+        // ALSO what lets the escrow's release path drop four field-by-field identity comparisons: the
+        // escrow independently recomputes the same id from ITS frozen fields, so equality there plus this
+        // equality here pins jobIdHash / milestoneIndex / stepId / escrow by collision resistance.
         bytes32 suid =
             VNextSettlementLib.computeSettlementUnitId(block.chainid, escrow, v.jobIdHash, v.milestoneIndex, v.stepId);
         if (suid != v.settlementUnitId) revert EscrowVerdictMismatch();
 
         // M-of-N quorum over the canonical digest (concrete rule). Reverts unless the quorum is met.
-        _verifySignatures(_digest(v), signatures);
+        // The digest doubles as the assertion id: it is the FULL signed verdict hash (all 14 fields plus
+        // the EIP-712 domain), so recording it binds the entire verdict even though the escrow only
+        // re-checks a subset of the fields.
+        assertionId = _digest(v);
+        _verifySignatures(assertionId, signatures);
 
         // SETTLE-only guard (anti-brick, decision counterpart of the M-01 escrow-read checks below). The O5
-        // rail is normatively EVIDENCE/SETTLE-only: hold/reject verdicts carry NO on-chain attestation. The
-        // escrow ALSO rejects a non-SETTLE verdict at release (`NotSettle`), so minting one here would only
-        // consume the unit's one-verdict slot and brick it to refund-only. Guard it BEFORE `usedUnit` is
+        // rail is normatively EVIDENCE/SETTLE-only: hold/reject verdicts carry NO on-chain assertion. The
+        // escrow ALSO rejects a non-SETTLE verdict at release (`NotSettle`), so asserting one here would
+        // only consume the unit's one-verdict slot and brick it to refund-only. Guard it BEFORE the slot is
         // consumed — `decision` is the oracle's own policy field (not escrow state), so it is checked
-        // directly rather than read back. A non-SETTLE verdict burns nothing; a real SETTLE still mints.
+        // directly rather than read back. A non-SETTLE verdict burns nothing; a real SETTLE still asserts.
         if (v.decision != O5_DECISION_SETTLE) revert NotSettleVerdict();
 
         // ── M-01 anti-brick pre-check ─────────────────────────────────────────────────────────────
         // Bind the verdict to the escrow's OWN state before the slot is consumed. Ordered AFTER the quorum
-        // check (only an authenticated call reaches out of this contract) and BEFORE the `usedUnit` effect,
+        // check (only an authenticated call reaches out of this contract) and BEFORE the record write,
         // so any mismatch — or an escrow that is unfunded / has not yet committed its package — consumes
         // nothing and can simply be re-attempted with a corrected verdict. It also enforces §B's
         // commit-before-verdict rule on the oracle side.
@@ -217,11 +292,71 @@ abstract contract O5AttesterBase is IOracleAttester {
         if (v.achievedTier < requiredTier) revert TierNotMet();
         if (v.requestedTier != requiredTier) revert RequestedTierMismatch();
 
-        // One settle-verdict per unit. EFFECT before the external attest (checks-effects-interactions).
-        if (usedUnit[v.settlementUnitId]) revert UnitAlreadyAttested();
-        usedUnit[v.settlementUnitId] = true;
+        // L-02's intent on the assertion rail: a zero identifier is never a real assertion, and the
+        // all-zero record is what `assertionOf` returns for an un-asserted unit. Guard it explicitly so
+        // the "absent" and "present" cases can never be confused, even though a keccak digest is not
+        // realistically zero. (The EAS-uid form of this guard now lives in `mirrorToEAS`.)
+        if (assertionId == bytes32(0)) revert ZeroAssertionId();
 
-        // Mint into EAS; this contract becomes the recorded `attester` the escrow checks against.
+        // One settle-verdict per unit. The record write IS the consume-once effect, and it is the LAST
+        // effect in the function — checks-effects-interactions holds trivially because P0-6 removed the
+        // interaction entirely: `attestO5` now makes NO external call after this point. Every read that
+        // could fail (the escrow bindings above) has already happened, so a verdict the escrow would
+        // reject still burns nothing and can be re-attempted with a corrected verdict.
+        if (_assertions[v.settlementUnitId].assertionId != bytes32(0)) revert UnitAlreadyAttested();
+        _assertions[v.settlementUnitId] = O5Assertion({
+            assertionId: assertionId,
+            feeScheduleHash: v.feeScheduleHash,
+            compositionRoot: v.compositionRoot,
+            evidenceBundleHash: v.evidenceBundleHash,
+            escrow: escrow,
+            assertedAt: uint64(block.timestamp),
+            achievedTier: v.achievedTier,
+            requestedTier: v.requestedTier,
+            decision: v.decision,
+            feeRecipient: v.feeRecipient,
+            oracleAuthEpoch: v.oracleAuthEpoch,
+            feeBps: v.feeBps
+        });
+        // The FULL 448-byte verdict goes in the log, not in storage (§13R.1): logs are on-chain, so the
+        // async mirror stays replayable from chain data, without paying 14 SSTOREs on the money path.
+        emit O5Asserted(v.settlementUnitId, assertionId, escrow, cohortId, abi.encode(v));
+    }
+
+    // ── Async EAS provenance mirror (P0-6 item 4) — NOT ON ANY MONEY PATH ──────────────────────────
+    /// @notice Mirror an already-written cohort assertion into EAS. PERMISSIONLESS: anyone may drain the
+    ///         queue, so provenance never depends on a privileged keeper being alive.
+    /// @dev    Safety of "permissionless": the only thing a caller supplies is `v`, and it is accepted
+    ///         ONLY if `_digest(v)` equals the stored `assertionId` — i.e. only the exact 14-field verdict
+    ///         the cohort quorum signed can ever be mirrored. The caller chooses nothing else: the schema,
+    ///         recipient and revocability are taken from immutable/recorded state.
+    ///
+    ///         ISOLATION (the property Wave 1 must prove): no escrow money path reaches this function, and
+    ///         `attestO5` does not call it. If EAS is unavailable this call reverts and the assertion stays
+    ///         un-mirrored — `mirroredUid[unitId] == 0` marks it as still queued — while settlement
+    ///         proceeds unaffected. When EAS recovers, the same call succeeds. That is the difference
+    ///         between "provenance lag" and "funds stuck", and it is the whole architectural point.
+    ///
+    ///         Deliberately NOT gated on `enabled`: a disabled cohort's past assertions still deserve
+    ///         provenance, and this path moves no money. One-shot per unit (`AlreadyMirrored`) so the
+    ///         provenance record cannot be multiplied.
+    /// @param v the full O5 verdict, exactly as signed. Recoverable from the `O5Asserted` log.
+    function mirrorToEAS(O5Verdict calldata v) external returns (bytes32 uid) {
+        bytes32 unitId = v.settlementUnitId;
+        O5Assertion storage a = _assertions[unitId];
+        bytes32 assertionId = a.assertionId;
+        if (assertionId == bytes32(0)) revert AssertionNotFound();
+        if (mirroredUid[unitId] != bytes32(0)) revert AlreadyMirrored();
+        // Proves the supplied 448 bytes ARE the signed verdict: the digest covers all 14 fields plus the
+        // domain, so no substituted field can survive this equality.
+        if (_digest(v) != assertionId) revert VerdictDigestMismatch();
+
+        address escrow = a.escrow;
+        // Read the settlement receipt BEFORE the mint so the emitted state is the escrow's own
+        // authoritative unit state, and read it TOLERANTLY: the mirror must never be blockable by escrow
+        // state (that would re-create the coupling P0-6 removes).
+        uint256 unitState = _tolerantUnitState(escrow, unitId);
+
         uid = IEAS(eas).attest(
             AttestationRequest({
                 schema: o5SchemaUid,
@@ -235,11 +370,21 @@ abstract contract O5AttesterBase is IOracleAttester {
                 })
             })
         );
-        // L-02: a zero uid is never a real attestation. Reverting here rolls back the `usedUnit` effect set
-        // just above (checks-effects-interactions), so a misbehaving/misconfigured EAS cannot burn the unit's
-        // one-verdict slot on a mint that recorded nothing — the same quorum can retry once EAS is healthy.
+        // L-02 (mirror form): a zero uid means EAS recorded nothing. Reverting leaves `mirroredUid` unset,
+        // so the assertion simply stays on the drainable queue instead of being marked mirrored falsely.
         if (uid == bytes32(0)) revert InvalidAttestationUid();
-        emit O5Attested(v.settlementUnitId, uid, escrow);
+        mirroredUid[unitId] = uid;
+        emit O5Mirrored(unitId, assertionId, uid, cohortId, escrow, v.verdictHash, unitState);
+    }
+
+    /// @dev `unitState(bytes32)` off the settling escrow, or `type(uint256).max` when unreadable (no code,
+    ///      missing getter, reverting getter, wrong return width). Tolerant BY DESIGN — this feeds a log
+    ///      field on a provenance path, never a decision.
+    function _tolerantUnitState(address escrow, bytes32 unitId) private view returns (uint256) {
+        (bool ok, bytes memory ret) =
+            escrow.staticcall(abi.encodeWithSelector(IEscrowSettlementBinding.unitState.selector, unitId));
+        if (!ok || ret.length != 32) return type(uint256).max;
+        return abi.decode(ret, (uint256));
     }
 
     // ── Escrow binding read (M-01) ─────────────────────────────────────────────────────────────────

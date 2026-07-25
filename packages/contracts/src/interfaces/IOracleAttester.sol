@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {O5Verdict} from "../O5Types.sol";
+import {O5Verdict, O5Assertion} from "../O5Types.sol";
 
 /**
  * @title IOracleAttester
@@ -9,14 +9,21 @@ import {O5Verdict} from "../O5Types.sol";
  *         address at deploy (`authorizedOracle`) and, at funding, pins the attester's `cohortId` and
  *         requires the cohort is still `enabled` — so a one-way `disable()` of the cohort neutralizes
  *         both new funding AND already-minted attestations (checked at release / payment time).
- * @dev    The escrow only calls the two view methods (`enabled` / `cohortId`); it never mints. The write
- *         path (`attestO5`) is exercised by the oracle operator with an M-of-N signature set.
+ * @dev    The escrow calls three view methods (`enabled` / `cohortId` / `assertionOf`); it never writes.
+ *         The write path (`attestO5`) is exercised by the oracle operator with an M-of-N signature set.
  *
- *         `attestO5` carries an explicit `escrow` argument: it becomes the EAS attestation recipient (the
- *         escrow verifies `attestation.recipient == address(this)` at release). The escrow address cannot
+ *         P0-6: `attestO5` writes a DIRECT COHORT ASSERTION into this contract's own storage and does NOT
+ *         touch EAS. The escrow's money authorization is `assertionOf(settlementUnitId)` — no synchronous
+ *         global write dependency, no shared failure domain across cohorts, and no external dependency
+ *         that a funded job cannot escape. EAS becomes an asynchronous, permissionlessly-replayable
+ *         provenance mirror (`mirrorToEAS`), which is deliberately absent from this interface because
+ *         nothing on the money path may call it.
+ *
+ *         `attestO5` carries an explicit `escrow` argument: it is recorded as the assertion's bound escrow
+ *         (the escrow verifies `assertion.escrow == address(this)` at release). The escrow address cannot
  *         be recovered from the verdict's `settlementUnitId` hash, so it is passed and then re-bound to
  *         the verdict inside the implementation (recompute settlementUnitId and require equality) — the
- *         attester therefore only ever mints an attestation whose recipient matches the signed verdict.
+ *         attester therefore only ever asserts for the escrow the quorum signed for.
  */
 interface IOracleAttester {
     /// @notice Cohort kill-switch. Starts true; a revoker may flip it false ONE-WAY (never re-enabled).
@@ -38,11 +45,20 @@ interface IOracleAttester {
     ///         whole cohort refund-only. Zero stays the documented deferred state (unpinned, no check).
     function o5SchemaUid() external view returns (bytes32);
 
-    /// @notice Mint the O5 EAS attestation for `escrow` from a valid cohort quorum over `v`. Reverts unless
-    ///         the quorum, cohort, and one-verdict-per-unit invariants all hold. Returns the EAS uid.
+    /// @notice The immutable cohort assertion bound to `settlementUnitId`, or an all-zero record when none
+    ///         exists. THE money-path read (P0-6): it replaces `IEAS.getAttestation` in the escrow's
+    ///         `releaseFromEvidence`. Callers MUST treat `assertionId == 0` as "no assertion" and fail
+    ///         closed — the zero record must never be readable as an authorization.
+    /// @dev    Keyed BY `settlementUnitId`, so the returned record is bound to the requested unit by
+    ///         construction (this is what the old `attestation.uid == requestedUid` check bought).
+    function assertionOf(bytes32 settlementUnitId) external view returns (O5Assertion memory);
+
+    /// @notice Write the direct cohort assertion for `escrow` from a valid cohort quorum over `v`. Reverts
+    ///         unless the quorum, cohort, and one-verdict-per-unit invariants all hold. Touches no external
+    ///         contract. Returns the assertion id (the EIP-712 digest over the full signed verdict).
     function attestO5(O5Verdict calldata v, address escrow, bytes[] calldata signatures)
         external
-        returns (bytes32 uid);
+        returns (bytes32 assertionId);
 
     /// @notice One-way, permanent cohort disable (revoker only).
     function disable() external;

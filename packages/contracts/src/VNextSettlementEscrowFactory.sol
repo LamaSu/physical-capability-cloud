@@ -23,9 +23,13 @@ contract VNextSettlementEscrowFactory {
         address indexed escrow, address indexed payer, bytes32 indexed jobIdHash, address arbiter, bytes32 salt
     );
 
-    /// @param usdc / eas / oracle / o5SchemaUid / o5TypeHash — the implementation immutables shared by every clone.
-    constructor(address usdc, address eas, address oracle, bytes32 o5SchemaUid, bytes32 o5TypeHash) {
-        implementation = address(new VNextSettlementEscrow(usdc, eas, oracle, o5SchemaUid, o5TypeHash));
+    /// @param usdc / oracle / o5SchemaUid / o5TypeHash — the implementation immutables shared by every clone.
+    /// @dev   P0-6: the former `eas` parameter is REMOVED. The escrow no longer reads any attestation
+    ///        registry, so a factory that accepted one would advertise a money-path dependency that does
+    ///        not exist. EAS now belongs solely to the cohort attester (its async provenance mirror), and
+    ///        is configured there.
+    constructor(address usdc, address oracle, bytes32 o5SchemaUid, bytes32 o5TypeHash) {
+        implementation = address(new VNextSettlementEscrow(usdc, oracle, o5SchemaUid, o5TypeHash));
     }
 
     /// @notice Clone + initialize a per-job escrow atomically. Permissionless AND safe: the CREATE2 salt
