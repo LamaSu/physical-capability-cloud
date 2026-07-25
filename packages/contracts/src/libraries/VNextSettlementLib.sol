@@ -225,20 +225,21 @@ library VNextSettlementLib {
     //   + 32                      offset to the PolicyAcceptance argument (dynamic — it carries two bytes)
     //   + 32                      UnitConfig[] length
     //   + 16 x 32   =   512       one head offset per UnitConfig element
-    //   + 16 x (448 + 1056)       per unit: 448 B static head (14 words = 13 fields + the payouts offset)
+    //   + 16 x (416 + 1056)       per unit: 416 B static head (13 words = 12 fields + the payouts offset)
     //                             + 1056 B payouts tail (32 B length + 16 legs x 64 B per PayoutEntry)
     //   + 4 x 32    =   128       PolicyAcceptance head: expiry, allowSelfAdjudication, 2 bytes offsets
     //   + 2 x (32 + 1024) = 2,112 the two signatures: 32 B length + MAX_SIGNATURE_BYTES payload each
     //   ------------------------
-    //   = 4 + 64 + 24,576 + 2,240  =  26,916 B
+    //   = 4 + 64 + 24,064 + 2,240  =  26,404 B
     // History: 24,644 B at rev-3 (13 head words); +512 B when §B added `evidenceCommitter` (14th word)
     // -> 25,156 B; +2,272 B for the H-01 bilateral `PolicyAcceptance` argument -> 27,428 B; -512 B when
-    // Wave 3 retired `disputeWindow` with the dispute path (13 head words again) -> 26,916 B.
+    // Wave 3 retired `disputeWindow` with the dispute path (13 head words) -> 26,916 B; -512 B when Wave 3c
+    // removed `evidenceCommitter` per brief §2.8 (12 head words) -> 26,404 B.
     // `test_gas_maxAggregateFunding_fits` builds the true 16x16 maximum with two MAX_SIGNATURE_BYTES
     // signatures and asserts BOTH that it fits and that it equals this constant exactly, so drift in either
     // direction fails the suite. The real griefing caps remain MAX_SETTLEMENT_UNITS /
     // MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB / MAX_SIGNATURE_BYTES.
-    uint256 internal constant MAX_CONFIG_BYTES = 26_916;
+    uint256 internal constant MAX_CONFIG_BYTES = 26_404;
 
     // Reserved claim leg indices (§2/§7): PRINCIPAL uses the payout entry index; FEE/REFUND use these sentinels.
     uint256 internal constant FEE_LEG_INDEX = type(uint256).max;
