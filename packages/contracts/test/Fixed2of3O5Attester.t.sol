@@ -5,7 +5,7 @@ import "forge-std/Test.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {SingleSignerO5Attester} from "../src/attesters/SingleSignerO5Attester.sol";
-import {O5Verdict, O5_DECISION_SETTLE} from "../src/O5Types.sol";
+import {O5Verdict, O5Assertion, O5_DECISION_SETTLE} from "../src/O5Types.sol";
 import {AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 
@@ -217,20 +217,63 @@ contract Fixed2of3O5AttesterTest is Test {
         }
     }
 
+    /// @dev P0-6 OBSERVATION POINT. These tests used to prove "a write happened" by reading the EAS mock's
+    ///      recorded attestation. `attestO5` no longer touches EAS, so the same property is now read off
+    ///      the ASSERTION RECORD -- the thing the escrow's money path actually consumes. Every field the
+    ///      escrow re-checks at release is asserted here, so a record that dropped or mis-copied one would
+    ///      fail loudly instead of silently authorizing the wrong economics.
+    function _assertRecordBound(O5AttesterBase a, O5Verdict memory v, bytes32 returnedId) internal view {
+        O5Assertion memory rec = a.assertionOf(v.settlementUnitId);
+        assertEq(rec.assertionId, returnedId, "record carries the id attestO5 returned");
+        assertEq(rec.assertionId, a.digestOf(v), "the id IS the EIP-712 digest over the FULL signed verdict");
+        assertTrue(rec.assertionId != bytes32(0), "a live record is never the zero record");
+        assertEq(rec.escrow, ESCROW, "bound to the settling escrow (was: EAS attestation recipient)");
+        assertEq(uint256(rec.assertedAt), block.timestamp, "assertion time (was: EAS attestation time)");
+        assertEq(uint256(rec.decision), uint256(O5_DECISION_SETTLE), "SETTLE-only");
+        assertEq(uint256(rec.achievedTier), uint256(v.achievedTier), "achievedTier");
+        assertEq(uint256(rec.requestedTier), uint256(v.requestedTier), "requestedTier");
+        assertEq(rec.feeScheduleHash, v.feeScheduleHash, "feeScheduleHash");
+        assertEq(uint256(rec.feeBps), uint256(v.feeBps), "raw feeBps (M-01)");
+        assertEq(rec.feeRecipient, v.feeRecipient, "raw feeRecipient (M-01)");
+        assertEq(uint256(rec.oracleAuthEpoch), uint256(v.oracleAuthEpoch), "cohort epoch");
+        assertEq(rec.compositionRoot, v.compositionRoot, "compositionRoot");
+        assertEq(rec.evidenceBundleHash, v.evidenceBundleHash, "evidenceBundleHash");
+        assertTrue(a.usedUnit(v.settlementUnitId), "the unit one-verdict slot is consumed");
+        assertEq(a.mirroredUid(v.settlementUnitId), bytes32(0), "asserting did NOT touch EAS");
+    }
+
     // ── Fixed 2-of-3 (mainnet) ───────────────────────────────────────────────────────────────────────
-    function test_TwoOfThree_Mints() public {
+    /// @dev MIGRATED from `test_TwoOfThree_Mints`. A valid quorum now writes the direct cohort assertion
+    ///      instead of minting into EAS, so the assertions move to the record. The EAS-shaped properties
+    ///      this test used to own (pinned schema, escrow recipient, byte-exact 448-B payload,
+    ///      non-revocable) are NOT dropped -- they move to `test_Mirror_MintsPinnedSchemaAndExactPayload`,
+    ///      which asserts them where the mint now happens.
+    function test_TwoOfThree_Asserts() public {
         O5Verdict memory v = _verdict();
         bytes32 digest = attester.digestOf(v);
         bytes[] memory sigs = _twoSigsAscending(pk1, pk2, digest);
 
-        bytes32 uid = attester.attestO5(v, ESCROW, sigs);
+        bytes32 assertionId = attester.attestO5(v, ESCROW, sigs);
 
-        assertEq(mockEas.schemaOf(uid), O5_SCHEMA, "minted with the pinned O5 schema");
+        assertEq(assertionId, digest, "the quorum-signed digest is the assertion id");
+        _assertRecordBound(attester, v, assertionId);
+    }
+
+    /// @dev The EAS-mint properties migrated out of `test_TwoOfThree_Mints`, asserted on the ASYNC mirror.
+    ///      Same guarantees, now off the money path: pinned schema, the settling escrow as recipient, the
+    ///      byte-exact 448-byte O5 payload, and non-revocable.
+    function test_Mirror_MintsPinnedSchemaAndExactPayload() public {
+        O5Verdict memory v = _verdict();
+        attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+
+        bytes32 uid = attester.mirrorToEAS(v);
+
+        assertEq(mockEas.schemaOf(uid), O5_SCHEMA, "mirrored with the pinned O5 schema");
         assertEq(mockEas.recipientOf(uid), ESCROW, "recipient == the settling escrow");
         assertEq(keccak256(mockEas.dataOf(uid)), keccak256(abi.encode(v)), "payload == abi.encode(O5Verdict)");
         assertEq(mockEas.dataOf(uid).length, 448, "payload is the 448-byte O5 layout");
-        assertFalse(mockEas.revocableOf(uid), "O5 mints are non-revocable");
-        assertTrue(attester.usedUnit(v.settlementUnitId), "unit consumed");
+        assertFalse(mockEas.revocableOf(uid), "O5 mirrors are non-revocable");
+        assertEq(attester.mirroredUid(v.settlementUnitId), uid, "drained from the mirror queue");
     }
 
     function test_AnyValidPair_Mints() public {
@@ -327,6 +370,44 @@ contract Fixed2of3O5AttesterTest is Test {
         attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, digest));
     }
 
+    /// @dev P0-6 CONSUME-ONCE + IMMUTABILITY. On the EAS rail the consume-once marker was a bool that no
+    ///      code path could alter. It is now a whole RECORD that the escrow's money path reads field by
+    ///      field, so "written exactly once and never mutated" has to be asserted, not assumed: a second
+    ///      quorum — signing a DIFFERENT but individually-valid verdict for the same unit — must not
+    ///      overwrite a single field of the first. Every field is compared before and after.
+    function test_AssertionIsConsumeOnce_AndImmutable() public {
+        O5Verdict memory first = _verdict();
+        bytes32 firstId = attester.attestO5(first, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(first)));
+        O5Assertion memory before = attester.assertionOf(first.settlementUnitId);
+
+        // A second verdict for the SAME unit, differing in fields the escrow reads, with a genuine quorum
+        // from a different valid signer pair, submitted later in time.
+        O5Verdict memory second = _verdict();
+        second.achievedTier = 3; // still >= requiredTier, so it would pass the pre-checks on its own
+        second.verdictHash = keccak256("a-second-verdict-document");
+        // Sign BEFORE `expectRevert`: `digestOf` is an external call, and an argument expression is
+        // evaluated first, so an inline `attester.digestOf(...)` would consume the expectRevert itself.
+        bytes[] memory secondSigs = _twoSigsAscending(pk2, pk3, attester.digestOf(second));
+        vm.warp(block.timestamp + 7 days);
+        vm.expectRevert(O5AttesterBase.UnitAlreadyAttested.selector);
+        attester.attestO5(second, ESCROW, secondSigs);
+
+        O5Assertion memory afterAttempt = attester.assertionOf(first.settlementUnitId);
+        assertEq(afterAttempt.assertionId, firstId, "assertionId immutable");
+        assertEq(afterAttempt.assertionId, before.assertionId, "assertionId unchanged");
+        assertEq(uint256(afterAttempt.achievedTier), uint256(before.achievedTier), "achievedTier immutable");
+        assertEq(uint256(afterAttempt.requestedTier), uint256(before.requestedTier), "requestedTier immutable");
+        assertEq(uint256(afterAttempt.decision), uint256(before.decision), "decision immutable");
+        assertEq(afterAttempt.feeScheduleHash, before.feeScheduleHash, "feeScheduleHash immutable");
+        assertEq(uint256(afterAttempt.feeBps), uint256(before.feeBps), "feeBps immutable");
+        assertEq(afterAttempt.feeRecipient, before.feeRecipient, "feeRecipient immutable");
+        assertEq(afterAttempt.compositionRoot, before.compositionRoot, "compositionRoot immutable");
+        assertEq(afterAttempt.evidenceBundleHash, before.evidenceBundleHash, "evidenceBundleHash immutable");
+        assertEq(uint256(afterAttempt.oracleAuthEpoch), uint256(before.oracleAuthEpoch), "epoch immutable");
+        assertEq(afterAttempt.escrow, before.escrow, "bound escrow immutable");
+        assertEq(uint256(afterAttempt.assertedAt), uint256(before.assertedAt), "assertedAt not re-stamped");
+    }
+
     function test_CohortMismatch_Reverts() public {
         O5Verdict memory v = _verdict();
         v.oracleAuthEpoch = COHORT + 1; // verdict claims a different cohort
@@ -344,13 +425,12 @@ contract Fixed2of3O5AttesterTest is Test {
     }
 
     // ── Single signer (testnet) ──────────────────────────────────────────────────────────────────────
-    function test_Single_Mints() public {
+    function test_Single_Asserts() public {
         O5Verdict memory v = _verdict();
         bytes[] memory sigs = new bytes[](1);
         sigs[0] = _sig(pkS, single.digestOf(v));
-        bytes32 uid = single.attestO5(v, ESCROW, sigs);
-        assertEq(mockEas.recipientOf(uid), ESCROW);
-        assertTrue(single.usedUnit(v.settlementUnitId));
+        bytes32 assertionId = single.attestO5(v, ESCROW, sigs);
+        _assertRecordBound(single, v, assertionId);
     }
 
     function test_Single_WrongSigner_Reverts() public {
@@ -411,9 +491,8 @@ contract Fixed2of3O5AttesterTest is Test {
         // the slot is untouched — the corrected verdict (echoing the escrow's frozen root) still mints.
         assertFalse(attester.usedUnit(stale.settlementUnitId), "wrong-root verdict must not consume the unit");
         O5Verdict memory good = _verdict();
-        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
-        assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
-        assertTrue(attester.usedUnit(good.settlementUnitId));
+        bytes32 id = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        _assertRecordBound(attester, good, id); // corrected verdict asserts for the same unit
     }
 
     /// @dev SETTLE-only guard: a non-SETTLE verdict — even with a VALID quorum — must revert WITHOUT
@@ -428,11 +507,10 @@ contract Fixed2of3O5AttesterTest is Test {
         attester.attestO5(bad, ESCROW, badSigs);
         assertFalse(attester.usedUnit(bad.settlementUnitId), "a non-SETTLE verdict must not consume the unit");
 
-        // the slot survived — the real SETTLE verdict still mints for the same unit.
+        // the slot survived -- the real SETTLE verdict still asserts for the same unit.
         O5Verdict memory good = _verdict();
-        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
-        assertEq(mockEas.recipientOf(uid), ESCROW, "the SETTLE verdict still mints for the same unit");
-        assertTrue(attester.usedUnit(good.settlementUnitId));
+        bytes32 id = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        _assertRecordBound(attester, good, id);
     }
 
     /// @dev §B twin of the above: a verdict over a package the escrow did NOT commit to must not consume
@@ -463,8 +541,8 @@ contract Fixed2of3O5AttesterTest is Test {
         assertFalse(attester.usedUnit(stale.settlementUnitId), "wrong-fee-hash verdict must not consume the unit");
 
         O5Verdict memory good = _verdict();
-        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
-        assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
+        bytes32 id = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        _assertRecordBound(attester, good, id); // corrected verdict asserts for the same unit
     }
 
     /// @dev M-01: a verdict echoing a false `feeBps` — even beside the CORRECT `feeScheduleHash` — must not
@@ -480,9 +558,8 @@ contract Fixed2of3O5AttesterTest is Test {
         assertFalse(attester.usedUnit(bad.settlementUnitId), "wrong-feeBps verdict must not consume the unit");
 
         O5Verdict memory good = _verdict();
-        bytes32 uid = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
-        assertEq(mockEas.recipientOf(uid), ESCROW, "corrected verdict mints for the same unit");
-        assertTrue(attester.usedUnit(good.settlementUnitId));
+        bytes32 id = attester.attestO5(good, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(good)));
+        _assertRecordBound(attester, good, id); // corrected verdict asserts for the same unit
     }
 
     /// @dev M-01 twin: a false `feeRecipient` (correct hash) must not consume the slot either.
@@ -560,8 +637,9 @@ contract Fixed2of3O5AttesterTest is Test {
     ///      decision — a disputed / past-deadline unit still mints, exactly as designed.
     function test_MutableEscrowStateIsNotPreChecked() public {
         O5Verdict memory v = _verdict();
-        bytes32 uid = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
-        assertEq(mockEas.recipientOf(uid), ESCROW, "mint does not depend on dispute/deadline/enabled state");
+        bytes32 id = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+        // the assertion does not depend on dispute/deadline/enabled state
+        _assertRecordBound(attester, v, id);
     }
 
     /// @dev §B commit-before-verdict: nothing committed on the escrow ⇒ no mint, nothing consumed.
@@ -621,23 +699,57 @@ contract Fixed2of3O5AttesterTest is Test {
         attester.attestO5(v, ESCROW, sigs);
     }
 
-    // ── L-02: reject a zero EAS uid ──────────────────────────────────────────────────────────────────
-    /// @dev A zero uid is never a real attestation. attestO5 sets `usedUnit` BEFORE the external mint, so a
-    ///      zero-uid return must revert (rolling back that effect) — otherwise a misbehaving/misconfigured
-    ///      EAS would burn the unit's one-verdict slot on a mint that recorded nothing. The unit stays
-    ///      mintable, and the same quorum mints once EAS returns a real uid.
-    function test_ZeroEasUid_Reverts_AndLeavesUnitMintable() public {
-        mockEas.setReturnZeroUid(true);
+    // ── L-02: reject a zero/invalid identifier ───────────────────────────────────────────────────────
+    // The original `test_ZeroEasUid_Reverts_AndLeavesUnitMintable` protected ONE property: a misbehaving
+    // or misconfigured dependency that returns a zero identifier must not burn a unit's one-verdict slot
+    // on a write that recorded nothing. P0-6 splits that property in two, and both halves are asserted.
+    //
+    // FINDING, stated rather than assumed: the MONEY-PATH form of this hazard is now structurally
+    // impossible, not merely guarded. `attestO5` makes NO external call, so no dependency can return
+    // anything to it — there is nothing left that could burn the slot. That is a strengthening of L-02,
+    // and it is why the original test cannot be reproduced verbatim on the money path.
+
+    /// @dev HALF 1 (the direct migration): the zero-uid hazard moved WITH EAS onto the async mirror. A
+    ///      zero uid there must revert and leave `mirroredUid` unset, so the assertion stays on the
+    ///      drainable queue instead of being falsely recorded as mirrored — and a later call succeeds.
+    ///      Note what is NO LONGER at stake: the unit's verdict slot was consumed by `attestO5` long
+    ///      before, and settlement does not wait on any of this. A broken EAS now costs provenance
+    ///      latency, never a burnt slot.
+    function test_L02_ZeroEasUid_OnTheMirror_LeavesAssertionQueued() public {
         O5Verdict memory v = _verdict();
-        bytes[] memory sigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        bytes32 assertionId = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+        assertTrue(attester.usedUnit(v.settlementUnitId), "the slot is consumed by the ASSERTION, not by EAS");
+
+        mockEas.setReturnZeroUid(true);
         vm.expectRevert(O5AttesterBase.InvalidAttestationUid.selector);
-        attester.attestO5(v, ESCROW, sigs);
-        assertFalse(attester.usedUnit(v.settlementUnitId), "a zero-uid mint must roll back the consumed slot");
+        attester.mirrorToEAS(v);
+        assertEq(attester.mirroredUid(v.settlementUnitId), bytes32(0), "a zero-uid mint marks nothing mirrored");
+        // The assertion is untouched by the failed mirror — it is still exactly what the escrow will read.
+        assertEq(attester.assertionOf(v.settlementUnitId).assertionId, assertionId, "assertion intact");
 
         mockEas.setReturnZeroUid(false);
-        bytes32 uid = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
-        assertTrue(attester.usedUnit(v.settlementUnitId), "the same quorum mints once EAS is healthy");
+        bytes32 uid = attester.mirrorToEAS(v);
+        assertTrue(uid != bytes32(0), "the same record mirrors once EAS is healthy");
+        assertEq(attester.mirroredUid(v.settlementUnitId), uid, "queue drained");
         assertEq(mockEas.recipientOf(uid), ESCROW);
+    }
+
+    /// @dev HALF 2 (the money-path form): the identifier the ESCROW authorizes against can never be zero,
+    ///      and the all-zero record must never read as an assertion. `assertionId` is a keccak digest, so
+    ///      the `ZeroAssertionId` guard in `attestO5` is defense-in-depth that is unreachable by
+    ///      construction — deliberately kept, and deliberately NOT faked into a passing test. What IS
+    ///      testable, and is what the escrow actually relies on, is asserted here.
+    function test_L02_AssertionIdIsNonZero_AndTheZeroRecordIsNotAnAssertion() public {
+        O5Verdict memory v = _verdict();
+        assertEq(attester.assertionOf(v.settlementUnitId).assertionId, bytes32(0), "unasserted reads all-zero");
+        assertFalse(attester.usedUnit(v.settlementUnitId), "and all-zero is NOT a consumed slot");
+
+        bytes32 assertionId = attester.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, attester.digestOf(v)));
+        assertTrue(assertionId != bytes32(0), "a real assertion id is never zero");
+        assertEq(assertionId, attester.digestOf(v), "it is the full signed-verdict digest");
+        // An unrelated unit still reads the zero record: the guard is per-unit, not global.
+        bytes32 otherUnit = VNextSettlementLib.computeSettlementUnitId(block.chainid, ESCROW, JOB, MI + 1, STEP);
+        assertEq(attester.assertionOf(otherUnit).assertionId, bytes32(0), "no bleed to a neighbouring unit");
     }
 
     // ── L-02: independently-computed EIP-712 golden ─────────────────────────────────────────────────
