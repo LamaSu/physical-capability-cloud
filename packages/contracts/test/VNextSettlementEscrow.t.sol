@@ -2010,6 +2010,30 @@ contract VNextSettlementEscrowTest is Test {
         factory.createEscrow(id);
     }
 
+    /// @dev ...and the other members of the exclusion set, which could never CALL resolveDispute and so
+    ///      would make every opened dispute silently expire to a refund.
+    function test_Initialize_RejectsAnUncallableArbiter() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory idToken = _identity(JOB, address(usdc), 1, c);
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        factory.createEscrow(idToken);
+
+        PolicyIdentity memory idFactory = _identity(JOB, address(factory), 1, c);
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        factory.createEscrow(idFactory);
+    }
+
+    /// @dev The per-signature calldata bound is real, and it is what makes MAX_CONFIG_BYTES exact.
+    function test_BilateralAcceptance_RejectsAnOversizedSignature() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        acc.operatorSignature = new bytes(VNextSettlementLib.MAX_SIGNATURE_BYTES + 1);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.SignatureTooLarge.selector);
+        e.fund(c, acc);
+    }
+
     /// @dev Symmetric with the payer case: an operator-appointed-as-arbiter is also self-adjudication.
     function test_Fund_RejectsOperatorAsArbiterWithoutConsent() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);

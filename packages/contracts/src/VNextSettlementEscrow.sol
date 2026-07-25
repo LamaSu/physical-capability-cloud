@@ -457,10 +457,12 @@ contract VNextSettlementEscrow {
         // operator would silently mean "nobody has to accept" — the exact H-01 hole.
         _requireAllowedRecipient(p.operator);
         if (p.operator == p.payer) revert PartyCollision();
-        // A zero arbiter is never a deliberate choice, it is a default: it would make every opened dispute
-        // unresolvable and expire to a refund. Payer/operator arbiters ARE expressible, but only via the
-        // bilaterally-signed `allowSelfAdjudication` flag checked at funding.
-        if (p.arbiter == address(0)) revert ForbiddenRecipient();
+        // The arbiter is held to the same exclusion set for the same reason: zero, this escrow, the token
+        // and the factory can none of them ever CALL `resolveDispute`, so any of them as arbiter makes
+        // every opened dispute unresolvable and silently expire to a refund. A zero arbiter in particular
+        // is never a deliberate choice, it is a default. Payer/operator arbiters ARE expressible, but only
+        // via the bilaterally-signed `allowSelfAdjudication` flag checked at funding.
+        _requireAllowedRecipient(p.arbiter);
         initialized = true;
         _status = 1;
         payer = p.payer;
@@ -662,6 +664,10 @@ contract VNextSettlementEscrow {
         }
         if (block.timestamp > acceptance.expiry) revert PolicyExpired();
 
+        // Passing the identity BACK to the factory is also a self-consistency proof: `consumePolicyNonce`
+        // recomputes the salt from these fields and requires the resulting CREATE2 address to equal
+        // `msg.sender`. So a clone can only ever fund itself if its stored identity really is the one its
+        // own address commits to — the initialization cannot have drifted from the salt.
         address impl = IVNextEscrowFactory(factory).consumePolicyNonce(
             PolicyIdentity({
                 payer: payer,
