@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
-import {O5Verdict, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
+import {O5Verdict, O5Assertion, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
 import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {PayoutEntry, FeeSchedule, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
@@ -84,20 +84,8 @@ contract MockToken {
     }
 }
 
-contract MockEAS {
-    EASAttestation internal _att;
-
-    function set(EASAttestation calldata a) external {
-        _att = a;
-    }
-
-    function getAttestation(bytes32) external view returns (EASAttestation memory) {
-        return _att;
-    }
-}
-
-/// @dev A read+write EAS double: records what an attester mints and serves it back by uid, so the real
-///      cohort attester and the real escrow can be exercised end-to-end through one registry.
+/// @dev A read+write EAS double: records what the attester's ASYNC MIRROR writes and serves it back by
+///      uid. P0-6: the escrow never touches this — it exists only to observe the provenance mirror.
 contract MockReadWriteEAS {
     mapping(bytes32 => EASAttestation) internal _atts;
     uint256 public n;
@@ -124,12 +112,23 @@ contract MockReadWriteEAS {
     }
 }
 
-/// @dev Minimal IOracleAttester the escrow reads at fund()/release(): a settable one-way kill-switch + a
-///      fixed cohort id. The escrow never calls attestO5 (evidence tests fake the attestation via MockEAS),
-///      so attestO5 is a no-op — the real quorum crypto is exercised in Fixed2of3O5Attester.t.sol.
+/// @dev Minimal IOracleAttester the escrow reads at fund()/release(): a settable one-way kill-switch, a
+///      fixed cohort id, and a settable per-unit ASSERTION RECORD (P0-6 — this is what the escrow's money
+///      path reads instead of an EAS attestation). The escrow never calls attestO5, so attestO5 is a no-op
+///      here — the real quorum crypto and the real record write are exercised in Fixed2of3O5Attester.t.sol
+///      and in the end-to-end tests at the bottom of this file.
 contract MockOracleAttester is IOracleAttester {
     bool public enabled = true;
     uint64 public cohortId;
+    mapping(bytes32 => O5Assertion) internal _assertions;
+
+    function setAssertion(bytes32 unitId, O5Assertion memory a) external {
+        _assertions[unitId] = a;
+    }
+
+    function assertionOf(bytes32 unitId) external view returns (O5Assertion memory) {
+        return _assertions[unitId];
+    }
     /// @dev the cohort's live O5 EIP-712 type hash — the escrow's constructor pins its metadata to this.
     bytes32 public o5TypeHash = keccak256("mock.o5.typehash");
     /// @dev the cohort's pinned O5 schema UID (M-02) — MUST equal the test's `O5_SCHEMA` so the escrow's
@@ -163,7 +162,6 @@ contract MockOracleAttester is IOracleAttester {
 
 contract VNextSettlementEscrowTest is Test {
     MockToken usdc;
-    MockEAS eas;
     MockOracleAttester attester;
     VNextSettlementEscrowFactory factory;
 
@@ -176,6 +174,7 @@ contract VNextSettlementEscrowTest is Test {
     address feeDest = address(0xFEE1);
     address operator = address(0x0FE7A); // the funder-designated evidence committer (§B)
     bytes32 constant PKG = keccak256("evidence-package-v1");
+    bytes32 constant ASSERTION_1 = keccak256("assertion-1"); // stands in for the attester's EIP-712 digest
     bytes32 constant O5_SCHEMA = keccak256("test.o5.schema");
     bytes32 constant JOB = keccak256("job-1");
     bytes32 constant TERMS = keccak256("terms-1");
@@ -183,9 +182,8 @@ contract VNextSettlementEscrowTest is Test {
     function setUp() public {
         payer = vm.addr(payerPk);
         usdc = new MockToken();
-        eas = new MockEAS();
         attester = new MockOracleAttester(COHORT);
-        factory = new VNextSettlementEscrowFactory(address(usdc), address(eas), address(attester), O5_SCHEMA, bytes32(0));
+        factory = new VNextSettlementEscrowFactory(address(usdc), address(attester), O5_SCHEMA, bytes32(0));
         usdc.mint(payer, 1_000_000e6);
     }
 
@@ -476,7 +474,7 @@ contract VNextSettlementEscrowTest is Test {
         e.approveByBuyer(id, a, "");
     }
 
-    // ── evidence release (mock EAS) ───────────────────────────────────────────────────────────────
+    // ── evidence release (P0-6 direct cohort assertion; no EAS anywhere on this path) ──────────────
     function _o5FullVerdict(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved)
         internal
         view
@@ -501,23 +499,31 @@ contract VNextSettlementEscrowTest is Test {
         });
     }
 
-    function _o5Attestation(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved)
-        internal
-        view
-        returns (EASAttestation memory a)
-    {
-        a = EASAttestation({
-            uid: keccak256("uid-1"),
-            schema: O5_SCHEMA,
-            time: uint64(block.timestamp),
-            expirationTime: 0,
-            revocationTime: 0,
-            refUID: bytes32(0),
-            recipient: address(e),
-            attester: address(attester),
-            revocable: true,
-            data: abi.encode(_o5FullVerdict(e, id, decision, achieved))
+    /// @dev The direct cohort assertion the escrow's money path reads (P0-6), derived from the same
+    ///      verdict the oracle would have signed. `assertionId` stands in for the EIP-712 digest the real
+    ///      attester records — the escrow only requires it to be non-zero and uses it as the §2
+    ///      authorization key seed; the digest binding itself is proven end-to-end against the REAL
+    ///      attester further down this file and in Fixed2of3O5Attester.t.sol.
+    function _assertionFor(O5Verdict memory v, address escrow) internal view returns (O5Assertion memory a) {
+        a = O5Assertion({
+            assertionId: ASSERTION_1,
+            feeScheduleHash: v.feeScheduleHash,
+            compositionRoot: v.compositionRoot,
+            evidenceBundleHash: v.evidenceBundleHash,
+            escrow: escrow,
+            assertedAt: uint64(block.timestamp),
+            achievedTier: v.achievedTier,
+            requestedTier: v.requestedTier,
+            decision: v.decision,
+            feeRecipient: v.feeRecipient,
+            oracleAuthEpoch: v.oracleAuthEpoch,
+            feeBps: v.feeBps
         });
+    }
+
+    /// @dev Bind an assertion for (e, id) built from the canonical verdict for that unit.
+    function _assert(VNextSettlementEscrow e, bytes32 id, uint8 decision, uint8 achieved) internal {
+        attester.setAssertion(id, _assertionFor(_o5FullVerdict(e, id, decision, achieved), address(e)));
     }
 
     function test_EvidenceRelease_Settle() public {
@@ -525,21 +531,44 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG); // §B: commit the package BEFORE the verdict exists
-        eas.set(_o5Attestation(e, id, 1, 1)); // decision=SETTLE(1), achieved>=required
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        _assert(e, id, 1, 1); // decision=SETTLE(1), achieved>=required
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
 
-    function test_EvidenceRelease_RejectsWrongAttester() public {
+    /// @dev MIGRATED from `test_EvidenceRelease_RejectsWrongAttester`. On the EAS rail the escrow compared
+    ///      `attestation.attester == authorizedOracle`, because ANY address could mint into the shared
+    ///      registry. On the assertion rail the escrow CALLS its immutable `authorizedOracle` directly, so
+    ///      a foreign attester's record is unreachable rather than rejected — the check is structurally
+    ///      subsumed and cannot be written as a test any more. What survives as a real hazard is the OTHER
+    ///      half of that binding: a genuine cohort assertion made for a DIFFERENT escrow must not pay this
+    ///      one. That is the `WrongRecipient` successor, asserted here.
+    function test_EvidenceRelease_RejectsAssertionBoundToAnotherEscrow() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
-        a.attester = address(0xBAD);
-        eas.set(a);
-        vm.expectRevert(VNextSettlementEscrow.WrongAttester.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        _commit(e, id, PKG);
+        O5Assertion memory a = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(0xE5C0F)); // another escrow
+        attester.setAssertion(id, a);
+        vm.expectRevert(VNextSettlementEscrow.WrongRecipient.selector);
+        e.releaseFromEvidence(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev Twin of the above: an escrow bound to a DIFFERENT attester sees no assertion at all. This is
+    ///      what "wrong attester" degrades to once the trust root is the callee rather than a field.
+    function test_EvidenceRelease_ForeignAttesterAssertionIsUnreachable() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        // A different, non-authorized attester holds a perfectly-formed assertion for this exact unit.
+        MockOracleAttester rogue = new MockOracleAttester(COHORT);
+        rogue.setAssertion(id, _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e)));
+        assertTrue(rogue.assertionOf(id).assertionId != bytes32(0), "the rogue record exists");
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
+        e.releaseFromEvidence(id); // the escrow only ever reads its own immutable authorizedOracle
     }
 
     function test_EvidenceRelease_RejectsUnderTier() public {
@@ -547,28 +576,38 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 2); // requiredTier 2
         _fund(e, c);
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1); // achieved 1 < required 2
-        a.data = abi.encode(_o5verdict(id, 1, 2, 1));
-        eas.set(a);
+        _commit(e, id, PKG);
+        // achieved 2 but requested 1 != the frozen requiredTier 2
+        attester.setAssertion(id, _assertionFor(_o5verdict(id, 1, 2, 1), address(e)));
         vm.expectRevert(VNextSettlementEscrow.RequestedTierMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
+    }
+
+    /// @dev The lower tier bound in its own right: achieved < the frozen requiredTier cannot settle.
+    function test_EvidenceRelease_RejectsAchievedBelowRequired() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 0, 0, 2)); // requiredTier 2
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        attester.setAssertion(id, _assertionFor(_o5verdict(id, 1, 1, 2), address(e))); // achieved 1 < 2
+        vm.expectRevert(VNextSettlementEscrow.TierNotMet.selector);
+        e.releaseFromEvidence(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
     /// @dev M-01: the release path binds the RAW `feeBps`, not just its 13-field hash. A verdict with the
     ///      correct feeScheduleHash but a false feeBps (the false economics permanently recorded in the
-    ///      attestation) must not settle; the unit stays FUNDED_ACTIVE.
+    ///      assertion) must not settle; the unit stays FUNDED_ACTIVE.
     function test_EvidenceRelease_RejectsMismatchedFeeBps() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.feeBps = 900; // != the frozen 235, though feeScheduleHash stays correct
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.FeeBpsMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -578,13 +617,38 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.feeRecipient = address(0xBADD); // != the frozen feeDest
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.FeeRecipientMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev The frozen 13-field fee commitment in its own right.
+    function test_EvidenceRelease_RejectsMismatchedFeeScheduleHash() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
+        v.feeScheduleHash = keccak256("stale-fee-schedule");
+        attester.setAssertion(id, _assertionFor(v, address(e)));
+        vm.expectRevert(VNextSettlementEscrow.FeeHashMismatch.selector);
+        e.releaseFromEvidence(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev A non-SETTLE decision never releases. (The real attester also refuses to assert one at all —
+    ///      `NotSettleVerdict` — so this is the escrow-side half of a doubly-guarded property.)
+    function test_EvidenceRelease_RejectsNonSettleDecision() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        _assert(e, id, 2, 1); // decision 2 != O5_DECISION_SETTLE
+        vm.expectRevert(VNextSettlementEscrow.NotSettle.selector);
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -595,10 +659,9 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // requiredTier 1
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 4); // SETTLE, achievedTier 4 (> MAX_TIER)
-        eas.set(a);
+        _assert(e, id, 1, 4); // SETTLE, achievedTier 4 (> MAX_TIER)
         vm.expectRevert(VNextSettlementEscrow.TierOutOfRange.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -959,36 +1022,34 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        eas.set(_o5Attestation(e, id, 1, 1)); // an otherwise-valid attestation already exists
-        attester.setEnabled(false); // cohort disabled AFTER the mint — must neutralize it at payment time
+        _assert(e, id, 1, 1); // an otherwise-valid assertion already exists
+        attester.setEnabled(false); // cohort disabled AFTER the assertion — must neutralize it at payment time
         vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
     }
 
     function test_EvidenceRelease_RevertsOnCohortEpochMismatch() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.oracleAuthEpoch = COHORT + 1; // wrong epoch
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.OracleCohortMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
     }
 
     function test_EvidenceRelease_RevertsOnCompositionRootMismatch() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // unit.compositionRoot == 0
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
+        _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.compositionRoot = keccak256("some-other-root"); // != frozen 0
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.CompositionRootMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
     }
 
     function test_EvidenceRelease_CompositionHappyPath() public {
@@ -1000,12 +1061,10 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, c);
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.compositionRoot = root; // matches the frozen unit root
-        a.data = abi.encode(v);
-        eas.set(a);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        attester.setAssertion(id, _assertionFor(v, address(e)));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
@@ -1062,20 +1121,34 @@ contract VNextSettlementEscrowTest is Test {
         e.disputeOf(keccak256("no-such-unit"));
     }
 
-    /// @dev easUidUsed flips false->true across an evidence release; authorizationUsed reads the §2
-    ///      single-use flag (false for a key that was never issued).
-    function test_L01_easUidUsed_and_authorizationUsed() public {
+    /// @dev MIGRATED from `test_L01_easUidUsed_and_authorizationUsed`. P0-6 removed `easUidUsed` with the
+    ///      EAS read; the replay guard it provided now lives in `authorizationUsed`, whose key is derived
+    ///      from the ASSERTION ID. This asserts the same property on the new rail: the §2 evidence
+    ///      authorization key reads false before the release and true after, and an unissued key reads
+    ///      false. The key is recomputed here exactly as the escrow derives it, so a change to the
+    ///      authorization-key envelope breaks this test rather than passing silently.
+    function test_L01_evidenceAuthorizationKey_and_authorizationUsed() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        bytes32 uid = keccak256("uid-1");
-        assertFalse(e.easUidUsed(uid), "uid unused before release");
+        bytes32 authKey = keccak256(
+            abi.encode(
+                uint8(AuthorizationType.EVIDENCE),
+                keccak256("PCC:vnext:auth:evidence:v1"),
+                address(attester),
+                ASSERTION_1, // rawAuthorizationId == the assertion id (was: the EAS uid)
+                block.chainid,
+                address(e),
+                id
+            )
+        );
+        assertFalse(e.authorizationUsed(authKey), "evidence auth key unused before release");
         assertFalse(e.authorizationUsed(keccak256("never-issued")), "an unissued auth key reads false");
 
-        eas.set(_o5Attestation(e, id, 1, 1));
-        e.releaseFromEvidence(id, uid);
-        assertTrue(e.easUidUsed(uid), "uid consumed after release");
+        _assert(e, id, 1, 1);
+        e.releaseFromEvidence(id);
+        assertTrue(e.authorizationUsed(authKey), "evidence auth key consumed after release");
     }
 
     // ── L-01/L-02: config-envelope pin + type-hash deployment pin ─────────────────────────────────
@@ -1091,7 +1164,7 @@ contract VNextSettlementEscrowTest is Test {
     function test_Constructor_RejectsTypeHashDrift() public {
         vm.expectRevert(VNextSettlementEscrow.TypeHashMismatch.selector);
         new VNextSettlementEscrowFactory(
-            address(usdc), address(eas), address(attester), O5_SCHEMA, keccak256("some-other-typehash")
+            address(usdc), address(attester), O5_SCHEMA, keccak256("some-other-typehash")
         );
     }
 
@@ -1103,7 +1176,7 @@ contract VNextSettlementEscrowTest is Test {
     function test_Constructor_RejectsSchemaUidDrift() public {
         vm.expectRevert(VNextSettlementEscrow.SchemaUidMismatch.selector);
         new VNextSettlementEscrowFactory(
-            address(usdc), address(eas), address(attester), keccak256("some-other-schema"), bytes32(0)
+            address(usdc), address(attester), keccak256("some-other-schema"), bytes32(0)
         );
     }
 
@@ -1114,7 +1187,7 @@ contract VNextSettlementEscrowTest is Test {
 
     function test_Constructor_AcceptsMatchingTypeHash() public {
         VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
-            address(usdc), address(eas), address(attester), O5_SCHEMA, attester.o5TypeHash()
+            address(usdc), address(attester), O5_SCHEMA, attester.o5TypeHash()
         );
         assertEq(VNextSettlementEscrow(f.implementation()).o5TypeHash(), attester.o5TypeHash());
     }
@@ -1156,15 +1229,35 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(e.arbiter(), arbiter, "the funded clone carries the arbiter the payer committed to");
     }
 
-    function test_EvidenceRelease_RevertsWhenUidMismatch() public {
+    /// @dev MIGRATED from `test_EvidenceRelease_RevertsWhenUidMismatch`. On the EAS rail the CALLER chose
+    ///      which uid to present, so the escrow had to bind the returned attestation back to the requested
+    ///      uid. On the assertion rail the record is KEYED by `settlementUnitId` — the caller chooses
+    ///      nothing — so a "mismatched identifier" is unreachable. What the check was really protecting is
+    ///      preserved and asserted here: an un-asserted unit reads the ALL-ZERO record, and a zero
+    ///      `assertionId` must fail closed rather than be treated as an authorization (L-02's intent).
+    function test_EvidenceRelease_RevertsWhenNoAssertionExists() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
-        a.uid = keccak256("different-uid"); // getAttestation returns a uid != the requested easUid
-        eas.set(a);
+        _commit(e, id, PKG);
+        assertEq(attester.assertionOf(id).assertionId, bytes32(0), "no assertion bound to this unit");
         vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev The zero-record guard is a check on the ID, not merely on emptiness: a record whose payload
+    ///      fields are all correct but whose `assertionId` is zero must still be rejected.
+    function test_EvidenceRelease_RejectsZeroAssertionId() public {
+        VNextSettlementEscrow e = _newEscrow(JOB);
+        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        O5Assertion memory a = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
+        a.assertionId = bytes32(0);
+        attester.setAssertion(id, a);
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
+        e.releaseFromEvidence(id);
     }
 
     // ══ §B — on-chain evidence binding ═════════════════════════════════════════════════════════════
@@ -1269,8 +1362,8 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        eas.set(_o5Attestation(e, id, 1, 1));
-        e.releaseFromEvidence(id, keccak256("uid-1")); // unit is now SETTLED_RELEASED
+        _assert(e, id, 1, 1);
+        e.releaseFromEvidence(id); // unit is now SETTLED_RELEASED
         vm.prank(operator);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
         e.submitEvidence(id, keccak256("late-package"));
@@ -1289,9 +1382,9 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
-        eas.set(_o5Attestation(e, id, 1, 1)); // an otherwise-perfect verdict, but nothing was committed
+        _assert(e, id, 1, 1); // an otherwise-perfect verdict, but nothing was committed
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -1300,13 +1393,11 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.evidenceBundleHash = bytes32(0); // matches the unit's untouched storage slot
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
     }
 
     function test_EvidenceRelease_RevertsOnDigestMismatch() public {
@@ -1314,13 +1405,11 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        EASAttestation memory a = _o5Attestation(e, id, 1, 1);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.evidenceBundleHash = _commitment(e, id, keccak256("a-different-package")); // verdict over another package
-        a.data = abi.encode(v);
-        eas.set(a);
+        attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -1355,50 +1444,53 @@ contract VNextSettlementEscrowTest is Test {
         );
     }
 
-    /// @dev ONE VERDICT PER UNIT: after a settle, a second otherwise-valid verdict (fresh uid, same
-    ///      committed package, same tier) cannot settle the unit again.
+    /// @dev ONE VERDICT PER UNIT: after a settle, a second otherwise-valid assertion (fresh assertion id,
+    ///      same committed package, same tier) cannot settle the unit again. The mock lets a second record
+    ///      be written precisely so this asserts the ESCROW-side guard; the real attester refuses the
+    ///      second write outright (`UnitAlreadyAttested`, asserted in Fixed2of3O5Attester.t.sol).
     function test_OneVerdictPerUnit_SecondValidVerdictCannotSettle() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
-        eas.set(_o5Attestation(e, id, 1, 1));
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        _assert(e, id, 1, 1);
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
 
-        EASAttestation memory a2 = _o5Attestation(e, id, 1, 1);
-        a2.uid = keccak256("uid-2"); // a brand-new, fully valid attestation over the same committed package
-        eas.set(a2);
+        O5Assertion memory a2 = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
+        a2.assertionId = keccak256("assertion-2"); // a brand-new, fully valid record over the same package
+        attester.setAssertion(id, a2);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id, keccak256("uid-2"));
+        e.releaseFromEvidence(id);
         assertEq(usdc.balanceOf(feeDest), 23_500000, "paid exactly once");
         assertEq(usdc.balanceOf(address(e)), 0);
     }
 
     /// @dev The consume-once is the UNIT's state transition, and it holds even in the partially-settled
-    ///      RELEASE_ALLOCATED case (payouts stuck as claims): neither a replay of the same uid nor a fresh
-    ///      verdict can allocate a second release. (`_easUidUsed` sits behind this state guard as
-    ///      defense-in-depth — an attestation is bound to exactly one unit, so the state guard is what
-    ///      actually fires.)
+    ///      RELEASE_ALLOCATED case (payouts stuck as claims): neither a replay of the same assertion nor a
+    ///      fresh one can allocate a second release. (The §2 authorization key sits behind this state guard
+    ///      as defense-in-depth — an assertion is bound to exactly one unit, so the state guard is what
+    ///      actually fires. That layering is unchanged by P0-6; only the key's seed moved from the EAS uid
+    ///      to the assertion id.)
     function test_OneVerdictPerUnit_ReleaseAllocatedCannotBeReReleased() public {
         VNextSettlementEscrow e = _newEscrow(JOB);
         _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         usdc.setTransferMode(MockToken.Mode.REVERT); // stay in RELEASE_ALLOCATED (claims outstanding)
-        eas.set(_o5Attestation(e, id, 1, 1));
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        _assert(e, id, 1, 1);
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.liabilityOf(id), 1000e6, "still owed once, not twice");
 
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1")); // same uid
+        e.releaseFromEvidence(id); // same assertion
 
-        EASAttestation memory a2 = _o5Attestation(e, id, 1, 1);
-        a2.uid = keccak256("uid-2");
-        eas.set(a2);
+        O5Assertion memory a2 = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
+        a2.assertionId = keccak256("assertion-2");
+        attester.setAssertion(id, a2);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id, keccak256("uid-2")); // fresh uid, same committed package
+        e.releaseFromEvidence(id); // fresh assertion, same committed package
         assertEq(e.liabilityOf(id), 1000e6, "no second allocation");
     }
 
@@ -1424,9 +1516,9 @@ contract VNextSettlementEscrowTest is Test {
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, keccak256("wrong-package"));
-        eas.set(_o5Attestation(e, id, 1, 1)); // verdict over the RIGHT package -> unpayable against this commit
+        _assert(e, id, 1, 1); // verdict over the RIGHT package -> unpayable against this commit
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id, keccak256("uid-1"));
+        e.releaseFromEvidence(id);
         vm.warp(block.timestamp + 31 days);
         uint256 before = usdc.balanceOf(payer);
         e.reclaimAfterDeadline(id);
@@ -1465,11 +1557,15 @@ contract VNextSettlementEscrowTest is Test {
     // ── end-to-end across the REAL attester + the REAL escrow ─────────────────────────────────────
     // The attester-side unit tests drive a mock escrow, which by construction cannot catch drift between
     // `IEscrowSettlementBinding` and this escrow's actual getters. This exercises the whole money path
-    // through both real contracts: fund -> commit -> 2-of-3 quorum mint -> release.
+    // through both real contracts: fund -> commit -> 2-of-3 quorum assertion -> release. P0-6: no EAS is
+    // deployed for these at all — the money path cannot reach one.
     uint256 constant sk1 = 0x51;
     uint256 constant sk2 = 0x52;
     uint256 constant sk3 = 0x53;
     uint64 constant REAL_COHORT = 9;
+    /// @dev An address with NO CODE, handed to the attester as its EAS registry. Any `attest` call against
+    ///      it reverts (Solidity's extcodesize guard). Used to prove settlement never reaches EAS.
+    address constant DEAD_EAS = address(0xEA5DEAD);
 
     function _ascendingSigs(bytes32 digest) internal pure returns (bytes[] memory sigs) {
         sigs = new bytes[](2);
@@ -1480,14 +1576,13 @@ contract VNextSettlementEscrowTest is Test {
         sigs[1] = abi.encodePacked(r1, s1, v1);
     }
 
-    function test_EndToEnd_RealAttesterMint_ThenRealEscrowRelease() public {
-        MockReadWriteEAS rwEas = new MockReadWriteEAS();
+    function test_EndToEnd_RealAttesterAssertion_ThenRealEscrowRelease() public {
+        // The EAS address is DEAD (no code) for the whole test: settlement must not care.
         Fixed2of3O5Attester real = new Fixed2of3O5Attester(
-            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), address(rwEas), O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
+            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), DEAD_EAS, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
         );
-        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
-            address(usdc), address(rwEas), address(real), O5_SCHEMA, real.o5TypeHash()
-        );
+        VNextSettlementEscrowFactory f =
+            new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
         VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
 
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
@@ -1517,10 +1612,13 @@ contract VNextSettlementEscrowTest is Test {
             oracleAuthEpoch: REAL_COHORT,
             compositionRoot: e.compositionRootOf(id)
         });
-        bytes32 uid = real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
+        bytes32 assertionId = real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
         assertTrue(real.usedUnit(id), "the unit's one verdict slot is now consumed");
+        assertEq(assertionId, real.digestOf(v), "the assertion id IS the full signed-verdict digest");
+        assertEq(real.assertionOf(id).escrow, address(e), "assertion bound to this escrow");
+        assertEq(real.mirroredUid(id), bytes32(0), "settlement did not touch EAS");
 
-        e.releaseFromEvidence(id, uid);
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), 1000e6 - 23_500000);
@@ -1528,16 +1626,14 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(e.totalLiability(), 0);
     }
 
-    /// @dev The same end-to-end path, but the oracle mirrors a STALE fee schedule: the mint must fail
-    ///      without consuming the slot, and the corrected verdict must then mint AND release.
+    /// @dev The same end-to-end path, but the oracle mirrors a STALE fee schedule: the assertion must fail
+    ///      without consuming the slot, and the corrected verdict must then assert AND release.
     function test_EndToEnd_StaleFeeMirror_DoesNotBrickTheUnit() public {
-        MockReadWriteEAS rwEas = new MockReadWriteEAS();
         Fixed2of3O5Attester real = new Fixed2of3O5Attester(
-            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), address(rwEas), O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
+            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), DEAD_EAS, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
         );
-        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
-            address(usdc), address(rwEas), address(real), O5_SCHEMA, real.o5TypeHash()
-        );
+        VNextSettlementEscrowFactory f =
+            new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
         VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
         _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
@@ -1562,11 +1658,11 @@ contract VNextSettlementEscrowTest is Test {
         bytes[] memory staleSigs = _ascendingSigs(real.digestOf(v));
         vm.expectRevert(O5AttesterBase.FeeHashMismatch.selector); // the attester's pre-check, not the escrow's
         real.attestO5(v, address(e), staleSigs);
-        assertFalse(real.usedUnit(id), "the unit must still be mintable");
+        assertFalse(real.usedUnit(id), "the unit must still be assertable");
 
         v.feeScheduleHash = e.feeScheduleHashOf(id); // oracle refreshes its mirror
-        bytes32 uid = real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
-        e.releaseFromEvidence(id, uid);
+        real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
+        e.releaseFromEvidence(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "settles after correction");
     }
 
@@ -1596,4 +1692,236 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev computed OUTSIDE this contract with `cast abi-encode` + `cast keccak` over the §B 7-word form
     ///      {domain, 8453, 0x…E5C0F, unitId, schemaVersion 1, format 1, keccak("golden-evidence-package")}.
     bytes32 constant GOLDEN_EVIDENCE_COMMITMENT = 0xba4753b572b0d79518e05c88932d213125d0634a2c2fbbd7e74d7d52578eb7aa;
+
+    // ══ P0-6 — EAS is off the money path; the mirror is async, isolated and replayable ══════════════
+    // These drive the REAL attester + the REAL escrow. `EAS_SLOT` is a fixed address whose CODE is
+    // swapped mid-test (`vm.etch`) to model an outage and a later recovery — the attester's `eas` is an
+    // immutable, so the address must stay put while its behaviour changes, exactly like a real registry.
+    address constant EAS_SLOT = address(0xEA50107);
+
+    struct P06Fixture {
+        Fixed2of3O5Attester attester;
+        VNextSettlementEscrow escrow;
+        bytes32 unitId;
+        O5Verdict verdict;
+    }
+
+    /// @dev A real, field-by-field COPY of a memory verdict. Plain assignment between memory structs binds
+    ///      a reference, so a test that "tampers with a copy" would mutate the original too.
+    function _copyVerdict(O5Verdict memory v) internal pure returns (O5Verdict memory) {
+        return O5Verdict({
+            jobIdHash: v.jobIdHash,
+            milestoneIndex: v.milestoneIndex,
+            stepId: v.stepId,
+            evidenceBundleHash: v.evidenceBundleHash,
+            achievedTier: v.achievedTier,
+            requestedTier: v.requestedTier,
+            decision: v.decision,
+            verdictHash: v.verdictHash,
+            feeBps: v.feeBps,
+            feeRecipient: v.feeRecipient,
+            feeScheduleHash: v.feeScheduleHash,
+            settlementUnitId: v.settlementUnitId,
+            oracleAuthEpoch: v.oracleAuthEpoch,
+            compositionRoot: v.compositionRoot
+        });
+    }
+
+    /// @dev fund + commit + build the canonical verdict, against an attester whose EAS is `easAddr`.
+    function _p06Setup(address easAddr, bytes32 job) internal returns (P06Fixture memory fx) {
+        fx.attester = new Fixed2of3O5Attester(
+            vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), easAddr, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
+        );
+        VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
+            address(usdc), address(fx.attester), O5_SCHEMA, fx.attester.o5TypeHash()
+        );
+        fx.escrow = VNextSettlementEscrow(f.createEscrow(payer, arbiter, job, TERMS));
+        _fund(fx.escrow, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        fx.unitId = VNextSettlementLib.computeSettlementUnitId(
+            block.chainid, address(fx.escrow), job, 0, keccak256("step-0")
+        );
+        vm.prank(operator);
+        fx.escrow.submitEvidence(fx.unitId, PKG);
+        fx.verdict = O5Verdict({
+            jobIdHash: job,
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            evidenceBundleHash: fx.escrow.evidenceBundleHashOf(fx.unitId),
+            achievedTier: 1,
+            requestedTier: 1,
+            decision: O5_DECISION_SETTLE,
+            verdictHash: keccak256("p06-verdict"),
+            feeBps: fx.escrow.feeBpsOf(fx.unitId),
+            feeRecipient: fx.escrow.feeRecipientOf(fx.unitId),
+            feeScheduleHash: fx.escrow.feeScheduleHashOf(fx.unitId),
+            settlementUnitId: fx.unitId,
+            oracleAuthEpoch: REAL_COHORT,
+            compositionRoot: bytes32(0)
+        });
+    }
+
+    /// @dev THE Wave-1 property: EAS UNAVAILABLE ⇒ SETTLEMENT STILL COMPLETES. The registry address holds
+    ///      no code for the entire test, so any attempt to reach it would revert. Money moves anyway,
+    ///      because no money path reaches it at all.
+    function test_P06_EasUnavailable_SettlementStillCompletes() public {
+        P06Fixture memory fx = _p06Setup(DEAD_EAS, JOB);
+        assertEq(DEAD_EAS.code.length, 0, "the EAS registry has no code");
+
+        fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        fx.escrow.releaseFromEvidence(fx.unitId);
+
+        assertEq(uint256(fx.escrow.unitState(fx.unitId)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(feeDest), 23_500000);
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), 1000e6 - 23_500000);
+        assertEq(usdc.balanceOf(address(fx.escrow)), 0);
+        assertEq(fx.escrow.totalLiability(), 0);
+        // And the provenance obligation is not lost — it is simply still queued.
+        assertEq(fx.attester.mirroredUid(fx.unitId), bytes32(0), "still on the drainable mirror queue");
+    }
+
+    /// @dev A LIVE-BUT-FAILING EAS is the harder outage shape (the call is made and reverts, rather than
+    ///      never being made). Settlement must still complete, and the mirror must be the only casualty.
+    function test_P06_MirrorFailureIsIsolatedFromSettlement() public {
+        vm.etch(EAS_SLOT, address(new RevertingEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+
+        fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        // The mirror is the ONLY thing that fails.
+        vm.expectRevert(RevertingEAS.EasIsDown.selector);
+        fx.attester.mirrorToEAS(fx.verdict);
+
+        fx.escrow.releaseFromEvidence(fx.unitId);
+        assertEq(uint256(fx.escrow.unitState(fx.unitId)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(feeDest), 23_500000);
+        assertEq(fx.attester.mirroredUid(fx.unitId), bytes32(0), "nothing was falsely marked mirrored");
+    }
+
+    /// @dev REPLAY AFTER A LONG OUTAGE: the assertion is written and settled while EAS is down; much later
+    ///      EAS recovers at the same address and ANY caller drains the queue from the on-chain record. The
+    ///      minted payload is byte-identical to the signed verdict, so provenance is complete, only late.
+    function test_P06_MirrorReplaysAfterEasOutage() public {
+        vm.etch(EAS_SLOT, address(new RevertingEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        bytes32 assertionId =
+            fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        fx.escrow.releaseFromEvidence(fx.unitId); // settles during the outage
+        vm.expectRevert(RevertingEAS.EasIsDown.selector);
+        fx.attester.mirrorToEAS(fx.verdict);
+
+        vm.warp(block.timestamp + 45 days); // a long outage; the unit is long since settled
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code); // EAS recovers at the same address
+
+        vm.prank(address(0xDEADBEEF)); // PERMISSIONLESS: a random third party drains the queue
+        bytes32 uid = fx.attester.mirrorToEAS(fx.verdict);
+
+        assertTrue(uid != bytes32(0), "mirrored");
+        assertEq(fx.attester.mirroredUid(fx.unitId), uid, "queue entry cleared");
+        EASAttestation memory a = MockReadWriteEAS(EAS_SLOT).getAttestation(uid);
+        assertEq(a.schema, O5_SCHEMA, "mirrored under the pinned O5 schema");
+        assertEq(a.recipient, address(fx.escrow), "recipient is the settling escrow");
+        assertEq(a.attester, address(fx.attester), "the cohort is the recorded attester");
+        assertEq(keccak256(a.data), keccak256(abi.encode(fx.verdict)), "payload is the signed verdict, byte-exact");
+        assertEq(a.data.length, O5_VERDICT_BYTES, "448-byte O5 payload");
+        assertEq(fx.attester.digestOf(fx.verdict), assertionId, "and it hashes back to the asserted digest");
+    }
+
+    /// @dev The mirror accepts ONLY the exact signed verdict, and only once. A permissionless entry point
+    ///      that took a caller-chosen payload would let anyone write false provenance for a real
+    ///      settlement; the digest equality is what makes "permissionless" safe.
+    function test_P06_MirrorRejectsTamperedVerdictAndDoubleMirror() public {
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+
+        // `_copyVerdict` is load-bearing: `O5Verdict memory x = fx.verdict` would ALIAS (memory structs
+        // are references), silently tampering with the signed verdict as well.
+        O5Verdict memory tampered = _copyVerdict(fx.verdict);
+        tampered.verdictHash = keccak256("a-different-verdict-document"); // a field the escrow never reads
+        vm.expectRevert(O5AttesterBase.VerdictDigestMismatch.selector);
+        fx.attester.mirrorToEAS(tampered);
+
+        fx.attester.mirrorToEAS(fx.verdict); // the untouched signed verdict still mirrors
+        vm.expectRevert(O5AttesterBase.AlreadyMirrored.selector);
+        fx.attester.mirrorToEAS(fx.verdict);
+    }
+
+    /// @dev Nothing can be mirrored that was never asserted — the mirror is a projection of the on-chain
+    ///      record, never an independent authority.
+    function test_P06_MirrorRejectsUnassertedUnit() public {
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        vm.expectRevert(O5AttesterBase.AssertionNotFound.selector);
+        fx.attester.mirrorToEAS(fx.verdict);
+    }
+
+    /// @dev The mirror carries the settlement receipt: `escrowUnitState` is read from the escrow itself, so
+    ///      an indexer joining EAS provenance to on-chain settlement needs no off-chain lookup.
+    function test_P06_MirrorEmitsSettlementReceiptLink() public {
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        bytes32 assertionId =
+            fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        fx.escrow.releaseFromEvidence(fx.unitId);
+
+        vm.recordLogs();
+        bytes32 uid = fx.attester.mirrorToEAS(fx.verdict);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics[0] != O5_MIRRORED_TOPIC) continue;
+            found = true;
+            assertEq(logs[i].topics[1], fx.unitId, "settlementUnitId");
+            assertEq(logs[i].topics[2], assertionId, "assertionId");
+            assertEq(logs[i].topics[3], uid, "easUid");
+            (uint64 cohort, address esc, bytes32 vh, uint256 state) =
+                abi.decode(logs[i].data, (uint64, address, bytes32, uint256));
+            assertEq(uint256(cohort), uint256(REAL_COHORT), "cohort");
+            assertEq(esc, address(fx.escrow), "escrow");
+            assertEq(vh, fx.verdict.verdictHash, "verdictHash");
+            assertEq(state, uint256(UnitState.SETTLED_RELEASED), "settlement receipt: the escrow's own state");
+        }
+        assertTrue(found, "O5Mirrored emitted");
+    }
+
+    bytes32 constant O5_MIRRORED_TOPIC =
+        keccak256("O5Mirrored(bytes32,bytes32,bytes32,uint64,address,bytes32,uint256)");
+
+    /// @dev The mirror survives the cohort kill-switch: `disable()` neutralizes MONEY (the escrow rejects
+    ///      release), but a settlement that already happened must still be able to acquire its provenance.
+    function test_P06_MirrorStillWorksAfterCohortDisabled() public {
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        fx.escrow.releaseFromEvidence(fx.unitId);
+
+        vm.prank(address(0xDEC0DE));
+        fx.attester.disable();
+        assertFalse(fx.attester.enabled());
+        assertTrue(fx.attester.mirrorToEAS(fx.verdict) != bytes32(0), "provenance still drainable");
+    }
+
+    /// @dev The reverse isolation: the mirror is NOT an authorization. Mirroring never releases anything,
+    ///      and a unit that fails an escrow-side check stays FUNDED_ACTIVE regardless of its EAS record.
+    function test_P06_MirroringIsNotAnAuthorization() public {
+        vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
+        P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
+        fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
+        fx.attester.mirrorToEAS(fx.verdict);
+        assertEq(uint256(fx.escrow.unitState(fx.unitId)), uint256(UnitState.FUNDED_ACTIVE), "mirror moved no money");
+
+        // Now disable the cohort: the EAS record exists and is perfect, and release is still refused.
+        vm.prank(address(0xDEC0DE));
+        fx.attester.disable();
+        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+        fx.escrow.releaseFromEvidence(fx.unitId);
+    }
+}
+
+/// @dev EAS double that is LIVE but FAILING — models the outage shape where the call is actually made.
+contract RevertingEAS {
+    error EasIsDown();
+
+    function attest(AttestationRequest calldata) external payable returns (bytes32) {
+        revert EasIsDown();
+    }
 }
