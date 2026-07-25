@@ -7,6 +7,7 @@ import {
     VNextSettlementLib,
     FeeSchedule,
     PayoutEntry,
+    PolicyIdentity,
     UnitState,
     ClaimClass,
     AuthorizationType
@@ -17,6 +18,12 @@ import {IOracleAttester} from "./interfaces/IOracleAttester.sol";
 /// @notice ERC-1271 smart-account signature validation interface.
 interface IERC1271 {
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4 magicValue);
+}
+
+/// @notice The slice of the deploying factory the clone calls at funding. Declared locally rather than
+///         imported so the escrow never depends on the factory (which imports the escrow).
+interface IVNextEscrowFactory {
+    function consumePolicyNonce(PolicyIdentity calldata p) external returns (address implementation);
 }
 
 // `O5Assertion` (the direct cohort assertion the money path reads) and `O5_DECISION_SETTLE` live in
@@ -63,6 +70,9 @@ contract VNextSettlementEscrow {
     bytes32 public immutable o5TypeHash;
 
     uint256 public constant CONTRACT_VERSION = 1;
+    /// @dev H-01 §2.1 policy-version pin, bound into every acceptance signature. A future policy shape
+    ///      bumps this, and yesterday's signatures stop validating instead of silently meaning something new.
+    uint256 public constant POLICY_VERSION = 1;
 
     /// @dev M-01 supported assurance-tier ceiling (tiers 0..3). Funding bounds `requiredTier` to this range;
     ///      the evidence path bounds the ORACLE-asserted `achievedTier` to it too, so a verdict claiming an
@@ -80,6 +90,17 @@ contract VNextSettlementEscrow {
     bytes32 private constant ROTATE_TYPEHASH = keccak256(
         "RotateDestination(bytes32 claimId,address claimOwner,address currentDestination,address newDestination,uint256 destinationNonce,uint256 expiry,uint256 chainId,address escrow,uint256 contractVersion)"
     );
+    /// @dev H-01 §2.1 — the ONE canonical `JobPolicyHash` both parties authenticate before any funds move.
+    ///      It covers every term that decides WHETHER and WHEN the operator is paid: the deployment
+    ///      incarnation (chainId / factory / implementation / escrow / policyVersion), both money-plane
+    ///      identities, the adjudication authority and whether self-adjudication was deliberately accepted,
+    ///      the job + terms identity, the policy generation (nonce) and its expiry, the pre-policy root
+    ///      (== keccak256(abi.encode(UnitConfig[])), i.e. every funded term) and the units root (every
+    ///      derived settlementUnitId). Binding factory+implementation+escrow is what makes a signature
+    ///      unusable against a different factory, a different implementation, or a different clone.
+    bytes32 private constant JOB_POLICY_TYPEHASH = keccak256(
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,address arbiter,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,bool allowSelfAdjudication,uint256 expiry)"
+    );
     bytes4 private constant ERC1271_MAGIC = 0x1626ba7e;
     uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
     // §2 authorization-key issuer domains (per authority type, L-01).
@@ -92,9 +113,29 @@ contract VNextSettlementEscrow {
     bool public initialized;
     bool public configurationSealed;
     address public payer; // immutable refund owner/destination once initialized
+    /// @notice H-01 §2.1 — the operator's MONEY-PLANE identity, frozen at initialization. This is an
+    ///         AUTHORITY, never a destination: it authenticates acceptance of the funded policy (EIP-712
+    ///         ECDSA, or ERC-1271 when the operator is a smart account) and is deliberately distinct from
+    ///         the off-chain Ed25519 device/evidence plane and from every payout recipient. Before this
+    ///         existed the escrow stored only where to pay, never who had agreed to be paid that way.
+    address public operator;
+    /// @dev Whether the funded policy explicitly accepted an arbiter equal to the payer or the operator.
+    ///      Default false; settable only by a signature from BOTH parties over a policy carrying it.
+    bool internal _selfAdjudicationAccepted;
     address public arbiter;
     bytes32 public jobIdHash; // keccak256(bytes(jobId)) — canonical UTF-8 (§10.12 M1)
     bytes32 public termsHash;
+    /// @dev H-01 §8.2 H-1 — this clone's policy generation, bound into the CREATE2 salt and consumed at
+    ///      the factory during `fund()`.
+    uint256 internal _policyNonce;
+    /// @dev keccak256(abi.encode(UnitConfig[])) — the address-independent commitment to the exact funded
+    ///      terms, bound into the CREATE2 salt. `fund()` re-derives it from the supplied configs, so the
+    ///      escrow's own ADDRESS proves which terms it may be funded with, before any signature is read.
+    bytes32 internal _prePolicyRoot;
+    /// @dev The EIP-712 struct hash of the policy both parties authenticated, written at funding. Zero
+    ///      until funded; it is the on-chain record that bilateral acceptance actually happened and the
+    ///      anchor the post-verdict state machine will reference.
+    bytes32 internal _jobPolicyHash;
     uint256 public totalLiability; // Σ over units of unit.liability (single-bucket, §3)
     uint256 public totalPayoutLegs;
     uint64 public oracleAuthEpoch; // rev-3 §A.2: the funded cohort id, pinned from the attester at fund()
@@ -128,8 +169,14 @@ contract VNextSettlementEscrow {
         uint8 requiredTier;
         uint8 requestedTier;
         UnitState state;
-        uint256 reclaimAt;
-        uint256 disputeWindow;
+        // ── one packed slot: H-2 bounded timestamps, written via CHECKED downcasts at funding ─────
+        // Both are bounded at funding (reclaimAt <= now + MAX_RECLAIM_DELAY, disputeWindow <=
+        // MAX_RECLAIM_DELAY), so uint64 is provably sufficient; `VNextSettlementLib.toUint64` reverts
+        // rather than truncating if that ever stops being true. Widened back to uint256 by the external
+        // getters, so the published read surface is unchanged.
+        uint64 reclaimAt;
+        uint64 disputeWindow;
+        // ──────────────────────────────────────────────────────────────────────────────────────────
         uint256 liability; // the unit's sole current liability bucket (§3)
         uint256 remainingClaimCount; // set at allocation; SETTLED_* only when 0 (§7)
         uint256 nextApprovalNonce; // buyer-approval single-use nonce (§10.10)
@@ -190,6 +237,20 @@ contract VNextSettlementEscrow {
         PayoutEntry[] payouts; // Σ amount == n; each nonzero; allowed recipients only
     }
 
+    /// @notice H-01 §2.1 bilateral acceptance, supplied to `fund()`. Both parties sign the SAME
+    ///         `JobPolicyHash`; the escrow recomputes that hash from its OWN frozen identity plus the
+    ///         configs actually being funded, so a signature over any other terms simply does not validate.
+    /// @dev    `payerSignature` MAY be empty — but ONLY when `msg.sender == payer`, i.e. the payer
+    ///         authenticated by sending the transaction itself. Delegated/agent funding (any other caller)
+    ///         always requires an explicit payer signature; there is no path where the payer's acceptance
+    ///         is assumed. `operatorSignature` is ALWAYS required: the operator never sends this tx.
+    struct PolicyAcceptance {
+        uint256 expiry; // acceptance is not open-ended; funding after this reverts
+        bool allowSelfAdjudication; // both parties deliberately accept arbiter == payer or == operator
+        bytes payerSignature;
+        bytes operatorSignature;
+    }
+
     /// @notice §10.10 payer-signed authorization (EIP-712) — used by the money-out path (2b).
     struct BuyerApproval {
         uint256 chainId;
@@ -210,7 +271,18 @@ contract VNextSettlementEscrow {
     }
 
     // ── Events ───────────────────────────────────────────────────────────────────────────────────
-    event Initialized(address indexed payer, address indexed arbiter, bytes32 jobIdHash);
+    event Initialized(address indexed payer, address indexed operator, address indexed arbiter, bytes32 jobIdHash);
+    /// @notice H-01 §2.1 — emitted once, at funding, recording that BOTH parties authenticated this exact
+    ///         policy. `unitsRoot` is the rolling commitment over the settlementUnitIds derived from this
+    ///         escrow's address; `policyNonce` is the generation the factory consumed in the same call.
+    event PolicyAccepted(
+        bytes32 indexed jobPolicyHash,
+        address indexed payer,
+        address indexed operator,
+        uint256 policyNonce,
+        bytes32 unitsRoot,
+        bool allowSelfAdjudication
+    );
     event UnitFunded(bytes32 indexed unitId, uint256 g, uint256 f, uint256 n);
     event Funded(uint256 unitCount, uint256 totalGross, uint256 totalPayoutLegs);
     event OracleCohortPinned(uint64 indexed cohort); // rev-3 §A.2
@@ -248,6 +320,22 @@ contract VNextSettlementEscrow {
     error PayoutSumMismatch();
     error ForbiddenRecipient();
     error BadReclaim();
+    /// @notice H-01 §13.1/H-2: the dispute window is outside [MIN_DISPUTE_WINDOW, MAX_RECLAIM_DELAY]. A
+    ///         zero window is what let `openDispute` and `refundOnDisputeExpiry` run in the SAME BLOCK.
+    error BadDisputeWindow();
+    /// @notice H-01: the operator and the payer must be distinct money-plane identities. Address inequality
+    ///         is not independence, but it is a necessary condition for bilateral acceptance to mean anything.
+    error PartyCollision();
+    /// @notice The supplied configs do not hash to the `prePolicyRoot` bound into this clone's address.
+    error PolicyRootMismatch();
+    /// @notice The bilateral acceptance expired before funding.
+    error PolicyExpired();
+    /// @notice arbiter == payer or arbiter == operator without both parties signing `allowSelfAdjudication`.
+    error SelfAdjudicationNotAccepted();
+    /// @notice The operator did not authenticate this exact funded policy.
+    error BadOperatorSignature();
+    /// @notice A supplied acceptance signature exceeds MAX_SIGNATURE_BYTES.
+    error SignatureTooLarge();
     error BalanceReadFailed();
     error FundingDeltaMismatch();
     error ConfigTooLarge();
@@ -356,37 +444,67 @@ contract VNextSettlementEscrow {
         initialized = true; // lock the implementation; only fresh clones (initialized=false) can init
     }
 
-    /// @notice One-time clone initialization by the factory (atomic clone+init upstream).
-    function initialize(address _payer, address _arbiter, bytes32 _jobIdHash, bytes32 _termsHash)
-        external
-    {
+    /// @notice One-time clone initialization by the factory (atomic clone+init upstream). Every field
+    ///         written here is in the CREATE2 salt preimage, so this clone's authorities and terms are
+    ///         exactly the ones its address commits to — initialization cannot introduce an authority the
+    ///         address does not already prove.
+    function initialize(PolicyIdentity calldata p) external {
         if (msg.sender != factory) revert OnlyFactory();
         if (initialized) revert AlreadyInitialized();
-        if (_payer == address(0)) revert ForbiddenRecipient(); // payer is the immutable refund owner (High 9)
+        if (p.payer == address(0)) revert ForbiddenRecipient(); // payer is the immutable refund owner (High 9)
+        // The operator is an AUTHORITY, so it is held to the same exclusion set as a money destination:
+        // none of {0, this escrow, the token, the factory} can be a signing counterparty, and a zero
+        // operator would silently mean "nobody has to accept" — the exact H-01 hole.
+        _requireAllowedRecipient(p.operator);
+        if (p.operator == p.payer) revert PartyCollision();
+        // A zero arbiter is never a deliberate choice, it is a default: it would make every opened dispute
+        // unresolvable and expire to a refund. Payer/operator arbiters ARE expressible, but only via the
+        // bilaterally-signed `allowSelfAdjudication` flag checked at funding.
+        if (p.arbiter == address(0)) revert ForbiddenRecipient();
         initialized = true;
         _status = 1;
-        payer = _payer;
-        arbiter = _arbiter;
-        jobIdHash = _jobIdHash;
-        termsHash = _termsHash;
-        emit Initialized(_payer, _arbiter, _jobIdHash);
+        payer = p.payer;
+        operator = p.operator;
+        arbiter = p.arbiter;
+        jobIdHash = p.jobIdHash;
+        termsHash = p.termsHash;
+        _policyNonce = p.policyNonce;
+        _prePolicyRoot = p.prePolicyRoot;
+        emit Initialized(p.payer, p.operator, p.arbiter, p.jobIdHash);
     }
 
     // ── Funding + atomic freeze (E2/E8/C4) ─────────────────────────────────────────────────────────
 
-    /// @notice Configure + atomically freeze all settlement units and reserve exactly ΣG. Callable
-    ///         once by the payer while unsealed. Every domain field is derived on-chain (E5); every
-    ///         unit is validated against E3 invariants; the exact aggregate gross is pulled and the
-    ///         balance delta is checked (rejects fee-on-transfer / under-receipt, C4).
-    function fund(UnitConfig[] calldata configs) external nonReentrant {
+    /// @notice Configure + atomically freeze all settlement units, verify BILATERAL ACCEPTANCE, consume the
+    ///         policy nonce, and reserve exactly ΣG — all in one transaction, so a funded escrow is by
+    ///         construction one whose complete terms both parties authenticated. Every domain field is
+    ///         derived on-chain (E5); every unit is validated against E3 invariants; the exact aggregate
+    ///         gross is pulled and the balance delta is checked (rejects fee-on-transfer / under-receipt, C4).
+    /// @dev    H-01 closure. Before this, the escrow could prove only that the PAYER selected the
+    ///         authorities; the operator's presence in the contract was a payout address, which authenticates
+    ///         nothing. Now no path reaches a funded state without an operator signature over the exact
+    ///         policy, and the funding parameters that made the veto costless (a zero dispute window, a
+    ///         self-selected arbiter, an unbounded reclaim horizon) are rejected here rather than resolved
+    ///         later. Order is deliberate: freeze -> re-derive the pre-policy root -> parameter constraints
+    ///         -> consume the nonce -> verify both signatures -> THEN pull funds. Any failure reverts the
+    ///         whole call, so "verifies both signatures AND consumes the nonce atomically" is structural.
+    function fund(UnitConfig[] calldata configs, PolicyAcceptance calldata acceptance) external nonReentrant {
         if (!initialized) revert NotInitialized();
-        if (msg.sender != payer) revert OnlyPayer();
         if (configurationSealed) revert AlreadySealed();
         // M-01 / §6: bound the COMPLETE fund() calldata (incl. 4-byte selector). Redundant with the leg
         // bounds below but pins the published input envelope. Max-config fit is asserted in the 2b tests.
         if (msg.data.length > VNextSettlementLib.MAX_CONFIG_BYTES) revert ConfigTooLarge();
+        if (
+            acceptance.payerSignature.length > VNextSettlementLib.MAX_SIGNATURE_BYTES
+                || acceptance.operatorSignature.length > VNextSettlementLib.MAX_SIGNATURE_BYTES
+        ) revert SignatureTooLarge();
         uint256 nConfigs = configs.length;
         if (nConfigs == 0 || nConfigs > VNextSettlementLib.MAX_SETTLEMENT_UNITS) revert BadUnitCount();
+        // The payer leg of the acceptance: implicit ONLY for a direct payer-sent transaction. Any other
+        // caller (a relayer, an agent, a composition parent) must carry an explicit payer signature, which
+        // is verified against the same JobPolicyHash below. Checked here so a caller with no payer
+        // authorization at all fails immediately rather than after the whole freeze loop.
+        if (msg.sender != payer && acceptance.payerSignature.length == 0) revert OnlyPayer();
 
         // rev-3 §A.2: pin this escrow to the oracle attester's cohort. Funding is rejected if the cohort is
         // disabled (fail-closed); the pinned epoch is echoed by every O5 verdict and re-checked at release.
@@ -410,6 +528,12 @@ contract VNextSettlementEscrow {
             if (c.requiredTier != c.requestedTier) revert TierRequestMismatch();
             if (c.requiredTier > 3) revert TierOutOfRange();
 
+            // H-2 explicit checked narrowing at the funding boundary. G is still STORED as uint256 — the
+            // point is the CHECK: bounding gross to uint128 keeps ΣG over <= 16 units nowhere near uint256
+            // overflow and makes the Wave-3 packed liability buckets safe by construction. `toUint128`
+            // reverts (ValueOverflow) instead of truncating, which is the whole difference from `uint128(x)`.
+            uint256 g = VNextSettlementLib.toUint128(c.g);
+
             bytes32 unitId =
                 VNextSettlementLib.computeSettlementUnitId(chainId, self, jobIdHash, c.milestoneIndex, c.stepId);
             if (_unitIndexPlusOne[unitId] != 0) revert DuplicateUnit();
@@ -420,7 +544,7 @@ contract VNextSettlementEscrow {
                 escrow: self,
                 settlementUnitId: unitId,
                 feeBasis: VNextSettlementLib.FEE_BASIS_GROSS,
-                g: c.g,
+                g: g,
                 f: c.f,
                 n: c.n,
                 feeBps: c.feeBps,
@@ -447,7 +571,28 @@ contract VNextSettlementEscrow {
             // fee leg present iff F>0 (E8); feeRecipient is committed whenever feeBps>0 (E3), validate it then.
             if (c.feeBps > 0) _requireAllowedRecipient(c.feeRecipient);
 
+            // H-2 §13.1 RECLAIM BOUNDS. Before this the funding path enforced only the LOWER edge
+            // (`reclaimAt <= block.timestamp` reverts), so an unbounded far-future deadline was legal and a
+            // payer could pin the operator's settlement horizon for a decade. Both edges are now bounded,
+            // and the ceiling is sized from PHYSICAL REALITY (long-lead tooling, castings and regulated QC
+            // legitimately run months) rather than from the attack — it must accommodate
+            // `primaryAssertionCutoff = reclaimAt - challengeWindow - appealWindow` (§8.2 C-3).
             if (c.reclaimAt <= block.timestamp) revert BadReclaim();
+            uint256 reclaimDelay = c.reclaimAt - block.timestamp;
+            if (
+                reclaimDelay < VNextSettlementLib.MIN_RECLAIM_DELAY
+                    || reclaimDelay > VNextSettlementLib.MAX_RECLAIM_DELAY
+            ) revert BadReclaim();
+            // H-01 anti-costless-veto. With a nonzero minimum window,
+            // `effectiveDisputeExpiry = min(openedAt + disputeWindow, reclaimAt)` is STRICTLY greater than
+            // `openedAt` — `openDispute` already requires `openedAt < reclaimAt`, so both branches of the
+            // min exceed `openedAt`. `refundOnDisputeExpiry` requires `now >= effectiveDisputeExpiry`, so
+            // the same-block openDispute -> refundOnDisputeExpiry sequence is impossible BY CONSTRUCTION,
+            // not by policy. The upper edge keeps the value inside its checked uint64 packing.
+            if (
+                c.disputeWindow < VNextSettlementLib.MIN_DISPUTE_WINDOW
+                    || c.disputeWindow > VNextSettlementLib.MAX_RECLAIM_DELAY
+            ) revert BadDisputeWindow();
 
             Unit storage u = _units[unitId];
             u.feeSchedule = fs;
@@ -465,19 +610,24 @@ contract VNextSettlementEscrow {
             _requireAllowedRecipient(c.evidenceCommitter);
             u.evidenceCommitter = c.evidenceCommitter;
             u.state = UnitState.FUNDED_ACTIVE;
-            u.reclaimAt = c.reclaimAt;
-            u.disputeWindow = c.disputeWindow;
-            u.liability = c.g; // FUNDED_ACTIVE liability == G (§3)
+            // H-2 checked downcasts into the packed slot (both values were bounded immediately above).
+            u.reclaimAt = VNextSettlementLib.toUint64(c.reclaimAt);
+            u.disputeWindow = VNextSettlementLib.toUint64(c.disputeWindow);
+            u.liability = g; // FUNDED_ACTIVE liability == G (§3)
 
             _unitIds.push(unitId);
             _unitIndexPlusOne[unitId] = _unitIds.length;
-            expectedGross += c.g;
-            emit UnitFunded(unitId, c.g, c.f, c.n);
+            expectedGross += g;
+            emit UnitFunded(unitId, g, c.f, c.n);
         }
 
         if (legTotal > VNextSettlementLib.MAX_TOTAL_LEGS_PER_JOB) revert TooManyLegs();
         totalPayoutLegs = legTotal;
         totalLiability = expectedGross;
+
+        // H-01: bilateral acceptance + policy-nonce consumption, BEFORE any money moves. Extracted so the
+        // freeze loop above keeps its own stack; a revert here rolls the entire freeze back.
+        _acceptPolicy(configs, acceptance);
 
         // Pull exactly ΣG and verify the received delta (C4 — rejects fee-on-transfer / under-receipt).
         uint256 beforeBal = _safeBalanceOf(self);
@@ -486,6 +636,112 @@ contract VNextSettlementEscrow {
         if (afterBal < beforeBal || afterBal - beforeBal != expectedGross) revert FundingDeltaMismatch();
 
         emit Funded(nConfigs, expectedGross, legTotal);
+    }
+
+    // ── H-01 bilateral acceptance (§2.1 + §8.2 H-1) ───────────────────────────────────────────────
+
+    /// @dev The single place a funded escrow proves BOTH parties authenticated the complete configuration.
+    ///      Five steps, in this order:
+    ///        1. the escrow's own ADDRESS commits to the terms — `prePolicyRoot` is in the CREATE2 salt
+    ///           preimage, so re-deriving it from the supplied configs proves this clone is being funded
+    ///           with exactly the terms the address was predicted from, before any signature is read;
+    ///        2. self-adjudication is expressible but never implicit;
+    ///        3. acceptance is time-bounded;
+    ///        4. the policy generation is consumed at the factory (retiring it and every older one, and
+    ///           failing closed if either party revoked) — which also returns the implementation so the
+    ///           signatures bind the exact deployment incarnation;
+    ///        5. both signatures are checked against ONE canonical `JobPolicyHash`.
+    function _acceptPolicy(UnitConfig[] calldata configs, PolicyAcceptance calldata acceptance) private {
+        if (keccak256(abi.encode(configs)) != _prePolicyRoot) revert PolicyRootMismatch();
+
+        // "Address inequality is not independence": an arbiter that IS one of the parties is a costless
+        // veto (or a self-release), so it is rejected unless BOTH parties signed a policy that says so.
+        // The flag lives inside the signed hash, so it can never be supplied by whoever sends the tx alone.
+        if (!acceptance.allowSelfAdjudication && (arbiter == payer || arbiter == operator)) {
+            revert SelfAdjudicationNotAccepted();
+        }
+        if (block.timestamp > acceptance.expiry) revert PolicyExpired();
+
+        address impl = IVNextEscrowFactory(factory).consumePolicyNonce(
+            PolicyIdentity({
+                payer: payer,
+                operator: operator,
+                arbiter: arbiter,
+                jobIdHash: jobIdHash,
+                termsHash: termsHash,
+                policyNonce: _policyNonce,
+                prePolicyRoot: _prePolicyRoot
+            })
+        );
+
+        bytes32 root = _unitsRoot();
+        bytes32 ph = _hashJobPolicy(impl, root, acceptance.allowSelfAdjudication, acceptance.expiry);
+        bytes32 digest = _typedDataHash(ph);
+        // Delegated/agent funding: an absent payer signature was already rejected as `OnlyPayer` at entry;
+        // a present one must actually validate. A direct payer-sent tx authenticates itself.
+        if (msg.sender != payer && !_isValidSignature(payer, digest, acceptance.payerSignature)) {
+            revert BadSignature();
+        }
+        // The operator NEVER sends this transaction, so its acceptance is always an explicit signature —
+        // ECDSA for an EOA, ERC-1271 for a smart account (both handled by `_isValidSignature`).
+        if (!_isValidSignature(operator, digest, acceptance.operatorSignature)) revert BadOperatorSignature();
+
+        _jobPolicyHash = ph;
+        _selfAdjudicationAccepted = acceptance.allowSelfAdjudication;
+        emit PolicyAccepted(ph, payer, operator, _policyNonce, root, acceptance.allowSelfAdjudication);
+    }
+
+    /// @notice The complete bilateral-acceptance record in ONE read. A COLLAPSED getter by design: the
+    ///         frozen size-reclamation order prefers collapsing read surfaces over four separate dispatch
+    ///         entries, and reading the policy atomically is also the correct shape for a verifier.
+    ///         `jobPolicyHash_` is zero until the escrow is funded — i.e. until acceptance actually happened.
+    function policy()
+        external
+        view
+        returns (
+            address operator_,
+            address arbiter_,
+            uint256 policyNonce_,
+            bytes32 prePolicyRoot_,
+            bytes32 jobPolicyHash_,
+            bool selfAdjudicationAccepted_
+        )
+    {
+        return (operator, arbiter, _policyNonce, _prePolicyRoot, _jobPolicyHash, _selfAdjudicationAccepted);
+    }
+
+    /// @dev The rolling commitment over every settlementUnitId this escrow froze, in funding order:
+    ///      `r_0 = 0; r_k = keccak256(abi.encode(r_{k-1}, unitId_k))`. Both parties reproduce it off-chain
+    ///      from the PREDICTED escrow address alone (step 4 of the §8.2 H-1 sequence), which is what lets
+    ///      them sign over the unit ids before the clone exists. Derivationally redundant with
+    ///      {escrow, prePolicyRoot} — carried because §2.1 requires the commitment to cover the unit ids
+    ///      explicitly, and because it is what an operator actually checks before signing.
+    function _unitsRoot() private view returns (bytes32 r) {
+        uint256 n = _unitIds.length;
+        for (uint256 i; i < n; ++i) {
+            r = keccak256(abi.encode(r, _unitIds[i]));
+        }
+    }
+
+    /// @dev EIP-712 struct hash of the frozen policy. Split into two `abi.encode` calls to avoid
+    ///      stack-too-deep; all 16 words are static, so `bytes.concat(abi.encode(..), abi.encode(..))`
+    ///      equals `abi.encode(all 16)` and the EIP-712 hash is identical.
+    function _hashJobPolicy(address impl, bytes32 unitsRoot, bool allowSelfAdjudication, uint256 expiry)
+        private
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            bytes.concat(
+                abi.encode(
+                    JOB_POLICY_TYPEHASH, block.chainid, factory, impl, address(this), POLICY_VERSION, payer, operator
+                ),
+                abi.encode(
+                    arbiter, jobIdHash, termsHash, _policyNonce, _prePolicyRoot, unitsRoot, allowSelfAdjudication,
+                    expiry
+                )
+            )
+        );
     }
 
     // ── Recipient exclusion set (High 9) ──────────────────────────────────────────────────────────
@@ -912,7 +1168,9 @@ contract VNextSettlementEscrow {
             AuthorizationType.RECLAIM,
             AUTHDOMAIN_RECLAIM,
             address(this),
-            keccak256(abi.encode("RECLAIM", unitId, u.reclaimAt)),
+            // uint256() is explicit, not cosmetic: `abi.encode` pads a uint64 to the same 32 bytes, so the
+            // authorization key is byte-identical to the pre-packing form — stated so it stays that way.
+            keccak256(abi.encode("RECLAIM", unitId, uint256(u.reclaimAt))),
             unitId
         );
         _allocateRefund(unitId, authKey);

@@ -6,7 +6,7 @@ import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
 import {O5Verdict, O5Assertion, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
 import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
-import {PayoutEntry, FeeSchedule, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
+import {PayoutEntry, FeeSchedule, PolicyIdentity, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {EASAttestation, AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
@@ -172,7 +172,10 @@ contract VNextSettlementEscrowTest is Test {
     address recip1 = address(0xBEEF01);
     address recip2 = address(0xBEEF02);
     address feeDest = address(0xFEE1);
-    address operator = address(0x0FE7A); // the funder-designated evidence committer (§B)
+    /// @dev H-01: the operator is now a MONEY-PLANE SIGNING IDENTITY, not just an address in a config.
+    ///      It is also the funder-designated evidence committer (§B) in these fixtures.
+    uint256 operatorPk = 0x0FE7A;
+    address operator;
     bytes32 constant PKG = keccak256("evidence-package-v1");
     bytes32 constant ASSERTION_1 = keccak256("assertion-1"); // stands in for the attester's EIP-712 digest
     bytes32 constant O5_SCHEMA = keccak256("test.o5.schema");
@@ -181,15 +184,156 @@ contract VNextSettlementEscrowTest is Test {
 
     function setUp() public {
         payer = vm.addr(payerPk);
+        operator = vm.addr(operatorPk);
         usdc = new MockToken();
         attester = new MockOracleAttester(COHORT);
         factory = new VNextSettlementEscrowFactory(address(usdc), address(attester), O5_SCHEMA, bytes32(0));
         usdc.mint(payer, 1_000_000e6);
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────────────────────────────
-    function _newEscrow(bytes32 job) internal returns (VNextSettlementEscrow e) {
-        e = VNextSettlementEscrow(factory.createEscrow(payer, arbiter, job, TERMS));
+    // ── H-01 bilateral-acceptance helpers ────────────────────────────────────────────────────────
+    // Everything below RE-DERIVES the policy hash from the frozen spec (the EIP-712 type string, the
+    // domain, the salt preimage, the unit-id derivation) rather than asking the contract for it, so a
+    // change to the contract's encoding fails these tests instead of silently agreeing with itself.
+
+    bytes32 constant JOB_POLICY_TYPEHASH_T = keccak256(
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,address arbiter,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,bool allowSelfAdjudication,uint256 expiry)"
+    );
+    uint256 constant POLICY_EXPIRY = 1e12; // far future for the happy paths; overridden where it matters
+
+    /// @dev The address-independent commitment to the exact funded terms (goes into the CREATE2 salt).
+    function _preRoot(VNextSettlementEscrow.UnitConfig[] memory cfgs) internal pure returns (bytes32) {
+        return keccak256(abi.encode(cfgs));
+    }
+
+    function _identity(bytes32 job, address arb, uint256 nonce, VNextSettlementEscrow.UnitConfig[] memory cfgs)
+        internal
+        view
+        returns (PolicyIdentity memory)
+    {
+        return PolicyIdentity({
+            payer: payer,
+            operator: operator,
+            arbiter: arb,
+            jobIdHash: job,
+            termsHash: TERMS,
+            policyNonce: nonce,
+            prePolicyRoot: _preRoot(cfgs)
+        });
+    }
+
+    /// @dev The rolling commitment over the settlementUnitIds derived from the PREDICTED escrow address —
+    ///      step 4 of the §8.2 H-1 sequence, computed here exactly as an operator would before signing.
+    function _unitsRootFor(address escrowAddr, bytes32 job, VNextSettlementEscrow.UnitConfig[] memory cfgs)
+        internal
+        view
+        returns (bytes32 r)
+    {
+        for (uint256 i; i < cfgs.length; ++i) {
+            bytes32 uid = VNextSettlementLib.computeSettlementUnitId(
+                block.chainid, escrowAddr, job, cfgs[i].milestoneIndex, cfgs[i].stepId
+            );
+            r = keccak256(abi.encode(r, uid));
+        }
+    }
+
+    struct PolicyArgs {
+        address escrowAddr;
+        address factoryAddr;
+        address impl;
+        bytes32 job;
+        address arb;
+        uint256 nonce;
+        bytes32 preRoot;
+        bytes32 unitsRoot;
+        bool allowSelf;
+        uint256 expiry;
+    }
+
+    function _policyStructHash(PolicyArgs memory a) internal view returns (bytes32) {
+        return keccak256(
+            bytes.concat(
+                abi.encode(
+                    JOB_POLICY_TYPEHASH_T,
+                    block.chainid,
+                    a.factoryAddr,
+                    a.impl,
+                    a.escrowAddr,
+                    uint256(1), // POLICY_VERSION
+                    payer,
+                    operator
+                ),
+                abi.encode(a.arb, a.job, TERMS, a.nonce, a.preRoot, a.unitsRoot, a.allowSelf, a.expiry)
+            )
+        );
+    }
+
+    function _policyDigest(PolicyArgs memory a) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _domainSep(a.escrowAddr), _policyStructHash(a)));
+    }
+
+    function _sign(uint256 pk, bytes32 digest) internal pure returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The canonical acceptance for `e`'s own frozen identity + the configs being funded.
+    function _acceptance(
+        VNextSettlementEscrow e,
+        VNextSettlementEscrow.UnitConfig[] memory cfgs,
+        bool allowSelf,
+        uint256 expiry,
+        bool includePayerSig
+    ) internal view returns (VNextSettlementEscrow.PolicyAcceptance memory acc) {
+        (,, uint256 nonce, bytes32 preRoot,,) = e.policy();
+        bytes32 job = e.jobIdHash();
+        address f = e.factory(); // the escrow's OWN deploying factory, not the fixture's
+        bytes32 digest = _policyDigest(
+            PolicyArgs({
+                escrowAddr: address(e),
+                factoryAddr: f,
+                impl: VNextSettlementEscrowFactory(f).implementation(),
+                job: job,
+                arb: e.arbiter(),
+                nonce: nonce,
+                preRoot: preRoot,
+                unitsRoot: _unitsRootFor(address(e), job, cfgs),
+                allowSelf: allowSelf,
+                expiry: expiry
+            })
+        );
+        acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: expiry,
+            allowSelfAdjudication: allowSelf,
+            payerSignature: includePayerSig ? _sign(payerPk, digest) : bytes(""),
+            operatorSignature: _sign(operatorPk, digest)
+        });
+    }
+
+    function _acceptance(VNextSettlementEscrow e, VNextSettlementEscrow.UnitConfig[] memory cfgs)
+        internal
+        view
+        returns (VNextSettlementEscrow.PolicyAcceptance memory)
+    {
+        return _acceptance(e, cfgs, false, POLICY_EXPIRY, false);
+    }
+
+    // ── escrow lifecycle helpers ─────────────────────────────────────────────────────────────────
+    /// @dev Create (not fund) the clone whose address commits to EXACTLY these configs.
+    function _escrowFor(bytes32 job, VNextSettlementEscrow.UnitConfig[] memory cfgs)
+        internal
+        returns (VNextSettlementEscrow e)
+    {
+        e = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 1, cfgs)));
+    }
+
+    /// @dev Create + fund in the canonical §8.2 H-1 order.
+    function _fundedEscrow(bytes32 job, VNextSettlementEscrow.UnitConfig[] memory cfgs)
+        internal
+        returns (VNextSettlementEscrow e)
+    {
+        e = _escrowFor(job, cfgs);
+        _fund(e, cfgs);
     }
 
     /// @dev One unit: G, fee F, two payouts summing to N. requiredTier/requestedTier configurable.
@@ -227,8 +371,9 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function _fund(VNextSettlementEscrow e, VNextSettlementEscrow.UnitConfig[] memory cfgs) internal {
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, cfgs);
         vm.prank(payer);
-        e.fund(cfgs);
+        e.fund(cfgs, acc);
     }
 
     // ── §B evidence-commit helpers ────────────────────────────────────────────────────────────────
@@ -251,9 +396,8 @@ contract VNextSettlementEscrowTest is Test {
 
     // ── funding ───────────────────────────────────────────────────────────────────────────────────
     function test_FundFreezesAndReservesExactG() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         // f = floor(1000e6 * 235 / 10000) = 23_500000
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
         assertEq(e.gross(id), 1000e6);
@@ -265,46 +409,52 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_FundRejectsUnderReceipt() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         usdc.setTransferFromMode(MockToken.Mode.FEE_ON_TRANSFER);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.FundingDeltaMismatch.selector);
-        e.fund(_oneUnitConfig(1000e6, 0, 0, 1));
+        e.fund(c, acc);
     }
 
     function test_FundRejectsBadInvariant() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].n = 999e6; // N + F != G
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
         vm.expectRevert(); // V1: N+F!=G (or payout sum mismatch)
-        e.fund(c);
+        e.fund(c, acc);
     }
 
     function test_FundRejectsForbiddenRecipient() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].payouts[0].recipient = address(usdc); // USDC is excluded
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
-        e.fund(c);
+        e.fund(c, acc);
     }
 
+    /// @dev The payer leg of the bilateral acceptance. A non-payer caller carrying NO payer signature is
+    ///      rejected as `OnlyPayer` — the payer's acceptance is implicit only for a direct payer-sent tx.
     function test_FundOnlyPayerAndSealed() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.expectRevert(VNextSettlementEscrow.OnlyPayer.selector);
-        e.fund(c); // not the payer
+        e.fund(c, acc); // not the payer, and no payer signature supplied
         _fund(e, c);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.AlreadySealed.selector);
-        e.fund(c);
+        e.fund(c, acc);
     }
 
     // ── release via dispute-win + distribution ────────────────────────────────────────────────────
     function test_DisputeOperatorWin_ReleasesExactlyG() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         vm.prank(payer);
         e.openDispute(id);
@@ -319,8 +469,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_DisputePayerWin_RefundsExactlyG() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         uint256 payerBefore = usdc.balanceOf(payer);
         vm.prank(payer);
@@ -333,8 +482,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_ReclaimAfterDeadline_Refunds() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         vm.expectRevert(VNextSettlementEscrow.TooEarlyToReclaim.selector);
         e.reclaimAfterDeadline(id);
@@ -347,8 +495,7 @@ contract VNextSettlementEscrowTest is Test {
 
     // ── transfer-classifier matrix ────────────────────────────────────────────────────────────────
     function test_Classifier_SafeRevert_CreatesClaim_ThenDischarge() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // solvent, but every payout push reverts -> CLAIM
         vm.prank(payer);
@@ -370,8 +517,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_Classifier_DebitNoCredit_RevertsAll() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.DEBIT_NO_CREDIT);
         vm.prank(payer);
@@ -382,8 +528,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_Classifier_FalseWithMove_RevertsAll() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.RETURN_FALSE_WITH_MOVE);
         vm.prank(payer);
@@ -443,8 +588,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_BuyerApproval_SignedRelease() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 0)); // Tier-0, no fee
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 0)); // Tier-0, no fee
         bytes32 id = _unitId(e);
         VNextSettlementEscrow.BuyerApproval memory a = _buyerApproval(e, id);
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), _buyerStructHash(a)));
@@ -455,8 +599,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_BuyerApproval_DirectCall() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 0));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 0));
         bytes32 id = _unitId(e);
         VNextSettlementEscrow.BuyerApproval memory a = _buyerApproval(e, id);
         vm.prank(payer);
@@ -465,8 +608,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_BuyerApproval_RejectsWrongTier() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1)); // Tier-1
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1)); // Tier-1
         bytes32 id = _unitId(e);
         VNextSettlementEscrow.BuyerApproval memory a = _buyerApproval(e, id);
         vm.prank(payer);
@@ -527,8 +669,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_Settle() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG); // §B: commit the package BEFORE the verdict exists
         _assert(e, id, 1, 1); // decision=SETTLE(1), achieved>=required
@@ -545,8 +686,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      half of that binding: a genuine cohort assertion made for a DIFFERENT escrow must not pay this
     ///      one. That is the `WrongRecipient` successor, asserted here.
     function test_EvidenceRelease_RejectsAssertionBoundToAnotherEscrow() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Assertion memory a = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(0xE5C0F)); // another escrow
@@ -559,8 +699,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev Twin of the above: an escrow bound to a DIFFERENT attester sees no assertion at all. This is
     ///      what "wrong attester" degrades to once the trust root is the callee rather than a field.
     function test_EvidenceRelease_ForeignAttesterAssertionIsUnreachable() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         // A different, non-authorized attester holds a perfectly-formed assertion for this exact unit.
@@ -572,9 +711,8 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_RejectsUnderTier() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 2); // requiredTier 2
-        _fund(e, c);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         // achieved 2 but requested 1 != the frozen requiredTier 2
@@ -585,8 +723,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev The lower tier bound in its own right: achieved < the frozen requiredTier cannot settle.
     function test_EvidenceRelease_RejectsAchievedBelowRequired() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 2)); // requiredTier 2
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 2)); // requiredTier 2
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         attester.setAssertion(id, _assertionFor(_o5verdict(id, 1, 1, 2), address(e))); // achieved 1 < 2
@@ -599,8 +736,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      correct feeScheduleHash but a false feeBps (the false economics permanently recorded in the
     ///      assertion) must not settle; the unit stays FUNDED_ACTIVE.
     function test_EvidenceRelease_RejectsMismatchedFeeBps() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -613,8 +749,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev M-01 twin: a false `feeRecipient` (correct hash) must not settle either.
     function test_EvidenceRelease_RejectsMismatchedFeeRecipient() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -627,8 +762,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev The frozen 13-field fee commitment in its own right.
     function test_EvidenceRelease_RejectsMismatchedFeeScheduleHash() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -642,8 +776,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev A non-SETTLE decision never releases. (The real attester also refuses to assert one at all —
     ///      `NotSettleVerdict` — so this is the escrow-side half of a doubly-guarded property.)
     function test_EvidenceRelease_RejectsNonSettleDecision() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 2, 1); // decision 2 != O5_DECISION_SETTLE
@@ -655,8 +788,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev M-01: the release path bounds the ORACLE-asserted `achievedTier` to the supported max (3). An
     ///      out-of-range tier is only lower-bounded (`>= requiredTier`) elsewhere, so it must be rejected here.
     function test_EvidenceRelease_RejectsAchievedTierAboveMax() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // requiredTier 1
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // requiredTier 1
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 4); // SETTLE, achievedTier 4 (> MAX_TIER)
@@ -690,7 +822,6 @@ contract VNextSettlementEscrowTest is Test {
 
     // ── gate-2: production-shaped max-aggregate funding gas + calldata-bound fit ───────────────────
     function test_gas_maxAggregateFunding_fits() public {
-        VNextSettlementEscrow e = _newEscrow(keccak256("job-max"));
         uint256 UNITS = VNextSettlementLib.MAX_SETTLEMENT_UNITS; // 16
         uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT; // 16
         uint256 legAmt = 1e6;
@@ -719,18 +850,32 @@ contract VNextSettlementEscrowTest is Test {
                 payouts: po
             });
         }
+        VNextSettlementEscrow e = _escrowFor(keccak256("job-max"), cfgs);
         // L-01 calldata bound. This config is 16 units x 16 legs == MAX_TOTAL_LEGS_PER_JOB, i.e. the largest
-        // config the contract SEMANTICALLY ACCEPTS, so it must fit — a bound below it is a funding DoS on a
-        // legal input. Asserted as an EXACT equality too, so adding a UnitConfig field without re-pinning
-        // MAX_CONFIG_BYTES (either direction) fails here rather than in production.
-        bytes memory cd = abi.encodeCall(VNextSettlementEscrow.fund, (cfgs));
+        // config the contract SEMANTICALLY ACCEPTS, carried alongside the largest acceptance the contract
+        // semantically accepts (two MAX_SIGNATURE_BYTES signatures — an ERC-1271 smart account may need
+        // them), so it must fit — a bound below it is a funding DoS on a legal input. Asserted as an EXACT
+        // equality too, so adding a UnitConfig/PolicyAcceptance field without re-pinning MAX_CONFIG_BYTES
+        // (either direction) fails here rather than in production.
+        VNextSettlementEscrow.PolicyAcceptance memory maxAcc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: new bytes(VNextSettlementLib.MAX_SIGNATURE_BYTES),
+            operatorSignature: new bytes(VNextSettlementLib.MAX_SIGNATURE_BYTES)
+        });
+        bytes memory cd = abi.encodeCall(VNextSettlementEscrow.fund, (cfgs, maxAcc));
         emit log_named_uint("max-config fund() calldata bytes", cd.length);
         assertLe(cd.length, VNextSettlementLib.MAX_CONFIG_BYTES, "max config must fit MAX_CONFIG_BYTES");
         assertEq(cd.length, VNextSettlementLib.MAX_CONFIG_BYTES, "MAX_CONFIG_BYTES is the exact 16x16 envelope");
-        // gas of the full 256-entry funding tx.
+        // The max envelope is ACCEPTED by the size gate: it fails on signature validity, never ConfigTooLarge.
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(cfgs, maxAcc);
+        // gas of the full 256-entry funding tx with real acceptance signatures.
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, cfgs);
         vm.prank(payer);
         uint256 g0 = gasleft();
-        e.fund(cfgs);
+        e.fund(cfgs, acc);
         emit log_named_uint("max aggregate funding gas (256 entries)", g0 - gasleft());
         assertEq(e.unitCount(), UNITS);
     }
@@ -739,7 +884,6 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev This drives Mode.NORMAL, so every leg discharges and no claim is created. It is the realistic
     ///      release, kept as a baseline; the TRUE worst case (all legs safe-fail -> claims) is below.
     function test_gas_worstCaseRelease_allDischarge() public {
-        VNextSettlementEscrow e = _newEscrow(keccak256("job-wc"));
         uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT;
         uint256 legAmt = 1e6;
         uint256 n = legAmt * LEGS;
@@ -763,7 +907,7 @@ contract VNextSettlementEscrowTest is Test {
             evidenceCommitter: operator,
             payouts: po
         });
-        _fund(e, cfgs);
+        VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc"), cfgs);
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.NORMAL); // all 16 legs discharge -> 0 claims (not the worst case)
         vm.prank(payer);
@@ -781,7 +925,6 @@ contract VNextSettlementEscrowTest is Test {
     ///      RELEASE_ALLOCATED with liability == G, and remainingClaimCount == 17. The prior
     ///      test_gas_worstCaseRelease used Mode.NORMAL (all discharge, 0 claims) and so understated the cost.
     function test_gas_worstCaseRelease() public {
-        VNextSettlementEscrow e = _newEscrow(keccak256("job-wc17"));
         uint256 LEGS = VNextSettlementLib.MAX_PAYOUT_LEGS_PER_UNIT; // 16
         // G = 16_000_000, feeBps = 250 -> F = floor(16e6 * 250 / 10000) = 400_000, N = 15_600_000 = 16 * 975_000.
         uint256 g = 16_000_000;
@@ -810,7 +953,7 @@ contract VNextSettlementEscrowTest is Test {
             evidenceCommitter: operator,
             payouts: po
         });
-        _fund(e, cfgs);
+        VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc17"), cfgs);
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // every push (16 payouts + fee) safe-fails -> CLAIM
         vm.prank(payer);
@@ -825,33 +968,45 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     // ── gate-2: audit edge cases (dispute-window-0 / payer-arbiter / final-claim-discharge) ────────
-    /// @dev disputeWindow == 0 -> the dispute expires in the block it opens: the arbiter is already too late
-    ///      (DisputeExpired) and the permissionless refundOnDisputeExpiry refunds the payer immediately.
-    function test_DisputeWindowZero_ImmediateRefundOnExpiry() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
+    /// @dev MIGRATED (H-01). This test previously PINNED the attack as accepted behaviour: with
+    ///      `disputeWindow == 0` the dispute expired in the block it opened, the arbiter was already too
+    ///      late, and the permissionless `refundOnDisputeExpiry` refunded the payer in that same block —
+    ///      a costless veto over a job the operator had already performed. That configuration is now
+    ///      rejected at FUNDING by `MIN_DISPUTE_WINDOW`, so the sequence it enabled is unreachable.
+    function test_DisputeWindowZero_RejectedAtFunding() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].disputeWindow = 0;
-        _fund(e, c);
-        bytes32 id = _unitId(e);
-        uint256 payerBefore = usdc.balanceOf(payer);
-
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        vm.expectRevert(VNextSettlementEscrow.DisputeExpired.selector);
-        e.resolveDispute(id, true); // effectiveDisputeExpiry == now -> already expired
-
-        e.refundOnDisputeExpiry(id); // permissionless, available in the same block
-        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
-        assertEq(usdc.balanceOf(payer), payerBefore + 1000e6);
+        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
+        e.fund(c, acc);
+        assertEq(usdc.balanceOf(address(e)), 0, "a rejected policy never takes custody");
     }
 
-    /// @dev The escrow permits arbiter == payer (not rejected at init) — a deployment-config choice. Such a
-    ///      payer can both open AND resolve its own dispute; pin that it works end to end.
-    function test_PayerAsArbiter_CanResolveOwnDispute() public {
-        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(payer, payer, JOB, TERMS));
-        assertEq(e.arbiter(), payer, "arbiter == payer is accepted at init");
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+    /// @dev MIGRATED (H-01). arbiter == payer is no longer merely "a deployment-config choice the payer
+    ///      makes": it is a self-adjudication policy that the OPERATOR must also sign. Once both parties
+    ///      have signed it, the end-to-end behaviour is unchanged — the point of the fix is authenticated
+    ///      consent, not banning the configuration.
+    function test_PayerAsArbiter_RequiresBilateralSelfAdjudication() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        VNextSettlementEscrow e =
+            VNextSettlementEscrow(factory.createEscrow(_identity(JOB, payer, 1, c)));
+        assertEq(e.arbiter(), payer, "arbiter == payer is still expressible");
+
+        // Without the bilaterally-signed flag the funding is refused outright.
+        VNextSettlementEscrow.PolicyAcceptance memory plain = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.SelfAdjudicationNotAccepted.selector);
+        e.fund(c, plain);
+
+        // With it — signed by BOTH parties over the same JobPolicyHash — the original behaviour holds.
+        VNextSettlementEscrow.PolicyAcceptance memory accepted = _acceptance(e, c, true, POLICY_EXPIRY, false);
+        vm.prank(payer);
+        e.fund(c, accepted);
+        (,,,,, bool selfAdj) = e.policy();
+        assertTrue(selfAdj, "self-adjudication recorded on-chain as bilaterally accepted");
+
         bytes32 id = _unitId(e);
         vm.prank(payer);
         e.openDispute(id);
@@ -864,8 +1019,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev Discharging the LAST outstanding claim (remainingClaimCount -> 0) transitions the unit to
     ///      SETTLED_RELEASED. Two payout legs both safe-fail -> 2 claims; the second discharge settles it.
     function test_FinalClaimDischarge_TransitionsToSettled() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // both pushes -> CLAIM
         vm.prank(payer);
@@ -996,30 +1150,31 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_Fund_PinsCohort_And_RejectsWhenDisabled() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         assertEq(e.oracleAuthEpoch(), COHORT, "fund pins the attester cohort id");
 
         // a fresh escrow funded while the cohort is disabled must revert (fail-closed).
+        VNextSettlementEscrow.UnitConfig[] memory c2 = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e2 = _escrowFor(keccak256("job-2"), c2);
+        VNextSettlementEscrow.PolicyAcceptance memory acc2 = _acceptance(e2, c2);
         attester.setEnabled(false);
-        VNextSettlementEscrow e2 = _newEscrow(keccak256("job-2"));
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.InvalidOrDisabledCohort.selector);
-        e2.fund(_oneUnitConfig(1000e6, 0, 0, 1));
+        e2.fund(c2, acc2);
     }
 
     function test_Fund_RevertsWhenRequiredTierNeRequestedTier() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].requestedTier = 2; // != requiredTier (1)
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.TierRequestMismatch.selector);
-        e.fund(c);
+        e.fund(c, acc);
     }
 
     function test_EvidenceRelease_RevertsWhenCohortDisabled() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 1); // an otherwise-valid assertion already exists
@@ -1029,8 +1184,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_RevertsOnCohortEpochMismatch() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -1041,8 +1195,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_RevertsOnCompositionRootMismatch() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // unit.compositionRoot == 0
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // unit.compositionRoot == 0
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -1053,12 +1206,11 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_CompositionHappyPath() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         bytes32 root = keccak256("composed-root");
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         c[0].compositionSchemaVersion = 1;
         c[0].compositionRoot = root;
-        _fund(e, c);
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -1073,8 +1225,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev claimOf + remainingClaimCountOf expose the collateralized-claim state created when a payout
     ///      push safe-fails during allocation; claimOf is existence-checked.
     function test_L01_claimOf_and_remainingClaimCount() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // every push -> CLAIM
         vm.prank(payer);
@@ -1100,8 +1251,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev disputeOf surfaces the dispute record set by openDispute; existence-checked.
     function test_L01_disputeOf() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         VNextSettlementEscrow.Dispute memory pre = e.disputeOf(id);
         assertFalse(pre.opened, "no dispute before openDispute");
@@ -1128,8 +1278,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      false. The key is recomputed here exactly as the escrow derives it, so a change to the
     ///      authorization-key envelope breaks this test rather than passing silently.
     function test_L01_evidenceAuthorizationKey_and_authorizationUsed() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         bytes32 authKey = keccak256(
@@ -1156,8 +1305,10 @@ contract VNextSettlementEscrowTest is Test {
     ///      max-config fit is asserted in test_gas_maxAggregateFunding_fits; this pins the constant itself
     ///      so a future UnitConfig field cannot silently leave slack (or, worse, make the max unfundable).
     function test_MaxConfigBytes_IsTheExactCanonicalEnvelope() public pure {
-        // 24,644 B at rev-3, + 512 B for §B's per-unit `evidenceCommitter` (16 units x 32 B).
-        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 25_156, "16 units x 16 legs max fund() calldata");
+        // 24,644 B at rev-3, + 512 B for §B's per-unit `evidenceCommitter` (16 units x 32 B) = 25,156 B,
+        // + 2,272 B for the H-01 `PolicyAcceptance` argument (64 B of extra arg head + 128 B struct head
+        // + 2 x (32 + MAX_SIGNATURE_BYTES) of signature tail) = 27,428 B.
+        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 27_428, "16 units x 16 legs + max acceptance");
     }
 
     /// @dev L-02: a non-zero `o5TypeHash` deployment pin must equal the bound cohort's live type hash.
@@ -1198,35 +1349,110 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(VNextSettlementEscrow(factory.implementation()).o5TypeHash(), bytes32(0));
     }
 
-    // ── H-01: `arbiter` is bound into the CREATE2 salt (hostile-arbiter front-run) ────────────────
-    /// @dev predictEscrow must equal the address createEscrow actually deploys for matching args — the
-    ///      payer computes one address and funds exactly the clone that lands there.
+    // ══ H-01: CREATE2 salt rebound to the BILATERAL POLICY IDENTITY ════════════════════════════════
+    // The rev-3 salt was `keccak256(abi.encode(payer, arbiter, jobIdHash, termsHash))`. It is retired and
+    // superseded: the salt now binds payer, operator, arbiter, jobIdHash, termsHash, policyNonce AND
+    // prePolicyRoot. The property it provided must be PRESERVED, not merely renamed — these tests hold it.
+
+    /// @dev predictEscrow must equal the address createEscrow actually deploys for matching args — both
+    ///      parties compute one address, derive the unit ids from it, sign it, and fund exactly that clone.
     function test_Factory_PredictMatchesCreate() public {
         bytes32 job = keccak256("h01-predict-job");
-        address predicted = factory.predictEscrow(payer, arbiter, job, TERMS);
-        address created = factory.createEscrow(payer, arbiter, job, TERMS);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory id = _identity(job, arbiter, 1, c);
+        address predicted = factory.predictEscrow(id);
+        address created = factory.createEscrow(id);
         assertEq(created, predicted, "predictEscrow == the deployed clone for matching args");
     }
 
-    /// @dev THE H-01 regression: changing ONLY the arbiter changes the address, so a permissionless
-    ///      front-run with a HOSTILE arbiter cannot occupy the address the payer computed and funds. The
-    ///      payer's intended-arbiter address stays free for them to create even after the hostile clone.
+    /// @dev PRESERVED from rev-3: changing ONLY the arbiter changes the address, so a front-run with a
+    ///      HOSTILE arbiter cannot occupy the address the parties computed and funded.
     function test_Factory_ArbiterIsBoundIntoTheAddress() public {
         bytes32 job = keccak256("h01-arbiter-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         address hostileArbiter = address(0xB0B0);
-        address intended = factory.predictEscrow(payer, arbiter, job, TERMS);
-        address hostileAddr = factory.predictEscrow(payer, hostileArbiter, job, TERMS);
+        address intended = factory.predictEscrow(_identity(job, arbiter, 1, c));
+        address hostileAddr = factory.predictEscrow(_identity(job, hostileArbiter, 1, c));
         assertTrue(intended != hostileAddr, "a different arbiter must yield a different escrow address");
 
         // Attacker front-runs with the hostile arbiter: their clone occupies its OWN address, not the payer's.
-        address deployedHostile = factory.createEscrow(payer, hostileArbiter, job, TERMS);
+        address deployedHostile = factory.createEscrow(_identity(job, hostileArbiter, 1, c));
         assertEq(deployedHostile, hostileAddr, "hostile-arbiter clone lands at its own committed address");
         assertTrue(deployedHostile != intended, "front-run cannot occupy the payer's computed address");
 
-        // The payer's intended-arbiter address is still available, and its clone binds the intended arbiter.
-        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(payer, arbiter, job, TERMS));
-        assertEq(address(e), intended, "intended-arbiter address remains available after the front-run");
-        assertEq(e.arbiter(), arbiter, "the funded clone carries the arbiter the payer committed to");
+        // The intended address is still available, and its clone binds the intended arbiter.
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 1, c)));
+        assertEq(address(e), intended, "intended address remains available after the front-run");
+        assertEq(e.arbiter(), arbiter, "the funded clone carries the arbiter the parties committed to");
+    }
+
+    /// @dev NEW under the rebound salt: every component of the policy identity moves the address. Each
+    ///      assertion is one substitution an attacker (or a careless integrator) might attempt.
+    function test_Factory_EveryPolicyFieldMovesTheAddress() public view {
+        bytes32 job = keccak256("h01-salt-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        address base = factory.predictEscrow(_identity(job, arbiter, 1, c));
+
+        // operator substituted
+        PolicyIdentity memory alt = _identity(job, arbiter, 1, c);
+        alt.operator = address(0xDEAD01);
+        assertTrue(factory.predictEscrow(alt) != base, "a different OPERATOR must move the address");
+
+        // payer substituted
+        alt = _identity(job, arbiter, 1, c);
+        alt.payer = address(0xDEAD02);
+        assertTrue(factory.predictEscrow(alt) != base, "a different PAYER must move the address");
+
+        // policy generation substituted
+        assertTrue(factory.predictEscrow(_identity(job, arbiter, 2, c)) != base, "a newer NONCE moves it");
+
+        // termsHash substituted
+        alt = _identity(job, arbiter, 1, c);
+        alt.termsHash = keccak256("other-terms");
+        assertTrue(factory.predictEscrow(alt) != base, "a different TERMS HASH must move the address");
+
+        // jobIdHash substituted
+        assertTrue(factory.predictEscrow(_identity(keccak256("other-job"), arbiter, 1, c)) != base, "job moves it");
+
+        // ANY funded term substituted (the pre-policy root) — here a single payout amount.
+        VNextSettlementEscrow.UnitConfig[] memory c2 = _oneUnitConfig(1000e6, 0, 0, 1);
+        c2[0].payouts[0].amount += 1;
+        c2[0].payouts[1].amount -= 1;
+        assertTrue(factory.predictEscrow(_identity(job, arbiter, 1, c2)) != base, "altered TERMS move the address");
+    }
+
+    /// @dev A permissionless pre-deploy of the EXACT canonical tuple is harmless: it lands at the address
+    ///      the parties already committed to, carries exactly their authorities, holds nothing, and the
+    ///      subsequent funding is unchanged. Deployment is not authorization — `fund()` is.
+    function test_Factory_CanonicalPredeployByAStrangerChangesNothing() public {
+        bytes32 job = keccak256("h01-predeploy-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        PolicyIdentity memory id = _identity(job, arbiter, 1, c);
+        address predicted = factory.predictEscrow(id);
+
+        vm.prank(address(0xBADBAD)); // a total stranger front-runs the canonical creation
+        address created = factory.createEscrow(id);
+        assertEq(created, predicted, "the stranger's clone lands at the canonical address");
+
+        VNextSettlementEscrow e = VNextSettlementEscrow(created);
+        assertEq(e.payer(), payer);
+        assertEq(e.operator(), operator);
+        assertEq(e.arbiter(), arbiter);
+        assertEq(usdc.balanceOf(created), 0, "a created clone holds nothing until it is funded");
+
+        // Semantics unchanged: the payer still funds it, with the same bilateral acceptance.
+        _fund(e, c);
+        assertEq(uint256(e.unitState(_unitId(e))), uint256(UnitState.FUNDED_ACTIVE));
+        assertEq(usdc.balanceOf(created), 1000e6);
+    }
+
+    /// @dev A duplicate canonical creation reverts (CREATE2 collision) — one escrow per policy identity.
+    function test_Factory_DuplicateIdentityReverts() public {
+        bytes32 job = keccak256("h01-dup-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        factory.createEscrow(_identity(job, arbiter, 1, c));
+        vm.expectRevert();
+        factory.createEscrow(_identity(job, arbiter, 1, c));
     }
 
     /// @dev MIGRATED from `test_EvidenceRelease_RevertsWhenUidMismatch`. On the EAS rail the CALLER chose
@@ -1236,8 +1462,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      preserved and asserted here: an un-asserted unit reads the ALL-ZERO record, and a zero
     ///      `assertionId` must fail closed rather than be treated as an authorization (L-02's intent).
     function test_EvidenceRelease_RevertsWhenNoAssertionExists() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         assertEq(attester.assertionOf(id).assertionId, bytes32(0), "no assertion bound to this unit");
@@ -1249,8 +1474,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev The zero-record guard is a check on the ID, not merely on emptiness: a record whose payload
     ///      fields are all correct but whose `assertionId` is zero must still be rejected.
     function test_EvidenceRelease_RejectsZeroAssertionId() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Assertion memory a = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
@@ -1264,8 +1488,7 @@ contract VNextSettlementEscrowTest is Test {
 
     // ── funding-time binding of the committer ─────────────────────────────────────────────────────
     function test_Fund_FreezesEvidenceCommitter_AndStartsUncommitted() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         assertEq(e.evidenceCommitterOf(id), operator, "committer frozen at funding");
         assertFalse(e.evidenceCommittedOf(id), "nothing committed yet");
@@ -1274,27 +1497,28 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_Fund_RejectsZeroEvidenceCommitter() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].evidenceCommitter = address(0);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
-        e.fund(c);
+        e.fund(c, acc);
     }
 
     function test_Fund_RejectsExcludedEvidenceCommitter() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
         c[0].evidenceCommitter = address(usdc); // the token can never be a caller
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
-        e.fund(c);
+        e.fund(c, acc);
     }
 
     // ── submitEvidence: authority, window, one-shot ───────────────────────────────────────────────
     function test_SubmitEvidence_StoresDomainSeparatedCommitment() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         bytes32 expected = _commitment(e, id, PKG);
         vm.expectEmit(true, false, false, true, address(e));
@@ -1306,8 +1530,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_OnlyCommitter() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
         e.submitEvidence(id, PKG); // the test contract is not the committer
@@ -1317,8 +1540,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsSecondCommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         vm.prank(operator);
@@ -1328,8 +1550,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsZeroDigest() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         vm.prank(operator);
         vm.expectRevert(VNextSettlementEscrow.ZeroEvidenceDigest.selector);
@@ -1337,8 +1558,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsAfterReclaimAt() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         vm.warp(block.timestamp + 30 days); // == reclaimAt
         vm.prank(operator);
@@ -1347,8 +1567,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsDuringLiveDispute() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         vm.prank(payer);
         e.openDispute(id);
@@ -1358,8 +1577,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsWhenNotActive() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 1);
@@ -1370,8 +1588,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_SubmitEvidence_RejectsUnknownUnit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         vm.prank(operator);
         vm.expectRevert(VNextSettlementEscrow.UnitNotFound.selector);
         e.submitEvidence(keccak256("not-a-unit"), PKG);
@@ -1379,8 +1596,7 @@ contract VNextSettlementEscrowTest is Test {
 
     // ── release binding ───────────────────────────────────────────────────────────────────────────
     function test_EvidenceRelease_RevertsWithNoCommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _assert(e, id, 1, 1); // an otherwise-perfect verdict, but nothing was committed
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
@@ -1390,8 +1606,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev The zero/default hash must never satisfy release — this is why `evidenceCommitted` is separate.
     function test_EvidenceRelease_ZeroBundleHashCannotSatisfyAnUncommittedUnit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.evidenceBundleHash = bytes32(0); // matches the unit's untouched storage slot
@@ -1401,8 +1616,7 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_RevertsOnDigestMismatch() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -1416,10 +1630,8 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev Domain separation: the SAME package digest committed on a different unit yields a different
     ///      commitment, so a verdict minted for unit A can never satisfy unit B.
     function test_EvidenceCommitment_DoesNotReplayAcrossUnits() public {
-        VNextSettlementEscrow e1 = _newEscrow(JOB);
-        VNextSettlementEscrow e2 = _newEscrow(keccak256("job-other"));
-        _fund(e1, _oneUnitConfig(1000e6, 0, 0, 1));
-        _fund(e2, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e1 = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e2 = _fundedEscrow(keccak256("job-other"), _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id1 = _unitId(e1);
         bytes32 id2 = _unitId(e2);
         _commit(e1, id1, PKG);
@@ -1449,8 +1661,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      be written precisely so this asserts the ESCROW-side guard; the real attester refuses the
     ///      second write outright (`UnitAlreadyAttested`, asserted in Fixed2of3O5Attester.t.sol).
     function test_OneVerdictPerUnit_SecondValidVerdictCannotSettle() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 1);
@@ -1473,8 +1684,7 @@ contract VNextSettlementEscrowTest is Test {
     ///      actually fires. That layering is unchanged by P0-6; only the key's seed moved from the EAS uid
     ///      to the assertion id.)
     function test_OneVerdictPerUnit_ReleaseAllocatedCannotBeReReleased() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 0, 0, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         usdc.setTransferMode(MockToken.Mode.REVERT); // stay in RELEASE_ALLOCATED (claims outstanding)
@@ -1498,8 +1708,7 @@ contract VNextSettlementEscrowTest is Test {
     /// @dev The refund path must never depend on the committer OR the attester: no commit at all still
     ///      refunds the payer in full at `reclaimAt`.
     function test_Reclaim_WorksWithNoCommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         assertFalse(e.evidenceCommittedOf(id));
         attester.setEnabled(false); // and the whole cohort is dead
@@ -1512,8 +1721,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev A WRONG commit (a package no verdict will ever match) also fails closed to a full refund.
     function test_Reclaim_WorksWithWrongCommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, keccak256("wrong-package"));
         _assert(e, id, 1, 1); // verdict over the RIGHT package -> unpayable against this commit
@@ -1528,8 +1736,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev Dispute-driven refund is likewise independent of any commit.
     function test_DisputeRefund_WorksWithNoCommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         uint256 before = usdc.balanceOf(payer);
         vm.prank(payer);
@@ -1542,8 +1749,7 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev A committed package does not weaken the payer's dispute/refund rights either.
     function test_DisputeRefund_WorksAfterACommit() public {
-        VNextSettlementEscrow e = _newEscrow(JOB);
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         uint256 before = usdc.balanceOf(payer);
@@ -1583,12 +1789,11 @@ contract VNextSettlementEscrowTest is Test {
         );
         VNextSettlementEscrowFactory f =
             new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
-        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
-
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         bytes32 root = keccak256("e2e-composition-root");
         c[0].compositionSchemaVersion = 1;
         c[0].compositionRoot = root;
+        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(_identity(JOB, arbiter, 1, c)));
         _fund(e, c);
         bytes32 id = _unitId(e);
         assertEq(e.oracleAuthEpoch(), REAL_COHORT, "escrow pinned the real cohort at funding");
@@ -1634,8 +1839,9 @@ contract VNextSettlementEscrowTest is Test {
         );
         VNextSettlementEscrowFactory f =
             new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
-        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(payer, arbiter, JOB, TERMS));
-        _fund(e, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(_identity(JOB, arbiter, 1, c)));
+        _fund(e, c);
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
 
@@ -1735,8 +1941,9 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
             address(usdc), address(fx.attester), O5_SCHEMA, fx.attester.o5TypeHash()
         );
-        fx.escrow = VNextSettlementEscrow(f.createEscrow(payer, arbiter, job, TERMS));
-        _fund(fx.escrow, _oneUnitConfig(1000e6, 23_500000, 235, 1));
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+        fx.escrow = VNextSettlementEscrow(f.createEscrow(_identity(job, arbiter, 1, c)));
+        _fund(fx.escrow, c);
         fx.unitId = VNextSettlementLib.computeSettlementUnitId(
             block.chainid, address(fx.escrow), job, 0, keccak256("step-0")
         );
