@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
-import { isAddress, type Address } from "viem";
+import { getAddress, isAddress, type Address } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getSettlementFacade } from "../facades/index.js";
 import type { DisputeInput } from "../facades/index.js";
@@ -24,13 +24,38 @@ import {
 import { getRepos } from "../db.js";
 
 /**
- * Look up an escrow row by its on-chain contract address to determine the
- * dispatch target (V2 or V3 write helpers). Returns "v2" by default when the
- * row is missing (pre-migration rows had no version column and default to v2).
+ * Look up an escrow row by its on-chain contract address. The single DB query
+ * shape for this module's "do we know this escrow?" question — used both as the
+ * V2/V3 dispatch hint (resolveEscrowVersion) and as the /fund provenance gate.
+ *
+ * Address casing: rows are written with the checksummed address decoded from
+ * the factory event (paid-job-flow.ts), while callers routinely send lowercase.
+ * The lookup is retried against the checksummed and lowercased forms so a
+ * legitimate escrow is never rejected over casing alone.
+ *
+ * Throws only when the escrow registry itself is unreadable. Callers decide
+ * whether that degrades (version hint) or fails closed (funding gate).
+ */
+function findEscrowRow(contractAddress: string) {
+  const escrows = getRepos().escrows;
+  const candidates = new Set<string>([contractAddress]);
+  if (isAddress(contractAddress)) candidates.add(getAddress(contractAddress));
+  candidates.add(contractAddress.toLowerCase());
+  for (const candidate of candidates) {
+    const row = escrows.findByContractAddress(candidate);
+    if (row) return row;
+  }
+  return undefined;
+}
+
+/**
+ * Determine the dispatch target (V2 or V3 write helpers) for an escrow.
+ * Returns "v2" by default when the row is missing (pre-migration rows had no
+ * version column and default to v2).
  */
 function resolveEscrowVersion(contractAddress: string): "v2" | "v3" {
   try {
-    const row = getRepos().escrows.findByContractAddress(contractAddress);
+    const row = findEscrowRow(contractAddress);
     return (row?.version as "v2" | "v3" | null | undefined) === "v3" ? "v3" : "v2";
   } catch {
     return "v2";
@@ -220,6 +245,22 @@ export async function escrowRoutes(app: FastifyInstance) {
   /**
    * Fund an escrow contract (payer must have approved token transfer).
    * Returns 503 if PCC_GATEWAY_PRIVATE_KEY is not configured.
+   *
+   * PROVENANCE GATE (audit C-03 containment, /fund leg).
+   *
+   * `isAddress()` only proves the param is well-formed hex — it says nothing
+   * about WHOSE contract it is. Before this gate the route forwarded any
+   * caller-supplied address straight into fundEscrowActivity, so the gateway
+   * signer could be pointed at an arbitrary contract and made to execute a
+   * chain write there. The address must now resolve to an escrow row this
+   * gateway actually created (findEscrowRow — the same lookup the V2/V3
+   * version hint uses) before any on-chain action is attempted.
+   *
+   * Unknown address -> 404 `escrow_not_found`: this is an existence question
+   * about the `:address` path resource, and the input itself is well-formed, so
+   * a 400 would mis-describe it as malformed. Registry unreadable -> 503
+   * `escrow_lookup_unavailable`, failing closed: an unavailable registry must
+   * not degrade into "unverified provenance is acceptable" on a money path.
    */
   app.post<{ Params: { address: string } }>(
     "/api/escrow/chain/:address/fund",
@@ -227,6 +268,24 @@ export async function escrowRoutes(app: FastifyInstance) {
       const { address } = req.params;
       if (!isAddress(address)) {
         return reply.status(400).send({ error: "Invalid address" });
+      }
+      let escrowRow: ReturnType<typeof findEscrowRow>;
+      try {
+        escrowRow = findEscrowRow(address);
+      } catch {
+        return reply.status(503).send({
+          error: "escrow_lookup_unavailable",
+          message:
+            "The escrow registry is unreadable; refusing to fund an address of unverified provenance.",
+        });
+      }
+      if (!escrowRow) {
+        return reply.status(404).send({
+          error: "escrow_not_found",
+          message:
+            "No escrow with this contract address is known to this gateway. " +
+            "Funding is limited to protocol-created escrows.",
+        });
       }
       const actorId = (req as any).operatorId ?? (req as any).apiKeyId ?? "system";
       const activityResult = await fundEscrowActivity.invoke({
@@ -246,47 +305,38 @@ export async function escrowRoutes(app: FastifyInstance) {
   );
 
   /**
-   * Approve token spending for an escrow contract.
-   * Returns 503 if write is disabled.
+   * REMOVED from the public API (audit C-03 containment).
+   *
+   * This route previously made the gateway signer send ERC-20
+   * `approve(spender = :address, token, amount)` with the spender, token, and
+   * amount taken directly from untrusted request params — no provenance,
+   * ownership, or token-allowlist check. That let any caller make the gateway
+   * signer approve an arbitrary spender for an arbitrary token/amount (bounded
+   * only by MAX_ESCROW_AMOUNT), i.e. drain the signer's ERC-20 balances.
+   *
+   * Per the P0 remediation (ChatGPT: "remove the arbitrary approval endpoint
+   * from the public API"), the endpoint is removed: it now returns 410 Gone
+   * unconditionally and accepts NO spender/token/amount params. The legitimate
+   * funding allowance is issued internally by the escrow-create path
+   * (paid-job-flow.createJobFromSession), which approves ONLY a freshly
+   * factory-created escrow for the exact fund amount — never an arbitrary spender.
+   *
+   * BREAKING (expected + accepted per spec): clients can no longer call approve
+   * directly.
+   *
+   * TODO(audit P0 follow-up, Wave 2): typed funding operation + treasury/relayer
+   * signer separation + rotate signer.
    */
-  app.post<{
-    Params: { address: string };
-    Body: { amount: string; tokenAddress?: string };
-  }>(
+  app.post<{ Params: { address: string } }>(
     "/api/escrow/chain/:address/approve",
-    async (req, reply) => {
-      const { address } = req.params;
-      if (!isAddress(address)) {
-        return reply.status(400).send({ error: "Invalid escrow address" });
-      }
-      const body = req.body as { amount?: string; tokenAddress?: string } | undefined;
-      if (!body?.amount) {
-        return reply.status(400).send({ error: "amount is required" });
-      }
-
-      // Bound approval to MAX_ESCROW_AMOUNT (default 1M USDC, 6 decimals)
-      const maxEscrowAmount = BigInt(
-        Math.floor(parseFloat(process.env.MAX_ESCROW_AMOUNT ?? "1000000") * 1_000_000),
-      );
-      let amountUnits: bigint;
-      try {
-        amountUnits = BigInt(Math.floor(parseFloat(body.amount) * 1_000_000));
-      } catch {
-        return reply.status(400).send({ error: "invalid_amount", message: "amount must be numeric" });
-      }
-      if (amountUnits <= 0n || amountUnits > maxEscrowAmount) {
-        return reply.status(400).send({
-          error: "amount_out_of_bounds",
-          message: `Amount must be between 0 and ${process.env.MAX_ESCROW_AMOUNT ?? "1000000"} USDC`,
-        });
-      }
-
-      const tokenAddr =
-        body.tokenAddress && isAddress(body.tokenAddress)
-          ? (body.tokenAddress as Address)
-          : undefined;
-      const result = await facade.approveToken(address as Address, body.amount, tokenAddr);
-      return sendResult(reply, result);
+    async (_req, reply) => {
+      return reply.status(410).send({
+        error: "endpoint_removed",
+        message:
+          "Arbitrary token approval has been removed from the public API (audit C-03). " +
+          "The gateway no longer approves caller-supplied spenders/tokens. Funding " +
+          "allowances are issued internally to protocol-created escrows only.",
+      });
     },
   );
 
