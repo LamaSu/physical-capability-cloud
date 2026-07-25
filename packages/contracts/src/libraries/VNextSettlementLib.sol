@@ -127,6 +127,34 @@ library VNextSettlementLib {
     bytes32 internal constant EVIDENCE_COMMITMENT_DOMAIN = keccak256("PCC:vnext:evidence-commitment:v1");
     uint8 internal constant EVIDENCE_PACKAGE_FORMAT_V1 = 1;
 
+    // ── H-01 §2.1 bilateral-acceptance EIP-712 pins (SHARED by the escrow and the factory) ───────────
+    // WHY they live here: Wave 4a moved the acceptance VERIFICATION into the factory (the escrow is the
+    // size-scarce per-clone implementation; the factory is deployed once). The digest is still the
+    // ESCROW's — `name`/`version` below and `verifyingContract == the clone` are unchanged, so every
+    // signature that validated before validates now, byte for byte. Holding ONE definition here is what
+    // makes that a fact rather than a promise: a second copy of a 15-field type string in the factory
+    // could drift, and a drifted typehash silently invalidates every acceptance signature ever produced.
+    uint256 internal constant POLICY_VERSION_V1 = 1; // uint256: the EIP-712 field is `uint256 policyVersion`
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 internal constant EIP712_NAME_HASH = keccak256(bytes("VNextSettlementEscrow"));
+    bytes32 internal constant EIP712_VERSION_HASH = keccak256(bytes("1"));
+    /// @dev H-01 §2.1 — the ONE canonical `JobPolicyHash` both parties authenticate before any funds move.
+    ///      It covers every term that decides WHETHER and WHEN the operator is paid: the deployment
+    ///      incarnation (chainId / factory / implementation / escrow / policyVersion), both money-plane
+    ///      identities, the adjudication authority and whether self-adjudication was deliberately accepted,
+    ///      the job + terms identity, the policy generation (nonce) and its expiry, the pre-policy root
+    ///      (== keccak256(abi.encode(UnitConfig[])), i.e. every funded term) and the units root (every
+    ///      derived settlementUnitId). Binding factory+implementation+escrow is what makes a signature
+    ///      unusable against a different factory, a different implementation, or a different clone.
+    bytes32 internal constant JOB_POLICY_TYPEHASH = keccak256(
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,address arbiter,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,bool allowSelfAdjudication,uint256 expiry)"
+    );
+    bytes4 internal constant ERC1271_MAGIC = 0x1626ba7e;
+    /// @dev secp256k1 n/2 — the ECDSA malleability bound (a signature with `s` above it is the mirror of a
+    ///      valid one and is rejected rather than accepted as a second, distinct signature).
+    uint256 internal constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
     // ── FROZEN limits (§6) ──────────────────────────────────────────────────
     uint256 internal constant MAX_PAYOUT_LEGS_PER_UNIT = 16;
     uint256 internal constant MAX_FEE_LEGS_PER_UNIT = 1;

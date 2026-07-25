@@ -2048,7 +2048,10 @@ contract VNextSettlementEscrowTest is Test {
         PolicyIdentity memory id = _identity(job, arbiter, 1, c);
         vm.prank(address(0xBADBAD));
         vm.expectRevert(VNextSettlementEscrowFactory.NotThePolicyEscrow.selector);
-        factory.consumePolicyNonce(id);
+        // Wave 4a: the same entrypoint now also verifies the bilateral acceptance, so a stranger reaching
+        // it would spend BOTH the nonce and the acceptance. The caller-is-the-policy-clone guard is checked
+        // FIRST, before any of it — signatures below are irrelevant and deliberately empty.
+        factory.acceptPolicy(id, bytes32(0), payer, POLICY_EXPIRY, false, "", "");
         assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, job)), 0, "floor untouched");
     }
 

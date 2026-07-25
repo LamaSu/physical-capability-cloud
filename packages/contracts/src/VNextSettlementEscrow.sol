@@ -30,8 +30,21 @@ interface IERC1271 {
 
 /// @notice The slice of the deploying factory the clone calls at funding. Declared locally rather than
 ///         imported so the escrow never depends on the factory (which imports the escrow).
+/// @dev    Wave 4a: this ONE call now both verifies the bilateral acceptance and consumes the policy
+///         nonce. It is the same call the clone already made on the funding path before Wave 4a — the
+///         verification moved INTO it rather than alongside it, so the funding path gained no new call,
+///         no new dependency and no new liveness surface. See
+///         {VNextSettlementEscrowFactory.acceptPolicy} for why the trust boundary is unchanged.
 interface IVNextEscrowFactory {
-    function consumePolicyNonce(PolicyIdentity calldata p) external returns (address implementation);
+    function acceptPolicy(
+        PolicyIdentity calldata p,
+        bytes32 unitsRoot,
+        address funder,
+        uint256 expiry,
+        bool allowSelfAdjudication,
+        bytes calldata payerSignature,
+        bytes calldata operatorSignature
+    ) external returns (bytes32 jobPolicyHash);
 }
 
 // `O5Assertion` (the direct cohort assertion the money path reads) and `O5_DECISION_SETTLE` live in
@@ -92,7 +105,7 @@ contract VNextSettlementEscrow {
     uint256 public constant CONTRACT_VERSION = 1;
     /// @dev H-01 §2.1 policy-version pin, bound into every acceptance signature. A future policy shape
     ///      bumps this, and yesterday's signatures stop validating instead of silently meaning something new.
-    uint256 public constant POLICY_VERSION = 1;
+    uint256 public constant POLICY_VERSION = VNextSettlementLib.POLICY_VERSION_V1;
 
     /// @dev M-01 supported assurance-tier ceiling (tiers 0..3). Funding bounds `requiredTier` to this range;
     ///      the evidence path bounds the ORACLE-asserted `achievedTier` to it too, so a verdict claiming an
@@ -100,29 +113,19 @@ contract VNextSettlementEscrow {
     uint8 internal constant MAX_TIER = 3;
 
     // ── EIP-712 + auth constants (2b-ii) ─────────────────────────────────────────────────────────
-    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant EIP712_NAME_HASH = keccak256(bytes("VNextSettlementEscrow"));
-    bytes32 private constant EIP712_VERSION_HASH = keccak256(bytes("1"));
+    // The domain pins live in {VNextSettlementLib} because the FACTORY rebuilds this escrow's EIP-712
+    // domain when it verifies the bilateral acceptance (Wave 4a). One definition, so the two can't drift.
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = VNextSettlementLib.EIP712_DOMAIN_TYPEHASH;
+    bytes32 private constant EIP712_NAME_HASH = VNextSettlementLib.EIP712_NAME_HASH;
+    bytes32 private constant EIP712_VERSION_HASH = VNextSettlementLib.EIP712_VERSION_HASH;
     bytes32 private constant BUYER_APPROVAL_TYPEHASH = keccak256(
         "BuyerApproval(uint256 chainId,address escrow,uint256 contractVersion,bytes32 settlementUnitId,address payer,bytes32 jobIdHash,bytes32 termsHash,uint256 g,uint256 f,uint256 n,bytes32 feeScheduleHash,bytes32 payoutConfigHash,uint8 decision,uint256 approvalNonce,uint256 expiry)"
     );
     bytes32 private constant ROTATE_TYPEHASH = keccak256(
         "RotateDestination(bytes32 claimId,address claimOwner,address currentDestination,address newDestination,uint256 destinationNonce,uint256 expiry,uint256 chainId,address escrow,uint256 contractVersion)"
     );
-    /// @dev H-01 §2.1 — the ONE canonical `JobPolicyHash` both parties authenticate before any funds move.
-    ///      It covers every term that decides WHETHER and WHEN the operator is paid: the deployment
-    ///      incarnation (chainId / factory / implementation / escrow / policyVersion), both money-plane
-    ///      identities, the adjudication authority and whether self-adjudication was deliberately accepted,
-    ///      the job + terms identity, the policy generation (nonce) and its expiry, the pre-policy root
-    ///      (== keccak256(abi.encode(UnitConfig[])), i.e. every funded term) and the units root (every
-    ///      derived settlementUnitId). Binding factory+implementation+escrow is what makes a signature
-    ///      unusable against a different factory, a different implementation, or a different clone.
-    bytes32 private constant JOB_POLICY_TYPEHASH = keccak256(
-        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,address arbiter,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,bool allowSelfAdjudication,uint256 expiry)"
-    );
-    bytes4 private constant ERC1271_MAGIC = 0x1626ba7e;
-    uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+    bytes4 private constant ERC1271_MAGIC = VNextSettlementLib.ERC1271_MAGIC;
+    uint256 private constant ECDSA_S_MAX = VNextSettlementLib.ECDSA_S_MAX;
     // §2 authorization-key issuer domains (per authority type, L-01).
     bytes32 private constant AUTHDOMAIN_EVIDENCE = keccak256("PCC:vnext:auth:evidence:v1");
     bytes32 private constant AUTHDOMAIN_DISPUTE = keccak256("PCC:vnext:auth:dispute:v1");
@@ -389,6 +392,11 @@ contract VNextSettlementEscrow {
     error PartyCollision();
     /// @notice The supplied configs do not hash to the `prePolicyRoot` bound into this clone's address.
     error PolicyRootMismatch();
+    // The next three are RAISED BY THE FACTORY since Wave 4a (the acceptance verification moved there) and
+    // bubble out of `fund()` unchanged — a custom error's selector is `keccak256("Name()")[0:4]` and
+    // carries no contract identity. They are declared here because they are part of `fund()`'s revert
+    // surface and every ABI decoder pointed at this contract must be able to name them. Costs no runtime
+    // bytecode: a declared-but-unraised error emits nothing.
     /// @notice The bilateral acceptance expired before funding.
     error PolicyExpired();
     /// @notice arbiter == payer or arbiter == operator without both parties signing `allowSelfAdjudication`.
@@ -724,32 +732,32 @@ contract VNextSettlementEscrow {
     // ── H-01 bilateral acceptance (§2.1 + §8.2 H-1) ───────────────────────────────────────────────
 
     /// @dev The single place a funded escrow proves BOTH parties authenticated the complete configuration.
-    ///      Five steps, in this order:
+    ///      Three steps, in this order:
     ///        1. the escrow's own ADDRESS commits to the terms — `prePolicyRoot` is in the CREATE2 salt
     ///           preimage, so re-deriving it from the supplied configs proves this clone is being funded
-    ///           with exactly the terms the address was predicted from, before any signature is read;
-    ///        2. self-adjudication is expressible but never implicit;
-    ///        3. acceptance is time-bounded;
-    ///        4. the policy generation is consumed at the factory (retiring it and every older one, and
-    ///           failing closed if either party revoked) — which also returns the implementation so the
-    ///           signatures bind the exact deployment incarnation;
-    ///        5. both signatures are checked against ONE canonical `JobPolicyHash`.
+    ///           with exactly the terms the address was predicted from, before any signature is read.
+    ///           This stays HERE and only here: it is what makes the address commit to the exact funded
+    ///           terms, and the factory never sees the configs (they are the calldata this bound would
+    ///           otherwise have to carry twice);
+    ///        2. the units root is derived from the ids this clone just froze;
+    ///        3. ONE call to the factory — which recomputes the CREATE2 address from the identity passed
+    ///           back to it and requires it to equal `msg.sender` (the self-consistency proof: a clone can
+    ///           only fund itself if its stored identity really is the one its own address commits to),
+    ///           then rejects implicit self-adjudication, rejects an expired acceptance, consumes the
+    ///           policy generation (retiring it and every older one, failing closed if either party
+    ///           revoked), and validates BOTH acceptance signatures against ONE canonical `JobPolicyHash`.
+    ///
+    ///      WAVE 4a: steps 2-5 of the pre-Wave-4a sequence are now the body of that single call, in the
+    ///      same order, over the same digest (the EIP-712 `verifyingContract` is still THIS clone). Nothing
+    ///      became optional: `fund()` reaches a funded state only through this call and the call reverts
+    ///      unless every one of those checks passes, so a funded escrow still cannot exist without a
+    ///      genuine, verified bilateral acceptance. The reverts bubble through unchanged — a custom error's
+    ///      selector carries no contract identity — which is why the declarations above are retained here.
     function _acceptPolicy(UnitConfig[] calldata configs, PolicyAcceptance calldata acceptance) private {
         if (keccak256(abi.encode(configs)) != _prePolicyRoot) revert PolicyRootMismatch();
 
-        // "Address inequality is not independence": an arbiter that IS one of the parties is a costless
-        // veto (or a self-release), so it is rejected unless BOTH parties signed a policy that says so.
-        // The flag lives inside the signed hash, so it can never be supplied by whoever sends the tx alone.
-        if (!acceptance.allowSelfAdjudication && (arbiter == payer || arbiter == operator)) {
-            revert SelfAdjudicationNotAccepted();
-        }
-        if (block.timestamp > acceptance.expiry) revert PolicyExpired();
-
-        // Passing the identity BACK to the factory is also a self-consistency proof: `consumePolicyNonce`
-        // recomputes the salt from these fields and requires the resulting CREATE2 address to equal
-        // `msg.sender`. So a clone can only ever fund itself if its stored identity really is the one its
-        // own address commits to — the initialization cannot have drifted from the salt.
-        address impl = IVNextEscrowFactory(factory).consumePolicyNonce(
+        bytes32 root = _unitsRoot();
+        bytes32 ph = IVNextEscrowFactory(factory).acceptPolicy(
             PolicyIdentity({
                 payer: payer,
                 operator: operator,
@@ -758,20 +766,14 @@ contract VNextSettlementEscrow {
                 termsHash: termsHash,
                 policyNonce: _policyNonce,
                 prePolicyRoot: _prePolicyRoot
-            })
+            }),
+            root,
+            msg.sender, // the payer leg is implicit ONLY for a direct payer-sent tx (see `OnlyPayer` above)
+            acceptance.expiry,
+            acceptance.allowSelfAdjudication,
+            acceptance.payerSignature,
+            acceptance.operatorSignature
         );
-
-        bytes32 root = _unitsRoot();
-        bytes32 ph = _hashJobPolicy(impl, root, acceptance.allowSelfAdjudication, acceptance.expiry);
-        bytes32 digest = _typedDataHash(ph);
-        // Delegated/agent funding: an absent payer signature was already rejected as `OnlyPayer` at entry;
-        // a present one must actually validate. A direct payer-sent tx authenticates itself.
-        if (msg.sender != payer && !_isValidSignature(payer, digest, acceptance.payerSignature)) {
-            revert BadSignature();
-        }
-        // The operator NEVER sends this transaction, so its acceptance is always an explicit signature —
-        // ECDSA for an EOA, ERC-1271 for a smart account (both handled by `_isValidSignature`).
-        if (!_isValidSignature(operator, digest, acceptance.operatorSignature)) revert BadOperatorSignature();
 
         _jobPolicyHash = ph;
         _selfAdjudicationAccepted = acceptance.allowSelfAdjudication;
@@ -810,26 +812,9 @@ contract VNextSettlementEscrow {
         }
     }
 
-    /// @dev EIP-712 struct hash of the frozen policy. Split into two `abi.encode` calls to avoid
-    ///      stack-too-deep; all 16 words are static, so `bytes.concat(abi.encode(..), abi.encode(..))`
-    ///      equals `abi.encode(all 16)` and the EIP-712 hash is identical.
-    function _hashJobPolicy(address impl, bytes32 unitsRoot, bool allowSelfAdjudication, uint256 expiry)
-        private
-        view
-        returns (bytes32)
-    {
-        return keccak256(
-            bytes.concat(
-                abi.encode(
-                    JOB_POLICY_TYPEHASH, block.chainid, factory, impl, address(this), POLICY_VERSION, payer, operator
-                ),
-                abi.encode(
-                    arbiter, jobIdHash, termsHash, _policyNonce, _prePolicyRoot, unitsRoot, allowSelfAdjudication,
-                    expiry
-                )
-            )
-        );
-    }
+    // NOTE: `_hashJobPolicy` moved to {VNextSettlementEscrowFactory} in Wave 4a together with the
+    // acceptance verification. The type string it hashes is pinned once in {VNextSettlementLib}, and the
+    // digest still uses THIS clone as the EIP-712 `verifyingContract`, so the hash is byte-identical.
 
     // ── Recipient exclusion set (High 9) ──────────────────────────────────────────────────────────
     function _requireAllowedRecipient(address r) internal view {
