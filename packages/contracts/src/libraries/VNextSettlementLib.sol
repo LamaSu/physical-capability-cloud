@@ -361,7 +361,7 @@ library VNextSettlementLib {
     }
 
     /// @notice §2 `feeScheduleHash` — 13-field ABI-standard keccak (#382 authoritative).
-    function computeFeeScheduleHash(FeeSchedule memory s) internal pure returns (bytes32) {
+    function computeFeeScheduleHash(FeeSchedule memory s) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
                 s.domainVersion,
@@ -383,7 +383,7 @@ library VNextSettlementLib {
 
     /// @notice §2 `payoutConfigHash` (Model-A): keccak256(abi.encode(unitId, entries)); Σ entries.amount == N.
     function computePayoutConfigHash(bytes32 settlementUnitId, PayoutEntry[] memory entries)
-        internal
+        public
         pure
         returns (bytes32)
     {
@@ -446,7 +446,12 @@ library VNextSettlementLib {
 
     /// @notice E3 full V1 invariant conformance. Reverts with a specific reason on any violation
     ///         (→ `contradiction` / reject at commit). Enforced identically by the oracle verdict.
-    function checkV1Invariants(FeeSchedule memory s) internal pure {
+    /// @dev Wave 4a rung 2: `public`, so this body — and `mulDivFloor`, which only this function calls —
+    ///      live in the DEPLOYED library and reach the escrow by DELEGATECALL instead of being inlined into
+    ///      its EIP-170-bounded runtime. Semantics are unchanged (the delegatecall executes in the escrow's
+    ///      own context and the function is `pure`); the revert strings are the same strings. The cost is a
+    ///      link step: `VNextSettlementLib` must be deployed and linked before the factory is deployed.
+    function checkV1Invariants(FeeSchedule memory s) public pure {
         require(s.domainVersion == DOMAIN_VERSION_V1, "V1: domainVersion");
         require(s.feeBasis == FEE_BASIS_GROSS, "V1: feeBasis");
         require(s.denominator == FEE_DENOMINATOR, "V1: denominator");
