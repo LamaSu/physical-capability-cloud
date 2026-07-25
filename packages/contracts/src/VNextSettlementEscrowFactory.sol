@@ -40,6 +40,19 @@ contract VNextSettlementEscrowFactory {
     ///         already sit at its predicted address holding nothing.
     mapping(bytes32 => uint256) public policyNonceFloor;
 
+    /// @notice The escrow that FUNDED this (payer, operator, jobIdHash), or zero. Write-once.
+    /// @dev    Wave 3c (L-3). The floor alone only retires OLDER generations, so funding generation N left
+    ///         generation N+1 fundable and an operator who counter-signed a revision expecting it to
+    ///         supersede the original could end up bound to BOTH — while `VNextSettlementLib` documented the
+    ///         scope as "one funded policy generation per job". This marker makes the documented scope
+    ///         structural: the FIRST bilaterally-accepted funding for a job is the only one. It cannot be
+    ///         griefed — `acceptPolicy` is callable only by that policy's own CREATE2 clone and only with
+    ///         both signatures, so setting this marker always required the operator's own acceptance, and
+    ///         it strictly REDUCES the operator's exposure (one signed generation instead of every signed
+    ///         generation). It is not the "cancel" primitive: `revokePolicy` still handles pre-funding
+    ///         cancellation, and after funding the money-out state machine owns the unit.
+    mapping(bytes32 => address) public fundedEscrowOf;
+
     event EscrowCreated(
         address indexed escrow,
         address indexed payer,
@@ -58,6 +71,8 @@ contract VNextSettlementEscrowFactory {
     error FloorNotIncreasing();
     /// @notice The policy generation was cancelled, or a newer generation has already been funded.
     error PolicyNoLongerValid();
+    /// @notice L-3: a generation of this (payer, operator, job) is already funded — one per job.
+    error JobAlreadyFunded();
     /// @notice Only the clone that CREATE2 places at this policy's predicted address may consume its nonce.
     error NotThePolicyEscrow();
     // ── Wave 4a: the bilateral-acceptance errors, verbatim from the escrow ────────────────────────
@@ -147,7 +162,8 @@ contract VNextSettlementEscrowFactory {
     ///         another job's floor or spend another job's acceptance, because no third party can be at that
     ///         address. Consuming sets the floor above the funded nonce, so (a) this generation can never be
     ///         re-funded and (b) every OLDER generation is invalidated — "a newer nonce invalidates older
-    ///         ones", enforced on-chain rather than by convention.
+    ///         ones", enforced on-chain rather than by convention — and, since Wave 3c, (c) every NEWER
+    ///         generation is invalidated too, via the write-once `fundedEscrowOf` marker (L-3).
     ///
     /// @dev    WAVE 4a — WHY THE VERIFICATION LIVES HERE AND NOT IN THE ESCROW.
     ///         The escrow implementation is the size-scarce artifact (one EIP-170-bounded runtime shared by
@@ -209,6 +225,11 @@ contract VNextSettlementEscrowFactory {
 
         bytes32 k = VNextSettlementLib.computePolicyKey(p.payer, p.operator, p.jobIdHash);
         if (p.policyNonce < policyNonceFloor[k]) revert PolicyNoLongerValid();
+        // L-3: the floor retires OLDER generations; this retires the NEWER ones too, which is what "one
+        // funded policy generation per job" always claimed. Write-once, and set before any signature is
+        // read so a second funding of the same job cannot be reached by any ordering.
+        if (fundedEscrowOf[k] != address(0)) revert JobAlreadyFunded();
+        fundedEscrowOf[k] = escrow;
         policyNonceFloor[k] = p.policyNonce + 1; // checked (0.8)
         emit PolicyNonceConsumed(k, escrow, p.policyNonce);
 
