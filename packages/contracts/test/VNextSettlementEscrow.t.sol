@@ -3,7 +3,18 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
-import {O5Verdict, O5Assertion, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
+import {
+    O5Verdict,
+    O5Assertion,
+    O5Adjudication,
+    O5AdjudicationRecord,
+    O5_VERDICT_BYTES,
+    O5_DECISION_SETTLE,
+    O5_ADJ_ROLE_APPEAL,
+    O5_ADJ_ROLE_EMERGENCY,
+    O5_ADJ_UPHOLD,
+    O5_ADJ_OVERTURN
+} from "../src/O5Types.sol";
 import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {PayoutEntry, FeeSchedule, PolicyIdentity, UnitState, ClaimClass, AuthorizationType, ValueOverflow, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
@@ -153,9 +164,34 @@ contract MockOracleAttester is IOracleAttester {
 
     function disable() external {
         enabled = false;
+        uint64 t = uint64(block.timestamp);
+        disabledAt = t == 0 ? 1 : t;
     }
 
     function attestO5(O5Verdict calldata, address, bytes[] calldata) external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    // ── H-01 Wave 3 surface ──────────────────────────────────────────────────────────────────────
+    uint64 public disabledAt;
+    mapping(bytes32 => O5AdjudicationRecord) internal _adj;
+
+    /// @dev Mirrors the real attester: `disable()` is one-way and stamps a WRITE-ONCE `disabledAt`.
+    function disableAtNow() external {
+        enabled = false;
+        uint64 t = uint64(block.timestamp);
+        disabledAt = t == 0 ? 1 : t;
+    }
+
+    function setAdjudication(bytes32 unitId, uint8 role, O5AdjudicationRecord memory r) external {
+        _adj[keccak256(abi.encode(unitId, role))] = r;
+    }
+
+    function adjudicationOf(bytes32 unitId, uint8 role) external view returns (O5AdjudicationRecord memory) {
+        return _adj[keccak256(abi.encode(unitId, role))];
+    }
+
+    function adjudicate(O5Adjudication calldata, bytes[] calldata) external pure returns (bytes32) {
         return bytes32(0);
     }
 }
@@ -205,9 +241,11 @@ contract DowncastHarness {
 contract VNextSettlementEscrowTest is Test {
     MockToken usdc;
     MockOracleAttester attester;
+    MockOracleAttester escalation; // H-01 Wave 3: appeal + backup + Model-B emergency cohort
     VNextSettlementEscrowFactory factory;
 
     uint64 constant COHORT = 1; // the mock attester's cohort id, pinned into the escrow at fund()
+    uint64 constant ESC_COHORT = 77; // the escalation cohort's id, pinned separately at fund()
     uint256 payerPk = 0xA11CE;
     address payer;
     address arbiter = address(0xAB12);
@@ -229,7 +267,12 @@ contract VNextSettlementEscrowTest is Test {
         operator = vm.addr(operatorPk);
         usdc = new MockToken();
         attester = new MockOracleAttester(COHORT);
-        factory = new VNextSettlementEscrowFactory(address(usdc), address(attester), O5_SCHEMA, bytes32(0));
+        // H-01 Wave 3: the escalation cohort is a SEPARATE deployment (its own signers/revoker in
+        // production). The escrow's constructor rejects escalation == oracle for exactly that reason.
+        escalation = new MockOracleAttester(ESC_COHORT);
+        factory = new VNextSettlementEscrowFactory(
+            address(usdc), address(attester), address(escalation), O5_SCHEMA, bytes32(0)
+        );
         usdc.mint(payer, 1_000_000e6);
     }
 
@@ -426,7 +469,6 @@ contract VNextSettlementEscrowTest is Test {
             n: n,
             feeBps: feeBps,
             feeRecipient: f > 0 ? feeDest : address(0),
-            disputeWindow: 1 days,
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
@@ -522,32 +564,48 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     // ── release via dispute-win + distribution ────────────────────────────────────────────────────
-    function test_DisputeOperatorWin_ReleasesExactlyG() public {
+    /// @dev MIGRATED from `test_DisputeOperatorWin_ReleasesExactlyG`. The arbiter's `resolveDispute(true)`
+    ///      money switch is retired; the equivalent outcome is now an appeal quorum UPHOLDING the exact
+    ///      accepted assertion. The DISTRIBUTION assertions are carried over verbatim — that is the point:
+    ///      a different authority must produce the identical frozen distribution (§10.10 one allocator).
+    function test_AppealUphold_ReleasesExactlyG() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, true);
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        e.acceptAssertion(id);
+        _challenge(e, id);
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(recip1), (1000e6 - 23_500000) / 2);
         assertEq(usdc.balanceOf(recip2), (1000e6 - 23_500000) - (1000e6 - 23_500000) / 2);
         assertEq(usdc.balanceOf(feeDest), 23_500000);
         assertEq(e.totalLiability(), 0);
+        // The escrow is NOT empty: the forfeited bond's delay-comp + burn legs already left, so what
+        // remains is zero here — but the assertion is on the BUCKETS, which is the H-3 invariant.
+        assertEq(e.bondLiability() + e.compLiability() + e.burnLiability(), 0);
         assertEq(usdc.balanceOf(address(e)), 0);
     }
 
-    function test_DisputePayerWin_RefundsExactlyG() public {
+    /// @dev MIGRATED from `test_DisputePayerWin_RefundsExactlyG`. `resolveDispute(false)` becomes an
+    ///      appeal OVERTURN — and, unlike the retired path, the payer had to post a bond to get here and
+    ///      gets it back in full on a successful challenge (§2.4).
+    function test_AppealOverturn_RefundsExactlyG() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        e.acceptAssertion(id);
+        uint256 bond = _challenge(e, id);
         uint256 payerBefore = usdc.balanceOf(payer);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, false);
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
-        assertEq(usdc.balanceOf(payer), payerBefore + 1000e6);
+        assertEq(usdc.balanceOf(payer), payerBefore + 1000e6 + bond, "refund AND the full bond back");
         assertEq(e.totalLiability(), 0);
+        assertEq(e.bondLiability(), 0);
+        assertEq(usdc.balanceOf(address(e)), 0);
     }
 
     function test_ReclaimAfterDeadline_Refunds() public {
@@ -567,10 +625,7 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // solvent, but every payout push reverts -> CLAIM
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, true);
+        _releaseNow(e, id);
         // no payouts moved; 2 claims outstanding; liability intact
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.liabilityOf(id), 1000e6);
@@ -589,22 +644,20 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.DEBIT_NO_CREDIT);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
+        _acceptNow(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         vm.expectRevert(VNextSettlementEscrow.WrongTransferDelta.selector);
-        e.resolveDispute(id, true);
+        e.finalize(id);
     }
 
     function test_Classifier_FalseWithMove_RevertsAll() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.RETURN_FALSE_WITH_MOVE);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
+        _acceptNow(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         vm.expectRevert(VNextSettlementEscrow.NonCanonicalTransferReturn.selector);
-        e.resolveDispute(id, true);
+        e.finalize(id);
     }
 
     // ── buyer approval (Tier-0) ───────────────────────────────────────────────────────────────────
@@ -737,12 +790,65 @@ contract VNextSettlementEscrowTest is Test {
         attester.setAssertion(id, _assertionFor(_o5FullVerdict(e, id, decision, achieved), address(e)));
     }
 
+    /// @dev H-01 Wave 3 — the two-phase successor to `releaseFromEvidence`. A valid SETTLE no longer pays:
+    ///      it is ACCEPTED (opening the challenge window on the ESCROW's clock), the window elapses
+    ///      unchallenged, and anyone finalizes. Every migrated release test drives this path, so the
+    ///      distribution assertions they already made now also prove the default outcome of an
+    ///      unchallenged assertion is RELEASE.
+    function _settleViaEvidence(VNextSettlementEscrow e, bytes32 id) internal {
+        e.acceptAssertion(id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
+        e.finalize(id);
+    }
+
+    /// @dev The escalation cohort's typed verdict over the unit's exact accepted assertion.
+    function _adjudicate(VNextSettlementEscrow e, bytes32 id, uint8 role, uint8 outcome) internal {
+        (,, bytes32 accepted,,,,) = e.settlement(id);
+        escalation.setAdjudication(
+            id,
+            role,
+            O5AdjudicationRecord({
+                adjudicationId: keccak256(abi.encode("adj", id, role, outcome)),
+                reviewedAssertionId: accepted,
+                escrow: address(e),
+                decidedAt: uint64(block.timestamp),
+                role: role,
+                outcome: outcome
+            })
+        );
+    }
+
+    /// @dev Commit + assert + ACCEPT, leaving the unit in PRIMARY_ASSERTED with the challenge window open.
+    function _acceptNow(VNextSettlementEscrow e, bytes32 id) internal {
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        e.acceptAssertion(id); // permissionless
+    }
+
+    /// @dev Drive a unit all the way to a release through the §8.1 machine. Used by the tests that need
+    ///      A release in order to exercise something else (the transfer classifier, claim mechanics, gas);
+    ///      the retired `openDispute` + `resolveDispute` pair used to play that role.
+    function _releaseNow(VNextSettlementEscrow e, bytes32 id) internal {
+        _acceptNow(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
+        e.finalize(id);
+    }
+
+    /// @dev Open a bonded challenge on an accepted assertion. Deliberately does NOT top the payer up: the
+    ///      whole point of a challenger-only bond is that contesting COSTS the payer, so a helper that
+    ///      silently minted the bond would hide the one economic property under test.
+    function _challenge(VNextSettlementEscrow e, bytes32 id) internal returns (uint256 bond) {
+        bond = e.requiredBondOf(id);
+        vm.prank(payer);
+        e.challenge(id);
+    }
+
     function test_EvidenceRelease_Settle() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG); // §B: commit the package BEFORE the verdict exists
         _assert(e, id, 1, 1); // decision=SETTLE(1), achieved>=required
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
@@ -761,7 +867,7 @@ contract VNextSettlementEscrowTest is Test {
         O5Assertion memory a = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(0xE5C0F)); // another escrow
         attester.setAssertion(id, a);
         vm.expectRevert(VNextSettlementEscrow.WrongRecipient.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -776,7 +882,7 @@ contract VNextSettlementEscrowTest is Test {
         rogue.setAssertion(id, _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e)));
         assertTrue(rogue.assertionOf(id).assertionId != bytes32(0), "the rogue record exists");
         vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
-        e.releaseFromEvidence(id); // the escrow only ever reads its own immutable authorizedOracle
+        e.acceptAssertion(id); // the escrow only ever reads its own immutable authorizedOracle
     }
 
     function test_EvidenceRelease_RejectsUnderTier() public {
@@ -787,7 +893,7 @@ contract VNextSettlementEscrowTest is Test {
         // achieved 2 but requested 1 != the frozen requiredTier 2
         attester.setAssertion(id, _assertionFor(_o5verdict(id, 1, 2, 1), address(e)));
         vm.expectRevert(VNextSettlementEscrow.RequestedTierMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     /// @dev The lower tier bound in its own right: achieved < the frozen requiredTier cannot settle.
@@ -797,7 +903,7 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, PKG);
         attester.setAssertion(id, _assertionFor(_o5verdict(id, 1, 1, 2), address(e))); // achieved 1 < 2
         vm.expectRevert(VNextSettlementEscrow.TierNotMet.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -812,7 +918,7 @@ contract VNextSettlementEscrowTest is Test {
         v.feeBps = 900; // != the frozen 235, though feeScheduleHash stays correct
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.FeeBpsMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -825,7 +931,7 @@ contract VNextSettlementEscrowTest is Test {
         v.feeRecipient = address(0xBADD); // != the frozen feeDest
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.FeeRecipientMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -838,7 +944,7 @@ contract VNextSettlementEscrowTest is Test {
         v.feeScheduleHash = keccak256("stale-fee-schedule");
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.FeeHashMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -850,7 +956,7 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, PKG);
         _assert(e, id, 2, 1); // decision 2 != O5_DECISION_SETTLE
         vm.expectRevert(VNextSettlementEscrow.NotSettle.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -862,7 +968,7 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, PKG);
         _assert(e, id, 1, 4); // SETTLE, achievedTier 4 (> MAX_TIER)
         vm.expectRevert(VNextSettlementEscrow.TierOutOfRange.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -911,7 +1017,6 @@ contract VNextSettlementEscrowTest is Test {
                 n: n,
                 feeBps: 0,
                 feeRecipient: address(0),
-                disputeWindow: 1 days,
                 reclaimAt: block.timestamp + 30 days,
                 compositionSchemaVersion: 0,
                 compositionRoot: bytes32(0),
@@ -969,7 +1074,6 @@ contract VNextSettlementEscrowTest is Test {
             n: n,
             feeBps: 0,
             feeRecipient: address(0),
-            disputeWindow: 1 days,
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
@@ -979,11 +1083,10 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc"), cfgs);
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.NORMAL); // all 16 legs discharge -> 0 claims (not the worst case)
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
+        _acceptNow(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         uint256 g0 = gasleft();
-        e.resolveDispute(id, true);
+        e.finalize(id);
         emit log_named_uint("all-discharge 16-leg release gas (0 claims)", g0 - gasleft());
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
     }
@@ -1015,7 +1118,6 @@ contract VNextSettlementEscrowTest is Test {
             n: g - f,
             feeBps: feeBps,
             feeRecipient: feeDest,
-            disputeWindow: 1 days,
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
@@ -1025,11 +1127,10 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc17"), cfgs);
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // every push (16 payouts + fee) safe-fails -> CLAIM
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
+        _acceptNow(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         uint256 g0 = gasleft();
-        e.resolveDispute(id, true);
+        e.finalize(id);
         emit log_named_uint("TRUE worst-case release gas (17 claims created)", g0 - gasleft());
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED), "claims outstanding -> not settled");
         assertEq(e.liabilityOf(id), g, "a CLAIM never discharges liability; still owes the full G");
@@ -1042,15 +1143,29 @@ contract VNextSettlementEscrowTest is Test {
     ///      late, and the permissionless `refundOnDisputeExpiry` refunded the payer in that same block —
     ///      a costless veto over a job the operator had already performed. That configuration is now
     ///      rejected at FUNDING by `MIN_DISPUTE_WINDOW`, so the sequence it enabled is unreachable.
-    function test_DisputeWindowZero_RejectedAtFunding() public {
+    /// @dev MIGRATED from `test_DisputeWindowZero_RejectedAtFunding`. A zero dispute window was the
+    ///      costless-veto lever, and it is no longer expressible AT ALL: the parameter is gone with the
+    ///      dispute path, and the windows that replaced it are compile-time constants. What must still
+    ///      hold at funding is the DERIVED floor — a deadline too near for the §8.1 machine to run is
+    ///      rejected, and a rejected policy never takes custody.
+    function test_ReclaimFloor_RejectsADeadlineTooNearForTheStateMachine() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
-        c[0].disputeWindow = 0;
+        // One second below the floor == the §8.1 windows cannot all fit before `reclaimAt`.
+        c[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY - 1;
         VNextSettlementEscrow e = _escrowFor(JOB, c);
         VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
         vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
+        vm.expectRevert(VNextSettlementEscrow.BadReclaim.selector);
         e.fund(c, acc);
         assertEq(usdc.balanceOf(address(e)), 0, "a rejected policy never takes custody");
+
+        // And the floor is exactly `CHALLENGE + APPEAL + BACKUP + 1 day`, so at the floor the operator
+        // still has a full day of working time before `primaryVerdictDue`.
+        assertEq(
+            VNextSettlementLib.MIN_RECLAIM_DELAY,
+            VNextSettlementLib.CHALLENGE_WINDOW + VNextSettlementLib.APPEAL_WINDOW
+                + VNextSettlementLib.BACKUP_WINDOW + 1 days
+        );
     }
 
     /// @dev MIGRATED (H-01). arbiter == payer is no longer merely "a deployment-config choice the payer
@@ -1076,11 +1191,11 @@ contract VNextSettlementEscrowTest is Test {
         (,,,,, bool selfAdj) = e.policy();
         assertTrue(selfAdj, "self-adjudication recorded on-chain as bilaterally accepted");
 
+        // Wave 3: the arbiter no longer HAS a money switch (`resolveDispute` is retired), so this
+        // configuration is now merely an accepted identity component. The bilateral CONSENT check above is
+        // what still matters, and the unit settles through the neutral evidence machine like any other.
         bytes32 id = _unitId(e);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(payer); // the same address is also the arbiter
-        e.resolveDispute(id, true); // operator-win -> release
+        _releaseNow(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
@@ -1091,10 +1206,7 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // both pushes -> CLAIM
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, true);
+        _releaseNow(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.remainingClaimCountOf(id), 2);
 
@@ -1249,7 +1361,7 @@ contract VNextSettlementEscrowTest is Test {
         _assert(e, id, 1, 1); // an otherwise-valid assertion already exists
         attester.setEnabled(false); // cohort disabled AFTER the assertion — must neutralize it at payment time
         vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     function test_EvidenceRelease_RevertsOnCohortEpochMismatch() public {
@@ -1260,7 +1372,7 @@ contract VNextSettlementEscrowTest is Test {
         v.oracleAuthEpoch = COHORT + 1; // wrong epoch
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.OracleCohortMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     function test_EvidenceRelease_RevertsOnCompositionRootMismatch() public {
@@ -1272,7 +1384,7 @@ contract VNextSettlementEscrowTest is Test {
         v.compositionRoot = keccak256("some-other-root"); // != frozen 0
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.CompositionRootMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     function test_EvidenceRelease_CompositionHappyPath() public {
@@ -1286,7 +1398,7 @@ contract VNextSettlementEscrowTest is Test {
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
         v.compositionRoot = root; // matches the frozen unit root
         attester.setAssertion(id, _assertionFor(v, address(e)));
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
     }
@@ -1298,10 +1410,7 @@ contract VNextSettlementEscrowTest is Test {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1)); // 2 payout legs, no fee
         bytes32 id = _unitId(e);
         usdc.setTransferMode(MockToken.Mode.REVERT); // every push -> CLAIM
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, true);
+        _releaseNow(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.remainingClaimCountOf(id), 2, "two outstanding claims");
 
@@ -1320,25 +1429,40 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     /// @dev disputeOf surfaces the dispute record set by openDispute; existence-checked.
-    function test_L01_disputeOf() public {
+    /// @dev MIGRATED from `test_L01_disputeOf`. `disputeOf` is retired with the dispute record; the
+    ///      equivalent one-shot read surface is `settlement()`, which publishes the §8.1 state, the
+    ///      escrow-clock `assertedAt`, the exact accepted assertion, the lane, and the live challenge.
+    function test_L01_settlementReadSurface() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
-        VNextSettlementEscrow.Dispute memory pre = e.disputeOf(id);
-        assertFalse(pre.opened, "no dispute before openDispute");
-        assertEq(pre.nonce, 0);
+        {
+            (UnitState s0, uint64 at0, bytes32 aid0, bool bl0, address ch0,, uint256 b0) = e.settlement(id);
+            assertEq(uint256(s0), uint256(UnitState.FUNDED_ACTIVE));
+            assertEq(at0, 0);
+            assertEq(aid0, bytes32(0));
+            assertFalse(bl0);
+            assertEq(ch0, address(0));
+            assertEq(b0, 0);
+        }
 
-        vm.prank(payer);
-        e.openDispute(id);
-        VNextSettlementEscrow.Dispute memory d = e.disputeOf(id);
-        assertTrue(d.opened);
-        assertFalse(d.resolved);
-        assertEq(d.nonce, 1);
-        assertEq(d.openedAt, block.timestamp);
-        assertEq(d.adjudicationDeadline, block.timestamp + 1 days);
-        assertEq(d.effectiveDisputeExpiry, block.timestamp + 1 days, "min(deadline, reclaimAt) = deadline");
+        uint256 acceptedAt = block.timestamp;
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+
+        {
+            (UnitState s1, uint64 at1, bytes32 aid1, bool bl1, address ch1, uint64 cat1, uint256 b1) =
+                e.settlement(id);
+            assertEq(uint256(s1), uint256(UnitState.CHALLENGED));
+            assertEq(uint256(at1), acceptedAt, "assertedAt is the ESCROW's acceptance clock");
+            assertEq(aid1, ASSERTION_1);
+            assertFalse(bl1, "primary lane");
+            assertEq(ch1, payer);
+            assertEq(uint256(cat1), block.timestamp);
+            assertEq(b1, bond);
+        }
 
         vm.expectRevert(VNextSettlementEscrow.UnitNotFound.selector);
-        e.disputeOf(keccak256("no-such-unit"));
+        e.settlement(keccak256("no-such-unit"));
     }
 
     /// @dev MIGRATED from `test_L01_easUidUsed_and_authorizationUsed`. P0-6 removed `easUidUsed` with the
@@ -1366,7 +1490,7 @@ contract VNextSettlementEscrowTest is Test {
         assertFalse(e.authorizationUsed(keccak256("never-issued")), "an unissued auth key reads false");
 
         _assert(e, id, 1, 1);
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertTrue(e.authorizationUsed(authKey), "evidence auth key consumed after release");
     }
 
@@ -1377,15 +1501,16 @@ contract VNextSettlementEscrowTest is Test {
     function test_MaxConfigBytes_IsTheExactCanonicalEnvelope() public pure {
         // 24,644 B at rev-3, + 512 B for §B's per-unit `evidenceCommitter` (16 units x 32 B) = 25,156 B,
         // + 2,272 B for the H-01 `PolicyAcceptance` argument (64 B of extra arg head + 128 B struct head
-        // + 2 x (32 + MAX_SIGNATURE_BYTES) of signature tail) = 27,428 B.
-        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 27_428, "16 units x 16 legs + max acceptance");
+        // + 2 x (32 + MAX_SIGNATURE_BYTES) of signature tail) = 27,428 B, - 512 B when Wave 3 retired the
+        // per-unit `disputeWindow` word with the dispute path (16 units x 32 B) = 26,916 B.
+        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 26_916, "16 units x 16 legs + max acceptance");
     }
 
     /// @dev L-02: a non-zero `o5TypeHash` deployment pin must equal the bound cohort's live type hash.
     function test_Constructor_RejectsTypeHashDrift() public {
         vm.expectRevert(VNextSettlementEscrow.TypeHashMismatch.selector);
         new VNextSettlementEscrowFactory(
-            address(usdc), address(attester), O5_SCHEMA, keccak256("some-other-typehash")
+            address(usdc), address(attester), address(escalation), O5_SCHEMA, keccak256("some-other-typehash")
         );
     }
 
@@ -1397,7 +1522,7 @@ contract VNextSettlementEscrowTest is Test {
     function test_Constructor_RejectsSchemaUidDrift() public {
         vm.expectRevert(VNextSettlementEscrow.SchemaUidMismatch.selector);
         new VNextSettlementEscrowFactory(
-            address(usdc), address(attester), keccak256("some-other-schema"), bytes32(0)
+            address(usdc), address(attester), address(escalation), keccak256("some-other-schema"), bytes32(0)
         );
     }
 
@@ -1408,7 +1533,7 @@ contract VNextSettlementEscrowTest is Test {
 
     function test_Constructor_AcceptsMatchingTypeHash() public {
         VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
-            address(usdc), address(attester), O5_SCHEMA, attester.o5TypeHash()
+            address(usdc), address(attester), address(escalation), O5_SCHEMA, attester.o5TypeHash()
         );
         assertEq(VNextSettlementEscrow(f.implementation()).o5TypeHash(), attester.o5TypeHash());
     }
@@ -1533,16 +1658,19 @@ contract VNextSettlementEscrowTest is Test {
     ///      while the operator is unpaid. The root cause was that no authenticated operator acceptance of
     ///      the funded terms ever existed. Each stage below shows the constraint that now stops it.
     function test_H01_PayerVetoAttack_IsBlockedAtFunding() public {
-        // ── Stage 1: the attack configuration as written. `disputeWindow == 0` is rejected in the funding
-        //    freeze loop by MIN_DISPUTE_WINDOW — even with the operator's signature, even with the
-        //    self-adjudication flag set. The costless-veto TIMING is gone before anything else is checked.
+        // ── Stage 1: the attack configuration as written. The `disputeWindow == 0` lever it depended on
+        //    is now UNEXPRESSIBLE — Wave 3 deleted the parameter along with the dispute path, so the
+        //    nearest remaining timing attack is a deadline too near for the §8.1 machine to run. That is
+        //    rejected in the funding freeze loop by the DERIVED reclaim floor, even with the operator's
+        //    signature and even with the self-adjudication flag set. The costless-veto TIMING is gone
+        //    before anything else is checked.
         VNextSettlementEscrow.UnitConfig[] memory hostile = _oneUnitConfig(1000e6, 0, 0, 1);
-        hostile[0].disputeWindow = 0;
+        hostile[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY - 1;
         VNextSettlementEscrow e0 =
             VNextSettlementEscrow(factory.createEscrow(_identity(JOB, payer, 1, hostile)));
         VNextSettlementEscrow.PolicyAcceptance memory a0 = _acceptance(e0, hostile, true, POLICY_EXPIRY, false);
         vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
+        vm.expectRevert(VNextSettlementEscrow.BadReclaim.selector);
         e0.fund(hostile, a0);
         assertEq(usdc.balanceOf(address(e0)), 0, "no custody was ever taken");
 
@@ -1571,22 +1699,32 @@ contract VNextSettlementEscrowTest is Test {
         vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
         e1.fund(c, forged);
 
-        // ── Stage 4: the operator GENUINELY consents to self-adjudication and a legal window. Funding
-        //    succeeds — the fix is authenticated consent, not banning configurations. The same-block
-        //    sequence is nevertheless unreachable, because `effectiveDisputeExpiry` is strictly after the
-        //    block the dispute opened in.
+        // ── Stage 4: the operator GENUINELY consents to self-adjudication and a legal deadline. Funding
+        //    succeeds — the fix is authenticated consent, not banning configurations. The attack's final
+        //    move is nevertheless unreachable, and Wave 3 makes it unreachable in a STRONGER way than the
+        //    original timing fix did: `openDispute` / `refundOnDisputeExpiry` no longer exist, so there is
+        //    no payer-triggered refund lever at all. The payer's only exits are the deadline (which the
+        //    operator's evidence pre-empts) and a BONDED challenge whose every silence resolves to
+        //    release. Both are exercised here against a valid neutral SETTLE.
         VNextSettlementEscrow.PolicyAcceptance memory real = _acceptance(e1, c, true, POLICY_EXPIRY, false);
         vm.prank(payer);
         e1.fund(c, real);
         bytes32 id = _unitId(e1);
         uint256 payerBefore = usdc.balanceOf(payer);
 
-        vm.prank(payer);
-        e1.openDispute(id);
-        vm.expectRevert(VNextSettlementEscrow.DisputeWindowOpen.selector);
-        e1.refundOnDisputeExpiry(id); // SAME BLOCK — this is the attack's final move
-        assertEq(uint256(e1.unitState(id)), uint256(UnitState.FUNDED_ACTIVE), "funds stay in escrow");
+        // A valid neutral SETTLE is accepted; from here the payer can never unilaterally refund.
+        _acceptNow(e1, id);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e1.reclaimAfterDeadline(id); // C-2: reclaim is permanently barred by the acceptance
         assertEq(usdc.balanceOf(payer), payerBefore, "the payer took nothing");
+
+        // The bonded challenge COSTS the payer and does not refund anything: appeal silence releases.
+        uint256 bond = _challenge(e1, id);
+        assertEq(usdc.balanceOf(payer), payerBefore - bond, "contesting costs the payer the bond");
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        e1.finalize(id);
+        assertEq(uint256(e1.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the operator is paid");
+        assertLt(usdc.balanceOf(payer), payerBefore, "the payer ended strictly worse off, not refunded");
     }
 
     /// @dev The root closure stated on its own: with NO operator signature there is no fundable state at
@@ -1609,18 +1747,32 @@ contract VNextSettlementEscrowTest is Test {
 
     /// @dev With the SMALLEST LEGAL window the same-block sequence is still unreachable — the property
     ///      does not depend on choosing a large window, it holds at the boundary.
-    function test_H01_SameBlockDisputeThenRefund_UnreachableAtTheMinimumWindow() public {
-        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
-        c[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW;
-        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+    /// @dev MIGRATED from `test_H01_SameBlockDisputeThenRefund_UnreachableAtTheMinimumWindow`. The
+    ///      same-block open-then-refund sequence is now unreachable for a STRONGER reason than a minimum
+    ///      window: there is no payer-triggered refund path at all. A challenge costs a bond, cannot
+    ///      refund anything by itself, and its silence resolves to RELEASE. This asserts the whole shape.
+    function test_H01_ChallengeCannotRefundInTheSameBlock_NorEver_ByItself() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        e.acceptAssertion(id);
+        _challenge(e, id);
+
+        // Same block: nothing the payer can call moves money.
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.finalize(id);
         vm.prank(payer);
-        e.openDispute(id);
-        vm.expectRevert(VNextSettlementEscrow.DisputeWindowOpen.selector);
-        e.refundOnDisputeExpiry(id);
-        // The arbiter is NOT already expired either — it has the full window to act.
-        vm.prank(arbiter);
-        e.resolveDispute(id, true);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.reclaimAfterDeadline(id);
+
+        // And after the deadline the payer would ordinarily have reclaimed at, reclaim is STILL barred
+        // (C-2) while the appeal window runs.
+        vm.warp(block.timestamp + 31 days);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.reclaimAfterDeadline(id);
+        // Appeal silence resolves to RELEASE, not refund.
+        e.finalize(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
     }
 
@@ -1812,7 +1964,7 @@ contract VNextSettlementEscrowTest is Test {
         bytes32 digestA = _digestOf(eA, c, false, POLICY_EXPIRY);
 
         VNextSettlementEscrowFactory fB =
-            new VNextSettlementEscrowFactory(address(usdc), address(attester), O5_SCHEMA, bytes32(0));
+            new VNextSettlementEscrowFactory(address(usdc), address(attester), address(escalation), O5_SCHEMA, bytes32(0));
         VNextSettlementEscrow eB = VNextSettlementEscrow(fB.createEscrow(_identity(JOB, arbiter, 1, c)));
         assertTrue(address(eA) != address(eB), "different factories -> different clone addresses");
 
@@ -1945,19 +2097,28 @@ contract VNextSettlementEscrowTest is Test {
         eFar.fund(far, accFar);
     }
 
-    function test_DisputeWindowBounds_MinimumIsAcceptedAndBelowItIsNot() public {
-        VNextSettlementEscrow.UnitConfig[] memory ok = _oneUnitConfig(1000e6, 0, 0, 1);
-        ok[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW;
-        VNextSettlementEscrow eOk = _fundedEscrow(keccak256("win-ok"), ok);
-        assertEq(eOk.disputeWindowOf(_unitIdOf(eOk, ok[0])), VNextSettlementLib.MIN_DISPUTE_WINDOW);
+    /// @dev MIGRATED from `test_DisputeWindowBounds_MinimumIsAcceptedAndBelowItIsNot`. There is no
+    ///      per-job window to bound any more; what replaces it is that a unit funded exactly AT the floor
+    ///      can still run the complete §8.1 machine to a release. That is the property the old bound was
+    ///      protecting, asserted end-to-end instead of as a parameter range.
+    function test_ReclaimFloor_TheFullStateMachineFitsAtTheFloor() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY;
+        VNextSettlementEscrow e = _fundedEscrow(keccak256("floor-ok"), c);
+        bytes32 id = _unitIdOf(e, c[0]);
+        _commit(e, id, PKG);
+        attester.setAssertion(id, _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e)));
 
-        VNextSettlementEscrow.UnitConfig[] memory bad = _oneUnitConfig(1000e6, 0, 0, 1);
-        bad[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW - 1;
-        VNextSettlementEscrow eBad = _escrowFor(keccak256("win-bad"), bad);
-        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(eBad, bad);
-        vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
-        eBad.fund(bad, acc);
+        // The operator has a full day before the primary verdict is due; assert at the last moment before
+        // the cutoff, then run challenge -> appeal-silence -> release, all before `reclaimAt`.
+        uint256 cutoff = c[0].reclaimAt - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;
+        vm.warp(cutoff - 1);
+        e.acceptAssertion(id);
+        _challenge(e, id);
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertLe(block.timestamp, c[0].reclaimAt, "the whole machine terminates by reclaimAt");
     }
 
     /// @dev H-2 checked downcasts, exercised DIRECTLY: `toUint64`/`toUint128` revert rather than
@@ -2066,7 +2227,7 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, PKG);
         assertEq(attester.assertionOf(id).assertionId, bytes32(0), "no assertion bound to this unit");
         vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -2080,7 +2241,7 @@ contract VNextSettlementEscrowTest is Test {
         a.assertionId = bytes32(0);
         attester.setAssertion(id, a);
         vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     // ══ §B — on-chain evidence binding ═════════════════════════════════════════════════════════════
@@ -2165,13 +2326,16 @@ contract VNextSettlementEscrowTest is Test {
         e.submitEvidence(id, PKG);
     }
 
-    function test_SubmitEvidence_RejectsDuringLiveDispute() public {
+    /// @dev MIGRATED from `test_SubmitEvidence_RejectsDuringLiveDispute`. The retired `LiveDispute` guard
+    ///      is SUBSUMED by the state machine: an accepted assertion leaves FUNDED_ACTIVE and
+    ///      `submitEvidence` already requires FUNDED_ACTIVE. The property is unchanged — the committed
+    ///      package cannot be re-pointed once the unit is under the post-verdict machine.
+    function test_SubmitEvidence_RejectsOnceAnAssertionIsAccepted() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
-        vm.prank(payer);
-        e.openDispute(id);
+        _acceptNow(e, id);
         vm.prank(operator);
-        vm.expectRevert(VNextSettlementEscrow.LiveDispute.selector);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
         e.submitEvidence(id, PKG);
     }
 
@@ -2180,7 +2344,7 @@ contract VNextSettlementEscrowTest is Test {
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 1);
-        e.releaseFromEvidence(id); // unit is now SETTLED_RELEASED
+        _settleViaEvidence(e, id); // unit is now SETTLED_RELEASED
         vm.prank(operator);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
         e.submitEvidence(id, keccak256("late-package"));
@@ -2199,7 +2363,7 @@ contract VNextSettlementEscrowTest is Test {
         bytes32 id = _unitId(e);
         _assert(e, id, 1, 1); // an otherwise-perfect verdict, but nothing was committed
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -2211,7 +2375,7 @@ contract VNextSettlementEscrowTest is Test {
         v.evidenceBundleHash = bytes32(0); // matches the unit's untouched storage slot
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
     }
 
     function test_EvidenceRelease_RevertsOnDigestMismatch() public {
@@ -2222,7 +2386,7 @@ contract VNextSettlementEscrowTest is Test {
         v.evidenceBundleHash = _commitment(e, id, keccak256("a-different-package")); // verdict over another package
         attester.setAssertion(id, _assertionFor(v, address(e)));
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
     }
 
@@ -2264,14 +2428,14 @@ contract VNextSettlementEscrowTest is Test {
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         _assert(e, id, 1, 1);
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
 
         O5Assertion memory a2 = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
         a2.assertionId = keccak256("assertion-2"); // a brand-new, fully valid record over the same package
         attester.setAssertion(id, a2);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         assertEq(usdc.balanceOf(feeDest), 23_500000, "paid exactly once");
         assertEq(usdc.balanceOf(address(e)), 0);
     }
@@ -2288,18 +2452,18 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, PKG);
         usdc.setTransferMode(MockToken.Mode.REVERT); // stay in RELEASE_ALLOCATED (claims outstanding)
         _assert(e, id, 1, 1);
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.RELEASE_ALLOCATED));
         assertEq(e.liabilityOf(id), 1000e6, "still owed once, not twice");
 
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id); // same assertion
+        e.acceptAssertion(id); // same assertion
 
         O5Assertion memory a2 = _assertionFor(_o5FullVerdict(e, id, 1, 1), address(e));
         a2.assertionId = keccak256("assertion-2");
         attester.setAssertion(id, a2);
         vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.releaseFromEvidence(id); // fresh assertion, same committed package
+        e.acceptAssertion(id); // fresh assertion, same committed package
         assertEq(e.liabilityOf(id), 1000e6, "no second allocation");
     }
 
@@ -2325,7 +2489,7 @@ contract VNextSettlementEscrowTest is Test {
         _commit(e, id, keccak256("wrong-package"));
         _assert(e, id, 1, 1); // verdict over the RIGHT package -> unpayable against this commit
         vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.releaseFromEvidence(id);
+        e.acceptAssertion(id);
         vm.warp(block.timestamp + 31 days);
         uint256 before = usdc.balanceOf(payer);
         e.reclaimAfterDeadline(id);
@@ -2333,29 +2497,27 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
     }
 
-    /// @dev Dispute-driven refund is likewise independent of any commit.
-    function test_DisputeRefund_WorksWithNoCommit() public {
+    /// @dev MIGRATED from `test_DisputeRefund_WorksWithNoCommit`. The payer's refund path is now the
+    ///      DEADLINE, not a dispute — and it is likewise independent of any commit.
+    function test_DeadlineRefund_WorksWithNoCommit() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         uint256 before = usdc.balanceOf(payer);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, false);
+        vm.warp(block.timestamp + 31 days);
+        e.reclaimAfterDeadline(id);
         assertEq(usdc.balanceOf(payer), before + 1000e6);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
     }
 
-    /// @dev A committed package does not weaken the payer's dispute/refund rights either.
-    function test_DisputeRefund_WorksAfterACommit() public {
+    /// @dev MIGRATED from `test_DisputeRefund_WorksAfterACommit`. A committed package does not weaken the
+    ///      payer's deadline-refund right — only an ACCEPTED assertion does (C-2), which is the point.
+    function test_DeadlineRefund_WorksAfterACommit() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         uint256 before = usdc.balanceOf(payer);
-        vm.prank(payer);
-        e.openDispute(id);
-        vm.prank(arbiter);
-        e.resolveDispute(id, false);
+        vm.warp(block.timestamp + 31 days);
+        e.reclaimAfterDeadline(id);
         assertEq(usdc.balanceOf(payer), before + 1000e6);
     }
 
@@ -2368,6 +2530,12 @@ contract VNextSettlementEscrowTest is Test {
     uint256 constant sk2 = 0x52;
     uint256 constant sk3 = 0x53;
     uint64 constant REAL_COHORT = 9;
+    // A DISJOINT signer set + its own revoker for the REAL escalation cohort: route diversity from the
+    // primary is a deployment property here, not a flag (§2.5).
+    uint256 constant esk1 = 0x61;
+    uint256 constant esk2 = 0x62;
+    uint256 constant esk3 = 0x63;
+    uint64 constant ESC_REAL_COHORT = 19;
     /// @dev An address with NO CODE, handed to the attester as its EAS registry. Any `attest` call against
     ///      it reverts (Solidity's extcodesize guard). Used to prove settlement never reaches EAS.
     address constant DEAD_EAS = address(0xEA5DEAD);
@@ -2387,7 +2555,7 @@ contract VNextSettlementEscrowTest is Test {
             vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), DEAD_EAS, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
         );
         VNextSettlementEscrowFactory f =
-            new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
+            new VNextSettlementEscrowFactory(address(usdc), address(real), address(escalation), O5_SCHEMA, real.o5TypeHash());
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         bytes32 root = keccak256("e2e-composition-root");
         c[0].compositionSchemaVersion = 1;
@@ -2422,7 +2590,7 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(real.assertionOf(id).escrow, address(e), "assertion bound to this escrow");
         assertEq(real.mirroredUid(id), bytes32(0), "settlement did not touch EAS");
 
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
         assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), 1000e6 - 23_500000);
@@ -2437,7 +2605,7 @@ contract VNextSettlementEscrowTest is Test {
             vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), DEAD_EAS, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
         );
         VNextSettlementEscrowFactory f =
-            new VNextSettlementEscrowFactory(address(usdc), address(real), O5_SCHEMA, real.o5TypeHash());
+            new VNextSettlementEscrowFactory(address(usdc), address(real), address(escalation), O5_SCHEMA, real.o5TypeHash());
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         VNextSettlementEscrow e = VNextSettlementEscrow(f.createEscrow(_identity(JOB, arbiter, 1, c)));
         _fund(e, c);
@@ -2467,7 +2635,7 @@ contract VNextSettlementEscrowTest is Test {
 
         v.feeScheduleHash = e.feeScheduleHashOf(id); // oracle refreshes its mirror
         real.attestO5(v, address(e), _ascendingSigs(real.digestOf(v)));
-        e.releaseFromEvidence(id);
+        _settleViaEvidence(e, id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "settles after correction");
     }
 
@@ -2506,6 +2674,7 @@ contract VNextSettlementEscrowTest is Test {
 
     struct P06Fixture {
         Fixed2of3O5Attester attester;
+        Fixed2of3O5Attester escalation;
         VNextSettlementEscrow escrow;
         bytes32 unitId;
         O5Verdict verdict;
@@ -2537,8 +2706,14 @@ contract VNextSettlementEscrowTest is Test {
         fx.attester = new Fixed2of3O5Attester(
             vm.addr(sk1), vm.addr(sk2), vm.addr(sk3), easAddr, O5_SCHEMA, REAL_COHORT, address(0xDEC0DE)
         );
+        // The escalation cohort in the P0-6 end-to-end fixture is a SECOND REAL attester with a
+        // DISJOINT signer set — the property §2.5 asks for (route diversity), made structural by using a
+        // separate deployment rather than a flag on one cohort.
+        fx.escalation = new Fixed2of3O5Attester(
+            vm.addr(esk1), vm.addr(esk2), vm.addr(esk3), easAddr, O5_SCHEMA, ESC_REAL_COHORT, address(0xDEC0DF)
+        );
         VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
-            address(usdc), address(fx.attester), O5_SCHEMA, fx.attester.o5TypeHash()
+            address(usdc), address(fx.attester), address(fx.escalation), O5_SCHEMA, fx.attester.o5TypeHash()
         );
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
         fx.escrow = VNextSettlementEscrow(f.createEscrow(_identity(job, arbiter, 1, c)));
@@ -2574,7 +2749,7 @@ contract VNextSettlementEscrowTest is Test {
         assertEq(DEAD_EAS.code.length, 0, "the EAS registry has no code");
 
         fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
-        fx.escrow.releaseFromEvidence(fx.unitId);
+        _settleViaEvidence(fx.escrow, fx.unitId);
 
         assertEq(uint256(fx.escrow.unitState(fx.unitId)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
@@ -2596,7 +2771,7 @@ contract VNextSettlementEscrowTest is Test {
         vm.expectRevert(RevertingEAS.EasIsDown.selector);
         fx.attester.mirrorToEAS(fx.verdict);
 
-        fx.escrow.releaseFromEvidence(fx.unitId);
+        _settleViaEvidence(fx.escrow, fx.unitId);
         assertEq(uint256(fx.escrow.unitState(fx.unitId)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), 23_500000);
         assertEq(fx.attester.mirroredUid(fx.unitId), bytes32(0), "nothing was falsely marked mirrored");
@@ -2610,7 +2785,7 @@ contract VNextSettlementEscrowTest is Test {
         P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
         bytes32 assertionId =
             fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
-        fx.escrow.releaseFromEvidence(fx.unitId); // settles during the outage
+        _settleViaEvidence(fx.escrow, fx.unitId); // settles during the outage
         vm.expectRevert(RevertingEAS.EasIsDown.selector);
         fx.attester.mirrorToEAS(fx.verdict);
 
@@ -2667,7 +2842,7 @@ contract VNextSettlementEscrowTest is Test {
         P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
         bytes32 assertionId =
             fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
-        fx.escrow.releaseFromEvidence(fx.unitId);
+        _settleViaEvidence(fx.escrow, fx.unitId);
 
         vm.recordLogs();
         bytes32 uid = fx.attester.mirrorToEAS(fx.verdict);
@@ -2698,7 +2873,7 @@ contract VNextSettlementEscrowTest is Test {
         vm.etch(EAS_SLOT, address(new MockReadWriteEAS()).code);
         P06Fixture memory fx = _p06Setup(EAS_SLOT, JOB);
         fx.attester.attestO5(fx.verdict, address(fx.escrow), _ascendingSigs(fx.attester.digestOf(fx.verdict)));
-        fx.escrow.releaseFromEvidence(fx.unitId);
+        _settleViaEvidence(fx.escrow, fx.unitId);
 
         vm.prank(address(0xDEC0DE));
         fx.attester.disable();
@@ -2719,7 +2894,7 @@ contract VNextSettlementEscrowTest is Test {
         vm.prank(address(0xDEC0DE));
         fx.attester.disable();
         vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
-        fx.escrow.releaseFromEvidence(fx.unitId);
+        fx.escrow.acceptAssertion(fx.unitId);
     }
 }
 
