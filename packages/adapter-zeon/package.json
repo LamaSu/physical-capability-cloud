@@ -1,0 +1,30 @@
+{
+  "name": "@pcc/adapter-zeon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zeon Systems adapter for PCC — exposes Zeon project authoring (sync REST) and TEM-1 screen analysis as a PCC digital kernel. Deliberately does NOT expose run-start: the Zeon cloud has no execution API, so a run is triggered from the Workflow Editor by an operator.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@pcc/spec": "workspace:*",
+    "@pcc/kernel-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "rimraf": "^5.0.0"
+  }
+}
