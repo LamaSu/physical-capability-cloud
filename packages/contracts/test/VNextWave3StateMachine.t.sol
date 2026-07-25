@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {VNextSettlementEscrowTest} from "./VNextSettlementEscrow.t.sol";
+import {VNextSettlementEscrowTest, MockToken} from "./VNextSettlementEscrow.t.sol";
 import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
 import {
     O5Assertion,
@@ -176,14 +176,22 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
 
     // ══ (4) appeal: typed, assertion-specific, no distribution authority, SILENCE -> RELEASE ════════
 
-    /// @dev THE safety default of the whole redesign (§2 table + §8.1). Appeal silence must release: if
-    ///      it refunded, the payer would regain the veto H-01 removed simply by challenging and then
-    ///      letting the appeal cohort go quiet. The bond is forfeited exactly as on an explicit UPHOLD.
-    function test_AppealSilence_ReleasesAndForfeitsTheBond() public {
+    /// @dev THE safety default of the whole redesign (§2 table + §8.1) AND the §8.3 C-1 bond rule, which
+    ///      are two separate halves of the same terminal state:
+    ///        * the RELEASE half — silence must not refund, or the payer regains the veto H-01 removed
+    ///          simply by challenging and then letting the appeal cohort go quiet;
+    ///        * the BOND half — the operator takes its full capped delay compensation, and the UNUSED
+    ///          remainder goes back to the CHALLENGER. Nothing is burned, because burning is a penalty and
+    ///          no quorum ruled. C-1, verbatim: "SETTLE releases + fixed delay-comp to the operator +
+    ///          unused challenger bond returned".
+    ///      Wave 3d changed the bond half (it burned the remainder before, treating "no overturn" as a
+    ///      finding of fault). The release half — the part that actually closes H-01 — is untouched.
+    function test_C1_AppealSilence_ReleasesAndReturnsTheUnusedBond() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
         uint256 bond = _challenge(e, id);
         uint256 opBefore = usdc.balanceOf(operator);
+        uint256 challengerBefore = usdc.balanceOf(payer); // `challenge` is payer-only, so payer == challenger
 
         vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW - 1);
         vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
@@ -195,20 +203,184 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         assertEq(usdc.balanceOf(feeDest), F, "the operator side is paid in full");
 
         uint256 comp = VNextSettlementLib.delayCompensation(G, bond);
+        assertGt(comp, 0, "the operator's delay is still compensated, in full and on schedule");
+        assertLt(comp, bond, "and still capped: the delay-comp never swallows the bond");
         assertEq(usdc.balanceOf(operator), opBefore + comp, "capped delay compensation only");
-        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - comp, "the remainder BURNED");
+        assertEq(usdc.balanceOf(payer), challengerBefore + (bond - comp), "the UNUSED bond RETURNS (C-1)");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), 0, "nothing burned: no quorum ever ruled");
+        assertEq(e.bondLiability(), 0, "no bond collateral left stranded");
+        assertEq(e.compLiability(), 0);
+        assertEq(e.burnLiability(), 0);
+        assertEq(usdc.balanceOf(address(e)), 0, "every bucket emptied to a real destination");
         _assertBucketsCovered(e);
     }
 
-    /// @dev §2.4 compensate-then-burn, stated as an economic property: the winner does not profit. The
-    ///      operator receives a CAPPED schedule amount, strictly less than the bond, and no part of the
-    ///      remainder reaches the counterparty or a treasury.
+    /// @dev WHY C-1 is not a softening of §2.4, asserted as an economic identity rather than argued: run
+    ///      the same job to appeal SILENCE and to an explicit UPHOLD, and the OPERATOR'S TAKE IS IDENTICAL.
+    ///      Forfeiting on silence never paid the operator one wei more — it only chose a different home for
+    ///      the challenger's remainder (the burn sink instead of the challenger). So the old rule bought no
+    ///      operator protection and no extra delay coverage; it was pure destruction of the challenger's
+    ///      capital, triggered by an event the challenger neither caused nor could prevent. The half that
+    ///      DOES deter a frivolous challenge — the operator's scheduled delay cost — is charged in both.
+    function test_C1_SilenceAndUphold_PayTheOperatorIdentically_AndDifferOnlyInTheRemainder() public {
+        // (a) appeal SILENCE — the unadjudicated end.
+        (VNextSettlementEscrow eS, bytes32 idS) = _live();
+        _acceptNow(eS, idS);
+        uint256 bond = _challenge(eS, idS);
+        uint256 opBefore = usdc.balanceOf(operator);
+        uint256 challengerBefore = usdc.balanceOf(payer);
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        eS.finalize(idS);
+        uint256 opFromSilence = usdc.balanceOf(operator) - opBefore;
+        uint256 returnedToChallenger = usdc.balanceOf(payer) - challengerBefore;
+
+        // (b) an explicit UPHOLD on an identical job — the adjudicated loss.
+        VNextSettlementEscrow eU = _fundedEscrow(keccak256("job-uphold"), _oneUnitConfig(G, F, BPS, 1));
+        bytes32 idU = VNextSettlementLib.computeSettlementUnitId(
+            block.chainid, address(eU), eU.jobIdHash(), 0, keccak256("step-0")
+        );
+        _acceptNow(eU, idU);
+        assertEq(_challenge(eU, idU), bond, "same job, same bond schedule");
+        opBefore = usdc.balanceOf(operator);
+        challengerBefore = usdc.balanceOf(payer);
+        _adjudicate(eU, idU, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        eU.resolveEscalation(idU, O5_ADJ_ROLE_APPEAL);
+        uint256 opFromUphold = usdc.balanceOf(operator) - opBefore;
+
+        // The identity. Both released the job; both charged the challenger the same delay cost.
+        assertEq(uint256(eS.unitState(idS)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(uint256(eU.unitState(idU)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(opFromSilence, opFromUphold, "forfeiture never paid the operator more than silence does");
+        assertEq(opFromSilence, VNextSettlementLib.delayCompensation(G, bond), "the pre-agreed schedule");
+
+        // The ONLY difference: where the unused remainder went.
+        assertEq(returnedToChallenger, bond - opFromSilence, "silence -> back to the challenger");
+        assertEq(usdc.balanceOf(payer), challengerBefore, "an ADJUDICATED loss returns nothing");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - opFromUphold, "uphold -> the sink");
+        _assertBucketsCovered(eS);
+        _assertBucketsCovered(eU);
+    }
+
+    /// @dev §8.3 C-5 boundary, on the bond. Killing the ESCALATION cohort makes the appeal quorum unable to
+    ///      rule at all (`resolveEscalation` refuses a disabled cohort), so every open challenge falls to
+    ///      the appeal-silence default. C-5 freezes that "the revoker may INITIATE but NEVER chooses the
+    ///      financial result" — so pressing that kill switch must not also decide that challengers lose
+    ///      their bonds. Under the pre-Wave-3d rule it did exactly that: governance action = confiscation.
+    function test_C1_DisabledEscalationCohort_DoesNotPenaliseTheChallenger() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        uint256 opBefore = usdc.balanceOf(operator);
+        uint256 challengerBefore = usdc.balanceOf(payer);
+
+        // The challenger's adjudicating authority is killed by the revoker — not by the challenger.
+        escalation.disableAtNow();
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN); // even a signed OVERTURN is now unusable
+        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // No emergency opens on this unit: `_emergencyDeadline` reads the PRIMARY cohort, which is healthy.
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+
+        uint256 comp = VNextSettlementLib.delayCompensation(G, bond);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "release still holds");
+        assertEq(usdc.balanceOf(operator), opBefore + comp, "the operator's scheduled delay cost, as always");
+        assertEq(usdc.balanceOf(payer), challengerBefore + (bond - comp), "not penalised for a killed authority");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), 0, "a kill switch is not a verdict");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev The same hazard on the lane the Wave-3c M-1 fix made reachable. After `invokeBackup` the unit's
+    ///      settlement authority IS the escalation cohort, so `_emergencyDeadline` deliberately excludes the
+    ///      backup lane (the killed body cannot review itself) and the unit resolves under its ORDINARY
+    ///      windows. A challenger who challenged a valid backup SETTLE and then had the adjudicating body
+    ///      disabled therefore lands on appeal silence — the concrete case where the old rule stripped a
+    ///      bond for a governance action the challenger had no part in.
+    function test_C1_BackupLane_DisabledCohort_DoesNotPenaliseTheChallenger() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _commit(e, id, PKG);
+        uint256 cutoff = e.reclaimAtOf(id) - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;
+        vm.warp(cutoff - VNextSettlementLib.BACKUP_WINDOW);
+        vm.prank(operator);
+        e.invokeBackup(id);
+        _assertOnEscalation(e, id);
+        e.acceptAssertion(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.BACKUP_ASSERTED));
+
+        uint256 bond = _challenge(e, id);
+        uint256 opBefore = usdc.balanceOf(operator);
+        uint256 challengerBefore = usdc.balanceOf(payer);
+        escalation.disableAtNow(); // the body that asserted AND would rule on the appeal is now dead
+
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+
+        uint256 comp = VNextSettlementLib.delayCompensation(G, bond);
+        (,,, bool backupLane,,,) = e.settlement(id);
+        assertTrue(backupLane, "this is the backup lane the M-1 exclusion covers");
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "last authenticated state");
+        assertEq(usdc.balanceOf(operator), opBefore + comp);
+        assertEq(usdc.balanceOf(payer), challengerBefore + (bond - comp), "the unused bond still returns");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), 0);
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev §8.3 H-3 on the NEW arithmetic. `COMP_RETURN` is the one disposition where value both leaves
+    ///      the bond bucket (the compensation) and STAYS in it (the returned remainder), so the CLAIM
+    ///      branch — where no push succeeds and every leg becomes a collateralized claim — is where a
+    ///      bucket error would hide. Every bucket is asserted exactly, the solvency invariant holds while
+    ///      the claims are outstanding, and the job buckets are untouched by any of it.
+    function test_C1_AppealSilence_BucketsAreExactWhenTheReturnBecomesAClaim() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        uint256 comp = VNextSettlementLib.delayCompensation(G, bond);
+
+        usdc.setTransferMode(MockToken.Mode.REVERT); // solvent, but every push safe-fails -> CLAIM
+        vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+
+        assertEq(e.totalLiability(), G, "a CLAIM never discharges liability; the job still owes G");
+        assertEq(e.compLiability(), comp, "the compensation moved bond -> comp bucket and stayed owed");
+        assertEq(e.bondLiability(), bond - comp, "the RETURNED remainder is still challenger money");
+        assertEq(e.burnLiability(), 0, "nothing was routed to the sink");
+        assertEq(usdc.balanceOf(address(e)), G + bond, "and the escrow still physically holds all of it");
+        _assertBucketsCovered(e);
+
+        // Discharging the two bond-family claims empties exactly their own buckets and never the job's.
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        uint256 challengerBefore = usdc.balanceOf(payer);
+        e.dischargeClaim(
+            VNextSettlementLib.computeClaimId(
+                block.chainid, address(e), id, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND
+            )
+        );
+        e.dischargeClaim(
+            VNextSettlementLib.computeClaimId(
+                block.chainid, address(e), id, VNextSettlementLib.DELAY_COMP_LEG_INDEX, ClaimClass.DELAY_COMP
+            )
+        );
+        assertEq(usdc.balanceOf(payer), challengerBefore + (bond - comp), "the challenger is paid its remainder");
+        assertEq(e.bondLiability(), 0);
+        assertEq(e.compLiability(), 0);
+        assertEq(e.totalLiability(), G, "the JOB legs are still owed: a bond claim settled no job leg");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev §2.4 compensate-then-burn on an ADJUDICATED loss — the branch §8.3 C-1 does NOT touch. A quorum
+    ///      ruled on the exact accepted assertion and the challenge lost, so there IS a finding, and the
+    ///      remainder burns. Stated as an economic property: the winner does not profit. The operator
+    ///      receives a CAPPED schedule amount, strictly less than the bond; no part of the remainder
+    ///      reaches the counterparty or a treasury; and — the half that separates this from the silence
+    ///      rule — the challenger gets nothing back.
     function test_CompensateThenBurn_WinningIsNeverAProfit() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
         uint256 bond = _challenge(e, id);
         uint256 opBefore = usdc.balanceOf(operator);
         uint256 feeBefore = usdc.balanceOf(feeDest);
+        uint256 challengerBefore = usdc.balanceOf(payer);
 
         _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
@@ -217,9 +389,13 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         assertEq(comp, VNextSettlementLib.delayCompensation(G, bond), "the pre-agreed schedule, nothing else");
         assertLt(comp, bond, "the operator does not capture the bond");
         assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - comp, "remainder to the sink");
+        assertEq(usdc.balanceOf(payer), challengerBefore, "an adjudicated loss returns NOTHING to the challenger");
         // The fee recipient (the protocol) received only the ordinary job fee — no share of the bond.
         assertEq(usdc.balanceOf(feeDest) - feeBefore, F, "the protocol earns nothing from the dispute");
         assertEq(usdc.balanceOf(address(e)), 0);
+        assertEq(e.bondLiability(), 0);
+        assertEq(e.compLiability(), 0);
+        assertEq(e.burnLiability(), 0);
     }
 
     /// @dev §2.5 assertion-specificity: an adjudication naming a DIFFERENT assertion cannot be applied.

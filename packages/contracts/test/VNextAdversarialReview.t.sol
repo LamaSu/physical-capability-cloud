@@ -407,19 +407,23 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
     }
 
-    /// @dev The §8.3 H-3 solvency invariant survives the full forfeit waterfall: appeal silence forfeits
-    ///      the bond into delay-comp + burn while the job's own G is paid out of the JOB bucket only.
+    /// @dev The §8.3 H-3 solvency invariant survives the full bond waterfall: appeal silence splits the
+    ///      bond into delay-comp + returned remainder (§8.3 C-1) while the job's own G is paid out of the
+    ///      JOB bucket only. The property under test is the NON-CROSSING — the job's G reaches the job's
+    ///      recipients and the bond's every cent reaches a bond-family destination, with neither family
+    ///      financing the other — and it holds under this disposition exactly as it did under the burn.
     function test_S06_BondBucketsNeverCrossTheJobBucket() public {
         (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
         _acceptNow(e, id);
         usdc.mint(payer, 100e6);
         uint256 bond = _challenge(e, id);
+        uint256 challengerBefore = usdc.balanceOf(payer); // `challenge` is payer-only
         assertEq(usdc.balanceOf(address(e)), AG + bond);
         assertEq(e.totalLiability(), AG);
         assertEq(e.bondLiability(), bond);
 
         vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
-        e.finalize(id); // appeal silence -> release + compensate-then-burn
+        e.finalize(id); // appeal silence -> release + compensate-then-RETURN (C-1)
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(e.totalLiability(), 0);
         assertEq(e.bondLiability(), 0);
@@ -428,7 +432,12 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
         assertEq(usdc.balanceOf(feeDest), AF);
         uint256 comp = VNextSettlementLib.delayCompensation(AG, bond);
         assertEq(usdc.balanceOf(operator), comp, "operator got the CAPPED delay comp, not the whole bond");
-        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - comp, "remainder burned, not paid out");
+        assertEq(
+            usdc.balanceOf(payer), challengerBefore + (bond - comp), "the unused remainder returned to the challenger"
+        );
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), 0, "no adjudicated loss, so nothing burned");
         assertEq(usdc.balanceOf(address(e)), 0);
+        // The non-crossing, stated as a sum: the bond financed exactly the bond family, and NOTHING else.
+        assertEq(comp + (usdc.balanceOf(payer) - challengerBefore), bond, "every cent of the bond is accounted for");
     }
 }

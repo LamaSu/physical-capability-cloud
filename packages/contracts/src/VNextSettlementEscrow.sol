@@ -156,7 +156,7 @@ contract VNextSettlementEscrow {
     ///         "an AUTHORITY, never a destination", and that was not true of the code): it is an authority
     ///         on the JOB distribution — `_allocateRelease` pays only the frozen payout legs and the fee
     ///         recipient, never this address — but it IS the destination of ONE bond-family leg, the
-    ///         §2.4 delay compensation (`_forfeitOrReturnBond` → `ClaimClass.DELAY_COMP`). So this key must
+    ///         §2.4 delay compensation (`_disposeBond` → `ClaimClass.DELAY_COMP`). So this key must
     ///         be able to RECEIVE and move USDC. It is held to the payout-recipient exclusion set in
     ///         `initialize` for exactly that reason. Paying delay-comp to a separate payout recipient
     ///         instead would be a distribution change, not a comment change, and is deliberately NOT made
@@ -221,6 +221,19 @@ contract VNextSettlementEscrow {
     enum TransferResult {
         DISCHARGE,
         CLAIM
+    }
+
+    /// @dev The THREE challenge-bond dispositions, and the ONE question that selects between them:
+    ///      was the challenge ADJUDICATED, and if so, did it lose? (§2.4 + §8.3 C-1.)
+    ///      `COMP_RETURN` is the C-1 rule for an UNADJUDICATED end: the operator still receives its
+    ///      capped, pre-agreed delay compensation, and the UNUSED remainder goes back to the challenger
+    ///      rather than to the sink. Burning is a penalty, and a penalty needs a finding; silence is the
+    ///      absence of one. See `_disposeBond` for why the distinction is economic and not cosmetic.
+    enum BondDisposition {
+        RETURN_ALL, // no adjudicated loss, and no delay chargeable to the challenger
+        COMP_RETURN, // §8.3 C-1: unadjudicated end — capped delay-comp, the REST returned
+        COMP_BURN // §2.4: an adjudicated loss — capped delay-comp, the REST burned
+
     }
 
     struct Unit {
@@ -382,7 +395,12 @@ contract VNextSettlementEscrow {
     /// @param reason 0 = uncontested challenge window closed, 1 = appeal silence, 2 = backup timeout,
     ///               3 = emergency-review silence (§8.3 C-5 Model B).
     event Finalized(bytes32 indexed unitId, bool released, uint8 reason);
-    event BondForfeited(bytes32 indexed unitId, uint256 delayCompensation, uint256 burned);
+    /// @dev The full disposition of a challenge bond, in one line: `delayCompensation + remainder == bond`
+    ///      always, and `burned` says where the remainder went (sink if true, back to the challenger if
+    ///      false). It replaces the old `BondForfeited`, which could only describe a forfeiture and so had
+    ///      no way to state the §8.3 C-1 outcome (compensate, then RETURN the remainder) — an event named
+    ///      "forfeited" firing on a return would have been a false log.
+    event BondDisposed(bytes32 indexed unitId, uint256 delayCompensation, uint256 remainder, bool burned);
     event EvidenceReleased(bytes32 indexed unitId, bytes32 indexed assertionId);
     /// @param packageDigest the raw evidence-package digest the committer supplied.
     /// @param commitment    the domain-separated form actually stored + checked at release (§B).
@@ -1531,7 +1549,10 @@ contract VNextSettlementEscrow {
         uint256 emergencyDue = _emergencyDeadline(u);
         if (emergencyDue != 0) {
             if (block.timestamp < emergencyDue) revert WindowStillOpen();
-            _forfeitOrReturnBond(unitId, u, false); // the challenger is made whole; the emergency is not its fault
+            // The challenger is made WHOLE — not merely un-penalised. This end refunds the job, so the
+            // challenge was vindicated in substance and no delay is chargeable to it; and the emergency
+            // is not the challenger's doing either way.
+            _disposeBond(unitId, u, BondDisposition.RETURN_ALL);
             _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
             emit Finalized(unitId, false, 3);
             return;
@@ -1563,9 +1584,25 @@ contract VNextSettlementEscrow {
             if (block.timestamp < uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW) {
                 revert WindowStillOpen();
             }
-            // Appeal silence ⇒ RELEASE, and the bond is forfeited: the challenge failed to produce an
-            // overturn, so §2.4's compensate-then-burn applies exactly as it does to an explicit UPHOLD.
-            _forfeitOrReturnBond(unitId, u, true);
+            // §8.3 C-1 — appeal silence ⇒ RELEASE, operator's capped delay-comp, UNUSED BOND RETURNED.
+            // The release half is the safety default (silence must not refund, or the payer regains the
+            // veto through appeal-liveness failure). The bond half is NOT §2.4: §2.4 disposes of a FAILED
+            // challenge, and no challenge failed here — the quorum never ruled. Three reasons this is the
+            // frozen rule and not a softening of it:
+            //   (a) it costs the operator nothing. `delayCompensation` is paid identically either way; the
+            //       old forfeiture sent the remainder to the burn sink, so it bought the operator zero
+            //       extra compensation and only destroyed the challenger's capital;
+            //   (b) it closes a gain-from-silence. §0's invariant is that NEITHER party improves its
+            //       outcome by an authority going quiet. Under forfeiture, an appeal cohort that would
+            //       have OVERTURNED could instead go quiet and hand the operator the release AND a
+            //       stripped counterparty — a payoff for inducing silence, on the operator's side;
+            //   (c) it keeps a revoker out of the financial result (§8.3 C-5). `resolveEscalation` refuses
+            //       a DISABLED escalation cohort, and `_emergencyDeadline` reads only the PRIMARY cohort —
+            //       so disabling the escalation attester routes every open challenge to exactly this line.
+            //       With forfeiture, pressing that kill switch WAS a decision to confiscate bonds.
+            // The anti-spam function is not lost: the challenger still pays the operator's full scheduled
+            // delay cost. What it no longer pays is a penalty for someone else's failure to rule.
+            _disposeBond(unitId, u, BondDisposition.COMP_RETURN);
             _allocateRelease(unitId, _assertionAuthKey(unitId, u));
             emit Finalized(unitId, true, 1);
             emit EvidenceReleased(unitId, u.acceptedAssertionId);
@@ -1629,8 +1666,11 @@ contract VNextSettlementEscrow {
         bytes32 authKey = _authorizationKey(
             AuthorizationType.DISPUTE, AUTHDOMAIN_DISPUTE, escalationAttester, r.adjudicationId, unitId
         );
-        // §2.4 compensate-then-burn on a failed challenge; full return on a successful one.
-        _forfeitOrReturnBond(unitId, u, upheld);
+        // §2.4 compensate-then-burn on a failed challenge; full return on a successful one. This is the
+        // ADJUDICATED branch — a quorum ruled on the exact accepted assertion — so it is the one place a
+        // burn is a finding rather than an assumption. (Both roles qualify: the EMERGENCY reviewer decides
+        // the same assertion on its merits, and an UPHOLD from it means the challenge was wrong.)
+        _disposeBond(unitId, u, upheld ? BondDisposition.COMP_BURN : BondDisposition.RETURN_ALL);
         if (upheld) {
             _allocateRelease(unitId, authKey);
             emit EvidenceReleased(unitId, u.acceptedAssertionId);
@@ -1640,29 +1680,45 @@ contract VNextSettlementEscrow {
         emit EscalationResolved(unitId, r.adjudicationId, role, upheld);
     }
 
-    /// @dev §2.4 slash waterfall. `forfeit == false` returns the whole bond to the challenger; `true`
-    ///      pays the operator its BOUNDED, pre-agreed delay compensation and BURNS the remainder.
-    ///      The remainder goes to neither counterparty and to no treasury: winning a challenge is never a
-    ///      profit (that would price a bait-a-slash), and a protocol that earned from disputes would be
-    ///      tuned for more of them. Called BEFORE the job allocation so the bond buckets are already
-    ///      correct when `_requireSolvent()` runs inside the allocator.
-    function _forfeitOrReturnBond(bytes32 unitId, Unit storage u, bool forfeit) private {
+    /// @dev §2.4 slash waterfall + §8.3 C-1. The operator's delay compensation is the SAME capped,
+    ///      pre-agreed schedule amount in both `COMP_*` dispositions; the only thing the disposition
+    ///      changes is where the UNUSED remainder goes — the sink (`COMP_BURN`) or back to the challenger
+    ///      (`COMP_RETURN`). That is the whole point of separating them, and it is why "forfeit on
+    ///      silence" was not a stricter version of the same rule: it paid the operator not one wei more,
+    ///      so its extra severity was pure destruction of the challenger's capital, triggered by an event
+    ///      the challenger did not cause and could not prevent.
+    ///
+    ///      WHERE THE LINE FALLS. Burning is a PENALTY and a penalty needs a FINDING:
+    ///        * an adjudicated loss (appeal UPHOLD, emergency UPHOLD) is a finding -> `COMP_BURN`;
+    ///        * an adjudicated win (OVERTURN) means no delay is chargeable at all -> `RETURN_ALL`;
+    ///        * silence — the appeal quorum never ruled, or its cohort was disabled so it never could —
+    ///          is the ABSENCE of a finding -> `COMP_RETURN` (§8.3 C-1: "SETTLE releases + fixed
+    ///          delay-comp to the operator + unused challenger bond returned").
+    ///      Three properties survive intact: the remainder still never reaches a treasury or a
+    ///      counterparty on a lost challenge, winning is still never a profit (the operator's take is
+    ///      capped by `delayCompensation` in every branch), and the job buckets are never touched here.
+    ///      Called BEFORE the job allocation so the bond buckets are already correct when
+    ///      `_requireSolvent()` runs inside the allocator.
+    function _disposeBond(bytes32 unitId, Unit storage u, BondDisposition d) private {
         uint256 b = u.bond;
         if (b == 0) return;
         u.bond = 0;
-        if (!forfeit) {
-            _settleLeg(unitId, u, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND, u.challenger, b);
-            return;
-        }
-        uint256 comp = VNextSettlementLib.delayCompensation(u.feeSchedule.g, b);
-        uint256 burn = b - comp;
-        // Move the value between buckets first: the totals must stay exact even if a leg becomes a claim.
-        bondLiability -= b;
+        uint256 comp = d == BondDisposition.RETURN_ALL ? 0 : VNextSettlementLib.delayCompensation(u.feeSchedule.g, b);
+        uint256 rest = b - comp;
+        bool burn = d == BondDisposition.COMP_BURN;
+        // Move the value between buckets FIRST: the totals must stay exact even if a leg becomes a claim.
+        // Only the compensated part ever leaves the bond bucket unless the remainder is being burned — a
+        // returned remainder is still challenger money and stays collateralized as `BOND` throughout.
+        bondLiability -= burn ? b : comp;
         compLiability += comp;
-        burnLiability += burn;
+        if (burn) burnLiability += rest;
         _settleLeg(unitId, u, VNextSettlementLib.DELAY_COMP_LEG_INDEX, ClaimClass.DELAY_COMP, operator, comp);
-        _settleLeg(unitId, u, VNextSettlementLib.BURN_LEG_INDEX, ClaimClass.BURN, VNextSettlementLib.BURN_SINK, burn);
-        emit BondForfeited(unitId, comp, burn);
+        if (burn) {
+            _settleLeg(unitId, u, VNextSettlementLib.BURN_LEG_INDEX, ClaimClass.BURN, VNextSettlementLib.BURN_SINK, rest);
+        } else {
+            _settleLeg(unitId, u, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND, u.challenger, rest);
+        }
+        emit BondDisposed(unitId, comp, rest, burn);
     }
 
     /// @notice §8.2 C-2 — permissionless payer refund at/after `reclaimAt`, ONLY from FUNDED_ACTIVE.
