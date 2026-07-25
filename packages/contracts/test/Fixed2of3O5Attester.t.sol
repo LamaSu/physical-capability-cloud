@@ -5,7 +5,17 @@ import "forge-std/Test.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {SingleSignerO5Attester} from "../src/attesters/SingleSignerO5Attester.sol";
-import {O5Verdict, O5Assertion, O5_DECISION_SETTLE} from "../src/O5Types.sol";
+import {
+    O5Verdict,
+    O5Assertion,
+    O5Adjudication,
+    O5AdjudicationRecord,
+    O5_DECISION_SETTLE,
+    O5_ADJ_ROLE_APPEAL,
+    O5_ADJ_ROLE_EMERGENCY,
+    O5_ADJ_UPHOLD,
+    O5_ADJ_OVERTURN
+} from "../src/O5Types.sol";
 import {AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 
@@ -89,6 +99,14 @@ contract MockEscrowBinding {
         if (reverts) revert UnitNotFound();
         if (!committed[unitId]) revert EvidenceNotCommitted();
         return _bundle[unitId];
+    }
+
+    /// @dev H-01 Wave 3: the assertion the escrow ACCEPTED for this unit. Zero while nothing is accepted,
+    ///      which is what makes an adjudication over an unaccepted unit fail closed at the attester.
+    mapping(bytes32 => bytes32) public acceptedAssertionIdOf;
+
+    function setAcceptedAssertionId(bytes32 unitId, bytes32 a) external {
+        acceptedAssertionIdOf[unitId] = a;
     }
 }
 
@@ -880,5 +898,213 @@ contract Fixed2of3O5AttesterTest is Test {
         v = _goldenVerdict();
         v.compositionRoot = keccak256("x");
         assertTrue(attester.digestOf(v) != d0, "14 compositionRoot");
+    }
+
+    // == H-01 Wave 3: the typed escalation adjudication (appeal + Model-B emergency) =================
+    // The escrow hosts NO signature verification. Every Wave-3 authority is an m-of-n quorum verified
+    // HERE and read back by the escrow as an immutable record, so these tests are where that quorum's
+    // safety properties live.
+
+    bytes32 constant ACCEPTED = keccak256("the-accepted-assertion");
+
+    function _adj(uint8 role, uint8 outcome) internal view returns (O5Adjudication memory a) {
+        a = O5Adjudication({
+            settlementUnitId: _suid(),
+            escrow: ESCROW,
+            reviewedAssertionId: ACCEPTED,
+            role: role,
+            outcome: outcome,
+            oracleAuthEpoch: COHORT
+        });
+    }
+
+    function _adjSigs(O5Adjudication memory a) internal view returns (bytes[] memory) {
+        return _twoSigsAscending(pk1, pk2, attester.adjudicationDigestOf(a));
+    }
+
+    function _armAccepted() internal {
+        escrowBinding.setAcceptedAssertionId(_suid(), ACCEPTED);
+    }
+
+    /// @dev The happy path: a 2-of-3 quorum writes an immutable, escrow-bound, assertion-specific UPHOLD.
+    function test_Adjudicate_QuorumWritesAnImmutableRecord() public {
+        _armAccepted();
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes32 expected = attester.adjudicationDigestOf(a);
+        bytes32 got = attester.adjudicate(a, _adjSigs(a));
+        assertEq(got, expected, "the adjudication id IS the EIP-712 digest over the full signed struct");
+
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL);
+        assertEq(r.adjudicationId, expected);
+        assertEq(r.reviewedAssertionId, ACCEPTED);
+        assertEq(r.escrow, ESCROW);
+        assertEq(uint256(r.role), uint256(O5_ADJ_ROLE_APPEAL));
+        assertEq(uint256(r.outcome), uint256(O5_ADJ_UPHOLD));
+        assertEq(uint256(r.decidedAt), block.timestamp);
+    }
+
+    /// @dev Consume-once PER ROLE. The appeal slot and the Model-B emergency slot are independent, so an
+    ///      appeal verdict can never consume (or masquerade as) the emergency review of the same unit.
+    function test_Adjudicate_ConsumeOncePerRole_ButRolesAreIndependent() public {
+        _armAccepted();
+        O5Adjudication memory ap = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        attester.adjudicate(ap, _adjSigs(ap));
+        bytes[] memory sigs_ap_0 = _adjSigs(ap);
+        vm.expectRevert(O5AttesterBase.UnitAlreadyAdjudicated.selector);
+        attester.adjudicate(ap, sigs_ap_0);
+
+        // A different OUTCOME under the same role is also refused: the SLOT is consumed, not the value.
+        O5Adjudication memory ap2 = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        bytes[] memory sigs_ap2_1 = _adjSigs(ap2);
+        vm.expectRevert(O5AttesterBase.UnitAlreadyAdjudicated.selector);
+        attester.adjudicate(ap2, sigs_ap2_1);
+
+        // The EMERGENCY slot is untouched and still writable.
+        O5Adjudication memory em = _adj(O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN);
+        attester.adjudicate(em, _adjSigs(em));
+        assertEq(
+            uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_EMERGENCY).outcome), uint256(O5_ADJ_OVERTURN)
+        );
+        assertEq(uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL).outcome), uint256(O5_ADJ_UPHOLD));
+    }
+
+    /// @dev A signature over an APPEAL cannot be replayed as an EMERGENCY (and vice versa): `role` is
+    ///      inside the signed struct, so changing it changes the digest and the quorum no longer holds.
+    function test_Adjudicate_RoleIsInsideTheSignedStruct_NoCrossRoleReplay() public {
+        _armAccepted();
+        O5Adjudication memory ap = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes[] memory sigs = _adjSigs(ap);
+        O5Adjudication memory em = _adj(O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+        vm.expectRevert(O5AttesterBase.NotAuthorizedSigner.selector);
+        attester.adjudicate(em, sigs); // the appeal signatures recover to strangers under the new digest
+    }
+
+    /// @dev An O5 SETTLE signature cannot be replayed as an UPHOLD: separate typehashes, same domain.
+    function test_Adjudicate_AnO5SettleSignatureIsNotAnUphold() public {
+        _armAccepted();
+        O5Verdict memory v = _verdict();
+        bytes[] memory settleSigs = _twoSigsAscending(pk1, pk2, attester.digestOf(v));
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        vm.expectRevert(O5AttesterBase.NotAuthorizedSigner.selector);
+        attester.adjudicate(a, settleSigs);
+    }
+
+    /// @dev ANTI-BRICK (the same discipline as the M-01 pre-check on `attestO5`): the slot is consume-once,
+    ///      so a verdict naming an assertion the escrow did not accept must consume NOTHING and stay
+    ///      re-signable. A unit with nothing accepted reads zero and fails closed for the same reason.
+    function test_Adjudicate_AntiBrick_WrongOrAbsentAssertionConsumesNothing() public {
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes[] memory sigs_a_2 = _adjSigs(a);
+        vm.expectRevert(O5AttesterBase.ReviewedAssertionMismatch.selector);
+        attester.adjudicate(a, sigs_a_2); // nothing accepted yet -> zero -> mismatch
+
+        escrowBinding.setAcceptedAssertionId(_suid(), keccak256("a-different-assertion"));
+        bytes[] memory sigs_a_3 = _adjSigs(a);
+        vm.expectRevert(O5AttesterBase.ReviewedAssertionMismatch.selector);
+        attester.adjudicate(a, sigs_a_3);
+
+        // Nothing was burned: once the escrow's accepted assertion matches, the SAME verdict writes.
+        _armAccepted();
+        attester.adjudicate(a, _adjSigs(a));
+        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL).reviewedAssertionId, ACCEPTED);
+    }
+
+    function test_Adjudicate_RejectsBadRoleOutcomeCohortAndZeroFields() public {
+        _armAccepted();
+        O5Adjudication memory bad = _adj(9, O5_ADJ_UPHOLD);
+        bytes[] memory sigs_bad_4 = _adjSigs(bad);
+        vm.expectRevert(O5AttesterBase.BadAdjudicationRole.selector);
+        attester.adjudicate(bad, sigs_bad_4);
+
+        bad = _adj(O5_ADJ_ROLE_APPEAL, 9);
+        bytes[] memory sigs_bad_5 = _adjSigs(bad);
+        vm.expectRevert(O5AttesterBase.BadAdjudicationOutcome.selector);
+        attester.adjudicate(bad, sigs_bad_5);
+
+        bad = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bad.oracleAuthEpoch = COHORT + 1;
+        bytes[] memory sigs_bad_6 = _adjSigs(bad);
+        vm.expectRevert(O5AttesterBase.CohortMismatch.selector);
+        attester.adjudicate(bad, sigs_bad_6);
+
+        bad = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bad.escrow = address(0);
+        bytes[] memory sigs_bad_7 = _adjSigs(bad);
+        vm.expectRevert(O5AttesterBase.ZeroAddress.selector);
+        attester.adjudicate(bad, sigs_bad_7);
+
+        bad = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bad.reviewedAssertionId = bytes32(0);
+        bytes[] memory sigs_bad_8 = _adjSigs(bad);
+        vm.expectRevert(O5AttesterBase.ZeroReviewedAssertion.selector);
+        attester.adjudicate(bad, sigs_bad_8);
+    }
+
+    /// @dev The adjudication quorum is the SAME m-of-n rule as the settle quorum: one signature is not a
+    ///      quorum, a duplicate is not two signers, and a non-signer is never authorized.
+    function test_Adjudicate_EnforcesTheSameQuorumRule() public {
+        _armAccepted();
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes32 d = attester.adjudicationDigestOf(a);
+
+        bytes[] memory one = new bytes[](1);
+        one[0] = _sig(pk1, d);
+        vm.expectRevert(O5AttesterBase.WrongSignatureCount.selector);
+        attester.adjudicate(a, one);
+
+        bytes[] memory dup = new bytes[](2);
+        dup[0] = _sig(pk1, d);
+        dup[1] = _sig(pk1, d);
+        vm.expectRevert(O5AttesterBase.SignersNotSortedOrUnique.selector);
+        attester.adjudicate(a, dup);
+
+        vm.expectRevert(O5AttesterBase.NotAuthorizedSigner.selector);
+        attester.adjudicate(a, _twoSigsAscending(pk1, pkX, d));
+    }
+
+    function test_Adjudicate_RejectedOnceTheCohortIsDisabled() public {
+        _armAccepted();
+        vm.prank(REVOKER);
+        attester.disable();
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes[] memory sigs_a_9 = _adjSigs(a);
+        vm.expectRevert(O5AttesterBase.CohortIsDisabled.selector);
+        attester.adjudicate(a, sigs_a_9);
+    }
+
+    /// @dev Section 8.3 C-5: `disabledAt` is WRITE-ONCE inside a one-way switch. That is the property
+    ///      that makes the escrow's emergency deadline immutable: the revoker cannot reset or extend it
+    ///      by calling `disable()` again later, so it may INITIATE an emergency but never move its clock.
+    function test_C5_DisabledAtIsWriteOnceAndOneWay() public {
+        assertEq(uint256(attester.disabledAt()), 0, "zero while enabled");
+        vm.warp(1_000_000);
+        vm.prank(REVOKER);
+        attester.disable();
+        assertEq(uint256(attester.disabledAt()), 1_000_000);
+        assertFalse(attester.enabled());
+
+        vm.warp(2_000_000);
+        vm.prank(REVOKER);
+        vm.expectRevert(O5AttesterBase.CohortIsDisabled.selector);
+        attester.disable(); // a second disable cannot move the deadline
+        assertEq(uint256(attester.disabledAt()), 1_000_000, "the emergency deadline is immutable");
+    }
+
+    function test_C5_DisabledAtIsNeverZeroAtGenesis() public {
+        vm.warp(0);
+        vm.prank(REVOKER);
+        attester.disable();
+        assertEq(uint256(attester.disabledAt()), 1, "clamped, so a dead cohort never reads as a live one");
+    }
+
+    /// @dev The record carries NO amount and NO recipient: the "no distribution authority" property is
+    ///      enforced by the TYPE, so this quorum can only ever select a path.
+    function test_Adjudication_HasNoDistributionAuthority() public {
+        _armAccepted();
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        attester.adjudicate(a, _adjSigs(a));
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL);
+        // abi.encode of the whole record is exactly 6 words: id, reviewed, escrow, decidedAt, role, outcome.
+        assertEq(abi.encode(r).length, 6 * 32, "no amount and no recipient field exists to abuse");
     }
 }
