@@ -12,7 +12,15 @@ import {
     ClaimClass,
     AuthorizationType
 } from "./libraries/VNextSettlementLib.sol";
-import {O5Assertion, O5_DECISION_SETTLE} from "./O5Types.sol";
+import {
+    O5Assertion,
+    O5AdjudicationRecord,
+    O5_DECISION_SETTLE,
+    O5_ADJ_ROLE_APPEAL,
+    O5_ADJ_ROLE_EMERGENCY,
+    O5_ADJ_UPHOLD,
+    O5_ADJ_OVERTURN
+} from "./O5Types.sol";
 import {IOracleAttester} from "./interfaces/IOracleAttester.sol";
 
 /// @notice ERC-1271 smart-account signature validation interface.
@@ -49,6 +57,18 @@ contract VNextSettlementEscrow {
     // ── Implementation immutables (baked into impl bytecode; shared by every clone) ──────────────
     address public immutable USDC;
     address public immutable authorizedOracle;
+    /// @notice H-01 §2.5/§2.6/§8.3 C-5 — the PRECOMMITTED ESCALATION COHORT: the backup verdict quorum,
+    ///         the appeal quorum, and the Model-B emergency cohort, all in one independently-deployed
+    ///         attester instance (its signer set, threshold and revoker are immutable per instance, so
+    ///         "independent of the primary" is a deployment fact, not a promise).
+    /// @dev    WHY an IMPLEMENTATION IMMUTABLE and not per-job state: `JobPolicyHash` already binds
+    ///         `implementation` (see `_hashJobPolicy`), so both parties signing the policy ARE signing this
+    ///         address — "precommitted, bilaterally accepted, cannot be installed after funding" comes out
+    ///         for free, with zero clone storage, zero extra policy fields, and zero factory churn. It is
+    ///         the same trust shape as `authorizedOracle`, which the money path already STATICCALLs.
+    ///         Wave 3 puts NO signature verification in this contract: every quorum it depends on is
+    ///         verified inside an attester and read back as an immutable record.
+    address public immutable escalationAttester;
     address public immutable factory;
     /// @dev P0-6: there is NO `EAS` immutable. The escrow reads no attestation registry at all — money
     ///      authorization comes from `IOracleAttester(authorizedOracle).assertionOf(unitId)`, which touches
@@ -136,9 +156,28 @@ contract VNextSettlementEscrow {
     ///      until funded; it is the on-chain record that bilateral acceptance actually happened and the
     ///      anchor the post-verdict state machine will reference.
     bytes32 internal _jobPolicyHash;
-    uint256 public totalLiability; // Σ over units of unit.liability (single-bucket, §3)
+    /// @notice §8.3 H-3 liability bucket 1 of 4 — JOB collateral: Σ over units of unit.liability.
+    uint256 public totalLiability;
+    /// @notice §8.3 H-3 bucket 2 — CHALLENGE BOND: posted by a challenger and owed BACK to that
+    ///         challenger until it is either returned (successful challenge) or forfeited into the
+    ///         delay-comp + burnable buckets (failed challenge). Bonds are NEW USDC, never part of G/F/N.
+    uint256 public bondLiability;
+    /// @notice §8.3 H-3 bucket 3 — DELAY COMPENSATION owed to the operator out of a forfeited bond.
+    uint256 public compLiability;
+    /// @notice §8.3 H-3 bucket 4 — BURNABLE remainder of a forfeited bond, owed to the sink.
+    /// @dev    The fifth named bucket in the frozen list, APPEAL FEE, is deliberately NOT carried here:
+    ///         §8.3 C-1 resolved v1's appeal cost to an owner-funded adjudication RESERVE that lives
+    ///         outside the per-job escrow, and the challenger's bond covers only anti-spam + operator
+    ///         delay-comp. Carrying a permanently-zero slot would be accounting theatre. The invariant
+    ///         this contract actually enforces is `balance >= totalLiability + bondLiability +
+    ///         compLiability + burnLiability`, checked by `_requireSolvent()` before every money move.
+    uint256 public burnLiability;
     uint256 public totalPayoutLegs;
     uint64 public oracleAuthEpoch; // rev-3 §A.2: the funded cohort id, pinned from the attester at fund()
+    /// @dev The escalation cohort's id, pinned at funding for the same reason `oracleAuthEpoch` is: a
+    ///      backup/appeal record echoing a different cohort id is not the cohort this job was funded
+    ///      against. Packs into the same slot as `oracleAuthEpoch`.
+    uint64 public escalationAuthEpoch;
 
     bytes32[] internal _unitIds;
     mapping(bytes32 => uint256) internal _unitIndexPlusOne; // existence + index (default 0 = absent)
@@ -169,34 +208,45 @@ contract VNextSettlementEscrow {
         uint8 requiredTier;
         uint8 requestedTier;
         UnitState state;
-        // ── one packed slot: H-2 bounded timestamps, written via CHECKED downcasts at funding ─────
-        // Both are bounded at funding (reclaimAt <= now + MAX_RECLAIM_DELAY, disputeWindow <=
-        // MAX_RECLAIM_DELAY), so uint64 is provably sufficient; `VNextSettlementLib.toUint64` reverts
-        // rather than truncating if that ever stops being true. Widened back to uint256 by the external
-        // getters, so the published read surface is unchanged.
+        // ── H-2 bounded timestamp, written via a CHECKED downcast at funding ──────────────────────
+        // Bounded at funding (reclaimAt <= now + MAX_RECLAIM_DELAY), so uint64 is provably sufficient;
+        // `VNextSettlementLib.toUint64` reverts rather than truncating if that ever stops being true.
+        // Widened back to uint256 by the external getter, so the published read surface is unchanged.
+        // Every §8.2 C-3 deadline is DERIVED from this one anchor plus the frozen protocol windows —
+        // {primaryVerdictDue, assertionCutoff, challengeDeadline, appealDeadline, backupVerdictDeadline}
+        // are therefore all frozen at funding and none of them is stored, settable, or extendable.
         uint64 reclaimAt;
-        uint64 disputeWindow;
         // ──────────────────────────────────────────────────────────────────────────────────────────
-        uint256 liability; // the unit's sole current liability bucket (§3)
-        uint256 remainingClaimCount; // set at allocation; SETTLED_* only when 0 (§7)
+        uint256 liability; // the unit's sole current JOB liability bucket (§3)
+        uint256 remainingClaimCount; // set at allocation; SETTLED_* only when 0 (§7). JOB legs only.
         uint256 nextApprovalNonce; // buyer-approval single-use nonce (§10.10)
-        // ── one packed slot: 2 + 20 + 1 = 23 bytes ────────────────────────────────────────────────
+        // ── one packed slot: 2 + 20 + 1 + 8 = 31 bytes ────────────────────────────────────────────
         uint16 compositionSchemaVersion; // rev-3 §C2: frozen at funding (0 = non-composed)
         address evidenceCommitter; // §B: the ONLY caller of submitEvidence, frozen at funding
         bool evidenceCommitted; // §B: separate from the hash so a zero/default hash NEVER satisfies release
+        /// @dev §8.2 C-3 — `block.timestamp` AT `acceptAssertion()`, NOT the attester's mint time. This is
+        ///      the whole point of the two-phase accept/finalize split: a stale assertion submitted late
+        ///      starts a FULL challenge window from the moment the escrow accepted it, so it can never
+        ///      have already eaten the window it is supposed to open.
+        uint64 assertedAt;
         // ──────────────────────────────────────────────────────────────────────────────────────────
         bytes32 compositionRoot; // rev-3 §C2/§C3: frozen root, oracle echoes it → equality-checked at release
         bytes32 evidenceBundleHash; // §B: the domain-separated commitment, oracle echoes it → checked at release
-        Dispute dispute;
-    }
-
-    struct Dispute {
-        bool opened;
-        bool resolved;
-        uint256 nonce;
-        uint256 openedAt;
-        uint256 adjudicationDeadline;
-        uint256 effectiveDisputeExpiry;
+        /// @dev The EXACT assertion this unit accepted. Every escalation verdict must name it
+        ///      (`O5AdjudicationRecord.reviewedAssertionId`), so an appeal decided over one assertion can
+        ///      never be applied to another. Zero until acceptance.
+        bytes32 acceptedAssertionId;
+        // ── one packed slot: 20 + 8 + 1 = 29 bytes ────────────────────────────────────────────────
+        address challenger; // §2.2: who posted the bond (the payer); zero when unchallenged
+        uint64 challengedAt; // the appeal window's anchor
+        /// @dev §8.2 C-4 — set ONE-WAY by `invokeBackup`. It is simultaneously "the primary lane is
+        ///      closed" and "the escalation cohort is this unit's settlement authority": once true the
+        ///      unit's state can never return to FUNDED_ACTIVE, so no primary assertion is reachable
+        ///      again and there is exactly one backup outcome. That is verifier-shopping closed by the
+        ///      state machine rather than by a separate flag that could drift out of sync with it.
+        bool backupLane;
+        // ──────────────────────────────────────────────────────────────────────────────────────────
+        uint256 bond; // the challenge bond currently held for this unit (0 when none)
     }
 
     struct ClaimRecord {
@@ -221,7 +271,11 @@ contract VNextSettlementEscrow {
         uint256 n;
         uint16 feeBps;
         address feeRecipient;
-        uint256 disputeWindow;
+        // NOTE: `disputeWindow` was REMOVED here in Wave 3 together with the free-floating dispute path it
+        // parameterized. It is not left as an ignored field: `UnitConfig[]` is hashed into `prePolicyRoot`
+        // and therefore into this clone's own address, so a term that no longer does anything would be a
+        // term both parties sign and neither can rely on. The post-verdict windows are protocol constants
+        // bound through `implementation` (see VNextSettlementLib).
         uint256 reclaimAt; // absolute timestamp; must be in the future
         uint16 compositionSchemaVersion; // rev-3 §C2 (0 = non-composed)
         bytes32 compositionRoot; // rev-3 §C2/§C3 (echoed into O5, equality-checked at release)
@@ -294,8 +348,18 @@ contract VNextSettlementEscrow {
     event ClaimDischarged(bytes32 indexed claimId, bytes32 indexed unitId, address destination, uint256 amount);
     event ReleaseAllocated(bytes32 indexed unitId, uint256 claimCount);
     event RefundAllocated(bytes32 indexed unitId, uint256 claimCount);
-    event DisputeOpened(bytes32 indexed unitId, uint256 nonce, uint256 effectiveDisputeExpiry);
-    event DisputeResolved(bytes32 indexed unitId, bool operatorWins);
+    // ── H-01 §8.1 post-verdict state machine ─────────────────────────────────────────────────────
+    /// @param assertedAt the ESCROW's clock at acceptance (§8.2 C-3), not the attester's mint time.
+    event AssertionAccepted(
+        bytes32 indexed unitId, bytes32 indexed assertionId, address indexed attester, uint64 assertedAt, bool backupLane
+    );
+    event Challenged(bytes32 indexed unitId, address indexed challenger, uint256 bond, uint64 challengedAt);
+    event BackupInvoked(bytes32 indexed unitId, uint64 at);
+    event EscalationResolved(bytes32 indexed unitId, bytes32 indexed adjudicationId, uint8 role, bool upheld);
+    /// @param reason 0 = uncontested challenge window closed, 1 = appeal silence, 2 = backup timeout,
+    ///               3 = emergency-review silence (§8.3 C-5 Model B).
+    event Finalized(bytes32 indexed unitId, bool released, uint8 reason);
+    event BondForfeited(bytes32 indexed unitId, uint256 delayCompensation, uint256 burned);
     event EvidenceReleased(bytes32 indexed unitId, bytes32 indexed assertionId);
     /// @param packageDigest the raw evidence-package digest the committer supplied.
     /// @param commitment    the domain-separated form actually stored + checked at release (§B).
@@ -320,9 +384,6 @@ contract VNextSettlementEscrow {
     error PayoutSumMismatch();
     error ForbiddenRecipient();
     error BadReclaim();
-    /// @notice H-01 §13.1/H-2: the dispute window is outside [MIN_DISPUTE_WINDOW, MAX_RECLAIM_DELAY]. A
-    ///         zero window is what let `openDispute` and `refundOnDisputeExpiry` run in the SAME BLOCK.
-    error BadDisputeWindow();
     /// @notice H-01: the operator and the payer must be distinct money-plane identities. Address inequality
     ///         is not independence, but it is a necessary condition for bilateral acceptance to mean anything.
     error PartyCollision();
@@ -350,15 +411,32 @@ contract VNextSettlementEscrow {
     error NotActive();
     error AuthorizationUsed();
     error RuntimeDomainMismatch();
-    error TooLateToDispute();
-    error DisputeAlreadyOpen();
-    error NotArbiter();
-    error NoLiveDispute();
-    error DisputeExpired();
-    error DisputeWindowOpen();
     error TooEarlyToReclaim();
-    error LiveDispute();
     error ClaimNotFound();
+    // ── H-01 §8.1 post-verdict state machine ─────────────────────────────────────────────────────
+    /// @notice Only the money-plane operator may escalate to the backup cohort (§2.6: the payer must NOT
+    ///         control this — a payer-invocable escalation is the withholding attack with extra steps).
+    error OnlyOperator();
+    /// @notice §8.2 C-3: `now >= reclaimAt - CHALLENGE_WINDOW - APPEAL_WINDOW`. A verdict that arrives too
+    ///         late for its own challenge + appeal windows to fit before the payer's deadline is refused,
+    ///         rather than silently extending the payer's capital lock past `reclaimAt`.
+    error AssertionCutoffPassed();
+    /// @notice §2.6: the primary verdict is not yet overdue, so the backup lane is not open.
+    error PrimaryVerdictNotDue();
+    /// @notice The challenge window on this assertion has closed (finalization is now the only move).
+    error ChallengeWindowClosed();
+    /// @notice A window that must elapse before this call is still open (challenge / appeal / backup /
+    ///         emergency review). Deliberately one error: the caller can read the state + deadlines view.
+    error WindowStillOpen();
+    /// @notice The unit is not in a state this escalation role can decide.
+    error BadEscalationRole();
+    /// @notice §8.3 C-5: the asserting cohort has been disabled, so ordinary finalization is PAUSED and
+    ///         only the emergency cohort (or the emergency deadline) may resolve this unit.
+    error EmergencyPaused();
+    /// @notice The unit is not under an emergency, so the emergency role has nothing to decide.
+    error NoEmergency();
+    /// @notice A unit may carry at most one live challenge.
+    error AlreadyChallenged();
     error ClaimStillUnpayable();
     error TooLateForEvidence();
     /// @dev P0-6: "no cohort assertion is bound to this unit" (an all-zero record ⇒ zero assertion id).
@@ -423,11 +501,17 @@ contract VNextSettlementEscrow {
     }
 
     /// @param usdc canonical settlement asset (Base USDC).
-    /// @param oracle the authorized O5 attester — the SOLE source of evidence-release authorization (P0-6).
+    /// @param oracle the authorized O5 attester — the SOLE source of PRIMARY settlement authorization (P0-6).
+    /// @param escalation the precommitted escalation cohort attester (backup verdicts + appeal + Model-B
+    ///        emergency). MUST be a different deployment from `oracle`: a single cohort acting as both the
+    ///        primary authority and its own appeal/emergency reviewer is not an appeal, it is a rubber
+    ///        stamp, and it would make §2.5's route-diversity requirement unsatisfiable at the type level.
     /// @param schemaUid / typeHash O5 publication pins (0 until O5 opens); metadata, not runtime checks.
-    constructor(address usdc, address oracle, bytes32 schemaUid, bytes32 typeHash) {
+    constructor(address usdc, address oracle, address escalation, bytes32 schemaUid, bytes32 typeHash) {
         USDC = usdc;
         authorizedOracle = oracle;
+        if (escalation == address(0) || escalation == oracle) revert ForbiddenRecipient();
+        escalationAttester = escalation;
         o5SchemaUid = schemaUid;
         // M-02: pin the published schema-UID metadata SYMMETRICALLY with the type-hash pin below. Without
         // it a one-char schema divergence would make every mint burn a unit's one-verdict slot and every
@@ -513,6 +597,11 @@ contract VNextSettlementEscrow {
         // enabled()/cohortId() are external view (STATICCALL) on the immutable, trusted attester.
         if (!IOracleAttester(authorizedOracle).enabled()) revert InvalidOrDisabledCohort();
         oracleAuthEpoch = IOracleAttester(authorizedOracle).cohortId();
+        // Wave 3: the ESCALATION cohort must also be live at funding and is pinned the same way. Funding a
+        // job whose only recourse path is already dead would hand the payer a guaranteed refund on any
+        // withheld primary verdict — i.e. the H-01 free option, restored through the escalation lane.
+        if (!IOracleAttester(escalationAttester).enabled()) revert InvalidOrDisabledCohort();
+        escalationAuthEpoch = IOracleAttester(escalationAttester).cohortId();
         emit OracleCohortPinned(oracleAuthEpoch);
 
         configurationSealed = true; // effects before the external token pull (nonReentrant-guarded)
@@ -585,16 +674,12 @@ contract VNextSettlementEscrow {
                 reclaimDelay < VNextSettlementLib.MIN_RECLAIM_DELAY
                     || reclaimDelay > VNextSettlementLib.MAX_RECLAIM_DELAY
             ) revert BadReclaim();
-            // H-01 anti-costless-veto. With a nonzero minimum window,
-            // `effectiveDisputeExpiry = min(openedAt + disputeWindow, reclaimAt)` is STRICTLY greater than
-            // `openedAt` — `openDispute` already requires `openedAt < reclaimAt`, so both branches of the
-            // min exceed `openedAt`. `refundOnDisputeExpiry` requires `now >= effectiveDisputeExpiry`, so
-            // the same-block openDispute -> refundOnDisputeExpiry sequence is impossible BY CONSTRUCTION,
-            // not by policy. The upper edge keeps the value inside its checked uint64 packing.
-            if (
-                c.disputeWindow < VNextSettlementLib.MIN_DISPUTE_WINDOW
-                    || c.disputeWindow > VNextSettlementLib.MAX_RECLAIM_DELAY
-            ) revert BadDisputeWindow();
+            // H-01 anti-costless-veto, Wave 3 form. The same-block "open a dispute, then immediately
+            // refund on its expiry" sequence is now impossible for a stronger reason than a minimum
+            // window: THAT PATH NO LONGER EXISTS. A payer's only way to contest an accepted SETTLE is a
+            // bonded, assertion-specific challenge whose failure mode is RELEASE, and the floor above
+            // (`MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + 1 day`) is what guarantees every
+            // window in the §8.1 machine has room to run before the payer's own deadline.
 
             Unit storage u = _units[unitId];
             u.feeSchedule = fs;
@@ -612,9 +697,8 @@ contract VNextSettlementEscrow {
             _requireAllowedRecipient(c.evidenceCommitter);
             u.evidenceCommitter = c.evidenceCommitter;
             u.state = UnitState.FUNDED_ACTIVE;
-            // H-2 checked downcasts into the packed slot (both values were bounded immediately above).
+            // H-2 checked downcast into the packed slot (the value was bounded immediately above).
             u.reclaimAt = VNextSettlementLib.toUint64(c.reclaimAt);
-            u.disputeWindow = VNextSettlementLib.toUint64(c.disputeWindow);
             u.liability = g; // FUNDED_ACTIVE liability == G (§3)
 
             _unitIds.push(unitId);
@@ -632,10 +716,7 @@ contract VNextSettlementEscrow {
         _acceptPolicy(configs, acceptance);
 
         // Pull exactly ΣG and verify the received delta (C4 — rejects fee-on-transfer / under-receipt).
-        uint256 beforeBal = _safeBalanceOf(self);
-        IERC20(USDC).safeTransferFrom(payer, self, expectedGross);
-        uint256 afterBal = _safeBalanceOf(self);
-        if (afterBal < beforeBal || afterBal - beforeBal != expectedGross) revert FundingDeltaMismatch();
+        _pullExact(payer, expectedGross);
 
         emit Funded(nConfigs, expectedGross, legTotal);
     }
@@ -753,6 +834,16 @@ contract VNextSettlementEscrow {
     // ── Recipient exclusion set (High 9) ──────────────────────────────────────────────────────────
     function _requireAllowedRecipient(address r) internal view {
         if (r == address(0) || r == address(this) || r == USDC || r == factory) revert ForbiddenRecipient();
+    }
+
+    /// @dev C4 exact-receipt pull, shared by `fund` (ΣG) and `challenge` (the bond). A token that takes a
+    ///      fee on transfer, or credits less than it was asked for, fails here instead of leaving the
+    ///      escrow quietly under-collateralized against a liability bucket it just increased.
+    function _pullExact(address from, uint256 amount) private {
+        uint256 beforeBal = _safeBalanceOf(address(this));
+        IERC20(USDC).safeTransferFrom(from, address(this), amount);
+        uint256 afterBal = _safeBalanceOf(address(this));
+        if (afterBal < beforeBal || afterBal - beforeBal != amount) revert FundingDeltaMismatch();
     }
 
     // ── Safe balance read (C1): staticcall balanceOf; require success + exactly 32 bytes ──────────
@@ -881,7 +972,10 @@ contract VNextSettlementEscrow {
         if (msg.sender != u.evidenceCommitter) revert OnlyEvidenceCommitter();
         if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
         if (block.timestamp >= u.reclaimAt) revert TooLateForEvidence();
-        if (u.dispute.opened) revert LiveDispute();
+        // The retired `LiveDispute` guard here is SUBSUMED, not dropped: a dispute used to be a flag on a
+        // still-FUNDED_ACTIVE unit, so it needed its own check. Wave 3's equivalents (PRIMARY_ASSERTED /
+        // CHALLENGED / BACKUP_*) are STATES, and the `FUNDED_ACTIVE` requirement one line up already
+        // excludes every one of them.
         if (packageDigest == bytes32(0)) revert ZeroEvidenceDigest();
         if (u.evidenceCommitted) revert EvidenceAlreadyCommitted();
 
@@ -920,8 +1014,47 @@ contract VNextSettlementEscrow {
         return _units[unitId].reclaimAt;
     }
 
-    function disputeWindowOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].disputeWindow;
+    /// @notice H-01 §8.1 — the complete post-verdict record for a unit, in ONE read (collapsed by design:
+    ///         the frozen size-reclamation order prefers collapsing read surfaces, and a verifier needs
+    ///         these fields together or not at all).
+    /// @return state_ the §8.1 state.
+    /// @return assertedAt_ the ESCROW's acceptance timestamp (§8.2 C-3), 0 until accepted.
+    /// @return acceptedAssertionId_ the exact assertion under this unit's post-verdict machine.
+    /// @return backupLane_ true once the primary lane was closed one-way (§8.2 C-4).
+    /// @return challenger_ / challengedAt_ / bond_ the live bonded challenge, if any.
+    function settlement(bytes32 unitId)
+        external
+        view
+        onlyExisting(unitId)
+        returns (
+            UnitState state_,
+            uint64 assertedAt_,
+            bytes32 acceptedAssertionId_,
+            bool backupLane_,
+            address challenger_,
+            uint64 challengedAt_,
+            uint256 bond_
+        )
+    {
+        Unit storage u = _units[unitId];
+        return (u.state, u.assertedAt, u.acceptedAssertionId, u.backupLane, u.challenger, u.challengedAt, u.bond);
+    }
+
+    // NOTE: there is deliberately NO `deadlinesOf` / `liabilityBuckets` convenience view. Every deadline
+    // is `reclaimAt` (published by `reclaimAtOf`) or `assertedAt`/`challengedAt` (published by
+    // `settlement`) plus a compile-time window from {VNextSettlementLib}, and every bucket already has a
+    // public accessor. On a contract at its EIP-170 ceiling, a derived view is bytecode spent on
+    // arithmetic any caller can do for free.
+
+    /// @notice §8.2 H-2 — the exact bond `challenge()` will pull for this unit. Deterministic.
+    function requiredBondOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
+        return VNextSettlementLib.challengeBond(_units[unitId].feeSchedule.g);
+    }
+
+    /// @notice The assertion id this unit accepted, or zero. Read by the escalation attester's anti-brick
+    ///         pre-check so an adjudication naming the wrong assertion can never burn the unit's slot.
+    function acceptedAssertionIdOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
+        return _units[unitId].acceptedAssertionId;
     }
 
     function liabilityOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
@@ -959,11 +1092,6 @@ contract VNextSettlementEscrow {
         return c;
     }
 
-    /// @notice The dispute record for a unit (opened/resolved/nonce/timing). Existence-checked.
-    function disputeOf(bytes32 unitId) external view onlyExisting(unitId) returns (Dispute memory) {
-        return _units[unitId].dispute;
-    }
-
     /// @notice Outstanding collateralized claims for a unit; a unit reaches SETTLED_* only once this hits 0 (§7).
     function remainingClaimCountOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
         return _units[unitId].remainingClaimCount;
@@ -984,9 +1112,15 @@ contract VNextSettlementEscrow {
     // uses tryTransferExact (three-way + both-delta), and consumes the unit before any transfer.
     // FROZEN §§4/5/9/10.10 + sol guards C1–C5 / H6–H10.
 
-    /// @dev Global solvency gate (C1 / DI-3): escrow USDC must cover ALL outstanding liabilities.
+    /// @dev Global solvency gate (C1 / DI-3): escrow USDC must cover ALL outstanding liabilities across
+    ///      EVERY §8.3 H-3 bucket — job collateral AND challenge-bond collateral. This one line is what
+    ///      makes "a job release/refund must never consume bond collateral" structural: a release may only
+    ///      proceed while the balance still covers the bond buckets on top of the job bucket, so paying G
+    ///      out can never dip into a challenger's stake, an operator's unpaid delay-comp, or a pending burn.
     function _requireSolvent() private view {
-        if (_safeBalanceOf(address(this)) < totalLiability) revert Insolvent();
+        if (_safeBalanceOf(address(this)) < totalLiability + bondLiability + compLiability + burnLiability) {
+            revert Insolvent();
+        }
     }
 
     /// @dev Runtime-domain check (E5/H2/H6): the frozen chainId/escrow must equal the live values.
@@ -1025,6 +1159,11 @@ contract VNextSettlementEscrow {
     /// @dev Settle one leg during allocation: DISCHARGE decrements both liability buckets; CLAIM
     ///      records a collateralized claim and leaves liability (still owed — a CLAIM never ADDS
     ///      liability, §3 / sol C3). Returns 1 iff a claim was created.
+    ///      Wave 3: ONE settler for both liability families. `class <= REFUND` is a JOB leg and moves the
+    ///      job buckets; anything above is a BOND-family leg (§8.3 H-3) and moves only its own bucket, so
+    ///      a bond leg can never touch `u.liability` / `totalLiability` and a job leg can never touch a
+    ///      bond bucket. Only JOB legs count toward `remainingClaimCount` (the return value), which keeps
+    ///      SETTLED_* meaning exactly what §7 froze it to mean.
     function _settleLeg(
         bytes32 unitId,
         Unit storage u,
@@ -1033,9 +1172,15 @@ contract VNextSettlementEscrow {
         address recipient,
         uint256 amount
     ) private returns (uint256 claimCreated) {
+        if (amount == 0) return 0;
+        bool job = class <= ClaimClass.REFUND;
         if (_tryTransferExact(recipient, amount) == TransferResult.DISCHARGE) {
-            u.liability -= amount;
-            totalLiability -= amount;
+            if (job) {
+                u.liability -= amount;
+                totalLiability -= amount;
+            } else {
+                _releaseBondBucket(class, amount);
+            }
             emit LegDischarged(unitId, legIndex, class, recipient, amount);
             return 0;
         }
@@ -1050,14 +1195,18 @@ contract VNextSettlementEscrow {
             destinationNonce: 0
         });
         emit ClaimCreated(cid, unitId, legIndex, class, recipient, amount);
-        return 1;
+        return job ? 1 : 0;
     }
 
     /// @dev The SINGLE release allocator (sol C2). All release authorities converge here, so the
     ///      distribution is identical regardless of authority. Consumes FUNDED_ACTIVE before transfers.
     function _allocateRelease(bytes32 unitId, bytes32 authKey) private {
         Unit storage u = _units[unitId];
-        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
+        // Wave 3: the live set is the five contiguous §8.1 states, not FUNDED_ACTIVE alone — a release can
+        // now be reached from PRIMARY_ASSERTED / BACKUP_ASSERTED (uncontested) or CHALLENGED (uphold or
+        // appeal silence). Each caller enforces its OWN precise precondition first; this is the shared
+        // "nothing has been allocated for this unit yet" gate.
+        if (u.state > UnitState.BACKUP_ASSERTED) revert NotActive();
         _assertRuntimeDomain(u);
         _requireSolvent();
         if (_authorizationUsed[authKey]) revert AuthorizationUsed();
@@ -1082,7 +1231,7 @@ contract VNextSettlementEscrow {
     /// @dev The refund allocator: the entire committed G returns to the immutable payer (one leg).
     function _allocateRefund(bytes32 unitId, bytes32 authKey) private {
         Unit storage u = _units[unitId];
-        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
+        if (u.state > UnitState.BACKUP_ASSERTED) revert NotActive();
         _assertRuntimeDomain(u);
         _requireSolvent();
         if (_authorizationUsed[authKey]) revert AuthorizationUsed();
@@ -1106,80 +1255,345 @@ contract VNextSettlementEscrow {
         _requireSolvent();
         address dest = c.claimDestination;
         uint256 amount = c.amount;
+        ClaimClass cl = c.class;
         if (_tryTransferExact(dest, amount) != TransferResult.DISCHARGE) revert ClaimStillUnpayable();
+        delete _claims[claimId];
+        emit ClaimDischarged(claimId, unitId, dest, amount);
+        // §8.3 H-3: which bucket this claim was collateralized out of decides which bucket it releases.
+        // A bond-family claim NEVER touches `u.liability` / `totalLiability`, and therefore never lets
+        // bond money settle a job leg (nor a job leg settle a bond).
+        if (cl > ClaimClass.REFUND) {
+            _releaseBondBucket(cl, amount);
+            return;
+        }
         u.liability -= amount;
         totalLiability -= amount;
-        delete _claims[claimId];
+        // `remainingClaimCount` counts JOB legs only, so SETTLED_* keeps its frozen §7 meaning ("every
+        // leg of the distribution is discharged") and is not held open by an unrelated bond claim.
         u.remainingClaimCount -= 1;
-        emit ClaimDischarged(claimId, unitId, dest, amount);
         if (u.remainingClaimCount == 0) {
             u.state = u.state == UnitState.REFUND_ALLOCATED ? UnitState.SETTLED_REFUNDED : UnitState.SETTLED_RELEASED;
         }
     }
 
-    // ── Dispute + reclaim authorities (FROZEN §4) ─────────────────────────────────────────────────
-
-    /// @notice Payer opens a dispute before `reclaimAt`; blocks evidence release, arms arbitration.
-    function openDispute(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
-        if (msg.sender != payer) revert OnlyPayer();
-        Unit storage u = _units[unitId];
-        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
-        if (block.timestamp >= u.reclaimAt) revert TooLateToDispute();
-        if (u.dispute.opened) revert DisputeAlreadyOpen(); // single dispute (v1)
-        u.dispute.opened = true;
-        u.dispute.nonce += 1;
-        u.dispute.openedAt = block.timestamp;
-        uint256 deadline = block.timestamp + u.disputeWindow; // checked (0.8)
-        u.dispute.adjudicationDeadline = deadline;
-        uint256 eff = deadline < u.reclaimAt ? deadline : u.reclaimAt; // min(deadline, reclaimAt)
-        u.dispute.effectiveDisputeExpiry = eff;
-        emit DisputeOpened(unitId, u.dispute.nonce, eff);
+    /// @dev Decrement the §8.3 H-3 bond-family bucket a discharged/settled aux leg belonged to.
+    function _releaseBondBucket(ClaimClass cl, uint256 amount) private {
+        if (cl == ClaimClass.BOND) {
+            bondLiability -= amount;
+        } else if (cl == ClaimClass.DELAY_COMP) {
+            compLiability -= amount;
+        } else {
+            burnLiability -= amount;
+        }
     }
 
-    /// @notice Arbiter resolves before `effectiveDisputeExpiry`: operator-win → release, else refund.
-    function resolveDispute(bytes32 unitId, bool operatorWins) external nonReentrant onlyExisting(unitId) {
-        if (msg.sender != arbiter) revert NotArbiter();
+    // ── H-01 §8.1 POST-VERDICT STATE MACHINE ──────────────────────────────────────────────────────
+    //
+    // This section REPLACES the retired `openDispute` / `resolveDispute` / `refundOnDisputeExpiry` trio.
+    // Those were a free-floating payer veto: a costless call that blocked a valid neutral SETTLE and, on
+    // adjudicator silence, auto-refunded. Nothing here reintroduces that shape. Every path below obeys the
+    // §0 invariant — once both parties accepted the unit and a valid neutral SETTLE exists, the payer may
+    // only DELAY settlement by posting a bond and invoking the precommitted appeal, and every silence
+    // resolves to the LAST AUTHENTICATED STATE (release), never to the escalator's preferred outcome.
+    //
+    //   FUNDED_ACTIVE    --accept primary SETTLE----------> PRIMARY_ASSERTED
+    //                    --operator invokes backup--------> BACKUP_PENDING   (one-way, C-4)
+    //                    --reclaimAt, nothing accepted----> REFUND_ALLOCATED
+    //   PRIMARY_ASSERTED --challenge window elapses-------> RELEASE_ALLOCATED    (default RELEASE)
+    //                    --bonded challenge---------------> CHALLENGED
+    //   CHALLENGED       --appeal UPHOLD------------------> RELEASE_ALLOCATED
+    //                    --appeal OVERTURN----------------> REFUND_ALLOCATED
+    //                    --appeal window elapses (SILENCE)-> RELEASE_ALLOCATED
+    //   BACKUP_PENDING   --accept backup SETTLE-----------> BACKUP_ASSERTED
+    //                    --assertion cutoff (timeout)-----> REFUND_ALLOCATED
+    //   BACKUP_ASSERTED  --same two exits as PRIMARY_ASSERTED
+    //   any of the five  --asserting cohort DISABLED------> emergency review (Model B), silence -> REFUND
+    //
+    // The whole machine is permissionlessly drivable: `acceptAssertion`, `finalize` and `resolveEscalation`
+    // take no privileged sender, so no keeper's absence can strand a unit or restore a party's veto.
+
+    /// @notice §8.2 C-3 — the latest moment an assertion may be ACCEPTED, primary or backup.
+    /// @dev    `reclaimAt - CHALLENGE_WINDOW - APPEAL_WINDOW`, verbatim from the freeze. Underflow-free by
+    ///         construction: funding requires `reclaimAt >= now + MIN_RECLAIM_DELAY` and
+    ///         `MIN_RECLAIM_DELAY == CHALLENGE + APPEAL + BACKUP + 1 day`. It exists so a late verdict can
+    ///         never extend the payer's capital lock past its own `reclaimAt`.
+    function _assertionCutoff(Unit storage u) private view returns (uint256) {
+        return uint256(u.reclaimAt) - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW;
+    }
+
+    /// @dev The cohort that is (or would be) this unit's settlement authority. §8.2 C-4 makes this
+    ///      one-way: before escalation it is the primary; after `invokeBackup` it is the escalation cohort
+    ///      and can never be the primary again.
+    function _assertingAttester(Unit storage u) private view returns (address) {
+        return u.backupLane ? escalationAttester : authorizedOracle;
+    }
+
+    /// @dev §8.3 C-5 (Model B) — 0 when no emergency is open for this unit, else the IMMUTABLE deadline.
+    ///      Scoped to the unit's CURRENT settlement authority on purpose. Scoping it to "either bound
+    ///      cohort" would hand the escalation cohort's revoker a kill-switch over every healthy primary
+    ///      settlement — a brand-new veto, which is the exact class of thing H-01 exists to delete. A unit
+    ///      that escalated AWAY from a disabled primary is no longer bound by that primary's emergency:
+    ///      escalation is the cure for the disable, not a second victim of it.
+    ///      The deadline is `disabledAt + EMERGENCY_REVIEW_WINDOW`, and `disabledAt` is write-once inside
+    ///      a one-way switch, so the revoker cannot extend it, reset it, or pick the outcome behind it.
+    function _emergencyDeadline(Unit storage u) private view returns (uint256) {
+        uint64 d = IOracleAttester(_assertingAttester(u)).disabledAt();
+        return d == 0 ? 0 : uint256(d) + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+    }
+
+    /// @notice §2.2 + §8.2 C-3 — ACCEPT a cohort SETTLE for this unit. Permissionless.
+    /// @dev    THE central Wave-3 change: a valid SETTLE no longer transfers funds. It creates a pending
+    ///         settlement stamped with the ESCROW's own clock, opening a bounded challenge window; the
+    ///         money moves later, from `finalize` or an escalation verdict. The full release predicate
+    ///         (identity, tier, fee commitment, cohort epoch, composition root, evidence binding,
+    ///         kill-switch) is enforced HERE, unchanged and in the same order — acceptance is exactly as
+    ///         hard as release used to be, and the split only inserts a window, never a weaker check.
+    ///
+    ///         Lane routing is by state, not by an argument, so a caller cannot choose which cohort is
+    ///         consulted: FUNDED_ACTIVE reads the primary, BACKUP_PENDING reads the escalation cohort.
+    ///         Because `invokeBackup` is one-way and no state returns to FUNDED_ACTIVE, a primary
+    ///         assertion is structurally unreachable after escalation (§8.2 C-4, no verifier-shopping).
+    function acceptAssertion(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
         Unit storage u = _units[unitId];
-        if (!u.dispute.opened || u.dispute.resolved) revert NoLiveDispute();
-        if (block.timestamp >= u.dispute.effectiveDisputeExpiry) revert DisputeExpired();
-        u.dispute.resolved = true;
-        bytes32 authKey = _disputeAuthKey(unitId, u.dispute.nonce, operatorWins, u.dispute.adjudicationDeadline);
-        if (operatorWins) {
+        UnitState s = u.state;
+        bool backup = s == UnitState.BACKUP_PENDING;
+        if (!backup && s != UnitState.FUNDED_ACTIVE) revert NotActive();
+        if (block.timestamp >= _assertionCutoff(u)) revert AssertionCutoffPassed();
+
+        address att = backup ? escalationAttester : authorizedOracle;
+        O5Assertion memory a = IOracleAttester(att).assertionOf(unitId);
+        if (a.assertionId == bytes32(0)) revert AttestationNotFound();
+        if (a.escrow != address(this)) revert WrongRecipient(); // the `attestation.recipient` check
+
+        // H3 identity — see the note on the release predicate below: recomputing the id from the escrow's
+        // OWN frozen fields pins jobIdHash / milestoneIndex / stepId / escrow by collision resistance.
+        bytes32 recomputed = VNextSettlementLib.computeSettlementUnitId(
+            u.feeSchedule.chainId, address(this), jobIdHash, u.milestoneIndex, u.stepId
+        );
+        if (recomputed != unitId) revert IdentityMismatch();
+
+        // Evidence predicate (§9): settle-only, Tier>=1, tier fulfillment + request identity, fee commitment.
+        if (a.decision != O5_DECISION_SETTLE) revert NotSettle();
+        if (u.requiredTier < 1) revert Tier0NotEvidence();
+        if (a.achievedTier > MAX_TIER) revert TierOutOfRange(); // M-01: bound the oracle-asserted tier (0..3)
+        if (a.achievedTier < u.requiredTier) revert TierNotMet();
+        if (a.requestedTier != u.requiredTier) revert RequestedTierMismatch();
+        if (a.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
+        // M-01: also bind the RAW fee fields carried in the permanent assertion, not just their 13-field hash.
+        if (a.feeBps != u.feeSchedule.feeBps) revert FeeBpsMismatch();
+        if (a.feeRecipient != u.feeSchedule.feeRecipient) revert FeeRecipientMismatch();
+
+        // rev-3 §A.2/§C3: cohort-epoch binding + composition-root binding, per LANE. The backup lane pins
+        // the escalation cohort's own funded epoch for exactly the reason the primary lane pins its own.
+        if (a.oracleAuthEpoch != (backup ? escalationAuthEpoch : oracleAuthEpoch)) revert OracleCohortMismatch();
+        if (a.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
+
+        // §B on-chain evidence binding: the verdict must be over the package this unit committed to.
+        if (!u.evidenceCommitted || a.evidenceBundleHash != u.evidenceBundleHash) revert EvidenceBundleMismatch();
+
+        // Kill-switch AT ACCEPTANCE TIME, and again at finalization (see `finalize`): a one-way disable
+        // neutralizes an otherwise-valid pre-written assertion at BOTH ends of the challenge window.
+        if (!IOracleAttester(att).enabled()) revert OracleCohortDisabled();
+
+        // §8.2 C-3: the escrow's OWN clock, never `a.assertedAt`. A verdict minted weeks ago and submitted
+        // one hour before the cutoff still gets a full, fresh challenge window.
+        uint64 nowTs = uint64(block.timestamp);
+        u.assertedAt = nowTs;
+        u.acceptedAssertionId = a.assertionId;
+        u.state = backup ? UnitState.BACKUP_ASSERTED : UnitState.PRIMARY_ASSERTED;
+        emit AssertionAccepted(unitId, a.assertionId, att, nowTs, backup);
+    }
+
+    /// @notice §2.2/§2.3 — the payer contests THIS EXACT accepted assertion, posting the frozen bond.
+    /// @dev    This is a challenge TO the oracle verdict, not a veto OF it: it buys an appeal, and its
+    ///         failure mode (including appeal silence) is RELEASE. The bond is pulled atomically with the
+    ///         same delta discipline as funding, so "challenger never completes the bond ⇒ the challenge
+    ///         never opens ⇒ release" is true by construction rather than by a separate timeout.
+    function challenge(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
+        if (msg.sender != payer) revert OnlyPayer();
+        Unit storage u = _units[unitId];
+        UnitState s = u.state;
+        if (s != UnitState.PRIMARY_ASSERTED && s != UnitState.BACKUP_ASSERTED) revert NotActive();
+        if (u.bond != 0) revert AlreadyChallenged();
+        if (block.timestamp >= uint256(u.assertedAt) + VNextSettlementLib.CHALLENGE_WINDOW) {
+            revert ChallengeWindowClosed();
+        }
+        uint256 bond = VNextSettlementLib.challengeBond(u.feeSchedule.g);
+
+        // Effects before the token pull (nonReentrant-guarded).
+        u.state = UnitState.CHALLENGED;
+        u.challenger = msg.sender;
+        u.challengedAt = uint64(block.timestamp);
+        u.bond = bond;
+        bondLiability += bond;
+
+        _pullExact(msg.sender, bond);
+        emit Challenged(unitId, msg.sender, bond, u.challengedAt);
+    }
+
+    /// @notice §2.6/§8.2 C-4 — the OPERATOR closes the primary lane and opens the backup cohort.
+    /// @dev    Operator-only and one-way. Operator-only because this is the operator's recourse against a
+    ///         WITHHELD verdict; a payer-invocable escalation would just be the withholding attack with an
+    ///         extra step. One-way because the state can never return to FUNDED_ACTIVE, so there is
+    ///         exactly one backup outcome and no shopping between two live lanes.
+    ///         Two triggers: the primary verdict is overdue (`>= primaryVerdictDue`), or the primary
+    ///         cohort has been disabled — in which case the lane is provably closed and waiting out the
+    ///         clock would only burn the operator's remaining window (§8.3 C-5, pre-assertion branch).
+    function invokeBackup(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
+        if (msg.sender != operator) revert OnlyOperator();
+        Unit storage u = _units[unitId];
+        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
+        uint256 cutoff = _assertionCutoff(u);
+        if (block.timestamp >= cutoff) revert AssertionCutoffPassed();
+        if (
+            block.timestamp < cutoff - VNextSettlementLib.BACKUP_WINDOW
+                && IOracleAttester(authorizedOracle).disabledAt() == 0
+        ) revert PrimaryVerdictNotDue();
+        u.backupLane = true;
+        u.state = UnitState.BACKUP_PENDING;
+        emit BackupInvoked(unitId, uint64(block.timestamp));
+    }
+
+    /// @notice §8.1 — drive a unit past whichever window has now elapsed. Permissionless.
+    /// @dev    The safety defaults live here, and every one of them preserves the LAST AUTHENTICATED
+    ///         STATE: an unchallenged assertion releases, a challenge that outlives its appeal releases
+    ///         (silence must not refund, or the payer regains the veto through appeal-liveness failure),
+    ///         a backup lane that produced no verdict refunds, and a declared emergency that produced no
+    ///         verdict refunds. The emergency branch is checked FIRST because §8.3 C-5 makes it the one
+    ///         deliberate exception: while the asserting cohort is disabled, ordinary finalization PAUSES.
+    function finalize(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
+        Unit storage u = _units[unitId];
+        UnitState s = u.state;
+        if (s > UnitState.BACKUP_ASSERTED) revert NotActive();
+
+        uint256 emergencyDue = _emergencyDeadline(u);
+        if (emergencyDue != 0) {
+            if (block.timestamp < emergencyDue) revert WindowStillOpen();
+            _forfeitOrReturnBond(unitId, u, false); // the challenger is made whole; the emergency is not its fault
+            _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
+            emit Finalized(unitId, false, 3);
+            return;
+        }
+
+        if (s == UnitState.PRIMARY_ASSERTED || s == UnitState.BACKUP_ASSERTED) {
+            if (block.timestamp < uint256(u.assertedAt) + VNextSettlementLib.CHALLENGE_WINDOW) {
+                revert WindowStillOpen();
+            }
+            // Re-check the kill-switch at PAYMENT time (the property the pre-Wave-3 release path had).
+            if (!IOracleAttester(_assertingAttester(u)).enabled()) revert EmergencyPaused();
+            _allocateRelease(unitId, _assertionAuthKey(unitId, u));
+            emit Finalized(unitId, true, 0);
+            emit EvidenceReleased(unitId, u.acceptedAssertionId);
+        } else if (s == UnitState.CHALLENGED) {
+            if (block.timestamp < uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW) {
+                revert WindowStillOpen();
+            }
+            if (!IOracleAttester(_assertingAttester(u)).enabled()) revert EmergencyPaused();
+            // Appeal silence ⇒ RELEASE, and the bond is forfeited: the challenge failed to produce an
+            // overturn, so §2.4's compensate-then-burn applies exactly as it does to an explicit UPHOLD.
+            _forfeitOrReturnBond(unitId, u, true);
+            _allocateRelease(unitId, _assertionAuthKey(unitId, u));
+            emit Finalized(unitId, true, 1);
+            emit EvidenceReleased(unitId, u.acceptedAssertionId);
+        } else if (s == UnitState.BACKUP_PENDING) {
+            // §8.1: backup REJECT / timeout ⇒ refund. The backup verdict deadline IS the assertion cutoff.
+            if (block.timestamp < _assertionCutoff(u)) revert WindowStillOpen();
+            _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
+            emit Finalized(unitId, false, 2);
+        } else {
+            revert NotActive(); // FUNDED_ACTIVE with no emergency: `reclaimAfterDeadline` is the exit
+        }
+    }
+
+    /// @notice §2.5/§8.3 C-5 — apply a typed escalation verdict (APPEAL or Model-B EMERGENCY).
+    /// @dev    Permissionless: the escrow READS an immutable, quorum-verified record out of the escalation
+    ///         attester and applies its OWN frozen distribution. The record carries no amount and no
+    ///         recipient, so this quorum can only select release-or-refund — never move, resize or
+    ///         redirect money. There is no signature verification in this contract at all.
+    /// @param role `O5_ADJ_ROLE_APPEAL` (only while CHALLENGED and no emergency) or
+    ///        `O5_ADJ_ROLE_EMERGENCY` (only while an emergency is open, for any accepted assertion).
+    function resolveEscalation(bytes32 unitId, uint8 role) external nonReentrant onlyExisting(unitId) {
+        Unit storage u = _units[unitId];
+        UnitState s = u.state;
+        bool emergency = _emergencyDeadline(u) != 0;
+
+        if (role == O5_ADJ_ROLE_APPEAL) {
+            // Model B: once an emergency is declared, the appeal quorum no longer decides this unit — the
+            // emergency cohort reviews the exact assertion instead. Otherwise a pre-signed appeal could
+            // pre-empt the systemic-compromise review that was declared precisely to override it.
+            if (emergency) revert EmergencyPaused();
+            if (s != UnitState.CHALLENGED) revert NotActive();
+            if (block.timestamp >= uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW) {
+                revert WindowStillOpen(); // the window closed; `finalize` now owns the (release) default
+            }
+        } else if (role == O5_ADJ_ROLE_EMERGENCY) {
+            if (!emergency) revert NoEmergency();
+            if (s < UnitState.PRIMARY_ASSERTED || s > UnitState.BACKUP_ASSERTED) revert NotActive();
+        } else {
+            revert BadEscalationRole();
+        }
+
+        O5AdjudicationRecord memory r = IOracleAttester(escalationAttester).adjudicationOf(unitId, role);
+        if (r.adjudicationId == bytes32(0)) revert AttestationNotFound();
+        if (r.escrow != address(this)) revert WrongRecipient();
+        // Assertion-specific by construction: a verdict signed over one assertion cannot be applied to
+        // another, and `acceptedAssertionId` is nonzero only in the accepted states gated above.
+        if (r.reviewedAssertionId != u.acceptedAssertionId) revert IdentityMismatch();
+        // A killed escalation cohort's pre-written verdict must not move money, exactly as a killed
+        // primary cohort's pre-written assertion must not (the symmetric rev-3 kill-switch property).
+        if (IOracleAttester(escalationAttester).disabledAt() != 0) revert OracleCohortDisabled();
+
+        bool upheld = r.outcome == O5_ADJ_UPHOLD; // the attester admits only UPHOLD | OVERTURN
+        bytes32 authKey = _authorizationKey(
+            AuthorizationType.DISPUTE, AUTHDOMAIN_DISPUTE, escalationAttester, r.adjudicationId, unitId
+        );
+        // §2.4 compensate-then-burn on a failed challenge; full return on a successful one.
+        _forfeitOrReturnBond(unitId, u, upheld);
+        if (upheld) {
             _allocateRelease(unitId, authKey);
+            emit EvidenceReleased(unitId, u.acceptedAssertionId);
         } else {
             _allocateRefund(unitId, authKey);
         }
-        emit DisputeResolved(unitId, operatorWins);
+        emit EscalationResolved(unitId, r.adjudicationId, role, upheld);
     }
 
-    /// @notice Permissionless payer refund once an opened dispute passes `effectiveDisputeExpiry`
-    ///         unresolved — available even before `reclaimAt` (no dead interval, §4).
-    function refundOnDisputeExpiry(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
-        Unit storage u = _units[unitId];
-        if (!u.dispute.opened || u.dispute.resolved) revert NoLiveDispute();
-        if (block.timestamp < u.dispute.effectiveDisputeExpiry) revert DisputeWindowOpen();
-        u.dispute.resolved = true;
-        bytes32 authKey = _disputeAuthKey(unitId, u.dispute.nonce, false, u.dispute.adjudicationDeadline);
-        _allocateRefund(unitId, authKey);
-        emit DisputeResolved(unitId, false);
+    /// @dev §2.4 slash waterfall. `forfeit == false` returns the whole bond to the challenger; `true`
+    ///      pays the operator its BOUNDED, pre-agreed delay compensation and BURNS the remainder.
+    ///      The remainder goes to neither counterparty and to no treasury: winning a challenge is never a
+    ///      profit (that would price a bait-a-slash), and a protocol that earned from disputes would be
+    ///      tuned for more of them. Called BEFORE the job allocation so the bond buckets are already
+    ///      correct when `_requireSolvent()` runs inside the allocator.
+    function _forfeitOrReturnBond(bytes32 unitId, Unit storage u, bool forfeit) private {
+        uint256 b = u.bond;
+        if (b == 0) return;
+        u.bond = 0;
+        if (!forfeit) {
+            _settleLeg(unitId, u, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND, u.challenger, b);
+            return;
+        }
+        uint256 comp = VNextSettlementLib.delayCompensation(u.feeSchedule.g, b);
+        uint256 burn = b - comp;
+        // Move the value between buckets first: the totals must stay exact even if a leg becomes a claim.
+        bondLiability -= b;
+        compLiability += comp;
+        burnLiability += burn;
+        _settleLeg(unitId, u, VNextSettlementLib.DELAY_COMP_LEG_INDEX, ClaimClass.DELAY_COMP, operator, comp);
+        _settleLeg(unitId, u, VNextSettlementLib.BURN_LEG_INDEX, ClaimClass.BURN, VNextSettlementLib.BURN_SINK, burn);
+        emit BondForfeited(unitId, comp, burn);
     }
 
-    /// @notice Permissionless payer refund at/after `reclaimAt` when no dispute is live.
+    /// @notice §8.2 C-2 — permissionless payer refund at/after `reclaimAt`, ONLY from FUNDED_ACTIVE.
+    /// @dev    This is the reclaim exclusion, and it is enforced by the state machine rather than by a
+    ///         flag: an accepted SETTLE leaves FUNDED_ACTIVE and NOTHING returns a unit to it, so ordinary
+    ///         deadline reclaim is disabled PERMANENTLY from the moment of acceptance. A missing keeper
+    ///         does not restore it — `finalize` is permissionless and can be called at any later time — and
+    ///         a validly-opened challenge (CHALLENGED) equally cannot be bypassed back into a refund here.
     function reclaimAfterDeadline(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
         Unit storage u = _units[unitId];
         if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
         if (block.timestamp < u.reclaimAt) revert TooEarlyToReclaim();
-        if (u.dispute.opened && !u.dispute.resolved) revert LiveDispute(); // use refundOnDisputeExpiry first
-        bytes32 authKey = _authorizationKey(
-            AuthorizationType.RECLAIM,
-            AUTHDOMAIN_RECLAIM,
-            address(this),
-            // uint256() is explicit, not cosmetic: `abi.encode` pads a uint64 to the same 32 bytes, so the
-            // authorization key is byte-identical to the pre-packing form — stated so it stays that way.
-            keccak256(abi.encode("RECLAIM", unitId, uint256(u.reclaimAt))),
-            unitId
-        );
-        _allocateRefund(unitId, authKey);
+        _allocateRefund(unitId, _deadlineAuthKey(unitId, u));
     }
 
     /// @dev §2 authorization-key envelope (L-01): binds type + issuer domain + issuer + raw id + chain + escrow + unit.
@@ -1195,104 +1609,37 @@ contract VNextSettlementEscrow {
         );
     }
 
-    function _disputeAuthKey(bytes32 unitId, uint256 nonce, bool operatorWins, uint256 adjudicationDeadline)
-        private
-        view
-        returns (bytes32)
-    {
-        bytes32 rawId = keccak256(abi.encode("DISPUTE", unitId, nonce, operatorWins, adjudicationDeadline));
-        return _authorizationKey(AuthorizationType.DISPUTE, AUTHDOMAIN_DISPUTE, arbiter, rawId, unitId);
+    /// @dev The evidence authorization key for a unit's ACCEPTED assertion. Issuer = the lane's cohort,
+    ///      raw id = the assertion id (the FULL signed verdict hash) — the same envelope the pre-Wave-3
+    ///      release path consumed, so the single-use replay guard carries forward unchanged.
+    function _assertionAuthKey(bytes32 unitId, Unit storage u) private view returns (bytes32) {
+        return _authorizationKey(
+            AuthorizationType.EVIDENCE, AUTHDOMAIN_EVIDENCE, _assertingAttester(u), u.acceptedAssertionId, unitId
+        );
     }
 
-    // ── Crypto authorities (INCREMENT 2b-ii) ─────────────────────────────────────────────────────
-
-    /// @notice Evidence release (FROZEN §9, sol H8/H3): read the DIRECT COHORT ASSERTION bound to this
-    ///         unit and, on a settle verdict for a Tier>=1 unit with matching identity + fee commitment,
-    ///         release. P0-6: this is the ONLY evidence-release path — the EAS-read path is deleted, not
-    ///         retained behind a flag, so there is exactly one release predicate to audit and no bypass.
-    /// @dev    The money path now makes exactly two STATICCALLs, both to the escrow's own immutable
-    ///         `authorizedOracle` (`assertionOf`, `enabled`). It reads no attestation registry and depends
-    ///         on no global write, so no external outage can strand a funded job on the release side.
-    ///
-    ///         Checks structurally SUBSUMED by reading the attester directly (each was an EAS artifact):
-    ///          * `attestation.attester == authorizedOracle` → the escrow CALLS `authorizedOracle`; "who
-    ///            asserted" is now the identity of the callee, not a field to compare.
-    ///          * `attestation.uid == requestedUid` → the record is KEYED by `settlementUnitId`, which is
-    ///            the argument, so it is bound to the requested unit by construction. The caller no longer
-    ///            selects which verdict to present at all.
-    ///          * `attestation.schema == o5SchemaUid` → there is no ABI blob to type; the record is a typed
-    ///            struct with one canonical shape.
-    ///          * `data.length == O5_VERDICT_BYTES` → same reason: nothing is decoded from bytes.
-    ///          * `revocationTime == 0` → O5 records were already minted non-revocable, and the assertion
-    ///            record is write-once by construction. The cohort kill-switch (`enabled`, re-checked
-    ///            below) remains the real revocation lever and is unchanged.
-    ///          * `expirationTime` → O5 mints always used "never expires"; the unit's own `reclaimAt`
-    ///            (checked above) is the real time bound and is unchanged.
-    ///         Everything else is preserved verbatim, in the same order, below.
-    function releaseFromEvidence(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
-        Unit storage u = _units[unitId];
-        if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
-        if (block.timestamp >= u.reclaimAt) revert TooLateForEvidence();
-        if (u.dispute.opened) revert LiveDispute(); // H7: any opened dispute blocks evidence release
-
-        // The one money-path read (replaces `IEAS.getAttestation`). Fail-closed: an un-asserted unit
-        // returns the all-zero record, whose zero `assertionId` is rejected on the next line (L-02).
-        O5Assertion memory a = IOracleAttester(authorizedOracle).assertionOf(unitId);
-        if (a.assertionId == bytes32(0)) revert AttestationNotFound();
-        if (a.escrow != address(this)) revert WrongRecipient(); // the `attestation.recipient` check
-
-        // H3 identity. The attester bound `computeSettlementUnitId(chainid, escrow, jobIdHash,
-        // milestoneIndex, stepId) == v.settlementUnitId` before writing, and this record is keyed by that
-        // same id; recomputing the id here from the escrow's OWN FROZEN fields and requiring equality
-        // therefore pins jobIdHash / milestoneIndex / stepId / escrow by collision resistance — the same
-        // guarantee the four field-by-field comparisons used to give, without carrying the fields.
-        bytes32 recomputed = VNextSettlementLib.computeSettlementUnitId(
-            u.feeSchedule.chainId, address(this), jobIdHash, u.milestoneIndex, u.stepId
+    /// @dev The deadline-refund authorization key (ordinary reclaim, backup timeout, emergency timeout).
+    ///      One key for all three because the state machine admits at most ONE of them per unit: each
+    ///      leaves the live set, and nothing re-enters it.
+    function _deadlineAuthKey(bytes32 unitId, Unit storage u) private view returns (bytes32) {
+        return _authorizationKey(
+            AuthorizationType.RECLAIM,
+            AUTHDOMAIN_RECLAIM,
+            address(this),
+            // uint256() is explicit, not cosmetic: `abi.encode` pads a uint64 to the same 32 bytes, so the
+            // authorization key is byte-identical to the pre-packing form — stated so it stays that way.
+            keccak256(abi.encode("RECLAIM", unitId, uint256(u.reclaimAt))),
+            unitId
         );
-        if (recomputed != unitId) revert IdentityMismatch();
-
-        // Evidence predicate (§9): settle-only, Tier>=1, tier fulfillment + request identity, fee commitment.
-        // The attester also pre-checks these (M-01 anti-brick) against the SAME frozen escrow state; they
-        // are re-checked here because this is the contract that moves the money and the fields it compares
-        // against are its own storage, not a value another contract reported.
-        if (a.decision != O5_DECISION_SETTLE) revert NotSettle();
-        if (u.requiredTier < 1) revert Tier0NotEvidence();
-        if (a.achievedTier > MAX_TIER) revert TierOutOfRange(); // M-01: bound the oracle-asserted tier (0..3)
-        if (a.achievedTier < u.requiredTier) revert TierNotMet();
-        if (a.requestedTier != u.requiredTier) revert RequestedTierMismatch();
-        if (a.feeScheduleHash != u.feeScheduleHash) revert FeeHashMismatch();
-        // M-01: also bind the RAW fee fields carried in the permanent assertion, not just their 13-field
-        // hash — downstream receipts/indexers read these words directly, so a true-hash/false-economics
-        // verdict must be rejected here too (the attester pre-checks the same two fields before asserting).
-        if (a.feeBps != u.feeSchedule.feeBps) revert FeeBpsMismatch();
-        if (a.feeRecipient != u.feeSchedule.feeRecipient) revert FeeRecipientMismatch();
-
-        // rev-3 §A.2/§C3: cohort-epoch binding + composition-root binding + kill-switch AT PAYMENT TIME.
-        // The epoch echo must match the funded cohort; the echoed root must equal the frozen unit root
-        // (so the oracle verdict cryptographically covers the composition root); and the cohort must still
-        // be enabled — a one-way disable neutralizes an otherwise-valid pre-written assertion here.
-        if (a.oracleAuthEpoch != oracleAuthEpoch) revert OracleCohortMismatch();
-        if (a.compositionRoot != u.compositionRoot) revert CompositionRootMismatch();
-
-        // §B on-chain evidence binding: the verdict must be over the package this unit committed to, and a
-        // unit with nothing committed can never release on evidence. The `evidenceCommitted` flag is checked
-        // separately from the hash so a zero/default `evidenceBundleHash` on BOTH sides can never match.
-        // With `requiredTier == requestedTier` frozen at funding (§E), at most ONE assertion per unit at the
-        // source, and the unit state consumed once here, exactly one verdict — the one over the committed
-        // package, at the required tier — is ever payable for a unit.
-        if (!u.evidenceCommitted || a.evidenceBundleHash != u.evidenceBundleHash) revert EvidenceBundleMismatch();
-
-        if (!IOracleAttester(authorizedOracle).enabled()) revert OracleCohortDisabled();
-
-        // §2 authorization key: `rawAuthorizationId` is the assertion id (the FULL signed verdict hash),
-        // taking over from the EAS uid. Single-use in `_authorizationUsed`, which is what carries the old
-        // `_easUidUsed` replay guard forward on the new rail.
-        _allocateRelease(
-            unitId,
-            _authorizationKey(AuthorizationType.EVIDENCE, AUTHDOMAIN_EVIDENCE, authorizedOracle, a.assertionId, unitId)
-        );
-        emit EvidenceReleased(unitId, a.assertionId);
     }
+
+    // ── Crypto authorities (INCREMENT 2b-ii) ──────────────────────────────────────────
+    //
+    // `releaseFromEvidence` is RETIRED. Its entire predicate now lives in `acceptAssertion` above,
+    // unchanged and in the same order — the only difference is what a passing verdict produces: a pending
+    // settlement with a fresh challenge window instead of an immediate transfer. There is still exactly
+    // ONE evidence predicate to audit and no second release path, which was the P0-6 property; the money
+    // simply moves from `finalize` / `resolveEscalation` once the §8.1 machine has run.
 
     /// @notice Tier-0 buyer approval (FROZEN §10.10, sol C5): a distinct authorization type. Only the
     ///         immutable payer authorizes — a direct call or a relayable EIP-712/ERC-1271 signature.
@@ -1302,8 +1649,11 @@ contract VNextSettlementEscrow {
         onlyExisting(unitId)
     {
         Unit storage u = _units[unitId];
+        // §8.3 C-6: Tier-0 is UNCHANGED by Wave 3 — explicit buyer approval or deadline refund, and no
+        // optimistic operator-assertion path. The `FUNDED_ACTIVE` requirement subsumes the retired
+        // `LiveDispute` guard, and a Tier-0 unit never enters the §8.1 evidence machine at all
+        // (`acceptAssertion` rejects `requiredTier < 1`).
         if (u.state != UnitState.FUNDED_ACTIVE) revert NotActive();
-        if (u.dispute.opened) revert LiveDispute();
         if (block.timestamp >= u.reclaimAt) revert TooLateForEvidence();
         if (u.requiredTier != 0 || u.requestedTier != 0) revert NotTier0();
 

@@ -61,13 +61,22 @@ contract VNextSettlementEscrowFactory {
     /// @notice Only the clone that CREATE2 places at this policy's predicted address may consume its nonce.
     error NotThePolicyEscrow();
 
-    /// @param usdc / oracle / o5SchemaUid / o5TypeHash — the implementation immutables shared by every clone.
+    /// @param usdc / oracle / escalation / o5SchemaUid / o5TypeHash — the implementation immutables shared
+    ///        by every clone.
     /// @dev   P0-6: the former `eas` parameter is REMOVED. The escrow no longer reads any attestation
     ///        registry, so a factory that accepted one would advertise a money-path dependency that does
     ///        not exist. EAS now belongs solely to the cohort attester (its async provenance mirror), and
     ///        is configured there.
-    constructor(address usdc, address oracle, bytes32 o5SchemaUid, bytes32 o5TypeHash) {
-        implementation = address(new VNextSettlementEscrow(usdc, oracle, o5SchemaUid, o5TypeHash));
+    ///
+    ///        H-01 Wave 3: `escalation` is the PRECOMMITTED escalation cohort (backup verdicts + appeal +
+    ///        Model-B emergency). It is a constructor argument rather than per-job config on purpose —
+    ///        `JobPolicyHash` already binds `implementation`, so both parties signing the policy are
+    ///        signing this cohort, and "no replacement authority may be installed after funding" holds
+    ///        because an implementation immutable cannot be changed at all. A different escalation cohort
+    ///        is a different factory + implementation, i.e. a deliberate new deployment both parties must
+    ///        re-accept. The escrow's constructor rejects `escalation == oracle`.
+    constructor(address usdc, address oracle, address escalation, bytes32 o5SchemaUid, bytes32 o5TypeHash) {
+        implementation = address(new VNextSettlementEscrow(usdc, oracle, escalation, o5SchemaUid, o5TypeHash));
     }
 
     /// @notice Clone + initialize a per-job escrow atomically. Permissionless AND safe: the CREATE2 salt

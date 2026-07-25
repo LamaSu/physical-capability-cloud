@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {O5Verdict, O5Assertion} from "../O5Types.sol";
+import {O5Verdict, O5Assertion, O5Adjudication, O5AdjudicationRecord} from "../O5Types.sol";
 
 /**
  * @title IOracleAttester
@@ -62,4 +62,28 @@ interface IOracleAttester {
 
     /// @notice One-way, permanent cohort disable (revoker only).
     function disable() external;
+
+    // ── H-01 Wave 3 (post-verdict state machine) ────────────────────────────────────────────────────
+
+    /// @notice The block timestamp `disable()` was called at; 0 while the cohort is enabled.
+    /// @dev    §8.3 C-5 Model B. WRITE-ONCE (disable is one-way and refuses a second call), which is what
+    ///         makes the escrow's emergency review deadline — `disabledAt + EMERGENCY_REVIEW_WINDOW` —
+    ///         immutable: the revoker can INITIATE the emergency but can neither extend it, reset it, nor
+    ///         choose the financial outcome. Never zero once disabled (clamped to 1 at genesis).
+    function disabledAt() external view returns (uint64);
+
+    /// @notice The typed escalation adjudication for `(settlementUnitId, role)`, or an all-zero record.
+    /// @dev    THE second money-path read (Wave 3). `role` is `O5_ADJ_ROLE_APPEAL` or
+    ///         `O5_ADJ_ROLE_EMERGENCY`; each has its OWN consume-once slot. Callers MUST treat
+    ///         `adjudicationId == 0` as "no verdict" and fail closed. The record carries no amount and no
+    ///         recipient by design — it selects a path, never a distribution.
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role)
+        external
+        view
+        returns (O5AdjudicationRecord memory);
+
+    /// @notice Write the typed UPHOLD/OVERTURN from a valid escalation-cohort quorum over `a`.
+    function adjudicate(O5Adjudication calldata a, bytes[] calldata signatures)
+        external
+        returns (bytes32 adjudicationId);
 }

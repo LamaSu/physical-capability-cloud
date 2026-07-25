@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {O5Verdict, O5Assertion, O5_DECISION_SETTLE} from "../O5Types.sol";
+import {
+    O5Verdict,
+    O5Assertion,
+    O5Adjudication,
+    O5AdjudicationRecord,
+    O5_DECISION_SETTLE,
+    O5_ADJ_ROLE_APPEAL,
+    O5_ADJ_ROLE_EMERGENCY,
+    O5_ADJ_UPHOLD,
+    O5_ADJ_OVERTURN
+} from "../O5Types.sol";
 import {IOracleAttester} from "../interfaces/IOracleAttester.sol";
 import {IEAS, AttestationRequest, AttestationRequestData} from "../interfaces/IEAS.sol";
 import {VNextSettlementLib} from "../libraries/VNextSettlementLib.sol";
@@ -20,6 +30,10 @@ interface IEscrowSettlementBinding {
     function feeBpsOf(bytes32 unitId) external view returns (uint16);
     function feeRecipientOf(bytes32 unitId) external view returns (address);
     function requiredTierOf(bytes32 unitId) external view returns (uint8);
+    /// @dev H-01 Wave 3 anti-brick pre-check for `adjudicate`: the assertion id the escrow ACCEPTED for
+    ///      this unit (zero while nothing is accepted). Same discipline as the M-01 pre-checks — an
+    ///      adjudication the escrow would reject must never burn the unit's one adjudication slot.
+    function acceptedAssertionIdOf(bytes32 unitId) external view returns (bytes32);
     /// @dev P0-6 mirror only (NOT a money-path read): the escrow's authoritative settlement state for the
     ///      unit, emitted as the "settlement receipt" leg of the `O5Mirrored` link. The real escrow returns
     ///      the `UnitState` enum; declared `uint8` here because a selector depends only on name + inputs,
@@ -71,12 +85,24 @@ abstract contract O5AttesterBase is IOracleAttester {
 
     // ── One-way kill-switch + consume-once ─────────────────────────────────────────────────────────
     bool public enabled; // IOracleAttester.enabled — starts true, one-way to false
+    /// @dev H-01 §8.3 C-5 (Model B): the block timestamp `disable()` was called at; 0 while enabled.
+    ///      WRITE-ONCE by construction — `disable()` is one-way and refuses a second call — which is what
+    ///      makes the escrow's emergency deadline (`disabledAt + EMERGENCY_REVIEW_WINDOW`) IMMUTABLE. The
+    ///      revoker cannot extend it, cannot reset it, and cannot decide the financial outcome with it.
+    ///      Packed into the same slot as `enabled`.
+    uint64 public disabledAt;
 
     /// @dev settlementUnitId => the immutable cohort assertion. Write-once: `attestO5` is the only writer
     ///      and refuses a unit that already has one, so no code path mutates a written record. This
     ///      mapping IS the consume-once marker (`usedUnit` below is a view over it), which is why the
     ///      money path costs one record write and no separate flag slot.
     mapping(bytes32 => O5Assertion) internal _assertions;
+
+    /// @dev keccak256(abi.encode(settlementUnitId, role)) => the immutable escalation adjudication.
+    ///      Write-once per (unit, role): `adjudicate` is the only writer and refuses an occupied slot, so
+    ///      the APPEAL verdict and the Model-B EMERGENCY verdict are independent one-shot decisions and
+    ///      neither can consume the other's slot.
+    mapping(bytes32 => O5AdjudicationRecord) internal _adjudications;
 
     /// @dev settlementUnitId => the EAS uid of the ASYNC provenance mirror; zero = not yet mirrored.
     ///      The un-mirrored set is exactly the drainable queue after an EAS outage. Nothing on any money
@@ -95,6 +121,12 @@ abstract contract O5AttesterBase is IOracleAttester {
     bytes32 private constant EIP712_VERSION_HASH = keccak256(bytes("1"));
     bytes32 private constant O5_TYPEHASH = keccak256(
         "O5Verdict(bytes32 jobIdHash,uint256 milestoneIndex,bytes32 stepId,bytes32 evidenceBundleHash,uint8 achievedTier,uint8 requestedTier,uint8 decision,bytes32 verdictHash,uint16 feeBps,address feeRecipient,bytes32 feeScheduleHash,bytes32 settlementUnitId,uint64 oracleAuthEpoch,bytes32 compositionRoot)"
+    );
+    /// @dev H-01 §2.5 — the escalation adjudication type. A SEPARATE typehash from `O5_TYPEHASH` under the
+    ///      SAME domain, so an O5 SETTLE signature can never be replayed as an UPHOLD (and vice versa), and
+    ///      `role` inside the struct separates APPEAL from EMERGENCY for the same reason.
+    bytes32 private constant O5_ADJUDICATION_TYPEHASH = keccak256(
+        "O5Adjudication(bytes32 settlementUnitId,address escrow,bytes32 reviewedAssertionId,uint8 role,uint8 outcome,uint64 oracleAuthEpoch)"
     );
     /// @dev secp256k1 n/2 — reject high-s (malleable) signatures (EIP-2 canonical form).
     uint256 private constant ECDSA_S_MAX = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
@@ -123,6 +155,15 @@ abstract contract O5AttesterBase is IOracleAttester {
         uint256 escrowUnitState
     );
     event CohortDisabled(uint64 indexed cohortId);
+    /// @notice A typed escalation adjudication (appeal or Model-B emergency) was written.
+    event O5Adjudicated(
+        bytes32 indexed settlementUnitId,
+        bytes32 indexed adjudicationId,
+        address indexed escrow,
+        uint8 role,
+        uint8 outcome,
+        bytes32 reviewedAssertionId
+    );
 
     error ZeroAddress();
     error ZeroSigner();
@@ -158,6 +199,12 @@ abstract contract O5AttesterBase is IOracleAttester {
     error Tier0NotEvidence();
     error TierNotMet();
     error RequestedTierMismatch();
+    // Wave 3 (escalation adjudication)
+    error BadAdjudicationRole();
+    error BadAdjudicationOutcome();
+    error UnitAlreadyAdjudicated();
+    error ZeroReviewedAssertion();
+    error ReviewedAssertionMismatch();
 
     constructor(address eas_, bytes32 o5SchemaUid_, uint64 cohortId_, address revoker_) {
         if (eas_ == address(0) || revoker_ == address(0)) revert ZeroAddress();
@@ -169,9 +216,17 @@ abstract contract O5AttesterBase is IOracleAttester {
     }
 
     /// @notice One-way, permanent cohort kill-switch (revoker only). No re-enable exists by construction.
+    /// @dev H-01 §8.3 C-5: `disabledAt` is stamped in the SAME one-way move, so it is written at most
+    ///      once. A second call reverts (`CohortIsDisabled`), which is what forbids the revoker from
+    ///      resetting or extending the escrow-side emergency deadline derived from it.
     function disable() external {
         if (msg.sender != revoker) revert OnlyRevoker();
+        if (!enabled) revert CohortIsDisabled();
         enabled = false;
+        // Never store a zero: the escrow reads `disabledAt != 0` as "this cohort is dead", and a genesis
+        // timestamp of 0 must not read as "still alive". Fail-closed by clamping to 1.
+        uint64 t = uint64(block.timestamp);
+        disabledAt = t == 0 ? 1 : t;
         emit CohortDisabled(cohortId);
     }
 
@@ -321,6 +376,100 @@ abstract contract O5AttesterBase is IOracleAttester {
         // The FULL 448-byte verdict goes in the log, not in storage (§13R.1): logs are on-chain, so the
         // async mirror stays replayable from chain data, without paying 14 SSTOREs on the money path.
         emit O5Asserted(v.settlementUnitId, assertionId, escrow, cohortId, abi.encode(v));
+    }
+
+    // ── H-01 Wave 3: the typed escalation adjudication (appeal + Model-B emergency) ─────────────────
+
+    /// @notice The consume-once storage key for one (unit, role) adjudication slot.
+    function adjudicationKey(bytes32 settlementUnitId, uint8 role) public pure returns (bytes32) {
+        return keccak256(abi.encode(settlementUnitId, role));
+    }
+
+    /// @inheritdoc IOracleAttester
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role)
+        external
+        view
+        returns (O5AdjudicationRecord memory)
+    {
+        return _adjudications[adjudicationKey(settlementUnitId, role)];
+    }
+
+    /// @notice The canonical adjudication EIP-712 digest the escalation quorum signs — for the off-chain side.
+    function adjudicationDigestOf(O5Adjudication calldata a) external view returns (bytes32) {
+        return _adjDigest(a);
+    }
+
+    /// @notice Write a typed UPHOLD/OVERTURN over ONE EXACT accepted assertion, from a valid quorum.
+    /// @dev    This is the whole of Wave 3's new authority surface, and it lives HERE rather than in the
+    ///         escrow for two reasons: (1) this contract already owns the EIP-712 + m-of-n + consume-once
+    ///         machinery (`_verifySignatures`, `_digest`, the write-once record discipline), so the
+    ///         escalation quorum is the SAME audited code path as the primary quorum; (2) the escrow is at
+    ///         its EIP-170 ceiling and must stay a money contract — per-job state, deadlines, distribution
+    ///         and the liability buckets — with **no signature verification in it at all**.
+    ///
+    ///         The record carries NO amount and NO recipient. The escrow reads only `{outcome, role,
+    ///         reviewedAssertionId, escrow}` and applies its OWN frozen distribution, so this quorum
+    ///         selects a path and can never move, redirect, or resize money (§2.5 "no distribution
+    ///         authority"). `reviewedAssertionId` binds the decision to one exact assertion, so an appeal
+    ///         verdict cannot be recycled onto a later assertion for the same unit.
+    ///
+    ///         ANTI-BRICK (same rule as the M-01 pre-check in `attestO5`): the slot is consume-once, so
+    ///         everything correctable is checked BEFORE it is consumed — including reading the escrow's
+    ///         own `acceptedAssertionIdOf` and requiring equality. A verdict the escrow would reject
+    ///         therefore burns nothing and can be re-signed. A unit with nothing accepted yet is
+    ///         unreadable/zero and fails closed here.
+    function adjudicate(O5Adjudication calldata a, bytes[] calldata signatures)
+        external
+        returns (bytes32 adjudicationId)
+    {
+        if (!enabled) revert CohortIsDisabled();
+        if (a.oracleAuthEpoch != cohortId) revert CohortMismatch();
+        if (a.role != O5_ADJ_ROLE_APPEAL && a.role != O5_ADJ_ROLE_EMERGENCY) revert BadAdjudicationRole();
+        if (a.outcome != O5_ADJ_UPHOLD && a.outcome != O5_ADJ_OVERTURN) revert BadAdjudicationOutcome();
+        if (a.escrow == address(0)) revert ZeroAddress();
+        if (a.reviewedAssertionId == bytes32(0)) revert ZeroReviewedAssertion();
+
+        adjudicationId = _adjDigest(a);
+        _verifySignatures(adjudicationId, signatures);
+        if (adjudicationId == bytes32(0)) revert ZeroAssertionId();
+
+        // Anti-brick: bind to the assertion the escrow ACTUALLY accepted, before consuming the slot.
+        if (
+            _escrowBindingWord(a.escrow, IEscrowSettlementBinding.acceptedAssertionIdOf.selector, a.settlementUnitId)
+                != a.reviewedAssertionId
+        ) revert ReviewedAssertionMismatch();
+
+        bytes32 k = adjudicationKey(a.settlementUnitId, a.role);
+        if (_adjudications[k].adjudicationId != bytes32(0)) revert UnitAlreadyAdjudicated();
+        _adjudications[k] = O5AdjudicationRecord({
+            adjudicationId: adjudicationId,
+            reviewedAssertionId: a.reviewedAssertionId,
+            escrow: a.escrow,
+            decidedAt: uint64(block.timestamp),
+            role: a.role,
+            outcome: a.outcome
+        });
+        emit O5Adjudicated(a.settlementUnitId, adjudicationId, a.escrow, a.role, a.outcome, a.reviewedAssertionId);
+    }
+
+    function _adjDigest(O5Adjudication calldata a) private view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                _domainSeparator(),
+                keccak256(
+                    abi.encode(
+                        O5_ADJUDICATION_TYPEHASH,
+                        a.settlementUnitId,
+                        a.escrow,
+                        a.reviewedAssertionId,
+                        a.role,
+                        a.outcome,
+                        a.oracleAuthEpoch
+                    )
+                )
+            )
+        );
     }
 
     // ── Async EAS provenance mirror (P0-6 item 4) — NOT ON ANY MONEY PATH ──────────────────────────

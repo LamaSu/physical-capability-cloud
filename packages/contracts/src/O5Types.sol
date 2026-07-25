@@ -73,11 +73,52 @@ struct O5Assertion {
     bytes32 compositionRoot; // rev-3 §C3 echo the escrow re-checks against its frozen root
     bytes32 evidenceBundleHash; // §B domain-separated evidence commitment the escrow re-checks
     address escrow; // the bound escrow (the EASAttestation.recipient analog)
-    uint64 assertedAt; // block.timestamp of the assertion (the EASAttestation.time analog)
+    // @dev H-01 §8.2 C-3: this is the MINT time, and it is deliberately NOT the escrow's clock. The escrow
+    //      stamps its OWN `assertedAt = block.timestamp` inside `acceptAssertion()`, so a stale assertion
+    //      submitted late can never have already eaten the challenge window. This field is provenance only.
+    uint64 assertedAt;
     uint8 achievedTier;
     uint8 requestedTier;
     uint8 decision; // always O5_DECISION_SETTLE: the attester mints no other decision
     address feeRecipient; // M-01 raw fee word the escrow re-checks
     uint64 oracleAuthEpoch; // the cohort id the escrow pinned at funding
     uint16 feeBps; // M-01 raw fee word the escrow re-checks
+}
+
+// ── H-01 §2.5 / §8.3 C-5: the TYPED ESCALATION ADJUDICATION ───────────────────────────────────────────
+// The appeal quorum and the emergency cohort issue the SAME shape: an m-of-n signed, typed
+// UPHOLD/OVERTURN over ONE EXACT already-accepted assertion, with **no distribution authority** — it
+// selects a path, and the escrow alone owns every number. It is hosted in the ATTESTER (which already
+// owns EIP-712 + m-of-n + consume-once) and merely READ by the escrow, exactly like `O5Assertion`.
+
+uint8 constant O5_ADJ_ROLE_APPEAL = 1; // §2.5 independent appeal-verifier quorum
+uint8 constant O5_ADJ_ROLE_EMERGENCY = 2; // §8.3 C-5 Model-B emergency cohort
+uint8 constant O5_ADJ_UPHOLD = 1; // the reviewed SETTLE stands  -> RELEASE
+uint8 constant O5_ADJ_OVERTURN = 2; // the reviewed SETTLE falls -> REFUND
+
+/// @notice The signed adjudication payload (the appeal/emergency analog of {O5Verdict}).
+/// @dev    `reviewedAssertionId` is what makes this ASSERTION-SPECIFIC: a verdict signed over one
+///         assertion can never be applied to a different one, and the escrow re-checks it against its own
+///         `acceptedAssertionId`. There is no amount, no recipient and no fee field anywhere in this
+///         struct — that absence IS the "no distribution authority" property, enforced by the type.
+struct O5Adjudication {
+    bytes32 settlementUnitId;
+    address escrow;
+    bytes32 reviewedAssertionId;
+    uint8 role; // O5_ADJ_ROLE_*
+    uint8 outcome; // O5_ADJ_UPHOLD | O5_ADJ_OVERTURN
+    uint64 oracleAuthEpoch; // the escalation cohort's own id
+}
+
+/// @notice The immutable record written by the escalation cohort's quorum, read by the escrow.
+/// @dev    Keyed by `keccak256(abi.encode(settlementUnitId, role))` so APPEAL and EMERGENCY each get
+///         their own consume-once slot: an appeal verdict can never pre-empt (or be replayed as) the
+///         Model-B emergency review of the same unit.
+struct O5AdjudicationRecord {
+    bytes32 adjudicationId; // EIP-712 digest over the full signed adjudication; 0 == none
+    bytes32 reviewedAssertionId;
+    address escrow;
+    uint64 decidedAt;
+    uint8 role;
+    uint8 outcome;
 }
