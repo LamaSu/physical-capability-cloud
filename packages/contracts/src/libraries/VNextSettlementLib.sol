@@ -452,6 +452,26 @@ library VNextSettlementLib {
     ///      its EIP-170-bounded runtime. Semantics are unchanged (the delegatecall executes in the escrow's
     ///      own context and the function is `pure`); the revert strings are the same strings. The cost is a
     ///      link step: `VNextSettlementLib` must be deployed and linked before the factory is deployed.
+    ///
+    /// @dev DEPLOY GATE — READ BEFORE DEPLOYING (adversarial-review M-2, Wave 3c). This function and the
+    ///      two `public` hashers above are THREE DELEGATECALLs on the FUNDING PATH, and a delegatecall
+    ///      executes in the CLONE'S OWN STORAGE CONTEXT: a factory linked against a wrong or hostile
+    ///      library yields clones in which these can be no-ops, can return chosen hashes, and can rewrite
+    ///      escrow storage from inside `fund()`. `JobPolicyHash` binds `implementation`, so a signer who
+    ///      verifies the implementation's bytecode does transitively pin the library address — but that
+    ///      means verifying TWO contracts, and NOTHING ON-CHAIN performs the second check. Therefore the
+    ///      deployment MUST: (a) link this library explicitly (`forge create --libraries
+    ///      src/libraries/VNextSettlementLib.sol:VNextSettlementLib:<addr>`) at FACTORY-compile time — the
+    ///      factory constructs the implementation, so the placeholders live in the FACTORY's creation code,
+    ///      one step earlier than a reader expects; and (b) assert that the linked address's runtime code
+    ///      hash equals the canonical `VNextSettlementLib`'s before the factory is used.
+    ///      Wave 3c MEASURED the alternative (making these three `internal` again, i.e. reverting rung 2):
+    ///      the escrow runtime goes 24,094 -> 25,246 B, which is 670 B OVER EIP-170. So the delegatecalls
+    ///      cannot currently be removed, and the deploy gate above is the mitigation. An unlinked build is
+    ///      at least loud rather than silent: `checkV1Invariants` returns nothing so solc keeps the
+    ///      `extcodesize` check, and the two value-returning calls fail their returndata decode.
+    ///      Do NOT put a fixed `libraries = [...]` in `foundry.toml` to "fix" this: forge would link the
+    ///      TEST build to that address too, where no code lives, and every funding test would fail.
     function checkV1Invariants(FeeSchedule memory s) public pure {
         require(s.domainVersion == DOMAIN_VERSION_V1, "V1: domainVersion");
         require(s.feeBasis == FEE_BASIS_GROSS, "V1: feeBasis");
