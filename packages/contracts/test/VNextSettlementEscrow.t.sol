@@ -472,7 +472,6 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
-            evidenceCommitter: operator,
             payouts: po
         });
     }
@@ -1020,7 +1019,6 @@ contract VNextSettlementEscrowTest is Test {
                 reclaimAt: block.timestamp + 30 days,
                 compositionSchemaVersion: 0,
                 compositionRoot: bytes32(0),
-                evidenceCommitter: operator,
                 payouts: po
             });
         }
@@ -1077,7 +1075,6 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
-            evidenceCommitter: operator,
             payouts: po
         });
         VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc"), cfgs);
@@ -1121,7 +1118,6 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
-            evidenceCommitter: operator,
             payouts: po
         });
         VNextSettlementEscrow e = _fundedEscrow(keccak256("job-wc17"), cfgs);
@@ -1502,8 +1498,9 @@ contract VNextSettlementEscrowTest is Test {
         // 24,644 B at rev-3, + 512 B for §B's per-unit `evidenceCommitter` (16 units x 32 B) = 25,156 B,
         // + 2,272 B for the H-01 `PolicyAcceptance` argument (64 B of extra arg head + 128 B struct head
         // + 2 x (32 + MAX_SIGNATURE_BYTES) of signature tail) = 27,428 B, - 512 B when Wave 3 retired the
-        // per-unit `disputeWindow` word with the dispute path (16 units x 32 B) = 26,916 B.
-        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 26_916, "16 units x 16 legs + max acceptance");
+        // per-unit `disputeWindow` word with the dispute path (16 units x 32 B) = 26,916 B, - 512 B when
+        // Wave 3c removed the per-unit `evidenceCommitter` word (brief §2.8) = 26,404 B.
+        assertEq(VNextSettlementLib.MAX_CONFIG_BYTES, 26_404, "16 units x 16 legs + max acceptance");
     }
 
     /// @dev L-02: a non-zero `o5TypeHash` deployment pin must equal the bound cohort's live type hash.
@@ -2249,34 +2246,43 @@ contract VNextSettlementEscrowTest is Test {
 
     // ══ §B — on-chain evidence binding ═════════════════════════════════════════════════════════════
 
-    // ── funding-time binding of the committer ─────────────────────────────────────────────────────
-    function test_Fund_FreezesEvidenceCommitter_AndStartsUncommitted() public {
+    // ── the committer is the OPERATOR, by construction (§2.8 / Wave 3c) ───────────────────────────
+    /// @dev INVERTED from `test_Fund_FreezesEvidenceCommitter_AndStartsUncommitted`. That test pinned a
+    ///      funding-time FREEZE of a configurable committer; there is no such configuration any more, so
+    ///      the successor property is stronger: the committer is `operator` and no funding input can say
+    ///      otherwise. The uncommitted-start assertions are carried over verbatim.
+    function test_Fund_EvidenceCommitterIsTheOperator_AndIsNotConfigurable() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
-        assertEq(e.evidenceCommitterOf(id), operator, "committer frozen at funding");
+        assertEq(e.operator(), operator, "the operator IS the committer: one clone-wide authority");
         assertFalse(e.evidenceCommittedOf(id), "nothing committed yet");
         vm.expectRevert(VNextSettlementEscrow.EvidenceNotCommitted.selector);
         e.evidenceBundleHashOf(id); // the default value is never readable as a commitment
+        // Only the operator can move that flag — no per-unit designation exists to point elsewhere.
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
+        e.submitEvidence(id, PKG);
+        _commit(e, id, PKG);
+        assertTrue(e.evidenceCommittedOf(id));
     }
 
-    function test_Fund_RejectsZeroEvidenceCommitter() public {
+    /// @dev INVERTED from `test_Fund_RejectsZeroEvidenceCommitter` / `test_Fund_RejectsExcludedEvidence-
+    ///      Committer`. Those pinned the funding-time exclusion set on a config field that no longer
+    ///      exists. The property they protected — "the committer can never be an address that could not
+    ///      legitimately call, and never a default that silently means anyone" — now holds one layer up
+    ///      and unconditionally: the committer IS `operator`, which `initialize` holds to exactly that
+    ///      exclusion set for every clone, before any unit exists.
+    function test_Initialize_CommitterAuthorityIsHeldToTheExclusionSet() public {
         VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
-        c[0].evidenceCommitter = address(0);
-        VNextSettlementEscrow e = _escrowFor(JOB, c);
-        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
-        vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
-        e.fund(c, acc);
-    }
+        PolicyIdentity memory p = _identity(JOB, arbiter, 1, c);
 
-    function test_Fund_RejectsExcludedEvidenceCommitter() public {
-        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
-        c[0].evidenceCommitter = address(usdc); // the token can never be a caller
-        VNextSettlementEscrow e = _escrowFor(JOB, c);
-        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
-        vm.prank(payer);
+        p.operator = address(0); // a zero committer/operator is never a deliberate choice
         vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
-        e.fund(c, acc);
+        factory.createEscrow(p);
+
+        p.operator = address(usdc); // the token can never be a caller
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        factory.createEscrow(p);
     }
 
     // ── submitEvidence: authority, window, one-shot ───────────────────────────────────────────────
@@ -2292,13 +2298,18 @@ contract VNextSettlementEscrowTest is Test {
         assertTrue(expected != PKG, "the raw package digest is never what is stored");
     }
 
-    function test_SubmitEvidence_OnlyCommitter() public {
+    /// @dev INVERTED (Wave 3c / §2.8): the caller guard is now `OnlyOperator`, and the payer is refused
+    ///      UNCONDITIONALLY — "unless it designated itself" was the whole H-1 lever and is gone.
+    function test_SubmitEvidence_OnlyOperator() public {
         VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
         bytes32 id = _unitId(e);
-        vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
-        e.submitEvidence(id, PKG); // the test contract is not the committer
-        vm.prank(payer); // not even the payer, unless it designated itself
-        vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
+        e.submitEvidence(id, PKG); // the test contract is not the operator
+        vm.prank(payer); // and the payer can never designate itself into this seat
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
+        e.submitEvidence(id, PKG);
+        vm.prank(arbiter); // nor any other party
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
         e.submitEvidence(id, PKG);
     }
 
@@ -2951,7 +2962,6 @@ contract VNextSettlementEscrowTest is Test {
             reclaimAt: block.timestamp + 30 days,
             compositionSchemaVersion: 0,
             compositionRoot: bytes32(0),
-            evidenceCommitter: operator,
             payouts: po
         });
     }

@@ -45,104 +45,88 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
-    // A-01  The payer-controlled `evidenceCommitter` is a costless, one-transaction refund switch.
-    //       Design brief §2.8 required this authority to be REMOVED from the payer's side. It was not.
+    // A-01  BLOCKED (Wave 3c). The payer-controlled `evidenceCommitter` was a costless, one-transaction
+    //       refund switch. Brief §2.8 required the authority to be REMOVED from the payer's side, and it
+    //       now is: `UnitConfig` carries NO committer field at all and `submitEvidence` is bound to
+    //       `operator`. THE CONSTRAINT THAT STOPS EACH ATTACK BELOW: `submitEvidence`'s
+    //       `msg.sender != operator -> OnlyOperator` guard, over an authority no funding input can move.
+    //       (The three tests below are the INVERTED forms of the demonstrating A-01a/b/c: same setups,
+    //       same money assertions, opposite outcomes. Note that the payer-committer SETUP is no longer
+    //       even expressible — `cfgs[0].evidenceCommitter = payer` does not compile — which is itself the
+    //       first half of the proof, enforced by this file's own compilation.)
     // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-    /// @dev The funding path accepts `evidenceCommitter == payer`: the ONLY guard is
-    ///      `_requireAllowedRecipient` ({0, escrow, USDC, factory}) at VNextSettlementEscrow.sol:705.
-    function test_A01a_FundingAcceptsThePayerAsEvidenceCommitter() public {
-        VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
-        cfgs[0].evidenceCommitter = payer;
-        VNextSettlementEscrow e = _fundedEscrow(JOB, cfgs);
+    /// @dev INVERTED A-01a. Funding can no longer express a payer committer: there is one committer for
+    ///      the whole clone and it is the `operator` the OPERATOR itself signed as its money-plane identity.
+    function test_A01a_ThePayerCanNeverBeTheEvidenceCommitter() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(AG, AF, ABPS, 1));
         bytes32 id = _unitId(e);
-        assertEq(e.evidenceCommitterOf(id), payer, "the payer is a legal evidence committer");
         assertEq(uint256(e.unitState(id)), uint256(UnitState.FUNDED_ACTIVE));
+        assertEq(e.operator(), operator, "the committer authority IS the operator");
+        assertTrue(e.operator() != payer, "and the parties are distinct by construction (PartyCollision)");
+
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
+        e.submitEvidence(id, PKG);
     }
 
-    /// @dev THE TRACE. Payer funds with itself as committer, the operator signs, the operator performs,
-    ///      the cohort has a valid SETTLE ready — and the payer simply never commits. Both settlement
-    ///      lanes are structurally dead and the whole G returns to the payer at `reclaimAt`.
-    ///      This is the H-01 OUTCOME (operator performs, payer refunds unilaterally) reached through the
-    ///      §B commit gate instead of the retired `openDispute`.
-    function test_A01b_PayerCommitterWithholds_OperatorPerformsAndIsNeverPaid() public {
-        VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
-        cfgs[0].evidenceCommitter = payer;
-        VNextSettlementEscrow e = _fundedEscrow(JOB, cfgs);
+    /// @dev INVERTED A-01b — THE TRACE, blocked. Same sequence: the operator performs and the cohort
+    ///      signs a valid SETTLE over the real package. The payer's withholding move is now a revert, the
+    ///      operator commits its own package, and the money assertions come out the other way round: the
+    ///      payer does NOT recover the gross and the operator side IS paid.
+    function test_A01b_PayerCannotWithhold_OperatorPerformsAndIsPaid() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(AG, AF, ABPS, 1));
         bytes32 id = _unitId(e);
         uint256 payerBefore = usdc.balanceOf(payer);
 
-        // The operator did the work and the cohort signed a valid SETTLE over the real package.
-        _assert(e, id, 1, 1);
-
-        // Primary lane: refused, because nothing was committed.
-        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.acceptAssertion(id);
-
-        // The operator cannot supply the commitment itself — the committer is frozen to the payer.
-        vm.prank(operator);
-        vm.expectRevert(VNextSettlementEscrow.OnlyEvidenceCommitter.selector);
-        e.submitEvidence(id, PKG);
-
-        // Backup lane: the operator's own recourse, and it is dead for the same reason.
-        vm.warp(_cutoff(e, id) - VNextSettlementLib.BACKUP_WINDOW);
-        vm.prank(operator);
-        e.invokeBackup(id);
-        _backupAssert(e, id);
-        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.acceptAssertion(id);
-
-        // And escalating has now also locked the commit gate shut for good (`submitEvidence` needs
-        // FUNDED_ACTIVE), so even a repentant payer could not rescue the operator from here.
+        // The payer's veto attempt: it has no commit authority to withhold OR to misuse.
         vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
-        e.submitEvidence(id, PKG);
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
+        e.submitEvidence(id, keccak256("junk"));
 
-        // Backup timeout -> refund. Payer whole, operator and its payout recipients paid nothing.
-        vm.warp(_cutoff(e, id));
+        // The operator commits the package it will be judged on, and the cohort settles it.
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        e.acceptAssertion(id); // permissionless — the primary lane is NOT structurally dead any more
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.PRIMARY_ASSERTED));
+
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         e.finalize(id);
-        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
-        assertEq(usdc.balanceOf(payer), payerBefore + AG, "payer recovered the full gross");
-        assertEq(usdc.balanceOf(recip1), 0, "operator side paid nothing");
-        assertEq(usdc.balanceOf(recip2), 0);
-        assertEq(usdc.balanceOf(feeDest), 0);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(payer), payerBefore, "the payer recovered NOTHING");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), AG - AF, "operator side paid in full");
+        assertEq(usdc.balanceOf(feeDest), AF);
     }
 
-    /// @dev The faster form: the payer does not even have to wait. ONE cheap transaction — a one-shot
-    ///      commitment over a digest that is not the package the oracle evaluated — permanently strands
-    ///      the release path, because `submitEvidence` is single-use.
-    function test_A01c_PayerCommitterCanBrickReleaseInOneTransaction() public {
-        VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
-        cfgs[0].evidenceCommitter = payer;
-        VNextSettlementEscrow e = _fundedEscrow(JOB, cfgs);
+    /// @dev INVERTED A-01c. The one-transaction brick is gone with the authority: a junk one-shot
+    ///      commitment from the payer reverts, so the one-shot commit can only ever be spent by the party
+    ///      that loses if it is spent badly. The unit settles normally afterwards.
+    function test_A01c_PayerCannotBrickReleaseWithAJunkCommit() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(AG, AF, ABPS, 1));
         bytes32 id = _unitId(e);
 
         vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.OnlyOperator.selector);
         e.submitEvidence(id, keccak256("not-the-package-the-operator-produced"));
+        assertFalse(e.evidenceCommittedOf(id), "the one-shot slot was not consumed by the payer");
 
-        // The real package can never be committed now.
-        vm.prank(payer);
-        vm.expectRevert(VNextSettlementEscrow.EvidenceAlreadyCommitted.selector);
-        e.submitEvidence(id, PKG);
-
-        // A cohort verdict over the REAL package no longer matches the frozen commitment.
+        // The real package still goes in, and a verdict over it is payable.
+        _commit(e, id, PKG);
         _assert(e, id, 1, 1);
-        vm.expectRevert(VNextSettlementEscrow.EvidenceBundleMismatch.selector);
-        e.acceptAssertion(id);
-
-        // Terminal state: refund at the deadline.
         uint256 payerBefore = usdc.balanceOf(payer);
-        vm.warp(e.reclaimAtOf(id));
-        e.reclaimAfterDeadline(id);
-        assertEq(usdc.balanceOf(payer), payerBefore + AG);
+        _settleViaEvidence(e, id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(payer), payerBefore, "no refund lever remains");
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
-    // A-02  Model B does NOT hold on the backup lane: there the escalation revoker's `disable()` is a
-    //       deterministic refund switch, because the emergency REVIEWER is the attester it just killed.
+    // A-02  BLOCKED (Wave 3c). Model B now holds on the backup lane too. THE CONSTRAINT: exclusion (1)
+    //       in `_emergencyDeadline` — a backup-lane unit is NOT put under an emergency, because there the
+    //       reviewer would be the body just killed. The lane resolves under its ORDINARY windows to the
+    //       LAST AUTHENTICATED STATE, so the escalation revoker can no longer choose a refund.
     // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-    function test_A02_BackupLane_DisableIsADeterministicRefund_NoUpholdReachable() public {
+    function test_A02_BackupLane_DisableIsNotARefundSwitch_TheLastAuthenticatedStateStands() public {
         (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
         _commit(e, id, PKG);
 
@@ -150,28 +134,54 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
         vm.prank(operator);
         e.invokeBackup(id);
         _backupAssert(e, id);
+        uint256 acceptedAt = block.timestamp;
         e.acceptAssertion(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.BACKUP_ASSERTED), "a valid backup SETTLE");
 
-        // A genuine emergency UPHOLD is already written and waiting.
+        // Same setup as the demonstrating form: a genuine emergency UPHOLD written and waiting.
         _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
 
         uint256 disabledAt = block.timestamp;
         escalation.disableAtNow(); // the escalation cohort's revoker acts
 
-        // Neither escalation role can decide: EMERGENCY is barred by the cohort-disabled check
-        // (VNextSettlementEscrow.sol:1536) and APPEAL by the emergency pause (:1516).
-        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+        // No emergency is OPEN for a backup-lane unit, so the emergency role has nothing to decide...
+        vm.expectRevert(VNextSettlementEscrow.NoEmergency.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
-        vm.expectRevert(VNextSettlementEscrow.EmergencyPaused.selector);
+        // ...and the appeal role is inapplicable (nothing is challenged); a disabled cohort's verdict
+        // still cannot move money either way.
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
 
-        // So the ONLY reachable outcome is the emergency-silence refund. The revoker chose it alone.
+        // The unit is NOT paused: it finalizes on its ordinary challenge deadline, to a RELEASE.
         uint256 payerBefore = usdc.balanceOf(payer);
-        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        vm.warp(acceptedAt + VNextSettlementLib.CHALLENGE_WINDOW);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(payer), payerBefore, "the revoker could NOT convert a valid SETTLE to a refund");
+        assertEq(usdc.balanceOf(recip1) + usdc.balanceOf(recip2), AG - AF, "the operator side was paid");
+        assertGt(disabledAt, 0);
+    }
+
+    /// @dev The other half of exclusion (1), stated so the fix is not mistaken for "the backup lane always
+    ///      releases": a backup lane that never produced a SETTLE still REFUNDS at the assertion cutoff.
+    ///      The §8.1 "backup silent ⇒ refund" default is untouched — what changed is only that a disable
+    ///      cannot reach an accepted one.
+    function test_A02b_BackupLane_WithNoSettle_StillRefundsAtTheCutoff_EvenWhenDisabled() public {
+        (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
+        _commit(e, id, PKG);
+        vm.warp(_cutoff(e, id) - VNextSettlementLib.BACKUP_WINDOW);
+        vm.prank(operator);
+        e.invokeBackup(id);
+        escalation.disableAtNow();
+
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.finalize(id);
+
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.warp(_cutoff(e, id));
         e.finalize(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
-        assertEq(usdc.balanceOf(payer), payerBefore + AG, "a valid accepted SETTLE became a refund");
+        assertEq(usdc.balanceOf(payer), payerBefore + AG, "no authenticated SETTLE means refund, as designed");
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -190,67 +200,120 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
     }
 
-    /// @dev Same state, nobody calls `finalize`, and 14 days later the primary cohort is disabled. The
-    ///      already-due release is re-opened and defaults to REFUND on emergency silence.
-    function test_A03b_NobodyFinalized_ALaterDisableConvertsTheDueReleaseIntoARefund() public {
+    /// @dev INVERTED A-03b — BLOCKED (Wave 3c). Same state, nobody calls `finalize`, and 14 days later
+    ///      the primary cohort is disabled. THE CONSTRAINT: exclusion (2) in `_emergencyDeadline` — the
+    ///      emergency does not open over a release that was ALREADY DUE at `disabledAt`, so relayer
+    ///      inactivity no longer changes the payer's outcome (§8.1's expanded invariant names it
+    ///      explicitly). The money assertions are the demonstrating test's, inverted.
+    function test_A03b_NobodyFinalized_ALaterDisableCannotReachTheDueRelease() public {
         (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
         _acceptNow(e, id);
         vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW);
         // (release is due here — see the control test — but no keeper transacts)
 
         vm.warp(block.timestamp + 14 days);
+        attester.disableAtNow();
+
+        // No pause: the release the control test proved was due is still due, to anyone who asks.
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.prank(address(0xD00D));
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+        assertEq(usdc.balanceOf(payer), payerBefore, "the payer gained nothing from nobody transacting");
+        assertEq(usdc.balanceOf(recip1), (AG - AF) / 2);
+        assertEq(usdc.balanceOf(feeDest), AF);
+    }
+
+    /// @dev The boundary of exclusion (2), so it cannot be mistaken for "a disable never pauses": a
+    ///      disable landing ONE SECOND BEFORE the release is due still opens the emergency and still
+    ///      refunds on review silence. Model B is intact for a settlement still inside its window.
+    function test_A03c_ADisableOneSecondBeforeTheReleaseIsDue_StillPausesAndRefunds() public {
+        (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
+        _acceptNow(e, id);
+        (, uint64 assertedAt,,,,,) = e.settlement(id);
+        uint256 due = uint256(assertedAt) + VNextSettlementLib.CHALLENGE_WINDOW;
+
+        vm.warp(due - 1);
         uint256 disabledAt = block.timestamp;
         attester.disableAtNow();
 
+        vm.warp(due);
         vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
-        e.finalize(id);
+        e.finalize(id); // PAUSED — the emergency owns this unit
 
         uint256 payerBefore = usdc.balanceOf(payer);
         vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
         e.finalize(id);
         assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
         assertEq(usdc.balanceOf(payer), payerBefore + AG);
-        assertEq(usdc.balanceOf(recip1), 0);
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
-    // A-04  The "immutable emergency deadline" is not terminal: `resolveEscalation` carries no deadline
-    //       check, so a post-deadline UPHOLD that front-runs `finalize` still releases.
+    // A-04  BLOCKED (Wave 3c). THE CONSTRAINT: `resolveEscalation` now refuses the EMERGENCY role once
+    //       `block.timestamp >= emergencyDue`, symmetrically with the appeal deadline one branch up. The
+    //       deadline is terminal instead of the start of a race between a late UPHOLD and `finalize`.
     // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-    function test_A04_EmergencyDeadlineIsNotTerminal_APostDeadlineUpholdStillReleases() public {
+    function test_A04_EmergencyDeadlineIsTerminal_APostDeadlineUpholdCannotPay() public {
         (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
         _acceptNow(e, id);
         uint256 disabledAt = block.timestamp;
         attester.disableAtNow();
 
-        // Well past the deadline at which `finalize` would have refunded.
+        // Well past the deadline at which `finalize` refunds.
         vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW + 3 days);
         _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
-        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "late UPHOLD still pays");
+
+        // The deadline outcome is the only one left, and it is not a race.
+        uint256 payerBefore = usdc.balanceOf(payer);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "silence refunds AT the deadline");
+        assertEq(usdc.balanceOf(feeDest), 0, "the late UPHOLD paid nothing");
+        assertEq(usdc.balanceOf(payer), payerBefore + AG);
+    }
+
+    /// @dev The boundary: one second before the deadline the emergency cohort can still decide, so the
+    ///      terminality fix removed the race without shortening the review window it bounds.
+    function test_A04b_TheLastSecondOfTheEmergencyWindowStillDecides() public {
+        (VNextSettlementEscrow e, bytes32 id) = _liveUnit();
+        _acceptNow(e, id);
+        uint256 disabledAt = block.timestamp;
+        attester.disableAtNow();
+
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW - 1);
+        _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
         assertEq(usdc.balanceOf(feeDest), AF);
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
-    // A-05  Funding generation N does NOT retire generation N+1: both can be funded, in that order.
+    // A-05  BLOCKED (Wave 3c). THE CONSTRAINT: the factory's write-once `fundedEscrowOf` marker — funding
+    //       ANY generation of a (payer, operator, jobIdHash) retires every other one, which is what
+    //       "one funded policy generation per job" always claimed.
     // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-    function test_A05_OlderGenerationFundedFirst_DoesNotRetireTheNewerOne() public {
+    function test_A05_FundingOneGeneration_RetiresTheNewerOneToo() public {
         VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
 
         // Generation 1.
         VNextSettlementEscrow e1 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, arbiter, 1, cfgs)));
         _fund(e1, cfgs);
 
-        // Generation 2 — a "revision" both parties also signed — is still fundable afterwards.
+        // Generation 2 — a "revision" both parties also signed — can no longer ALSO be funded.
         VNextSettlementEscrow e2 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, arbiter, 2, cfgs)));
-        _fund(e2, cfgs);
+        VNextSettlementEscrow.PolicyAcceptance memory acc2 = _acceptance(e2, cfgs);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrowFactory.JobAlreadyFunded.selector);
+        e2.fund(cfgs, acc2);
 
         assertTrue(address(e1) != address(e2));
         assertEq(usdc.balanceOf(address(e1)), AG);
-        assertEq(usdc.balanceOf(address(e2)), AG, "the payer funded BOTH generations of one job");
-        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, JOB)), 3);
+        assertEq(usdc.balanceOf(address(e2)), 0, "the operator is bound to ONE signed generation, not both");
+        assertEq(factory.fundedEscrowOf(factory.policyKey(payer, operator, JOB)), address(e1));
+        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, JOB)), 2);
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════════
