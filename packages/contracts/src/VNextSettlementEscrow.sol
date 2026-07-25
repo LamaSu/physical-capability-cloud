@@ -77,8 +77,19 @@ contract VNextSettlementEscrow {
     address public immutable authorizedOracle;
     /// @notice H-01 §2.5/§2.6/§8.3 C-5 — the PRECOMMITTED ESCALATION COHORT: the backup verdict quorum,
     ///         the appeal quorum, and the Model-B emergency cohort, all in one independently-deployed
-    ///         attester instance (its signer set, threshold and revoker are immutable per instance, so
-    ///         "independent of the primary" is a deployment fact, not a promise).
+    ///         attester instance (its signer set, threshold and revoker are immutable per instance).
+    /// @dev    DEPLOY GATE — §2.5 ROUTE DIVERSITY IS NOT ENFORCED HERE (adversarial-review L-2, corrected
+    ///         in Wave 3c; an earlier version of this comment called independence "a deployment fact, not a
+    ///         promise", which overstated it). The only structural check is `escalation != oracle` in the
+    ///         constructor. Immutability makes each signer set FIXED, not DIVERSE: two attester deployments
+    ///         carrying the SAME three signers pass every check here and in both attesters, and §2.5's
+    ///         route-diversity requirement would be silently unsatisfied — the appeal would be the primary
+    ///         reviewing itself. It is deliberately not checked on-chain because the concrete signer getters
+    ///         belong to `Fixed2of3O5Attester`, not to `IOracleAttester`, and requiring them would forbid
+    ///         any other quorum shape (e.g. 3-of-5) at the type level. So it is a DEPLOYMENT-REVIEW item:
+    ///         assert signer-set disjointness between `oracle` and `escalation` in the deploy gate, next to
+    ///         the `VNextSettlementLib` code-hash assertion (see that library's deploy-gate note).
+    /// @dev    Wave 3c also narrows what this cohort's revoker can do to a unit — see `_emergencyDeadline`.
     /// @dev    WHY an IMPLEMENTATION IMMUTABLE and not per-job state: `JobPolicyHash` already binds
     ///         `implementation` (see `_hashJobPolicy`), so both parties signing the policy ARE signing this
     ///         address — "precommitted, bilaterally accepted, cannot be installed after funding" comes out
