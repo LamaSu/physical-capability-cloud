@@ -6,7 +6,7 @@ import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
 import {O5Verdict, O5Assertion, O5_VERDICT_BYTES, O5_DECISION_SETTLE} from "../src/O5Types.sol";
 import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
-import {PayoutEntry, FeeSchedule, PolicyIdentity, UnitState, ClaimClass, AuthorizationType, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
+import {PayoutEntry, FeeSchedule, PolicyIdentity, UnitState, ClaimClass, AuthorizationType, ValueOverflow, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {EASAttestation, AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
@@ -160,6 +160,48 @@ contract MockOracleAttester is IOracleAttester {
     }
 }
 
+/// @dev A minimal ERC-1271 smart-account OPERATOR. H-01 requires the operator's money-plane identity to
+///      work when the operator is a contract, not just an EOA — most real operators will be smart
+///      accounts. It validates an ECDSA signature from its owner key and can be told to decline, so both
+///      the accept and reject branches of the escrow's ERC-1271 path are exercised.
+contract MockSmartAccountOperator {
+    address public immutable owner;
+    bool public accepts = true;
+
+    constructor(address owner_) {
+        owner = owner_;
+    }
+
+    function setAccepts(bool a) external {
+        accepts = a;
+    }
+
+    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+        if (!accepts || signature.length != 65) return 0xffffffff;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+        return ecrecover(hash, v, r, s) == owner ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
+    }
+}
+
+/// @dev Exposes the H-2 checked downcasts at an EXTERNAL call boundary. `vm.expectRevert` cannot observe
+///      a revert raised at its own call depth, so an internal library call has to be wrapped to be tested.
+contract DowncastHarness {
+    function toUint64(uint256 v) external pure returns (uint64) {
+        return VNextSettlementLib.toUint64(v);
+    }
+
+    function toUint128(uint256 v) external pure returns (uint128) {
+        return VNextSettlementLib.toUint128(v);
+    }
+}
+
 contract VNextSettlementEscrowTest is Test {
     MockToken usdc;
     MockOracleAttester attester;
@@ -275,6 +317,33 @@ contract VNextSettlementEscrowTest is Test {
     function _sign(uint256 pk, bytes32 digest) internal pure returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The exact digest `e` will recompute for these configs — derived here from the spec, so a
+    ///      drift in the contract's encoding surfaces as a signature failure rather than silent agreement.
+    function _digestOf(
+        VNextSettlementEscrow e,
+        VNextSettlementEscrow.UnitConfig[] memory cfgs,
+        bool allowSelf,
+        uint256 expiry
+    ) internal view returns (bytes32) {
+        (,, uint256 nonce, bytes32 preRoot,,) = e.policy();
+        bytes32 job = e.jobIdHash();
+        address f = e.factory();
+        return _policyDigest(
+            PolicyArgs({
+                escrowAddr: address(e),
+                factoryAddr: f,
+                impl: VNextSettlementEscrowFactory(f).implementation(),
+                job: job,
+                arb: e.arbiter(),
+                nonce: nonce,
+                preRoot: preRoot,
+                unitsRoot: _unitsRootFor(address(e), job, cfgs),
+                allowSelf: allowSelf,
+                expiry: expiry
+            })
+        );
     }
 
     /// @dev The canonical acceptance for `e`'s own frozen identity + the configs being funded.
@@ -1195,7 +1264,8 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     function test_EvidenceRelease_RevertsOnCompositionRootMismatch() public {
-        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1)); // unit.compositionRoot == 0
+        // unit.compositionRoot == 0
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 23_500000, 235, 1));
         bytes32 id = _unitId(e);
         _commit(e, id, PKG);
         O5Verdict memory v = _o5FullVerdict(e, id, 1, 1);
@@ -1453,6 +1523,511 @@ contract VNextSettlementEscrowTest is Test {
         factory.createEscrow(_identity(job, arbiter, 1, c));
         vm.expectRevert();
         factory.createEscrow(_identity(job, arbiter, 1, c));
+    }
+
+    // ══ H-01: THE ATTACK ═══════════════════════════════════════════════════════════════════════════
+
+    /// @dev THE H-01 REGRESSION. The original attack, verbatim: the payer funds with `arbiter == payer`
+    ///      and `disputeWindow == 0`; the operator performs the physical work; the payer then calls
+    ///      `openDispute` and `refundOnDisputeExpiry` in the SAME BLOCK and walks away with a full refund
+    ///      while the operator is unpaid. The root cause was that no authenticated operator acceptance of
+    ///      the funded terms ever existed. Each stage below shows the constraint that now stops it.
+    function test_H01_PayerVetoAttack_IsBlockedAtFunding() public {
+        // ── Stage 1: the attack configuration as written. `disputeWindow == 0` is rejected in the funding
+        //    freeze loop by MIN_DISPUTE_WINDOW — even with the operator's signature, even with the
+        //    self-adjudication flag set. The costless-veto TIMING is gone before anything else is checked.
+        VNextSettlementEscrow.UnitConfig[] memory hostile = _oneUnitConfig(1000e6, 0, 0, 1);
+        hostile[0].disputeWindow = 0;
+        VNextSettlementEscrow e0 =
+            VNextSettlementEscrow(factory.createEscrow(_identity(JOB, payer, 1, hostile)));
+        VNextSettlementEscrow.PolicyAcceptance memory a0 = _acceptance(e0, hostile, true, POLICY_EXPIRY, false);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
+        e0.fund(hostile, a0);
+        assertEq(usdc.balanceOf(address(e0)), 0, "no custody was ever taken");
+
+        // ── Stage 2: repair the window, keep the self-selected arbiter, and present a HONEST acceptance
+        //    (the operator did sign — but signed a policy WITHOUT self-adjudication). Rejected: the payer
+        //    cannot appoint itself judge on terms the operator did not accept.
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        bytes32 jobA = keccak256("h01-attack-a");
+        VNextSettlementEscrow e1 = VNextSettlementEscrow(factory.createEscrow(_identity(jobA, payer, 1, c)));
+        VNextSettlementEscrow.PolicyAcceptance memory a1 = _acceptance(e1, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.SelfAdjudicationNotAccepted.selector);
+        e1.fund(c, a1);
+
+        // ── Stage 3: the payer FORGES the consent — flips the self-adjudication flag and signs the
+        //    operator leg with its own key. Rejected: the operator's identity is an authenticated
+        //    signing identity, not an address the payer writes into a config.
+        bytes32 forgedDigest = _digestOf(e1, c, true, POLICY_EXPIRY);
+        VNextSettlementEscrow.PolicyAcceptance memory forged = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: true,
+            payerSignature: bytes(""),
+            operatorSignature: _sign(payerPk, forgedDigest) // the PAYER signing as the operator
+        });
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e1.fund(c, forged);
+
+        // ── Stage 4: the operator GENUINELY consents to self-adjudication and a legal window. Funding
+        //    succeeds — the fix is authenticated consent, not banning configurations. The same-block
+        //    sequence is nevertheless unreachable, because `effectiveDisputeExpiry` is strictly after the
+        //    block the dispute opened in.
+        VNextSettlementEscrow.PolicyAcceptance memory real = _acceptance(e1, c, true, POLICY_EXPIRY, false);
+        vm.prank(payer);
+        e1.fund(c, real);
+        bytes32 id = _unitId(e1);
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        vm.prank(payer);
+        e1.openDispute(id);
+        vm.expectRevert(VNextSettlementEscrow.DisputeWindowOpen.selector);
+        e1.refundOnDisputeExpiry(id); // SAME BLOCK — this is the attack's final move
+        assertEq(uint256(e1.unitState(id)), uint256(UnitState.FUNDED_ACTIVE), "funds stay in escrow");
+        assertEq(usdc.balanceOf(payer), payerBefore, "the payer took nothing");
+    }
+
+    /// @dev The root closure stated on its own: with NO operator signature there is no fundable state at
+    ///      all. Everything else above is defence in depth on top of this.
+    function test_H01_NoOperatorAcceptance_MeansNoFundedState() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory empty = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: bytes(""),
+            operatorSignature: bytes("")
+        });
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(c, empty);
+        assertFalse(e.configurationSealed(), "a refused policy leaves the escrow unsealed and unfunded");
+        assertEq(usdc.balanceOf(address(e)), 0);
+    }
+
+    /// @dev With the SMALLEST LEGAL window the same-block sequence is still unreachable — the property
+    ///      does not depend on choosing a large window, it holds at the boundary.
+    function test_H01_SameBlockDisputeThenRefund_UnreachableAtTheMinimumWindow() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW;
+        VNextSettlementEscrow e = _fundedEscrow(JOB, c);
+        bytes32 id = _unitId(e);
+        vm.prank(payer);
+        e.openDispute(id);
+        vm.expectRevert(VNextSettlementEscrow.DisputeWindowOpen.selector);
+        e.refundOnDisputeExpiry(id);
+        // The arbiter is NOT already expired either — it has the full window to act.
+        vm.prank(arbiter);
+        e.resolveDispute(id, true);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+    }
+
+    // ══ H-01 §8.2 H-1: the predict -> derive -> sign -> deploy -> fund sequence ════════════════════
+
+    /// @dev The canonical sequence, executed in order and asserted at every step. This is the test that
+    ///      shows the circular escrow-address dependency is actually broken: the unit ids, and therefore
+    ///      the hash both parties sign, are derived from an address that does not exist yet.
+    function test_BilateralAcceptance_PredictDeriveSignDeployFund() public {
+        bytes32 job = keccak256("h01-sequence-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 23_500000, 235, 1);
+
+        // 1-2. factory + implementation are fixed; the pre-policy root is address-INDEPENDENT.
+        PolicyIdentity memory id = _identity(job, arbiter, 1, c);
+        assertEq(id.prePolicyRoot, keccak256(abi.encode(c)), "prePolicyRoot == keccak(abi.encode(configs))");
+
+        // 3. predict the address from the salt that binds that root.
+        address predicted = factory.predictEscrow(id);
+        assertEq(predicted.code.length, 0, "nothing is deployed yet");
+
+        // 4. derive the settlementUnitIds from the PREDICTED address.
+        bytes32 predictedUnitId = VNextSettlementLib.computeSettlementUnitId(
+            block.chainid, predicted, job, c[0].milestoneIndex, c[0].stepId
+        );
+        bytes32 unitsRoot = keccak256(abi.encode(bytes32(0), predictedUnitId));
+        assertEq(unitsRoot, _unitsRootFor(predicted, job, c), "units root derived from the predicted address");
+
+        // 5. build the JobPolicyHash and 6. both parties sign it — still before deployment.
+        VNextSettlementEscrow.PolicyAcceptance memory acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: bytes(""), // implicit: the payer sends the tx
+            operatorSignature: _sign(
+                operatorPk,
+                _policyDigest(
+                    PolicyArgs({
+                        escrowAddr: predicted,
+                        factoryAddr: address(factory),
+                        impl: factory.implementation(),
+                        job: job,
+                        arb: arbiter,
+                        nonce: 1,
+                        preRoot: id.prePolicyRoot,
+                        unitsRoot: unitsRoot,
+                        allowSelf: false,
+                        expiry: POLICY_EXPIRY
+                    })
+                )
+            )
+        });
+
+        // 7. deploy at the predicted address.
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(id));
+        assertEq(address(e), predicted, "the clone lands exactly where both parties signed");
+        assertEq(e.operator(), operator, "the escrow now STORES an authenticated operator identity");
+
+        // 8. fund: both signatures verified + the policy nonce consumed, atomically.
+        vm.prank(payer);
+        e.fund(c, acc);
+
+        assertEq(_unitId(e), predictedUnitId, "the funded unit id is the one that was signed");
+        assertEq(usdc.balanceOf(address(e)), 1000e6);
+        _assertAcceptedPolicy(e, job, id.prePolicyRoot);
+    }
+
+    /// @dev Split out of the sequence test to keep its stack shallow.
+    function _assertAcceptedPolicy(VNextSettlementEscrow e, bytes32 job, bytes32 expectedPreRoot) internal view {
+        (,, uint256 nonce_, bytes32 preRoot_, bytes32 policyHash_, bool selfAdj_) = e.policy();
+        assertEq(nonce_, 1);
+        assertEq(preRoot_, expectedPreRoot);
+        assertFalse(selfAdj_);
+        assertTrue(policyHash_ != bytes32(0), "the authenticated policy hash is recorded on-chain");
+        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, job)), 2, "nonce consumed");
+    }
+
+    // ══ H-01 §2.1: bilateral acceptance — the failure modes ════════════════════════════════════════
+
+    function test_BilateralAcceptance_RejectsWrongOperatorSigner() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        bytes32 digest = _digestOf(e, c, false, POLICY_EXPIRY);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: bytes(""),
+            operatorSignature: _sign(0xB0B, digest) // a valid signature — by the wrong identity
+        });
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(c, acc);
+    }
+
+    /// @dev A signature over a DIFFERENT policy (here: the self-adjudication flag flipped) does not
+    ///      validate against the policy actually being funded.
+    function test_BilateralAcceptance_RejectsSignatureOverADifferentPolicy() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        bytes32 otherDigest = _digestOf(e, c, true, POLICY_EXPIRY); // signed WITH self-adjudication
+        VNextSettlementEscrow.PolicyAcceptance memory acc = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false, // ...but funded WITHOUT it
+            payerSignature: bytes(""),
+            operatorSignature: _sign(operatorPk, otherDigest)
+        });
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(c, acc);
+    }
+
+    function test_BilateralAcceptance_RejectsExpiredPolicy() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        uint256 expiry = block.timestamp + 1 hours;
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c, false, expiry, false);
+        vm.warp(expiry + 1);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.PolicyExpired.selector);
+        e.fund(c, acc);
+    }
+
+    /// @dev The escrow's ADDRESS commits to the terms: funding it with different configs is refused before
+    ///      any signature is even consulted.
+    function test_BilateralAcceptance_RejectsConfigsThatAreNotTheCommittedTerms() public {
+        VNextSettlementEscrow.UnitConfig[] memory committed = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, committed);
+        VNextSettlementEscrow.UnitConfig[] memory swapped = _oneUnitConfig(1000e6, 0, 0, 1);
+        swapped[0].payouts[0].recipient = address(0xC0FFEE); // pay someone else the same amount
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, swapped, false, POLICY_EXPIRY, false);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.PolicyRootMismatch.selector);
+        e.fund(swapped, acc);
+    }
+
+    /// @dev Delegated/agent funding: a non-payer caller CAN fund, but only with an explicit payer
+    ///      signature over the same policy. The payer's acceptance is never assumed.
+    function test_BilateralAcceptance_DelegatedFundingRequiresAnExplicitPayerSignature() public {
+        address relayer = address(0xAE1A);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        bytes32 digest = _digestOf(e, c, false, POLICY_EXPIRY);
+
+        // A wrong-key payer signature is rejected.
+        VNextSettlementEscrow.PolicyAcceptance memory bad = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: _sign(0xB0B, digest),
+            operatorSignature: _sign(operatorPk, digest)
+        });
+        vm.prank(relayer);
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.fund(c, bad);
+
+        // The genuine payer signature lets the relayer fund; the funds still come from the payer.
+        VNextSettlementEscrow.PolicyAcceptance memory good = _acceptance(e, c, false, POLICY_EXPIRY, true);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.prank(relayer);
+        e.fund(c, good);
+        assertEq(usdc.balanceOf(address(e)), 1000e6);
+        assertEq(usdc.balanceOf(payer), payerBefore - 1000e6, "the payer's funds, not the relayer's");
+    }
+
+    /// @dev The operator may be a SMART ACCOUNT: the money-plane identity is ERC-1271-capable.
+    function test_BilateralAcceptance_ERC1271SmartAccountOperator() public {
+        MockSmartAccountOperator sa = new MockSmartAccountOperator(vm.addr(operatorPk));
+        operator = address(sa); // the fixture's operator identity is now a contract
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        assertEq(e.operator(), address(sa));
+
+        // Declining account -> no funded state.
+        sa.setAccepts(false);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(c, acc);
+
+        // Accepting account -> funded.
+        sa.setAccepts(true);
+        vm.prank(payer);
+        e.fund(c, acc);
+        assertEq(uint256(e.unitState(_unitId(e))), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev No cross-factory reuse: an acceptance signed for one factory/implementation cannot fund the
+    ///      identical policy deployed by another factory, because both are inside the signed hash.
+    function test_BilateralAcceptance_NoCrossFactoryReuse() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow eA = _escrowFor(JOB, c);
+        bytes32 digestA = _digestOf(eA, c, false, POLICY_EXPIRY);
+
+        VNextSettlementEscrowFactory fB =
+            new VNextSettlementEscrowFactory(address(usdc), address(attester), O5_SCHEMA, bytes32(0));
+        VNextSettlementEscrow eB = VNextSettlementEscrow(fB.createEscrow(_identity(JOB, arbiter, 1, c)));
+        assertTrue(address(eA) != address(eB), "different factories -> different clone addresses");
+
+        VNextSettlementEscrow.PolicyAcceptance memory replay = VNextSettlementEscrow.PolicyAcceptance({
+            expiry: POLICY_EXPIRY,
+            allowSelfAdjudication: false,
+            payerSignature: bytes(""),
+            operatorSignature: _sign(operatorPk, digestA)
+        });
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        eB.fund(c, replay);
+    }
+
+    // ══ H-01 §8.2 H-1: cancellation + policy-nonce semantics ══════════════════════════════════════
+
+    /// @dev Funding a generation retires it AND every older one for that (payer, operator, job).
+    function test_PolicyNonce_FundingANewerGenerationInvalidatesOlderOnes() public {
+        bytes32 job = keccak256("h01-nonce-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow old = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 1, c)));
+        VNextSettlementEscrow fresh = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 7, c)));
+        VNextSettlementEscrow.PolicyAcceptance memory accOld = _acceptance(old, c);
+
+        _fund(fresh, c); // fund generation 7
+        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, job)), 8);
+
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrowFactory.PolicyNoLongerValid.selector);
+        old.fund(c, accOld); // generation 1 is dead even though its clone exists and its signatures are valid
+    }
+
+    function test_PolicyNonce_RevokeBeforeFunding_ByEitherParty() public {
+        bytes32 job = keccak256("h01-revoke-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 3, c)));
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+
+        // The OPERATOR walks away from a policy it signed but which was never funded.
+        vm.prank(operator);
+        factory.revokePolicy(payer, operator, job, 3);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrowFactory.PolicyNoLongerValid.selector);
+        e.fund(c, acc);
+
+        // Symmetrically, the PAYER can revoke a later generation.
+        VNextSettlementEscrow e2 = VNextSettlementEscrow(factory.createEscrow(_identity(job, arbiter, 4, c)));
+        VNextSettlementEscrow.PolicyAcceptance memory acc2 = _acceptance(e2, c);
+        vm.prank(payer);
+        factory.revokePolicy(payer, operator, job, 4);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrowFactory.PolicyNoLongerValid.selector);
+        e2.fund(c, acc2);
+    }
+
+    function test_PolicyNonce_RevokeIsMonotoneAndPartyGated() public {
+        bytes32 job = keccak256("h01-revoke-guard-job");
+        vm.prank(payer);
+        factory.revokePolicy(payer, operator, job, 5);
+        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, job)), 6);
+
+        // A revocation can never be walked back or restated.
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrowFactory.FloorNotIncreasing.selector);
+        factory.revokePolicy(payer, operator, job, 4);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrowFactory.FloorNotIncreasing.selector);
+        factory.revokePolicy(payer, operator, job, 5);
+
+        // And only a party to the policy may cancel it.
+        vm.prank(address(0xBADBAD));
+        vm.expectRevert(VNextSettlementEscrowFactory.NotAParty.selector);
+        factory.revokePolicy(payer, operator, job, 9);
+    }
+
+    /// @dev The nonce registry cannot be used to grief: only the clone CREATE2 places at that policy's
+    ///      predicted address may consume it, so no stranger can raise another job's floor.
+    function test_PolicyNonce_OnlyThePolicyEscrowMayConsume() public {
+        bytes32 job = keccak256("h01-consume-guard-job");
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory id = _identity(job, arbiter, 1, c);
+        vm.prank(address(0xBADBAD));
+        vm.expectRevert(VNextSettlementEscrowFactory.NotThePolicyEscrow.selector);
+        factory.consumePolicyNonce(id);
+        assertEq(factory.policyNonceFloor(factory.policyKey(payer, operator, job)), 0, "floor untouched");
+    }
+
+    // ══ H-01 §13.1/H-2: reclaim + dispute-window bounds, and the checked downcasts ═════════════════
+
+    function test_ReclaimBounds_BoundaryValuesAreAccepted() public {
+        VNextSettlementEscrow.UnitConfig[] memory lo = _oneUnitConfig(1000e6, 0, 0, 1);
+        lo[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY; // exactly the floor
+        VNextSettlementEscrow eLo = _fundedEscrow(keccak256("bound-lo"), lo);
+        assertEq(eLo.reclaimAtOf(_unitIdOf(eLo, lo[0])), lo[0].reclaimAt);
+
+        VNextSettlementEscrow.UnitConfig[] memory hi = _oneUnitConfig(1000e6, 0, 0, 1);
+        hi[0].reclaimAt = block.timestamp + VNextSettlementLib.MAX_RECLAIM_DELAY; // exactly the ceiling
+        VNextSettlementEscrow eHi = _fundedEscrow(keccak256("bound-hi"), hi);
+        assertEq(eHi.reclaimAtOf(_unitIdOf(eHi, hi[0])), hi[0].reclaimAt);
+    }
+
+    function test_ReclaimBounds_RejectsJustBelowTheFloor() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY - 1;
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadReclaim.selector);
+        e.fund(c, acc);
+    }
+
+    /// @dev The gap the pre-H-01 code left open: only the LOWER edge was enforced, so an unbounded
+    ///      far-future deadline was legal and could pin the operator's settlement horizon indefinitely.
+    function test_ReclaimBounds_RejectsJustAboveTheCeiling() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].reclaimAt = block.timestamp + VNextSettlementLib.MAX_RECLAIM_DELAY + 1;
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadReclaim.selector);
+        e.fund(c, acc);
+
+        // ...including the value that used to be the only rejected case's opposite extreme.
+        VNextSettlementEscrow.UnitConfig[] memory far = _oneUnitConfig(1000e6, 0, 0, 1);
+        far[0].reclaimAt = type(uint256).max;
+        VNextSettlementEscrow eFar = _escrowFor(keccak256("bound-far"), far);
+        VNextSettlementEscrow.PolicyAcceptance memory accFar = _acceptance(eFar, far);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadReclaim.selector);
+        eFar.fund(far, accFar);
+    }
+
+    function test_DisputeWindowBounds_MinimumIsAcceptedAndBelowItIsNot() public {
+        VNextSettlementEscrow.UnitConfig[] memory ok = _oneUnitConfig(1000e6, 0, 0, 1);
+        ok[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW;
+        VNextSettlementEscrow eOk = _fundedEscrow(keccak256("win-ok"), ok);
+        assertEq(eOk.disputeWindowOf(_unitIdOf(eOk, ok[0])), VNextSettlementLib.MIN_DISPUTE_WINDOW);
+
+        VNextSettlementEscrow.UnitConfig[] memory bad = _oneUnitConfig(1000e6, 0, 0, 1);
+        bad[0].disputeWindow = VNextSettlementLib.MIN_DISPUTE_WINDOW - 1;
+        VNextSettlementEscrow eBad = _escrowFor(keccak256("win-bad"), bad);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(eBad, bad);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadDisputeWindow.selector);
+        eBad.fund(bad, acc);
+    }
+
+    /// @dev H-2 checked downcasts, exercised DIRECTLY: `toUint64`/`toUint128` revert rather than
+    ///      truncating. `uint64(x)`/`uint128(x)` would silently produce a wrong value here.
+    function test_CheckedDowncasts_RevertInsteadOfTruncating() public {
+        DowncastHarness h = new DowncastHarness();
+        assertEq(h.toUint64(type(uint64).max), type(uint64).max);
+        vm.expectRevert(ValueOverflow.selector);
+        h.toUint64(uint256(type(uint64).max) + 1); // `uint64(x)` would silently return 0 here
+
+        assertEq(h.toUint128(type(uint128).max), type(uint128).max);
+        vm.expectRevert(ValueOverflow.selector);
+        h.toUint128(uint256(type(uint128).max) + 1);
+    }
+
+    /// @dev ...and reachable through the funding path: a gross above uint128 is refused at the boundary
+    ///      rather than silently narrowed once the Wave-3 liability buckets are packed.
+    function test_Fund_RejectsGrossAboveUint128() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        c[0].g = uint256(type(uint128).max) + 1;
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(ValueOverflow.selector);
+        e.fund(c, acc);
+    }
+
+    // ══ H-01: the operator identity must exist and be independent ═════════════════════════════════
+
+    function test_Initialize_RejectsAZeroOperator() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory id = _identity(JOB, arbiter, 1, c);
+        id.operator = address(0); // "nobody has to accept" — the H-01 hole, now unrepresentable
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        factory.createEscrow(id);
+    }
+
+    function test_Initialize_RejectsOperatorEqualToPayer() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory id = _identity(JOB, arbiter, 1, c);
+        id.operator = payer; // bilateral acceptance by one party is not bilateral
+        vm.expectRevert(VNextSettlementEscrow.PartyCollision.selector);
+        factory.createEscrow(id);
+    }
+
+    function test_Initialize_RejectsAZeroArbiter() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        PolicyIdentity memory id = _identity(JOB, address(0), 1, c);
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        factory.createEscrow(id);
+    }
+
+    /// @dev Symmetric with the payer case: an operator-appointed-as-arbiter is also self-adjudication.
+    function test_Fund_RejectsOperatorAsArbiterWithoutConsent() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, operator, 1, c)));
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.SelfAdjudicationNotAccepted.selector);
+        e.fund(c, acc);
+    }
+
+    function _unitIdOf(VNextSettlementEscrow e, VNextSettlementEscrow.UnitConfig memory c)
+        internal
+        view
+        returns (bytes32)
+    {
+        return VNextSettlementLib.computeSettlementUnitId(
+            block.chainid, address(e), e.jobIdHash(), c.milestoneIndex, c.stepId
+        );
     }
 
     /// @dev MIGRATED from `test_EvidenceRelease_RevertsWhenUidMismatch`. On the EAS rail the CALLER chose
