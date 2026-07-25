@@ -2899,6 +2899,539 @@ contract VNextSettlementEscrowTest is Test {
         vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
         fx.escrow.acceptAssertion(fx.unitId);
     }
+
+    // ══ rotateClaimDestination: MONEY-REDIRECTION coverage ═══════════════════════════════════════
+    // Zero coverage before this pass (verified: no `rotat` hits anywhere under test/). The function
+    // (VNextSettlementEscrow.sol:1681-1706) changes WHERE a collateralized claim's money pays out on
+    // the next `dischargeClaim` — exactly the surface an auditor flags. A reclamation pass just moved
+    // its signature predicate from a local check to `factory.verifyCloneSignature`
+    // (VNextSettlementEscrowFactory.sol:239-247); the digest is unchanged, but the move touches the
+    // one line that decides authorization for a money-redirecting call.
+    //
+    // The function is PURELY signature-gated: there is no `msg.sender == claimOwner` check anywhere
+    // in its body (VNextSettlementEscrow.sol:1681-1706 read in full — confirmed), so any relayer
+    // holding a valid signature may submit it, mirroring `approveByBuyer`'s relay design. It is also
+    // entirely UNIT-STATE-AGNOSTIC — it never reads `_units[unitId].state` — so there is deliberately
+    // no "unit must be in state X" test below; the source has no such gate to test.
+    //
+    // ROTATE_TYPEHASH (VNextSettlementEscrow.sol:126-128) binds 9 fields: claimId, claimOwner,
+    // currentDestination, newDestination, destinationNonce, expiry, chainId, escrow, contractVersion.
+    // `claimOwner`/`currentDestination`/`destinationNonce` are read from the CLAIM'S OWN STORAGE, not
+    // attacker-suppliable parameters, so their binding is structural. `claimId` and `newDestination`
+    // ARE direct call parameters — the binding tests below tamper the call for those. `chainId`,
+    // `escrow`, and `contractVersion` are never call parameters either (the contract always uses its
+    // own live `block.chainid` / `address(this)` / `CONTRACT_VERSION`) — the binding tests for those
+    // instead sign against a WRONG value and show the live, correct value no longer matches it.
+
+    /// @dev Twin of `_oneUnitConfig` with CALLER-CHOSEN recipients. Needed here specifically: a claim's
+    ///      `claimOwner` is exactly the payout recipient at claim-creation time (VNextSettlementEscrow
+    ///      .sol:1176), and `rotateClaimDestination`'s sole authority is a signature BY that owner — so
+    ///      testing it for real requires a recipient whose private key the test actually holds, unlike
+    ///      the fixture's own `recip1`/`recip2` constants.
+    function _oneUnitConfigWithRecipients(uint256 g, uint256 f, uint16 feeBps, uint8 tier, address r1, address r2)
+        internal
+        view
+        returns (VNextSettlementEscrow.UnitConfig[] memory cfgs)
+    {
+        uint256 n = g - f;
+        PayoutEntry[] memory po = new PayoutEntry[](2);
+        po[0] = PayoutEntry({recipient: r1, amount: n / 2});
+        po[1] = PayoutEntry({recipient: r2, amount: n - n / 2});
+        cfgs = new VNextSettlementEscrow.UnitConfig[](1);
+        cfgs[0] = VNextSettlementEscrow.UnitConfig({
+            milestoneIndex: 0,
+            stepId: keccak256("step-0"),
+            requiredTier: tier,
+            requestedTier: tier,
+            g: g,
+            f: f,
+            n: n,
+            feeBps: feeBps,
+            feeRecipient: f > 0 ? feeDest : address(0),
+            reclaimAt: block.timestamp + 30 days,
+            compositionSchemaVersion: 0,
+            compositionRoot: bytes32(0),
+            evidenceCommitter: operator,
+            payouts: po
+        });
+    }
+
+    bytes32 constant ROTATE_TYPEHASH_T = keccak256(
+        "RotateDestination(bytes32 claimId,address claimOwner,address currentDestination,address newDestination,uint256 destinationNonce,uint256 expiry,uint256 chainId,address escrow,uint256 contractVersion)"
+    );
+
+    /// @dev Mirrors VNextSettlementEscrow.sol:1698-1703 exactly, field-for-field and in the same order,
+    ///      so a drift in the contract's own encoding surfaces as a signature failure here rather than
+    ///      silent agreement. Every field is an explicit parameter (including chainId/escrow/version,
+    ///      which the contract itself reads live) so the binding tests can deliberately pass a WRONG
+    ///      value for exactly one field at a time.
+    function _rotateStructHash(
+        bytes32 claimId,
+        address owner_,
+        address current_,
+        address newDestination,
+        uint256 nonce,
+        uint256 expiry,
+        uint256 chainId_,
+        address escrowAddr,
+        uint256 contractVersion
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ROTATE_TYPEHASH_T, claimId, owner_, current_, newDestination, nonce, expiry, chainId_, escrowAddr,
+                contractVersion
+            )
+        );
+    }
+
+    function test_RotateClaimDestination_HappyPath_PaysNewDestinationNotOld() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D1);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT); // every push -> CLAIM
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        VNextSettlementEscrow.ClaimRecord memory before_ = e.claimOf(claimId);
+        assertEq(before_.claimOwner, ownerAddr);
+        assertEq(before_.claimDestination, ownerAddr);
+        assertEq(before_.destinationNonce, 0);
+        uint256 amount = before_.amount;
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectEmit(true, false, false, true, address(e));
+        emit VNextSettlementEscrow.ClaimDestinationRotated(claimId, ownerAddr, newDest, 0);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+
+        VNextSettlementEscrow.ClaimRecord memory after_ = e.claimOf(claimId);
+        assertEq(after_.claimDestination, newDest, "destination moved to the NEW address");
+        assertEq(after_.claimOwner, ownerAddr, "owner is unchanged by a rotation");
+        assertEq(after_.destinationNonce, 1);
+
+        // The real invariant: money must land on the NEW destination, never the old one.
+        e.dischargeClaim(claimId);
+        assertEq(usdc.balanceOf(newDest), amount, "paid to the rotated destination");
+        assertEq(usdc.balanceOf(ownerAddr), 0, "the old destination received nothing from this claim");
+    }
+
+    /// @dev Confirms the design is DELIBERATELY sender-agnostic (mirrors `approveByBuyer`'s relay
+    ///      pattern, VNextSettlementEscrow.sol:1636-1637): msg.sender is neither the owner nor the
+    ///      payer, and the rotation still succeeds because the signature alone is the authority.
+    function test_RotateClaimDestination_AnyRelayerMaySubmit_SignatureIsTheAuthority() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D2);
+        address randomRelayer = address(0x1234567);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.prank(randomRelayer);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+        assertEq(e.claimOf(claimId).claimDestination, newDest);
+    }
+
+    function test_RotateClaimDestination_RejectsSignatureFromNonOwnerKey() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        uint256 attackerPk = 0xBAD1DEA;
+        address newDest = address(0xD00D3);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory badSig = _sign(attackerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, badSig);
+
+        // §5.2: the optimistic write must not leak past a failed signature check.
+        VNextSettlementEscrow.ClaimRecord memory c = e.claimOf(claimId);
+        assertEq(c.claimDestination, ownerAddr, "unchanged after a rejected rotation");
+        assertEq(c.destinationNonce, 0, "unchanged after a rejected rotation");
+    }
+
+    function test_RotateClaimDestination_RejectsReplayAfterSuccessfulRotation() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D4);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        e.rotateClaimDestination(claimId, newDest, expiry, sig); // succeeds once
+        assertEq(e.claimOf(claimId).destinationNonce, 1);
+
+        // Replay the identical (claimId, newDestination, expiry, signature) tuple. `current` and
+        // `nonce` have both moved on, so the contract's freshly-recomputed structHash no longer
+        // matches what was signed, and the exact call that just succeeded now fails.
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+
+        VNextSettlementEscrow.ClaimRecord memory c = e.claimOf(claimId);
+        assertEq(c.claimDestination, newDest, "state from the FIRST rotation, untouched by the replay");
+        assertEq(c.destinationNonce, 1);
+    }
+
+    /// @dev Isolates the NONCE alone as sufficient replay protection, independent of whether the
+    ///      destination changed: a no-op rotation (newDestination == current) still consumes the
+    ///      nonce, so replaying the same signature fails even though `current` still matches live state.
+    function test_RotateClaimDestination_RejectsStaleNonceEvenWhenDestinationUnchanged() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, ownerAddr, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        e.rotateClaimDestination(claimId, ownerAddr, expiry, sig); // no-op: succeeds, nonce -> 1
+        VNextSettlementEscrow.ClaimRecord memory mid = e.claimOf(claimId);
+        assertEq(mid.claimDestination, ownerAddr, "no-op: destination unchanged");
+        assertEq(mid.destinationNonce, 1);
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, ownerAddr, expiry, sig);
+    }
+
+    function test_RotateClaimDestination_ExpiryBoundary_ExactlyAtExpirySucceeds() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D5);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 days;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.warp(expiry); // block.timestamp == expiry: the guard is strict `>`, not `>=`
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+        assertEq(e.claimOf(claimId).claimDestination, newDest);
+    }
+
+    function test_RotateClaimDestination_RejectsExpiredSignature() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D6);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 days;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.warp(expiry + 1);
+        vm.expectRevert(VNextSettlementEscrow.ApprovalExpired.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+    }
+
+    /// @dev claimId is a direct call parameter, so an attacker can freely swap it. BOTH payout legs go
+    ///      to the SAME controlled owner, giving claim0/claim1 an identical owner/current/nonce shape
+    ///      so ONLY claimId differs between them — isolating it as the sole varying bound field.
+    function test_RotateClaimDestination_BindingClaimId_CrossClaimSignatureRejected() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00D7);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, ownerAddr));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claim0 = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        bytes32 claim1 = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 1, ClaimClass.PRINCIPAL);
+        assertTrue(claim0 != claim1, "sanity: distinct claim ids");
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claim0, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claim1, newDest, expiry, sig);
+        assertEq(e.claimOf(claim1).destinationNonce, 0, "claim1 untouched by a claim0-scoped signature");
+    }
+
+    function test_RotateClaimDestination_BindingNewDestination_TamperedDestinationRejected() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address signedDest = address(0xD00D8);
+        address suppliedDest = address(0xD00D9);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, signedDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, suppliedDest, expiry, sig); // signed for a DIFFERENT destination
+    }
+
+    /// @dev chainId is never a call parameter — the contract always folds in its own live
+    ///      `block.chainid`. Signing against a wrong chainId (while the REAL domain separator, which
+    ///      also carries chainId, is used to wrap the digest) proves the struct's OWN chainId field is
+    ///      independently checked, not just the domain separator's copy.
+    function test_RotateClaimDestination_BindingChainId_WrongChainRejected() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00DA);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        uint256 wrongChainId = block.chainid + 12345;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, wrongChainId, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+    }
+
+    /// @dev escrow address is never a call parameter — the contract always folds in its own
+    ///      `address(this)`. A signature built for a decoy escrow address cannot authorize THIS clone.
+    function test_RotateClaimDestination_BindingEscrowAddress_WrongEscrowRejected() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00DB);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        address decoyEscrow = address(0xE5C500); // any address that is NOT address(e)
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, decoyEscrow, e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+    }
+
+    /// @dev contractVersion is a constant, never a call parameter. A signature pinned to a WRONG
+    ///      version cannot authorize a rotation under the live (correct) version — proving that a
+    ///      future version bump would correctly invalidate yesterday's signatures, same as §2.1 H-01.
+    function test_RotateClaimDestination_BindingContractVersion_WrongVersionRejected() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00DC);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        assertEq(e.CONTRACT_VERSION(), 1, "sanity: the live version this test pins against");
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), 2
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+    }
+
+    /// @dev The recipient gate (`_requireAllowedRecipient`) runs BEFORE signature verification
+    ///      (VNextSettlementEscrow.sol:1687-1688), so an empty signature is sufficient to prove this
+    ///      is the guard that fired, not an incidental BadSignature.
+    function test_RotateClaimDestination_RejectsZeroAddressDestination() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.rotateClaimDestination(claimId, address(0), block.timestamp + 1 hours, "");
+    }
+
+    function test_RotateClaimDestination_RejectsForbiddenRecipients_SelfUsdcFactory() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        uint256 expiry = block.timestamp + 1 hours;
+
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.rotateClaimDestination(claimId, address(e), expiry, "");
+
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.rotateClaimDestination(claimId, address(usdc), expiry, "");
+
+        vm.expectRevert(VNextSettlementEscrow.ForbiddenRecipient.selector);
+        e.rotateClaimDestination(claimId, address(factory), expiry, "");
+
+        VNextSettlementEscrow.ClaimRecord memory c = e.claimOf(claimId);
+        assertEq(c.destinationNonce, 0, "none of the rejected attempts mutated the claim");
+        assertEq(c.claimDestination, recip1);
+    }
+
+    function test_RotateClaimDestination_RejectsNonexistentClaim() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
+        vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
+        e.rotateClaimDestination(keccak256("no-such-claim"), address(0xD00DD), block.timestamp + 1 hours, "");
+    }
+
+    /// @dev `dischargeClaim` `delete`s the record (VNextSettlementEscrow.sol:1245), so a signature that
+    ///      WOULD have been valid pre-discharge cannot resurrect it: existence is checked first.
+    function test_RotateClaimDestination_DischargedClaimIsUnreachable() public {
+        uint256 ownerPk = 0xC1A1D0;
+        address ownerAddr = vm.addr(ownerPk);
+        address newDest = address(0xD00DE);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, ownerAddr, recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, ownerAddr, ownerAddr, newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        e.dischargeClaim(claimId); // pays out and deletes the record
+        vm.expectRevert(VNextSettlementEscrow.ClaimNotFound.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig); // a would-be-valid signature, too late
+    }
+
+    /// @dev The claim owner may be a smart account: `_isValidSignature` falls back to ERC-1271 whenever
+    ///      the signer has code (VNextSettlementEscrowFactory.sol:304-308), exactly as it already does
+    ///      for the operator identity (test_BilateralAcceptance_ERC1271SmartAccountOperator).
+    function test_RotateClaimDestination_ERC1271SmartAccountOwner() public {
+        uint256 saOwnerPk = 0x5A1234;
+        MockSmartAccountOperator sa = new MockSmartAccountOperator(vm.addr(saOwnerPk));
+        address newDest = address(0xD00DF);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, address(sa), recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        VNextSettlementEscrow.ClaimRecord memory rec = e.claimOf(claimId);
+        assertEq(rec.claimOwner, address(sa), "the smart account IS the claim owner");
+        uint256 amount = rec.amount;
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, address(sa), address(sa), newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(saOwnerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        sa.setAccepts(false);
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+
+        sa.setAccepts(true);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+        assertEq(e.claimOf(claimId).claimDestination, newDest);
+
+        e.dischargeClaim(claimId);
+        assertEq(usdc.balanceOf(newDest), amount, "paid to the rotated destination via ERC-1271 authorization");
+    }
 }
 
 /// @dev EAS double that is LIVE but FAILING — models the outage shape where the call is actually made.
