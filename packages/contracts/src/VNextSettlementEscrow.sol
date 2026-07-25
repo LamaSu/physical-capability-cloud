@@ -1439,6 +1439,13 @@ contract VNextSettlementEscrow {
     ///         Two triggers: the primary verdict is overdue (`>= primaryVerdictDue`), or the primary
     ///         cohort has been disabled — in which case the lane is provably closed and waiting out the
     ///         clock would only burn the operator's remaining window (§8.3 C-5, pre-assertion branch).
+    ///
+    ///         OPERATIONAL ORDER (not a hazard, but it must be stated): commit the evidence package
+    ///         BEFORE escalating. `submitEvidence` requires FUNDED_ACTIVE, and this call leaves it, so an
+    ///         operator that escalates with nothing committed cannot then commit — and the backup cohort
+    ///         cannot assert over an uncommitted package (§B is enforced on the attester side too), so the
+    ///         unit would simply time out to a refund. That ordering is inherent to §B: the package is
+    ///         selected before any verdict exists, and escalation is a request for a verdict.
     function invokeBackup(bytes32 unitId) external nonReentrant onlyExisting(unitId) {
         if (msg.sender != operator) revert OnlyOperator();
         Unit storage u = _units[unitId];
