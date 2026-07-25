@@ -222,6 +222,30 @@ contract VNextSettlementEscrowFactory {
         if (!_isValidSignature(p.operator, digest, operatorSignature)) revert BadOperatorSignature();
     }
 
+    /// @notice Validate `signer`'s EIP-712 signature over `structHash` in the CALLING CLONE's domain —
+    ///         the residual signature surface (`approveByBuyer`, `rotateClaimDestination`) that Wave 4a's
+    ///         `acceptPolicy` move left behind in the escrow.
+    /// @dev    Same lever, same trust: the escrow implementation is the EIP-170-bounded per-clone artifact
+    ///         and `factory` is one of its immutables, so this is a call it could already make and to a
+    ///         contract it already trusts unconditionally. `verifyingContract` is `msg.sender`, i.e. the
+    ///         clone itself, so the digest is byte-identical to the one the clone computed for itself
+    ///         before Wave 4a and every signature that validated then validates now.
+    ///
+    ///         Deliberately a PREDICATE, not an authorization. It returns a bool, writes nothing, and
+    ///         reads no escrow state — the caller keeps ownership of which error a `false` means and of
+    ///         every binding/nonce/expiry check around it, all of which stay in the clone. It is `view`
+    ///         and permissionless because it can only ever restate what its caller already holds: a
+    ///         signature, and the hash that signature is over.
+    function verifyCloneSignature(address signer, bytes32 structHash, bytes calldata signature)
+        external
+        view
+        returns (bool)
+    {
+        return _isValidSignature(
+            signer, keccak256(abi.encodePacked("\x19\x01", _domainSeparator(msg.sender), structHash)), signature
+        );
+    }
+
     /// @dev EIP-712 struct hash of the frozen policy, over the CLONE's domain. Split into two
     ///      `abi.encode` calls to avoid stack-too-deep; all 16 words are static, so
     ///      `bytes.concat(abi.encode(..), abi.encode(..))` equals `abi.encode(all 16)` and the EIP-712 hash

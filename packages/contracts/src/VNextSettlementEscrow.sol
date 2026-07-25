@@ -45,6 +45,11 @@ interface IVNextEscrowFactory {
         bytes calldata payerSignature,
         bytes calldata operatorSignature
     ) external returns (bytes32 jobPolicyHash);
+
+    function verifyCloneSignature(address signer, bytes32 structHash, bytes calldata signature)
+        external
+        view
+        returns (bool);
 }
 
 // `O5Assertion` (the direct cohort assertion the money path reads) and `O5_DECISION_SETTLE` live in
@@ -113,19 +118,14 @@ contract VNextSettlementEscrow {
     uint8 internal constant MAX_TIER = 3;
 
     // ── EIP-712 + auth constants (2b-ii) ─────────────────────────────────────────────────────────
-    // The domain pins live in {VNextSettlementLib} because the FACTORY rebuilds this escrow's EIP-712
-    // domain when it verifies the bilateral acceptance (Wave 4a). One definition, so the two can't drift.
-    bytes32 private constant EIP712_DOMAIN_TYPEHASH = VNextSettlementLib.EIP712_DOMAIN_TYPEHASH;
-    bytes32 private constant EIP712_NAME_HASH = VNextSettlementLib.EIP712_NAME_HASH;
-    bytes32 private constant EIP712_VERSION_HASH = VNextSettlementLib.EIP712_VERSION_HASH;
+    // The EIP-712 domain pins live in {VNextSettlementLib} and are consumed by the FACTORY, which
+    // rebuilds this escrow's domain (verifyingContract == this clone) for every signature check.
     bytes32 private constant BUYER_APPROVAL_TYPEHASH = keccak256(
         "BuyerApproval(uint256 chainId,address escrow,uint256 contractVersion,bytes32 settlementUnitId,address payer,bytes32 jobIdHash,bytes32 termsHash,uint256 g,uint256 f,uint256 n,bytes32 feeScheduleHash,bytes32 payoutConfigHash,uint8 decision,uint256 approvalNonce,uint256 expiry)"
     );
     bytes32 private constant ROTATE_TYPEHASH = keccak256(
         "RotateDestination(bytes32 claimId,address claimOwner,address currentDestination,address newDestination,uint256 destinationNonce,uint256 expiry,uint256 chainId,address escrow,uint256 contractVersion)"
     );
-    bytes4 private constant ERC1271_MAGIC = VNextSettlementLib.ERC1271_MAGIC;
-    uint256 private constant ECDSA_S_MAX = VNextSettlementLib.ECDSA_S_MAX;
     // §2 authorization-key issuer domains (per authority type, L-01).
     bytes32 private constant AUTHDOMAIN_EVIDENCE = keccak256("PCC:vnext:auth:evidence:v1");
     bytes32 private constant AUTHDOMAIN_DISPUTE = keccak256("PCC:vnext:auth:dispute:v1");
@@ -1665,7 +1665,7 @@ contract VNextSettlementEscrow {
         u.nextApprovalNonce = approval.approvalNonce + 1;
         bytes32 structHash = _hashBuyerApproval(approval);
         if (msg.sender != payer) {
-            if (!_isValidSignature(payer, _typedDataHash(structHash), signature)) revert BadSignature();
+            if (!_isValidSignature(payer, structHash, signature)) revert BadSignature();
         }
 
         // §2 buyer authorization key (L-01): issuer = payer, rawAuthorizationId = the EIP-712 struct hash.
@@ -1701,21 +1701,17 @@ contract VNextSettlementEscrow {
                 CONTRACT_VERSION
             )
         );
-        if (!_isValidSignature(owner, _typedDataHash(structHash), signature)) revert BadSignature();
+        if (!_isValidSignature(owner, structHash, signature)) revert BadSignature();
         emit ClaimDestinationRotated(claimId, current, newDestination, nonce);
     }
 
     // ── EIP-712 + signature helpers ──────────────────────────────────────────────────────────────
-    function _domainSeparator() private view returns (bytes32) {
-        return keccak256(
-            abi.encode(EIP712_DOMAIN_TYPEHASH, EIP712_NAME_HASH, EIP712_VERSION_HASH, block.chainid, address(this))
-        );
-    }
-
-    function _typedDataHash(bytes32 structHash) private view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-    }
-
+    // `_domainSeparator` / `_typedDataHash` / `_isValidSignature` moved to
+    // {VNextSettlementEscrowFactory.verifyCloneSignature} in Wave 4a, together with the acceptance
+    // verification. The digest is unchanged: the factory builds it with `verifyingContract == msg.sender`,
+    // which is this clone. Everything that decides WHETHER a signature may authorize anything — the field
+    // bindings, the nonce, the expiry, the state guards — stays here; only the "is this signature valid
+    // over this hash" predicate is answered next door.
     function _hashBuyerApproval(BuyerApproval calldata a) private pure returns (bytes32) {
         // Split the 16-field encode to avoid stack-too-deep. All fields are static, so
         // bytes.concat(abi.encode(...), abi.encode(...)) == abi.encode(all 16) — the EIP-712 hash is identical.
@@ -1730,26 +1726,14 @@ contract VNextSettlementEscrow {
         );
     }
 
-    /// @dev Validate `signer`'s signature over `digest`: ERC-1271 for contracts (strict 32-byte magic
-    ///      word, rejecting dirty padding), malleability-guarded ECDSA for EOAs.
-    function _isValidSignature(address signer, bytes32 digest, bytes calldata signature) private view returns (bool) {
-        if (signer.code.length > 0) {
-            (bool ok, bytes memory ret) =
-                signer.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, signature)));
-            return ok && ret.length == 32 && abi.decode(ret, (bytes32)) == bytes32(ERC1271_MAGIC);
-        }
-        if (signature.length != 65) return false;
-        bytes32 r;
-        bytes32 s;
-        uint8 vByte;
-        assembly {
-            r := calldataload(signature.offset)
-            s := calldataload(add(signature.offset, 32))
-            vByte := byte(0, calldataload(add(signature.offset, 64)))
-        }
-        if (uint256(s) > ECDSA_S_MAX) return false;
-        if (vByte != 27 && vByte != 28) return false;
-        address recovered = ecrecover(digest, vByte, r, s);
-        return recovered != address(0) && recovered == signer;
+    /// @dev Validate `signer`'s signature over the EIP-712 digest of `structHash` in THIS clone's domain.
+    ///      One hop to the factory (see {VNextSettlementEscrowFactory.verifyCloneSignature}); ERC-1271 for
+    ///      contracts, malleability-guarded ECDSA for EOAs, exactly as before Wave 4a.
+    function _isValidSignature(address signer, bytes32 structHash, bytes calldata signature)
+        private
+        view
+        returns (bool)
+    {
+        return IVNextEscrowFactory(factory).verifyCloneSignature(signer, structHash, signature);
     }
 }
