@@ -115,7 +115,8 @@ const MetricFormat = z.enum(["usd", "int", "pct", "ts"]);
 /** One row descriptor for a `list` window. */
 export const ListItemSchema = z.object({
   title: z.string().min(1),
-  meta: z.array(z.string()).default([]),
+  // capped — meta selectors are looped per rendered row; unbounded = render DoS (sol re-review #7)
+  meta: z.array(z.string()).max(12).default([]),
   statusFrom: z.string().optional(),
 });
 
@@ -266,7 +267,11 @@ function decodePercentDeep(s: string): string {
 // A `Bearer <token>` header value, or a JWT (three base64url segments starting
 // `eyJ`), baked into a shared manifest is a credential leak regardless of the
 // PCC prefix (sol security pass, finding #10).
-const BEARER_RE = /\bbearer\s+[A-Za-z0-9._~+/\-]{12,}/i;
+// Require the token after "Bearer" to have CREDENTIAL shape (≥20 chars AND at
+// least one digit or dot) — real bearer tokens/JWTs have those; ordinary prose
+// like "Bearer authentication" does not, so it is not a false positive (sol
+// re-review #10). A JWT after Bearer is also caught by JWT_RE below.
+const BEARER_RE = /\bbearer\s+(?=[A-Za-z0-9._~+/\-]{20,})[A-Za-z0-9._~+/\-]*[\d.][A-Za-z0-9._~+/\-]*/i;
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/;
 
 /** Bounded base64/base64url decode; returns "" on anything that isn't clean
@@ -376,11 +381,13 @@ const DashboardManifestBase = z.object({
   csd: z.literal(DASHBOARD_CSD_URL),
   title: z.string().min(1),
   description: z.string().optional(),
-  // NOTE: no `api_base`. Live transport is HARD-BOUND to the render origin by
-  // the kit (a manifest that could name its own fetch host would let a shared
-  // dashboard redirect the viewer's Bearer key to an attacker origin — sol
-  // security pass #1). z.object strips an inbound `api_base` silently; it is
-  // never honored for transport.
+  // ADVISORY ONLY — retained because host-mode consumers (mcp-app-view) still
+  // read it. Live transport is HARD-BOUND to the render origin by the kit and
+  // this is IGNORED for fetches: a manifest that could name its own fetch host
+  // would let a shared dashboard redirect the viewer's Bearer key to an attacker
+  // origin (sol security pass #1). The ENFORCING fix is the kit-side origin
+  // hard-bind (staged); this field must NEVER be used as a transport destination.
+  api_base: z.string().optional(),
   theme: z.enum(["auto", "dark", "light"]).optional(),
   sections: z.array(SectionSchema).max(MAX_SECTIONS),
 });
@@ -405,7 +412,10 @@ export const DashboardManifestSchema = DashboardManifestBase
   // Size guard FIRST — a real dashboard is 2–6KB. Rejecting oversized manifests
   // up front bounds the node walk below (so it never hits its fail-closed
   // budget on legitimate input) and blocks resource exhaustion (sol #5/#7).
-  .refine((m) => JSON.stringify(m).length <= MAX_MANIFEST_BYTES, {
+  // Measure UTF-8 BYTES (TextEncoder is universal in browser + Node) — .length
+  // counts UTF-16 code units, so non-ASCII could be ~3x larger than it appears
+  // and slip past a code-unit check (sol re-review #7).
+  .refine((m) => new TextEncoder().encode(JSON.stringify(m)).length <= MAX_MANIFEST_BYTES, {
     message: `manifest exceeds ${MAX_MANIFEST_BYTES} bytes (a dashboard is 2–6KB)`,
     path: ["_size"],
   })
