@@ -236,8 +236,11 @@ function resolveCaller(req: FastifyRequest): string | null {
   // on req.userId. Without recognising it here a SIWE user falls through to a
   // token-derived id (or null) and 401s on / cannot own their own artifacts
   // (sol security pass #9). Namespaced so it never collides with an operatorId.
+  // Canonicalize: an Ethereum address is case-insensitive (checksum case is only
+  // a display encoding), so lowercase it or the same wallet in checksum vs
+  // lowercase form resolves to two different owners (sol re-review #9).
   const userId = (req as unknown as { userId?: string | null }).userId;
-  if (userId) return "siwe_" + String(userId);
+  if (userId) return "siwe_" + String(userId).toLowerCase();
 
   try {
     const key = resolveApiKey(req);
@@ -568,7 +571,7 @@ function rejectIfBodyHasKey(reply: FastifyReply, body: unknown): FastifyReply | 
   return reply.status(400).send({
     error: "invalid_body",
     message:
-      "Invalid artifact body — no field may contain an API key (pcc_live_/pcc_test_ substring); a shared artifact travels with its contents.",
+      "Invalid artifact body — no field may contain a credential (pcc_live_/pcc_test_ key, Bearer token, or JWT — raw, percent-encoded, or base64), and it must be small enough to fully scan; a shared artifact travels with its contents.",
   });
 }
 
