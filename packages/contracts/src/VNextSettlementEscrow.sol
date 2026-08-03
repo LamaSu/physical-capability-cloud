@@ -928,64 +928,37 @@ contract VNextSettlementEscrow {
         return _units[unitId].state;
     }
 
-    function feeDomainVersion(bytes32 unitId) external view onlyExisting(unitId) returns (uint8) {
-        return _units[unitId].feeSchedule.domainVersion;
+    /// @notice WAVE 4c — the unit's whole frozen fee schedule in ONE read.
+    /// @dev    REPLACES eleven one-field accessors (`feeDomainVersion`, `feeChainId`, `escrowOf`,
+    ///         `settlementUnitIdOf`, `feeBasisOf`, `gross`, `fee`, `net`, `denominatorOf`,
+    ///         `roundingRuleOf`, `feeSplitConfigHashOf`). Each cost a dispatch-table entry, a body, and an
+    ///         inlined existence check, on a contract sitting 134 bytes under the EIP-170 ceiling. The
+    ///         schedule is written ONCE at funding and frozen thereafter, so a consumer wanting two of
+    ///         these fields was already paying two calls to read one immutable record — one struct read is
+    ///         strictly better for them.
+    ///
+    ///         THE THREE FEE SELECTORS THE O5 ATTESTER STATICCALLS ARE DELIBERATELY NOT COLLAPSED HERE.
+    ///         `O5AttesterBase._escrowBindingWord` requires `returndatasize() == 32` EXACTLY and reverts
+    ///         `EscrowBindingUnreadable` otherwise, so folding `feeScheduleHashOf` / `feeBpsOf` /
+    ///         `feeRecipientOf` into a multi-word return would make EVERY `attestO5` revert — nothing
+    ///         stolen, but settlement silently degraded to refund-only. They keep their own selectors and
+    ///         their exact one-word returns below; `feeBps` / `feeRecipient` appearing in this struct too
+    ///         is intentional duplication.
+    function feeScheduleOf(bytes32 unitId) external view onlyExisting(unitId) returns (FeeSchedule memory) {
+        return _units[unitId].feeSchedule;
     }
 
-    function feeChainId(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].feeSchedule.chainId;
-    }
-
-    function escrowOf(bytes32 unitId) external view onlyExisting(unitId) returns (address) {
-        return _units[unitId].feeSchedule.escrow;
-    }
-
-    function settlementUnitIdOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
-        return _units[unitId].feeSchedule.settlementUnitId;
-    }
-
-    function feeBasisOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint8) {
-        return _units[unitId].feeSchedule.feeBasis;
-    }
-
-    function gross(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].feeSchedule.g;
-    }
-
-    function fee(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].feeSchedule.f;
-    }
-
-    function net(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].feeSchedule.n;
-    }
-
+    // ── The ONE-WORD fee selectors the O5 attester STATICCALLs. Do not reshape. ───────────────────────
     function feeBpsOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint16) {
         return _units[unitId].feeSchedule.feeBps;
-    }
-
-    function denominatorOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].feeSchedule.denominator;
-    }
-
-    function roundingRuleOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint8) {
-        return _units[unitId].feeSchedule.roundingRule;
     }
 
     function feeRecipientOf(bytes32 unitId) external view onlyExisting(unitId) returns (address) {
         return _units[unitId].feeSchedule.feeRecipient;
     }
 
-    function feeSplitConfigHashOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
-        return _units[unitId].feeSchedule.feeSplitConfigHash;
-    }
-
     function feeScheduleHashOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
         return _units[unitId].feeScheduleHash;
-    }
-
-    function payoutConfigHashOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
-        return _units[unitId].payoutConfigHash;
     }
 
     /// @notice rev-3 §C2/§C3 read surface (M-01): the funding-frozen composition commitment. The oracle
@@ -996,20 +969,14 @@ contract VNextSettlementEscrow {
         return _units[unitId].compositionRoot;
     }
 
-    /// @notice rev-3 §C2: the funding-frozen composition schema version (0 = non-composed).
-    function compositionSchemaVersionOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint16) {
-        return _units[unitId].compositionSchemaVersion;
-    }
+    // NOTE: `compositionSchemaVersionOf`, `payoutConfigHashOf` and `evidenceCommittedOf` are COLLAPSED
+    // into `unitTerms` below (WAVE 4c). All three are funding-frozen or one-shot fields that a consumer
+    // wants alongside the rest of the unit's terms, never alone.
 
     // NOTE: `evidenceCommitterOf(bytes32)` is REMOVED (Wave 3c / brief §2.8). The committer is no longer a
     // per-unit configurable authority, so a per-unit getter for it would publish a degree of freedom that
     // does not exist. The successor read surface is the existing `operator()` — one value for the whole
     // clone, which is exactly what the authority now is.
-
-    /// @notice §B: whether an evidence package has been committed for this unit.
-    function evidenceCommittedOf(bytes32 unitId) external view onlyExisting(unitId) returns (bool) {
-        return _units[unitId].evidenceCommitted;
-    }
 
     /// @notice §B: the committed evidence commitment the O5 verdict must echo.
     /// @dev    REVERTS with `EvidenceNotCommitted` when nothing is committed rather than returning zero —
@@ -1070,24 +1037,53 @@ contract VNextSettlementEscrow {
         emit EvidenceCommitted(unitId, packageDigest, commitment);
     }
 
-    function milestoneIndexOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].milestoneIndex;
+    /// @notice WAVE 4c — the unit's remaining funding-frozen TERMS in ONE read.
+    /// @dev    Replaces seven one-field accessors (`milestoneIndexOf`, `stepIdOf`, `requestedTierOf`,
+    ///         `reclaimAtOf`, `payoutConfigHashOf`, `compositionSchemaVersionOf`, `evidenceCommittedOf`).
+    ///         Same reasoning as `feeScheduleOf`: every field here is written once at funding (or, for
+    ///         `evidenceCommitted`, once by `submitEvidence`) and a verifier wants them together.
+    ///         `requiredTierOf` is NOT folded in — the O5 attester STATICCALLs it and requires a bare
+    ///         32-byte return (see `feeScheduleOf`'s note).
+    /// @return milestoneIndex_ the unit's milestone position in the job.
+    /// @return stepId_ the unit's step identifier within the job.
+    /// @return requestedTier_ frozen at funding; `requiredTier == requestedTier` is enforced there.
+    /// @return reclaimAt_ the §8.2 C-3 deadline anchor every derived window hangs off.
+    /// @return payoutConfigHash_ the frozen payout configuration commitment.
+    /// @return compositionSchemaVersion_ rev-3 §C2 (0 = non-composed).
+    /// @return evidenceCommitted_ §B — whether an evidence package has been committed. Kept SEPARATE from
+    ///         `evidenceBundleHashOf` on purpose: that getter REVERTS while uncommitted so a default zero
+    ///         can never read as a valid commitment, which makes this flag the only non-reverting way to
+    ///         ask the question.
+    function unitTerms(bytes32 unitId)
+        external
+        view
+        onlyExisting(unitId)
+        returns (
+            uint256 milestoneIndex_,
+            bytes32 stepId_,
+            uint8 requestedTier_,
+            uint256 reclaimAt_,
+            bytes32 payoutConfigHash_,
+            uint16 compositionSchemaVersion_,
+            bool evidenceCommitted_
+        )
+    {
+        Unit storage u = _units[unitId];
+        return (
+            u.milestoneIndex,
+            u.stepId,
+            u.requestedTier,
+            u.reclaimAt,
+            u.payoutConfigHash,
+            u.compositionSchemaVersion,
+            u.evidenceCommitted
+        );
     }
 
-    function stepIdOf(bytes32 unitId) external view onlyExisting(unitId) returns (bytes32) {
-        return _units[unitId].stepId;
-    }
-
+    /// @notice The unit's required assurance tier. ONE-WORD BY CONTRACT — the O5 attester STATICCALLs this
+    ///         selector and rejects any return that is not exactly 32 bytes.
     function requiredTierOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint8) {
         return _units[unitId].requiredTier;
-    }
-
-    function requestedTierOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint8) {
-        return _units[unitId].requestedTier;
-    }
-
-    function reclaimAtOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].reclaimAt;
     }
 
     /// @notice H-01 §8.1 — the complete post-verdict record for a unit, in ONE read (collapsed by design:

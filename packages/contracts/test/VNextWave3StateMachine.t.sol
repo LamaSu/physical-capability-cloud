@@ -13,6 +13,9 @@ import {
 } from "../src/O5Types.sol";
 import {UnitState, ClaimClass, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
+import {VNextReadLens} from "./helpers/VNextReadLens.sol"; // WAVE 4c read adapter
+
+using VNextReadLens for VNextSettlementEscrow;
 
 /**
  * @title VNextWave3StateMachineTest

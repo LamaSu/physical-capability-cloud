@@ -15,6 +15,9 @@ import {IOracleAttester} from "../src/interfaces/IOracleAttester.sol";
 import {PayoutEntry, PolicyIdentity, UnitState, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
+import {VNextReadLens} from "./helpers/VNextReadLens.sol"; // WAVE 4c read adapter
+
+using VNextReadLens for VNextSettlementEscrow;
 
 /// @dev Minimal USDC double: NORMAL-transfer semantics only. The adversarial transfer-classifier matrix
 ///      (fee-on-transfer, debit-no-credit, wrong-delta, ...) is already covered by

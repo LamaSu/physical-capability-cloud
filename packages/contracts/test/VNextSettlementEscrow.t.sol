@@ -21,6 +21,12 @@ import {PayoutEntry, FeeSchedule, PolicyIdentity, UnitState, ClaimClass, Authori
 import {EASAttestation, AttestationRequest} from "../src/interfaces/IEAS.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {O5AttesterBase} from "../src/attesters/O5AttesterBase.sol";
+// WAVE 4c: the eighteen one-field escrow getters collapsed into `feeScheduleOf` + `unitTerms`. The lens
+// re-exposes each retired accessor by its original name and signature, off-contract, so these assertions
+// keep reading exactly the value they always read.
+import {VNextReadLens} from "./helpers/VNextReadLens.sol";
+
+using VNextReadLens for VNextSettlementEscrow;
 
 /// @dev Configurable adversarial USDC mock. `transfer` (money-out) and `transferFrom` (funding) modes
 ///      are set per test to drive the tryTransferExact classifier + the funding delta check.

@@ -13,6 +13,9 @@ import {
     O5_ADJ_OVERTURN
 } from "../src/O5Types.sol";
 import {PolicyIdentity, UnitState, VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
+import {VNextReadLens} from "./helpers/VNextReadLens.sol"; // WAVE 4c read adapter
+
+using VNextReadLens for VNextSettlementEscrow;
 
 /**
  * @title VNextAdversarialReviewTest
