@@ -108,4 +108,20 @@ library VNextReadLens {
     function evidenceCommittedOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (bool v) {
         (,,,,,, v) = e.unitTerms(unitId);
     }
+
+    // ── Live-counter projections (successor: `unitCounters`) ─────────────────────────────────────────
+    // These three MUTATE, so the collapse also removes a torn-read hazard: three separate calls could
+    // straddle a state change, one call cannot.
+
+    function liabilityOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (v,,) = e.unitCounters(unitId);
+    }
+
+    function payoutCount(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (, v,) = e.unitCounters(unitId);
+    }
+
+    function remainingClaimCountOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (,, v) = e.unitCounters(unitId);
+    }
 }

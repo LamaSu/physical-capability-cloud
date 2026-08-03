@@ -1129,12 +1129,23 @@ contract VNextSettlementEscrow {
         return _units[unitId].acceptedAssertionId;
     }
 
-    function liabilityOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].liability;
-    }
-
-    function payoutCount(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _payouts[unitId].length;
+    /// @notice WAVE 4c — the unit's three LIVE counters in ONE read.
+    /// @dev    Replaces `liabilityOf`, `payoutCount` and `remainingClaimCountOf`. Unlike `feeScheduleOf` /
+    ///         `unitTerms`, these fields MUTATE, which makes the collapse a correctness improvement rather
+    ///         than only a size one: three separate calls can straddle a state change and observe a torn
+    ///         view (a liability already decremented against a claim count not yet decremented), whereas
+    ///         one call cannot. None of the three is in `IEscrowSettlementBinding`, so no attester
+    ///         STATICCALL is reshaped.
+    /// @return liability_ the unit's outstanding job-collateral liability.
+    /// @return payoutCount_ the number of payout legs recorded for the unit.
+    /// @return remainingClaimCount_ outstanding collateralized claims; a unit reaches SETTLED_* only at 0 (§7).
+    function unitCounters(bytes32 unitId)
+        external
+        view
+        onlyExisting(unitId)
+        returns (uint256 liability_, uint256 payoutCount_, uint256 remainingClaimCount_)
+    {
+        return (_units[unitId].liability, _payouts[unitId].length, _units[unitId].remainingClaimCount);
     }
 
     function payoutAt(bytes32 unitId, uint256 index)
@@ -1164,10 +1175,7 @@ contract VNextSettlementEscrow {
         return c;
     }
 
-    /// @notice Outstanding collateralized claims for a unit; a unit reaches SETTLED_* only once this hits 0 (§7).
-    function remainingClaimCountOf(bytes32 unitId) external view onlyExisting(unitId) returns (uint256) {
-        return _units[unitId].remainingClaimCount;
-    }
+    // NOTE: `remainingClaimCountOf` is COLLAPSED into `unitCounters` above (WAVE 4c).
 
     /// @notice Whether a §2 authorization key has already been consumed (release/refund/dispute single-use).
     function authorizationUsed(bytes32 authKey) external view returns (bool) {
