@@ -232,9 +232,16 @@ contract MockOracleAttester is IOracleAttester {
 ///      work when the operator is a contract, not just an EOA — most real operators will be smart
 ///      accounts. It validates an ECDSA signature from its owner key and can be told to decline, so both
 ///      the accept and reject branches of the escrow's ERC-1271 path are exercised.
+/// @dev M-04 (sol 4th-family): it is ALSO CALLER-AWARE when `expectedCaller` is set. ERC-1271 explicitly
+///      permits caller-aware validation, and a wallet that only honours its owner's signatures when the
+///      query comes from ITS escrow is a reasonable, deployed pattern — the audit's point was that our
+///      mock was caller-INSENSITIVE, so it could not observe the Wave-4a regression at all (the wallet
+///      began seeing the FACTORY, not the clone, as `msg.sender`). `expectedCaller == 0` keeps the old
+///      permissive behaviour, so every pre-existing test means exactly what it meant before.
 contract MockSmartAccountOperator {
     address public immutable owner;
     bool public accepts = true;
+    address public expectedCaller;
 
     constructor(address owner_) {
         owner = owner_;
@@ -244,7 +251,14 @@ contract MockSmartAccountOperator {
         accepts = a;
     }
 
+    function setExpectedCaller(address c) external {
+        expectedCaller = c;
+    }
+
+    /// @dev Stays `view`: the escrow relays this by STATICCALL, so a state-writing 1271 would fail the
+    ///      call outright and prove nothing about the caller. `expectedCaller` is the observation channel.
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+        if (expectedCaller != address(0) && msg.sender != expectedCaller) return 0xffffffff;
         if (!accepts || signature.length != 65) return 0xffffffff;
         bytes32 r;
         bytes32 s;
@@ -3474,6 +3488,177 @@ contract VNextSettlementEscrowTest is Test {
 
         e.dischargeClaim(claimId);
         assertEq(usdc.balanceOf(newDest), amount, "paid to the rotated destination via ERC-1271 authorization");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // sol 4th-family audit — M-04 (ERC-1271 caller identity), M-01 (linked-library gate),
+    // H-02 (shared revoker), INFO (challenge-bond ceiling). Each fails against the pre-fix contracts.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @dev M-04, THE concrete failure the audit names. A CALLER-AWARE smart-account payout recipient
+    ///      accepts its owner's signatures only when the query arrives from its own escrow. A failed USDC
+    ///      payment leaves it holding a claim; the owner signs a destination rotation — and before the fix
+    ///      the 1271 query arrived from the FACTORY (Wave 4a moved the predicate there), so validation
+    ///      could NEVER succeed and the unpayable claim was locked forever. The digest was never the
+    ///      problem; the caller identity was, and ERC-1271 lets a wallet rely on it.
+    function test_M04_CallerAwareERC1271ClaimOwner_CanStillRotate_TheCloneIsTheCaller() public {
+        uint256 saOwnerPk = 0x5A4444;
+        MockSmartAccountOperator sa = new MockSmartAccountOperator(vm.addr(saOwnerPk));
+        address newDest = address(0xD00DE1);
+
+        VNextSettlementEscrow e =
+            _fundedEscrow(JOB, _oneUnitConfigWithRecipients(1000e6, 0, 0, 1, address(sa), recip2));
+        bytes32 id = _unitId(e);
+        usdc.setTransferMode(MockToken.Mode.REVERT);
+        _releaseNow(e, id);
+        usdc.setTransferMode(MockToken.Mode.NORMAL);
+        bytes32 claimId = VNextSettlementLib.computeClaimId(block.chainid, address(e), id, 0, ClaimClass.PRINCIPAL);
+        uint256 amount = e.claimOf(claimId).amount;
+
+        uint256 expiry = block.timestamp + 1 hours;
+        bytes32 sh = _rotateStructHash(
+            claimId, address(sa), address(sa), newDest, 0, expiry, block.chainid, address(e), e.CONTRACT_VERSION()
+        );
+        bytes memory sig = _sign(saOwnerPk, keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), sh)));
+
+        // Control FIRST, so the success below is not vacuous: a wallet that trusts the FACTORY is now the
+        // one that cannot validate — i.e. the caller really is the clone, not merely "some address".
+        sa.setExpectedCaller(address(factory));
+        vm.expectRevert(VNextSettlementEscrow.BadSignature.selector);
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+
+        // The wallet trusts ONLY its own escrow. Before the fix this was the branch that could never pass,
+        // leaving the unpayable claim locked forever.
+        sa.setExpectedCaller(address(e));
+        e.rotateClaimDestination(claimId, newDest, expiry, sig);
+        assertEq(e.claimOf(claimId).claimDestination, newDest, "the caller-aware wallet authorized it");
+        e.dischargeClaim(claimId);
+        assertEq(usdc.balanceOf(newDest), amount, "and the previously-unpayable claim finally pays");
+    }
+
+    /// @dev M-04 on the OTHER signature surface: bilateral acceptance at funding. A caller-aware operator
+    ///      smart account must see the clone it is being bound to, not the factory that verifies for it.
+    function test_M04_CallerAwareERC1271Operator_SeesTheCloneAtFunding() public {
+        MockSmartAccountOperator sa = new MockSmartAccountOperator(vm.addr(operatorPk));
+        operator = address(sa);
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(1000e6, 0, 0, 1);
+        VNextSettlementEscrow e = _escrowFor(JOB, c);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(e, c);
+
+        // Trusting the factory is now the case that FAILS...
+        sa.setExpectedCaller(address(factory));
+        vm.prank(payer);
+        vm.expectRevert(VNextSettlementEscrow.BadOperatorSignature.selector);
+        e.fund(c, acc);
+
+        // ...and trusting its own predicted escrow is the case that works.
+        sa.setExpectedCaller(address(e));
+        vm.prank(payer);
+        e.fund(c, acc);
+        assertEq(uint256(e.unitState(_unitId(e))), uint256(UnitState.FUNDED_ACTIVE));
+    }
+
+    /// @dev M-04's relay is FACTORY-GATED. Without the gate, anyone could make a read-only call appear to
+    ///      originate from this escrow — which is exactly the caller-aware trust the fix exists to keep.
+    function test_M04_Erc1271Relay_IsFactoryGatedAndErc1271Only() public {
+        VNextSettlementEscrow e = _fundedEscrow(JOB, _oneUnitConfig(1000e6, 0, 0, 1));
+        bytes memory payload = abi.encodeWithSelector(
+            VNextSettlementEscrow.erc1271Check.selector,
+            address(0xBEEF),
+            bytes32(0),
+            bytes32(0) // a well-formed-looking tail; the gate must not depend on its shape
+        );
+        (bool ok, bytes memory ret) = address(e).staticcall(payload);
+        assertFalse(ok, "a stranger cannot borrow the clone's caller identity");
+        assertEq(bytes4(ret), VNextSettlementEscrow.OnlyFactory.selector);
+
+        // From the factory, a NON-1271 payload relays nothing and answers zero (fail-closed, not revert).
+        vm.prank(address(factory));
+        assertEq(
+            e.erc1271Check{gas: 200000}(address(usdc)),
+            bytes32(0),
+            "the relay refuses to be a general-purpose call forwarder"
+        );
+    }
+
+    /// @dev M-01 — the linked-library gate is now ENFORCED, not documented. The three funding-path calls
+    ///      into {VNextSettlementLib} are DELEGATECALLs into clone storage, so a hostile link can rewrite
+    ///      `_payouts[...].recipient` after the signed entries validated and let a later VALID settle pay a
+    ///      substituted recipient. The expectation is derived at compile time from this build's own
+    ///      library, so no deployer input can satisfy it with a different one.
+    function test_M01_LinkedLibraryCodehashGate_AbortsAHostileOrWrongLink() public {
+        address lib = address(VNextSettlementLib);
+        bytes memory realCode = lib.code;
+        assertGt(realCode.length, 0, "precondition: the library is linked and deployed");
+
+        // Any other code at the linked address aborts the DEPLOYMENT (the factory constructs the escrow).
+        vm.etch(lib, hex"60016000526020600060003e00");
+        vm.expectRevert(VNextSettlementEscrow.LinkedLibraryMismatch.selector);
+        new VNextSettlementEscrowFactory(address(usdc), address(attester), address(escalation), O5_SCHEMA, bytes32(0));
+
+        // Restore, and prove the SAME deployment succeeds against the canonical library — so the test is
+        // about the codehash and not about `vm.etch` breaking something incidental.
+        vm.etch(lib, realCode);
+        VNextSettlementEscrowFactory f2 = new VNextSettlementEscrowFactory(
+            address(usdc), address(attester), address(escalation), O5_SCHEMA, bytes32(0)
+        );
+        assertGt(f2.implementation().code.length, 0);
+    }
+
+    /// @dev H-02's structural half: the primary and escalation cohorts may not share a kill-switch holder.
+    ///      Disabling the primary opens the Model-B emergency (silence refunds) and disabling the
+    ///      escalation cohort stops any emergency verdict being written; in ONE hand that pair is a
+    ///      unilateral "refund every accepted SETTLE" switch, which §8.3 C-5 forbids.
+    function test_H02_SharedRevokerAcrossBothCohorts_IsRejectedAtDeploy() public {
+        Fixed2of3O5Attester primary = new Fixed2of3O5Attester(
+            vm.addr(0x71), vm.addr(0x72), vm.addr(0x73), address(0xEA5), O5_SCHEMA, 101, address(0xC0FFEE)
+        );
+        Fixed2of3O5Attester esc = new Fixed2of3O5Attester(
+            vm.addr(0x81), vm.addr(0x82), vm.addr(0x83), address(0xEA5), O5_SCHEMA, 102, address(0xC0FFEE)
+        );
+        // Hoisted: `expectRevert` binds the NEXT call, and an argument-position staticcall would eat it.
+        bytes32 th = primary.o5TypeHash();
+        vm.expectRevert(VNextSettlementEscrow.PartyCollision.selector);
+        new VNextSettlementEscrowFactory(address(usdc), address(primary), address(esc), O5_SCHEMA, th);
+
+        // Separately custodied revokers deploy fine — the constraint is collision, not custody itself.
+        Fixed2of3O5Attester esc2 = new Fixed2of3O5Attester(
+            vm.addr(0x81), vm.addr(0x82), vm.addr(0x83), address(0xEA5), O5_SCHEMA, 102, address(0xDECAF)
+        );
+        new VNextSettlementEscrowFactory(address(usdc), address(primary), address(esc2), O5_SCHEMA, th);
+    }
+
+    /// @dev INFO — the H-2 challenge-bond CEILING must actually hold. For `G = 1..4` base units the 20%
+    ///      cap rounded to zero and `challengeBond`'s never-a-free-challenge floor then forced a bond of
+    ///      1, i.e. 25%..100% of gross. Absolute exposure was dust, but the two rules cannot both hold
+    ///      below `MIN_BONDABLE_GROSS`, so funding refuses there — the one place refusing costs nothing.
+    function test_INFO_ChallengeBondCeilingHolds_ForEveryFundableGross() public {
+        VNextSettlementEscrow.UnitConfig[] memory tiny = _oneUnitConfig(4, 0, 0, 1);
+        VNextSettlementEscrow eTiny = _escrowFor(keccak256("tiny"), tiny);
+        VNextSettlementEscrow.PolicyAcceptance memory acc = _acceptance(eTiny, tiny);
+        vm.prank(payer);
+        vm.expectRevert(bytes("V1: G<minBondable"));
+        eTiny.fund(tiny, acc);
+
+        // At the derived floor the ceiling binds exactly, and funding works.
+        VNextSettlementEscrow.UnitConfig[] memory ok = _oneUnitConfig(VNextSettlementLib.MIN_BONDABLE_GROSS, 0, 0, 1);
+        VNextSettlementEscrow eOk = _fundedEscrow(keccak256("floor"), ok);
+        uint256 g = VNextSettlementLib.MIN_BONDABLE_GROSS;
+        assertEq(
+            eOk.requiredBondOf(_unitId(eOk)),
+            (g * VNextSettlementLib.MAX_CHALLENGE_BOND_BPS) / VNextSettlementLib.FEE_DENOMINATOR,
+            "the bond IS the ceiling at the floor gross"
+        );
+        assertGt(eOk.requiredBondOf(_unitId(eOk)), 0, "and never a free challenge");
+    }
+
+    /// @dev The ceiling as a property, over the whole fundable range.
+    function testFuzz_INFO_ChallengeBondNeverExceedsTheCeiling(uint128 g) public pure {
+        vm.assume(g >= VNextSettlementLib.MIN_BONDABLE_GROSS);
+        uint256 bond = VNextSettlementLib.challengeBond(g);
+        uint256 cap = (uint256(g) * VNextSettlementLib.MAX_CHALLENGE_BOND_BPS) / VNextSettlementLib.FEE_DENOMINATOR;
+        assertLe(bond, cap, "bond <= 20% of G, for every fundable G");
+        assertGt(bond, 0, "and never zero");
     }
 }
 
