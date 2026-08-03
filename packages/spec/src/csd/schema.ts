@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { CompositionBlockSchema } from "./composition.js";
 
 // ── Pricing Impact ─────────────────────────────────────────────────
 
@@ -217,6 +218,14 @@ export const CsdSchema = z.object({
   constraints: z.array(CsdConstraintSchema),
   invariants: z.array(CsdInvariantSchema).optional(),
   evidence: z.record(CsdEvidenceTierSchema).optional(),
+  /**
+   * D1-minimal: OPTIONAL composable-contract declaration (the seam ABI mirror,
+   * `composition.ts`). Absent ⇒ the capability is not (yet) composable and the
+   * D2 registry→contract adapter omits it — graceful degradation, existing CSDs
+   * unaffected. Present ⇒ the D2 adapter projects it into the prism compiler's
+   * `CapabilityContract` (failing closed on a present-but-partial block).
+   */
+  composition: CompositionBlockSchema.optional(),
   pricing: CsdPricingSchema,
 });
 
