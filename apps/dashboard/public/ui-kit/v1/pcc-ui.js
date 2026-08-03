@@ -47,7 +47,13 @@
 
   var API_DEFAULT = 'https://capability.network';
   var POLL_DEFAULT_MS = 30000; // the system_prompt's own recommended cadence
-  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve)(?:[\/_.-]|$)/i;
+  // Money-verb detection is FAIL-CLOSED: a money action that slips past this
+  // never reaches the Approval gate and fires on a bare click. So the verb list
+  // is broad (every known money verb, not just escrow's), AND any write into a
+  // money NAMESPACE is treated as money even when the verb is unrecognised — a
+  // new money route must not be able to slip through as "not money".
+  var MONEY_VERB = /(?:^|[\/_.-])(fund|release|dispute|commit|approve|withdraw|payout|deposit|charge|settle|refund|transfer|onramp|offramp|escrow|pay)(?:[\/_.-]|$)/i;
+  var MONEY_NAMESPACE = /^\/api\/(escrow|fiat-ramp|compose)(\/|$)/i;
 
   // ═══════════════════════════════════════════════════════════════════════
   // DOM helpers (verbatim shape from control-plane bus.js) — textContent only
@@ -329,10 +335,29 @@
     this.isHost = !!isHost;
     this.lastTrace = null;
   }
+  // Origin hard-bind for the viewer's key. The manifest is UNTRUSTED content
+  // (the whole reason this kit exists), and resolveApiBase() will honour a
+  // manifest-supplied api_base in non-host mode — so the Bearer key must NOT be
+  // sent to a base the manifest chose. The key travels ONLY to a base the
+  // VIEWER's context vouches for: same-origin (''), the canonical PCC origin, or
+  // an override the viewer typed themselves (?api= / stored pcc.apiBase). A
+  // manifest api_base pointing anywhere else gets public reads with no key.
+  Transport.prototype._keyAllowedForBase = function () {
+    var b = this.base;
+    if (b === '') return true;            // same-origin (the page's own origin)
+    if (b === API_DEFAULT) return true;   // canonical PCC origin
+    try {
+      var q = new URLSearchParams(location.search).get('api');
+      if (q && q.replace(/\/+$/, '') === b) return true;      // viewer-typed ?api=
+      var ls = localStorage.getItem('pcc.apiBase');
+      if (ls && ls.replace(/\/+$/, '') === b) return true;    // viewer-stored override
+    } catch (e) {}
+    return false; // manifest-supplied off-origin base → never attach the key
+  };
   Transport.prototype._headers = function (extra) {
     var h = extra || {};
     var k = getKey();
-    if (k) h['Authorization'] = 'Bearer ' + k;
+    if (k && this._keyAllowedForBase()) h['Authorization'] = 'Bearer ' + k;
     return h;
   };
   Transport.prototype._trace = function (res) {
@@ -360,13 +385,18 @@
         return r.json();
       });
   };
-  Transport.prototype.send = function (method, path, body) {
+  Transport.prototype.send = function (method, path, body, idempotencyKey) {
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
+    var headers = this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
+    // Real Idempotency-Key HEADER (the server's idempotency middleware reads the
+    // header, not a body field) — a double-click / retry sends the SAME key so the
+    // server dedupes instead of double-charging. Caller owns key stability.
+    if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey);
     return fetch(this.base + safe, {
       method: method,
-      headers: this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+      headers: headers,
       body: body != null ? JSON.stringify(body) : undefined
     }).then(function (r) {
       self._trace(r);
@@ -837,15 +867,30 @@
       };
       foot.appendChild(approve);
       if (w.deny) {
-        var deny = el('button', 'pcc-btn pcc-btn-quiet', w.deny.label || 'Deny');
+        var deny = el('button', 'pcc-btn pcc-btn-quiet', (w.deny && w.deny.label) || 'Deny');
         deny.type = 'button';
-        deny.onclick = function () { dispatchAction(ctx, w.deny, { status: status, viaApproval: true }); };
+        // Deny is UI-ONLY: it must NEVER dispatch a manifest-authored action. A
+        // hostile manifest could set w.deny to a money POST; dispatching it here
+        // — and worse, with viaApproval, which SKIPS the money gate — would turn
+        // the "Deny" button into a one-click unapproved payment. Deny just closes
+        // the surface; nothing is ever sent.
+        deny.onclick = function () {
+          status.className = 'pcc-action-status';
+          status.textContent = 'Denied — nothing was sent.';
+          approve.disabled = true; deny.disabled = true;
+          var pill = wrap.querySelector('.pcc-pill');
+          if (pill) { pill.textContent = 'denied'; pill.className = 'pcc-pill st-failed'; }
+        };
         foot.appendChild(deny);
       }
       foot.appendChild(status);
       hostLockActionBar(foot); // host lockdown: disable Approve/Deny + show the note
-      wrap.appendChild(foot);
+      // _setFoot manages a trace/stale meta-footer that ALSO carries the
+      // .pcc-win-foot class; call it BEFORE appending the action bar, else its
+      // querySelector('.pcc-win-foot') grabs and deletes this action foot —
+      // silently removing the Approve/Deny controls (the money-safety surface).
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
+      wrap.appendChild(foot);
     });
     return wrap;
   }
@@ -991,10 +1036,11 @@
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
-      // NOTE: an MCP-App projected action carries no `path` (raw-HTTP fields are
-      // stripped; it acts only via operation_id) — read money intent from the
-      // fields the projection keeps (label/id), coercing a missing path to ''.
-      var isMoney = a.confirm === 'approval' || MONEY_VERB.test(String(a.path || '') + ' ' + String(a.label || '') + ' ' + String(a.id || ''));
+      // Button styling uses the SAME predicate as the dispatch gate (below), so a
+      // money action can never look non-money — or vice versa. isMoneyAction is
+      // fail-closed (verb list + money namespaces) and tolerates a projected
+      // action with no `path` (MCP-App host mode).
+      var isMoney = isMoneyAction(a);
       var btn = el('button', 'pcc-btn ' + (isMoney ? 'pcc-btn-primary' : 'pcc-btn-quiet'), a.label);
       btn.type = 'button';
       // PR2: a button wired to a registered typed operation stays live under the
@@ -1015,9 +1061,14 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function isMoneyAction(action) {
-    // Tolerate a projected action with no `path` (MCP-App host mode): a missing
-    // path coerces to '' rather than the literal 'undefined'.
-    return action.confirm === 'approval' || MONEY_VERB.test(String(action.path || '') + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
+    if (!action) return false;
+    if (action.confirm === 'approval') return true;
+    var path = String(action.path || '');
+    // Fail-closed: a write into a money namespace is money even if the verb is
+    // unrecognised. Then the broad verb list over path+label+id. (Tolerates a
+    // projected action with no `path` — coerced to '' — in MCP-App host mode.)
+    if (MONEY_NAMESPACE.test(path)) return true;
+    return MONEY_VERB.test(path + ' ' + String(action.label || '') + ' ' + String(action.id || ''));
   }
 
   // Pull the first text line out of an MCP tool-error result (server-authored,
@@ -1088,29 +1139,52 @@
   }
 
   function doPost(ctx, action, opts, status) {
+    // Double-click coalesce: ignore a re-entrant dispatch of the SAME action
+    // while its request is still in flight — a money button must not fire twice.
+    if (action.__posting) return;
     var body = Object.assign({}, action.body || {}, opts.formValues || {});
-    // idempotencyKey on every offer-posting action (a button can be double-clicked).
-    if (action.kind === 'post') {
-      var idem = action.idempotencyFrom && opts.formValues ? opts.formValues[action.idempotencyFrom] : null;
-      if (!idem) idem = 'idem-' + uuid();
-      body.idempotencyKey = idem;
-    }
+    // Stable idempotency key per action instance. A form may derive it from a
+    // field (idempotencyFrom); otherwise it is generated ONCE and cached on the
+    // action, so a double-click or a retry sends the SAME key and the server
+    // dedupes rather than double-charging (a fresh uuid per click would defeat
+    // idempotency exactly when it matters).
+    var idem = (action.idempotencyFrom && opts.formValues && opts.formValues[action.idempotencyFrom]) || action.__idemKey;
+    if (!idem) { idem = 'idem-' + uuid(); action.__idemKey = idem; }
+    if (action.kind === 'post') body.idempotencyKey = idem; // legacy body field, preserved
+    action.__posting = true;
     status.className = 'pcc-action-status'; status.textContent = 'Working…';
     var method = (action.kind === 'patch') ? 'PATCH' : 'POST';
-    var idemHeader = body.idempotencyKey;
-    ctx.tx.send(method, action.path, body, idemHeader).then(function (res) {
+    ctx.tx.send(method, action.path, body, idem).then(function (res) {
+      action.__posting = false;
       if (res.ok) {
         status.className = 'pcc-action-status st-settled';
         status.textContent = 'Done' + (ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
         if (typeof opts.rebind === 'function') opts.rebind();
       } else {
         status.className = 'pcc-action-status st-failed';
-        status.textContent = (res.body && (res.body.message || res.body.error)) || ('Failed (HTTP ' + res.status + ')');
+        status.textContent = postErrorText(res, action);
       }
     }, function (err) {
+      action.__posting = false;
       status.className = 'pcc-action-status st-failed';
       status.textContent = String(err && err.message || 'Request failed');
     });
+  }
+
+  // Honest message for a failed write. Prefers the server's own message; adds a
+  // clear fallback for the C-03 endpoint changes so a stale manifest that hits a
+  // now-changed money endpoint explains itself instead of showing a bare code:
+  //   410 — the endpoint was removed (e.g. the old public token-approval route);
+  //   404 on /fund — the escrow is not provenance-recognised by the protocol;
+  //   503 — a fail-closed gate (e.g. registry unreadable) — safe to retry.
+  function postErrorText(res, action) {
+    var msg = res.body && (res.body.message || res.body.error);
+    if (msg) return String(msg);
+    var path = String((action && action.path) || '');
+    if (res.status === 410) return 'This action is no longer available — the endpoint was removed. Nothing was sent.';
+    if (res.status === 404 && /\/fund(\/|$|\?)/.test(path)) return 'Funding was refused: this escrow is not recognised by the protocol.';
+    if (res.status === 503) return 'Temporarily unavailable (a safety gate is closed) — nothing was charged; you can retry shortly.';
+    return 'Failed (HTTP ' + res.status + ')';
   }
 
   function inlineConfirm(status, action, onConfirm) {
@@ -1155,6 +1229,10 @@
     // Host lockdown: writes are disabled in a hosted view — never open the gate.
     // (dispatchAction already returns before here in host mode; belt-and-suspenders.)
     if (isHostEmbed()) { markWriteUnavailable(opts && opts.status); return; }
+    // Double-click coalesce at the gate: a rapid second click must not stack a
+    // second approval modal for the same action.
+    if (action.__gateOpen) return;
+    action.__gateOpen = true;
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
@@ -1175,7 +1253,7 @@
     approve.type = 'button';
     var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
     cancel.type = 'button';
-    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    function close() { action.__gateOpen = false; if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     approve.onclick = function () {
       if (desc.destination === null) {
         status.className = 'pcc-action-status st-failed';
