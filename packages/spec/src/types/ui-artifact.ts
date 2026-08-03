@@ -337,8 +337,9 @@ function stringHasKeyPrefix(raw: string): boolean {
  *
  * The primary guarantee stays architectural (a manifest is not a credential
  * transport — Round 1); this is cheap, conservative defense-in-depth. Robust
- * against cycles / pathological depth (visited set + node budget); a
- * degenerate input fails "clean" (returns false), never hangs.
+ * against cycles / pathological depth (visited set + node budget); an
+ * oversized/degenerate input fails CLOSED (budget exhaustion returns true =
+ * treat as key-bearing and reject, sol pass #5), never hangs.
  */
 export function containsApiKey(value: unknown): boolean {
   const seen = new WeakSet<object>();
