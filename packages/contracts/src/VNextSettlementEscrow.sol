@@ -102,20 +102,22 @@ contract VNextSettlementEscrow {
     ///      authorization comes from `IOracleAttester(authorizedOracle).assertionOf(unitId)`, which touches
     ///      only the attester's own storage. EAS is now an async provenance mirror owned entirely by the
     ///      attester, so the escrow has no reference to it and no code path that could acquire one.
-    /// @dev O5/v3 schema UID + attestation EIP-712 type hash are JOINT-DEFERRED (E6, deploy-gate §8);
-    ///      pinned byte-exact across escrow+oracle+evidence when O5 opens. Zero until then. Both are now
-    ///      PUBLISHED DEPLOYMENT METADATA ONLY (see the M-02/L-02 constructor pins): with the EAS read gone
-    ///      there is no runtime `WrongSchema` check, so `o5SchemaUid` names the schema the cohort's mirror
-    ///      writes under, and the constructor pin is what stops that published value from drifting away
-    ///      from the attester's real one.
-    bytes32 public immutable o5SchemaUid;
-    /// @dev L-02 — NOT a runtime security check. The release predicate's trust root is
-    ///      `attestation.attester == authorizedOracle`; the quorum digest's type hash lives INSIDE the
-    ///      attester. This immutable is DEPLOYMENT METADATA published for the off-chain signer/mirror. To
-    ///      stop that published value from drifting away from the cohort's real one, the constructor pins
-    ///      it: when non-zero it MUST equal `IOracleAttester(oracle).o5TypeHash()`. Zero = the documented
-    ///      deferred state (unpinned, no check, and no security claim is made for it).
-    bytes32 public immutable o5TypeHash;
+    /// @dev WAVE 4c — the `o5SchemaUid` / `o5TypeHash` IMMUTABLES AND THEIR GETTERS ARE REMOVED FROM THE
+    ///      ESCROW. Both were PUBLICATION-ONLY deployment metadata: neither was ever read by any escrow code
+    ///      path (with the EAS read gone in P0-6 there is no runtime `WrongSchema` check), and the oracle
+    ///      lane confirmed (#577 (d)) that its `EscrowStateReader` reads NEITHER — they are oracle-side
+    ///      EIP-712 constants matched through the codehash pin, never a live escrow read.
+    ///
+    ///      What is NOT removed is the thing that gave them their value: the M-02/L-02 CONSTRUCTOR PINS
+    ///      below still compare the deployed values byte-for-byte against `IOracleAttester(oracle)`, so a
+    ///      schema/type-hash divergence still aborts the deployment. The pins read the constructor
+    ///      PARAMETERS directly, so deleting the immutables cannot weaken them.
+    ///
+    ///      The published read surface moves UP to {VNextSettlementEscrowFactory}, which is the correct
+    ///      publication point anyway: both values are implementation-wide constants shared by every clone,
+    ///      not per-clone state, and the factory is the contract that chose them. This is a relocation of a
+    ///      read surface, not a deletion of one — and it buys runtime bytecode on the contract that is at
+    ///      the EIP-170 ceiling, spent from the contract that has ~20 KiB of headroom.
 
     uint256 public constant CONTRACT_VERSION = 1;
     /// @dev H-01 §2.1 policy-version pin, bound into every acceptance signature. A future policy shape
@@ -605,7 +607,6 @@ contract VNextSettlementEscrow {
         // runtime bytecode, and it is exactly the shape of the separation `Fixed2of3O5Attester` already
         // enforces between its revoker and its signers.
         if (IOracleAttester(oracle).revoker() == IOracleAttester(escalation).revoker()) revert PartyCollision();
-        o5SchemaUid = schemaUid;
         // M-02: pin the published schema-UID metadata SYMMETRICALLY with the type-hash pin below. Without
         // it a one-char schema divergence would make every mint burn a unit's one-verdict slot and every
         // release revert `WrongSchema`, silently turning a whole cohort refund-only. Deploy-time only and
@@ -616,7 +617,6 @@ contract VNextSettlementEscrow {
         // `oracle` that does not expose the getter — aborts the deployment rather than shipping an escrow
         // whose published pin disagrees with the attester the money path actually trusts.
         if (typeHash != bytes32(0) && IOracleAttester(oracle).o5TypeHash() != typeHash) revert TypeHashMismatch();
-        o5TypeHash = typeHash;
         factory = msg.sender;
         initialized = true; // lock the implementation; only fresh clones (initialized=false) can init
     }

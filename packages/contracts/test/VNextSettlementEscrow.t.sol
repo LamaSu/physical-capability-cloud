@@ -1531,21 +1531,26 @@ contract VNextSettlementEscrowTest is Test {
     }
 
     /// @dev The setUp factory already pins O5_SCHEMA == attester.o5SchemaUid(); state the accept-path intent.
+    /// @dev WAVE 4c: the published read moved from the escrow to the FACTORY (the escrow is at the EIP-170
+    ///      ceiling and never read either value). The assertion is unchanged in substance — a deployment
+    ///      that exists publishes a schema UID equal to the bound cohort's — only its read site moved. The
+    ///      pin itself is still enforced inside the escrow constructor, which
+    ///      `test_Constructor_RejectsSchemaUidDrift` above exercises directly.
     function test_Constructor_AcceptsMatchingSchemaUid() public view {
-        assertEq(VNextSettlementEscrow(factory.implementation()).o5SchemaUid(), attester.o5SchemaUid());
+        assertEq(factory.o5SchemaUid(), attester.o5SchemaUid());
     }
 
     function test_Constructor_AcceptsMatchingTypeHash() public {
         VNextSettlementEscrowFactory f = new VNextSettlementEscrowFactory(
             address(usdc), address(attester), address(escalation), O5_SCHEMA, attester.o5TypeHash()
         );
-        assertEq(VNextSettlementEscrow(f.implementation()).o5TypeHash(), attester.o5TypeHash());
+        assertEq(f.o5TypeHash(), attester.o5TypeHash());
     }
 
     /// @dev Zero stays the documented deferred state: unpinned, no check, no security claim (the setUp
     ///      factory already exercises it — this states the intent explicitly).
     function test_Constructor_ZeroTypeHashSkipsThePin() public view {
-        assertEq(VNextSettlementEscrow(factory.implementation()).o5TypeHash(), bytes32(0));
+        assertEq(factory.o5TypeHash(), bytes32(0));
     }
 
     // ══ H-01: CREATE2 salt rebound to the BILATERAL POLICY IDENTITY ════════════════════════════════

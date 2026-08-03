@@ -88,8 +88,22 @@ contract VNextSettlementEscrowFactory {
     /// @notice The operator's acceptance signature does not validate for `operator`.
     error BadOperatorSignature();
 
-    /// @param usdc / oracle / escalation / o5SchemaUid / o5TypeHash — the implementation immutables shared
-    ///        by every clone.
+    /// @notice WAVE 4c — the O5 v1.1 EAS schema UID pinned for this deployment's cohort (M-02), and the O5
+    ///         attestation EIP-712 type hash pinned for it (L-02). Zero = the documented deferred state.
+    /// @dev    These getters MOVED HERE from {VNextSettlementEscrow}, which is at the EIP-170 ceiling. They
+    ///         are publication-only metadata — no escrow code path ever read them, and the oracle lane
+    ///         confirmed (#577 (d)) its `EscrowStateReader` reads neither. Publishing them from the factory
+    ///         is also more honest about what they are: implementation-wide constants shared by every clone
+    ///         (the escrow bakes them into one implementation that all clones delegate to), not per-clone
+    ///         state. The values are still PINNED against the live cohort by the escrow's constructor, which
+    ///         runs inside the `new VNextSettlementEscrow(...)` below — so a divergent pin aborts THIS
+    ///         factory's deployment, and a factory that exists at all necessarily published matching values.
+    bytes32 public immutable o5SchemaUid;
+    bytes32 public immutable o5TypeHash;
+
+    /// @param usdc / oracle / escalation / schemaUid / typeHash — the implementation immutables shared
+    ///        by every clone. WAVE 4c: `schemaUid`/`typeHash` are ALSO republished by this factory (see
+    ///        `o5SchemaUid`/`o5TypeHash` above) because the escrow no longer carries their getters.
     /// @dev   P0-6: the former `eas` parameter is REMOVED. The escrow no longer reads any attestation
     ///        registry, so a factory that accepted one would advertise a money-path dependency that does
     ///        not exist. EAS now belongs solely to the cohort attester (its async provenance mirror), and
@@ -102,8 +116,12 @@ contract VNextSettlementEscrowFactory {
     ///        because an implementation immutable cannot be changed at all. A different escalation cohort
     ///        is a different factory + implementation, i.e. a deliberate new deployment both parties must
     ///        re-accept. The escrow's constructor rejects `escalation == oracle`.
-    constructor(address usdc, address oracle, address escalation, bytes32 o5SchemaUid, bytes32 o5TypeHash) {
-        implementation = address(new VNextSettlementEscrow(usdc, oracle, escalation, o5SchemaUid, o5TypeHash));
+    constructor(address usdc, address oracle, address escalation, bytes32 schemaUid, bytes32 typeHash) {
+        // The escrow constructor performs the M-02/L-02 pin checks against `oracle` and reverts on
+        // divergence; publishing the same words here therefore cannot advertise an unpinned value.
+        implementation = address(new VNextSettlementEscrow(usdc, oracle, escalation, schemaUid, typeHash));
+        o5SchemaUid = schemaUid;
+        o5TypeHash = typeHash;
     }
 
     /// @notice Clone + initialize a per-job escrow atomically. Permissionless AND safe: the CREATE2 salt
