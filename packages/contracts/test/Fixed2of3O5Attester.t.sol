@@ -146,6 +146,39 @@ contract MockAttestEAS {
     }
 }
 
+interface IMirrorToEAS {
+    function mirrorToEAS(O5Verdict calldata v) external returns (bytes32);
+}
+
+/// @dev L-01 (sol 4th-family): a HOSTILE EAS (or a callback-capable resolver behind one) that reenters
+///      `mirrorToEAS` for the same unit while the outer mint is still in flight. Records whether the
+///      reentrant call got through, and counts how many attestations it actually minted.
+contract ReentrantEAS {
+    IMirrorToEAS public target;
+    O5Verdict internal _v;
+    bool public reentered;
+    bool public reentrySucceeded;
+    uint256 public n;
+
+    function arm(address t, O5Verdict calldata v) external {
+        target = IMirrorToEAS(t);
+        _v = v;
+    }
+
+    function attest(AttestationRequest calldata r) external payable returns (bytes32 uid) {
+        if (!reentered) {
+            reentered = true;
+            try target.mirrorToEAS(_v) returns (bytes32) {
+                reentrySucceeded = true;
+            } catch {
+                reentrySucceeded = false;
+            }
+        }
+        uid = keccak256(abi.encode(r.schema, r.data.recipient, r.data.data, n));
+        n += 1;
+    }
+}
+
 contract Fixed2of3O5AttesterTest is Test {
     MockAttestEAS mockEas;
     MockEscrowBinding escrowBinding;
@@ -1106,5 +1139,109 @@ contract Fixed2of3O5AttesterTest is Test {
         O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
         // abi.encode of the whole record is exactly 6 words: id, reviewed, escrow, decidedAt, role, outcome.
         assertEq(abi.encode(r).length, 6 * 32, "no amount and no recipient field exists to abuse");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // sol 4th-family audit — M-05 (cross-escrow slot poisoning), H-01 (decidedAt read surface),
+    // L-01 (mirror one-shot reentrancy).
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @dev M-05 — a MALFORMED cross-escrow adjudication must not poison the real unit's slot. A unit id
+    ///      commits to its escrow by construction, but a keccak cannot be inverted, so nothing here can
+    ///      REBIND a claimed `escrow` to the unit: a quorum handed a wrong escrow address that merely
+    ///      ECHOES the real unit's accepted assertion passes the anti-brick pre-check. When the slot key
+    ///      was `(unit, role)` alone, that record consumed the REAL escrow's one slot — the real escrow
+    ///      then rejected it as `WrongRecipient`, and no corrected record could ever be written, which is
+    ///      precisely the brick the consume-once pre-checks exist to prevent. It needs a quorum-INPUT
+    ///      mistake, not a forged signature. With `escrow` in the key, it lands in its own slot.
+    function test_M05_CrossEscrowAdjudication_CannotPoisonTheRealUnitsSlot() public {
+        _armAccepted();
+
+        // A different escrow that happens to answer with the REAL unit's accepted assertion.
+        MockEscrowBinding fake = new MockEscrowBinding();
+        fake.setAcceptedAssertionId(_suid(), ACCEPTED);
+
+        O5Adjudication memory bad = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        bad.escrow = address(fake); // same unit id, same reviewed assertion, WRONG escrow
+        attester.adjudicate(bad, _adjSigs(bad)); // quorum-signed, so it is written — into its OWN slot
+
+        // The real escrow's slot is untouched...
+        assertEq(
+            attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).adjudicationId,
+            bytes32(0),
+            "the real unit's slot was NOT consumed by a foreign-escrow record"
+        );
+        // ...and the corrected record still writes, which is the whole anti-brick property.
+        O5Adjudication memory good = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        bytes32 id = attester.adjudicate(good, _adjSigs(good));
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
+        assertEq(r.adjudicationId, id);
+        assertEq(r.escrow, ESCROW);
+        assertEq(uint256(r.outcome), uint256(O5_ADJ_UPHOLD), "the real escrow reads its own verdict");
+        // The foreign record still exists in its own slot — it was never destroyed, just scoped.
+        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, address(fake)).escrow, address(fake));
+    }
+
+    /// @dev H-01 — the one-word read the escrow's deadline defaults consult. It answers `max` ("never")
+    ///      for anything it would not apply, so an absent or unbound record can never stall a unit, and
+    ///      answers the RECORDED decision time for a bound one, so a timely verdict is never expired by
+    ///      relay time.
+    function test_H01_AdjudicationDecidedAt_AnswersMaxUnlessFullyBound() public {
+        _armAccepted();
+        uint64 never = type(uint64).max;
+        assertEq(
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED), never, "no record yet"
+        );
+
+        vm.warp(1_700_000_000);
+        O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        attester.adjudicate(a, _adjSigs(a));
+
+        assertEq(
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, ACCEPTED),
+            uint64(block.timestamp),
+            "the RECORDED decision time"
+        );
+        assertEq(
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW, keccak256("other-assertion")),
+            never,
+            "a different reviewed assertion is not this unit's verdict"
+        );
+        assertEq(
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_APPEAL, address(0xE5C0F), ACCEPTED),
+            never,
+            "a different escrow's slot is not this escrow's verdict"
+        );
+        assertEq(
+            attester.adjudicationDecidedAt(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW, ACCEPTED),
+            never,
+            "the roles are independent slots"
+        );
+    }
+
+    /// @dev L-01 — the `mirrorToEAS` one-shot marker must be claimed BEFORE the external mint. With it
+    ///      written afterwards, a hostile EAS (or a callback-capable resolver) that reenters sees zero in
+    ///      BOTH frames, both frames mint, and the outer write overwrites the inner uid: two mirrors for
+    ///      one assertion, one of them permanently unreferenced. No money path is involved — this is
+    ///      provenance integrity — but a one-shot marker that is not one-shot is still a broken claim.
+    function test_L01_MirrorToEAS_IsOneShotUnderReentrancy() public {
+        ReentrantEAS evil = new ReentrantEAS();
+        Fixed2of3O5Attester att = new Fixed2of3O5Attester(
+            vm.addr(pk1), vm.addr(pk2), vm.addr(pk3), address(evil), O5_SCHEMA, COHORT, REVOKER
+        );
+        O5Verdict memory v = _verdict();
+        att.attestO5(v, ESCROW, _twoSigsAscending(pk1, pk2, att.digestOf(v)));
+        evil.arm(address(att), v);
+
+        bytes32 uid = att.mirrorToEAS(v);
+
+        assertTrue(evil.reentered(), "precondition: the hostile EAS did attempt to reenter");
+        assertFalse(evil.reentrySucceeded(), "the reentrant mirror was refused");
+        assertEq(evil.n(), 1, "exactly ONE attestation was minted");
+        assertEq(att.mirroredUid(v.settlementUnitId), uid, "and the recorded uid is the one that was minted");
+
+        // Still one-shot afterwards, from the outside.
+        vm.expectRevert(O5AttesterBase.AlreadyMirrored.selector);
+        att.mirrorToEAS(v);
     }
 }
