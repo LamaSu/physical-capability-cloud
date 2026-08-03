@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {VNextSettlementEscrow} from "../../src/VNextSettlementEscrow.sol";
-import {FeeSchedule} from "../../src/libraries/VNextSettlementLib.sol";
 
 /// @title  VNextReadLens — the WAVE 4c read adapter for the collapsed escrow read plane.
 /// @notice WAVE 4c collapsed eighteen one-field getters on {VNextSettlementEscrow} into two fixed-width
@@ -27,57 +26,30 @@ import {FeeSchedule} from "../../src/libraries/VNextSettlementLib.sol";
 ///         attester STATICCALLs those selectors and requires `returndatasize() == 32` exactly, so
 ///         reshaping any of them would make every `attestO5` revert `EscrowBindingUnreadable`.
 library VNextReadLens {
-    // ── FeeSchedule projections (successor: `feeScheduleOf`) ─────────────────────────────────────────
+    // ── Fee-amount projections (successor: `feeAmountsOf`) ───────────────────────────────────────────
+    // WAVE 4c Move 4 replaced the 13-field `feeScheduleOf` struct getter with the 3-word `feeAmountsOf`,
+    // because g/f/n are the ONLY fee-schedule fields with no other on-chain reader. These three keep a
+    // faithful storage-backed projection.
 
-    function feeDomainVersion(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint8) {
-        return e.feeScheduleOf(unitId).domainVersion;
+    function gross(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (v,,) = e.feeAmountsOf(unitId);
     }
 
-    function feeChainId(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256) {
-        return e.feeScheduleOf(unitId).chainId;
+    function fee(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (, v,) = e.feeAmountsOf(unitId);
     }
 
-    function escrowOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (address) {
-        return e.feeScheduleOf(unitId).escrow;
+    function net(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256 v) {
+        (,, v) = e.feeAmountsOf(unitId);
     }
 
-    function settlementUnitIdOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (bytes32) {
-        return e.feeScheduleOf(unitId).settlementUnitId;
-    }
-
-    function feeBasisOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint8) {
-        return e.feeScheduleOf(unitId).feeBasis;
-    }
-
-    function gross(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256) {
-        return e.feeScheduleOf(unitId).g;
-    }
-
-    function fee(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256) {
-        return e.feeScheduleOf(unitId).f;
-    }
-
-    function net(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256) {
-        return e.feeScheduleOf(unitId).n;
-    }
-
-    function denominatorOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint256) {
-        return e.feeScheduleOf(unitId).denominator;
-    }
-
-    function roundingRuleOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (uint8) {
-        return e.feeScheduleOf(unitId).roundingRule;
-    }
-
-    function feeSplitConfigHashOf(VNextSettlementEscrow e, bytes32 unitId) internal view returns (bytes32) {
-        return e.feeScheduleOf(unitId).feeSplitConfigHash;
-    }
-
-    /// @notice The whole schedule, for a consumer that wants more than one field (the case the collapse
-    ///         was built for — one call instead of N).
-    function feeScheduleStruct(VNextSettlementEscrow e, bytes32 unitId) internal view returns (FeeSchedule memory) {
-        return e.feeScheduleOf(unitId);
-    }
+    // DELIBERATELY NOT PROJECTED, and this is the honest part: `feeDomainVersion`, `feeChainId`,
+    // `escrowOf`, `settlementUnitIdOf`, `feeBasisOf`, `denominatorOf`, `roundingRuleOf`,
+    // `feeSplitConfigHashOf`. Each of those eight is a compile-time constant, `address(this)`, the map
+    // key the caller already holds, or `block.chainid` (VNextSettlementEscrow.sol:727-741), so nothing
+    // in storage backs them any more. A lens that returned `VNextSettlementLib.FEE_DENOMINATOR` here
+    // would ASSERT THE CONSTANT AGAINST ITSELF and pass even if the contract stored something else —
+    // a test that cannot fail. They are dropped rather than faked. No test referenced any of them.
 
     // ── Unit-terms projections (successor: `unitTerms`) ──────────────────────────────────────────────
 

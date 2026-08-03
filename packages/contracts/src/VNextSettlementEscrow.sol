@@ -944,8 +944,14 @@ contract VNextSettlementEscrow {
     ///         stolen, but settlement silently degraded to refund-only. They keep their own selectors and
     ///         their exact one-word returns below; `feeBps` / `feeRecipient` appearing in this struct too
     ///         is intentional duplication.
-    function feeScheduleOf(bytes32 unitId) external view onlyExisting(unitId) returns (FeeSchedule memory) {
-        return _units[unitId].feeSchedule;
+    function feeAmountsOf(bytes32 unitId)
+        external
+        view
+        onlyExisting(unitId)
+        returns (uint256 g_, uint256 f_, uint256 n_)
+    {
+        FeeSchedule storage fs = _units[unitId].feeSchedule;
+        return (fs.g, fs.f, fs.n);
     }
 
     // ── The ONE-WORD fee selectors the O5 attester STATICCALLs. Do not reshape. ───────────────────────
