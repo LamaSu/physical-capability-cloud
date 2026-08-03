@@ -72,15 +72,42 @@ interface IOracleAttester {
     ///         choose the financial outcome. Never zero once disabled (clamped to 1 at genesis).
     function disabledAt() external view returns (uint64);
 
-    /// @notice The typed escalation adjudication for `(settlementUnitId, role)`, or an all-zero record.
+    /// @notice The cohort's kill-switch holder. Read at DEPLOY time only (the escrow's constructor
+    ///         forbids one key holder from being the revoker of BOTH the primary and the escalation
+    ///         cohort — see {VNextSettlementEscrow}'s constructor). No money path reads it.
+    function revoker() external view returns (address);
+
+    /// @notice The typed escalation adjudication for `(settlementUnitId, role, escrow)`, or an all-zero
+    ///         record.
     /// @dev    THE second money-path read (Wave 3). `role` is `O5_ADJ_ROLE_APPEAL` or
     ///         `O5_ADJ_ROLE_EMERGENCY`; each has its OWN consume-once slot. Callers MUST treat
     ///         `adjudicationId == 0` as "no verdict" and fail closed. The record carries no amount and no
     ///         recipient by design — it selects a path, never a distribution.
-    function adjudicationOf(bytes32 settlementUnitId, uint8 role)
+    /// @dev    M-05: `escrow` is part of the slot key, so a record naming a different escrow cannot
+    ///         consume this one's slot. The escrow passes `address(this)`.
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow)
         external
         view
         returns (O5AdjudicationRecord memory);
+
+    /// @notice H-01 (sol 4th-family) — the timestamp the quorum DECIDED an adjudication this escrow would
+    ///         actually apply, or `type(uint64).max` ("never") when there is none.
+    /// @dev    Returns `decidedAt` only if the record exists, is bound to `escrow`, and reviews exactly
+    ///         `reviewedAssertionId`. It exists so the escrow's DEADLINE DEFAULTS can ask "was a verdict
+    ///         already decided in time?" for ONE WORD instead of decoding the whole record: a timely
+    ///         authenticated verdict must never be overtaken by a deadline default just because nobody
+    ///         relayed it in time (relayer inactivity must not change either party's outcome).
+    /// @dev    THE SENTINEL IS `max`, NOT 0, and that is load-bearing rather than a taste: the caller's
+    ///         only question is `decidedAt < myDeadline`, so "nothing applicable" must answer a value that
+    ///         is never inside any window. `max` makes the absent case FAIL TOWARD the ordinary deadline
+    ///         default with no second comparison to get wrong; 0 would have answered "decided at the dawn
+    ///         of time", i.e. inside every window, and stalled units instead.
+    function adjudicationDecidedAt(
+        bytes32 settlementUnitId,
+        uint8 role,
+        address escrow,
+        bytes32 reviewedAssertionId
+    ) external view returns (uint64 decidedAtOrNever);
 
     /// @notice Write the typed UPHOLD/OVERTURN from a valid escalation-cohort quorum over `a`.
     function adjudicate(O5Adjudication calldata a, bytes[] calldata signatures)

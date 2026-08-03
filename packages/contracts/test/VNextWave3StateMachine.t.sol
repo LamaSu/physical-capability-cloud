@@ -273,10 +273,12 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         uint256 opBefore = usdc.balanceOf(operator);
         uint256 challengerBefore = usdc.balanceOf(payer);
 
-        // The challenger's adjudicating authority is killed by the revoker — not by the challenger.
+        // The challenger's adjudicating authority is killed by the revoker — not by the challenger — and
+        // it had NOT ruled. (H-02: no post-disable record is planted here any more, because none can
+        // exist: `O5AttesterBase.adjudicate` refuses a disabled cohort, so a killed authority's effect on
+        // an unruled challenge is exactly this — silence — and nothing else.)
         escalation.disableAtNow();
-        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN); // even a signed OVERTURN is now unusable
-        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+        vm.expectRevert(VNextSettlementEscrow.AttestationNotFound.selector);
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
 
         // No emergency opens on this unit: `_emergencyDeadline` reads the PRIMARY cohort, which is healthy.
@@ -406,6 +408,7 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         escalation.setAdjudication(
             id,
             O5_ADJ_ROLE_APPEAL,
+            address(e),
             O5AdjudicationRecord({
                 adjudicationId: keccak256("adj-other"),
                 reviewedAssertionId: keccak256("some-other-assertion"),
@@ -419,7 +422,10 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
     }
 
-    /// @dev An adjudication bound to another escrow cannot pay/refund this one.
+    /// @dev An adjudication bound to another escrow cannot pay/refund this one. The record is planted in
+    ///      THIS escrow's own slot (M-05 keys the slot on the escrow, so a foreign-escrow record could not
+    ///      otherwise land here at all) precisely to show the escrow's OWN `WrongRecipient` defense still
+    ///      stands unaided — a non-conforming attester cannot talk it into paying.
     function test_Appeal_RejectsAVerdictBoundToAnotherEscrow() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
@@ -428,6 +434,7 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         escalation.setAdjudication(
             id,
             O5_ADJ_ROLE_APPEAL,
+            address(e),
             O5AdjudicationRecord({
                 adjudicationId: keccak256("adj-elsewhere"),
                 reviewedAssertionId: accepted,
@@ -441,8 +448,13 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
     }
 
-    /// @dev An appeal may only decide a CHALLENGED unit, and only inside its window.
-    function test_Appeal_RequiresAChallengeAndALiveWindow() public {
+    /// @dev An appeal may only decide a CHALLENGED unit, and only over a verdict DECIDED inside its window.
+    /// @dev H-01 (sol 4th-family): the second half used to warp past the deadline with a verdict decided
+    ///      BEFORE it and expect a revert — i.e. it asserted that a timely verdict expires on RELAY time.
+    ///      The deadline now bounds the DECISION time (`O5AdjudicationRecord.decidedAt`), so the case that
+    ///      must revert is a verdict DECIDED at/after the deadline. The timely-record-late-relay case is
+    ///      the opposite assertion and has its own test below.
+    function test_Appeal_RequiresAChallengeAndAVerdictDecidedInTheWindow() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
         _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN); // signed, but nothing is challenged
@@ -451,20 +463,57 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
 
         _challenge(e, id);
         vm.warp(block.timestamp + VNextSettlementLib.APPEAL_WINDOW);
+        // Decided AT the deadline (not before it): the release default owns the unit and this is refused.
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
         vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
-        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL); // too late: the release default now owns it
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
     }
 
-    /// @dev A killed escalation cohort's pre-written verdict must not move money — the symmetric form of
-    ///      the rev-3 property that a killed primary cohort's pre-written assertion must not.
-    function test_Appeal_ADisabledEscalationCohortCannotPay() public {
+    /// @dev H-02 (sol 4th-family) — INVERTED. This test previously asserted that disabling the escalation
+    ///      cohort neutralized an already-recorded verdict, and that behaviour was the finding: since
+    ///      `O5AttesterBase.adjudicate` refuses a disabled cohort, EVERY stored record predates the
+    ///      disable, so the escrow's runtime `disabledAt() != 0` re-check could never reject a
+    ///      post-disable record — it could only let the revoker, having SEEN a verdict it disliked, delete
+    ///      its effect and take the silence default instead. §8.3 C-5 freezes that a revoker may INITIATE
+    ///      but never CHOOSE the financial result. So the recorded verdict now stands.
+    function test_H02_DisableCannotVetoAnAlreadyRecordedAdjudication() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
-        _challenge(e, id);
+        uint256 bond = _challenge(e, id);
+        uint256 payerBefore = usdc.balanceOf(payer);
+        uint256 feeBefore = usdc.balanceOf(feeDest);
+
+        // A valid UPHOLD is recorded while the cohort is live — the only way a record can ever exist.
         _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
+        // ...and only THEN does the revoker press the kill switch, having seen the verdict.
         escalation.disableAtNow();
-        vm.expectRevert(VNextSettlementEscrow.OracleCohortDisabled.selector);
+
         e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the verdict still decides");
+        assertEq(usdc.balanceOf(feeDest), feeBefore + F, "the operator side was paid, as the quorum ruled");
+        // The UPHOLD's own §2.4 disposition applies too — the revoker did not get to pick that either.
+        uint256 comp = VNextSettlementLib.delayCompensation(G, bond);
+        assertEq(usdc.balanceOf(payer), payerBefore, "no refund, and no bond back on an adjudicated loss");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), bond - comp, "the adjudicated burn, not silence");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev The other direction of the same lever: the revoker cannot suppress an OVERTURN either. Before
+    ///      the fix, disabling turned a recorded refund verdict into the appeal-silence RELEASE.
+    function test_H02_DisableCannotVetoARecordedOverturnEither() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+        escalation.disableAtNow();
+
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "the OVERTURN still decides");
+        assertEq(usdc.balanceOf(payer), payerBefore + G + bond, "refund plus the whole bond back");
+        assertEq(usdc.balanceOf(VNextSettlementLib.BURN_SINK), 0, "an adjudicated win burns nothing");
+        _assertBucketsCovered(e);
     }
 
     /// @dev A unit carries at most ONE live challenge, and only the payer may open it.

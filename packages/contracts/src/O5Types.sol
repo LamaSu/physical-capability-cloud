@@ -111,9 +111,18 @@ struct O5Adjudication {
 }
 
 /// @notice The immutable record written by the escalation cohort's quorum, read by the escrow.
-/// @dev    Keyed by `keccak256(abi.encode(settlementUnitId, role))` so APPEAL and EMERGENCY each get
-///         their own consume-once slot: an appeal verdict can never pre-empt (or be replayed as) the
+/// @dev    Keyed by `keccak256(abi.encode(settlementUnitId, role, escrow))` so APPEAL and EMERGENCY each
+///         get their own consume-once slot: an appeal verdict can never pre-empt (or be replayed as) the
 ///         Model-B emergency review of the same unit.
+/// @dev    M-05 (sol 4th-family) — `escrow` IS PART OF THE KEY. Without it the slot was keyed on
+///         `(settlementUnitId, role)` alone while nothing rebound `escrow` to that unit, so a quorum-signed
+///         record naming a DIFFERENT (e.g. hostile or mistaken) escrow that merely echoed the real unit's
+///         accepted assertion consumed the REAL unit's one slot: the real escrow then rejected it
+///         (`WrongRecipient`) and no corrected record could ever be written — the exact brick the
+///         consume-once pre-checks exist to prevent. Widening the key costs one word of preimage and makes
+///         a wrong-escrow record land in its own slot, where it can harm nothing.
+///         This is a STORAGE-KEY change only: `O5_ADJUDICATION_TYPEHASH` and every signature over it are
+///         byte-identical, because `escrow` was already a signed field of {O5Adjudication}.
 struct O5AdjudicationRecord {
     bytes32 adjudicationId; // EIP-712 digest over the full signed adjudication; 0 == none
     bytes32 reviewedAssertionId;

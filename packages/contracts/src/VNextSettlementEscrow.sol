@@ -518,6 +518,9 @@ contract VNextSettlementEscrow {
     error TierOutOfRange();
     error TypeHashMismatch();
     error SchemaUidMismatch();
+    /// @notice M-01: the linked {VNextSettlementLib} is not the one this build was compiled against.
+    ///         Deploy-time only (raised in the constructor) — it aborts the deployment.
+    error LinkedLibraryMismatch();
     // §B on-chain evidence binding
     // NOTE: `OnlyEvidenceCommitter` is REMOVED (Wave 3c / §2.8). `submitEvidence` is operator-only now, so
     // the caller guard raises `OnlyOperator` — the same error `invokeBackup` raises, because it is now the
@@ -562,6 +565,40 @@ contract VNextSettlementEscrow {
         authorizedOracle = oracle;
         if (escalation == address(0) || escalation == oracle) revert ForbiddenRecipient();
         escalationAttester = escalation;
+        // ── M-01 (sol 4th-family): THE LINKED-LIBRARY GATE, in code rather than in a comment ──────────
+        // The three {VNextSettlementLib} calls on the funding path are DELEGATECALLs, so they execute in
+        // the CLONE'S OWN STORAGE. A hostile link therefore does not merely return a wrong hash: a
+        // malicious `computePayoutConfigHash` can rewrite `_payouts[unitId][0].recipient` AFTER the signed
+        // entries validated, return the HONEST hash so bilateral acceptance and funding both succeed, and
+        // let a later, entirely VALID settle pay a substituted recipient. That was previously a
+        // deploy-review note ("assert the code hash before use"), which nothing enforced.
+        //
+        // The expectation is derived at COMPILE TIME from this build's own library — nothing here is
+        // supplied by a deployer, so a hostile deployment cannot satisfy it by also supplying a matching
+        // hash. The ONLY byte-difference between the compile-time template and the deployed library is the
+        // library's own address, which solc emits as the PUSH20 operand of the call-protection prologue
+        // (`0x73 <20-byte address> 0x30 ...`) and which is filled in at LINK time; splicing the linked
+        // address into that operand makes the two byte-identical (verified: exactly 20 differing bytes, at
+        // offsets 1..20). FAIL-CLOSED: a different library, a mutable proxy, an unlinked build, or a future
+        // prologue shape this splice no longer matches all ABORT the deployment — of the implementation and
+        // therefore of the factory that constructs it — rather than shipping clones whose funding path
+        // delegatecalls unknown code.
+        bytes memory expectedLib = type(VNextSettlementLib).runtimeCode;
+        address linkedLib = address(VNextSettlementLib);
+        assembly ("memory-safe") {
+            let p := add(expectedLib, 0x21) // 0x20 length word + the 1-byte PUSH20 opcode
+            mstore(p, or(shl(96, linkedLib), and(mload(p), shr(160, not(0)))))
+        }
+        if (keccak256(expectedLib) != linkedLib.codehash) revert LinkedLibraryMismatch();
+        // ── H-02: the two cohorts must not share a KILL-SWITCH HOLDER ────────────────────────────────
+        // §8.3 C-5 freezes that a revoker may INITIATE but never CHOOSE the financial result. Disabling
+        // the PRIMARY opens the Model-B emergency (whose silence refunds); disabling the ESCALATION cohort
+        // stops any emergency verdict from being written at all. Separately custodied, that pair of moves
+        // needs two independent key holders; in ONE hand it is a unilateral "refund every accepted SETTLE"
+        // switch — C-5's property restated as an address inequality. Deploy-time only, so it costs no
+        // runtime bytecode, and it is exactly the shape of the separation `Fixed2of3O5Attester` already
+        // enforces between its revoker and its signers.
+        if (IOracleAttester(oracle).revoker() == IOracleAttester(escalation).revoker()) revert PartyCollision();
         o5SchemaUid = schemaUid;
         // M-02: pin the published schema-UID metadata SYMMETRICALLY with the type-hash pin below. Without
         // it a one-char schema divergence would make every mint burn a unit's one-verdict slot and every
@@ -1396,8 +1433,25 @@ contract VNextSettlementEscrow {
     ///          "relayer inactivity" explicitly as something that must not improve the payer's outcome. Note
     ///          the old behaviour was not protection but a RACE the operator wins by calling `finalize` the
     ///          instant the window closes; this makes the outcome deterministic instead of timing-dependent.
+    ///      (3) TIER-0 IS EXCLUDED (M-02, sol 4th-family). A Tier-0 unit can enter NEITHER assertion lane
+    ///          (`acceptAssertion` rejects `requiredTier < 1`), so there is no settlement for an emergency
+    ///          to review and the only thing an emergency could do there is hand the payer an EARLY refund
+    ///          at `disabledAt + EMERGENCY_REVIEW_WINDOW`. §8.3 C-6 freezes Tier-0 to "buyer approval or
+    ///          reclaim only"; without this exclusion a payer who is also the primary cohort's revoker
+    ///          could race that refund months ahead of the bilaterally signed `reclaimAt` — an undocumented
+    ///          early-refund authority over a unit the primary cohort has no role in at all.
+    ///      (4) IT NEVER OUTLIVES `reclaimAt` (M-03, sol 4th-family). Everything else in §8.1 is anchored
+    ///          BACKWARDS from `reclaimAt` so a funded unit provably terminates by its own deadline; this
+    ///          one deadline was anchored on `disabledAt` instead and could land up to a full
+    ///          EMERGENCY_REVIEW_WINDOW PAST it, with ordinary reclaim permanently excluded — the payer's
+    ///          capital locked beyond the date both parties signed. When the review cannot fit, NO
+    ///          emergency opens (rather than a truncated one): a shortened window would let the revoker
+    ///          pick the moment and thereby the result — disable one second before the appeal expires,
+    ///          leave the cohort ~no time to decide, and collect the silence refund — which is precisely
+    ///          the C-5 property this exclusion list exists to protect. With no emergency, the unit
+    ///          resolves under its ORDINARY windows to the LAST AUTHENTICATED STATE, before `reclaimAt`.
     function _emergencyDeadline(Unit storage u) private view returns (uint256) {
-        if (u.backupLane) return 0; // (1)
+        if (u.backupLane || u.requiredTier == 0) return 0; // (1) + (3)
         uint256 d = IOracleAttester(authorizedOracle).disabledAt();
         if (d == 0) return 0;
         uint64 a = u.assertedAt;
@@ -1411,7 +1465,9 @@ contract VNextSettlementEscrow {
                 : uint256(a) + VNextSettlementLib.CHALLENGE_WINDOW;
             if (d >= due) return 0;
         }
-        return d + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        uint256 e = d + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        if (e > u.reclaimAt) return 0; // (4)
+        return e;
     }
 
     /// @notice §2.2 + §8.2 C-3 — ACCEPT a cohort SETTLE for this unit. Permissionless.
@@ -1529,6 +1585,16 @@ contract VNextSettlementEscrow {
             block.timestamp < cutoff - VNextSettlementLib.BACKUP_WINDOW
                 && IOracleAttester(authorizedOracle).disabledAt() == 0
         ) revert PrimaryVerdictNotDue();
+        // M-03 (sol 4th-family): an emergency outcome that is ALREADY DUE is TERMINAL, so escalation may
+        // not reach back over it. Escalating sets `backupLane`, which makes `_emergencyDeadline` return 0
+        // — i.e. it would ERASE a refund that the §8.3 C-5 clock had already awarded and reopen settlement,
+        // leaving "full-G refund vs backup settlement" decided by whichever transaction the block ordered
+        // first, PAST a deadline the machine calls terminal. The exclusion is one-sided on purpose: while
+        // the emergency is still OPEN, escalating remains the operator's designed recourse against a dead
+        // primary cohort (and closes the emergency, per exclusion (1) — a lane whose reviewer is the body
+        // just killed has no honest review to wait for).
+        uint256 emg = _emergencyDeadline(u);
+        if (emg != 0 && block.timestamp >= emg) revert NotActive();
         u.backupLane = true;
         u.state = UnitState.BACKUP_PENDING;
         emit BackupInvoked(unitId, uint64(block.timestamp));
@@ -1546,9 +1612,31 @@ contract VNextSettlementEscrow {
         UnitState s = u.state;
         if (s > UnitState.BACKUP_ASSERTED) revert NotActive();
 
+        // ── H-01 (sol 4th-family): the ESCALATION DEFAULTS, guarded ONCE ─────────────────────────────
+        // Both deadline defaults that an escalation quorum could have pre-empted — the emergency-silence
+        // REFUND and the appeal-silence RELEASE — share one gate, because they share one rule: SILENCE
+        // means the quorum never DECIDED, not that nobody RELAYED. A record decided inside the window is
+        // already authenticated, so it owns this unit's outcome however late it arrives, and the default
+        // must stand aside for it. Otherwise a quorum could rule at `due - 1` and the party the ruling
+        // went against would simply not relay it and collect the default at `due` — "relayer inactivity
+        // must not improve either party's outcome", broken by whoever transacts first.
+        // Never a brick: `resolveEscalation` is permissionless and stays callable forever, and
+        // `_decidedInTime` re-checks exactly the bindings that call re-checks (see it), so every record
+        // this defers to is one that somebody can always apply.
         uint256 emergencyDue = _emergencyDeadline(u);
+        uint8 escRole; // 0 = no escalation default is in play for this state
+        uint256 escDue;
         if (emergencyDue != 0) {
-            if (block.timestamp < emergencyDue) revert WindowStillOpen();
+            (escRole, escDue) = (O5_ADJ_ROLE_EMERGENCY, emergencyDue);
+        } else if (s == UnitState.CHALLENGED) {
+            (escRole, escDue) = (O5_ADJ_ROLE_APPEAL, uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW);
+        }
+        if (escRole != 0) {
+            if (block.timestamp < escDue) revert WindowStillOpen();
+            if (_decidedInTime(unitId, escRole, escDue, u.acceptedAssertionId)) revert WindowStillOpen();
+        }
+
+        if (emergencyDue != 0) {
             // The challenger is made WHOLE — not merely un-penalised. This end refunds the job, so the
             // challenge was vindicated in substance and no delay is chargeable to it; and the emergency
             // is not the challenger's doing either way.
@@ -1581,9 +1669,7 @@ contract VNextSettlementEscrow {
             emit Finalized(unitId, true, 0);
             emit EvidenceReleased(unitId, u.acceptedAssertionId);
         } else if (s == UnitState.CHALLENGED) {
-            if (block.timestamp < uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW) {
-                revert WindowStillOpen();
-            }
+            // The appeal window (and the H-01 "was it already decided?" guard) were both applied above.
             // §8.3 C-1 — appeal silence ⇒ RELEASE, operator's capped delay-comp, UNUSED BOND RETURNED.
             // The release half is the safety default (silence must not refund, or the payer regains the
             // veto through appeal-liveness failure). The bond half is NOT §2.4: §2.4 disposes of a FAILED
@@ -1627,40 +1713,54 @@ contract VNextSettlementEscrow {
         Unit storage u = _units[unitId];
         UnitState s = u.state;
         uint256 emergencyDue = _emergencyDeadline(u);
-        bool emergency = emergencyDue != 0;
+        uint256 decisionDue; // the window the verdict had to be DECIDED inside — never "relayed inside"
 
         if (role == O5_ADJ_ROLE_APPEAL) {
             // Model B: once an emergency is declared, the appeal quorum no longer decides this unit — the
             // emergency cohort reviews the exact assertion instead. Otherwise a pre-signed appeal could
             // pre-empt the systemic-compromise review that was declared precisely to override it.
-            if (emergency) revert EmergencyPaused();
+            if (emergencyDue != 0) revert EmergencyPaused();
             if (s != UnitState.CHALLENGED) revert NotActive();
-            if (block.timestamp >= uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW) {
-                revert WindowStillOpen(); // the window closed; `finalize` now owns the (release) default
-            }
+            decisionDue = uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW;
         } else if (role == O5_ADJ_ROLE_EMERGENCY) {
-            if (!emergency) revert NoEmergency();
-            // Wave 3c: the emergency deadline is TERMINAL, symmetrically with the appeal deadline one
-            // branch up. Without this the deadline bounded nothing: past it, `finalize` (→ refund) and a
-            // late UPHOLD (→ release) were both live and the first transaction won, so "silence ⇒ refund AT
-            // the immutable deadline" was in truth "⇒ refund unless the cohort outruns the keeper". Same
-            // error as the appeal branch by design (see `WindowStillOpen`): one error for "this call is not
-            // the one this window admits right now", with the state + deadlines readable from the views.
-            if (block.timestamp >= emergencyDue) revert WindowStillOpen();
+            if (emergencyDue == 0) revert NoEmergency();
             if (s < UnitState.PRIMARY_ASSERTED || s > UnitState.BACKUP_ASSERTED) revert NotActive();
+            decisionDue = emergencyDue;
         } else {
             revert BadEscalationRole();
         }
 
-        O5AdjudicationRecord memory r = IOracleAttester(escalationAttester).adjudicationOf(unitId, role);
+        O5AdjudicationRecord memory r =
+            IOracleAttester(escalationAttester).adjudicationOf(unitId, role, address(this));
         if (r.adjudicationId == bytes32(0)) revert AttestationNotFound();
         if (r.escrow != address(this)) revert WrongRecipient();
         // Assertion-specific by construction: a verdict signed over one assertion cannot be applied to
         // another, and `acceptedAssertionId` is nonzero only in the accepted states gated above.
         if (r.reviewedAssertionId != u.acceptedAssertionId) revert IdentityMismatch();
-        // A killed escalation cohort's pre-written verdict must not move money, exactly as a killed
-        // primary cohort's pre-written assertion must not (the symmetric rev-3 kill-switch property).
-        if (IOracleAttester(escalationAttester).disabledAt() != 0) revert OracleCohortDisabled();
+        // ── H-01 (sol 4th-family): THE RECORDED DECISION TIME OWNS THE WINDOW ────────────────────────
+        // This check was `block.timestamp >= <deadline>`, i.e. it expired an ALREADY-AUTHENTICATED verdict
+        // on RELAY time. `decidedAt` proves when the quorum ruled, and it was stored but never read; so a
+        // quorum could record a timely EMERGENCY UPHOLD at `emergencyDue - 1`, nobody would relay this
+        // call, and at `emergencyDue` the payer's `finalize` collected the silence refund — the §0
+        // invariant's "relayer inactivity must not improve the payer's outcome", broken in one line. The
+        // appeal role broke it symmetrically, discarding a timely OVERTURN into the release default.
+        // A record decided INSIDE its window therefore stays resolvable forever (this call is
+        // permissionless, so it cannot be withheld), and the deadline defaults in `finalize` stand aside
+        // for it. What the deadline still bounds is what it always meant to bound: a verdict DECIDED late.
+        if (uint256(r.decidedAt) >= decisionDue) revert WindowStillOpen();
+        // ── H-02 (sol 4th-family): THE `disabledAt() != 0` RE-CHECK THAT STOOD HERE IS REMOVED ───────
+        // It could not do the job it claimed. `O5AttesterBase.adjudicate` refuses a disabled cohort, so
+        // EVERY stored record necessarily predates the disable — the check could never reject a
+        // post-disable record because none can exist. What it actually did was let the escalation cohort's
+        // revoker, AFTER seeing an immutable verdict it disliked, delete that verdict's effect and take the
+        // silence default instead: suppress an EMERGENCY UPHOLD and collect the refund, suppress an APPEAL
+        // OVERTURN and force the release, or suppress an UPHOLD to change the bond disposition. That is
+        // §8.3 C-5 inverted — the revoker CHOOSING the financial result, not merely initiating a review.
+        // The residual is stated plainly rather than papered over: a compromised escalation cohort's
+        // pre-disable record now stands, because there is no fourth authority to review it. That is the
+        // SAME shape the primary lane already accepts — an accepted primary assertion is not voided by a
+        // later disable either; it is reviewed (Model B) — and it is strictly better than a kill-switch
+        // that doubles as a verdict veto.
 
         bool upheld = r.outcome == O5_ADJ_UPHOLD; // the attester admits only UPHOLD | OVERTURN
         bytes32 authKey = _authorizationKey(
@@ -1719,6 +1819,90 @@ contract VNextSettlementEscrow {
             _settleLeg(unitId, u, VNextSettlementLib.BOND_LEG_INDEX, ClaimClass.BOND, u.challenger, rest);
         }
         emit BondDisposed(unitId, comp, rest, burn);
+    }
+
+    /// @dev H-01 — "did the escalation quorum already DECIDE this, in time?" Read as ONE WORD (the attester
+    ///      applies the escrow/assertion bindings itself and answers `type(uint64).max` — "never" — when
+    ///      nothing applies), so a deadline default costs one staticcall and one comparison rather than a
+    ///      full record decode on a contract at its EIP-170 ceiling.
+    ///
+    ///      WHY A DEFAULT MUST STAND ASIDE FOR IT, and why that is not a brick: the bindings checked
+    ///      attester-side are EXACTLY the ones `resolveEscalation` re-checks (record exists, bound to this
+    ///      escrow, reviews this unit's accepted assertion), and that function is permissionless and stays
+    ///      callable forever. So every record this returns non-zero for is one that SOMEBODY can always
+    ///      apply — deferring to it can delay a unit but can never strand one. A record naming a different
+    ///      escrow, or a different assertion, answers 0 and the ordinary default proceeds untouched.
+    function _decidedInTime(bytes32 unitId, uint8 role, uint256 due, bytes32 acceptedId)
+        private
+        view
+        returns (bool)
+    {
+        return uint256(
+            IOracleAttester(escalationAttester).adjudicationDecidedAt(unitId, role, address(this), acceptedId)
+        ) < due;
+    }
+
+    /// @notice M-04 — issue ONE ERC-1271 `isValidSignature` staticcall FROM THIS CLONE, for the factory.
+    /// @dev    Wave 4a moved signature validation into the factory for bytecode economy; that silently
+    ///         changed the `msg.sender` a smart-account signer observes from the clone to the factory, and
+    ///         ERC-1271 explicitly permits caller-aware validation. This relay restores the pre-Wave-4a
+    ///         caller for every 1271 check the factory performs on this clone's behalf, at the cost of one
+    ///         small function rather than the whole EIP-712 + ECDSA machinery coming back.
+    ///
+    ///         It is SAFE because of what it cannot do: it is `view` (so callers reach it by STATICCALL and
+    ///         it can write nothing, here or downstream), the inner call is a STATICCALL, it returns the
+    ///         first returndata word verbatim and decides nothing (the factory compares it to the magic
+    ///         value), and it is gated to `factory` — which is an implementation immutable this contract
+    ///         already trusts unconditionally. The gate matters: without it, ANY caller could make an
+    ///         arbitrary read-only call appear to originate from this escrow, which is precisely the
+    ///         caller-aware trust this fix exists to preserve. `data` is required to be an
+    ///         `isValidSignature` call so the relay stays what its name says it is.
+
+    /// @notice M-04 — issue ONE ERC-1271 `isValidSignature` STATICCALL FROM THIS CLONE, for the factory.
+    /// @dev    WHY IT EXISTS. Wave 4a moved signature validation into the factory for bytecode economy.
+    ///         The digest was unaffected (it is still built over this clone's own EIP-712 domain), but the
+    ///         `msg.sender` a smart-account signer observes changed from the clone to the factory — and
+    ///         ERC-1271 explicitly permits CALLER-AWARE validation. A caller-aware wallet that only honours
+    ///         its owner's signatures when the query comes from ITS escrow therefore stopped validating
+    ///         entirely: e.g. a smart-account payout recipient holding a failed-payment claim could never
+    ///         authorize a destination rotation again, leaving that claim permanently unpayable. This relay
+    ///         restores the pre-Wave-4a caller for every 1271 check the factory performs on this clone's
+    ///         behalf — bilateral acceptance at funding, and buyer-approval / claim-rotation through
+    ///         `verifyCloneSignature` — for one small function instead of the whole EIP-712 + ECDSA
+    ///         machinery coming back.
+    ///
+    ///         WHY IT IS SAFE. It is `view` (callers reach it by STATICCALL; nothing here or downstream can
+    ///         write), the inner call is a STATICCALL, it decides NOTHING (it returns the first returndata
+    ///         word verbatim and the factory compares it to the magic value), and it is gated to `factory`
+    ///         — an implementation immutable this contract already trusts unconditionally and already
+    ///         delegates every signature predicate to. The gate is load-bearing: without it ANY caller
+    ///         could make a read-only call appear to originate from this escrow, which is exactly the
+    ///         caller-aware trust this fix exists to preserve. The relayed calldata is required to be an
+    ///         `isValidSignature` call, so the relay stays what its name says it is.
+    ///
+    ///         CALLING CONVENTION. The 1271 calldata is appended AFTER this function's 36-byte head rather
+    ///         than passed as a `bytes` argument: on a contract at its EIP-170 ceiling, ABI-decoding one
+    ///         dynamic argument costs ~75 B more than reading the tail directly, and the payload is
+    ///         forwarded verbatim either way. The factory builds it with
+    ///         `bytes.concat(abi.encodeWithSelector(erc1271Check.selector, signer), <1271 calldata>)`.
+    ///         Any other returndata shape leaves `word` zero, which the factory reads as "did not validate"
+    ///         — fail-closed.
+    function erc1271Check(address signer) external view returns (bytes32 word) {
+        if (msg.sender != factory) revert OnlyFactory();
+        assembly ("memory-safe") {
+            let n := sub(calldatasize(), 0x24)
+            let p := mload(0x40)
+            calldatacopy(p, 0x24, n)
+            // Narrow the relay to ERC-1271 and nothing else. Read from CALLDATA, not from the copy: a
+            // short tail reads as zeros there by EVM rule, whereas unwritten memory is merely usually
+            // zero. A non-1271 payload (or any other returndata shape) simply leaves `word` at zero, which
+            // the factory reads as "did not validate" — fail-closed, and one branch instead of a revert.
+            if eq(shr(224, calldataload(0x24)), 0x1626ba7e) {
+                if staticcall(gas(), signer, p, n, p, 0x20) {
+                    if eq(returndatasize(), 0x20) { word := mload(p) }
+                }
+            }
+        }
     }
 
     /// @notice §8.2 C-2 — permissionless payer refund at/after `reclaimAt`, ONLY from FUNDED_ACTIVE.

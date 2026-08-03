@@ -98,10 +98,15 @@ abstract contract O5AttesterBase is IOracleAttester {
     ///      money path costs one record write and no separate flag slot.
     mapping(bytes32 => O5Assertion) internal _assertions;
 
-    /// @dev keccak256(abi.encode(settlementUnitId, role)) => the immutable escalation adjudication.
-    ///      Write-once per (unit, role): `adjudicate` is the only writer and refuses an occupied slot, so
-    ///      the APPEAL verdict and the Model-B EMERGENCY verdict are independent one-shot decisions and
-    ///      neither can consume the other's slot.
+    /// @dev keccak256(abi.encode(settlementUnitId, role, escrow)) => the immutable escalation adjudication.
+    ///      Write-once per (unit, role, escrow): `adjudicate` is the only writer and refuses an occupied
+    ///      slot, so the APPEAL verdict and the Model-B EMERGENCY verdict are independent one-shot
+    ///      decisions and neither can consume the other's slot.
+    ///      M-05: `escrow` joined the key because nothing here can REBIND a claimed escrow to a unit — the
+    ///      unit id commits to its escrow by construction, but a keccak cannot be inverted to recover it.
+    ///      So a quorum-signed record naming the WRONG escrow used to consume the RIGHT escrow's slot and
+    ///      brick it (the real escrow rejects a foreign record, and the slot can never be rewritten). With
+    ///      `escrow` in the key such a record occupies only its own slot.
     mapping(bytes32 => O5AdjudicationRecord) internal _adjudications;
 
     /// @dev settlementUnitId => the EAS uid of the ASYNC provenance mirror; zero = not yet mirrored.
@@ -380,18 +385,38 @@ abstract contract O5AttesterBase is IOracleAttester {
 
     // ── H-01 Wave 3: the typed escalation adjudication (appeal + Model-B emergency) ─────────────────
 
-    /// @notice The consume-once storage key for one (unit, role) adjudication slot.
-    function adjudicationKey(bytes32 settlementUnitId, uint8 role) public pure returns (bytes32) {
-        return keccak256(abi.encode(settlementUnitId, role));
+    /// @notice The consume-once storage key for one (unit, role, escrow) adjudication slot.
+    function adjudicationKey(bytes32 settlementUnitId, uint8 role, address escrow) public pure returns (bytes32) {
+        return keccak256(abi.encode(settlementUnitId, role, escrow));
     }
 
     /// @inheritdoc IOracleAttester
-    function adjudicationOf(bytes32 settlementUnitId, uint8 role)
+    function adjudicationOf(bytes32 settlementUnitId, uint8 role, address escrow)
         external
         view
         returns (O5AdjudicationRecord memory)
     {
-        return _adjudications[adjudicationKey(settlementUnitId, role)];
+        return _adjudications[adjudicationKey(settlementUnitId, role, escrow)];
+    }
+
+    /// @inheritdoc IOracleAttester
+    /// @dev H-01: the one-word form of the read above, for the escrow's deadline defaults. Everything the
+    ///      escrow would re-check about the record's BINDING is applied here (existence, bound escrow,
+    ///      reviewed assertion), so an answer other than `max` means "this escrow would apply this record"
+    ///      and the caller only has to compare the timestamp against its own window. Anything unbound
+    ///      answers `max` ("never"), i.e. fails toward the ordinary deadline default — never inside a
+    ///      window, so an absent record can never stall a unit.
+    function adjudicationDecidedAt(bytes32 settlementUnitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
+        external
+        view
+        returns (uint64)
+    {
+        O5AdjudicationRecord storage r = _adjudications[adjudicationKey(settlementUnitId, role, escrow)];
+        if (
+            r.adjudicationId == bytes32(0) || r.escrow != escrow
+                || r.reviewedAssertionId != reviewedAssertionId
+        ) return type(uint64).max;
+        return r.decidedAt;
     }
 
     /// @notice The canonical adjudication EIP-712 digest the escalation quorum signs — for the off-chain side.
@@ -439,13 +464,18 @@ abstract contract O5AttesterBase is IOracleAttester {
                 != a.reviewedAssertionId
         ) revert ReviewedAssertionMismatch();
 
-        bytes32 k = adjudicationKey(a.settlementUnitId, a.role);
+        bytes32 k = adjudicationKey(a.settlementUnitId, a.role, a.escrow);
         if (_adjudications[k].adjudicationId != bytes32(0)) revert UnitAlreadyAdjudicated();
+        // H-01: `decidedAt` is the AUTHORITATIVE decision time — the escrow's windows are measured against
+        // it, not against the block that happens to relay the record. Clamped non-zero for the same reason
+        // `disabledAt` is: the escrow reads 0 as "nothing applicable", so a genesis timestamp must never
+        // read as the absence of a verdict that exists.
+        uint64 t = uint64(block.timestamp);
         _adjudications[k] = O5AdjudicationRecord({
             adjudicationId: adjudicationId,
             reviewedAssertionId: a.reviewedAssertionId,
             escrow: a.escrow,
-            decidedAt: uint64(block.timestamp),
+            decidedAt: t == 0 ? 1 : t,
             role: a.role,
             outcome: a.outcome
         });
@@ -505,6 +535,15 @@ abstract contract O5AttesterBase is IOracleAttester {
         // authoritative unit state, and read it TOLERANTLY: the mirror must never be blockable by escrow
         // state (that would re-create the coupling P0-6 removes).
         uint256 unitState = _tolerantUnitState(escrow, unitId);
+
+        // L-01: CLAIM the one-shot marker BEFORE the external mint (checks-effects-interactions). `attest`
+        // is a call into an EAS registry that may run a resolver, and a hostile one can reenter here; with
+        // the marker written afterwards BOTH calls read zero, BOTH mint, and the outer write overwrites the
+        // inner uid — two mirrors for one assertion, and one of them permanently unreferenced. The sentinel
+        // is `assertionId` (non-zero by the guard above) purely so no extra constant is needed; the real
+        // uid replaces it below. Nothing is lost on failure: `attest` reverting rolls the marker back with
+        // the transaction, so the assertion simply stays on the drainable queue.
+        mirroredUid[unitId] = assertionId;
 
         uid = IEAS(eas).attest(
             AttestationRequest({

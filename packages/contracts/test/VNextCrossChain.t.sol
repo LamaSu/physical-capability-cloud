@@ -57,8 +57,13 @@ contract MockOracleAttester is IOracleAttester {
     bytes32 public o5TypeHash = keccak256("mock.o5.typehash");
     bytes32 public o5SchemaUid = keccak256("test.o5.schema");
 
+    /// @dev H-02: distinct per cohort — the escrow's constructor forbids a shared revoker across the two
+    ///      bound cohorts (one key holder must not be able to press both kill switches).
+    address public revoker;
+
     constructor(uint64 cohortId_) {
         cohortId = cohortId_;
+        revoker = address(uint160(0xE0000 + uint256(cohortId_)));
     }
 
     function setAssertion(bytes32 unitId, O5Assertion memory a) external {
@@ -79,8 +84,25 @@ contract MockOracleAttester is IOracleAttester {
         disabledAt = t == 0 ? 1 : t;
     }
 
-    function adjudicationOf(bytes32 unitId, uint8 role) external view returns (O5AdjudicationRecord memory) {
-        return _adj[keccak256(abi.encode(unitId, role))];
+    function adjudicationOf(bytes32 unitId, uint8 role, address escrow)
+        external
+        view
+        returns (O5AdjudicationRecord memory)
+    {
+        return _adj[keccak256(abi.encode(unitId, role, escrow))];
+    }
+
+    function adjudicationDecidedAt(bytes32 unitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
+        external
+        view
+        returns (uint64)
+    {
+        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow))];
+        if (
+            r.adjudicationId == bytes32(0) || r.escrow != escrow
+                || r.reviewedAssertionId != reviewedAssertionId
+        ) return type(uint64).max;
+        return r.decidedAt;
     }
 
     function adjudicate(O5Adjudication calldata, bytes[] calldata) external pure returns (bytes32) {

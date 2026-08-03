@@ -146,8 +146,15 @@ contract MockOracleAttester is IOracleAttester {
     ///      symmetric schema pin passes at construction (the setUp factory pins O5_SCHEMA, non-zero).
     bytes32 public o5SchemaUid = keccak256("test.o5.schema");
 
+    /// @dev H-02: the escrow's constructor forbids ONE key holder from being the revoker of BOTH bound
+    ///      cohorts (that pair of kill switches in one hand is a unilateral refund lever). Derived from the
+    ///      cohort id so every mock cohort in the suite gets its own, distinct, non-zero revoker without
+    ///      any fixture having to name one.
+    address public revoker;
+
     constructor(uint64 cohortId_) {
         cohortId = cohortId_;
+        revoker = address(uint160(0xE0000 + uint256(cohortId_)));
     }
 
     function setO5TypeHash(bytes32 h) external {
@@ -183,12 +190,37 @@ contract MockOracleAttester is IOracleAttester {
         disabledAt = t == 0 ? 1 : t;
     }
 
-    function setAdjudication(bytes32 unitId, uint8 role, O5AdjudicationRecord memory r) external {
-        _adj[keccak256(abi.encode(unitId, role))] = r;
+    /// @dev M-05: the slot is keyed on (unit, role, escrow), as in the real attester. `slotEscrow` is an
+    ///      EXPLICIT argument rather than `r.escrow` on purpose — that is what lets a test place a
+    ///      NON-CONFORMING record (right slot, wrong bound escrow) in this escrow's own slot and prove the
+    ///      escrow's `WrongRecipient` defense still stands on its own.
+    function setAdjudication(bytes32 unitId, uint8 role, address slotEscrow, O5AdjudicationRecord memory r)
+        external
+    {
+        _adj[keccak256(abi.encode(unitId, role, slotEscrow))] = r;
     }
 
-    function adjudicationOf(bytes32 unitId, uint8 role) external view returns (O5AdjudicationRecord memory) {
-        return _adj[keccak256(abi.encode(unitId, role))];
+    function adjudicationOf(bytes32 unitId, uint8 role, address escrow)
+        external
+        view
+        returns (O5AdjudicationRecord memory)
+    {
+        return _adj[keccak256(abi.encode(unitId, role, escrow))];
+    }
+
+    /// @dev H-01: mirrors {O5AttesterBase.adjudicationDecidedAt} — the one-word "already decided, and this
+    ///      escrow would apply it" read the escrow's deadline defaults consult.
+    function adjudicationDecidedAt(bytes32 unitId, uint8 role, address escrow, bytes32 reviewedAssertionId)
+        external
+        view
+        returns (uint64)
+    {
+        O5AdjudicationRecord storage r = _adj[keccak256(abi.encode(unitId, role, escrow))];
+        if (
+            r.adjudicationId == bytes32(0) || r.escrow != escrow
+                || r.reviewedAssertionId != reviewedAssertionId
+        ) return type(uint64).max;
+        return r.decidedAt;
     }
 
     function adjudicate(O5Adjudication calldata, bytes[] calldata) external pure returns (bytes32) {
@@ -806,6 +838,7 @@ contract VNextSettlementEscrowTest is Test {
         escalation.setAdjudication(
             id,
             role,
+            address(e),
             O5AdjudicationRecord({
                 adjudicationId: keccak256(abi.encode("adj", id, role, outcome)),
                 reviewedAssertionId: accepted,

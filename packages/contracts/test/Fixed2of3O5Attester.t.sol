@@ -934,7 +934,7 @@ contract Fixed2of3O5AttesterTest is Test {
         bytes32 got = attester.adjudicate(a, _adjSigs(a));
         assertEq(got, expected, "the adjudication id IS the EIP-712 digest over the full signed struct");
 
-        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL);
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
         assertEq(r.adjudicationId, expected);
         assertEq(r.reviewedAssertionId, ACCEPTED);
         assertEq(r.escrow, ESCROW);
@@ -963,9 +963,9 @@ contract Fixed2of3O5AttesterTest is Test {
         O5Adjudication memory em = _adj(O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN);
         attester.adjudicate(em, _adjSigs(em));
         assertEq(
-            uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_EMERGENCY).outcome), uint256(O5_ADJ_OVERTURN)
+            uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_EMERGENCY, ESCROW).outcome), uint256(O5_ADJ_OVERTURN)
         );
-        assertEq(uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL).outcome), uint256(O5_ADJ_UPHOLD));
+        assertEq(uint256(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).outcome), uint256(O5_ADJ_UPHOLD));
     }
 
     /// @dev A signature over an APPEAL cannot be replayed as an EMERGENCY (and vice versa): `role` is
@@ -1006,7 +1006,7 @@ contract Fixed2of3O5AttesterTest is Test {
         // Nothing was burned: once the escrow's accepted assertion matches, the SAME verdict writes.
         _armAccepted();
         attester.adjudicate(a, _adjSigs(a));
-        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL).reviewedAssertionId, ACCEPTED);
+        assertEq(attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW).reviewedAssertionId, ACCEPTED);
     }
 
     function test_Adjudicate_RejectsBadRoleOutcomeCohortAndZeroFields() public {
@@ -1103,7 +1103,7 @@ contract Fixed2of3O5AttesterTest is Test {
         _armAccepted();
         O5Adjudication memory a = _adj(O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD);
         attester.adjudicate(a, _adjSigs(a));
-        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL);
+        O5AdjudicationRecord memory r = attester.adjudicationOf(_suid(), O5_ADJ_ROLE_APPEAL, ESCROW);
         // abi.encode of the whole record is exactly 6 words: id, reviewed, escrow, decidedAt, role, outcome.
         assertEq(abi.encode(r).length, 6 * 32, "no amount and no recipient field exists to abuse");
     }

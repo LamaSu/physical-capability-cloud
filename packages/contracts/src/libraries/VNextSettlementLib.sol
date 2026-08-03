@@ -194,6 +194,15 @@ library VNextSettlementLib {
     uint16 internal constant MAX_CHALLENGE_BOND_BPS = 2000; // 20% of G — the H-2 ceiling; always wins
     uint256 internal constant MIN_CHALLENGE_BOND = 1_000_000; // 1 USDC (6dp) anti-spam floor
     uint16 internal constant DELAY_COMP_BPS = 100; // 1% of G — the operator's CAPPED delay compensation
+    /// @notice The smallest gross for which the H-2 CEILING is satisfiable at all, DERIVED not chosen:
+    ///         `floor(G * MAX_CHALLENGE_BOND_BPS / FEE_DENOMINATOR) >= 1  <=>  G >= 5` base units.
+    /// @dev    sol 4th-family INFO. Below it the ceiling rounds to ZERO, and `challengeBond`'s
+    ///         never-a-free-challenge floor then forced a bond of 1 — i.e. 25%..100% of gross, in open
+    ///         violation of the 20% ceiling the schedule advertises. Absolute exposure was dust (a 4-base-unit
+    ///         job is 0.000004 USDC), but a stated bound that the code breaks is a bound nobody can rely on,
+    ///         and the two rules cannot both hold below this point. It is enforced at FUNDING — the one
+    ///         place where refusing is free and nothing is stranded — rather than by softening either rule.
+    uint256 internal constant MIN_BONDABLE_GROSS = FEE_DENOMINATOR / MAX_CHALLENGE_BOND_BPS; // == 5
     /// @notice The burn sink (§2.4 compensate-then-burn). USDC exposes no burn to a holder, so the
     ///         forfeited remainder is sent to a provably unspendable address. It is NOT the treasury and
     ///         NOT the counterparty: a protocol that profits from disputes tunes for more disputes, and a
@@ -261,6 +270,11 @@ library VNextSettlementLib {
     ///      uint16 constants, so `g * bps < 2^128 * 2^16 = 2^144` can never overflow uint256. A plain
     ///      checked multiply is therefore exact AND provably safe here, and it keeps the 512-bit mulDiv
     ///      body out of the escrow's bytecode at three extra call sites.
+    /// @dev The trailing `if (b == 0) b = 1` is UNREACHABLE for any FUNDED unit since `checkV1Invariants`
+    ///      enforces `G >= MIN_BONDABLE_GROSS`, which makes the ceiling at least 1. It is retained as a
+    ///      fail-closed guard for direct callers of this pure helper (a zero bond is a free challenge, i.e.
+    ///      the costless veto H-01 exists to remove) — and it is exactly the branch that used to BREAK the
+    ///      20% ceiling for `G = 1..4`, which is why the fix is the funding-time floor and not this line.
     function challengeBond(uint256 g) internal pure returns (uint256 b) {
         b = (g * CHALLENGE_BOND_BPS) / FEE_DENOMINATOR;
         if (b < MIN_CHALLENGE_BOND) b = MIN_CHALLENGE_BOND;
@@ -479,7 +493,8 @@ library VNextSettlementLib {
         require(s.roundingRule == ROUNDING_FLOOR, "V1: roundingRule");
         require(s.feeSplitConfigHash == bytes32(0), "V1: feeSplitConfigHash");
         require(s.feeBps <= MAX_FEE_BPS, "V1: feeBps>MAX");
-        require(s.g > 0, "V1: G==0");
+        // `G > 0` is subsumed by the bondable floor (5 > 0); both are stated so the intent of each survives.
+        require(s.g >= MIN_BONDABLE_GROSS, "V1: G<minBondable");
         require(s.n > 0, "V1: N==0");
         require(s.f < s.g, "V1: F>=G");
         require(s.n + s.f == s.g, "V1: N+F!=G");

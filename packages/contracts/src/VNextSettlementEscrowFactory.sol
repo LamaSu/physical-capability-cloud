@@ -237,10 +237,10 @@ contract VNextSettlementEscrowFactory {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(escrow), jobPolicyHash));
         // Delegated/agent funding: an absent payer signature was already rejected as `OnlyPayer` at the
         // escrow's entry; a present one must actually validate. A direct payer-sent tx authenticates itself.
-        if (funder != p.payer && !_isValidSignature(p.payer, digest, payerSignature)) revert BadSignature();
+        if (funder != p.payer && !_isValidSignature(escrow, p.payer, digest, payerSignature)) revert BadSignature();
         // The operator NEVER sends this transaction, so its acceptance is always an explicit signature —
         // ECDSA for an EOA, ERC-1271 for a smart account (both handled by `_isValidSignature`).
-        if (!_isValidSignature(p.operator, digest, operatorSignature)) revert BadOperatorSignature();
+        if (!_isValidSignature(escrow, p.operator, digest, operatorSignature)) revert BadOperatorSignature();
     }
 
     /// @notice Validate `signer`'s EIP-712 signature over `structHash` in the CALLING CLONE's domain —
@@ -257,13 +257,23 @@ contract VNextSettlementEscrowFactory {
     ///         every binding/nonce/expiry check around it, all of which stay in the clone. It is `view`
     ///         and permissionless because it can only ever restate what its caller already holds: a
     ///         signature, and the hash that signature is over.
+    ///
+    ///         M-04 (sol 4th-family): the ERC-1271 leg is issued BY `msg.sender` (see `_isValidSignature`),
+    ///         so a caller-aware smart account still observes the CLONE as `msg.sender`, exactly as it did
+    ///         before the Wave-4a move. That also removes the confused-deputy shape this permissionless
+    ///         entry point otherwise had: a wallet that trusted "calls from the factory" is never called by
+    ///         the factory at all, and a hostile caller can only make the query appear to come from ITSELF
+    ///         — which it could already do by calling the wallet directly.
     function verifyCloneSignature(address signer, bytes32 structHash, bytes calldata signature)
         external
         view
         returns (bool)
     {
         return _isValidSignature(
-            signer, keccak256(abi.encodePacked("\x19\x01", _domainSeparator(msg.sender), structHash)), signature
+            msg.sender,
+            signer,
+            keccak256(abi.encodePacked("\x19\x01", _domainSeparator(msg.sender), structHash)),
+            signature
         );
     }
 
@@ -315,16 +325,32 @@ contract VNextSettlementEscrowFactory {
 
     /// @dev Validate `signer`'s signature over `digest`: ERC-1271 for contracts (strict 32-byte magic
     ///      word, rejecting dirty padding), malleability-guarded ECDSA for EOAs. Verbatim from the
-    ///      pre-Wave-4a escrow — the escrow retains its own copy for `approveByBuyer` /
-    ///      `rotateClaimDestination`, whose digests are still verified in the clone.
-    function _isValidSignature(address signer, bytes32 digest, bytes calldata signature)
+    ///      pre-Wave-4a escrow except for the caller identity of the ERC-1271 leg.
+    ///
+    ///      M-04 — WHY `clone` IS A PARAMETER. ERC-1271 explicitly permits CALLER-AWARE validation, and a
+    ///      wallet that only honours its owner's signatures when the query comes from ITS escrow is a
+    ///      reasonable, deployed pattern. Wave 4a moved this predicate into the factory, so such a wallet
+    ///      began seeing the FACTORY as `msg.sender` and could never validate again — e.g. a smart-account
+    ///      payout recipient holding a failed-payment claim could no longer authorize a destination
+    ///      rotation, leaving the claim permanently unpayable. The DIGEST was never affected (it is still
+    ///      built over the clone's own EIP-712 domain); only the caller identity was, and that is a
+    ///      semantic the wallet is entitled to rely on. So the 1271 staticcall is issued BY THE CLONE, via
+    ///      a factory-gated, read-only relay on the escrow ({VNextSettlementEscrow.erc1271Check}) — one
+    ///      small function that restores the pre-Wave-4a caller for BOTH signature surfaces (bilateral
+    ///      acceptance here, and buyer-approval / claim-rotation through `verifyCloneSignature`).
+    ///      The EOA leg is unchanged: `ecrecover` has no notion of a caller.
+    function _isValidSignature(address clone, address signer, bytes32 digest, bytes calldata signature)
         private
         view
         returns (bool)
     {
         if (signer.code.length > 0) {
-            (bool ok, bytes memory ret) =
-                signer.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, signature)));
+            (bool ok, bytes memory ret) = clone.staticcall(
+                bytes.concat(
+                    abi.encodeWithSelector(VNextSettlementEscrow.erc1271Check.selector, signer),
+                    abi.encodeCall(IERC1271.isValidSignature, (digest, signature))
+                )
+            );
             return ok && ret.length == 32 && abi.decode(ret, (bytes32)) == bytes32(VNextSettlementLib.ERC1271_MAGIC);
         }
         if (signature.length != 65) return false;
