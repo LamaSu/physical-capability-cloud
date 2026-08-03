@@ -174,6 +174,32 @@ console.log(
     `(${routeCount} total gateway routes across ${routeFiles.length} files)`,
 );
 
+// ---------------------------------------------------------------------------
+// 6. C-03 regression: the public token-approval step was REMOVED (audit C-03 —
+// the gateway no longer approves caller-supplied spenders/tokens; allowances
+// are issued internally to protocol-created escrows). The pack must not
+// reintroduce `approve_token`, any public escrow `/approve` tool, or a
+// `fund_escrow` instruction to "approve first".
+// ---------------------------------------------------------------------------
+const c03Violations: string[] = [];
+for (const tool of tools as Array<{ name: string; description?: string; endpoint?: { path?: string } }>) {
+  if (tool.name === "approve_token") {
+    c03Violations.push(`tool "approve_token" (public token approval removed by audit C-03)`);
+  }
+  const p = tool.endpoint?.path ?? "";
+  if (/\/escrow\/chain\/[^/]+\/approve$/.test(p)) {
+    c03Violations.push(`tool "${tool.name}" -> POST ${p} (public escrow approve removed by C-03)`);
+  }
+  if (tool.name === "fund_escrow" && /approve_token|approve first|already approved/i.test(tool.description ?? "")) {
+    c03Violations.push(`fund_escrow description still instructs an approve-first step (audit C-03)`);
+  }
+}
+if (c03Violations.length > 0) {
+  console.log("\nC-03 REGRESSION — the public token-approval flow was removed; the pack must not reintroduce it:");
+  for (const v of c03Violations) console.log(`  x ${v}`);
+  process.exit(1);
+}
+
 // Exit non-zero if there are missing routes (useful for CI)
 if (missingRoutes.length > 0) {
   process.exit(1);
