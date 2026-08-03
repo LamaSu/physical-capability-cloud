@@ -161,6 +161,27 @@ describe("scope-checker — money-path authorization", () => {
     });
   });
 
+  describe("plugin encapsulation (the defect that made the whole layer inert)", () => {
+    it("applies its hook to routes registered on the PARENT app", async () => {
+      // scopeChecker must carry Symbol.for("skip-override"). Without it Fastify
+      // isolates the onRequest hook to the plugin's own scope, and since no
+      // routes are registered inside it the hook fires for NOTHING — every scope
+      // rule in the table silently stops being enforced. Identical to the
+      // apiGate defect fixed in T1.5 (see apigate-encapsulation.test.ts).
+      expect(
+        (scopeChecker as unknown as Record<symbol, unknown>)[Symbol.for("skip-override")],
+      ).toBe(true);
+
+      // Behavioural proof: the route below is on the parent app, not inside the
+      // plugin. If the hook were encapsulated this would return 200.
+      keyScopes = JSON.stringify(["contributor:read"]);
+      const app = await buildApp();
+      const res = await app.inject({ method: "POST", url: "/api/fiat-ramp/payout" });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+  });
+
   describe("KNOWN GAP — pinned, not fixed here", () => {
     it("wildcard keys STILL pass the money path (provisioning half is unfixed)", async () => {
       // routes/provision.ts mints scopes:["*"] for every public self-service

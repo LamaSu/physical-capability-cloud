@@ -216,7 +216,7 @@ function getCallerScopes(req: FastifyRequest): string[] {
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
-export async function scopeChecker(app: FastifyInstance) {
+async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith("/api/")) return;
 
@@ -288,3 +288,25 @@ export async function scopeChecker(app: FastifyInstance) {
     });
   });
 }
+
+// scopeChecker must run as a NON-ENCAPSULATED plugin so its onRequest hook
+// applies to sibling route plugins registered against the parent app. Without
+// these symbols Fastify isolates the hook to this plugin's own scope — and
+// since no routes are registered inside it, the hook fired for NOTHING and the
+// entire scope/RBAC layer was inert.
+//
+// This is the identical defect fixed for apiGate in T1.5 (2026-04-29, see
+// api-gate.ts and apigate-encapsulation.test.ts); the same fix was never
+// applied here. idempotency, rate-limiter, tenant-context and trace-id all set
+// this symbol — scope-checker was the one middleware that did not.
+//
+// Caught empirically: every deny-case in scope-checker-money-path.test.ts
+// returned 200 instead of 403 because the hook never ran.
+//
+// Equivalent to wrapping with fastify-plugin(fn) without adding the dep.
+(scopeCheckerImpl as unknown as Record<symbol, unknown>)[Symbol.for("skip-override")] = true;
+(scopeCheckerImpl as unknown as Record<symbol, unknown>)[
+  Symbol.for("fastify.display-name")
+] = "scopeChecker";
+
+export const scopeChecker = scopeCheckerImpl;
