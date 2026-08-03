@@ -4,11 +4,12 @@ pragma solidity ^0.8.24;
 import {VNextSettlementEscrow} from "../../src/VNextSettlementEscrow.sol";
 
 /// @title  VNextReadLens — the WAVE 4c read adapter for the collapsed escrow read plane.
-/// @notice WAVE 4c collapsed eighteen one-field getters on {VNextSettlementEscrow} into two fixed-width
-///         snapshot reads (`feeScheduleOf` and `unitTerms`) to reclaim contract size under EIP-170. This
-///         library restores every retired accessor as an OFF-CONTRACT lens: same name, same signature,
-///         same value, zero bytes on the escrow. It is the migration reference for any consumer — the
-///         retired selector's successor is exactly the destructuring shown here.
+/// @notice WAVE 4c collapsed twenty-one one-field getters on {VNextSettlementEscrow} into three
+///         fixed-width snapshot reads (`feeAmountsOf`, `unitTerms`, `unitCounters`) to reclaim contract
+///         size under EIP-170. This library restores every retired accessor that still has a storage
+///         source as an OFF-CONTRACT lens: same name, same signature, same value, zero bytes on the
+///         escrow. It is the migration reference for any consumer — the retired selector's successor is
+///         exactly the destructuring shown here.
 ///
 ///         Nothing in here computes: every function is a pure projection of one snapshot call, so a test
 ///         reading through the lens observes byte-identical on-chain state to one that called the retired
@@ -16,10 +17,13 @@ import {VNextSettlementEscrow} from "../../src/VNextSettlementEscrow.sol";
 ///         test suite and the contract to disagree.
 ///
 /// @dev    RETIRED SELECTOR -> SUCCESSOR
-///         feeDomainVersion, feeChainId, escrowOf, settlementUnitIdOf, feeBasisOf, gross, fee, net,
-///         denominatorOf, roundingRuleOf, feeSplitConfigHashOf   ->  feeScheduleOf(unitId).<field>
+///         gross, fee, net                                          ->  feeAmountsOf(unitId).<slot>
 ///         milestoneIndexOf, stepIdOf, requestedTierOf, reclaimAtOf, payoutConfigHashOf,
-///         compositionSchemaVersionOf, evidenceCommittedOf                 ->  unitTerms(unitId).<slot>
+///         compositionSchemaVersionOf, evidenceCommittedOf          ->  unitTerms(unitId).<slot>
+///         liabilityOf, payoutCount, remainingClaimCountOf          ->  unitCounters(unitId).<slot>
+///         feeDomainVersion, feeChainId, escrowOf, settlementUnitIdOf, feeBasisOf, denominatorOf,
+///         roundingRuleOf, feeSplitConfigHashOf                     ->  NO SUCCESSOR, and none is
+///         needed: each is a compile-time constant, `address(this)`, the map key, or `block.chainid`.
 ///
 ///         STILL ON THE CONTRACT, DELIBERATELY NOT COLLAPSED: `feeScheduleHashOf`, `feeBpsOf`,
 ///         `feeRecipientOf`, `requiredTierOf`, `compositionRootOf`, `evidenceBundleHashOf`. The O5
