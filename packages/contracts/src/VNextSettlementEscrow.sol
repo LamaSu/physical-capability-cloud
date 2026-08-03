@@ -485,6 +485,10 @@ contract VNextSettlementEscrow {
     error EmergencyPaused();
     /// @notice The unit is not under an emergency, so the emergency role has nothing to decide.
     error NoEmergency();
+    /// @notice WAVE 4b — an APPEAL verdict recorded inside `[challengedAt, min(appealDue, disabledAt))` is
+    ///         FINAL for this unit, so the emergency role may not decide it. Raised only by
+    ///         `resolveEscalation(EMERGENCY)`; the appeal itself remains applicable and permissionless.
+    error AppealIsFinal();
     /// @notice A unit may carry at most one live challenge.
     error AlreadyChallenged();
     error ClaimStillUnpayable();
@@ -1621,20 +1625,36 @@ contract VNextSettlementEscrow {
         // went against would simply not relay it and collect the default at `due` — "relayer inactivity
         // must not improve either party's outcome", broken by whoever transacts first.
         // Never a brick: `resolveEscalation` is permissionless and stays callable forever, and
-        // `_decidedInTime` re-checks exactly the bindings that call re-checks (see it), so every record
+        // `_decidedIn` re-checks exactly the bindings that call re-checks (see it), so every record
         // this defers to is one that somebody can always apply.
+        //
+        // WAVE 4b — THE GLOBAL RULE (see `_appealWindow`). Two changes, both about not DISCARDING a
+        // verdict that was already decided in time:
+        //   (a) the APPEAL check now runs even when an emergency is open, because an appeal recorded
+        //       BEFORE the declaration is final and the emergency must not erase it. Patching only
+        //       `resolveEscalation` would have left `finalize` handing that unit the emergency-silence
+        //       refund — first-relayer-wins, moved rather than fixed;
+        //   (b) both checks are TWO-SIDED, so a record decided before its own window opened (a
+        //       pre-challenge appeal, a pre-declaration emergency) no longer blocks the default forever.
         uint256 emergencyDue = _emergencyDeadline(u);
-        uint8 escRole; // 0 = no escalation default is in play for this state
-        uint256 escDue;
-        if (emergencyDue != 0) {
-            (escRole, escDue) = (O5_ADJ_ROLE_EMERGENCY, emergencyDue);
-        } else if (s == UnitState.CHALLENGED) {
-            (escRole, escDue) = (O5_ADJ_ROLE_APPEAL, uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW);
-        }
-        if (escRole != 0) {
-            if (block.timestamp < escDue) revert WindowStillOpen();
-            if (_decidedInTime(unitId, escRole, escDue, u.acceptedAssertionId)) revert WindowStillOpen();
-        }
+        // Wait out whichever default deadline governs this state before firing it.
+        uint256 defaultDue = emergencyDue != 0
+            ? emergencyDue
+            : (s == UnitState.CHALLENGED ? uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW : 0);
+        if (defaultDue != 0 && block.timestamp < defaultDue) revert WindowStillOpen();
+        // A FINAL appeal owns this unit — checked first, because it is the one that can pre-empt BOTH
+        // defaults (its window is capped at `disabledAt`, so it is only ever the strictly earlier verdict).
+        if (_appealIsFinal(unitId, u, emergencyDue)) revert WindowStillOpen();
+        if (
+            emergencyDue != 0
+                && _decidedIn(
+                    unitId,
+                    O5_ADJ_ROLE_EMERGENCY,
+                    emergencyDue - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW, // == disabledAt
+                    emergencyDue,
+                    u.acceptedAssertionId
+                )
+        ) revert WindowStillOpen();
 
         if (emergencyDue != 0) {
             // The challenger is made WHOLE — not merely un-penalised. This end refunds the job, so the
@@ -1710,25 +1730,49 @@ contract VNextSettlementEscrow {
     ///         attester and applies its OWN frozen distribution. The record carries no amount and no
     ///         recipient, so this quorum can only select release-or-refund — never move, resize or
     ///         redirect money. There is no signature verification in this contract at all.
-    /// @param role `O5_ADJ_ROLE_APPEAL` (only while CHALLENGED and no emergency) or
-    ///        `O5_ADJ_ROLE_EMERGENCY` (only while an emergency is open, for any accepted assertion).
+    /// @param role `O5_ADJ_ROLE_APPEAL` (only while CHALLENGED, and only for a verdict decided inside
+    ///        `[challengedAt, min(appealDue, disabledAt))`) or `O5_ADJ_ROLE_EMERGENCY` (only while an
+    ///        emergency is open, for a verdict decided inside `[disabledAt, emergencyDue)`, and only when
+    ///        no earlier appeal is already final). WAVE 4b: the two windows are disjoint and exhaustive by
+    ///        construction, so exactly one role can ever own a unit — see `_appealWindow`.
     function resolveEscalation(bytes32 unitId, uint8 role) external nonReentrant onlyExisting(unitId) {
         Unit storage u = _units[unitId];
         UnitState s = u.state;
         uint256 emergencyDue = _emergencyDeadline(u);
-        uint256 decisionDue; // the window the verdict had to be DECIDED inside — never "relayed inside"
+        uint256 decisionFrom; // the window the verdict had to be DECIDED inside — never "relayed inside"
+        uint256 decisionDue;
 
         if (role == O5_ADJ_ROLE_APPEAL) {
-            // Model B: once an emergency is declared, the appeal quorum no longer decides this unit — the
-            // emergency cohort reviews the exact assertion instead. Otherwise a pre-signed appeal could
-            // pre-empt the systemic-compromise review that was declared precisely to override it.
-            if (emergencyDue != 0) revert EmergencyPaused();
             if (s != UnitState.CHALLENGED) revert NotActive();
-            decisionDue = uint256(u.challengedAt) + VNextSettlementLib.APPEAL_WINDOW;
+            // ── WAVE 4b: THE BLANKET `if (emergencyDue != 0) revert EmergencyPaused()` IS REPLACED ───
+            // It read "once an emergency is declared, the appeal quorum no longer decides this unit",
+            // and it reverted BEFORE anything consulted the stored `decidedAt` — so it discarded appeals
+            // that had ALREADY been recorded, in time, before the disable existed. That is the 4th
+            // instance of the H-01 class: relayer inactivity plus a later disable improving the payer's
+            // outcome. What replaces it is not a weakening but a BOUND: the appeal's window is CAPPED at
+            // the declaration instant, so a verdict recorded before it stands and everything from the
+            // declaration onward belongs to the emergency cohort. A merely pre-signed appeal cannot slip
+            // through, because `decidedAt` is stamped by the attester at WRITE time and is not a signed
+            // field — see `_appealWindow` for the full argument.
+            (decisionFrom, decisionDue) = _appealWindow(u, emergencyDue);
+            // Also new: a LOWER bound at `challengedAt`. An appeal record can be written any time after
+            // the assertion is accepted, i.e. potentially BEFORE the challenge it purports to answer was
+            // ever filed; such a verdict ruled on nothing and must not decide this unit.
+            if (decisionDue <= decisionFrom) revert EmergencyPaused(); // the emergency owns the whole window
         } else if (role == O5_ADJ_ROLE_EMERGENCY) {
             if (emergencyDue == 0) revert NoEmergency();
             if (s < UnitState.PRIMARY_ASSERTED || s > UnitState.BACKUP_ASSERTED) revert NotActive();
+            // WAVE 4b: a LOWER bound at `disabledAt`. `adjudicate` requires only that the ESCALATION
+            // cohort is enabled — it never consults the PRIMARY cohort's `disabledAt` — so an EMERGENCY
+            // record could be written BEFORE any emergency was declared and then activate once one was.
+            // A verdict reviewing a compromise that had not happened yet is a pre-signed veto waiting to
+            // pounce; it is now inert, and the unit resolves under its ordinary windows.
+            decisionFrom = emergencyDue - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW; // == disabledAt
             decisionDue = emergencyDue;
+            // And the emergency DEFERS to a final earlier appeal, so the two roles cannot both apply.
+            // Not a brick: the appeal this defers to satisfies the APPEAL branch above by construction,
+            // and that branch is permissionless and stays callable forever.
+            if (_appealIsFinal(unitId, u, emergencyDue)) revert AppealIsFinal();
         } else {
             revert BadEscalationRole();
         }
@@ -1750,7 +1794,9 @@ contract VNextSettlementEscrow {
         // A record decided INSIDE its window therefore stays resolvable forever (this call is
         // permissionless, so it cannot be withheld), and the deadline defaults in `finalize` stand aside
         // for it. What the deadline still bounds is what it always meant to bound: a verdict DECIDED late.
-        if (uint256(r.decidedAt) >= decisionDue) revert WindowStillOpen();
+        // WAVE 4b adds the symmetric LOWER bound — a verdict DECIDED EARLY, before the window it answers
+        // had opened, is equally not an answer to it. `[decisionFrom, decisionDue)`.
+        if (uint256(r.decidedAt) < decisionFrom || uint256(r.decidedAt) >= decisionDue) revert WindowStillOpen();
         // ── H-02 (sol 4th-family): THE `disabledAt() != 0` RE-CHECK THAT STOOD HERE IS REMOVED ───────
         // It could not do the job it claimed. `O5AttesterBase.adjudicate` refuses a disabled cohort, so
         // EVERY stored record necessarily predates the disable — the check could never reject a
@@ -1824,25 +1870,75 @@ contract VNextSettlementEscrow {
         emit BondDisposed(unitId, comp, rest, burn);
     }
 
-    /// @dev H-01 — "did the escalation quorum already DECIDE this, in time?" Read as ONE WORD (the attester
-    ///      applies the escrow/assertion bindings itself and answers `type(uint64).max` — "never" — when
-    ///      nothing applies), so a deadline default costs one staticcall and one comparison rather than a
-    ///      full record decode on a contract at its EIP-170 ceiling.
+    /// @dev H-01 — "did the escalation quorum already DECIDE this, INSIDE its own window?" Read as ONE WORD
+    ///      (the attester applies the escrow/assertion bindings itself and answers `type(uint64).max` —
+    ///      "never" — when nothing applies), so a deadline default costs one staticcall and two comparisons
+    ///      rather than a full record decode on a contract at its EIP-170 ceiling.
     ///
     ///      WHY A DEFAULT MUST STAND ASIDE FOR IT, and why that is not a brick: the bindings checked
     ///      attester-side are EXACTLY the ones `resolveEscalation` re-checks (record exists, bound to this
     ///      escrow, reviews this unit's accepted assertion), and that function is permissionless and stays
-    ///      callable forever. So every record this returns non-zero for is one that SOMEBODY can always
+    ///      callable forever. So every record this returns true for is one that SOMEBODY can always
     ///      apply — deferring to it can delay a unit but can never strand one. A record naming a different
-    ///      escrow, or a different assertion, answers 0 and the ordinary default proceeds untouched.
-    function _decidedInTime(bytes32 unitId, uint8 role, uint256 due, bytes32 acceptedId)
+    ///      escrow, or a different assertion, answers "never" and the ordinary default proceeds untouched.
+    ///
+    ///      WAVE 4b — THE WINDOW IS NOW TWO-SIDED: `[from, due)`, not just `< due`. An upper bound alone
+    ///      admitted verdicts decided BEFORE the window they claim to answer even opened — a pre-challenge
+    ///      APPEAL and a pre-declaration EMERGENCY (see `resolveEscalation`). Both are the same defect and
+    ///      both are closed by the same `from`.
+    function _decidedIn(bytes32 unitId, uint8 role, uint256 from, uint256 due, bytes32 acceptedId)
         private
         view
         returns (bool)
     {
-        return uint256(
+        uint256 d = uint256(
             IOracleAttester(escalationAttester).adjudicationDecidedAt(unitId, role, address(this), acceptedId)
-        ) < due;
+        );
+        return d >= from && d < due;
+    }
+
+    /// @dev WAVE 4b (the GLOBAL appeal rule) — the half-open window `[from, due)` inside which an APPEAL
+    ///      verdict for this unit is FINAL. `due <= from` means no appeal can qualify.
+    ///
+    ///      THE RULE, stated once and applied in all three places that could otherwise disagree
+    ///      (`finalize`, `resolveEscalation(APPEAL)`, `resolveEscalation(EMERGENCY)`):
+    ///          challengedAt <= appeal.decidedAt    <  min(appealDue, disabledAt)  => APPEAL is final
+    ///          disabledAt   <= emergency.decidedAt <  emergencyDue                => EMERGENCY owns
+    ///      AT EQUALITY, EMERGENCY WINS — `<` on the appeal's upper bound, `<=` on the emergency's lower
+    ///      one. Timestamps cannot order two transactions inside one block, so a tie must be broken by a
+    ///      stated rule rather than by whichever call is mined first; the emergency (a declared systemic
+    ///      compromise) is the safer owner of an ambiguous instant.
+    ///
+    ///      WHY THIS IS THE 4th INSTANCE OF THE H-01 CLASS. `resolveEscalation(APPEAL)` reverted
+    ///      `EmergencyPaused` the moment ANY emergency was open, before anything consulted the stored
+    ///      `decidedAt`. So an appeal quorum could record a timely verdict, nobody would relay it, and a
+    ///      LATER disable would erase it — relayer inactivity plus a disable improving the payer's outcome,
+    ///      which is exactly the invariant §0 exists to protect and exactly what H-01/H-02 fixed elsewhere.
+    ///
+    ///      WHY DEFERRING TO AN EARLIER APPEAL IS SAFE — i.e. why this does NOT reopen the pre-signed-appeal
+    ///      hole that the blanket `EmergencyPaused` was protecting. `decidedAt` is stamped by the ATTESTER
+    ///      from `block.timestamp` when it WRITES the record (`O5AttesterBase.adjudicate`), and it is not a
+    ///      field of the signed struct (`_adjDigest` does not cover it), so signers cannot supply or
+    ///      backdate it. A merely pre-signed, unrecorded appeal submitted after the declaration therefore
+    ///      lands with `decidedAt >= disabledAt` and is REJECTED — the anti-capture property is intact.
+    ///      What is honoured is only a strictly EARLIER ON-CHAIN RECORD, which is already an immutable
+    ///      quorum decision; letting the revoker erase THAT is the financial veto H-02 removed.
+    function _appealWindow(Unit storage u, uint256 emergencyDue) private view returns (uint256 from, uint256 due) {
+        if (u.state != UnitState.CHALLENGED) return (0, 0); // no appeal is in play for any other state
+        from = uint256(u.challengedAt);
+        due = from + VNextSettlementLib.APPEAL_WINDOW;
+        if (emergencyDue != 0) {
+            // `_emergencyDeadline` returns `disabledAt + EMERGENCY_REVIEW_WINDOW`, so the declaration
+            // instant is recoverable exactly, with no second staticcall to the attester.
+            uint256 declaredAt = emergencyDue - VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+            if (declaredAt < due) due = declaredAt;
+        }
+    }
+
+    /// @dev Does a FINAL appeal verdict exist for this unit? (The rule above, as one predicate.)
+    function _appealIsFinal(bytes32 unitId, Unit storage u, uint256 emergencyDue) private view returns (bool) {
+        (uint256 from, uint256 due) = _appealWindow(u, emergencyDue);
+        return due > from && _decidedIn(unitId, O5_ADJ_ROLE_APPEAL, from, due, u.acceptedAssertionId);
     }
 
     /// @notice M-04 — issue ONE ERC-1271 `isValidSignature` staticcall FROM THIS CLONE, for the factory.

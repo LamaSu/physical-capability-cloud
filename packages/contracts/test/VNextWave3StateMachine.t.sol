@@ -516,6 +516,251 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         _assertBucketsCovered(e);
     }
 
+    // ══ WAVE 4b — THE GLOBAL APPEAL RULE (the 4th instance of the H-01 class) ══════════════════════
+    //
+    //     challengedAt <= appeal.decidedAt    <  min(appealDue, disabledAt)  => APPEAL is final
+    //     disabledAt   <= emergency.decidedAt <  emergencyDue                => EMERGENCY owns
+    //     at equality, EMERGENCY wins (timestamps cannot order two txs inside one block)
+    //
+    // The defect: `resolveEscalation(APPEAL)` reverted `EmergencyPaused` the instant ANY emergency was
+    // open, BEFORE anything read the stored `decidedAt` — so a timely appeal already RECORDED on-chain was
+    // discarded by a LATER disable. Relayer inactivity plus a disable improved the payer's outcome, which
+    // is the invariant §0 exists to protect. Fixing only that branch would have left first-relayer-wins in
+    // three other places, so the rule is applied globally: `finalize`, both `resolveEscalation` branches,
+    // and both roles gained the missing LOWER bound.
+    //
+    // Each test below is annotated with what it does against PRE-FIX code. The four marked
+    // [FAILS PRE-FIX] were each confirmed by reverting the fix, watching them fail, and restoring it.
+    // The two marked [GUARD] pass both before and after BY DESIGN — they pin the anti-capture property
+    // the fix must not trade away, and are stated as guards rather than dressed up as regressions.
+
+    /// @dev Stamp an adjudication with an EXPLICIT decision time, so the boundary tests below can sit one
+    ///      second either side of `disabledAt` instead of relying on same-block coincidence.
+    function _adjudicateAt(VNextSettlementEscrow e, bytes32 id, uint8 role, uint8 outcome, uint256 decidedAt)
+        internal
+    {
+        (,, bytes32 accepted,,,,) = e.settlement(id);
+        escalation.setAdjudication(
+            id,
+            role,
+            address(e),
+            O5AdjudicationRecord({
+                adjudicationId: keccak256(abi.encode("adj-at", id, role, outcome, decidedAt)),
+                reviewedAssertionId: accepted,
+                escrow: address(e),
+                decidedAt: uint64(decidedAt),
+                role: role,
+                outcome: outcome
+            })
+        );
+    }
+
+    /// @dev Accept + challenge, then disable the PRIMARY cohort `gap` seconds later, and report the two
+    ///      instants the rule is written in terms of.
+    function _challengedThenDisabled(uint256 gap)
+        internal
+        returns (VNextSettlementEscrow e, bytes32 id, uint256 challengedAt, uint256 disabledAt)
+    {
+        (e, id) = _live();
+        _acceptNow(e, id);
+        _challenge(e, id);
+        challengedAt = block.timestamp;
+        vm.warp(challengedAt + gap);
+        attester.disableAtNow();
+        disabledAt = block.timestamp;
+    }
+
+    /// @dev [FAILS PRE-FIX] THE HEADLINE FIX. A timely APPEAL verdict RECORDED BEFORE the disable is
+    ///      HONOURED, not discarded by the emergency that opened afterwards.
+    ///      Pre-fix: `resolveEscalation(APPEAL)` reverts `EmergencyPaused` without ever reading
+    ///      `decidedAt`, and the payer collects the emergency-silence refund at `emergencyDue` — i.e. the
+    ///      operator loses an already-authenticated OVERTURN/UPHOLD to relayer inactivity plus a disable.
+    function test_WAVE4B_TimelyAppealRecordedBeforeDisable_IsHonoured() public {
+        (VNextSettlementEscrow e, bytes32 id, uint256 challengedAt, uint256 disabledAt) =
+            _challengedThenDisabled(2 days);
+        // The quorum ruled STRICTLY BEFORE the declaration, and it ruled UPHOLD (the operator is paid).
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD, disabledAt - 1);
+        assertGe(disabledAt - 1, challengedAt, "the record is inside the appeal window's lower bound");
+        uint256 feeBefore = usdc.balanceOf(feeDest);
+
+        // Nobody relayed it for a while; the emergency review window elapses. The appeal still owns it.
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW + 1 days);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the recorded appeal decides");
+        assertEq(usdc.balanceOf(feeDest), feeBefore + F, "the operator side was paid, as the quorum ruled");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev [FAILS PRE-FIX] The same rule seen from `finalize`: the emergency-silence REFUND must stand
+    ///      aside for that earlier appeal. Patching only `resolveEscalation` would have moved the bug
+    ///      rather than fixed it — whoever transacted first would still decide the outcome.
+    function test_WAVE4B_Finalize_StandsAsideForAQualifyingEarlierAppeal() public {
+        (VNextSettlementEscrow e, bytes32 id,, uint256 disabledAt) = _challengedThenDisabled(2 days);
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD, disabledAt - 1);
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        // Past the emergency deadline, `finalize` would ordinarily fire the silence refund. It must not.
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.finalize(id);
+        assertEq(usdc.balanceOf(payer), payerBefore, "the payer collected no silence refund");
+
+        // Not a brick: the appeal it deferred to is permissionless and still applicable, by anyone.
+        vm.prank(address(0xD00D));
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+    }
+
+    /// @dev [FAILS PRE-FIX] ...and the EMERGENCY role defers to it too, so the two roles can never both
+    ///      decide one unit. Pre-fix there is no such deferral: whichever call lands first wins, and an
+    ///      emergency OVERTURN could overwrite an earlier appeal UPHOLD.
+    function test_WAVE4B_EmergencyDefersToAQualifyingEarlierAppeal() public {
+        (VNextSettlementEscrow e, bytes32 id,, uint256 disabledAt) = _challengedThenDisabled(2 days);
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD, disabledAt - 1); // earlier: pay the operator
+        _adjudicateAt(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN, disabledAt + 1); // later: refund
+
+        vm.expectRevert(VNextSettlementEscrow.AppealIsFinal.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+
+        uint256 feeBefore = usdc.balanceOf(feeDest);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the EARLIER record decides");
+        assertEq(usdc.balanceOf(feeDest), feeBefore + F);
+    }
+
+    /// @dev [GUARD] The anti-capture half, and the EQUALITY tie-break. An appeal decided AT or AFTER the
+    ///      declaration is REJECTED — a merely pre-signed appeal cannot pounce on the systemic-compromise
+    ///      review that was declared to override it. This is why honouring the earlier record is safe:
+    ///      `decidedAt` is stamped by the ATTESTER at WRITE time (`O5AttesterBase.adjudicate`) and is not
+    ///      a field of the signed struct (`_adjDigest` excludes it), so signers cannot backdate it.
+    ///      MEASURED against pre-fix code: the REJECTION is unchanged (pre-fix the blanket
+    ///      `EmergencyPaused` rejected everything here); only the error IDENTITY moves, to
+    ///      `WindowStillOpen`. So this is a guard on behaviour, not a regression test — the fix's
+    ///      DISCRIMINATING neighbour is the `disabledAt - 1` case one test above.
+    /// @dev TWO ERRORS, deliberately distinct — verified, not assumed:
+    ///        * `EmergencyPaused` when the declaration lands AT OR BEFORE `challengedAt`, so the appeal
+    ///          has NO qualifying window at all (`due <= from`) and the emergency owns the unit outright.
+    ///          That is the case `test_C5_ModelB_...` exercises (challenge and disable in one block).
+    ///        * `WindowStillOpen` when a window DID exist and this verdict simply fell outside it — the
+    ///          same error the late-verdict case raises, because it is the same fact.
+    ///      Both are rejections; the difference is only which is true. Collapsing them to one error would
+    ///      lose the distinction between "there was never an appeal to make" and "this appeal was late".
+    function test_WAVE4B_AppealDecidedAtOrAfterTheDisable_IsRejected() public {
+        (VNextSettlementEscrow e, bytes32 id, uint256 challengedAt, uint256 disabledAt) =
+            _challengedThenDisabled(2 days);
+        assertGt(disabledAt, challengedAt, "an appeal window DID open before the declaration");
+
+        // EQUALITY: `decidedAt == disabledAt` -> EMERGENCY wins. Two txs in one block are unordered by
+        // timestamp, so the tie is broken by a stated rule rather than by mining order.
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, disabledAt);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // STRICTLY AFTER: rejected for the same reason, a fortiori.
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, disabledAt + 1);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // And the emergency cohort — a different authority from the revoker — still decides it.
+        _adjudicateAt(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN, disabledAt + 1);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED));
+    }
+
+    /// @dev [GUARD] The other error's own case: a declaration AT OR BEFORE `challengedAt` leaves the
+    ///      appeal with no window at all, so `EmergencyPaused` is raised before any record is read.
+    ///      This is the branch that keeps a payer from opening a challenge AFTER a compromise is declared
+    ///      and then having an appeal quorum decide it.
+    function test_WAVE4B_DeclarationAtOrBeforeTheChallenge_LeavesNoAppealWindow() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        attester.disableAtNow();
+        uint256 disabledAt = block.timestamp;
+        _challenge(e, id); // same block: challengedAt == disabledAt
+        assertEq(block.timestamp, disabledAt, "challenge and declaration share an instant");
+
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, disabledAt);
+        vm.expectRevert(VNextSettlementEscrow.EmergencyPaused.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+    }
+
+    /// @dev [FAILS PRE-FIX] The EMERGENCY role's own missing LOWER bound — a separate bug in the same
+    ///      family. `O5AttesterBase.adjudicate` requires only that the ESCALATION cohort is enabled; it
+    ///      never consults the PRIMARY cohort's `disabledAt`. So an EMERGENCY record could be written
+    ///      BEFORE any emergency existed and then activate once one was declared — a pre-signed verdict
+    ///      reviewing a compromise that had not happened yet.
+    ///      Pre-fix: `resolveEscalation(EMERGENCY)` APPLIES it (only `decidedAt < emergencyDue` was
+    ///      checked), so the record's holder picks the outcome the moment the revoker acts.
+    function test_WAVE4B_PreDeclarationEmergencyRecord_CannotActivateLater() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 preDeclaration = block.timestamp;
+        // Recorded now, while no emergency is open at all.
+        _adjudicateAt(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_OVERTURN, preDeclaration);
+
+        vm.warp(preDeclaration + 1 days);
+        attester.disableAtNow();
+        uint256 disabledAt = block.timestamp;
+        assertLt(preDeclaration, disabledAt, "the record really does predate the declaration");
+
+        // It is inert: it answers a review that did not exist when it was decided.
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+
+        // [FAILS PRE-FIX] and it does not BRICK the unit either. Pre-fix, `finalize`'s one-sided
+        // `_decidedInTime` also saw this stale record as "decided in time" and reverted forever, so the
+        // unit could neither finalize nor resolve. It now takes its ordinary emergency-silence refund.
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.warp(disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "the ordinary default fires");
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "the payer is refunded, not stranded");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev [FAILS PRE-FIX] The APPEAL role's missing LOWER bound, with no emergency anywhere in sight.
+    ///      An appeal record can be written any time after the assertion is ACCEPTED — potentially before
+    ///      the challenge it purports to answer was ever filed. Pre-fix only `decidedAt < challengedAt +
+    ///      APPEAL_WINDOW` was checked, so such a verdict decided the challenge in advance: the appeal
+    ///      quorum ruling on a dispute that did not exist.
+    function test_WAVE4B_AppealDecidedBeforeTheChallenge_IsRejected() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 preChallenge = block.timestamp;
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, preChallenge);
+
+        vm.warp(preChallenge + 1 days);
+        _challenge(e, id);
+        uint256 challengedAt = block.timestamp;
+        assertLt(preChallenge, challengedAt, "the record really does predate the challenge");
+
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+
+        // And the unit is not bricked: appeal silence resolves to the RELEASE default, as §8.3 C-1 says.
+        vm.warp(challengedAt + VNextSettlementLib.APPEAL_WINDOW);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the silence default fires");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev [GUARD] The rule did not widen the appeal's UPPER bound: a verdict decided at/after
+    ///      `appealDue` is still late, emergency or no emergency. Guards against the fix being read as
+    ///      "any recorded appeal always wins".
+    function test_WAVE4B_AppealDecidedAfterItsOwnDeadline_IsStillLate() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        _challenge(e, id);
+        uint256 appealDue = block.timestamp + VNextSettlementLib.APPEAL_WINDOW;
+        _adjudicateAt(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN, appealDue);
+
+        vm.warp(appealDue);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        e.finalize(id); // the release default owns it
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED));
+    }
+
     /// @dev A unit carries at most ONE live challenge, and only the payer may open it.
     function test_Challenge_IsPayerOnlyAndSingleShot() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
@@ -728,13 +973,21 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
     }
 
     /// @dev The revoker may INITIATE but NEVER decide: with the cohort disabled, the emergency ROLE is
-    ///      the only one that can resolve the unit, and the appeal role is locked out so a pre-signed
-    ///      appeal cannot pre-empt the systemic-compromise review.
+    ///      the only one that can resolve the unit, and the appeal role is locked out so an appeal that
+    ///      did not beat the declaration cannot pre-empt the systemic-compromise review.
+    /// @dev WAVE 4b — WHAT THIS TEST ACTUALLY EXERCISES, restated because the old comment called the
+    ///      record "pre-signed" when it is in fact RECORDED. `_adjudicate` stamps `decidedAt =
+    ///      block.timestamp` and `disableAtNow()` runs in the SAME block, so this is the EQUALITY case:
+    ///      `appeal.decidedAt == disabledAt`, where the frozen rule gives the unit to the EMERGENCY
+    ///      (timestamps cannot order two transactions inside one block, so the tie needs a stated rule).
+    ///      The outcome is unchanged, and it is now unchanged for a reason the comment names. The case
+    ///      the rule DOES treat differently — a record strictly EARLIER than the declaration — is
+    ///      `test_WAVE4B_TimelyAppealRecordedBeforeDisable_IsHonoured`.
     function test_C5_ModelB_RevokerCannotDecide_AndAppealCannotPreemptTheEmergency() public {
         (VNextSettlementEscrow e, bytes32 id) = _live();
         _acceptNow(e, id);
         _challenge(e, id);
-        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD); // pre-signed appeal, sitting ready
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_UPHOLD); // decidedAt == the disable instant, below
         attester.disableAtNow();
 
         vm.expectRevert(VNextSettlementEscrow.EmergencyPaused.selector);
