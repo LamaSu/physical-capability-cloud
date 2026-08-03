@@ -866,6 +866,194 @@ contract VNextWave3StateMachineTest is VNextSettlementEscrowTest {
         assertEq(usdc.balanceOf(payer), payerBefore + G);
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // (10) sol 4th-family audit — H-01 / M-02 / M-03. Every test here is the DEMONSTRATING form of a
+    //      finding, i.e. it fails against the pre-fix contract. The shared invariant they defend:
+    //      once a valid SETTLE is accepted, neither ordinary reclaim, challenger silence, appeal
+    //      silence, RELAYER INACTIVITY, nor authority withholding may improve the payer's outcome.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @dev H-01, emergency lane — THE audit scenario, verbatim. A quorum records a TIMELY emergency
+    ///      UPHOLD at `emergencyDue - 1`; nobody relays `resolveEscalation`. Before the fix, the
+    ///      resolution then reverted against the CURRENT block timestamp and the payer's `finalize`
+    ///      collected the silence refund — an authenticated RELEASE converted to a REFUND by nothing but
+    ///      relayer inactivity, with no challenge and no OVERTURN. `decidedAt` proves it was in time.
+    function test_H01_TimelyEmergencyUphold_SurvivesAnArbitrarilyLateRelay() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 disabledAt = block.timestamp;
+        attester.disableAtNow();
+        uint256 emergencyDue = disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        vm.warp(emergencyDue - 1); // the last second of the review window
+        _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+
+        // ... and then NOBODY transacts for a fortnight.
+        vm.warp(emergencyDue + 14 days);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.finalize(id); // the silence default stands aside: this was not silence
+
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY); // permissionless, and still live
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the timely UPHOLD decides");
+        assertEq(usdc.balanceOf(feeDest), F, "the operator side was paid");
+        assertEq(usdc.balanceOf(payer), payerBefore, "relayer inactivity bought the payer nothing");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev H-01, the symmetric appeal-lane form: a timely OVERTURN must not be discarded into the
+    ///      appeal-silence RELEASE default just because it was relayed late.
+    function test_H01_TimelyAppealOverturn_SurvivesALateRelay() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 bond = _challenge(e, id);
+        uint256 appealDue = block.timestamp + VNextSettlementLib.APPEAL_WINDOW;
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        vm.warp(appealDue - 1);
+        _adjudicate(e, id, O5_ADJ_ROLE_APPEAL, O5_ADJ_OVERTURN);
+
+        vm.warp(appealDue + 3 days);
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.finalize(id);
+
+        e.resolveEscalation(id, O5_ADJ_ROLE_APPEAL);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "the timely OVERTURN decides");
+        assertEq(usdc.balanceOf(payer), payerBefore + G + bond, "refund plus the whole bond back");
+        assertEq(usdc.balanceOf(feeDest), 0);
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev H-01's other edge, stated so the fix is not mistaken for "the deadline stopped mattering":
+    ///      the deadline still bounds the DECISION. A verdict decided AT the deadline is refused, and the
+    ///      silence default then proceeds normally.
+    function test_H01_AnEmergencyDecidedAtTheDeadline_DoesNotApply_AndSilenceStillRefunds() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _acceptNow(e, id);
+        uint256 emergencyDue = block.timestamp + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        attester.disableAtNow();
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        vm.warp(emergencyDue); // decided exactly AT the deadline — one second too late
+        _adjudicate(e, id, O5_ADJ_ROLE_EMERGENCY, O5_ADJ_UPHOLD);
+
+        vm.expectRevert(VNextSettlementEscrow.WindowStillOpen.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "silence still refunds");
+        assertEq(usdc.balanceOf(payer), payerBefore + G);
+    }
+
+    /// @dev M-02 — Tier-0 has NO emergency, therefore no early-refund authority. A Tier-0 unit can enter
+    ///      neither assertion lane, so the primary cohort has no role in it at all; before the fix,
+    ///      disabling that cohort still made `finalize` refund at `disabledAt + 5 days`, which a payer who
+    ///      is also the allowed primary revoker could race MONTHS ahead of the bilaterally signed
+    ///      `reclaimAt`. §8.3 C-6 freezes Tier-0 to "buyer approval or reclaim only".
+    function test_M02_Tier0_HasNoEmergencyEarlyRefundAuthority() public {
+        VNextSettlementEscrow e = _fundedEscrow(keccak256("t0-emg"), _oneUnitConfig(G, 0, 0, 0));
+        bytes32 id = _unitId(e);
+        uint256 reclaimAt = e.reclaimAtOf(id);
+        attester.disableAtNow();
+        uint256 payerBefore = usdc.balanceOf(payer);
+
+        // Well past what WOULD have been the emergency deadline, and still long before `reclaimAt`.
+        vm.warp(block.timestamp + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW + 1 days);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.finalize(id); // FUNDED_ACTIVE with no emergency: `reclaimAfterDeadline` is the only exit
+        vm.expectRevert(VNextSettlementEscrow.TooEarlyToReclaim.selector);
+        e.reclaimAfterDeadline(id);
+        assertEq(usdc.balanceOf(payer), payerBefore, "no early refund exists for Tier-0");
+
+        // The signed deadline still works, unchanged.
+        vm.warp(reclaimAt);
+        e.reclaimAfterDeadline(id);
+        assertEq(usdc.balanceOf(payer), payerBefore + G, "the bilaterally signed deadline, and only it");
+    }
+
+    /// @dev M-03(a) — the emergency deadline may never outlive `reclaimAt`. Accept just before the
+    ///      cutoff, challenge just before ITS deadline, then disable just before the appeal expires:
+    ///      `disabledAt + EMERGENCY_REVIEW_WINDOW` lands ~5 days PAST the signed `reclaimAt`, with
+    ///      ordinary reclaim permanently barred — the payer's capital locked beyond the date both parties
+    ///      signed. No emergency opens when the review cannot fit (a TRUNCATED one would be worse: the
+    ///      revoker would pick the moment and thereby the result), so the unit resolves under its ordinary
+    ///      windows, before `reclaimAt`.
+    function test_M03_EmergencyDeadlineNeverOutlivesReclaimAt() public {
+        VNextSettlementEscrow.UnitConfig[] memory c = _oneUnitConfig(G, F, BPS, 1);
+        c[0].reclaimAt = block.timestamp + VNextSettlementLib.MIN_RECLAIM_DELAY; // the tightest legal job
+        VNextSettlementEscrow e = _fundedEscrow(keccak256("m03-cap"), c);
+        bytes32 id = _unitId(e);
+        uint256 reclaimAt = e.reclaimAtOf(id);
+
+        _commit(e, id, PKG);
+        _assert(e, id, 1, 1);
+        vm.warp(reclaimAt - VNextSettlementLib.CHALLENGE_WINDOW - VNextSettlementLib.APPEAL_WINDOW - 1);
+        e.acceptAssertion(id);
+        vm.warp(block.timestamp + VNextSettlementLib.CHALLENGE_WINDOW - 1);
+        _challenge(e, id);
+        uint256 appealDue = block.timestamp + VNextSettlementLib.APPEAL_WINDOW;
+
+        vm.warp(appealDue - 1);
+        uint256 disabledAt = block.timestamp;
+        attester.disableAtNow();
+        assertGt(
+            disabledAt + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW,
+            reclaimAt,
+            "precondition: an unbounded emergency WOULD have run past the signed deadline"
+        );
+
+        // No emergency opened, so the emergency role has nothing to decide...
+        vm.expectRevert(VNextSettlementEscrow.NoEmergency.selector);
+        e.resolveEscalation(id, O5_ADJ_ROLE_EMERGENCY);
+
+        // ...and the unit terminates under its ORDINARY window, to the last authenticated state, BEFORE
+        // the payer's own deadline.
+        uint256 payerBefore = usdc.balanceOf(payer);
+        vm.warp(appealDue);
+        assertLt(block.timestamp, reclaimAt, "resolved strictly before the signed reclaim deadline");
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_RELEASED), "the accepted SETTLE stands");
+        assertEq(usdc.balanceOf(payer), payerBefore + (bondOf(G) - VNextSettlementLib.delayCompensation(G, bondOf(G))), "only the unused bond came back");
+        _assertBucketsCovered(e);
+    }
+
+    /// @dev M-03(b) — `invokeBackup` must not erase an emergency refund that is ALREADY DUE. Escalating
+    ///      sets `backupLane`, which closes the emergency; past the deadline that would reopen settlement
+    ///      on a unit whose refund the C-5 clock had already awarded, leaving "full-G refund vs backup
+    ///      settlement" decided by transaction ordering PAST a deadline the machine calls terminal.
+    function test_M03_InvokeBackupCannotEraseADueEmergencyRefund() public {
+        (VNextSettlementEscrow e, bytes32 id) = _live();
+        _commit(e, id, PKG);
+        // Both escrows are funded BEFORE the disable — `fund()` refuses a dead cohort, so a post-disable
+        // fixture would not be a reachable state.
+        VNextSettlementEscrow eControl = _fundedEscrow(keccak256("m03b-ctl"), _oneUnitConfig(G, F, BPS, 1));
+        bytes32 idControl = _unitId(eControl);
+        _commit(eControl, idControl, PKG);
+
+        uint256 emergencyDue = block.timestamp + VNextSettlementLib.EMERGENCY_REVIEW_WINDOW;
+        attester.disableAtNow();
+
+        // Control: while the emergency is still OPEN, escalation is the operator's designed recourse.
+        vm.warp(emergencyDue - 1);
+        vm.prank(operator);
+        eControl.invokeBackup(idControl);
+        assertEq(uint256(eControl.unitState(idControl)), uint256(UnitState.BACKUP_PENDING), "still open: allowed");
+
+        // One second later the refund is due, and escalation can no longer reach back over it.
+        vm.warp(emergencyDue);
+        vm.prank(operator);
+        vm.expectRevert(VNextSettlementEscrow.NotActive.selector);
+        e.invokeBackup(id);
+
+        uint256 payerBefore = usdc.balanceOf(payer);
+        e.finalize(id);
+        assertEq(uint256(e.unitState(id)), uint256(UnitState.SETTLED_REFUNDED), "the due refund is terminal");
+        assertEq(usdc.balanceOf(payer), payerBefore + G);
+    }
+
+    function bondOf(uint256 g) internal pure returns (uint256) {
+        return VNextSettlementLib.challengeBond(g);
+    }
+
     // ══ helpers ════════════════════════════════════════════════════════════════════════════════════
 
     /// @dev A backup SETTLE: the SAME `O5Assertion` shape, written by the ESCALATION cohort under its own
