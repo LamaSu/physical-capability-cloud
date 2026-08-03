@@ -1409,7 +1409,8 @@ contract VNextSettlementEscrow {
     ///      veto of exactly the class H-01 exists to delete, and a unit that escalated AWAY from a disabled
     ///      primary is not a second victim of that primary's emergency.
     ///
-    ///      TWO EXCLUSIONS (Wave 3c). C-5's load-bearing property is that the revoker may INITIATE but
+    ///      FOUR EXCLUSIONS (1)-(2) Wave 3c, (3)-(4) the sol 4th-family audit. C-5's load-bearing property
+    ///      is that the revoker may INITIATE but
     ///      never CHOOSE the financial result. Each exclusion is a case where the unrestricted form handed
     ///      the result to one key holder outright:
     ///
@@ -1657,10 +1658,11 @@ contract VNextSettlementEscrow {
         //     due before the disable — see `_emergencyDeadline`); with the re-check still here, those two
         //     units would revert on EVERY exit and be BRICKED forever, since `reclaimAfterDeadline` needs
         //     FUNDED_ACTIVE. A permanent lock-up is strictly worse than the refund it replaced.
-        // Nothing that reads a verdict lost its kill-switch: `acceptAssertion` still refuses to accept an
-        // assertion from a disabled cohort, and `resolveEscalation` still refuses a disabled escalation
-        // cohort's adjudication. What is gone is only the re-read, at payment time, of a switch whose
-        // "on" state the branch above already owns.
+        // The kill-switch that remains is the one at the SOURCE: `acceptAssertion` refuses an assertion
+        // from a disabled cohort, and `O5AttesterBase.attestO5` / `adjudicate` refuse to WRITE one at all.
+        // What is gone is only the re-read, at payment time, of a switch whose "on" state the branch above
+        // already owns. (The symmetric re-read in `resolveEscalation` is gone too — H-02 — for the
+        // stronger reason that it could only ever veto a record written while the cohort was alive.)
         if (s == UnitState.PRIMARY_ASSERTED || s == UnitState.BACKUP_ASSERTED) {
             if (block.timestamp < uint256(u.assertedAt) + VNextSettlementLib.CHALLENGE_WINDOW) {
                 revert WindowStillOpen();
@@ -1682,10 +1684,12 @@ contract VNextSettlementEscrow {
             //       outcome by an authority going quiet. Under forfeiture, an appeal cohort that would
             //       have OVERTURNED could instead go quiet and hand the operator the release AND a
             //       stripped counterparty — a payoff for inducing silence, on the operator's side;
-            //   (c) it keeps a revoker out of the financial result (§8.3 C-5). `resolveEscalation` refuses
-            //       a DISABLED escalation cohort, and `_emergencyDeadline` reads only the PRIMARY cohort —
-            //       so disabling the escalation attester routes every open challenge to exactly this line.
-            //       With forfeiture, pressing that kill switch WAS a decision to confiscate bonds.
+            //   (c) it keeps a revoker out of the financial result (§8.3 C-5). `_emergencyDeadline` reads
+            //       only the PRIMARY cohort, and `O5AttesterBase.adjudicate` refuses to WRITE for a
+            //       disabled one — so disabling the escalation attester stops any FUTURE appeal verdict
+            //       and routes every UNRULED challenge to exactly this line. With forfeiture, pressing
+            //       that kill switch WAS a decision to confiscate bonds. (Since H-02 it can no longer
+            //       reach a verdict that was ALREADY recorded, which is the other half of the property.)
             // The anti-spam function is not lost: the challenger still pays the operator's full scheduled
             // delay cost. What it no longer pays is a penalty for someone else's failure to rule.
             _disposeBond(unitId, u, BondDisposition.COMP_RETURN);

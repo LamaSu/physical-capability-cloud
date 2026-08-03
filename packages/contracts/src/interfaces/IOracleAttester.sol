@@ -7,8 +7,12 @@ import {O5Verdict, O5Assertion, O5Adjudication, O5AdjudicationRecord} from "../O
  * @title IOracleAttester
  * @notice The cohort-scoped O5 attester surface (addendum §A). The settlement escrow binds one attester
  *         address at deploy (`authorizedOracle`) and, at funding, pins the attester's `cohortId` and
- *         requires the cohort is still `enabled` — so a one-way `disable()` of the cohort neutralizes
- *         both new funding AND already-minted attestations (checked at release / payment time).
+ *         requires the cohort is still `enabled` — so a one-way `disable()` of the cohort blocks new
+ *         funding, blocks anything further being WRITTEN by the cohort, and blocks the escrow ACCEPTING a
+ *         pre-written assertion. It deliberately does not reach BACKWARDS over what the escrow already
+ *         accepted (the §8.3 C-5 Model-B emergency reviews that) nor over an adjudication already
+ *         recorded (H-02: every record predates the disable, so such a re-check could only veto a valid
+ *         verdict, never reject an invalid one).
  * @dev    The escrow calls three view methods (`enabled` / `cohortId` / `assertionOf`); it never writes.
  *         The write path (`attestO5`) is exercised by the oracle operator with an M-of-N signature set.
  *

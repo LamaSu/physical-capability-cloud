@@ -63,8 +63,13 @@ interface IEscrowSettlementBinding {
  *           guard/rotation/re-enable) — a mutable Safe cannot be substituted behind the address.
  *         - EOA-only ECDSA recovery (no ERC-1271) with low-s + canonical-v malleability guards — a
  *           mutable smart-account signer cannot satisfy the quorum.
- *         - `disable()` is ONE-WAY: it neutralizes future assertions, and (because the escrow re-checks
- *           `enabled` at release) also neutralizes already-written assertions for the cohort.
+ *         - `disable()` is ONE-WAY, and its reach is bounded ON PURPOSE: it stops this cohort WRITING
+ *           anything further (`attestO5` and `adjudicate` both refuse a disabled cohort) and the escrow
+ *           refuses to ACCEPT a pre-written assertion from it. It does NOT retroactively void what the
+ *           escrow already accepted — that is what the §8.3 C-5 Model-B emergency REVIEWS — and, since the
+ *           H-02 finding, it does not void an already-recorded adjudication either: because a record can
+ *           only be written while the cohort is alive, a runtime "is it still enabled?" re-check could
+ *           never reject a post-disable record, only hand the revoker a veto over a valid verdict.
  *         - One O5 per `settlementUnitId` (consume-once) is enforced in-contract, and the assertion
  *           record IS that marker — it is written exactly once and never mutated afterwards.
  *         - Because that slot is consumable exactly once, every field the ESCROW will re-check at release
