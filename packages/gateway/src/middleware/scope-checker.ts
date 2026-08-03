@@ -7,9 +7,12 @@
  *
  * Behaviour:
  *   - Wildcard scope ("*") grants access to all endpoints.
- *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY: if no requirement
- *     matches, access is REFUSED. A new money route is therefore closed the moment
- *     it is added, rather than silently open until someone remembers a rule.
+ *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY for MUTATING
+ *     methods (POST/PUT/PATCH/DELETE): if no requirement matches, access is
+ *     REFUSED. A new money-moving route is therefore closed the moment it is
+ *     added, rather than silently open until someone remembers a rule.
+ *     Money-path READS stay open — the dashboard does GET /api/escrow and no GET
+ *     requirement covers it; the exposure closed here is funds MOVEMENT.
  *   - All other routes remain open-by-default when no requirement matches
  *     (backwards compatibility — see the note below on why this is not yet global).
  *   - If a requirement exists and the caller lacks all required scopes → 403.
@@ -82,6 +85,9 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
  * this list and the money-path requirements above in sync.
  */
 const MONEY_PATH_PREFIXES = ["/api/escrow/", "/api/fiat-ramp/", "/api/settlement/"];
+
+/** Methods that can move funds. Default-deny applies to these only. */
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function isMoneyPath(path: string): boolean {
   return MONEY_PATH_PREFIXES.some((p) => path === p.slice(0, -1) || path.startsWith(p));
@@ -251,7 +257,11 @@ export async function scopeChecker(app: FastifyInstance) {
     //     note on why the global flip is a separate, sweep-gated change).
     if (!matchedRequirement) {
       const path = req.url.split("?")[0];
-      if (!isMoneyPath(path)) return;
+      // Default-deny covers MUTATING methods only. Money-path reads stay open
+      // (the dashboard does GET /api/escrow, and no GET requirement covers it),
+      // because the exposure being closed here is funds MOVEMENT. A read-side
+      // sweep is a separate change with its own compatibility surface.
+      if (!isMoneyPath(path) || !MUTATING_METHODS.has(req.method.toUpperCase())) return;
 
       return reply.status(403).send({
         error: "insufficient_scope",
