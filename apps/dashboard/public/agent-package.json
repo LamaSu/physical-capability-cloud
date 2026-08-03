@@ -2,8 +2,8 @@
   "schema": "pcc-agent-package/2.0",
   "name": "Physical Capability Cloud",
   "description": "Open infrastructure for agents to buy and sell from each other — anything, not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares, ticket purchases, custom commissions. Drop this package into a Claude conversation and Claude can transact on the user's behalf.",
-  "version": "2.19.0",
-  "toolCount": 254,
+  "version": "2.19.1",
+  "toolCount": 253,
   "lastUpdated": "2026-07-10T03:53:56.678Z",
   "homepage": "https://capability.network",
   "api_base": "https://capability.network",
@@ -685,7 +685,7 @@
     },
     {
       "name": "fund_escrow",
-      "description": "Fund an escrow contract on-chain. The payer must have already approved the token transfer (use approve_token first). Returns transaction hash.",
+      "description": "Fund a protocol-created escrow on-chain. Approval is handled INTERNALLY by the gateway for protocol-created escrows (audit C-03 removed the public approve step) — do NOT call a separate approve first; fund directly. Returns transaction hash.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -701,35 +701,6 @@
       "endpoint": {
         "method": "POST",
         "path": "/api/escrow/chain/{address}/fund"
-      }
-    },
-    {
-      "name": "approve_token",
-      "description": "Approve ERC-20 token spending for an escrow contract on-chain. Call this before fund_escrow. Returns transaction hash.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Escrow contract address (0x...) to approve as spender"
-          },
-          "amount": {
-            "type": "string",
-            "description": "Amount to approve in wei (as string to avoid precision loss)"
-          },
-          "tokenAddress": {
-            "type": "string",
-            "description": "ERC-20 token address to approve (optional, uses default if omitted)"
-          }
-        },
-        "required": [
-          "address",
-          "amount"
-        ]
-      },
-      "endpoint": {
-        "method": "POST",
-        "path": "/api/escrow/chain/{address}/approve"
       }
     },
     {
