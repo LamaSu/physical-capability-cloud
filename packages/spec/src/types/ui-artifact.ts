@@ -35,6 +35,20 @@ import { ComposeRequestSchema } from "./composition.js";
 export const DASHBOARD_CSD_URL = "pcc://artifacts/dashboard/v1" as const;
 
 // ---------------------------------------------------------------------------
+// Manifest resource caps. A shared/popular dashboard is untrusted content that
+// many viewers render, so it must not be able to DoS the gateway or a browser
+// (fast-polling many authenticated bindings, or a pathologically large tree).
+// A real dashboard is 2–6KB; these bounds are generous (sol security pass #7).
+// ---------------------------------------------------------------------------
+
+export const MIN_POLL_MS = 2000;
+export const MAX_SECTIONS = 24;
+export const MAX_WINDOWS_PER_SECTION = 24;
+export const MAX_ACTIONS_PER_WINDOW = 24;
+export const MAX_LIST_LIMIT = 200;
+export const MAX_MANIFEST_BYTES = 256 * 1024;
+
+// ---------------------------------------------------------------------------
 // Manifest building blocks
 // ---------------------------------------------------------------------------
 
@@ -44,8 +58,10 @@ export const BindingSchema = z.object({
   path: z.string().min(1),
   /** Optional query params merged onto the request. */
   query: z.record(z.unknown()).optional(),
-  /** Poll cadence in ms (falls back to the system_prompt's ~30s default). */
-  pollMs: z.number().int().positive().optional(),
+  /** Poll cadence in ms (falls back to the system_prompt's ~30s default).
+   *  Floored at MIN_POLL_MS so a shared dashboard can't fast-poll authenticated
+   *  endpoints (sol security pass #7). */
+  pollMs: z.number().int().min(MIN_POLL_MS).optional(),
   /** Optional SSE stream "/sse/stream/…" (fetch-SSE with Bearer, G4). */
   sse: z.string().min(1).optional(),
   /** Dot-path into the response (e.g. "data.jobs.0.status"). NOT JSONPath. */
@@ -99,7 +115,8 @@ const MetricFormat = z.enum(["usd", "int", "pct", "ts"]);
 /** One row descriptor for a `list` window. */
 export const ListItemSchema = z.object({
   title: z.string().min(1),
-  meta: z.array(z.string()).default([]),
+  // capped — meta selectors are looped per rendered row; unbounded = render DoS (sol re-review #7)
+  meta: z.array(z.string()).max(12).default([]),
   statusFrom: z.string().optional(),
 });
 
@@ -127,7 +144,7 @@ export const WindowSchema = z.discriminatedUnion("kind", [
     kind: z.literal("list"),
     binding: BindingSchema,
     item: ListItemSchema,
-    limit: z.number().int().positive().optional(),
+    limit: z.number().int().positive().max(MAX_LIST_LIMIT).optional(),
   }),
   // a form; submit is an ActionRef
   z.object({
@@ -158,14 +175,17 @@ export const WindowSchema = z.discriminatedUnion("kind", [
     execute: ActionRefSchema.optional(),
   }),
   // a bare action bar
-  z.object({ kind: z.literal("actions"), actions: z.array(ActionSchema).min(1) }),
+  z.object({
+    kind: z.literal("actions"),
+    actions: z.array(ActionSchema).min(1).max(MAX_ACTIONS_PER_WINDOW),
+  }),
 ]);
 export type Window = z.infer<typeof WindowSchema>;
 
 /** One ordered section of the dashboard. */
 export const SectionSchema = z.object({
   heading: z.string().optional(),
-  windows: z.array(WindowSchema),
+  windows: z.array(WindowSchema).max(MAX_WINDOWS_PER_SECTION),
 });
 export type Section = z.infer<typeof SectionSchema>;
 
@@ -244,6 +264,35 @@ function decodePercentDeep(s: string): string {
  * PERCENT-ENCODING — so `PCC_LIVE_…`, `pcc%5Flive%5F…`, `%70%63%63_live_…` all
  * match, not just the exact lowercase literal.
  */
+// A `Bearer <token>` header value, or a JWT (three base64url segments starting
+// `eyJ`), baked into a shared manifest is a credential leak regardless of the
+// PCC prefix (sol security pass, finding #10).
+// Require the token after "Bearer" to have CREDENTIAL shape (≥20 chars AND at
+// least one digit or dot) — real bearer tokens/JWTs have those; ordinary prose
+// like "Bearer authentication" does not, so it is not a false positive (sol
+// re-review #10). A JWT after Bearer is also caught by JWT_RE below.
+const BEARER_RE = /\bbearer\s+(?=[A-Za-z0-9._~+/\-]{20,})[A-Za-z0-9._~+/\-]*[\d.][A-Za-z0-9._~+/\-]*/i;
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/;
+
+/** Bounded base64/base64url decode; returns "" on anything that isn't clean
+ *  base64 of a plausible length (so an encoded PCC prefix can't slip past). */
+function tryBase64Decode(raw: string): string {
+  if (raw.length < 12 || raw.length > 8192) return "";
+  const s = raw.trim();
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(s)) return "";
+  try {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    // atob is universal (browser + Node ≥16 global); fall back to Buffer.
+    const dec =
+      typeof atob === "function"
+        ? atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, "="))
+        : Buffer.from(b64, "base64").toString("latin1");
+    return dec;
+  } catch {
+    return "";
+  }
+}
+
 function stringHasKeyPrefix(raw: string): boolean {
   const forms = new Set<string>([raw, raw.toLowerCase()]);
   const decoded = decodePercentDeep(raw);
@@ -251,11 +300,19 @@ function stringHasKeyPrefix(raw: string): boolean {
     forms.add(decoded);
     forms.add(decoded.toLowerCase());
   }
+  // Bounded base64 decode — a PCC key stuffed inside a base64 blob still leaks.
+  const b64 = tryBase64Decode(raw);
+  if (b64) {
+    forms.add(b64);
+    forms.add(b64.toLowerCase());
+  }
   for (const form of forms) {
     for (const prefix of PCC_API_KEY_PREFIXES) {
       if (form.indexOf(prefix) !== -1) return true;
     }
   }
+  // Vendor-agnostic authorization credentials (Bearer / JWT) in any string.
+  if (BEARER_RE.test(raw) || JWT_RE.test(raw)) return true;
   return false;
 }
 
@@ -280,15 +337,21 @@ function stringHasKeyPrefix(raw: string): boolean {
  *
  * The primary guarantee stays architectural (a manifest is not a credential
  * transport — Round 1); this is cheap, conservative defense-in-depth. Robust
- * against cycles / pathological depth (visited set + node budget); a
- * degenerate input fails "clean" (returns false), never hangs.
+ * against cycles / pathological depth (visited set + node budget); an
+ * oversized/degenerate input fails CLOSED (budget exhaustion returns true =
+ * treat as key-bearing and reject, sol pass #5), never hangs.
  */
 export function containsApiKey(value: unknown): boolean {
   const seen = new WeakSet<object>();
-  let budget = 100000;
+  // Node budget. A manifest large enough to exhaust this is pathological — the
+  // route also enforces MAX_MANIFEST_BYTES below, so a legitimate dashboard
+  // never approaches it. FAIL CLOSED on exhaustion (return true = "treat as
+  // key-bearing", reject) so a caller cannot pad an object with ~budget filler
+  // nodes to push a trailing key past the scan (sol security pass, finding #5).
+  let budget = 20000;
 
   function walk(v: unknown): boolean {
-    if (budget-- <= 0) return false;
+    if (budget-- <= 0) return true;
     if (typeof v === "string") return stringHasKeyPrefix(v);
     if (typeof v !== "object" || v === null) return false;
     if (seen.has(v)) return false;
@@ -319,10 +382,15 @@ const DashboardManifestBase = z.object({
   csd: z.literal(DASHBOARD_CSD_URL),
   title: z.string().min(1),
   description: z.string().optional(),
-  /** default https://capability.network */
+  // ADVISORY ONLY — retained because host-mode consumers (mcp-app-view) still
+  // read it. Live transport is HARD-BOUND to the render origin by the kit and
+  // this is IGNORED for fetches: a manifest that could name its own fetch host
+  // would let a shared dashboard redirect the viewer's Bearer key to an attacker
+  // origin (sol security pass #1). The ENFORCING fix is the kit-side origin
+  // hard-bind (staged); this field must NEVER be used as a transport destination.
   api_base: z.string().optional(),
   theme: z.enum(["auto", "dark", "light"]).optional(),
-  sections: z.array(SectionSchema),
+  sections: z.array(SectionSchema).max(MAX_SECTIONS),
 });
 
 /**
@@ -341,14 +409,22 @@ const DashboardManifestBase = z.object({
  * then MCP Apps is the ONE UI transport (F11/directive 18); do not claim this
  * manifest is A2UI, and add an A2UI/Atelier adapter only against a real consumer.
  */
-export const DashboardManifestSchema = DashboardManifestBase.refine(
-  (m) => !containsApiKey(m),
-  {
+export const DashboardManifestSchema = DashboardManifestBase
+  // Size guard FIRST — a real dashboard is 2–6KB. Rejecting oversized manifests
+  // up front bounds the node walk below (so it never hits its fail-closed
+  // budget on legitimate input) and blocks resource exhaustion (sol #5/#7).
+  // Measure UTF-8 BYTES (TextEncoder is universal in browser + Node) — .length
+  // counts UTF-16 code units, so non-ASCII could be ~3x larger than it appears
+  // and slip past a code-unit check (sol re-review #7).
+  .refine((m) => new TextEncoder().encode(JSON.stringify(m)).length <= MAX_MANIFEST_BYTES, {
+    message: `manifest exceeds ${MAX_MANIFEST_BYTES} bytes (a dashboard is 2–6KB)`,
+    path: ["_size"],
+  })
+  .refine((m) => !containsApiKey(m), {
     message:
-      "manifest must not contain an API key (pcc_live_/pcc_test_ substring) — a shared artifact travels with its contents",
+      "manifest must not contain a credential (pcc_live_/pcc_test_ key, Bearer token, or JWT — raw, encoded, or base64) — a shared artifact travels with its contents",
     path: ["_security"],
-  },
-);
+  });
 export type DashboardManifest = z.infer<typeof DashboardManifestSchema>;
 
 // ---------------------------------------------------------------------------
