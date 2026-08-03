@@ -299,11 +299,11 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
         VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
 
         // Generation 1.
-        VNextSettlementEscrow e1 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, arbiter, 1, cfgs)));
+        VNextSettlementEscrow e1 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, 1, cfgs)));
         _fund(e1, cfgs);
 
         // Generation 2 — a "revision" both parties also signed — can no longer ALSO be funded.
-        VNextSettlementEscrow e2 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, arbiter, 2, cfgs)));
+        VNextSettlementEscrow e2 = VNextSettlementEscrow(factory.createEscrow(_identity(JOB, 2, cfgs)));
         VNextSettlementEscrow.PolicyAcceptance memory acc2 = _acceptance(e2, cfgs);
         vm.prank(payer);
         vm.expectRevert(VNextSettlementEscrowFactory.JobAlreadyFunded.selector);
@@ -326,19 +326,28 @@ contract VNextAdversarialReviewTest is VNextSettlementEscrowTest {
     function test_S01_FactoryAcceptPolicy_OnlyTheCanonicalCloneMayCallIt() public {
         VNextSettlementEscrow.UnitConfig[] memory cfgs = _oneUnitConfig(AG, AF, ABPS, 1);
         VNextSettlementEscrow e = _escrowFor(JOB, cfgs);
-        PolicyIdentity memory p = _identity(JOB, arbiter, 1, cfgs);
+        PolicyIdentity memory p = _identity(JOB, 1, cfgs);
         assertEq(factory.predictEscrow(p), address(e));
 
         // A stranger cannot borrow the factory's verification.
         vm.expectRevert(VNextSettlementEscrowFactory.NotThePolicyEscrow.selector);
-        factory.acceptPolicy(p, bytes32(0), payer, POLICY_EXPIRY, false, bytes(""), bytes(""));
+        factory.acceptPolicy(p, bytes32(0), payer, POLICY_EXPIRY, bytes(""), bytes(""));
 
         // Nor can the real clone, if the identity it hands back is not the one its address commits to.
+        // WAVE 4b: the tampered field was `arbiter`; it is now `termsHash` — any salt component works, and
+        // this one is still in the v2 preimage. (Tampering a REMOVED field would leave the salt unchanged
+        // and the call would sail past `NotThePolicyEscrow`, so the substitution is load-bearing — hence
+        // the explicit "did the salt actually move?" assertion below.)
+        // NOTE: `PolicyIdentity memory` assignment is a REFERENCE copy, so the baseline salt must be read
+        // BEFORE the mutation — `saltOf(p)` after it would return the tampered salt and the guard would
+        // compare a value with itself.
+        bytes32 canonicalSalt = factory.saltOf(p);
         PolicyIdentity memory tampered = p;
-        tampered.arbiter = address(0xDEAD01);
+        tampered.termsHash = keccak256("not-the-committed-terms");
+        assertTrue(factory.saltOf(tampered) != canonicalSalt, "the tamper must actually move the salt");
         vm.prank(address(e));
         vm.expectRevert(VNextSettlementEscrowFactory.NotThePolicyEscrow.selector);
-        factory.acceptPolicy(tampered, bytes32(0), payer, POLICY_EXPIRY, false, bytes(""), bytes(""));
+        factory.acceptPolicy(tampered, bytes32(0), payer, POLICY_EXPIRY, bytes(""), bytes(""));
     }
 
     /// @dev The Wave-3b residual verifier is a pure predicate bound to `msg.sender`'s EIP-712 domain: a

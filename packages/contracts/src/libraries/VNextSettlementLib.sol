@@ -91,8 +91,24 @@ struct FeeSchedule {
 ///         initialized with. It supersedes the rev-3 `(payer, arbiter, jobIdHash, termsHash)` salt tuple:
 ///         the same front-run property (the address the payer computes can only ever be occupied by a
 ///         clone bearing the intended authorities) now covers the OPERATOR, the POLICY NONCE and the
-///         PRE-POLICY ROOT as well, so an address commits to WHO may adjudicate, WHO must accept, WHICH
-///         policy generation this is, and the EXACT funded terms.
+///         PRE-POLICY ROOT as well, so an address commits to WHO must accept, WHICH policy generation
+///         this is, and the EXACT funded terms.
+/// @dev    WAVE 4b — `arbiter` IS REMOVED, and with it `allowSelfAdjudication`. Wave 3 replaced the
+///         dispute path with the §8.1 post-verdict state machine, in which every money decision comes
+///         from a cohort quorum record (`assertionOf` / `adjudicationOf`) and NO code path reads an
+///         arbiter address: there is no `msg.sender == arbiter` check anywhere in the escrow or the
+///         factory, and `resolveDispute` — the only function that ever consulted one — no longer exists.
+///         The field was therefore a DEAD AUTHORITY: bilaterally signed, exclusion-checked, and unable to
+///         move a single wei. Carrying it was not free. It sat in the CREATE2 salt preimage and in
+///         `JOB_POLICY_TYPEHASH`, so both parties had to negotiate, sign and pin a value with no meaning,
+///         and a mistake in it silently changed the escrow's address.
+///
+///         It is removed OUTRIGHT rather than zeroed or reserved. A reserved slot would preserve storage
+///         layout but NOT addresses (every valid policy carried a nonzero arbiter, so every salt moves
+///         regardless), and EIP-712 hashes field names, order and types — so forcing zeros still
+///         invalidates every signature, while merely IGNORING the value would let two different arbiters
+///         produce two different addresses for one meaningful policy. Half a removal buys nothing and
+///         costs a permanent ghost field.
 /// @dev    `prePolicyRoot == keccak256(abi.encode(UnitConfig[]))` — the address-INDEPENDENT half of the
 ///         policy. It is computable before the escrow address exists, which is what breaks the circular
 ///         dependency (§8.2 H-1): predict the address from this root, derive the settlementUnitIds from
@@ -100,7 +116,6 @@ struct FeeSchedule {
 struct PolicyIdentity {
     address payer;
     address operator; // money-plane operator identity (ECDSA or ERC-1271); NOT a payout destination
-    address arbiter;
     bytes32 jobIdHash;
     bytes32 termsHash;
     uint256 policyNonce;
@@ -121,7 +136,15 @@ library VNextSettlementLib {
     bytes32 internal constant SETTLEMENT_UNIT_DOMAIN = keccak256("PCC:vnext:settlement-unit:v1");
     // H-01 §8.2 H-1 domains: the CREATE2 salt over the bilateral policy identity, and the factory-side
     // nonce key that scopes revoke-before-funding / newer-invalidates-older to one (payer, operator, job).
-    bytes32 internal constant POLICY_SALT_DOMAIN = keccak256("PCC:vnext:policy-salt:v1");
+    /// @dev WAVE 4b RE-PIN — bumped `v1` -> `v2` when `arbiter` left the salt preimage (see
+    ///      {PolicyIdentity} and `computePolicySalt`). Dropping a field already changes every salt on its
+    ///      own (a 6-word `abi.encode` is not a 7-word one), so the bump is not what makes old addresses
+    ///      unreachable — it is what makes the change LOUD: an off-chain builder still computing the v1
+    ///      domain gets a visibly different address instead of a subtly different one, and the two
+    ///      generations can never be confused in a log or a mirror.
+    ///      OLD: keccak256("PCC:vnext:policy-salt:v1") == 0x6d6768c5d0719f80e4ab3cea1038634eeb4289ec437e106409abae0cfb2a7ecd
+    ///      NEW: keccak256("PCC:vnext:policy-salt:v2") == 0x9c545f70e44ba4292821022010c5750f92d0a3f2cbf06099ed1eaec2ba2ec8ef
+    bytes32 internal constant POLICY_SALT_DOMAIN = keccak256("PCC:vnext:policy-salt:v2");
     bytes32 internal constant POLICY_NONCE_DOMAIN = keccak256("PCC:vnext:policy-nonce:v1");
     // §B on-chain evidence binding: the domain tag + the package-format label of the committed digest.
     bytes32 internal constant EVIDENCE_COMMITMENT_DOMAIN = keccak256("PCC:vnext:evidence-commitment:v1");
@@ -134,7 +157,12 @@ library VNextSettlementLib {
     // signature that validated before validates now, byte for byte. Holding ONE definition here is what
     // makes that a fact rather than a promise: a second copy of a 15-field type string in the factory
     // could drift, and a drifted typehash silently invalidates every acceptance signature ever produced.
-    uint256 internal constant POLICY_VERSION_V1 = 1; // uint256: the EIP-712 field is `uint256 policyVersion`
+    /// @dev WAVE 4b RE-PIN — bumped 1 -> 2 with the arbiter removal. The typehash change alone already
+    ///      invalidates every v1 signature (EIP-712 hashes field names, order and types), so this is the
+    ///      belt to that braces: the policy SHAPE changed, and the version field is the declared channel
+    ///      for saying so at the VALUE level too. A v1 signature now fails on both counts rather than
+    ///      silently meaning something new.
+    uint256 internal constant POLICY_VERSION_V2 = 2; // uint256: the EIP-712 field is `uint256 policyVersion`
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant EIP712_NAME_HASH = keccak256(bytes("VNextSettlementEscrow"));
@@ -142,13 +170,22 @@ library VNextSettlementLib {
     /// @dev H-01 §2.1 — the ONE canonical `JobPolicyHash` both parties authenticate before any funds move.
     ///      It covers every term that decides WHETHER and WHEN the operator is paid: the deployment
     ///      incarnation (chainId / factory / implementation / escrow / policyVersion), both money-plane
-    ///      identities, the adjudication authority and whether self-adjudication was deliberately accepted,
-    ///      the job + terms identity, the policy generation (nonce) and its expiry, the pre-policy root
-    ///      (== keccak256(abi.encode(UnitConfig[])), i.e. every funded term) and the units root (every
-    ///      derived settlementUnitId). Binding factory+implementation+escrow is what makes a signature
-    ///      unusable against a different factory, a different implementation, or a different clone.
+    ///      identities, the job + terms identity, the policy generation (nonce) and its expiry, the
+    ///      pre-policy root (== keccak256(abi.encode(UnitConfig[])), i.e. every funded term) and the units
+    ///      root (every derived settlementUnitId). Binding factory+implementation+escrow is what makes a
+    ///      signature unusable against a different factory, a different implementation, or a different clone.
+    ///      The ESCALATION COHORT — the only adjudication authority that remains — is bound through
+    ///      `implementation`, since it is an implementation immutable (see
+    ///      {VNextSettlementEscrow.escalationAttester}); signing the implementation IS signing the cohort.
+    /// @dev WAVE 4b RE-PIN — `address arbiter` and `bool allowSelfAdjudication` are REMOVED (13 fields,
+    ///      was 15). Neither had any money power left after Wave 3 retired the dispute path, and a term
+    ///      both parties must sign but nothing can enforce is worse than no term at all: it looks like a
+    ///      protection and is not one. Removing them changes the typehash, which is the point — every
+    ///      signature over the old shape stops validating rather than quietly meaning the new shape.
+    ///      OLD: 0x8f215705a8b214f653cf376e5ae9b8d10ac7f7d9b64ec835e344bb829c4e56b6
+    ///      NEW: 0xb60365989ceff69362e0386c0825b30fc6e385a6b16870d3879edf1d66a8c6ab
     bytes32 internal constant JOB_POLICY_TYPEHASH = keccak256(
-        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,address arbiter,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,bool allowSelfAdjudication,uint256 expiry)"
+        "JobPolicy(uint256 chainId,address factory,address implementation,address escrow,uint256 policyVersion,address payer,address operator,bytes32 jobIdHash,bytes32 termsHash,uint256 policyNonce,bytes32 prePolicyRoot,bytes32 unitsRoot,uint256 expiry)"
     );
     bytes4 internal constant ERC1271_MAGIC = 0x1626ba7e;
     /// @dev secp256k1 n/2 — the ECDSA malleability bound (a signature with `s` above it is the mirror of a
@@ -236,19 +273,20 @@ library VNextSettlementLib {
     //   + 16 x 32   =   512       one head offset per UnitConfig element
     //   + 16 x (416 + 1056)       per unit: 416 B static head (13 words = 12 fields + the payouts offset)
     //                             + 1056 B payouts tail (32 B length + 16 legs x 64 B per PayoutEntry)
-    //   + 4 x 32    =   128       PolicyAcceptance head: expiry, allowSelfAdjudication, 2 bytes offsets
+    //   + 3 x 32    =    96       PolicyAcceptance head: expiry, 2 bytes offsets
     //   + 2 x (32 + 1024) = 2,112 the two signatures: 32 B length + MAX_SIGNATURE_BYTES payload each
     //   ------------------------
-    //   = 4 + 64 + 24,064 + 2,240  =  26,404 B
+    //   = 4 + 64 + 24,064 + 2,208  =  26,372 B
     // History: 24,644 B at rev-3 (13 head words); +512 B when §B added `evidenceCommitter` (14th word)
     // -> 25,156 B; +2,272 B for the H-01 bilateral `PolicyAcceptance` argument -> 27,428 B; -512 B when
     // Wave 3 retired `disputeWindow` with the dispute path (13 head words) -> 26,916 B; -512 B when Wave 3c
-    // removed `evidenceCommitter` per brief §2.8 (12 head words) -> 26,404 B.
+    // removed `evidenceCommitter` per brief §2.8 (12 head words) -> 26,404 B; -32 B when Wave 4b removed
+    // `allowSelfAdjudication` with the arbiter semantic (3 acceptance head words) -> 26,372 B.
     // `test_gas_maxAggregateFunding_fits` builds the true 16x16 maximum with two MAX_SIGNATURE_BYTES
     // signatures and asserts BOTH that it fits and that it equals this constant exactly, so drift in either
     // direction fails the suite. The real griefing caps remain MAX_SETTLEMENT_UNITS /
     // MAX_PAYOUT_LEGS_PER_UNIT / MAX_TOTAL_LEGS_PER_JOB / MAX_SIGNATURE_BYTES.
-    uint256 internal constant MAX_CONFIG_BYTES = 26_404;
+    uint256 internal constant MAX_CONFIG_BYTES = 26_372;
 
     // Reserved claim leg indices (§2/§7): PRINCIPAL uses the payout entry index; FEE/REFUND use these sentinels.
     uint256 internal constant FEE_LEG_INDEX = type(uint256).max;
@@ -308,22 +346,26 @@ library VNextSettlementLib {
     ///         is initialized with is in the preimage, so the address a payer/operator computes can only
     ///         ever be occupied by a clone bearing exactly those authorities and exactly those terms; a
     ///         front-run that alters ANY of them lands at a DIFFERENT address neither party ever funds.
-    ///         This supersedes (and strictly widens) the rev-3 `(payer, arbiter, jobIdHash, termsHash)`
-    ///         tuple — `arbiter` survives as one component of the identity because it is still a money
-    ///         authority until the Wave-3 state machine retires it.
+    ///         This supersedes the rev-3 `(payer, arbiter, jobIdHash, termsHash)` tuple.
+    /// @dev    WAVE 4b RE-PIN — `arbiter` is GONE from the preimage (7 words -> 6, and the domain tag is
+    ///         now `:v2`). It was kept here only "because it is still a money authority until the Wave-3
+    ///         state machine retires it"; Wave 3 retired it, and nothing re-checked that sentence. The
+    ///         front-run property is UNCHANGED and is not weakened by the removal: the salt still commits
+    ///         to every authority the clone is initialized with, and the set of such authorities is now
+    ///         {payer, operator} because that is the set the code actually reads. Binding a value no code
+    ///         reads adds no security — it only adds a way to land at the wrong address.
+    ///         EVERY PREDICTED ADDRESS CHANGES. That is authorised and expected (nothing is deployed,
+    ///         funded, pre-funded or signed against the v1 salt); off-chain builders re-derive.
     function computePolicySalt(
         address payer,
         address operator,
-        address arbiter,
         bytes32 jobIdHash,
         bytes32 termsHash,
         uint256 policyNonce,
         bytes32 prePolicyRoot
     ) internal pure returns (bytes32) {
         return keccak256(
-            abi.encode(
-                POLICY_SALT_DOMAIN, payer, operator, arbiter, jobIdHash, termsHash, policyNonce, prePolicyRoot
-            )
+            abi.encode(POLICY_SALT_DOMAIN, payer, operator, jobIdHash, termsHash, policyNonce, prePolicyRoot)
         );
     }
 

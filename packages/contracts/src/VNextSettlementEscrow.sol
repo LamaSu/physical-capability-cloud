@@ -41,7 +41,6 @@ interface IVNextEscrowFactory {
         bytes32 unitsRoot,
         address funder,
         uint256 expiry,
-        bool allowSelfAdjudication,
         bytes calldata payerSignature,
         bytes calldata operatorSignature
     ) external returns (bytes32 jobPolicyHash);
@@ -121,7 +120,7 @@ contract VNextSettlementEscrow {
     uint256 public constant CONTRACT_VERSION = 1;
     /// @dev H-01 §2.1 policy-version pin, bound into every acceptance signature. A future policy shape
     ///      bumps this, and yesterday's signatures stop validating instead of silently meaning something new.
-    uint256 public constant POLICY_VERSION = VNextSettlementLib.POLICY_VERSION_V1;
+    uint256 public constant POLICY_VERSION = VNextSettlementLib.POLICY_VERSION_V2;
 
     /// @dev M-01 supported assurance-tier ceiling (tiers 0..3). Funding bounds `requiredTier` to this range;
     ///      the evidence path bounds the ORACLE-asserted `achievedTier` to it too, so a verdict claiming an
@@ -163,10 +162,14 @@ contract VNextSettlementEscrow {
     ///         here: it would alter who is compensated on a failed challenge.
     /// @dev    §2.8 (Wave 3c): this address is ALSO the evidence committer — see `submitEvidence`.
     address public operator;
-    /// @dev Whether the funded policy explicitly accepted an arbiter equal to the payer or the operator.
-    ///      Default false; settable only by a signature from BOTH parties over a policy carrying it.
-    bool internal _selfAdjudicationAccepted;
-    address public arbiter;
+    /// @dev WAVE 4b — `arbiter` and `_selfAdjudicationAccepted` ARE REMOVED, storage slot and all. The
+    ///      Wave-3 state machine left no code path that reads an arbiter: every money decision is a cohort
+    ///      quorum record, and `resolveDispute` (its only caller, ever) no longer exists. A stored address
+    ///      no function consults is not a safeguard, it is a liability — it was in the CREATE2 salt and in
+    ///      `JOB_POLICY_TYPEHASH`, so both parties had to agree on a value that could not affect a single
+    ///      wei, while a typo in it silently moved the escrow's address. No ghost/reserved slot is kept:
+    ///      preserving layout would preserve nothing that matters here (there are no deployed clones, and
+    ///      every salt moves anyway), and a permanently-zero field is accounting theatre.
     bytes32 public jobIdHash; // keccak256(bytes(jobId)) — canonical UTF-8 (§10.12 M1)
     bytes32 public termsHash;
     /// @dev H-01 §8.2 H-1 — this clone's policy generation, bound into the CREATE2 salt and consumed at
@@ -336,7 +339,6 @@ contract VNextSettlementEscrow {
     ///         is assumed. `operatorSignature` is ALWAYS required: the operator never sends this tx.
     struct PolicyAcceptance {
         uint256 expiry; // acceptance is not open-ended; funding after this reverts
-        bool allowSelfAdjudication; // both parties deliberately accept arbiter == payer or == operator
         bytes payerSignature;
         bytes operatorSignature;
     }
@@ -361,7 +363,7 @@ contract VNextSettlementEscrow {
     }
 
     // ── Events ───────────────────────────────────────────────────────────────────────────────────
-    event Initialized(address indexed payer, address indexed operator, address indexed arbiter, bytes32 jobIdHash);
+    event Initialized(address indexed payer, address indexed operator, bytes32 jobIdHash);
     /// @notice H-01 §2.1 — emitted once, at funding, recording that BOTH parties authenticated this exact
     ///         policy. `unitsRoot` is the rolling commitment over the settlementUnitIds derived from this
     ///         escrow's address; `policyNonce` is the generation the factory consumed in the same call.
@@ -370,8 +372,7 @@ contract VNextSettlementEscrow {
         address indexed payer,
         address indexed operator,
         uint256 policyNonce,
-        bytes32 unitsRoot,
-        bool allowSelfAdjudication
+        bytes32 unitsRoot
     );
     event UnitFunded(bytes32 indexed unitId, uint256 g, uint256 f, uint256 n);
     event Funded(uint256 unitCount, uint256 totalGross, uint256 totalPayoutLegs);
@@ -430,15 +431,16 @@ contract VNextSettlementEscrow {
     error PartyCollision();
     /// @notice The supplied configs do not hash to the `prePolicyRoot` bound into this clone's address.
     error PolicyRootMismatch();
-    // The next three are RAISED BY THE FACTORY since Wave 4a (the acceptance verification moved there) and
+    // The next two are RAISED BY THE FACTORY since Wave 4a (the acceptance verification moved there) and
     // bubble out of `fund()` unchanged — a custom error's selector is `keccak256("Name()")[0:4]` and
     // carries no contract identity. They are declared here because they are part of `fund()`'s revert
     // surface and every ABI decoder pointed at this contract must be able to name them. Costs no runtime
     // bytecode: a declared-but-unraised error emits nothing.
+    // WAVE 4b: `SelfAdjudicationNotAccepted` is REMOVED from this list. With no arbiter there is nothing
+    // to self-adjudicate, so neither contract can raise it and a decoder that still names it is decoding
+    // a selector nothing emits.
     /// @notice The bilateral acceptance expired before funding.
     error PolicyExpired();
-    /// @notice arbiter == payer or arbiter == operator without both parties signing `allowSelfAdjudication`.
-    error SelfAdjudicationNotAccepted();
     /// @notice The operator did not authenticate this exact funded policy.
     error BadOperatorSignature();
     /// @notice A supplied acceptance signature exceeds MAX_SIGNATURE_BYTES.
@@ -628,22 +630,22 @@ contract VNextSettlementEscrow {
         // operator would silently mean "nobody has to accept" — the exact H-01 hole.
         _requireAllowedRecipient(p.operator);
         if (p.operator == p.payer) revert PartyCollision();
-        // The arbiter is held to the same exclusion set for the same reason: zero, this escrow, the token
-        // and the factory can none of them ever CALL `resolveDispute`, so any of them as arbiter makes
-        // every opened dispute unresolvable and silently expire to a refund. A zero arbiter in particular
-        // is never a deliberate choice, it is a default. Payer/operator arbiters ARE expressible, but only
-        // via the bilaterally-signed `allowSelfAdjudication` flag checked at funding.
-        _requireAllowedRecipient(p.arbiter);
+        // WAVE 4b: the arbiter exclusion check that stood here is REMOVED with the field. It read "none of
+        // {0, this escrow, the token, the factory} can ever CALL `resolveDispute`, so any of them as
+        // arbiter makes every opened dispute unresolvable" — and `resolveDispute` has not existed since
+        // Wave 3 replaced the dispute path with the §8.1 state machine. It was validating an input that no
+        // function could act on. The adjudication authority that DOES decide money now is the escalation
+        // cohort, and it is an implementation immutable checked in the constructor (`escalation != oracle`,
+        // distinct revokers) — not a per-job address anyone can get wrong at initialization.
         initialized = true;
         _status = 1;
         payer = p.payer;
         operator = p.operator;
-        arbiter = p.arbiter;
         jobIdHash = p.jobIdHash;
         termsHash = p.termsHash;
         _policyNonce = p.policyNonce;
         _prePolicyRoot = p.prePolicyRoot;
-        emit Initialized(p.payer, p.operator, p.arbiter, p.jobIdHash);
+        emit Initialized(p.payer, p.operator, p.jobIdHash);
     }
 
     // ── Funding + atomic freeze (E2/E8/C4) ─────────────────────────────────────────────────────────
@@ -656,9 +658,11 @@ contract VNextSettlementEscrow {
     /// @dev    H-01 closure. Before this, the escrow could prove only that the PAYER selected the
     ///         authorities; the operator's presence in the contract was a payout address, which authenticates
     ///         nothing. Now no path reaches a funded state without an operator signature over the exact
-    ///         policy, and the funding parameters that made the veto costless (a zero dispute window, a
-    ///         self-selected arbiter, an unbounded reclaim horizon) are rejected here rather than resolved
-    ///         later. Order is deliberate: freeze -> re-derive the pre-policy root -> parameter constraints
+    ///         policy, and the funding parameters that made the veto costless (an unbounded reclaim
+    ///         horizon, a gross too small to carry a bond) are rejected here rather than resolved
+    ///         later. (The other two — a zero dispute window and a self-selected arbiter — are no longer
+    ///         rejected because they are no longer EXPRESSIBLE: Wave 3 retired the dispute path and Wave 4b
+    ///         removed the arbiter.) Order is deliberate: freeze -> re-derive the pre-policy root -> constraints
     ///         -> consume the nonce -> verify both signatures -> THEN pull funds. Any failure reverts the
     ///         whole call, so "verifies both signatures AND consumes the nonce atomically" is structural.
     function fund(UnitConfig[] calldata configs, PolicyAcceptance calldata acceptance) external nonReentrant {
@@ -821,9 +825,9 @@ contract VNextSettlementEscrow {
     ///        3. ONE call to the factory — which recomputes the CREATE2 address from the identity passed
     ///           back to it and requires it to equal `msg.sender` (the self-consistency proof: a clone can
     ///           only fund itself if its stored identity really is the one its own address commits to),
-    ///           then rejects implicit self-adjudication, rejects an expired acceptance, consumes the
-    ///           policy generation (retiring it and every older one, failing closed if either party
-    ///           revoked), and validates BOTH acceptance signatures against ONE canonical `JobPolicyHash`.
+    ///           then rejects an expired acceptance, consumes the policy generation (retiring it and every
+    ///           older one, failing closed if either party revoked), and validates BOTH acceptance
+    ///           signatures against ONE canonical `JobPolicyHash`.
     ///
     ///      WAVE 4a: steps 2-5 of the pre-Wave-4a sequence are now the body of that single call, in the
     ///      same order, over the same digest (the EIP-712 `verifyingContract` is still THIS clone). Nothing
@@ -839,7 +843,6 @@ contract VNextSettlementEscrow {
             PolicyIdentity({
                 payer: payer,
                 operator: operator,
-                arbiter: arbiter,
                 jobIdHash: jobIdHash,
                 termsHash: termsHash,
                 policyNonce: _policyNonce,
@@ -848,14 +851,12 @@ contract VNextSettlementEscrow {
             root,
             msg.sender, // the payer leg is implicit ONLY for a direct payer-sent tx (see `OnlyPayer` above)
             acceptance.expiry,
-            acceptance.allowSelfAdjudication,
             acceptance.payerSignature,
             acceptance.operatorSignature
         );
 
         _jobPolicyHash = ph;
-        _selfAdjudicationAccepted = acceptance.allowSelfAdjudication;
-        emit PolicyAccepted(ph, payer, operator, _policyNonce, root, acceptance.allowSelfAdjudication);
+        emit PolicyAccepted(ph, payer, operator, _policyNonce, root);
     }
 
     /// @notice The complete bilateral-acceptance record in ONE read. A COLLAPSED getter by design: the
@@ -867,14 +868,12 @@ contract VNextSettlementEscrow {
         view
         returns (
             address operator_,
-            address arbiter_,
             uint256 policyNonce_,
             bytes32 prePolicyRoot_,
-            bytes32 jobPolicyHash_,
-            bool selfAdjudicationAccepted_
+            bytes32 jobPolicyHash_
         )
     {
-        return (operator, arbiter, _policyNonce, _prePolicyRoot, _jobPolicyHash, _selfAdjudicationAccepted);
+        return (operator, _policyNonce, _prePolicyRoot, _jobPolicyHash);
     }
 
     /// @dev The rolling commitment over every settlementUnitId this escrow froze, in funding order:

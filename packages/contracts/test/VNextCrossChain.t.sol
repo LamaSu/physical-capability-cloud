@@ -265,7 +265,6 @@ contract VNextCrossChainTest is Test {
         return PolicyIdentity({
             payer: payer,
             operator: operator,
-            arbiter: arbiter,
             jobIdHash: job,
             termsHash: TERMS,
             policyNonce: nonce,
@@ -333,11 +332,11 @@ contract VNextCrossChainTest is Test {
                     address(factory),
                     factory.implementation(),
                     address(e),
-                    VNextSettlementLib.POLICY_VERSION_V1,
+                    VNextSettlementLib.POLICY_VERSION_V2, // WAVE 4b: 1 -> 2
                     payer,
                     operator
                 ),
-                abi.encode(arbiter, job, TERMS, nonce, preRoot, uRoot, false, POLICY_EXPIRY)
+                abi.encode(job, TERMS, nonce, preRoot, uRoot, POLICY_EXPIRY)
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", _domainSep(address(e)), structHash));
@@ -351,11 +350,10 @@ contract VNextCrossChainTest is Test {
         view
         returns (VNextSettlementEscrow.PolicyAcceptance memory acc)
     {
-        (,, uint256 nonce, bytes32 preRoot,,) = e.policy();
+        (, uint256 nonce, bytes32 preRoot,) = e.policy();
         bytes32 digest = _jobPolicyDigest(e, cfgs, nonce, preRoot);
         acc = VNextSettlementEscrow.PolicyAcceptance({
             expiry: POLICY_EXPIRY,
-            allowSelfAdjudication: false,
             payerSignature: bytes(""),
             operatorSignature: _sign(operatorPk, digest)
         });

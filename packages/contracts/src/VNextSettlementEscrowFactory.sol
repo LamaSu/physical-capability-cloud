@@ -9,7 +9,7 @@ import {VNextSettlementLib, PolicyIdentity} from "./libraries/VNextSettlementLib
  * @title VNextSettlementEscrowFactory
  * @notice Deploys the V-next settlement-escrow implementation once (initializer-locked) and clones it
  *         per job via EIP-1167 CREATE2. Each clone gets a unique, deterministic address derived from the
- *         complete BILATERAL POLICY IDENTITY (payer, operator, arbiter, jobIdHash, termsHash, policyNonce,
+ *         complete BILATERAL POLICY IDENTITY (payer, operator, jobIdHash, termsHash, policyNonce,
  *         prePolicyRoot) — so the address both parties compute and sign over commits to every authority
  *         AND to the exact funded terms, and cannot be occupied by a front-run clone bearing different
  *         ones (H-01). It is also the deployment-incarnation binding for the frozen-spec §10.12 H1 replay
@@ -23,8 +23,8 @@ import {VNextSettlementLib, PolicyIdentity} from "./libraries/VNextSettlementLib
  *           2. prePolicyRoot = keccak256(abi.encode(UnitConfig[]))        (address-INDEPENDENT)
  *           3. escrow = predictEscrow(identity)                          (salt binds prePolicyRoot)
  *           4. settlementUnitIds = computeSettlementUnitId(chainId, escrow, ...) from the PREDICTED address
- *           5. JobPolicyHash over {chainId, factory, impl, escrow, policyVersion, payer, operator, arbiter,
- *              jobIdHash, termsHash, policyNonce, prePolicyRoot, unitsRoot, allowSelfAdjudication, expiry}
+ *           5. JobPolicyHash over {chainId, factory, impl, escrow, policyVersion, payer, operator,
+ *              jobIdHash, termsHash, policyNonce, prePolicyRoot, unitsRoot, expiry}
  *           6. payer AND operator sign it
  *           7. createEscrow(identity)  -> deploys + initializes the predicted address
  *           8. fund(configs, acceptance) -> verifies both signatures AND consumes the policy nonce atomically
@@ -58,7 +58,6 @@ contract VNextSettlementEscrowFactory {
         address indexed payer,
         address indexed operator,
         bytes32 jobIdHash,
-        address arbiter,
         uint256 policyNonce,
         bytes32 salt
     );
@@ -78,10 +77,10 @@ contract VNextSettlementEscrowFactory {
     // ── Wave 4a: the bilateral-acceptance errors, verbatim from the escrow ────────────────────────
     // A custom error's selector is `keccak256("Name()")[0:4]` — it carries no contract identity — and a
     // failed high-level external call bubbles its revert data through unchanged. So `fund()` still reverts
-    // with EXACTLY these four selectors after the verification moved here; the escrow keeps the matching
+    // with EXACTLY these selectors after the verification moved here; the escrow keeps the matching
     // declarations for ABI/decoder stability. This is a relocation, not a redefinition.
-    /// @notice `arbiter == payer` or `arbiter == operator` without both parties signing a policy saying so.
-    error SelfAdjudicationNotAccepted();
+    // WAVE 4b: `SelfAdjudicationNotAccepted` is REMOVED — the check it named guarded an arbiter that no
+    // longer exists (three, not four, acceptance errors remain).
     /// @notice The acceptance's own expiry has passed.
     error PolicyExpired();
     /// @notice A delegated funder supplied a payer signature that does not validate for `payer`.
@@ -110,7 +109,7 @@ contract VNextSettlementEscrowFactory {
     /// @notice Clone + initialize a per-job escrow atomically. Permissionless AND safe: the CREATE2 salt
     ///         commits to the COMPLETE policy identity, so the canonical address the parties compute with
     ///         `predictEscrow` can only ever be occupied by a clone initialized with the INTENDED payer,
-    ///         operator, arbiter, job, terms, nonce and pre-policy root. Front-running `createEscrow` with
+    ///         operator, job, terms, nonce and pre-policy root. Front-running `createEscrow` with
     ///         the exact canonical tuple therefore just deploys the clone both parties already committed
     ///         to (a permissionless pre-deploy is harmless and changes no semantics); front-running with
     ///         ANY altered value yields a DIFFERENT address neither party ever funds. A fresh clone also
@@ -120,7 +119,7 @@ contract VNextSettlementEscrowFactory {
         bytes32 salt = _salt(p);
         escrow = Clones.cloneDeterministic(implementation, salt);
         VNextSettlementEscrow(escrow).initialize(p);
-        emit EscrowCreated(escrow, p.payer, p.operator, p.jobIdHash, p.arbiter, p.policyNonce, salt);
+        emit EscrowCreated(escrow, p.payer, p.operator, p.jobIdHash, p.policyNonce, salt);
     }
 
     /// @notice Precompute the clone address for a policy before it is created — step 3 of the §8.2 H-1
@@ -188,19 +187,16 @@ contract VNextSettlementEscrowFactory {
     ///         validated before Wave 4a validates now, byte for byte — no off-chain builder changes.
     ///
     ///         NON-SKIPPABLE: `fund()` reaches a funded state only through this call, and this call reverts
-    ///         unless both legs verify. The check order is the pre-Wave-4a order verbatim (self-adjudication
-    ///         -> expiry -> nonce floor + consume -> payer leg -> operator leg); any revert rolls the whole
-    ///         funding transaction back, so "verifies both signatures AND consumes the nonce atomically"
-    ///         remains structural rather than sequential.
+    ///         unless both legs verify. The check order is the pre-Wave-4a order verbatim minus the retired
+    ///         self-adjudication leg (expiry -> nonce floor + consume -> payer leg -> operator leg); any
+    ///         revert rolls the whole funding transaction back, so "verifies both signatures AND consumes
+    ///         the nonce atomically" remains structural rather than sequential.
     ///
     /// @param p                      the clone's bilateral policy identity (proven to be its own by (3)).
     /// @param unitsRoot              the rolling commitment over the settlementUnitIds the clone just froze.
     /// @param funder                 the `fund()` caller. The payer leg is implicit ONLY when it IS the
     ///                               payer; every other funder must carry an explicit payer signature.
     /// @param expiry                 the acceptance's own deadline (inside the signed hash).
-    /// @param allowSelfAdjudication  both parties' deliberate acceptance of arbiter == payer/operator
-    ///                               (inside the signed hash, so it can never be supplied by the sender
-    ///                               alone).
     /// @return jobPolicyHash the EIP-712 struct hash both parties authenticated; the clone stores it as its
     ///         on-chain record that acceptance happened.
     function acceptPolicy(
@@ -208,19 +204,18 @@ contract VNextSettlementEscrowFactory {
         bytes32 unitsRoot,
         address funder,
         uint256 expiry,
-        bool allowSelfAdjudication,
         bytes calldata payerSignature,
         bytes calldata operatorSignature
     ) external returns (bytes32 jobPolicyHash) {
         address escrow = _predict(p);
         if (msg.sender != escrow) revert NotThePolicyEscrow();
 
-        // "Address inequality is not independence": an arbiter that IS one of the parties is a costless
-        // veto (or a self-release), so it is rejected unless BOTH parties signed a policy that says so.
-        // The flag lives inside the signed hash, so it can never be supplied by whoever sends the tx alone.
-        if (!allowSelfAdjudication && (p.arbiter == p.payer || p.arbiter == p.operator)) {
-            revert SelfAdjudicationNotAccepted();
-        }
+        // WAVE 4b: the self-adjudication gate that stood here is REMOVED with the arbiter. It enforced
+        // "an arbiter that IS one of the parties is a costless veto, so both must sign for it" — a real
+        // property while an arbiter could resolve a dispute, and a dead one since Wave 3 retired
+        // `resolveDispute`. Nothing replaces it because nothing needs to: the party-independence that
+        // still decides money is `escalation != oracle` with disjoint revokers, checked in the escrow's
+        // constructor, plus `operator != payer` checked in `initialize`.
         if (block.timestamp > expiry) revert PolicyExpired();
 
         bytes32 k = VNextSettlementLib.computePolicyKey(p.payer, p.operator, p.jobIdHash);
@@ -233,7 +228,7 @@ contract VNextSettlementEscrowFactory {
         policyNonceFloor[k] = p.policyNonce + 1; // checked (0.8)
         emit PolicyNonceConsumed(k, escrow, p.policyNonce);
 
-        jobPolicyHash = _hashJobPolicy(p, escrow, unitsRoot, allowSelfAdjudication, expiry);
+        jobPolicyHash = _hashJobPolicy(p, escrow, unitsRoot, expiry);
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(escrow), jobPolicyHash));
         // Delegated/agent funding: an absent payer signature was already rejected as `OnlyPayer` at the
         // escrow's entry; a present one must actually validate. A direct payer-sent tx authenticates itself.
@@ -278,17 +273,16 @@ contract VNextSettlementEscrowFactory {
     }
 
     /// @dev EIP-712 struct hash of the frozen policy, over the CLONE's domain. Split into two
-    ///      `abi.encode` calls to avoid stack-too-deep; all 16 words are static, so
-    ///      `bytes.concat(abi.encode(..), abi.encode(..))` equals `abi.encode(all 16)` and the EIP-712 hash
-    ///      is identical. This is the pre-Wave-4a `VNextSettlementEscrow._hashJobPolicy` verbatim, with
-    ///      `address(this)`/`implementation` now read from the factory and the clone address passed in.
-    function _hashJobPolicy(
-        PolicyIdentity calldata p,
-        address escrow,
-        bytes32 unitsRoot,
-        bool allowSelfAdjudication,
-        uint256 expiry
-    ) private view returns (bytes32) {
+    ///      `abi.encode` calls to avoid stack-too-deep; all 14 words are static, so
+    ///      `bytes.concat(abi.encode(..), abi.encode(..))` equals `abi.encode(all 14)` and the EIP-712 hash
+    ///      is identical. This is the pre-Wave-4a `VNextSettlementEscrow._hashJobPolicy` with
+    ///      `address(this)`/`implementation` read from the factory, the clone address passed in, and
+    ///      (Wave 4b) `arbiter` + `allowSelfAdjudication` removed — 14 words, was 16.
+    function _hashJobPolicy(PolicyIdentity calldata p, address escrow, bytes32 unitsRoot, uint256 expiry)
+        private
+        view
+        returns (bytes32)
+    {
         return keccak256(
             bytes.concat(
                 abi.encode(
@@ -297,14 +291,11 @@ contract VNextSettlementEscrowFactory {
                     address(this),
                     implementation,
                     escrow,
-                    VNextSettlementLib.POLICY_VERSION_V1,
+                    VNextSettlementLib.POLICY_VERSION_V2,
                     p.payer,
                     p.operator
                 ),
-                abi.encode(
-                    p.arbiter, p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot, unitsRoot,
-                    allowSelfAdjudication, expiry
-                )
+                abi.encode(p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot, unitsRoot, expiry)
             )
         );
     }
@@ -374,7 +365,7 @@ contract VNextSettlementEscrowFactory {
 
     function _salt(PolicyIdentity calldata p) private pure returns (bytes32) {
         return VNextSettlementLib.computePolicySalt(
-            p.payer, p.operator, p.arbiter, p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot
+            p.payer, p.operator, p.jobIdHash, p.termsHash, p.policyNonce, p.prePolicyRoot
         );
     }
 }
