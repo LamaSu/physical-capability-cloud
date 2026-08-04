@@ -8,6 +8,15 @@ solc_version = "0.8.24"
 # runs=200 is the standard size/gas balance; verified all contracts fit (see PR).
 optimizer = true
 optimizer_runs = 200
+# Deploy scripts persist their address/codehash record under `deployments/` (vm.writeJson) and read the
+# existing record back to refuse publishing a rival deployment (vm.exists / vm.readFile). Grant exactly
+# that directory, nothing wider.
+#
+# NOTE — deliberately ABSENT: a `libraries = [...]` entry. {VNextSettlementLib} is an external linked
+# library, and pinning its address here would link the TEST build against an address holding no code,
+# breaking every funding test. The V-next deploy scripts link per-invocation with `--libraries` instead
+# and assert the address they were linked against. See script/DeployVNextSettlement.s.sol.
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
 
 [profile.default.fmt]
 line_length = 120
