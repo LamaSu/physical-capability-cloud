@@ -6,15 +6,8 @@ pragma solidity ^0.8.24;
  * @notice The deterministic-deployment SPEC shared by both V-next deploy phases: salt derivation,
  *         mode namespacing, the provisional cohort band, and CREATE2 address math.
  *
- * @dev    DELIBERATELY IMPORTS NOTHING FROM `src/`.
- *
- *         This file is `internal`-only and references neither {VNextSettlementEscrow} nor
- *         {VNextSettlementEscrowFactory}. That is load-bearing, not tidiness: the factory's CREATION
- *         code carries three unresolved {VNextSettlementLib} placeholders (measured: 4 in the factory's
- *         initcode, 3 in the escrow's runtime), so ANY contract that references the factory inherits an
- *         unlinked creation code. `forge script` resolves that by auto-deploying the library as a real
- *         transaction — which is precisely the non-deterministic library deployment phase 1 exists to
- *         prevent. Keeping this file src-free lets phase 1 compile and run with no link requirement.
+ * @dev    DELIBERATELY IMPORTS NOTHING FROM `src/`, so this spec can be read, reviewed and reused without
+ *         dragging in the escrow's link requirement.
  *
  *         WHY CREATE2 AT ALL. `forge script` is not transactional across transactions: a four-contract
  *         deploy is four txs, and a failure at tx 3 strands two contracts. Routing every deployment
@@ -77,19 +70,45 @@ library VNextDeploySpec {
     string internal constant TAG_FACTORY = "VNextSettlementEscrowFactory";
     string internal constant TAG_PROVISIONAL_USDC = "ProvisionalMockUSDC";
 
-    /// @notice The library's salt is deliberately CHAIN-INDEPENDENT.
-    /// @dev    {VNextSettlementLib} carries no constructor arguments and no configuration — it is the same
-    ///         audited artifact on Base and Base Sepolia, and its own initcode contains no address (its
-    ///         constructor splices `ADDRESS` into the call-protection prologue at deploy time; verified by
-    ///         disassembling the 53-byte deploy prefix). So one salt puts it at the SAME address on both
-    ///         networks, and — because the only address-dependent bytes in its runtime are its own — at the
-    ///         same runtime codehash on both. That equality is a directly checkable, one-command expression
-    ///         of "the same audited bytecode backs both networks": compare the two `EXTCODEHASH`es.
+    // ── The library is deployed BY FORGE, not by us. This is not a convenience — it is required. ─────
+    /// @notice The salt `forge script` uses when it auto-deploys an unlinked library: `bytes32(0)`.
+    /// @dev    MEASURED, not assumed (forge 1.5.1): a dry run emits one `transactionType: "CREATE2"` to
+    ///         {CREATE2_DEPLOYER}, and `create2(CREATE2_DEPLOYER, 0, keccak(libInitCode))` reproduces the
+    ///         address forge chose, exactly.
+    ///
+    ///         WHY WE MUST NOT DEPLOY THE LIBRARY OURSELVES, AND MUST NEVER PASS `--libraries`.
+    ///         solc records the `libraries` compiler setting in every contract's METADATA, and the
+    ///         metadata hash is appended to that contract's bytecode. Measured on this build: the
+    ///         library's own runtime tail changes with the `--libraries` value —
+    ///           no flag          -> ...398fa92d67af5be5da557fa0903a20b847dc74c370019dbc...
+    ///           --libraries 0x11 -> ...0bebbe8e3b0d27a778fb2a395af603159311640cb102f98a...
+    ///           --libraries 0x22 -> ...ba5008a089fa370dce2328c19607f42cfd05b28d87a6701a...
+    ///         The escrow's constructor gate hashes `type(VNextSettlementLib).runtimeCode` — the template
+    ///         from ITS OWN compilation, metadata included — and compares it to the deployed library's
+    ///         `EXTCODEHASH` (`VNextSettlementEscrow.sol:594-600`). So the library and the factory must
+    ///         come from the SAME compilation, or the factory's deployment reverts `LinkedLibraryMismatch`.
+    ///         Passing `--libraries ADDR` makes that impossible: it would require
+    ///         `ADDR == create2(salt, keccak(initcode(metadata(ADDR))))`, a fixed point inside a hash.
+    ///
+    ///         Letting forge do it keeps ONE compilation and is therefore self-consistent by
+    ///         construction — which is exactly why the 918-test suite links libraries this way today. It
+    ///         also happens to be deterministic (CREATE2, salt 0) and idempotent (a second broadcast
+    ///         reports "No transactions to broadcast"), so nothing is lost.
+    ///
+    ///         Consequences worth stating plainly:
+    ///           1. the library address is CHAIN- and MODE-independent — one address, one codehash, for
+    ///              canonical and provisional, Base and Base Sepolia. "The same audited bytecode backs
+    ///              both networks" becomes a one-command check: compare the two chains' `EXTCODEHASH`.
+    ///           2. a consumer that pins the library codehash off a PROVISIONAL stack does not have to
+    ///              re-pin when the canonical stack lands.
     ///         Contrast {contractSalt}: the factory and attesters carry NETWORK-SPECIFIC configuration
-    ///         (settlement asset, signer set, cohort), so their addresses are chain-scoped on purpose —
-    ///         a Base Sepolia factory must never be confusable with a Base one by address alone.
-    function librarySalt(string memory mode) internal pure returns (bytes32) {
-        return keccak256(abi.encode(NAMESPACE, SPEC_VERSION, mode, TAG_LIBRARY));
+    ///         (settlement asset, signer set, cohort), so their addresses are chain- AND mode-scoped on
+    ///         purpose — a Base Sepolia factory must never be confusable with a Base one by address alone.
+    bytes32 internal constant FORGE_LIBRARY_SALT = bytes32(0);
+
+    /// @notice Where `forge script` will place (or has placed) an auto-deployed library with this initcode.
+    function forgeLibraryAddress(bytes32 initCodeHash) internal pure returns (address) {
+        return create2Address(FORGE_LIBRARY_SALT, initCodeHash);
     }
 
     /// @notice Chain-scoped salt for a configured contract.

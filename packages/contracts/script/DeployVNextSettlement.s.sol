@@ -13,9 +13,9 @@ import {MockUSDC} from "../src/MockUSDC.sol";
 
 /**
  * @title DeployVNextSettlement
- * @notice PHASE 2 of 2 — deploys the V-next settlement cohort (primary attester + escalation attester +
- *         factory, whose constructor builds the escrow implementation) and publishes the pinnable tuple
- *         `{factory, implementation, library, codehash}` per network.
+ * @notice Deploys the V-next settlement cohort — {VNextSettlementLib}, the primary attester, the
+ *         escalation attester, and the factory (whose constructor builds the escrow implementation) —
+ *         and publishes the pinnable tuple `{factory, implementation, library, codehash}` per network.
  *
  * ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
  * │ GATED on-chain action. SCRIPT-ONLY — DO NOT BROADCAST without explicit authorization.        │
@@ -24,23 +24,38 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  * └──────────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * ══ THE DEPLOY ORDER IS FORCED, NOT CHOSEN ══════════════════════════════════════════════════════
- *   1. {VNextSettlementLib} — phase 1, a separate script and a separate invocation.
- *   2. LINK — this script must be compiled against that address via `--libraries` on the CLI.
- *   3. attesters — primary + escalation, two SEPARATE deployments with DISJOINT revokers.
- *   4. factory — its CONSTRUCTOR builds the implementation and runs five deploy-time gates.
+ *   1. {VNextSettlementLib} — deployed BY FORGE, automatically, before this script's body runs.
+ *   2. attesters — primary + escalation, two SEPARATE deployments with DISJOINT revokers.
+ *   3. factory — its CONSTRUCTOR builds the implementation and runs five deploy-time gates.
  *
- *   Why the link lands one step earlier than a reader expects: the escrow's runtime carries 3 unresolved
+ *   Why the link lands one step earlier than a reader expects: the escrow's RUNTIME carries 3 unresolved
  *   library placeholders (measured), and the factory's CONSTRUCTOR embeds the escrow's initcode — so the
  *   factory's CREATION code carries them (4 of them; the factory's RUNTIME has none). Linking is therefore
- *   a COMPILE-time act for the factory, which is why it cannot be folded into one invocation.
+ *   a COMPILE-time act for the factory.
  *
- *   Why not `libraries = [...]` in `foundry.toml`: it would link the TEST build against an address that
- *   holds no code and break every funding test (30 suites / 918 tests). `--libraries` is per-invocation
- *   and leaves the test build alone. This script ASSERTS the address it was linked against before it
- *   broadcasts anything, so forgetting the flag aborts instead of silently deploying against a fresh
- *   auto-deployed library.
+ *   ══ DO NOT PASS `--libraries`. DO NOT ADD `libraries = [...]` TO `foundry.toml`. ══
+ *   Both are load-bearing prohibitions, and the second is not the obvious one.
+ *     - `libraries = [...]` in `foundry.toml` would link the TEST build against an address holding no
+ *       code and break every funding test (30 suites / 918 tests).
+ *     - `--libraries <addr>` looks like the safe per-invocation alternative. It is not. solc records the
+ *       `libraries` setting in every contract's METADATA, and the metadata hash is appended to its
+ *       bytecode — so the flag changes the library's OWN bytecode, and therefore its address. Measured on
+ *       this build, three different `--libraries` values give three different library runtimes. Since the
+ *       escrow's gate hashes `type(VNextSettlementLib).runtimeCode` from its own compilation and compares
+ *       it to the deployed library's `EXTCODEHASH`, a library deployed from any OTHER compilation makes
+ *       the factory's construction revert `LinkedLibraryMismatch`. Pinning an address up front cannot fix
+ *       it either: that needs `ADDR == create2(salt, keccak(initcode(metadata(ADDR))))`, a fixed point
+ *       inside a hash.
+ *   Letting `forge` deploy and link the library keeps ONE compilation, which is self-consistent by
+ *   construction — and, measured, it is also deterministic (CREATE2 via the canonical proxy at salt 0)
+ *   and idempotent (a second broadcast reports "No transactions to broadcast"). {_assertToolchain}
+ *   re-derives the address forge should have chosen and aborts if it disagrees, so a stray `--libraries`
+ *   is caught before anything is broadcast rather than at the factory's revert.
  *
  * ══ WHAT IS ATOMIC / WHAT IS RESUMABLE ══════════════════════════════════════════════════════════
+ *   IDEMPOTENT-BY-FORGE:
+ *     - the library. Deployed via CREATE2 at salt 0 from this compilation's initcode, and skipped
+ *       entirely on a re-run.
  *   ATOMIC (single transaction, all-or-nothing):
  *     - factory + implementation + every deploy-time gate. `new VNextSettlementEscrowFactory{salt}(...)`
  *       is ONE transaction: its constructor CREATEs the implementation, whose own constructor runs the
@@ -59,28 +74,28 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *       operator to bump `VNextDeploySpec.SPEC_VERSION` — a deliberate, reviewable act — instead of
  *       quietly publishing a rival.
  *
- * ══ USAGE ═══════════════════════════════════════════════════════════════════════════════════════
- *   Predict the addresses with no RPC, no key, no gas (CREATE2 is key-independent, so this is the real
- *   tuple minus the implementation codehash):
- *     forge script script/DeployVNextSettlement.s.sol:DeployVNextSettlement --sig "predict()" \
- *       --libraries src/libraries/VNextSettlementLib.sol:VNextSettlementLib:<LIB>
+ * ══ USAGE (never with `--libraries`) ════════════════════════════════════════════════════════════
+ *   Predict the addresses with no RPC, no key, no gas. CREATE2 is sent by the deterministic proxy, so
+ *   the addresses do not depend on the deploying key — this is the real tuple minus the implementation
+ *   codehash, reviewable before anyone holds the key:
+ *     forge script script/DeployVNextSettlement.s.sol:DeployVNextSettlement --sig "predict()"
  *
  *   DRY RUN — full simulation against a live chain, nothing sent (omitting `--broadcast` is what makes it
- *   a dry run). This produces the COMPLETE tuple including the implementation codehash, so the tuple can
- *   be reviewed before anything is spent:
+ *   a dry run). Produces the COMPLETE tuple including the implementation codehash, so the tuple can be
+ *   reviewed before anything is spent:
  *     forge script script/DeployVNextSettlement.s.sol:DeployVNextSettlement --sig "run()" \
- *       --rpc-url base_sepolia \
- *       --libraries src/libraries/VNextSettlementLib.sol:VNextSettlementLib:<LIB>
+ *       --rpc-url base_sepolia --sender <DEPLOYER>
  *
- *   Deploy (ONLY when explicitly authorized): add `--broadcast --verify -vvvv`.
+ *   Deploy (ONLY when explicitly authorized): add `--broadcast --private-key $DEPLOYER_PRIVATE_KEY
+ *   --verify -vvvv`. The CLI key is needed because forge deploys the library BEFORE the script body runs,
+ *   i.e. before `vm.startBroadcast` has told it who is signing.
  *
  *   Provisional/throwaway (never mainnet, never pinnable):
  *     ... --sig "provisional()" ...      with VNEXT_LABEL=<run-label>
  *
  *   Re-derive and re-check a published tuple from the factory address ALONE (read-only, no key):
  *     forge script script/DeployVNextSettlement.s.sol:DeployVNextSettlement \
- *       --sig "verify(address)" <FACTORY> --rpc-url base_sepolia \
- *       --libraries src/libraries/VNextSettlementLib.sol:VNextSettlementLib:<LIB>
+ *       --sig "verify(address)" <FACTORY> --rpc-url base_sepolia
  *
  * ══ ENV ═════════════════════════════════════════════════════════════════════════════════════════
  *   DEPLOYER_PRIVATE_KEY      required for run()/provisional(); pays gas only. CREATE2 is sent by the
@@ -117,9 +132,10 @@ contract DeployVNextSettlement is Script {
 
     /// @dev This build's escrow RUNTIME carries exactly this many unresolved {VNextSettlementLib} link
     ///      sites (the 3 `delegatecall`s on the funding path; measured from
-    ///      `out/VNextSettlementEscrow.sol/VNextSettlementEscrow.json`). {_recoverLinkedLibrary} requires
-    ///      the count to match, so a refactor that adds or removes an external library call fails loudly
-    ///      here instead of silently recovering the wrong address.
+    ///      `out/VNextSettlementEscrow.sol/VNextSettlementEscrow.json`).
+    ///      {_assertImplementationLinkedTo} requires the deployed runtime to hold exactly this many
+    ///      `PUSH20 <library>` sites, so a refactor that adds or removes an external library call fails
+    ///      loudly here instead of quietly weakening the check.
     uint256 internal constant LINK_SITES = 3;
 
     /// @dev Supply minted by the throwaway settlement asset a provisional deployment uses.
@@ -196,6 +212,9 @@ contract DeployVNextSettlement is Script {
             block.chainid != VNextDeploySpec.CHAIN_BASE, "provisional deployments are forbidden on Base mainnet"
         );
         Inputs memory i = _readInputs(VNextDeploySpec.MODE_PROVISIONAL, label);
+        // Toolchain guards run BEFORE the throwaway token is deployed, so a misconfigured invocation
+        // (unlinked build, missing CREATE2 proxy, wrong RPC) costs nothing at all.
+        _assertToolchain();
         i.usdc = _deployProvisionalUsdc(label);
         _deploy(i);
     }
@@ -238,6 +257,17 @@ contract DeployVNextSettlement is Script {
     ///         A reviewer runs this against the recorded factory and gets a revert if any recorded field
     ///         was altered. No trusted store, no signature infrastructure required.
     function verify(address factory) external view returns (Tuple memory t) {
+        t = _verify(factory);
+        console2.log("== V-next settlement stack : VERIFY (read-only) ==");
+        _printTuple(t);
+        console2.log("tuple digest:");
+        console2.logBytes32(_digest(t));
+        console2.log("VERIFIED - every assertion re-ran against chain state.");
+    }
+
+    /// @dev The re-derivation itself. Internal so {_deploy} can reuse it without `this.verify(...)`, which
+    ///      forge rejects (`address(this)` in a script contract).
+    function _verify(address factory) internal view returns (Tuple memory t) {
         require(factory.code.length > 0, "verify: no code at the factory address");
         VNextSettlementEscrowFactory f = VNextSettlementEscrowFactory(factory);
 
@@ -253,7 +283,8 @@ contract DeployVNextSettlement is Script {
         require(impl.factory() == factory, "verify: implementation.factory() != factory");
         require(impl.initialized(), "verify: implementation is not initializer-locked");
 
-        t.settlementLib = _recoverLinkedLibrary(t.implementation);
+        t.settlementLib = address(VNextSettlementLib);
+        _assertImplementationLinkedTo(t.implementation, t.settlementLib);
         t.implementationCodehash = t.implementation.codehash;
         t.libraryCodehash = t.settlementLib.codehash;
         t.primaryAttester = impl.authorizedOracle();
@@ -268,12 +299,6 @@ contract DeployVNextSettlement is Script {
         _assertCohortSeparation(t.primaryAttester, t.escalationAttester);
         _assertPins(f, t.primaryAttester, t.schemaUid);
         _assertNetworkPolicy(t.primaryAttester, t.escalationAttester);
-
-        console2.log("== V-next settlement stack : VERIFY (read-only) ==");
-        _printTuple(t);
-        console2.log("tuple digest:");
-        console2.logBytes32(_digest(t));
-        console2.log("VERIFIED - every assertion re-ran against chain state.");
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -289,7 +314,7 @@ contract DeployVNextSettlement is Script {
         (address predPrimary, address predEscalation, address predFactory) = _predictAll(i);
         _guardAgainstRivalDeployment(i, predFactory);
 
-        console2.log("== V-next settlement stack (phase 2) ==");
+        console2.log("== V-next settlement stack : DEPLOY ==");
         console2.log("mode:                ", i.mode);
         console2.log("chainId:             ", block.chainid);
         console2.log("deployer (gas only): ", vm.addr(deployerKey));
@@ -312,7 +337,7 @@ contract DeployVNextSettlement is Script {
         }
         require(predFactory.code.length > 0, "factory not present at the predicted address after deployment");
 
-        Tuple memory t = this.verify(predFactory);
+        Tuple memory t = _verify(predFactory);
         // `verify` re-derives from chain; cross-check it against what THIS run intended to deploy, so a
         // resumed run that finds pre-existing contracts cannot silently adopt someone else's cohort.
         require(t.primaryAttester == primary, "resumed factory is bound to a different primary attester");
@@ -382,23 +407,26 @@ contract DeployVNextSettlement is Script {
     //                                        ASSERTIONS
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-    /// @dev Everything that must hold BEFORE a single transaction is broadcast.
-    function _assertPreflight(Inputs memory i) internal view {
-        // The `--libraries` guard. Placed first on purpose: if the operator forgot the flag, `forge` will
-        // have queued an auto-deployment of a FRESH library, and reverting here means that transaction is
-        // never sent. A silently auto-deployed library would produce a different implementation codehash
-        // and a tuple nobody could reproduce.
+    /// @dev The guards that depend on nothing but the toolchain and the RPC. Run FIRST, and separately, so
+    ///      a misconfigured invocation cannot spend gas before it is caught.
+    function _assertToolchain() internal view {
+        // THE `--libraries` GUARD, and the most important assertion in this file.
+        //
+        // Forge links this script against a library it deploys itself at
+        // `create2(CREATE2_DEPLOYER, 0, keccak(libInitCode))`, taking the initcode from THIS compilation.
+        // Re-deriving that address from the artifact and requiring a match proves two things at once:
+        //   1. the build is linked at all;
+        //   2. it is linked to a library built from THIS compilation — not one supplied via
+        //      `--libraries`, whose value would have altered the metadata inside `libInitCode` and so
+        //      moved this computed address away from the supplied one. A stray flag therefore fails
+        //      HERE, before any broadcast, instead of surfacing as a `LinkedLibraryMismatch` revert
+        //      inside the factory's constructor with no explanation attached.
+        require(address(VNextSettlementLib) != address(0), "unlinked build");
         require(
-            address(VNextSettlementLib) != address(0),
-            "unlinked build - pass --libraries src/libraries/VNextSettlementLib.sol:VNextSettlementLib:<addr>"
+            address(VNextSettlementLib) == VNextDeploySpec.forgeLibraryAddress(keccak256(vm.getCode(LIB_ARTIFACT))),
+            "linked library is not the one forge builds from this compilation - do NOT pass --libraries"
         );
-        address expectedLib = VNextDeploySpec.create2Address(
-            VNextDeploySpec.librarySalt(i.mode), keccak256(vm.getCode(LIB_ARTIFACT))
-        );
-        require(
-            address(VNextSettlementLib) == expectedLib,
-            "linked library is not the phase-1 deterministic deployment for this mode"
-        );
+        // Independent confirmation for the case where the deployed code is not what the artifact says.
         _assertLinkedLibrary(address(VNextSettlementLib));
 
         require(
@@ -409,6 +437,11 @@ contract DeployVNextSettlement is Script {
             block.chainid == vm.envUint("VNEXT_EXPECT_CHAIN_ID"),
             "block.chainid != VNEXT_EXPECT_CHAIN_ID - wrong RPC for the intended network"
         );
+    }
+
+    /// @dev Everything else that must hold BEFORE a single transaction is broadcast.
+    function _assertPreflight(Inputs memory i) internal view {
+        _assertToolchain();
         require(i.usdc.code.length > 0, "settlement asset has no code on this chain");
         require(i.eas != address(0), "VNEXT_EAS is zero - the attester constructor rejects it");
 
@@ -481,14 +514,6 @@ contract DeployVNextSettlement is Script {
         for (uint256 k; k < 20; ++k) {
             template[1 + k] = bytes1(uint8(v >> (8 * (19 - k))));
         }
-    }
-
-    /// @dev True iff `b[at .. at+19]` is all zero — i.e. an UNFILLED link placeholder in the template.
-    function _isPlaceholder20(bytes memory b, uint256 at) private pure returns (bool) {
-        for (uint256 k; k < 20; ++k) {
-            if (uint8(b[at + k]) != 0) return false;
-        }
-        return true;
     }
 
     /// @dev The 20-byte address stored at `b[at .. at+19]`.
@@ -618,27 +643,30 @@ contract DeployVNextSettlement is Script {
         return VNextDeploySpec.contractSalt(i.mode, block.chainid, VNextDeploySpec.TAG_FACTORY, i.label);
     }
 
-    /// @dev Recover the linked library from an implementation's ON-CHAIN runtime. This build's escrow
-    ///      template carries exactly three `PUSH20 <20 zero bytes>` link sites; the same offsets in the
-    ///      deployed runtime hold the linked address. All three must agree, and the recovered address must
-    ///      satisfy the codehash relation — an address cannot be forged into that relation because it is
-    ///      inside the bytes being hashed.
-    function _recoverLinkedLibrary(address implementation) internal view returns (address lib) {
+    /// @notice Prove the ON-CHAIN implementation delegates to `lib`, and to nothing else, at every one of
+    ///         this build's library call sites.
+    /// @dev    WHAT THIS DOES AND DOES NOT CLAIM. `vm.getDeployedCode` hands back an ALREADY-LINKED
+    ///         template (forge resolves the placeholders before returning it), so there are no zero-filled
+    ///         placeholders left to scan for and "recover the library address from the bytecode" is not
+    ///         available. What IS available, and is stronger where it matters, is a direct count: scan the
+    ///         deployed runtime for `PUSH20 <lib>` and require exactly {LINK_SITES} occurrences — the 3
+    ///         `delegatecall` targets on the funding path. An implementation linked to a DIFFERENT library
+    ///         yields zero hits and aborts.
+    ///         So the honest statement of {verify}'s guarantee is: "this on-chain factory and
+    ///         implementation match THIS BUILD, including its library" — not "the tuple was reconstructed
+    ///         from an address with no other input". The build is an input, which is why the artifact
+    ///         records the solc version and optimizer settings alongside the addresses.
+    function _assertImplementationLinkedTo(address implementation, address lib) internal view {
         bytes memory template = vm.getDeployedCode(ESCROW_ARTIFACT);
         bytes memory onchain = implementation.code;
         require(template.length == onchain.length, "implementation runtime length != this build's escrow");
-        uint256 found;
-        for (uint256 p; p + 21 <= template.length; ++p) {
-            // A link site is a `PUSH20` whose operand is still an unfilled placeholder in the template.
-            if (uint8(template[p]) != 0x73) continue;
-            if (!_isPlaceholder20(template, p + 1)) continue;
-            address candidate = _readAddress20(onchain, p + 1);
-            if (found == 0) lib = candidate;
-            else require(candidate == lib, "implementation link sites disagree on the library address");
-            found++;
+        uint256 hits;
+        for (uint256 p; p + 21 <= onchain.length; ++p) {
+            if (uint8(onchain[p]) != 0x73) continue;
+            if (_readAddress20(onchain, p + 1) == lib) hits++;
         }
-        require(found == LINK_SITES, "unexpected number of library link sites in the escrow runtime");
-        require(lib != address(0), "implementation is unlinked");
+        console2.log("library call sites found in the deployed implementation:", hits);
+        require(hits == LINK_SITES, "implementation does not delegate to this build's library at every site");
     }
 
     function _guardAgainstRivalDeployment(Inputs memory i, address predictedFactory) internal view {
@@ -652,12 +680,24 @@ contract DeployVNextSettlement is Script {
         );
     }
 
+    /// @dev A DRY RUN writes to a `DRYRUN-` path, never to the deployment record.
+    ///      Forge executes the script body in full whether or not `--broadcast` is passed, so without this
+    ///      split a simulation would leave a file asserting a deployment that does not exist — and would
+    ///      poison {_guardAgainstRivalDeployment}, whose whole job is to refuse a second deployment. The
+    ///      dry-run tuple is still written, because producing a reviewable tuple before anything is spent
+    ///      is the point of the dry run; it is just kept where it cannot be mistaken for the real record.
     function _artifactPath(Inputs memory i) internal view returns (string memory) {
         string memory dir = string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid), "/");
+        string memory prefix = _isBroadcasting() ? "" : "DRYRUN-";
         if (keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL))) {
-            return string.concat(dir, "PROVISIONAL-", i.label, ".json");
+            return string.concat(dir, prefix, "PROVISIONAL-", i.label, ".json");
         }
-        return string.concat(dir, "CANONICAL.json");
+        return string.concat(dir, prefix, "CANONICAL.json");
+    }
+
+    function _isBroadcasting() internal view returns (bool) {
+        return vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)
+            || vm.isContext(VmSafe.ForgeContext.ScriptResume);
     }
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
@@ -668,6 +708,9 @@ contract DeployVNextSettlement is Script {
         vm.serializeBool(j, "doNotPin", !canonical);
         vm.serializeString(j, "mode", i.mode);
         vm.serializeString(j, "label", i.label);
+        // A simulated tuple is REAL data about what a deploy would produce, and NOT evidence that anything
+        // exists on chain. Both facts belong in the file.
+        vm.serializeBool(j, "broadcast", _isBroadcasting());
         vm.serializeString(
             j,
             "provisionalTagOnChain",
@@ -701,6 +744,9 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
+        // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
+        // but failed to record its tuple is the worst outcome available here.
+        vm.createDir(string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
     }
