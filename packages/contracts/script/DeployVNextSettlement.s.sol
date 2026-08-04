@@ -64,9 +64,11 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *       (`:614`, `:619`). A failure of ANY of them reverts the whole transaction, so a factory that
  *       exists at all necessarily passed all five. There is no half-built factory.
  *   RESUMABLE (idempotent per contract):
- *     - all four CREATE2 deployments. Each predicted address is checked for code first and skipped if
+ *     - every CREATE2 deployment this script performs (both attesters, the factory, and the throwaway
+ *       token in provisional mode). Each predicted address is checked for code first and skipped if
  *       occupied, so a run interrupted after the attesters resumes into the factory instead of deploying
- *       rival attesters.
+ *       rival attesters. Verified: a second broadcast logs "already deployed - skipping" for each and
+ *       ends with "No transactions to broadcast".
  *   THE ONE WAY TO GET A SECOND VALID-LOOKING DEPLOYMENT, and its guard:
  *     - re-running with DIFFERENT constructor inputs yields a DIFFERENT address (the args are inside the
  *       initcode hash). {_guardAgainstRivalDeployment} refuses that: if an artifact already exists for
@@ -208,9 +210,7 @@ contract DeployVNextSettlement is Script {
     function provisional() external {
         string memory label = vm.envString("VNEXT_LABEL");
         require(bytes(label).length > 0, "VNEXT_LABEL is required for a provisional deployment");
-        require(
-            block.chainid != VNextDeploySpec.CHAIN_BASE, "provisional deployments are forbidden on Base mainnet"
-        );
+        require(block.chainid != VNextDeploySpec.CHAIN_BASE, "provisional deployments are forbidden on Base mainnet");
         Inputs memory i = _readInputs(VNextDeploySpec.MODE_PROVISIONAL, label);
         // Toolchain guards run BEFORE the throwaway token is deployed, so a misconfigured invocation
         // (unlinked build, missing CREATE2 proxy, wrong RPC) costs nothing at all.
@@ -320,12 +320,13 @@ contract DeployVNextSettlement is Script {
         console2.log("deployer (gas only): ", vm.addr(deployerKey));
         console2.log("library (linked):    ", address(VNextSettlementLib));
 
-        // ── 3. attesters — two separate deployments, disjoint revokers (H-02) ───────────────────────
+        // ── 2. attesters — two separate deployments, disjoint revokers (H-02) ───────────────────────
+        //      (step 1, the library, was already deployed by forge before this function ran.)
         address primary = _deployAttester(deployerKey, i, i.primary, VNextDeploySpec.TAG_PRIMARY_ATTESTER, predPrimary);
         address escalation =
             _deployAttester(deployerKey, i, i.escalation, VNextDeploySpec.TAG_ESCALATION_ATTESTER, predEscalation);
 
-        // ── 4. factory — ONE transaction that also builds the implementation and runs all five gates ─
+        // ── 3. factory — ONE transaction that also builds the implementation and runs all five gates ─
         if (predFactory.code.length == 0) {
             vm.startBroadcast(deployerKey);
             new VNextSettlementEscrowFactory{salt: _factorySalt(i)}(
@@ -696,8 +697,7 @@ contract DeployVNextSettlement is Script {
     }
 
     function _isBroadcasting() internal view returns (bool) {
-        return vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)
-            || vm.isContext(VmSafe.ForgeContext.ScriptResume);
+        return vm.isContext(VmSafe.ForgeContext.ScriptBroadcast) || vm.isContext(VmSafe.ForgeContext.ScriptResume);
     }
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
@@ -806,10 +806,10 @@ contract DeployVNextSettlement is Script {
         i.schemaUid = vm.envBytes32("VNEXT_O5_SCHEMA_UID");
         i.attesterType = block.chainid == VNextDeploySpec.CHAIN_BASE
             ? AttesterType.FIXED_2OF3
-            : (
-                keccak256(bytes(vm.envOr("VNEXT_ATTESTER_TYPE", string("SINGLE_SIGNER"))))
-                    == keccak256(bytes("FIXED_2OF3")) ? AttesterType.FIXED_2OF3 : AttesterType.SINGLE_SIGNER
-            );
+            : (keccak256(bytes(vm.envOr("VNEXT_ATTESTER_TYPE", string("SINGLE_SIGNER"))))
+                    == keccak256(bytes("FIXED_2OF3"))
+                    ? AttesterType.FIXED_2OF3
+                    : AttesterType.SINGLE_SIGNER);
         i.primary = _readCohort("VNEXT_PRIMARY_", i.attesterType);
         i.escalation = _readCohort("VNEXT_ESCALATION_", i.attesterType);
     }
@@ -853,7 +853,6 @@ contract DeployVNextSettlement is Script {
         console2.log("artifact:", _artifactPath(i));
         console2.log("re-derive from the factory alone: --sig 'verify(address)'");
     }
-
 }
 
 /// @dev The read-only slice of {IOracleAttester} + {O5AttesterBase} this script needs. Declared locally so

@@ -3,8 +3,8 @@ pragma solidity ^0.8.24;
 
 /**
  * @title VNextDeploySpec
- * @notice The deterministic-deployment SPEC shared by both V-next deploy phases: salt derivation,
- *         mode namespacing, the provisional cohort band, and CREATE2 address math.
+ * @notice The deterministic-deployment SPEC for the V-next settlement stack: salt derivation, mode
+ *         namespacing, the provisional cohort band, and CREATE2 address math.
  *
  * @dev    DELIBERATELY IMPORTS NOTHING FROM `src/`, so this spec can be read, reviewed and reused without
  *         dragging in the escrow's link requirement.
@@ -17,7 +17,7 @@ pragma solidity ^0.8.24;
  *           1. RESUMABLE — a re-run recomputes the same addresses, finds the already-deployed prefix,
  *              and skips it. A partial run is completed, never duplicated.
  *           2. NO SECOND VALID-LOOKING DEPLOYMENT — identical inputs can only ever produce the identical
- *              address. Different inputs produce a DIFFERENT address, which the artifact guard in phase 2
+ *              address. Different inputs produce a DIFFERENT address, which the deploy script's guard
  *              refuses rather than silently publishing as a rival deployment.
  *           3. KEY-INDEPENDENT — the proxy is the CREATE2 sender, so the resulting addresses do not
  *              depend on which key ran the script. The tuple can therefore be reviewed and agreed BEFORE
@@ -27,8 +27,8 @@ library VNextDeploySpec {
     // ── The canonical deterministic-deployment proxy ────────────────────────────────────────────────
     /// @notice `0x4e59b44847b379578588920cA78FbF26c0B4956C` — the proxy `forge` routes `new X{salt: s}()`
     ///         through while broadcasting, and the CREATE2 sender every address here is computed against.
-    /// @dev    VERIFY IT EXISTS ON THE TARGET CHAIN BEFORE DEPLOYING. Both scripts assert
-    ///         `CREATE2_DEPLOYER.code.length > 0` and abort otherwise, because a missing proxy silently
+    /// @dev    VERIFY IT EXISTS ON THE TARGET CHAIN BEFORE DEPLOYING. The deploy script asserts
+    ///         `CREATE2_DEPLOYER.code.length > 0` and aborts otherwise, because a missing proxy silently
     ///         changes the CREATE2 sender and therefore every address in the published tuple.
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -126,9 +126,8 @@ library VNextDeploySpec {
 
     /// @notice CREATE2 address for `initCodeHash` under `salt`, deployed by {CREATE2_DEPLOYER}.
     function create2Address(bytes32 salt, bytes32 initCodeHash) internal pure returns (address) {
-        return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), CREATE2_DEPLOYER, salt, initCodeHash))))
-        );
+        return
+            address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), CREATE2_DEPLOYER, salt, initCodeHash)))));
     }
 
     /// @notice True iff `cohortId` sits in the provisional band.
