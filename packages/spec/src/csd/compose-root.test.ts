@@ -536,3 +536,44 @@ describe("inc-3a §7 rejection rules", () => {
     expect(root1).toHaveLength(32);
   });
 });
+
+// ---------------------------------------------------------------------------
+// re-audit F1 (HIGH): a missing required Option<T> field must REJECT (§7 "missing
+// required fields"), not be silently coerced to Option-None. Only an explicit
+// `null` value encodes 0x00. Closes the gap where an omitted feeId / lowerTolerance
+// / upperTolerance key read as `undefined` and hashed as None — an input two
+// conformant implementations could disagree on (one rejects, one hashes).
+// ---------------------------------------------------------------------------
+
+describe("inc-3a re-audit F1: missing required Option field rejects (not coerced to None)", () => {
+  it("non-fee allocation with the feeId KEY omitted -> MISSING_FIELD (was silently Option-None)", () => {
+    const { plan, m1 } = fixtureA();
+    delete (plan.settlementUnits[0].outcomes[0].allocations[0] as unknown as Record<string, unknown>).feeId;
+    expectReject(() => deriveCompositionRoot(plan, m1), "MISSING_FIELD");
+  });
+
+  it("non-fee allocation with feeId: undefined -> ALLOC_FEE_PRESENT (only explicit null is None)", () => {
+    const { plan, m1 } = fixtureA();
+    (plan.settlementUnits[0].outcomes[0].allocations[0] as { feeId: unknown }).feeId = undefined;
+    expectReject(() => deriveCompositionRoot(plan, m1), "ALLOC_FEE_PRESENT");
+  });
+
+  it("acceptance criterion with the lowerTolerance KEY omitted -> MISSING_FIELD", () => {
+    const { plan, m1 } = fixtureA();
+    delete (plan.settlementUnits[0].acceptancePolicy.criteria[0] as unknown as Record<string, unknown>).lowerTolerance;
+    expectReject(() => deriveCompositionRoot(plan, m1), "MISSING_FIELD");
+  });
+
+  it("acceptance criterion with upperTolerance: undefined -> rejects (not silently None)", () => {
+    const { plan, m1 } = fixtureA();
+    (plan.settlementUnits[0].acceptancePolicy.criteria[0] as { upperTolerance: unknown }).upperTolerance = undefined;
+    expect(() => deriveCompositionRoot(plan, m1)).toThrow(CompositionRootError);
+  });
+
+  it("byte-neutral: valid fixtures (explicit null Option fields) still hit the pinned golden root", () => {
+    const { plan, m1 } = fixtureA();
+    expect(digestToHex(deriveCompositionRoot(plan, m1))).toBe(
+      "3292178be141f918a5f78db7fee784c120d9a992e29070ed1b931fd23dfadb5e",
+    );
+  });
+});

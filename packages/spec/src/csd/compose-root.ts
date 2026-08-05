@@ -172,6 +172,20 @@ function assertExactKeys(v: object, allowed: readonly string[], ctx: string): vo
   }
 }
 
+// Spec §7 "missing required fields": every listed key must be an own-property.
+// assertExactKeys only rejects EXTRA keys; a nullable-but-required Option<T> field
+// (feeId, lowerTolerance, upperTolerance) whose key is simply absent would otherwise
+// read as `undefined` and be silently coerced to Option-None (0x00) — accepting a
+// malformed input two conformant implementations could disagree on (one rejects, one
+// hashes). Presence is required here; only an explicit `null` value means Option-None.
+function assertRequiredKeys(v: object, required: readonly string[], ctx: string): void {
+  for (const k of required) {
+    if (!Object.prototype.hasOwnProperty.call(v, k)) {
+      reject("MISSING_FIELD", `${ctx}: missing required field '${k}'`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // §1.2 Identifiers, paths, ASCII
 // ---------------------------------------------------------------------------
@@ -810,6 +824,7 @@ interface FeeInfo {
 function encodeTransferAllocation(a: TransferAllocationInput, ctx: string, feeMap: Map<string, FeeInfo>): Uint8Array {
   assertObject(a, ctx);
   assertExactKeys(a, ["allocationId", "role", "recipient", "amount", "feeId"], ctx);
+  assertRequiredKeys(a, ["allocationId", "role", "recipient", "amount", "feeId"], ctx);
   const role = a.role;
   if (role !== 1 && role !== 2 && role !== 3 && role !== 4) reject("ROLE_TAG", `${ctx}: unknown role ${role}`);
   const recipientBytes = encodePrincipal(a.recipient, `${ctx}.recipient`);
@@ -823,7 +838,9 @@ function encodeTransferAllocation(a: TransferAllocationInput, ctx: string, feeMa
     if (fee.amount !== a.amount) reject("ALLOC_FEE_AMOUNT", `${ctx}: fee amount mismatch`);
     feeOption = optionSome(encodeId(a.feeId, `${ctx}.feeId`));
   } else {
-    if (a.feeId !== null && a.feeId !== undefined) reject("ALLOC_FEE_PRESENT", `${ctx}: non-fee role must not carry a feeId`);
+    // key presence guaranteed above; only an explicit null encodes Option-None —
+    // a present `undefined` (or any value) on a non-fee role rejects.
+    if (a.feeId !== null) reject("ALLOC_FEE_PRESENT", `${ctx}: non-fee role must set feeId to null, not ${a.feeId === undefined ? "undefined" : "a value"}`);
     feeOption = optionNone();
   }
   return concat(encodeId(a.allocationId, `${ctx}.allocationId`), u8(role), lp32(recipientBytes), u256(a.amount), feeOption);
@@ -942,6 +959,11 @@ function encodeAcceptanceCriterion(c: AcceptanceCriterionInput, ctx: string): Ui
     ["criterionId", "requirementReferences", "metricId", "metricParameters", "comparator", "target", "lowerTolerance", "upperTolerance", "minPassingEvidence", "authority"],
     ctx,
   );
+  assertRequiredKeys(
+    c,
+    ["criterionId", "requirementReferences", "metricId", "metricParameters", "comparator", "target", "lowerTolerance", "upperTolerance", "minPassingEvidence", "authority"],
+    ctx,
+  );
   const refs = c.requirementReferences;
   if (!Array.isArray(refs) || refs.length < 1) reject("CRITERION_REFS", `${ctx}: requirementReferences must be nonempty`);
   if (refs.length > U16_MAX) reject("CRITERION_REFS_COUNT", `${ctx}: too many requirement references`);
@@ -957,8 +979,11 @@ function encodeAcceptanceCriterion(c: AcceptanceCriterionInput, ctx: string): Ui
   }
   if (!COMPARATORS.has(c.comparator)) reject("CRITERION_COMPARATOR_TAG", `${ctx}: unknown comparator ${c.comparator}`);
   if (!Number.isInteger(c.minPassingEvidence) || c.minPassingEvidence < 1) reject("CRITERION_MIN_PASS", `${ctx}: minPassingEvidence >= 1`);
-  const lowerOpt = c.lowerTolerance === null || c.lowerTolerance === undefined ? optionNone() : optionSome(encodeValue(c.lowerTolerance, `${ctx}.lowerTolerance`));
-  const upperOpt = c.upperTolerance === null || c.upperTolerance === undefined ? optionNone() : optionSome(encodeValue(c.upperTolerance, `${ctx}.upperTolerance`));
+  // key presence guaranteed above; only an explicit null encodes Option-None. A
+  // missing key already rejected (MISSING_FIELD); a present `undefined` falls through
+  // to encodeValue and rejects — never silently coerced to None.
+  const lowerOpt = c.lowerTolerance === null ? optionNone() : optionSome(encodeValue(c.lowerTolerance, `${ctx}.lowerTolerance`));
+  const upperOpt = c.upperTolerance === null ? optionNone() : optionSome(encodeValue(c.upperTolerance, `${ctx}.upperTolerance`));
   return concat(
     encodeId(c.criterionId, `${ctx}.criterionId`),
     u16(refs.length),
