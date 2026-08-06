@@ -267,6 +267,16 @@ contract DeployVNextSettlement is Script {
         // Toolchain guards run BEFORE the throwaway token is deployed, so a misconfigured invocation
         // (unlinked build, missing CREATE2 proxy, wrong RPC) costs nothing at all.
         _assertToolchain();
+        // GATE 1 + GATE 2 run here too, for the same reason and to keep that promise literal: the token
+        // deployment below is a BROADCAST, and `_deploy`'s copy of these gates sits after it. Neither
+        // cohort address depends on the settlement asset — {_predictAttester} hashes the signer set, EAS,
+        // schema, cohort id and revoker, never `usdc` — so both gates are fully answerable before a single
+        // transaction is sent, and a cohort pair that shares a quorum (or is already dead) costs nothing.
+        _assertInputRouteDiversity(i);
+        _assertCohortsBeforeBroadcast(
+            _predictAttester(i, i.primary, VNextDeploySpec.TAG_PRIMARY_ATTESTER),
+            _predictAttester(i, i.escalation, VNextDeploySpec.TAG_ESCALATION_ATTESTER)
+        );
         i.usdc = _deployProvisionalUsdc(label);
         _deploy(i);
     }
