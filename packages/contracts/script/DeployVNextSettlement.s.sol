@@ -781,7 +781,13 @@ contract DeployVNextSettlement is Script {
         return ok && ret.length == 32;
     }
 
-    function _signerOverlapAllowed() internal view returns (bool) {
+    /// @dev `virtual` for ONE reason: it is the only part of GATE 1 that reads HOST process state rather
+    ///      than chain state, and `forge` executes tests within a suite in PARALLEL against a single shared
+    ///      environment - so a test suite that drove this flag with `vm.setEnv` would race with itself.
+    ///      (Measured before the seam existed: 3 of 5 identical runs failed, on unmutated code.) Overriding
+    ///      it in a test harness moves the flag into EVM state, which forge does isolate per test. The
+    ///      production reader below is still pinned by one dedicated test that owns the variable.
+    function _signerOverlapAllowed() internal view virtual returns (bool) {
         return vm.envOr("VNEXT_ALLOW_SIGNER_OVERLAP", uint256(0)) == 1;
     }
 
