@@ -165,8 +165,8 @@ contract DeployVNextSettlement is Script {
     uint256 internal constant PROVISIONAL_USDC_SUPPLY = 1_000_000e6;
 
     /// @dev The quorum size of each concrete attester, restated. Neither is readable on chain: the 2-of-3
-    ///      rule is a `private constant` (`Fixed2of3O5Attester.sol:16`) and the single-signer rule is a
-    ///      literal inside `_verifySignatures` (`SingleSignerO5Attester.sol:29-31`) — there is no getter to
+    ///      rule is a `private constant` (`Fixed2of3O5Attester.sol:17`) and the single-signer rule is a
+    ///      literal inside `_verifySignatures` (`SingleSignerO5Attester.sol:30-31`) — there is no getter to
     ///      probe, so a restatement here is unavoidable if the script is to reason about quorums at all.
     ///      The restatement is NOT unverified: the existing suite pins both numbers empirically —
     ///      `test/Fixed2of3O5Attester.t.sol:302` (2 sigs assert), `:338` (1 sig reverts), `:346` (3 sigs
@@ -728,7 +728,7 @@ contract DeployVNextSettlement is Script {
     }
 
     /// @dev `|a ∩ b|`. Each DISTINCT member of `a` is counted at most once. Both attester constructors
-    ///      already reject duplicates (`Fixed2of3O5Attester.sol:32`), but an intersection count has to be
+    ///      already reject duplicates (`Fixed2of3O5Attester.sol:33`), but an intersection count has to be
     ///      correct on its own terms rather than by borrowing another contract's invariant.
     function _routeOverlap(Route memory a, Route memory b) internal pure returns (uint256 n) {
         for (uint256 x; x < a.size; ++x) {
