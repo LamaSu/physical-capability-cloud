@@ -66,5 +66,15 @@ const neg = [
 ];
 let ok = true;
 for (const [label, a] of neg) { const c = re(a).toLowerCase() !== evidenceCommitment.toLowerCase(); ok = ok && c; console.log(`${c ? 'PASS' : 'FAIL'}  negative-parity: ${label}`); }
-console.log(`\n${ok ? 'evidenceCommitment GOLDEN + negative parity: OK' : 'evidenceCommitment GOLDEN: DIVERGENCE -- blocker'}`);
+// ── pinned-golden PARITY (S6: assert the RATIFIED output, not just field-sensitivity) ──
+const EXPECT = {
+  settlementUnitId:   '0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1', // == gate-1 golden unit
+  packageDigest:      '0x97a0f8074d69fa7a3ffebad9458fa0f9995d465d58fbf53547b1c3ffd231d753', // SHA-256("golden-package")
+  evidenceCommitment: '0xcf9029ea219c3200613b552845676f519d98ca7c52eca17b049197209b6099a0', // 3-way ratified (oracle a5789f5)
+};
+for (const [k, v] of [['settlementUnitId', settlementUnitId], ['packageDigest', packageDigest], ['evidenceCommitment', evidenceCommitment]]) {
+  const pass = v.toLowerCase() === EXPECT[k].toLowerCase(); ok = ok && pass;
+  console.log(`${pass ? 'PASS' : 'FAIL'}  pinned-golden ${k} == ${EXPECT[k]}`);
+}
+console.log(`\n${ok ? 'evidenceCommitment GOLDEN + PARITY + negative parity: OK' : 'evidenceCommitment GOLDEN: DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);

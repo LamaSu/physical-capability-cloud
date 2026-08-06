@@ -74,5 +74,15 @@ for (const [label, h] of neg) {
   ok = ok && changed;
   console.log(`${changed ? 'PASS' : 'FAIL'}  negative-parity: ${label}`);
 }
-console.log(`\n${ok ? 'termsHash GOLDEN v2.1 + negative parity: OK' : 'termsHash GOLDEN: DIVERGENCE -- blocker'}`);
+// ── pinned-golden PARITY (S6: assert the RATIFIED output, not just field-sensitivity) ──
+const EXPECT = {
+  TERMS_DOMAIN:   '0xaf4cf568beb02a9dca015909829c12f5eb22b355111bdf85603e98da8a43c141',
+  milestonesRoot: '0xf7147855908c6b7e33a27556c9662c07c15ca6ef4b6bfbccbc8d634634409388',
+  termsHash:      '0x2cb7a79e45cbb5b78b61dbbcc182b2f27ac7991b055a66ef58457459dc2f4fe6', // golden #504 (ratified)
+};
+for (const [k, v] of [['TERMS_DOMAIN', TERMS_DOMAIN], ['milestonesRoot', milestonesRoot], ['termsHash', termsHash]]) {
+  const pass = v.toLowerCase() === EXPECT[k].toLowerCase(); ok = ok && pass;
+  console.log(`${pass ? 'PASS' : 'FAIL'}  pinned-golden ${k} == ${EXPECT[k]}`);
+}
+console.log(`\n${ok ? 'termsHash GOLDEN v2.1 + PARITY + negative parity: OK' : 'termsHash GOLDEN: DIVERGENCE -- blocker'}`);
 process.exit(ok ? 0 : 1);
