@@ -52,6 +52,23 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   re-derives the address forge should have chosen and aborts if it disagrees, so a stray `--libraries`
  *   is caught before anything is broadcast rather than at the factory's revert.
  *
+ * ══ THE TWO GATES NO CONSTRUCTOR CAN ENFORCE ════════════════════════════════════════════════════
+ *   Both are DEPLOYMENT INVARIANTS, both abort BEFORE any broadcast, and both exist here because the
+ *   escrow structurally cannot check them (see the block comments above {_assertInputRouteDiversity} and
+ *   {_assertCohortsBeforeBroadcast} for the full reasoning).
+ *     GATE 1 — ROUTE DIVERSITY (§2.5). The escrow enforces `escalation != oracle` and distinct revokers;
+ *       neither implies independent DECISION ROUTES, because two different attester ADDRESSES can hold
+ *       the same immutable signer set. Rule: abort if the two cohorts' signer sets intersect in
+ *       `min(thresholdPrimary, thresholdEscalation)` or more members — i.e. if any group large enough to
+ *       reach quorum on one route also sits on the other. Launch policy is FULLY DISJOINT sets;
+ *       sub-quorum overlap needs `VNEXT_ALLOW_SIGNER_OVERLAP=1`, and no flag ever permits a shared quorum.
+ *       Enforced from the inputs in `predict()`/`_assertPreflight`, from chain state in `verify()`.
+ *     GATE 2 — BOTH COHORTS ALIVE. A cohort that was already `disable()`d passes the factory constructor
+ *       and leaves the whole stack unfundable forever. Asserted (`enabled()` and `disabledAt() == 0`)
+ *       against every predicted cohort address that already holds code, before the first transaction.
+ *   Both results are written into the artifact — `signerSetIntersection`, `quorumFloor`,
+ *   `primaryEnabled`, `escalationEnabled` — so a reviewer reads the numbers instead of trusting a claim.
+ *
  * ══ WHAT IS ATOMIC / WHAT IS RESUMABLE ══════════════════════════════════════════════════════════
  *   IDEMPOTENT-BY-FORGE:
  *     - the library. Deployed via CREATE2 at salt 0 from this compilation's initcode, and skipped
@@ -120,6 +137,10 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   VNEXT_PRIMARY_REVOKER     kill-switch holder. Must not be a signer (attester ctor enforces).
  *   VNEXT_ESCALATION_SIGNER_0..2 / VNEXT_ESCALATION_REVOKER  same, for the escalation cohort. The revoker
  *                             MUST differ from the primary's — H-02 (`VNextSettlementEscrow.sol:609`).
+ *   VNEXT_ALLOW_SIGNER_OVERLAP  optional, default 0. GATE 1's opt-in. `1` permits SUB-QUORUM overlap
+ *                             between the two cohorts' signer sets; the quorum rule
+ *                             (`|intersection| < min(thresholds)`) is NOT overridable by it. Recorded in
+ *                             the artifact as `signerOverlapExplicitlyAllowed`.
  *   VNEXT_ATTESTER_TYPE       "FIXED_2OF3" | "SINGLE_SIGNER". Forced to FIXED_2OF3 on Base mainnet.
  *   VNEXT_LABEL               provisional() only. Names the throwaway run.
  *   VNEXT_ALLOW_UNKNOWN_CHAIN set to 1 to permit a chain that is neither Base nor Base Sepolia (anvil).
@@ -143,9 +164,29 @@ contract DeployVNextSettlement is Script {
     /// @dev Supply minted by the throwaway settlement asset a provisional deployment uses.
     uint256 internal constant PROVISIONAL_USDC_SUPPLY = 1_000_000e6;
 
+    /// @dev The quorum size of each concrete attester, restated. Neither is readable on chain: the 2-of-3
+    ///      rule is a `private constant` (`Fixed2of3O5Attester.sol:16`) and the single-signer rule is a
+    ///      literal inside `_verifySignatures` (`SingleSignerO5Attester.sol:29-31`) — there is no getter to
+    ///      probe, so a restatement here is unavoidable if the script is to reason about quorums at all.
+    ///      The restatement is NOT unverified: the existing suite pins both numbers empirically —
+    ///      `test/Fixed2of3O5Attester.t.sol:302` (2 sigs assert), `:338` (1 sig reverts), `:346` (3 sigs
+    ///      revert); `:479` (1 sig asserts), `:495` (2 sigs revert). A change to either quorum turns those
+    ///      tests red, which is the drift alarm these constants would otherwise lack.
+    uint256 internal constant FIXED_2OF3_THRESHOLD = 2;
+    uint256 internal constant SINGLE_SIGNER_THRESHOLD = 1;
+
     enum AttesterType {
         FIXED_2OF3,
         SINGLE_SIGNER
+    }
+
+    /// @notice A cohort's DECISION ROUTE: who can sign, and how many of them a verdict needs.
+    /// @dev    `signers[0..size-1]` are the live members; `threshold` is the quorum. Two cohorts at
+    ///         different ADDRESSES can still share a route, which is the whole point of {_routeDiversity}.
+    struct Route {
+        address[3] signers;
+        uint256 size;
+        uint256 threshold;
     }
 
     struct CohortInput {
@@ -180,6 +221,17 @@ contract DeployVNextSettlement is Script {
         bytes32 typeHash;
         uint64 primaryCohortId;
         uint64 escalationCohortId;
+        // ── Deploy-gate results. Diagnostics, deliberately OUTSIDE {_digest}'s fifteen-word preimage. ──
+        //    They are not signed into the digest because they do not need to be: {verify} RE-DERIVES and
+        //    RE-ENFORCES both gates from chain state, so a doctored artifact field is contradicted by the
+        //    next `--sig 'verify(address)'` run rather than merely mismatching a hash. Adding them to the
+        //    preimage would also silently re-address every previously published digest.
+        uint256 signerOverlap;
+        uint256 quorumFloor;
+        bool primaryEnabled;
+        bool escalationEnabled;
+        uint64 primaryDisabledAt;
+        uint64 escalationDisabledAt;
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -232,6 +284,9 @@ contract DeployVNextSettlement is Script {
         i.usdc = keccak256(bytes(mode)) == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL))
             ? _predictProvisionalUsdc(label)
             : vm.envAddress("VNEXT_USDC");
+        // GATE 1 at the input level, here too: predicting and circulating addresses for a cohort pair that
+        // could ratify its own appeal is precisely the review artifact that should never exist.
+        _assertInputRouteDiversity(i);
         (address primary, address escalation, address factory) = _predictAll(i);
         console2.log("== V-next settlement stack : PREDICT ==");
         console2.log("mode:                ", i.mode);
@@ -297,6 +352,14 @@ contract DeployVNextSettlement is Script {
 
         _assertLinkedLibrary(t.settlementLib);
         _assertCohortSeparation(t.primaryAttester, t.escalationAttester);
+        // GATE 1, re-derived from chain state alone. This is what makes route diversity checkable by a
+        // reviewer who holds only the factory address and this build — no artifact, no env, no trust.
+        (t.signerOverlap, t.quorumFloor) = _assertOnChainRouteDiversity(t.primaryAttester, t.escalationAttester);
+        // GATE 2's readings, recorded so the artifact can state them rather than imply them.
+        t.primaryEnabled = IAttesterView(t.primaryAttester).enabled();
+        t.escalationEnabled = IAttesterView(t.escalationAttester).enabled();
+        t.primaryDisabledAt = IAttesterView(t.primaryAttester).disabledAt();
+        t.escalationDisabledAt = IAttesterView(t.escalationAttester).disabledAt();
         _assertPins(f, t.primaryAttester, t.schemaUid);
         _assertNetworkPolicy(t.primaryAttester, t.escalationAttester);
     }
@@ -312,6 +375,9 @@ contract DeployVNextSettlement is Script {
         _assertPreflight(i);
 
         (address predPrimary, address predEscalation, address predFactory) = _predictAll(i);
+        // GATE 1 + GATE 2 against whatever is ALREADY on chain at the predicted addresses. Still
+        // pre-broadcast: the first `vm.startBroadcast` is inside `_deployAttester`, below.
+        _assertCohortsBeforeBroadcast(predPrimary, predEscalation);
         _guardAgainstRivalDeployment(i, predFactory);
 
         console2.log("== V-next settlement stack : DEPLOY ==");
@@ -449,7 +515,10 @@ contract DeployVNextSettlement is Script {
         // Cohort inputs, checked before they can waste a deployment.
         require(i.primary.cohortId != i.escalation.cohortId, "primary and escalation share a cohort id");
         require(i.primary.revoker != i.escalation.revoker, "H-02: the two cohorts share a kill-switch holder");
-        _assertDisjointSigners(i);
+        // GATE 1 at the input level — the only level available before either cohort exists. Additional to
+        // the distinct-revoker check above, never a replacement for it: a shared revoker and a shared
+        // quorum are different failures.
+        _assertInputRouteDiversity(i);
 
         // Mode <-> cohort band. This is the tag that survives reading only the artifact, so it is enforced
         // rather than documented.
@@ -569,17 +638,196 @@ contract DeployVNextSettlement is Script {
         return ok && ret.length == 32;
     }
 
-    /// @dev §2.5 route diversity: an appeal decided by the same keys that made the primary verdict is not
-    ///      an appeal. No constructor can see both signer sets, so this is enforced here.
-    function _assertDisjointSigners(Inputs memory i) internal pure {
-        address[3] memory a = [i.primary.signer0, i.primary.signer1, i.primary.signer2];
-        address[3] memory b = [i.escalation.signer0, i.escalation.signer1, i.escalation.signer2];
-        uint256 n = i.attesterType == AttesterType.FIXED_2OF3 ? 3 : 1;
-        for (uint256 x; x < n; ++x) {
-            for (uint256 y; y < n; ++y) {
-                require(a[x] != b[y], "cohort signer sets overlap - the escalation route is not independent");
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //                     GATE 1 — ROUTE DIVERSITY (§2.5). A DEPLOYMENT INVARIANT.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // WHY THIS CANNOT LIVE IN THE ESCROW, and therefore MUST live here.
+    //   `VNextSettlementEscrow`'s constructor enforces `escalation != oracle` (`:574`) and distinct
+    //   revokers (`:609`). Neither implies route diversity: two DIFFERENT attester ADDRESSES can hold the
+    //   SAME signer set, and both sets are immutable, so address inequality proves nothing about who
+    //   actually decides. If the sets overlap enough to form a quorum on both routes, the "appeal" is the
+    //   primary reviewing itself and §2.5 is silently unsatisfied while every on-chain check still passes.
+    //   The escrow deliberately cannot close this: the signer getters belong to the CONCRETE attester
+    //   (`Fixed2of3O5Attester.signer0/1/2`, `SingleSignerO5Attester.signer`), not to `IOracleAttester`, and
+    //   requiring them would forbid every other quorum shape the interface is meant to admit. So the
+    //   invariant is mechanical HERE or nowhere — and "nowhere" is what the audit found.
+    //
+    // THE RULE: no quorum-sized group can control both routes.
+    //   abort if  |primary.signers ∩ escalation.signers|  >=  min(primary.threshold, escalation.threshold)
+    //   Taking the MINIMUM is the load-bearing choice: a 2-of-3 primary appealed to a 1-of-1 escalation is
+    //   captured by ONE shared key, so the floor must be that route's 1, not the primary's 2.
+    //
+    // THE LAUNCH POLICY: fully disjoint by default.
+    //   Any overlap at all — even a sub-quorum one — needs an explicit `VNEXT_ALLOW_SIGNER_OVERLAP=1`.
+    //   The threshold rule above still applies with the flag set; the flag buys sub-quorum overlap, never
+    //   a shared quorum. One shared key in a 2-of-3 pair is one compromise away from being a shared
+    //   quorum, so it is a deliberate act with a name on it, not a default.
+
+    /// @dev Enforce {GATE 1} against the CONFIGURED INPUTS, before any cohort exists. Returns the measured
+    ///      `(overlap, quorumFloor)` so callers can surface them.
+    function _assertInputRouteDiversity(Inputs memory i) internal view returns (uint256, uint256) {
+        return _routeDiversity(
+            _routeOfInput(i.primary, i.attesterType), _routeOfInput(i.escalation, i.attesterType), "configured inputs"
+        );
+    }
+
+    /// @dev Enforce {GATE 1} against two DEPLOYED cohorts, reading each signer set from the concrete
+    ///      attester type. This is the form `verify(address)` uses, so a reviewer holding nothing but a
+    ///      factory address re-runs the invariant against chain state.
+    function _assertOnChainRouteDiversity(address primary, address escalation)
+        internal
+        view
+        returns (uint256, uint256)
+    {
+        return _routeDiversity(_routeOf(primary), _routeOf(escalation), "deployed cohorts");
+    }
+
+    /// @dev The one implementation of the rule. Both entry points above funnel here so the pre-deploy check
+    ///      and the post-deploy re-derivation can never drift apart.
+    function _routeDiversity(Route memory p, Route memory e, string memory source)
+        internal
+        view
+        returns (uint256 overlap, uint256 quorumFloor)
+    {
+        overlap = _routeOverlap(p, e);
+        quorumFloor = p.threshold < e.threshold ? p.threshold : e.threshold;
+        require(quorumFloor > 0, "route diversity: a cohort reports a zero quorum - refusing to reason about it");
+
+        console2.log("route diversity:", source);
+        console2.log("  signer-set intersection:", overlap);
+        console2.log("  quorum floor min(thresholds):", quorumFloor);
+
+        // THE RULE. A group this large is a quorum on at least one route while also sitting on the other,
+        // so it can decide the primary verdict AND its own appeal. Not overridable by any flag.
+        require(
+            overlap < quorumFloor,
+            "GATE 1 route diversity: a quorum-sized group of signers sits on BOTH routes - the escalation "
+            "cohort could ratify its own primary verdict. Give the escalation cohort independent keys."
+        );
+
+        // THE LAUNCH POLICY. Sub-quorum overlap is survivable but is never the default.
+        if (overlap != 0) {
+            require(
+                _signerOverlapAllowed(),
+                "GATE 1 route diversity: the two cohorts share a signer. Launch policy is FULLY DISJOINT "
+                "signer sets. To accept sub-quorum overlap deliberately, set VNEXT_ALLOW_SIGNER_OVERLAP=1."
+            );
+            console2.log("  WARNING: VNEXT_ALLOW_SIGNER_OVERLAP=1 - shipping a cohort pair with shared signers.");
+        }
+    }
+
+    /// @dev `|a ∩ b|`. Each DISTINCT member of `a` is counted at most once. Both attester constructors
+    ///      already reject duplicates (`Fixed2of3O5Attester.sol:32`), but an intersection count has to be
+    ///      correct on its own terms rather than by borrowing another contract's invariant.
+    function _routeOverlap(Route memory a, Route memory b) internal pure returns (uint256 n) {
+        for (uint256 x; x < a.size; ++x) {
+            bool alreadyCounted;
+            for (uint256 k; k < x; ++k) {
+                if (a.signers[k] == a.signers[x]) alreadyCounted = true;
+            }
+            if (alreadyCounted) continue;
+            for (uint256 y; y < b.size; ++y) {
+                if (a.signers[x] == b.signers[y]) {
+                    n++;
+                    break;
+                }
             }
         }
+    }
+
+    /// @dev The route a DEPLOYED cohort actually implements, probed by selector rather than trusted from
+    ///      configuration — the same technique {_assertNetworkPolicy} uses, for the same reason: it must
+    ///      work in `verify()`, where the only input is an address.
+    /// @dev    An UNRECOGNISED shape ABORTS. That is the point: a quorum this script cannot read is a
+    ///         quorum it cannot prove diverse, and silently passing an unreadable cohort would make the
+    ///         whole gate vacuous exactly when a new attester type is introduced.
+    function _routeOf(address attester) internal view returns (Route memory r) {
+        require(attester.code.length > 0, "route diversity: no code at the cohort address");
+        if (_isFixed2of3(attester)) {
+            Fixed2of3O5Attester a = Fixed2of3O5Attester(attester);
+            r.signers = [a.signer0(), a.signer1(), a.signer2()];
+            r.size = 3;
+            r.threshold = FIXED_2OF3_THRESHOLD;
+            return r;
+        }
+        if (_isSingleSigner(attester)) {
+            r.signers[0] = SingleSignerO5Attester(attester).signer();
+            r.size = 1;
+            r.threshold = SINGLE_SIGNER_THRESHOLD;
+            return r;
+        }
+        revert(
+            "route diversity: unrecognised attester shape - neither signer0() nor signer(). Teach _routeOf "
+            "how to read this cohort's signer set before deploying it; an unreadable quorum cannot be proven diverse."
+        );
+    }
+
+    /// @dev The route the CONFIGURED INPUTS describe, for the pre-deploy check where no cohort exists yet.
+    function _routeOfInput(CohortInput memory c, AttesterType t) internal pure returns (Route memory r) {
+        if (t == AttesterType.FIXED_2OF3) {
+            r.signers = [c.signer0, c.signer1, c.signer2];
+            r.size = 3;
+            r.threshold = FIXED_2OF3_THRESHOLD;
+        } else {
+            r.signers[0] = c.signer0;
+            r.size = 1;
+            r.threshold = SINGLE_SIGNER_THRESHOLD;
+        }
+    }
+
+    function _isSingleSigner(address attester) internal view returns (bool) {
+        (bool ok, bytes memory ret) = attester.staticcall(abi.encodeWithSignature("signer()"));
+        return ok && ret.length == 32;
+    }
+
+    function _signerOverlapAllowed() internal view returns (bool) {
+        return vm.envOr("VNEXT_ALLOW_SIGNER_OVERLAP", uint256(0)) == 1;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //                  GATE 2 — BOTH COHORTS ALIVE, ASSERTED BEFORE ANY BROADCAST
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // A cohort that was already `disable()`d passes the factory constructor without complaint — nothing in
+    // `VNextSettlementEscrow`'s constructor reads `enabled` — so a stack can be deployed, permanently,
+    // bound to a dead cohort that `fund()` will reject forever. The deployment cannot be undone and the
+    // gas is spent. {_verify} has always caught it (`_assertCohortSeparation`), but {_verify} runs AFTER
+    // the factory is broadcast, which is one transaction too late. This runs BEFORE.
+
+    /// @dev Everything that must hold about the cohorts themselves before the first transaction is sent.
+    ///      A predicted address with NO code is a cohort this run is about to create: it is `enabled` by
+    ///      construction (`O5AttesterBase.sol:225`) and has no signer set to read yet, so it is checked at
+    ///      the INPUT level in {_assertPreflight} instead. A predicted address WITH code is a cohort this
+    ///      run is about to ADOPT — that is the case that can be dead, or a rival shape, and it is read
+    ///      here from chain state.
+    function _assertCohortsBeforeBroadcast(address primary, address escalation) internal view {
+        bool haveP = primary.code.length > 0;
+        bool haveE = escalation.code.length > 0;
+        if (haveP) _assertCohortAlive(primary, "primary");
+        if (haveE) _assertCohortAlive(escalation, "escalation");
+        // Both already on chain ⇒ read the REAL signer sets rather than trusting the inputs that predicted
+        // them. Belt and braces: CREATE2 already ties the code at a predicted address to these inputs.
+        if (haveP && haveE) _assertOnChainRouteDiversity(primary, escalation);
+    }
+
+    /// @dev GATE 2, one cohort. `enabled` and `disabledAt` are checked TOGETHER because they are one
+    ///      one-way move written to the same slot (`O5AttesterBase.sol:235-239`); disagreement between
+    ///      them would itself be evidence the cohort is not what it claims.
+    function _assertCohortAlive(address attester, string memory which) internal view {
+        IAttesterView a = IAttesterView(attester);
+        require(
+            a.enabled(),
+            string.concat(
+                "GATE 2 dead cohort: the ",
+                which,
+                " cohort is already disabled. A factory bound to it would "
+                "deploy fine and then reject every fund() forever. Deploy a fresh cohort."
+            )
+        );
+        require(
+            a.disabledAt() == 0, string.concat("GATE 2 dead cohort: the ", which, " cohort carries a disable timestamp")
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -733,6 +981,23 @@ contract DeployVNextSettlement is Script {
         vm.serializeBytes32(j, "o5TypeHash", t.typeHash);
         vm.serializeUint(j, "primaryCohortId", t.primaryCohortId);
         vm.serializeUint(j, "escalationCohortId", t.escalationCohortId);
+        // ── The two deploy gates, stated as numbers a human can check by eye. ──────────────────────────
+        // GATE 1: `signerSetIntersection < quorumFloor` is the invariant; `== 0` is the launch policy.
+        vm.serializeUint(j, "signerSetIntersection", t.signerOverlap);
+        vm.serializeUint(j, "quorumFloor", t.quorumFloor);
+        vm.serializeBool(j, "signerSetsFullyDisjoint", t.signerOverlap == 0);
+        vm.serializeBool(j, "signerOverlapExplicitlyAllowed", _signerOverlapAllowed());
+        // GATE 2: both cohorts alive at deploy time.
+        vm.serializeBool(j, "primaryEnabled", t.primaryEnabled);
+        vm.serializeBool(j, "escalationEnabled", t.escalationEnabled);
+        vm.serializeUint(j, "primaryDisabledAt", t.primaryDisabledAt);
+        vm.serializeUint(j, "escalationDisabledAt", t.escalationDisabledAt);
+        vm.serializeString(
+            j,
+            "routeDiversityRule",
+            "GATE 1: signerSetIntersection < quorumFloor = min(primaryThreshold, escalationThreshold). "
+            "Re-derivable from chain state with --sig 'verify(address)'; these fields are NOT in `digest`."
+        );
         vm.serializeUint(j, "chainId", block.chainid);
         vm.serializeUint(j, "specVersion", VNextDeploySpec.SPEC_VERSION);
         vm.serializeUint(j, "blockNumber", block.number);
@@ -837,6 +1102,8 @@ contract DeployVNextSettlement is Script {
         console2.log("primary attester:    ", t.primaryAttester);
         console2.log("escalation attester: ", t.escalationAttester);
         console2.log("settlement asset:    ", t.usdc);
+        console2.log("GATE 1 signer-set intersection:", t.signerOverlap, "of quorum floor", t.quorumFloor);
+        console2.log("GATE 2 primary enabled / escalation enabled:", t.primaryEnabled, t.escalationEnabled);
     }
 
     function _printHandoff(Inputs memory i, Tuple memory t) internal view {
