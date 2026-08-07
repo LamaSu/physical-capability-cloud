@@ -63,6 +63,55 @@ library VNextDeploySpec {
     uint256 internal constant CHAIN_BASE = 8453;
     uint256 internal constant CHAIN_BASE_SEPOLIA = 84532;
 
+    // ── DEP-01. The canonical SETTLEMENT ASSET, per chain. ───────────────────────────────────────────
+    //
+    // WHY AN ADDRESS PIN AND NOT A CODE CHECK. Every escrow invariant — funding, freezing, the fee
+    // split, release — is expressed in terms of `USDC.transferFrom` / `USDC.transfer` and holds against
+    // ANY conforming ERC-20. So a stale, fumbled or substituted `VNEXT_USDC` does not break the money
+    // path; it makes the money path work perfectly against a token nobody can redeem. The failure is
+    // silent by construction, it is only detectable by comparing the address to the one Circle issues,
+    // and it is unrecoverable once the factory is broadcast (the settlement asset is fixed at
+    // construction — `VNextSettlementEscrow.USDC()` is immutable). Hence a hard equality, chain-scoped,
+    // enforced at every point that can still refuse.
+    /// @notice Circle-issued USDC on Base mainnet.
+    address internal constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    /// @notice Circle-issued USDC on Base Sepolia.
+    address internal constant USDC_BASE_SEPOLIA = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+
+    // ── PROV-01. The canonical PROVENANCE registries. ────────────────────────────────────────────────
+    //
+    // NOT a money-path pin, and the distinction is worth stating so nobody over- or under-reacts to it.
+    // The escrow reads NO attestation registry (P0-6): release reads `assertionOf` out of the attester's
+    // own storage, and EAS is written by `mirrorToEAS`, an ASYNC mirror reachable from no money path
+    // (`O5AttesterBase.sol:84-86`, `:52-58`). A counterfeit EAS-shaped contract therefore cannot release
+    // a single cent — but it CAN return an arbitrary non-zero uid, which `mirrorToEAS` records as
+    // `mirroredUid` and announces as `O5Mirrored`. Downstream UI and indexers read that as "mirrored into
+    // EAS". So the harm is a corrupted provenance CLAIM, and the fix is an address pin at the same three
+    // points as DEP-01.
+    /// @notice EAS. An OP-Stack predeploy, hence the same address on Base and Base Sepolia.
+    address internal constant EAS = 0x4200000000000000000000000000000000000021;
+    /// @notice The EAS SchemaRegistry predeploy, alongside {EAS}.
+    address internal constant EAS_SCHEMA_REGISTRY = 0x4200000000000000000000000000000000000020;
+
+    /// @notice True iff this chain has a pinned settlement asset and pinned provenance registries — i.e.
+    ///         iff {canonicalUsdc} can answer for it.
+    /// @dev    Deliberately the SAME predicate the deploy script's unknown-chain opt-in keys off, so
+    ///         "which chains are pinned" is one fact with one definition rather than two lists that drift.
+    function isPinnedChain(uint256 chainId) internal pure returns (bool) {
+        return chainId == CHAIN_BASE || chainId == CHAIN_BASE_SEPOLIA;
+    }
+
+    /// @notice The canonical settlement asset for a PINNED chain.
+    /// @dev    REVERTS on any other chain rather than returning `address(0)`. A zero return would make
+    ///         `usdc == canonicalUsdc(chainid)` a check that silently passes for a token at the zero
+    ///         address and silently fails for every real one — the two worst answers available. Callers
+    ///         must decide the unknown-chain policy explicitly before asking this question.
+    function canonicalUsdc(uint256 chainId) internal pure returns (address) {
+        if (chainId == CHAIN_BASE) return USDC_BASE;
+        if (chainId == CHAIN_BASE_SEPOLIA) return USDC_BASE_SEPOLIA;
+        revert("no canonical settlement asset is pinned for this chain - guard with isPinnedChain first");
+    }
+
     // ── Contract tags (one per deployed artifact) ───────────────────────────────────────────────────
     string internal constant TAG_LIBRARY = "VNextSettlementLib";
     string internal constant TAG_PRIMARY_ATTESTER = "PrimaryO5Attester";

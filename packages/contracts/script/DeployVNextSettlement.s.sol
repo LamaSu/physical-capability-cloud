@@ -123,12 +123,21 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *                             deploying a "Base Sepolia" cohort onto Base.
  *   VNEXT_USDC                required for run(). The settlement asset. provisional() ignores it and
  *                             deploys its own MockUSDC.
- *                             Known values, VERIFY BEFORE USE (this script only asserts the address has
- *                             code, it cannot know which token you meant):
+ *                             GATE 3 (DEP-01) PINS THIS BY ADDRESS on Base and Base Sepolia — it is no
+ *                             longer merely a has-code check, and a wrong-but-conforming token aborts
+ *                             instead of settling unredeemably. Enforced at three points (configured
+ *                             inputs / chain state / deployment artifact); values in
+ *                             `VNextDeploySpec.USDC_BASE` + `USDC_BASE_SEPOLIA`:
  *                               Base mainnet  USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
  *                               Base Sepolia  USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+ *                             A PROVISIONAL run is held to the opposite rule — its throwaway token must
+ *                             NOT be the canonical one — so non-canonicity stays structural.
  *   VNEXT_EAS                 required. EAS address for the attesters' async provenance mirror.
- *                             (The escrow reads no attestation registry — P0-6. This is attester-only.)
+ *                             (The escrow reads no attestation registry — P0-6. This is attester-only, so
+ *                             a wrong value corrupts a provenance CLAIM, never a payment.) GATE 4
+ *                             (PROV-01) pins it to the OP-Stack predeploy 0x42..0021 on both pinned
+ *                             chains, and requires code at 0x42..0021 and at the SchemaRegistry
+ *                             0x42..0020. Verifying the SCHEMA REGISTRATION itself is the ORACLE lane's.
  *   VNEXT_O5_SCHEMA_UID       required, bytes32. Pinned on the primary cohort AND republished by the
  *                             factory; the escrow constructor rejects a mismatch (`:614`).
  *   VNEXT_PRIMARY_COHORT_ID   required, uint64. CANONICAL must be < 0xF000000000000000.
@@ -144,6 +153,11 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   VNEXT_ATTESTER_TYPE       "FIXED_2OF3" | "SINGLE_SIGNER". Forced to FIXED_2OF3 on Base mainnet.
  *   VNEXT_LABEL               provisional() only. Names the throwaway run.
  *   VNEXT_ALLOW_UNKNOWN_CHAIN set to 1 to permit a chain that is neither Base nor Base Sepolia (anvil).
+ *                             It is ALSO what waives GATE 3 + GATE 4's address pins, because off the
+ *                             pinned chains there is no canonical token or registry to compare against.
+ *                             It waives the IDENTITY pins only: `usdc.code.length > 0` and
+ *                             `eas != address(0)` still hold on every chain. One flag rather than three,
+ *                             so "which chains may proceed unverified" cannot drift into three answers.
  */
 contract DeployVNextSettlement is Script {
     string internal constant ESCROW_ARTIFACT = "VNextSettlementEscrow.sol:VNextSettlementEscrow";
@@ -217,6 +231,11 @@ contract DeployVNextSettlement is Script {
         address primaryAttester;
         address escalationAttester;
         address usdc;
+        /// @dev GATE 4's subject: the provenance registry BOTH cohorts mirror into, read from the attesters
+        ///      themselves. Recorded in the artifact but deliberately NOT added to {_digest}'s fifteen-word
+        ///      preimage — adding a word would silently re-address every digest published to date, and the
+        ///      field needs no digest protection because {_verify} re-derives it from chain state anyway.
+        address eas;
         bytes32 schemaUid;
         bytes32 typeHash;
         uint64 primaryCohortId;
@@ -359,6 +378,11 @@ contract DeployVNextSettlement is Script {
         t.typeHash = f.o5TypeHash();
         t.primaryCohortId = IAttesterView(t.primaryAttester).cohortId();
         t.escalationCohortId = IAttesterView(t.escalationAttester).cohortId();
+        t.eas = IAttesterView(t.primaryAttester).eas();
+        require(
+            IAttesterView(t.escalationAttester).eas() == t.eas,
+            "verify: the two cohorts mirror into DIFFERENT EAS registries - one of them is not the canonical one"
+        );
 
         _assertLinkedLibrary(t.settlementLib);
         _assertCohortSeparation(t.primaryAttester, t.escalationAttester);
@@ -372,6 +396,14 @@ contract DeployVNextSettlement is Script {
         t.escalationDisabledAt = IAttesterView(t.escalationAttester).disabledAt();
         _assertPins(f, t.primaryAttester, t.schemaUid);
         _assertNetworkPolicy(t.primaryAttester, t.escalationAttester);
+        // GATE 3 + GATE 4, re-derived from CHAIN STATE and nothing else. This is the enforcement point a
+        // REVIEWER reaches: `--sig "verify(address)" <factory>` needs no env, no artifact and no key, so
+        // "the deployed stack settles in real USDC and mirrors into the real EAS" becomes checkable by
+        // someone who trusts none of the inputs. Whether the deployment is provisional is likewise read
+        // from chain rather than taken on trust — the cohort band is a `uint64 public immutable`
+        // (`VNextDeploySpec.sol:182-185`), which is exactly why the band was made structural.
+        _assertSettlementAsset(t.usdc, VNextDeploySpec.isProvisionalCohort(t.primaryCohortId), "chain state");
+        _assertProvenanceRegistries(t.eas, "chain state");
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -519,8 +551,6 @@ contract DeployVNextSettlement is Script {
     /// @dev Everything else that must hold BEFORE a single transaction is broadcast.
     function _assertPreflight(Inputs memory i) internal view {
         _assertToolchain();
-        require(i.usdc.code.length > 0, "settlement asset has no code on this chain");
-        require(i.eas != address(0), "VNEXT_EAS is zero - the attester constructor rejects it");
 
         // Cohort inputs, checked before they can waste a deployment.
         require(i.primary.cohortId != i.escalation.cohortId, "primary and escalation share a cohort id");
@@ -554,12 +584,15 @@ contract DeployVNextSettlement is Script {
                 i.attesterType == AttesterType.FIXED_2OF3,
                 "Base mainnet requires Fixed2of3O5Attester - SingleSignerO5Attester is testnet-only"
             );
-        } else if (block.chainid != VNextDeploySpec.CHAIN_BASE_SEPOLIA) {
-            require(
-                vm.envOr("VNEXT_ALLOW_UNKNOWN_CHAIN", uint256(0)) == 1,
-                "unknown chain - set VNEXT_ALLOW_UNKNOWN_CHAIN=1 to proceed deliberately"
-            );
+        } else if (!VNextDeploySpec.isPinnedChain(block.chainid)) {
+            require(_unknownChainAllowed(), "unknown chain - set VNEXT_ALLOW_UNKNOWN_CHAIN=1 to proceed deliberately");
         }
+
+        // GATE 3 + GATE 4, from the CONFIGURED INPUTS. Placed AFTER the unknown-chain opt-in above so an
+        // unrecognised chain reports the one actionable thing first; still entirely pre-broadcast, since
+        // the first `vm.startBroadcast` is inside {_deployAttester}.
+        _assertSettlementAsset(i.usdc, provisionalMode, "configured inputs");
+        _assertProvenanceRegistries(i.eas, "configured inputs");
 
         // Size ceilings, asserted rather than assumed. The transaction actually sent carries the FACTORY's
         // initcode (its constructor CREATEs the escrow), so that is the number EIP-3860 bounds here.
@@ -847,6 +880,146 @@ contract DeployVNextSettlement is Script {
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //          GATE 3 (DEP-01) — THE SETTLEMENT ASSET IS THE CANONICAL TOKEN, NOT MERELY A TOKEN
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // WHAT THE OLD CHECK MISSED. `require(i.usdc.code.length > 0)` establishes that SOMETHING is deployed
+    // at the address. It cannot establish WHICH something, and nothing downstream ever asks:
+    // {_assertNetworkPolicy} gates on `block.chainid == CHAIN_BASE` but pins only the attester SHAPE and
+    // the cohort band; `_verify` reads `impl.USDC()` into the tuple and asserts nothing about it. The
+    // script's own header said so in prose — "this script only asserts the address has code, it cannot
+    // know which token you meant".
+    //
+    // WHY THAT IS A MAINNET BLOCKER AND NOT A NIT. Every escrow invariant is written against an ERC-20
+    // INTERFACE, so all of them hold against any conforming token: funding succeeds, the freeze holds,
+    // the fee split computes, release transfers. A stale, fumbled or substituted `VNEXT_USDC` therefore
+    // yields a money path that behaves PERFECTLY and settles in a token nobody can redeem — a failure
+    // with no symptom, no revert and no alarm. And it is unrecoverable: the settlement asset is fixed at
+    // construction (`VNextSettlementEscrow.USDC()` is immutable), so the only remedy after the fact is
+    // redeploying the whole stack and re-pinning every consumer.
+    //
+    // THE RULE. On a PINNED chain, a CANONICAL deployment's settlement asset must EQUAL the Circle-issued
+    // token for that chain. A PROVISIONAL deployment must NOT — it settles in a throwaway {MockUSDC} it
+    // deploys itself, and that non-canonicity is a load-bearing structural property (see {provisional}),
+    // so it is checked rather than assumed. On any other chain the pin cannot be stated, and the existing
+    // `VNEXT_ALLOW_UNKNOWN_CHAIN=1` opt-in is required rather than silently waived — see
+    // {_unknownChainAllowed} for why that flag and not a new one.
+
+    /// @dev GATE 3. `source` names where the address came from, so a reviewer reading a failure knows
+    ///      which of the three enforcement points fired.
+    function _assertSettlementAsset(address usdc, bool provisionalDeployment, string memory source)
+        internal
+        view
+    {
+        // The pre-existing check, kept verbatim and now run at all three points rather than one.
+        require(usdc.code.length > 0, "settlement asset has no code on this chain");
+
+        if (!VNextDeploySpec.isPinnedChain(block.chainid)) {
+            require(
+                _unknownChainAllowed(),
+                "GATE 3 DEP-01: no canonical settlement asset is pinned for this chain, so the token "
+                "cannot be verified. Set VNEXT_ALLOW_UNKNOWN_CHAIN=1 to accept an unverifiable settlement "
+                "asset deliberately (local/anvil only)."
+            );
+            return;
+        }
+
+        address canonical = VNextDeploySpec.canonicalUsdc(block.chainid);
+        if (provisionalDeployment) {
+            require(
+                usdc != canonical,
+                string.concat(
+                    "GATE 3 DEP-01 (",
+                    source,
+                    "): a PROVISIONAL deployment must settle in its own throwaway token, never in the "
+                    "canonical settlement asset."
+                )
+            );
+            return;
+        }
+        require(
+            usdc == canonical,
+            string.concat(
+                "GATE 3 DEP-01 (",
+                source,
+                "): the settlement asset is NOT the canonical USDC for this chain. Every escrow invariant "
+                "would still hold against it and the funds would be unredeemable. Check VNEXT_USDC."
+            )
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //        GATE 4 (PROV-01) — THE PROVENANCE REGISTRIES ARE THE CANONICAL ONES (NOT MONEY)
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // SCOPE, STATED BEFORE THE RULE so this is not mistaken for a money-path gate. The escrow reads NO
+    // attestation registry (P0-6): release reads `assertionOf` out of the attester's own storage, and EAS
+    // is written by `mirrorToEAS`, an ASYNC mirror reachable from no money path (`O5AttesterBase.sol:84-86`,
+    // `:52-58`). A counterfeit EAS-shaped contract therefore cannot release, refund or freeze a single
+    // cent.
+    //
+    // WHAT IT CAN DO. The old check was `require(i.eas != address(0))` — nonzero, nothing more. A
+    // contract that merely RETURNS a non-zero uid satisfies `mirrorToEAS`, which records it as
+    // `mirroredUid` and emits `O5Mirrored`. Downstream UI and indexers read that pair as "this verdict is
+    // mirrored into EAS". So the loss is the integrity of a provenance CLAIM, and it is worth an address
+    // pin at the same three points, priced as MEDIUM rather than HIGH.
+    //
+    // NOT IN SCOPE HERE, deliberately: verifying the SCHEMA REGISTRATION itself — that the pinned
+    // `VNEXT_O5_SCHEMA_UID` resolves in the registry to the exact expected schema string, with
+    // `resolver == address(0)` and `revocable == false`. That is the ORACLE lane's, and duplicating it
+    // here would put two definitions of the schema in two lanes' code. This gate stops one address short:
+    // the registries themselves are canonical and live.
+
+    /// @dev GATE 4. Both registries are checked for code: a pinned address with nothing at it means this
+    ///      chain has no EAS deployment, which makes the mirror a permanent no-op rather than a mirror.
+    function _assertProvenanceRegistries(address eas, string memory source) internal view {
+        // The pre-existing check, kept verbatim.
+        require(eas != address(0), "VNEXT_EAS is zero - the attester constructor rejects it");
+
+        if (!VNextDeploySpec.isPinnedChain(block.chainid)) {
+            require(
+                _unknownChainAllowed(),
+                "GATE 4 PROV-01: no canonical EAS is pinned for this chain, so the provenance registry "
+                "cannot be verified. Set VNEXT_ALLOW_UNKNOWN_CHAIN=1 to accept an unverifiable EAS "
+                "deliberately (local/anvil only)."
+            );
+            return;
+        }
+
+        require(
+            eas == VNextDeploySpec.EAS,
+            string.concat(
+                "GATE 4 PROV-01 (",
+                source,
+                "): the EAS address is not the canonical registry. A counterfeit EAS cannot move funds, "
+                "but it makes every `mirroredUid` and `O5Mirrored` a false provenance claim. Check VNEXT_EAS."
+            )
+        );
+        require(
+            eas.code.length > 0,
+            "GATE 4 PROV-01: the canonical EAS address holds NO code on this chain - the provenance mirror "
+            "would be a permanent no-op"
+        );
+        require(
+            VNextDeploySpec.EAS_SCHEMA_REGISTRY.code.length > 0,
+            "GATE 4 PROV-01: the canonical EAS SchemaRegistry holds NO code on this chain - the pinned O5 "
+            "schema uid could not have been registered here"
+        );
+    }
+
+    /// @dev The ONE reader of `VNEXT_ALLOW_UNKNOWN_CHAIN`, shared by the pre-existing unknown-chain guard
+    ///      in {_assertPreflight} and by both pins above — so "which chains may proceed unverified" has a
+    ///      single definition rather than three that drift.
+    /// @dev `virtual` for the same reason as {_signerOverlapAllowed}: it reads HOST process state rather
+    ///      than chain state, and `forge` runs the tests within a suite in PARALLEL against one shared
+    ///      environment, so a suite driving this with `vm.setEnv` would race with itself. Overriding it in
+    ///      a test harness moves the flag into EVM state, which forge does isolate per test. The
+    ///      production reader below is still pinned by one dedicated test that owns the variable.
+    function _unknownChainAllowed() internal view virtual returns (bool) {
+        return vm.envOr("VNEXT_ALLOW_UNKNOWN_CHAIN", uint256(0)) == 1;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
     //                                    PREDICTION + ARTIFACT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -966,6 +1139,20 @@ contract DeployVNextSettlement is Script {
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
         bool canonical = keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL));
+
+        // ── GATE 3 + GATE 4, third and last enforcement point: the DEPLOYMENT ARTIFACT. ───────────────
+        // The last moment anything can still refuse. Past this line a file exists claiming a deployment,
+        // and files get pinned, indexed and trusted long after the run that produced them is forgotten.
+        //
+        // Not a duplicate of the copy in {_verify}, and the difference is the point: {_verify} infers
+        // provisional-ness from CHAIN STATE (the cohort band), this uses the mode DECLARED by the entry
+        // point. The two pins are exact opposites — canonical demands `usdc == canonical`, provisional
+        // demands `usdc != canonical` — so a run whose declared mode disagrees with its on-chain cohort
+        // band cannot get an artifact written no matter which way the disagreement points. One of the two
+        // necessarily fires.
+        _assertSettlementAsset(t.usdc, !canonical, "deployment artifact");
+        _assertProvenanceRegistries(t.eas, "deployment artifact");
+
         string memory j = "vnext";
         // Non-canonicity is the FIRST thing a reader sees, and it is restated three ways.
         vm.serializeBool(j, "canonical", canonical);
@@ -993,6 +1180,9 @@ contract DeployVNextSettlement is Script {
         vm.serializeAddress(j, "primaryAttester", t.primaryAttester);
         vm.serializeAddress(j, "escalationAttester", t.escalationAttester);
         vm.serializeAddress(j, "usdc", t.usdc);
+        // GATE 4's subject, recorded so the artifact STATES which provenance registry the cohorts mirror
+        // into instead of leaving a reader to infer it. Read from the attesters, not from configuration.
+        vm.serializeAddress(j, "eas", t.eas);
         vm.serializeBytes32(j, "o5SchemaUid", t.schemaUid);
         vm.serializeBytes32(j, "o5TypeHash", t.typeHash);
         vm.serializeUint(j, "primaryCohortId", t.primaryCohortId);
@@ -1147,4 +1337,8 @@ interface IAttesterView {
     function disabledAt() external view returns (uint64);
     function o5SchemaUid() external view returns (bytes32);
     function o5TypeHash() external view returns (bytes32);
+    /// @dev `address public immutable eas` on {O5AttesterBase} (`:86`). GATE 4 reads it here rather than
+    ///      from configuration so `verify()` can pin the provenance registry from the factory address
+    ///      alone — a reviewer holding no env and no artifact still gets the check.
+    function eas() external view returns (address);
 }
