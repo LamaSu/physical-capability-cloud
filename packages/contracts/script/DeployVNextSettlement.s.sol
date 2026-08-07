@@ -378,11 +378,7 @@ contract DeployVNextSettlement is Script {
         t.typeHash = f.o5TypeHash();
         t.primaryCohortId = IAttesterView(t.primaryAttester).cohortId();
         t.escalationCohortId = IAttesterView(t.escalationAttester).cohortId();
-        t.eas = IAttesterView(t.primaryAttester).eas();
-        require(
-            IAttesterView(t.escalationAttester).eas() == t.eas,
-            "verify: the two cohorts mirror into DIFFERENT EAS registries - one of them is not the canonical one"
-        );
+        t.eas = _assertCohortsShareEas(t.primaryAttester, t.escalationAttester);
 
         _assertLinkedLibrary(t.settlementLib);
         _assertCohortSeparation(t.primaryAttester, t.escalationAttester);
@@ -969,6 +965,24 @@ contract DeployVNextSettlement is Script {
     // `resolver == address(0)` and `revocable == false`. That is the ORACLE lane's, and duplicating it
     // here would put two definitions of the schema in two lanes' code. This gate stops one address short:
     // the registries themselves are canonical and live.
+
+    /// @dev GATE 4, the part that must be answered BEFORE the pin can be: which registry is "the"
+    ///      registry for this deployment. `eas` is a separate `immutable` on each attester
+    ///      (`O5AttesterBase.sol:86`, set from a constructor argument), so the two cohorts CAN disagree —
+    ///      and a tuple that reported the primary's registry while the escalation quietly mirrored
+    ///      somewhere else would be a true statement that misleads. Extracted from {_verify} so it is
+    ///      reachable by a test without standing up a whole factory; at most one of two different
+    ///      registries can be canonical, so disagreement is refused before either is compared.
+    /// @return The single registry both cohorts mirror into.
+    function _assertCohortsShareEas(address primary, address escalation) internal view returns (address) {
+        address eas = IAttesterView(primary).eas();
+        require(
+            IAttesterView(escalation).eas() == eas,
+            "GATE 4 PROV-01: the two cohorts mirror into DIFFERENT EAS registries - at most one of them can be "
+            "canonical, so the tuple cannot state a single provenance registry"
+        );
+        return eas;
+    }
 
     /// @dev GATE 4. Both registries are checked for code: a pinned address with nothing at it means this
     ///      chain has no EAS deployment, which makes the mirror a permanent no-op rather than a mirror.

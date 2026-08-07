@@ -488,6 +488,24 @@ contract VNextDeployGatesTest is Test {
         _assertAborts(_provenanceRegistries(address(0)), EAS_ZERO);
     }
 
+    /// @notice `eas` is a per-attester immutable set from a constructor argument, so the two cohorts CAN
+    ///         be wired to different registries. A tuple reporting the primary's registry while the
+    ///         escalation quietly mirrored elsewhere would be a true statement that misleads, so the
+    ///         disagreement is refused before either address is compared to the canonical one.
+    function test_Gate4_CohortsWiredToDifferentRegistries_Abort() public {
+        address primary = _fixedWithEas(P1, P2, P3, REV_P, 1, VNextDeploySpec.EAS);
+        address escalation = _fixedWithEas(E1, E2, E3, REV_E, 2, IMPOSTOR_EAS);
+        _assertAborts(_cohortsShareEas(primary, escalation), "mirror into DIFFERENT EAS registries");
+    }
+
+    function test_Gate4_CohortsSharingOneRegistry_ReturnIt() public {
+        address primary = _fixedWithEas(P1, P2, P3, REV_P, 1, VNextDeploySpec.EAS);
+        address escalation = _fixedWithEas(E1, E2, E3, REV_E, 2, VNextDeploySpec.EAS);
+        (bool ok, bytes memory ret) = _run(_cohortsShareEas(primary, escalation));
+        assertTrue(ok, string.concat("gate aborted unexpectedly: ", _reason(ret)));
+        assertEq(abi.decode(ret, (address)), VNextDeploySpec.EAS, "must report the registry both cohorts share");
+    }
+
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     //                  GATES 3 + 4 — CROSS-CUTTING PROPERTIES OF THE TWO PINS
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -595,6 +613,18 @@ contract VNextDeployGatesTest is Test {
 
     function _provenanceRegistriesFrom(address eas, string memory source) internal pure returns (bytes memory) {
         return abi.encodeCall(DeployGatesHarness.provenanceRegistries, (eas, source));
+    }
+
+    function _cohortsShareEas(address p, address e) internal pure returns (bytes memory) {
+        return abi.encodeCall(DeployGatesHarness.cohortsShareEas, (p, e));
+    }
+
+    /// @dev {_fixed} with the registry as a parameter — the two cohorts' `eas` immutables are independent.
+    function _fixedWithEas(address s0, address s1, address s2, address revoker, uint64 cohortId, address eas_)
+        internal
+        returns (address)
+    {
+        return address(new Fixed2of3O5Attester(s0, s1, s2, eas_, SCHEMA, cohortId, revoker));
     }
 
 
@@ -717,6 +747,11 @@ contract DeployGatesHarness is DeployVNextSettlement {
     /// @dev GATE 4.
     function provenanceRegistries(address eas, string calldata source) external view {
         _assertProvenanceRegistries(eas, source);
+    }
+
+    /// @dev GATE 4's which-registry precondition, as {_verify} reaches it.
+    function cohortsShareEas(address primary, address escalation) external view returns (address) {
+        return _assertCohortsShareEas(primary, escalation);
     }
 }
 
