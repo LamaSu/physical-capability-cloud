@@ -88,6 +88,14 @@ const PUBLIC_COURIER_JOBS_DETAIL_RE = /^\/api\/courier-jobs\/(?:jobs\/)?[^/]+$/;
 // anonymous caller — the public path never leaks private content.
 const PUBLIC_ARTIFACTS_READ_RE = /^\/api\/artifacts(?:\/[^/]+)?$/;
 
+// D2 compiler-ABI: the registry snapshot + its historical-by-digest recall are
+// public reads (the snapshot IS the public compiler ABI; no auth to read).
+// Matches GET /api/compose/registry-snapshot and
+// /api/compose/registry-snapshot/:registryDigest. GET-only — there is no
+// mutation surface, and the sibling /api/compose/:id stays auth-gated (its
+// second segment is never the literal "registry-snapshot").
+const PUBLIC_REGISTRY_SNAPSHOT_RE = /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/;
+
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
@@ -102,6 +110,8 @@ function isPublicRoute(url: string, method?: string): boolean {
   if (method === "GET" && PUBLIC_COURIER_JOBS_DETAIL_RE.test(path)) return true;
   // Only GET on artifact discovery/recall is public; mutations stay gated.
   if (method === "GET" && PUBLIC_ARTIFACTS_READ_RE.test(path)) return true;
+  // D2 compiler-ABI registry snapshot + historical recall — public GET reads.
+  if (method === "GET" && PUBLIC_REGISTRY_SNAPSHOT_RE.test(path)) return true;
   return false;
 }
 
