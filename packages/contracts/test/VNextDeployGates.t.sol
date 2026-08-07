@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import {DeployVNextSettlement} from "../script/DeployVNextSettlement.s.sol";
+import {VNextDeploySpec} from "../script/vnext/VNextDeploySpec.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {SingleSignerO5Attester} from "../src/attesters/SingleSignerO5Attester.sol";
 
@@ -46,6 +47,25 @@ contract VNextDeployGatesTest is Test {
     string internal constant LAUNCH_POLICY = "Launch policy is FULLY DISJOINT";
     string internal constant UNREADABLE = "unrecognised attester shape";
     string internal constant DEAD_COHORT = "GATE 2 dead cohort";
+    // GATE 3 (DEP-01) — the settlement asset.
+    string internal constant USDC_NO_CODE = "settlement asset has no code on this chain";
+    string internal constant USDC_NOT_CANONICAL = "the settlement asset is NOT the canonical USDC for this chain";
+    string internal constant USDC_UNPINNED_CHAIN = "no canonical settlement asset is pinned for this chain";
+    string internal constant PROVISIONAL_TOOK_CANONICAL = "must settle in its own throwaway token";
+    // GATE 4 (PROV-01) — the provenance registries.
+    string internal constant EAS_ZERO = "VNEXT_EAS is zero";
+    string internal constant EAS_NOT_CANONICAL = "the EAS address is not the canonical registry";
+    string internal constant EAS_NO_CODE = "the canonical EAS address holds NO code on this chain";
+    string internal constant REGISTRY_NO_CODE = "the canonical EAS SchemaRegistry holds NO code on this chain";
+    string internal constant EAS_UNPINNED_CHAIN = "no canonical EAS is pinned for this chain";
+
+    /// @dev A perfectly good ERC-20 that simply is not the one Circle issues — the whole point of DEP-01
+    ///      is that nothing downstream can tell the difference, so the fixture must not be degenerate.
+    address internal constant IMPOSTOR_TOKEN = address(0xDECAF0);
+    /// @dev A contract with the EAS call surface at the wrong address. Also indistinguishable downstream.
+    address internal constant IMPOSTOR_EAS = address(0xDECAF1);
+    /// @dev Any chain that is neither Base nor Base Sepolia. 31337 is the local anvil the flows run on.
+    uint256 internal constant CHAIN_ANVIL = 31337;
 
     function setUp() public {
         harness = new DeployGatesHarnessNoEnv();
@@ -296,8 +316,287 @@ contract VNextDeployGatesTest is Test {
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //            GATE 3 (DEP-01) — THE SETTLEMENT ASSET IS THE CANONICAL TOKEN, NOT MERELY A TOKEN
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // Every fixture below etches REAL CODE at the impostor address. That is deliberate: the old check was
+    // `usdc.code.length > 0`, so a fixture with an empty impostor would pass these tests for the OLD
+    // reason and prove nothing about the new one. The impostor is always a live, conforming-looking
+    // contract — exactly the thing no escrow invariant can distinguish from the real token.
+
+    function test_Gate3_Base_WrongToken_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etch(VNextDeploySpec.USDC_BASE); // the real one is present and reachable...
+        _etch(IMPOSTOR_TOKEN); // ...and the configured one is live too. Only the ADDRESS differs.
+        _assertAborts(_settlementAsset(IMPOSTOR_TOKEN, false), USDC_NOT_CANONICAL);
+    }
+
+    function test_Gate3_Base_CanonicalToken_Proceeds() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etch(VNextDeploySpec.USDC_BASE);
+        _assertPassesVoid(_settlementAsset(VNextDeploySpec.USDC_BASE, false));
+    }
+
+    function test_Gate3_BaseSepolia_WrongToken_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etch(VNextDeploySpec.USDC_BASE_SEPOLIA);
+        _etch(IMPOSTOR_TOKEN);
+        _assertAborts(_settlementAsset(IMPOSTOR_TOKEN, false), USDC_NOT_CANONICAL);
+    }
+
+    function test_Gate3_BaseSepolia_CanonicalToken_Proceeds() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etch(VNextDeploySpec.USDC_BASE_SEPOLIA);
+        _assertPassesVoid(_settlementAsset(VNextDeploySpec.USDC_BASE_SEPOLIA, false));
+    }
+
+    /// @notice The likeliest real fumble, and the one a per-chain pin exists for: a `.env` carried across
+    ///         networks. Base's USDC is canonical — on Base. On Base Sepolia it is just another token, and
+    ///         a check that asked "is this a known USDC?" instead of "is this THIS CHAIN's USDC?" would
+    ///         wave it straight through.
+    function test_Gate3_CanonicalTokenOfTheWrongChain_IsStillWrong() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etch(VNextDeploySpec.USDC_BASE);
+        _assertAborts(_settlementAsset(VNextDeploySpec.USDC_BASE, false), USDC_NOT_CANONICAL);
+
+        // ...and symmetrically, so neither direction is special-cased by accident.
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etch(VNextDeploySpec.USDC_BASE_SEPOLIA);
+        _assertAborts(_settlementAsset(VNextDeploySpec.USDC_BASE_SEPOLIA, false), USDC_NOT_CANONICAL);
+    }
+
+    /// @notice The pre-existing has-code check is KEPT, not replaced. It fires first, because "nothing is
+    ///         deployed there" is a more actionable report than "that is the wrong token".
+    function test_Gate3_EmptyAddress_StillFailsTheOriginalCodeCheck() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _assertAborts(_settlementAsset(VNextDeploySpec.USDC_BASE, false), USDC_NO_CODE);
+        _assertAborts(_settlementAsset(address(0), false), USDC_NO_CODE);
+    }
+
+    /// @notice A PROVISIONAL deployment is held to the INVERSE rule. Its throwaway token is what makes it
+    ///         structurally incapable of moving real funds, so a provisional run that somehow acquired the
+    ///         canonical asset has lost the property, not gained a convenience.
+    function test_Gate3_Provisional_MustNotSettleInTheCanonicalToken() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etch(VNextDeploySpec.USDC_BASE_SEPOLIA);
+        _assertAborts(_settlementAsset(VNextDeploySpec.USDC_BASE_SEPOLIA, true), PROVISIONAL_TOOK_CANONICAL);
+    }
+
+    function test_Gate3_Provisional_ThrowawayToken_Proceeds() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etch(IMPOSTOR_TOKEN);
+        _assertPassesVoid(_settlementAsset(IMPOSTOR_TOKEN, true));
+    }
+
+    /// @notice An unrecognised chain has no canonical token to compare against. It must NOT pass silently:
+    ///         "I could not check this" and "I checked this" are different answers and the script says so.
+    function test_Gate3_UnknownChain_DoesNotSilentlyPass() public {
+        vm.chainId(CHAIN_ANVIL);
+        _etch(IMPOSTOR_TOKEN);
+        _setUnknownChainAllowed(false);
+        _assertAborts(_settlementAsset(IMPOSTOR_TOKEN, false), USDC_UNPINNED_CHAIN);
+    }
+
+    function test_Gate3_UnknownChain_ProceedsOnlyWithTheExplicitOptIn() public {
+        vm.chainId(CHAIN_ANVIL);
+        _etch(IMPOSTOR_TOKEN);
+        _setUnknownChainAllowed(true);
+        _assertPassesVoid(_settlementAsset(IMPOSTOR_TOKEN, false));
+    }
+
+    /// @notice The opt-in waives the IDENTITY pin only. It is not a global "skip GATE 3", so an address
+    ///         with no code at all is still refused on an unknown chain.
+    function test_Gate3_UnknownChainOptIn_DoesNotWaiveTheCodeCheck() public {
+        vm.chainId(CHAIN_ANVIL);
+        _setUnknownChainAllowed(true);
+        _assertAborts(_settlementAsset(IMPOSTOR_TOKEN, false), USDC_NO_CODE);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //          GATE 4 (PROV-01) — THE PROVENANCE REGISTRIES ARE THE CANONICAL PREDEPLOYS
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    function test_Gate4_Base_NonCanonicalEas_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etchProvenancePredeploys();
+        _etch(IMPOSTOR_EAS); // live, EAS-shaped, wrong address
+        _assertAborts(_provenanceRegistries(IMPOSTOR_EAS), EAS_NOT_CANONICAL);
+    }
+
+    function test_Gate4_BaseSepolia_NonCanonicalEas_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _etchProvenancePredeploys();
+        _etch(IMPOSTOR_EAS);
+        _assertAborts(_provenanceRegistries(IMPOSTOR_EAS), EAS_NOT_CANONICAL);
+    }
+
+    function test_Gate4_CanonicalPredeploys_Proceed() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etchProvenancePredeploys();
+        _assertPassesVoid(_provenanceRegistries(VNextDeploySpec.EAS));
+
+        vm.chainId(VNextDeploySpec.CHAIN_BASE_SEPOLIA);
+        _assertPassesVoid(_provenanceRegistries(VNextDeploySpec.EAS));
+    }
+
+    /// @notice The SchemaRegistry is not an input — it is pinned to the OP-Stack predeploy — so the only
+    ///         way for it to be non-canonical is for the canonical address to hold something other than
+    ///         the registry. Empty is the checkable case: a chain without the registry deployed cannot
+    ///         have registered the pinned O5 schema uid, so the mirror's premise is already false.
+    /// @dev    HONEST LIMIT, stated where a reviewer will read it: this proves code EXISTS at the pinned
+    ///         registry address, not that the code IS a SchemaRegistry. Confirming the registration itself
+    ///         (schema string, `resolver == address(0)`, `revocable == false`) is the ORACLE lane's.
+    function test_Gate4_SchemaRegistryMissing_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etch(VNextDeploySpec.EAS); // EAS present...
+        // ...SchemaRegistry deliberately NOT etched.
+        _assertAborts(_provenanceRegistries(VNextDeploySpec.EAS), REGISTRY_NO_CODE);
+    }
+
+    /// @notice The canonical ADDRESS with nothing at it makes `mirrorToEAS` a permanent no-op rather than
+    ///         a mirror — a pin that only compared addresses would call that a pass.
+    function test_Gate4_CanonicalEasAddressWithNoCode_Aborts() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etch(VNextDeploySpec.EAS_SCHEMA_REGISTRY); // registry present, EAS itself empty
+        _assertAborts(_provenanceRegistries(VNextDeploySpec.EAS), EAS_NO_CODE);
+    }
+
+    /// @notice The pre-existing non-zero check is KEPT and still fires first.
+    function test_Gate4_ZeroEas_StillFailsTheOriginalCheck() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etchProvenancePredeploys();
+        _assertAborts(_provenanceRegistries(address(0)), EAS_ZERO);
+    }
+
+    function test_Gate4_UnknownChain_DoesNotSilentlyPass() public {
+        vm.chainId(CHAIN_ANVIL);
+        _etch(IMPOSTOR_EAS);
+        _setUnknownChainAllowed(false);
+        _assertAborts(_provenanceRegistries(IMPOSTOR_EAS), EAS_UNPINNED_CHAIN);
+    }
+
+    function test_Gate4_UnknownChain_ProceedsOnlyWithTheExplicitOptIn() public {
+        vm.chainId(CHAIN_ANVIL);
+        _etch(IMPOSTOR_EAS);
+        _setUnknownChainAllowed(true);
+        _assertPassesVoid(_provenanceRegistries(IMPOSTOR_EAS));
+    }
+
+    function test_Gate4_UnknownChainOptIn_DoesNotWaiveTheZeroCheck() public {
+        vm.chainId(CHAIN_ANVIL);
+        _setUnknownChainAllowed(true);
+        _assertAborts(_provenanceRegistries(address(0)), EAS_ZERO);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    //                  GATES 3 + 4 — CROSS-CUTTING PROPERTIES OF THE TWO PINS
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Both pins name the enforcement point that fired. Three points check the same address from
+    ///         three different sources (configured inputs / chain state / deployment artifact), so a
+    ///         reviewer reading only a revert needs to know WHICH source disagreed.
+    function test_Gates34_AbortMessageNamesTheEnforcementPointThatFired() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etchProvenancePredeploys();
+        _etch(IMPOSTOR_TOKEN);
+        _etch(IMPOSTOR_EAS);
+
+        _assertAborts(_settlementAssetFrom(IMPOSTOR_TOKEN, false, "chain state"), "GATE 3 DEP-01 (chain state)");
+        _assertAborts(
+            _settlementAssetFrom(IMPOSTOR_TOKEN, false, "deployment artifact"), "GATE 3 DEP-01 (deployment artifact)"
+        );
+        _assertAborts(_provenanceRegistriesFrom(IMPOSTOR_EAS, "chain state"), "GATE 4 PROV-01 (chain state)");
+        _assertAborts(
+            _provenanceRegistriesFrom(IMPOSTOR_EAS, "deployment artifact"), "GATE 4 PROV-01 (deployment artifact)"
+        );
+    }
+
+    /// @notice Pins the PRODUCTION opt-in reader, exactly as {test_Gate1_OptIn_IsReadFromTheEnvironment}
+    ///         does for GATE 1: `VNEXT_ALLOW_UNKNOWN_CHAIN` really is the variable
+    ///         {DeployVNextSettlement._unknownChainAllowed} consults, and unset really does mean refuse.
+    ///         Without this, the EVM-state seam the tests above use could drift away from the flag an
+    ///         operator actually sets. This test is the SOLE owner of that variable in the suite.
+    function test_Gates34_UnknownChainOptIn_IsReadFromTheEnvironment() public {
+        DeployGatesHarness envHarness = new DeployGatesHarness();
+        vm.chainId(CHAIN_ANVIL);
+        _etch(IMPOSTOR_TOKEN);
+        bytes memory gateCall = _settlementAsset(IMPOSTOR_TOKEN, false);
+
+        vm.setEnv("VNEXT_ALLOW_UNKNOWN_CHAIN", "0");
+        (bool ok,) = address(envHarness).staticcall(gateCall);
+        assertFalse(ok, "unset/0 must refuse an unverifiable settlement asset");
+
+        vm.setEnv("VNEXT_ALLOW_UNKNOWN_CHAIN", "1");
+        (ok,) = address(envHarness).staticcall(gateCall);
+        assertTrue(ok, "an explicit 1 must accept it deliberately");
+
+        vm.setEnv("VNEXT_ALLOW_UNKNOWN_CHAIN", "0"); // leave the process as it was found
+    }
+
+    /// @notice The GATE 1/GATE 2 proof, extended to the two new gates: both run to completion inside a
+    ///         STATICCALL, which the EVM aborts on ANY state change — so neither can broadcast a
+    ///         transaction or write a slot. The nonce either side is the second, independent reading.
+    /// @dev    "no artifact written" is proven by CONSTRUCTION rather than by assertion: both gates are
+    ///         `internal view` and reached here through `external view`, and `vm.writeJson` is declared
+    ///         non-view on `Vm`, so a gate able to write the deployment artifact would not compile. The
+    ///         end-to-end form of the same claim (a real pending broadcast that spends zero nonces and
+    ///         leaves no file) is the N-DEP anvil pair in `ai/research/vnext-dep01-prov01-log.md`.
+    function test_Gates34_RunEntirelyWithinAStaticCall_SoNothingCanBeSent() public {
+        vm.chainId(VNextDeploySpec.CHAIN_BASE);
+        _etchProvenancePredeploys();
+        _etch(VNextDeploySpec.USDC_BASE);
+        uint64 nonceBefore = vm.getNonce(address(harness));
+
+        _assertPassesVoid(_settlementAsset(VNextDeploySpec.USDC_BASE, false));
+        _assertPassesVoid(_provenanceRegistries(VNextDeploySpec.EAS));
+
+        assertEq(vm.getNonce(address(harness)), nonceBefore, "a gate sent something");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
     //                                          FIXTURES
     // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// @dev Put NON-EMPTY runtime at `at`. The bytes are never executed — both gates only ever read
+    ///      `code.length` — but they must be non-empty or the fixture would satisfy the new pins for the
+    ///      OLD reason and the tests would prove nothing.
+    function _etch(address at) internal {
+        vm.etch(at, hex"60006000fd");
+    }
+
+    function _etchProvenancePredeploys() internal {
+        _etch(VNextDeploySpec.EAS);
+        _etch(VNextDeploySpec.EAS_SCHEMA_REGISTRY);
+    }
+
+    /// @dev GATE 3/GATE 4's unknown-chain opt-in, driven through EVM STATE rather than `vm.setEnv`, for
+    ///      the reason spelled out on {_setOverlapAllowed}: forge runs a suite's tests in PARALLEL against
+    ///      one shared process environment. {test_Gates34_UnknownChainOptIn_IsReadFromTheEnvironment} is
+    ///      the sole owner of the real variable.
+    function _setUnknownChainAllowed(bool allowed) internal {
+        harness.setAllowUnknownChain(allowed);
+    }
+
+    function _settlementAsset(address usdc, bool provisionalDeployment) internal pure returns (bytes memory) {
+        return _settlementAssetFrom(usdc, provisionalDeployment, "configured inputs");
+    }
+
+    function _settlementAssetFrom(address usdc, bool provisionalDeployment, string memory source)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodeCall(DeployGatesHarness.settlementAsset, (usdc, provisionalDeployment, source));
+    }
+
+    function _provenanceRegistries(address eas) internal pure returns (bytes memory) {
+        return _provenanceRegistriesFrom(eas, "configured inputs");
+    }
+
+    function _provenanceRegistriesFrom(address eas, string memory source) internal pure returns (bytes memory) {
+        return abi.encodeCall(DeployGatesHarness.provenanceRegistries, (eas, source));
+    }
+
 
     function _fixed(address s0, address s1, address s2, address revoker, uint64 cohortId) internal returns (address) {
         return address(new Fixed2of3O5Attester(s0, s1, s2, EAS, SCHEMA, cohortId, revoker));
@@ -408,6 +707,17 @@ contract DeployGatesHarness is DeployVNextSettlement {
         i.escalation = CohortInput({signer0: e0, signer1: e1, signer2: e2, revoker: address(0xDEAD02), cohortId: 2});
         return _assertInputRouteDiversity(i);
     }
+
+    /// @dev GATE 3. `source` is a parameter rather than a constant so the tests can exercise all three
+    ///      enforcement points' messages through one entry point.
+    function settlementAsset(address usdc, bool provisionalDeployment, string calldata source) external view {
+        _assertSettlementAsset(usdc, provisionalDeployment, source);
+    }
+
+    /// @dev GATE 4.
+    function provenanceRegistries(address eas, string calldata source) external view {
+        _assertProvenanceRegistries(eas, source);
+    }
 }
 
 /// @dev The harness the rule tests actually use: identical to {DeployGatesHarness} except that GATE 1's
@@ -415,13 +725,24 @@ contract DeployGatesHarness is DeployVNextSettlement {
 ///      isolated copy. See {VNextDeployGatesTest._setOverlapAllowed} for why that matters.
 contract DeployGatesHarnessNoEnv is DeployGatesHarness {
     bool public allowOverlap;
+    /// @dev GATE 3/GATE 4's unknown-chain opt-in, moved into EVM state for the same reason as
+    ///      {allowOverlap}: forge isolates EVM state per test but not the host environment.
+    bool public allowUnknownChain;
 
     function setAllowOverlap(bool allowed) external {
         allowOverlap = allowed;
     }
 
+    function setAllowUnknownChain(bool allowed) external {
+        allowUnknownChain = allowed;
+    }
+
     function _signerOverlapAllowed() internal view override returns (bool) {
         return allowOverlap;
+    }
+
+    function _unknownChainAllowed() internal view override returns (bool) {
+        return allowUnknownChain;
     }
 }
 
