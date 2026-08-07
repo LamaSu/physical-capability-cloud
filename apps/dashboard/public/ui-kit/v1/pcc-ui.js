@@ -335,29 +335,36 @@
     this.isHost = !!isHost;
     this.lastTrace = null;
   }
-  // Origin hard-bind for the viewer's key. The manifest is UNTRUSTED content
-  // (the whole reason this kit exists), and resolveApiBase() will honour a
-  // manifest-supplied api_base in non-host mode — so the Bearer key must NOT be
-  // sent to a base the manifest chose. The key travels ONLY to a base the
-  // VIEWER's context vouches for: same-origin (''), the canonical PCC origin, or
-  // an override the viewer typed themselves (?api= / stored pcc.apiBase). A
-  // manifest api_base pointing anywhere else gets public reads with no key.
+  // Origin hard-bind for the viewer's key. EVERY input that can name a base is
+  // untrusted: the manifest is untrusted content (the whole reason this kit
+  // exists), and `?api=` / the persisted `pcc.apiBase` are NOT "the viewer's own
+  // choice" — an artifact is shared as a LINK, so an attacker authors the query
+  // string, and resolveApiBase() persists it into localStorage itself, poisoning
+  // every later clean artifact. So the key travels ONLY to an ORIGIN (not a
+  // string) the page itself vouches for: its own, or the canonical PCC origin.
+  // Comparing origins also settles protocol-relative `//host`, scheme downgrade
+  // and port swaps for free. Anything unparseable fails CLOSED.
   Transport.prototype._keyAllowedForBase = function () {
-    var b = this.base;
-    if (b === '') return true;            // same-origin (the page's own origin)
-    if (b === API_DEFAULT) return true;   // canonical PCC origin
+    if (this.base === '') return true;    // same-origin (the page's own origin)
     try {
-      var q = new URLSearchParams(location.search).get('api');
-      if (q && q.replace(/\/+$/, '') === b) return true;      // viewer-typed ?api=
-      var ls = localStorage.getItem('pcc.apiBase');
-      if (ls && ls.replace(/\/+$/, '') === b) return true;    // viewer-stored override
-    } catch (e) {}
-    return false; // manifest-supplied off-origin base → never attach the key
+      var o = new URL(this.base, location.href).origin;
+      return o === new URL(API_DEFAULT).origin || o === location.origin;
+    } catch (e) { return false; }
+  };
+  Transport.prototype._credentialed = function () {
+    return !!getKey() && this._keyAllowedForBase();
+  };
+  // A request carrying the viewer's key must not FOLLOW a 3xx: with the default
+  // redirect:'follow' the browser re-issues the request — 307/308 preserve method
+  // AND body — at whatever origin the redirect names, before any code can inspect
+  // response.url. Checking `.redirected` afterwards detects the leak; refusing to
+  // follow prevents it. Uncredentialed reads keep the normal 'follow'.
+  Transport.prototype._redirectMode = function () {
+    return this._credentialed() ? 'error' : 'follow';
   };
   Transport.prototype._headers = function (extra) {
     var h = extra || {};
-    var k = getKey();
-    if (k && this._keyAllowedForBase()) h['Authorization'] = 'Bearer ' + k;
+    if (this._credentialed()) h['Authorization'] = 'Bearer ' + getKey();
     return h;
   };
   Transport.prototype._trace = function (res) {
@@ -378,7 +385,7 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.reject(new Error('refused unsafe request path: ' + path));
-    return fetch(this.base + safe + this.qs(query), { headers: this._headers({ Accept: 'application/json' }) })
+    return fetch(this.base + safe + this.qs(query), { headers: this._headers({ Accept: 'application/json' }), redirect: this._redirectMode() })
       .then(function (r) {
         self._trace(r);
         if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + safe);
@@ -389,6 +396,10 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: unsafe or non-PCC request path.' } });
+    // Withholding the key is NOT containment for a write: the instruction itself
+    // (escrowId, amount, the viewer's approval) is the payload. A write whose
+    // destination is not an origin this page vouches for is not sent at all.
+    if (!this._keyAllowedForBase()) return Promise.resolve({ ok: false, status: 0, body: { message: 'Refused: this action would be sent to an unrecognised destination.' } });
     var headers = this._headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
     // Real Idempotency-Key HEADER (the server's idempotency middleware reads the
     // header, not a body field) — a double-click / retry sends the SAME key so the
@@ -397,6 +408,10 @@
     return fetch(this.base + safe, {
       method: method,
       headers: headers,
+      // Always 'error' on a write — a 307/308 re-issues method AND body at the
+      // redirect's origin, so following one would hand the money instruction to
+      // whatever that redirect names even when no key is attached.
+      redirect: 'error',
       body: body != null ? JSON.stringify(body) : undefined
     }).then(function (r) {
       self._trace(r);
@@ -412,7 +427,7 @@
     var self = this;
     var safe = safeApiPath(path, this.isHost);
     if (safe === null) return Promise.reject(new Error('refused unsafe sse path: ' + path));
-    var init = { headers: this._headers({ Accept: 'text/event-stream' }) };
+    var init = { headers: this._headers({ Accept: 'text/event-stream' }), redirect: this._redirectMode() };
     if (opts.signal) init.signal = opts.signal;
     return fetch(this.base + safe, init).then(function (res) {
       self._trace(res);
