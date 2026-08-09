@@ -22,6 +22,7 @@ import { buildRoutes } from "./routes/build.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { kernelRoutes } from "./routes/kernels.js";
 import { escrowRoutes } from "./routes/escrow.js";
+import { settlementReadRoutes } from "./routes/settlement-read.js";
 import { pccProtocolRoutes } from "./routes/pcc-protocol.js";
 import { agentRoutes } from "./routes/agents.js";
 import { onboardRoutes } from "./routes/onboard.js";
@@ -609,6 +610,10 @@ export async function createGateway(port = 3200) {
   await app.register(jobRoutes);
   await app.register(kernelRoutes);
   await app.register(escrowRoutes);
+  // Settlement READ routes (#573) — receipt/lifecycle/provenance to gen-UI
+  // contract v1.4. Answers 503 INDEX_NOT_READY until a SettlementUnitReader is
+  // registered (gated on escrow's deployed V-next address, artifact D).
+  await app.register(settlementReadRoutes);
   await app.register(pccProtocolRoutes);
   await app.register(agentRoutes);
   await app.register(onboardRoutes);
