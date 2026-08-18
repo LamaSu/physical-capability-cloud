@@ -49,10 +49,13 @@ const payer = K('golden-payer');                       // Principal
 const operatorPrincipal = K('golden-operator');        // Principal (R4 fix: bytes32, disjoint-comparable)
 const operatorSettlementAddress = addr(0x0a71n);       // payout address (corroborates escrow.operator)
 // authorized (operator,kernel,device) TUPLES (R4: relationship, not independent set-membership):
-const authorizedTuples = [[operatorPrincipal, K('golden-kernel'), K('golden-device')]];
+// sol: sets require canonical SORT + DEDUP (alias-independent identity) — no author/caller order-freedom.
+const sortHex = (a) => [...new Set(a.map((x) => x.toLowerCase()))].sort();          // bytes32[] set
+const sortTup = (a) => [...a].sort((x, y) => JSON.stringify(x).toLowerCase() < JSON.stringify(y).toLowerCase() ? -1 : 1); // tuple[] set
+const authorizedTuples = sortTup([[operatorPrincipal, K('golden-kernel'), K('golden-device')]]);
 const authorizedTuplesRoot = keccak256(enc(['tuple(bytes32,bytes32,bytes32)[]'], [authorizedTuples]));
-const approvedExpertSet = [K('golden-expert-1')];      // Principal[]  (disjoint from operatorPrincipal)
-const approvedThirdPartyExecutorSet = [K('golden-exec-1')]; // Principal[] (R4: disjoint from operator)
+const approvedExpertSet = sortHex([K('golden-expert-1')]);              // Principal[] set (disjoint from operatorPrincipal)
+const approvedThirdPartyExecutorSet = sortHex([K('golden-exec-1')]);    // Principal[] set (R4: disjoint from operator)
 const expertSetRoot = keccak256(enc(['bytes32[]'], [approvedExpertSet]));
 const executorSetRoot = keccak256(enc(['bytes32[]'], [approvedThirdPartyExecutorSet]));
 const expectedRecipient = K('golden-recipient');       // Principal
@@ -60,7 +63,7 @@ const targetSystemIdentity = K('golden-target-system');
 const committedProgramHash = K('golden-program');
 const recipeRef = K('golden-recipe');
 const sampleManifestRef = K('golden-sample-manifest');  // R4: distinct field alongside recipeRef
-const children = [[K('golden-child-job'), addr(0xc41dn)]]; // {childJobId, childEscrow}
+const children = sortTup([[K('golden-child-job'), addr(0xc41dn)]]); // {childJobId, childEscrow} — set-sorted
 const childrenRoot = keccak256(enc(['tuple(bytes32,address)[]'], [children]));
 // telemetry/freshness subjects (verdict F4 / composition #688 enumeration):
 const operatingEnvelopeHash = keccak256(enc(['tuple(bytes32,uint256,uint256)[]'],
@@ -86,13 +89,21 @@ const subjectBlockHash = keccak256(enc(
 // srcKind = sourceIdentityConstraint (who generated), propKind = propositionSubjectConstraint (what it is about) — the F3 SPLIT.
 const settlementUnitId = '0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1'; // gate-1 golden unit
 const B = (reqId, src, prop, valueRef) => [settlementUnitId, K(reqId), BigInt(src), BigInt(prop), valueRef];
-const bindings = [
+const bindingsUnsorted = [
   B('req-approval-payer',     SEL.POLICY_PAYER,       SEL.NONE,             payer),                 // payer approves; source=payer, no distinct proposition
   B('req-target-confirm',     SEL.ORACLE_SELF,        SEL.TARGET_SYSTEM,    targetSystemIdentity),  // F3: source=oracle-fetch, proposition=target system
   B('req-escrow-receipt',     SEL.ORACLE_SELF,        SEL.CHILD_UNIT,       children[0][0]),        // F3: source=chain/oracle, proposition=child unit
   B('req-envelope',           SEL.AUTHORIZED_TUPLE,   SEL.OPERATING_ENVELOPE, operatingEnvelopeHash), // source=emitter, proposition=envelope
   B('req-artifact-hash',      SEL.AUTHORIZED_TUPLE,   SEL.CONTENT_ADDR,     Z32),                   // source=emitter, proposition=content (NONE-value)
 ];
+// sol #786 f1 + "sets need sort/dedup": PIN the binding ORDER canonically by (settlementUnitId, requirementId)
+// so composition RECOMPUTES bindingsRoot -> acceptedPolicyDigest deterministically (authenticates the bindings,
+// no caller order-freedom). Exactly-one binding per (settlementUnitId, requirementId) — reject a duplicate.
+const bkey = (r) => r[0].toLowerCase() + r[1].toLowerCase().slice(2);
+const seenB = new Set();
+for (const r of bindingsUnsorted) { if (seenB.has(bkey(r))) throw new Error('duplicate (settlementUnitId,requirementId) binding'); seenB.add(bkey(r)); }
+const bindings = [...bindingsUnsorted].sort((a, b) =>
+  a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
 const bindingsRoot = keccak256(enc(
   ['tuple(bytes32,bytes32,uint8,uint8,bytes32)[]'], [bindings]));
 
@@ -132,8 +143,8 @@ chk(disjoint, 'R4: operatorPrincipal (bytes32) is byte-disjoint from expert+exec
 // ── pinned PROPOSED golden (oracle cross-confirms, like termsHash/V2); re-pins if sub-type encodings change ──
 const EXPECT = {
   subjectBlockHash:     '0x05fb7b45f6079ca2c82f6b3676e8af2cf98f3322bdc1e64acf0afc2aef2c46c7',
-  bindingsRoot:         '0x65426c50b2e1a1cf195d2716e561f3e2753212e8c5dee53bfb7db84119cd85d6',
-  acceptedPolicyDigest: '0xf6af20eb59f49c22d5ec9df7767bb9203ba4fe37c768fb5d2ede81dc41571403',
+  bindingsRoot:         '0xb0fac97112a3e02d1c80e1017d033fa8d224b4ccf64de25ea5eaa0820ab6a340', // re-golden: bindings canonically sorted (sol #786 f1)
+  acceptedPolicyDigest: '0xe616864b43af297effb3215ee6ed89bb3d0b19db20226a472a5b6ef216b2a3ee', // was 0xf6af20eb (unsorted); sorted-bindings is the authoritative form
 };
 console.log('');
 for (const [k, v] of [['subjectBlockHash', subjectBlockHash], ['bindingsRoot', bindingsRoot], ['acceptedPolicyDigest', acceptedPolicyDigest]])
