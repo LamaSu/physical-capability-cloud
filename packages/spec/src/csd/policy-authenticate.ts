@@ -203,13 +203,35 @@ export function computeOperatingEnvelopeHash(bands: EnvelopeBand[]): Bytes32 {
   return keccak256(abiSingleArray(bands.map((b) => [wordBytes32(b.metric), wordUint(b.min), wordUint(b.max)])));
 }
 
+/** Dedup + ascending-byte sort a bytes32 set (mirror `sortHex`; sol: alias-independent, no author order). */
+function sortBytes32Set(xs: Bytes32[]): Bytes32[] {
+  const seen = new Set<string>();
+  const uniq: Bytes32[] = [];
+  for (const x of xs) {
+    const h = bytesToHex(x);
+    if (!seen.has(h)) { seen.add(h); uniq.push(x); }
+  }
+  return uniq.sort(compareBytes32);
+}
+
+/** Sort a tuple set by the JSON-of-hex key (mirror `sortTup` — sort only). */
+function sortTupleSet<T>(xs: T[], parts: (t: T) => Uint8Array[]): T[] {
+  const key = (t: T) => JSON.stringify(parts(t).map(bytesToHex)).toLowerCase();
+  return [...xs].sort((a, b) => {
+    const ka = key(a);
+    const kb = key(b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+}
+
 export function computeSubjectBlockHash(p: CanonicalAcceptedJobPolicyV1): Bytes32 {
+  // sets are canonical-sorted (+ bytes32 sets deduped) — sol order-malleability fix (evidence 999e6bdb).
   const authorizedTuplesRoot = keccak256(
-    abiSingleArray(p.authorizedTuples.map((t) => [wordBytes32(t.operator), wordBytes32(t.kernel), wordBytes32(t.device)])),
+    abiSingleArray(sortTupleSet(p.authorizedTuples, (t) => [t.operator, t.kernel, t.device]).map((t) => [wordBytes32(t.operator), wordBytes32(t.kernel), wordBytes32(t.device)])),
   );
-  const expertSetRoot = keccak256(abiSingleArray(p.approvedExpertSet.map((x) => [wordBytes32(x)])));
-  const executorSetRoot = keccak256(abiSingleArray(p.approvedThirdPartyExecutorSet.map((x) => [wordBytes32(x)])));
-  const childrenRoot = keccak256(abiSingleArray(p.children.map((c) => [wordBytes32(c.childJobId), wordAddress(c.childEscrow)])));
+  const expertSetRoot = keccak256(abiSingleArray(sortBytes32Set(p.approvedExpertSet).map((x) => [wordBytes32(x)])));
+  const executorSetRoot = keccak256(abiSingleArray(sortBytes32Set(p.approvedThirdPartyExecutorSet).map((x) => [wordBytes32(x)])));
+  const childrenRoot = keccak256(abiSingleArray(sortTupleSet(p.children, (c) => [c.childJobId, c.childEscrow]).map((c) => [wordBytes32(c.childJobId), wordAddress(c.childEscrow)])));
   const operatingEnvelopeHash = computeOperatingEnvelopeHash(p.operatingEnvelope);
   const expectedLocationHash = keccak256(
     abiStatic([wordInt(p.expectedLocation.lat), wordInt(p.expectedLocation.lng), wordUint(p.expectedLocation.radius), wordUint(p.expectedLocation.time)]),
@@ -241,8 +263,19 @@ export function computeSubjectBlockHash(p: CanonicalAcceptedJobPolicyV1): Bytes3
 }
 
 export function computeBindingsRoot(bs: SubjectBinding[]): Bytes32 {
-  // tuple(bytes32 settlementUnitId, bytes32 requirementIdHash, uint8 srcKind, uint8 propKind, bytes32 valueRef)[]
-  const elements = bs.map((b) => [
+  // sol f1 (evidence 999e6bdb): canonical-sort by (settlementUnitId, requirementId) + exactly-one per
+  // (unit,requirement) — deterministic recompute, no caller order-freedom. tuple(bytes32,bytes32,uint8,uint8,bytes32)[]
+  const seen = new Set<string>();
+  for (const b of bs) {
+    const k = bytesToHex(b.settlementUnitId) + bytesToHex(b.requirementIdHash).slice(2);
+    if (seen.has(k)) throw new Error("policy-authenticate: duplicate (settlementUnitId,requirementId) binding");
+    seen.add(k);
+  }
+  const sorted = [...bs].sort((a, b) => {
+    const c = compareBytes32(a.settlementUnitId, b.settlementUnitId);
+    return c !== 0 ? c : compareBytes32(a.requirementIdHash, b.requirementIdHash);
+  });
+  const elements = sorted.map((b) => [
     wordBytes32(b.settlementUnitId),
     wordBytes32(b.requirementIdHash),
     wordUint(BigInt(b.sourceKind)),

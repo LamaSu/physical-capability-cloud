@@ -96,12 +96,12 @@ describe("policy-authenticate — byte-exactness vs evidence's published goldens
     expect(bytesToHex(computeSubjectBlockHash(p))).toBe("0x05fb7b45f6079ca2c82f6b3676e8af2cf98f3322bdc1e64acf0afc2aef2c46c7");
   });
 
-  it("bindingsRoot == evidence golden", () => {
-    expect(bytesToHex(computeBindingsRoot(p.evidenceSubjectBindings))).toBe("0x65426c50b2e1a1cf195d2716e561f3e2753212e8c5dee53bfb7db84119cd85d6");
+  it("bindingsRoot == evidence golden 0xb0fac971.. (canonical binding-sort, 999e6bdb)", () => {
+    expect(bytesToHex(computeBindingsRoot(p.evidenceSubjectBindings))).toBe("0xb0fac97112a3e02d1c80e1017d033fa8d224b4ccf64de25ea5eaa0820ab6a340");
   });
 
-  it("acceptedPolicyDigest == evidence golden 0xf6af20eb..", () => {
-    expect(bytesToHex(computeAcceptedPolicyDigest(p))).toBe("0xf6af20eb59f49c22d5ec9df7767bb9203ba4fe37c768fb5d2ede81dc41571403");
+  it("acceptedPolicyDigest == evidence golden 0xe616864b.. (canonical binding-sort, 999e6bdb)", () => {
+    expect(bytesToHex(computeAcceptedPolicyDigest(p))).toBe("0xe616864b43af297effb3215ee6ed89bb3d0b19db20226a472a5b6ef216b2a3ee");
   });
 
   it("projection: 51 rows, rowsRoot + projectionDigest == evidence goldens", () => {
